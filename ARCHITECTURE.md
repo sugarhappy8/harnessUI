@@ -119,8 +119,8 @@ Three rules hold everywhere:
 
 Every child is started through one helper in the `runtime` crate. Nothing else in the codebase may spawn a process (enforced by a clippy `disallowed-methods` rule).
 
-- **Windows:** the app creates one Job Object with `KILL_ON_JOB_CLOSE` at startup and assigns every child to it while the child is still suspended. If the app exits for any reason, including a crash or Task Manager, Windows kills every process in the job. Each tool call also gets a nested job so one call's tree can be killed on its own. Children are started with `CREATE_NO_WINDOW` so no console flashes. The app does not put itself in the job, so the updater's installer survives the app exiting. Tauri's own shell plugin does not set kill-on-close, which is one reason the app doesn't use it.
-- **macOS:** every child is the leader of its own process group, and Stop or quit signals the whole group. macOS has no kernel feature that kills children when the parent dies, so two more layers cover a crash of the app itself: (1) at launch the app starts one small reaper, which is the app's own binary re-executed with a hidden flag, in its own session and connected by a pipe. The app tells it the process group of every child it starts. When the pipe closes or the app's PID disappears, the reaper kills every registered group; (2) `llama-server` runs in its managed mode, in which it also exits by itself when its stdin closes. That second layer only takes effect once the model has finished loading, which is why it is not the only one. A child that deliberately detaches into its own session can still escape; the startup sweep below catches llama-server in that case.
+- **Windows:** every child is started suspended inside its own Job Object with `KILL_ON_JOB_CLOSE`, and the app holds the only handle. If the app exits for any reason, including a crash or Task Manager, Windows closes the handles and kills every process in every job. A single job per child also means one call's whole tree can be killed on its own. Children are started with `CREATE_NO_WINDOW` so no console flashes. The app never puts itself in a job, so the updater's installer survives the app exiting. This goes through the `process-wrap` crate, which is what the MCP SDK itself accepts for spawning servers, so llama-server, tool commands and MCP servers all share one spawn path. Tauri's own shell plugin does not set kill-on-close, which is one reason the app doesn't use it.
+- **macOS:** every child is the leader of its own process group, and Stop or quit signals the whole group. macOS has no kernel feature that kills children when the parent dies, so two more layers cover a crash of the app itself: (1) at launch the app starts one small reaper, which is the app's own binary re-executed with a hidden flag, in its own session and connected by a pipe. The app tells it the process group of every child it starts. When the pipe closes or the app's PID disappears, the reaper kills every registered group; (2) `llama-server` runs in its managed mode, in which it also exits by itself when its stdin closes. That second layer only takes effect once the model has finished loading, which is why it is not the only one. A child that deliberately detaches into its own session can still escape; the startup sweep below catches llama-server in that case. The reaper is a design I have not been able to run: it is built first in M1 and tested against force-quit and crash before anything else depends on it.
 - **Both:** on startup the app reads a file of child PIDs it wrote in the previous run and kills any that are still alive and still match by executable path and start time.
 
 ### 4.2 Stop
@@ -263,13 +263,14 @@ Settings has **Backend: Auto / Vulkan / CUDA / ROCm / CPU** and a device picker 
 The app chooses a free port, generates a random API key for this launch and starts:
 
 ```
-llama-server --host 127.0.0.1 --port <port> --no-webui --offline --jinja
+llama-server --host 127.0.0.1 --port <port> --no-webui --no-slots --offline --jinja
+             --cors-origins <none> --no-context-shift
              -m <model.gguf> [--mmproj <mmproj.gguf>]
              -c <context> -np 1 --device <device> -ngl <auto|n>
-             --cache-ram <MiB>
+             --cache-ram <MiB> [--reasoning-budget <tokens>]
 ```
 
-with the key in the `LLAMA_API_KEY` environment variable, so it never shows in the process list. `--jinja` is passed explicitly even though it is now the default. `--offline` stops llama-server from ever downloading anything. An explicit `-c` stops it from silently shrinking the context to fit. `-np 1` and a small `--cache-ram` replace defaults meant for multi-user servers (four slots and an 8 GB prompt cache), which would hurt on a 16 GB machine.
+with the key in the `LLAMA_API_KEY` environment variable, so it never shows in the process list. `--jinja` is passed explicitly even though it is now the default. `--offline` stops llama-server from ever downloading anything. An explicit `-c` stops it from silently shrinking the context to fit. `-np 1` and a small `--cache-ram` replace defaults meant for multi-user servers (four slots and an 8 GB prompt cache), which would hurt on a 16 GB machine. By default the server also answers any web page's cross-origin requests and exposes a status endpoint; the key, `--cors-origins` and `--no-slots` close those. After every start the app reads the context the server actually allocated from `/props` and budgets against that number, never against the one it asked for.
 
 The working directory of the server and probes is always the runtime directory, never a user folder. llama.cpp also loads backend DLLs from the current directory, so starting it inside a cloned repository would let a file in that repository run as code. On Windows the app sets the error mode that stops a missing DLL from raising a system dialog, and maps the resulting exit code to a plain message.
 
@@ -329,20 +330,21 @@ build request → stream → classify response
    └─ server parse error                 → recovery (8.3) → next step
 ```
 
-- **Step cap:** 25 model calls per turn by default (configurable). At the cap the loop makes one last request with tools switched off, asking the model to say what it did and what is left, so the user is not left with a half-finished trace.
+- **Step cap:** 25 model calls per turn by default (configurable). At the cap the loop makes one last request in which tool calls are disabled, asking the model to say what it did and what is left, so the user is not left with a half-finished trace. (The tool list stays in that request and only the permission to call changes, which keeps llama-server's cached prompt valid instead of forcing a full re-read.)
 - **Loop detection:** the same tool with the same arguments three times in a row gets a note telling the model it is repeating itself; five times stops the turn.
 - **Order:** `parallel_tool_calls: false` is sent on every request, because llama-server's default depends on the model's template. If a model returns several calls anyway they run one at a time, in order.
 - **Cancellation:** checked between every stage and wired into the stream and each tool call (section 4.2).
 - **One turn at a time** across the app in v1, because one local model with one slot serves one request. Side jobs that would need the model (chat titles) use a cheap rule instead of a model call, since any second request on the single slot throws away the conversation's cached state.
-- **Reasoning:** streamed into a collapsible "Thinking" block and not sent back in later requests unless the template says it supports that.
+- **Reasoning:** streamed into a collapsible "Thinking" block and not sent back in later requests unless the template says it supports that. Thinking gets its own token budget, so a reasoning model cannot spend the whole reply allowance on thought and return an empty answer or a cut-off tool call.
 - **Sampling:** the app sends no temperature of its own. llama-server applies the values the model's publisher stored in the GGUF, the catalog can override them per model, and the user can override both. Model families disagree too much for one default (one recommends 0.15, another warns never to go below 0.6).
 
 **Tolerant stream reader.** Servers that call themselves OpenAI-compatible differ in details, so the reader accepts all of these: tool-call arguments in fragments (llama.cpp, LM Studio) or whole in one chunk (Ollama); reasoning in `reasoning_content` or in `reasoning`; missing or duplicate tool-call ids (the app makes its own); keep-alive comment lines; a usage chunk with no choices; a stream that ends with an error object and no `[DONE]`. Tool calls count if any arrived, whatever `finish_reason` says. A call cut off by the output limit is never run.
 
 ### 8.3 Tool-call parsing, repair and retries
 
-1. **Native:** accumulate streamed `tool_calls` deltas by index.
-2. **Fallback parser:** runs only when tools were offered and no native call arrived. It tries, in order:
+1. **Native:** accumulate streamed `tool_calls` deltas by index. On the bundled llama-server this is the normal path and a reliable one: the server turns each tool's schema into a grammar and constrains the model's output to it, so malformed arguments are rare. What still goes wrong locally is a call cut off by the output limit, and templates the server cannot derive a format from.
+   - *Schema hand-off:* that same conversion makes the whole request fail if one schema uses something it cannot convert (a remote `$ref`, an invalid `pattern`, very deep nesting). One odd schema from an added MCP server would break every chat. The app therefore sends llama-server a simplified copy of each schema (local definitions inlined; `pattern`, `format` and remote references dropped; depth bounded) and validates against the full schema itself.
+2. **Fallback parser:** runs only when tools were offered and no native call arrived. It matters most for remote endpoints, which do not constrain output. It tries, in order:
    - known markers: `<tool_call>…</tool_call>` holding JSON, or holding `<function=name><parameter=key>value</parameter></function>` (the form current Qwen and Granite models use); `[TOOL_CALLS]`; `<|tool_call|>`; `<|python_tag|>`; `[TOOL_REQUEST]…[END_TOOL_REQUEST]`; `<function=name>{…}</function>`;
    - a fenced `json` block;
    - bare JSON, but only when the message starts with `{` or `[`.
@@ -350,7 +352,7 @@ build request → stream → classify response
    Inside the JSON it accepts `name` + `arguments`, `name` + `parameters`, or `function.name` + `function.arguments`. A candidate counts only if the name is an enabled tool **and** its arguments validate against that tool's schema. That is what keeps ordinary JSON in an answer from being mistaken for a call. Text inside the Thinking block or quoted from a tool result is never searched. Recovered calls are removed from the visible text, marked "recovered from text" on the card, and go through the same approval path as native ones.
 3. **Server parse error:** when llama-server rejects the model's output as malformed (HTTP 500, or an error event mid-stream), the app retries the step once with thinking disabled, which is the known cause in most reports. A second failure is surfaced as an error.
 4. **Repair before validation**, guided by the schema and limited to what is unambiguous: arguments double-encoded as a JSON string are decoded; `"5"` becomes `5` and `"true"` becomes `true` where the schema demands that type; a null for an optional field is dropped; a single value is wrapped where the schema wants a list.
-5. **Validation:** against the tool's JSON Schema (compiled once per tool). On failure the tool is not run. The model gets a short error naming each bad field and what was expected.
+5. **Validation:** against the tool's JSON Schema (compiled once per tool). On failure the tool is not run. The model gets a short error naming each bad field and what was expected. Schemas from MCP servers are untrusted input: the validator is built without the ability to fetch a `$ref` from the network or from disk, schemas with external references are rejected, and depth and evaluation time are bounded.
 6. **Retry budget:** 2 corrections per call and 6 mistakes per turn. After that the turn stops with "The model kept producing invalid tool calls", plus the last error under Copy details.
 
 The parser is a pure function over text with a table-driven test suite, one fixture per model family. The format list is data, because new families appear every few months.
@@ -377,10 +379,16 @@ Tool results go back as tool-role messages wrapped in a delimiter that carries a
 
 That instruction lowers the odds; it guarantees nothing, and small models follow injected text more readily than large ones. The guarantee is structural and is described in section 13.5.
 
+Two details an implementer would otherwise have to guess:
+
+- *Images from tools* (screenshots) go back as an image in a user-role message placed directly after the tool result, marked as coming from the tool. Many chat templates cannot carry an image inside a tool message. The contract test checks this per catalog model.
+- *Stable prefix.* The system prompt, the skills index and the tool list are kept byte-identical and in a fixed order from one request to the next, because llama-server reuses its cached state only for an unchanged prefix. On local hardware a changed prefix means re-reading the whole conversation.
+
 ### 8.6 Attachments
 
 - **Images** are accepted only when the selected model has vision. They are downscaled, re-encoded to PNG or JPEG and sent inline.
 - **PDF and text files** have their text extracted locally and inserted into the message as a named, delimited block. Long documents are truncated to a token budget with a note. There is no retrieval index in v1.
+- **PDF parsing runs in a separate short-lived process** (the app's own binary with a hidden flag) with a time limit and a memory cap. PDF parsers can hang or overflow the stack on a crafted file, and neither can be contained inside the app's own process.
 
 ---
 
@@ -397,7 +405,7 @@ The host keeps one connection object per server. Built-in servers connect over a
 ### 9.2 External servers
 
 - **Config:** the same `mcpServers` JSON Claude Desktop uses (`command`, `args`, `env`), extended with `type`, `url` and `headers` for remote servers. The paste box also accepts the VS Code (`servers`) and Cursor shapes. Values in `env` and `headers` move to the keychain on save.
-- **Spawn:** resolve the command to an absolute path first. On Windows `npx` is a `.cmd` shim that a plain spawn does not find. On macOS, apps started from Finder don't inherit the shell's PATH, so the app computes the login-shell PATH once at startup, with a timeout, and passes it to children.
+- **Spawn:** resolve the command to an absolute path first. On Windows `npx` is a `.cmd` shim that a plain spawn does not find; the app looks it up the way the shell would and runs it through `cmd.exe` with strict quoting, refusing arguments that cannot be quoted safely. On macOS, apps started from Finder don't inherit the shell's PATH, so the app computes the login-shell PATH once at startup, with a timeout, and passes it to children.
 - **Missing runtime:** if the command is `npx`/`node`, `uvx`/`uv`/`python` or `docker` and it can't be found, the server shows "This server needs Node.js, which isn't installed" with a link, instead of a spawn error.
 - **Environment:** a spawned server gets a short allowlist of variables (PATH, home and temp folders, the handful Windows programs need) plus the `env` from its config. It does not inherit the app's whole environment, so API keys that happen to be set in the user's shell are not handed to third-party servers. The official TypeScript client does the same; the Rust SDK does not, so the spawn helper does it.
 - **Handshake:** the app owns a small connect routine per server, because the SDK's automatic mode fails in two cases found in testing: servers built on older SDKs exit when the first message isn't the old handshake, and a server that takes more than 10 s to start (a first `npx -y` download) breaks the fallback. The routine starts with the older handshake, pinned to protocol 2025-11-25, which every current SDK still answers. If a server rejects it, the routine restarts the server and connects with the 2026-07-28 revision. The result is remembered per server. A 60 s start-up timeout applies, because the SDK has none.
@@ -426,10 +434,14 @@ Every group and every tool can be toggled per chat.
 
 **Terminal.** One command per call, with a working directory that must be inside an approved folder. Output streams live into the tool card through plain pipes (no pseudo-terminal; nothing interactive is supported in v1). Output is capped at 1 MiB. Default timeout 120 s (configurable per call up to a ceiling), with a Kill button on the card. Kill and timeout take down the whole process tree.
 
-- *Windows:* `powershell.exe -NoLogo -NoProfile -NonInteractive -Command ...`. This is Windows PowerShell 5.1, the only shell every Windows machine has. The tool description tells the model so, because 5.1 has no `&&` or `||`. The app forces UTF-8 output and returns the real exit code, both of which 5.1 gets wrong by default. PowerShell 7 is used instead when it is installed and the user picks it.
+- *Windows:* `powershell.exe -NoLogo -NoProfile -NonInteractive -Command ...`. This is Windows PowerShell 5.1, the only shell every Windows machine has. The tool description tells the model so, because 5.1 has no `&&` or `||`. The app forces UTF-8 output and returns the real exit code (checking both the last program's exit code and PowerShell's own success flag), both of which 5.1 gets wrong by default. It starts PowerShell with `-ExecutionPolicy Bypass` for that one process, because the Windows default blocks every script file, including the ones Node installs for `npm`. Execution policy is not a security boundary (Microsoft says so); the approval card is. PowerShell 7 is used instead when it is installed and the user picks it.
 - *macOS:* `/bin/zsh -lc ...` with the environment captured once from the user's login shell, so Homebrew, nvm and similar tools are on PATH even though the app was started from Finder.
 
-**Git.** Uses the system `git` when it is on PATH and falls back to libgit2 when it isn't. Push always asks. With libgit2, operations that need credentials the app doesn't have fail with a message recommending installing git.
+**Git.** Uses the system `git` when it is installed and falls back to libgit2 when it isn't. Push always asks.
+
+- *Detecting git:* on macOS, `/usr/bin/git` exists even when git is not installed, and running it pops up Apple's "install developer tools" dialog. The app checks for the developer tools first and never runs that stub. Windows has no git by default, so the fallback is the normal case there for non-developers.
+- *libgit2 fallback:* covers status, diff, log, commit, and clone / pull / push over HTTPS. It has no access to git's credential helpers, so private repositories need a token the user enters once per host (kept in the keychain). It runs no hooks and has no LFS support; the UI says so when the fallback is in use.
+- *Build note:* libgit2's HTTPS support links OpenSSL on macOS. The app builds it statically, and CI checks the finished binary loads nothing from Homebrew.
 
 **Browser.**
 
@@ -501,7 +513,7 @@ The verdict is green (fits with at least 1 GB spare), yellow (fits only with a s
 
 ## 12. Storage
 
-**SQLite** (one file in the app data folder, WAL mode, versioned migrations):
+**SQLite** (one file in the app's *local* data folder, WAL mode, versioned migrations). On Windows that is the non-roaming folder: the roaming one is often redirected to a network share in companies, and SQLite's WAL mode does not work over a network.
 
 | Table | Holds |
 |---|---|
@@ -515,11 +527,11 @@ The verdict is green (fits with at least 1 GB spare), yellow (fits only with a s
 | `models`, `downloads` | installed models with their GGUF summary; download state for resume |
 | `providers`, `mcp_servers`, `mcp_tool_prefs`, `skills`, `approved_folders`, `settings` | configuration, never secrets |
 
-**Keychain** (Windows Credential Manager, macOS Keychain): provider API keys, the Hugging Face token, MCP `env` and header values. One entry per secret, because Windows caps an entry at 2,560 bytes; a longer value is split across numbered entries. Writes are serialised on one thread, because Credential Manager can lose concurrent updates. The database stores only references. An exported MCP config omits secret values. On unsigned macOS builds the Keychain asks for the login password once per entry after every rebuild; that stops with a Developer ID.
+**Keychain** (Windows Credential Manager, macOS Keychain): provider API keys, the Hugging Face token, MCP `env` and header values. One entry per secret, because Windows caps an entry at 2,560 bytes; a longer value is split across numbered entries. Writes are serialised on one thread, because Credential Manager can lose concurrent updates. Entries are stored as local to the machine, not roaming. The database stores only references. An exported MCP config omits secret values. On unsigned macOS builds the Keychain asks for the login password once per entry after every rebuild; that stops with a Developer ID.
 
 **SQLite access:** one dedicated database thread owns the connection and async code talks to it over a channel, so no Tauri command ever blocks on disk. History search uses SQLite's FTS5 with the trigram tokenizer, which matches substrings and works for Chinese, Japanese and Korean text; queries shorter than three characters fall back to a plain scan.
 
-**Files on disk:** skills, attachments, the browser profile and logs live in the app's data folder. Logs rotate, stay local, and are reachable from "Open logs folder".
+**Files on disk:** skills, attachments, the browser profile and logs live in the app's data folder. Logs rotate daily, are capped in size, stay local, and are reachable from "Open logs folder". llama-server's own output and tool output do not go into the log stream; they are kept in a bounded buffer per session so a chatty server cannot fill the disk. Secrets and prompt text are not logged.
 
 **Models folder:** configurable, and by default a visible folder in the user's home directory (`<home>/<app name>/models`), not the app's data folder. The Windows uninstaller offers to delete app data, and that should not silently delete tens of gigabytes of models.
 
@@ -693,7 +705,7 @@ Every error that reaches the UI has four parts: a code, a plain-language message
 
 ## 18. Dependencies
 
-Each has a one-line reason. Versions are the current stable ones, checked on 2026-11-10; lockfiles pin them exactly. A milestone summary lists every dependency it added.
+Each has a one-line reason. Versions are the current stable ones, checked on 2026-11-10; lockfiles pin them exactly. A milestone summary lists every dependency it added. Several of these versions are also the first without a known security advisory (`zip` 9, `git2` 0.21, `rmcp` 3.9, `tokio` 1.54.1), so they are written as minimums, not just as what happened to be current.
 
 **Rust**
 
@@ -712,7 +724,7 @@ Each has a one-line reason. Versions are the current stable ones, checked on 202
 | `serde`, `serde_json` | 1 | Serialisation |
 | `rusqlite` (bundled SQLite) | 0.40 | Storage with FTS5 built in and no system dependency. 0.40 because the migration helper does not accept 0.41 yet |
 | `rusqlite_migration` | 2.6 | Versioned schema migrations with a built-in validity test |
-| `keyring` | 4.2 | OS keychain on both platforms |
+| `keyring-core`, `apple-native-keyring-store`, `windows-native-keyring-store` | 1.0 / 1.0 / 1.1 | OS keychain on both platforms. These are the parts behind the `keyring` crate; using them directly is the only way to keep Windows entries local to the machine |
 | `jsonschema` | 0.61 | Validate tool arguments. Built with default features off, which removes its ability to fetch schemas over the network |
 | `process-wrap` | 10 | Job Objects and process groups; the same crate and version rmcp uses |
 | `windows` | 0.62 | DXGI adapter info, Job Objects, mouse input. Same version Tauri uses |
@@ -722,10 +734,10 @@ Each has a one-line reason. Versions are the current stable ones, checked on 202
 | `dunce` | 1.0 | Canonical Windows paths without the `\\?\` prefix, for the sandbox and for display |
 | `ignore`, `globset`, `grep-searcher`, `grep-regex` | 0.4 / 0.4 / 0.1 / 0.1 | File walking and content search; these are ripgrep's own libraries |
 | `tree-sitter`, `tree-sitter-bash`, `tree-sitter-powershell` | 0.27 / 0.25 / 0.26 | Parse shell commands for the destructive-command classifier |
-| `git2` (vendored libgit2, HTTPS) | 0.21 | Git fallback when system git is missing. Uses the OS's own TLS, so no OpenSSL |
+| `git2` (vendored libgit2, HTTPS) | 0.21 | Git fallback when system git is missing |
 | `zip` (deflate only) | 9.5 | Skill import, with its path-escape guard |
 | `serde-saphyr` | 2.1 | YAML frontmatter for skills. The older YAML crates are unmaintained or have security advisories |
-| `pdf-extract` | 0.12 | PDF text extraction in pure Rust. It can panic on odd files, so it runs on its own thread behind a guard with size and time limits |
+| `pdf-extract` | 0.12 | PDF text extraction in pure Rust, run in a separate worker process (section 8.6) |
 | `chardetng`, `encoding_rs` | 1.0 / 0.8 | Detect and decode non-UTF-8 text files |
 | `image`, `fast_image_resize` | 0.25 / 6.1 | Re-encode attachments; downscale screenshots quickly |
 | `tokio-tungstenite` | 0.30 | WebSocket for the browser tool's optional loopback-port mode |
@@ -737,7 +749,8 @@ Each has a one-line reason. Versions are the current stable ones, checked on 202
 | `thiserror` | 2 | Typed errors |
 | `ts-rs` | current | Export Rust types to TypeScript so the two sides cannot drift |
 | `proptest` (dev) | current | Property tests for the sandbox and the parser |
-| `cargo-deny` (CI tool) | current | Fails CI on security advisories and disallowed licenses; feeds the third-party notices |
+| `which` | 8 | Find `npx`, `uvx`, `git` and browsers the way the shell would, including Windows `.cmd` shims |
+| `cargo-deny` (CI tool) | current | Required from the first commit. Fails CI on security advisories, disallowed licenses and banned crates; feeds the third-party notices |
 
 Deliberately not used: `tauri-plugin-shell`, `-fs`, `-http` and `-sql` (they would give the webview direct access to processes, files, the network and the database); `hf-hub` (it forces Hugging Face's Xet protocol and extra hosts); `chromiumoxide` (section 9.3); `sqlx` (cannot coexist with `rusqlite`).
 
