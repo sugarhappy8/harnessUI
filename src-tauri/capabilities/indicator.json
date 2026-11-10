@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "indicator",
+  "description": "The computer-use Stop button. It can listen to events and call one command: stop.",
+  "local": true,
+  "windows": [
+    "indicator"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-overlay-stop"
+  ]
+}

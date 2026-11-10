@@ -36,18 +36,45 @@
         "focusable": false,
         "resizable": false,
         "visibleOnAllWorkspaces": true
+      },
+      {
+        "label": "indicator",
+        "create": false,
+        "url": "indicator.html",
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "resizable": false,
+        "visibleOnAllWorkspaces": true,
+        "width": 460,
+        "height": 52
       }
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'self'; require-trusted-types-for 'script'",
-      "dangerousDisableAssetCspModification": ["style-src"],
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ],
       "freezePrototype": true,
-      "capabilities": ["main", "overlay"]
+      "capabilities": [
+        "main",
+        "overlay",
+        "indicator"
+      ]
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "app", "dmg"],
+    "targets": [
+      "nsis",
+      "app",
+      "dmg"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Local-first agentic desktop app for local AI models",
     "copyright": "MIT License",

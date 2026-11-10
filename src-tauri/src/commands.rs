@@ -51,6 +51,9 @@ mod tests {
         };
         let main_perms = perms(&main);
         let overlay_perms = perms(&overlay);
+        let indicator: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/indicator.json")).unwrap();
+        let indicator_perms = perms(&indicator);
         for command in list
             .lines()
             .map(str::trim)
@@ -65,6 +68,12 @@ mod tests {
                 !overlay_perms.contains(&permission),
                 "the overlay must not be granted {permission}"
             );
+            // The Stop window may call exactly one app command.
+            assert_eq!(
+                indicator_perms.contains(&permission),
+                command == "overlay_stop",
+                "the indicator window may only be granted allow-overlay-stop ({permission})"
+            );
         }
     }
 
@@ -74,7 +83,7 @@ mod tests {
         let conf: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let caps = &conf["app"]["security"]["capabilities"];
-        assert_eq!(caps, &serde_json::json!(["main", "overlay"]));
+        assert_eq!(caps, &serde_json::json!(["main", "overlay", "indicator"]));
         let csp = conf["app"]["security"]["csp"].as_str().unwrap();
         assert!(csp.contains("script-src 'self';"));
         assert!(!csp.contains("unsafe-eval"));

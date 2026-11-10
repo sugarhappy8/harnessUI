@@ -17,6 +17,7 @@ mod logging;
 mod mcp_cmd;
 mod models_cmd;
 mod navigation;
+mod overlay;
 mod packs_cmd;
 mod permissions;
 mod providers;
@@ -161,6 +162,7 @@ pub fn run() {
             updates::set_update_auto_check,
             updates::check_for_update,
             updates::install_update,
+            overlay::overlay_stop,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

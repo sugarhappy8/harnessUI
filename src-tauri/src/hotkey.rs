@@ -28,7 +28,20 @@ pub struct HotkeyStatus {
 #[derive(Default)]
 pub struct Hotkey(Mutex<HotkeyStatus>);
 
-fn stop_now(app: &AppHandle) {
+impl Hotkey {
+    /// The current hotkey, as text for the indicator.
+    pub fn accelerator(&self) -> Option<String> {
+        self.0
+            .lock()
+            .ok()
+            .filter(|s| s.registered)
+            .map(|s| s.accelerator.clone())
+    }
+}
+
+/// Stops the turn (and, in M7, releases held input). Used by the hotkey and the
+/// computer-use indicator's Stop button.
+pub fn stop_now(app: &AppHandle) {
     if let Some(state) = app.try_state::<AppState>()
         && let Ok(guard) = state.generation.lock()
         && let Some(token) = guard.as_ref()
