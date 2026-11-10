@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronRight, Plus, RotateCw, Trash2 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../lib/ipc";
 import type { McpImportPreview, McpServerDto, ToolDto } from "../lib/types";
 import { toErrorInfo } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
 import type { ErrorInfo } from "../lib/types";
+
+/** What to install when a server's runtime is missing (section 15). */
+function missingRuntimeHint(reason: string): { label: string; url: string } | null {
+  if (reason.includes("Node.js")) return { label: "Install Node.js", url: "https://nodejs.org/en/download" };
+  if (reason.includes("uv (Python)")) return { label: "Install uv", url: "https://docs.astral.sh/uv/getting-started/installation/" };
+  if (reason.includes("Docker")) return { label: "Install Docker Desktop", url: "https://www.docker.com/products/docker-desktop/" };
+  return null;
+}
 
 function stateText(s: McpServerDto): { text: string; tone: string } {
   switch (s.state.type) {
@@ -136,7 +145,22 @@ function ServerRow(props: { server: McpServerDto; onChange: () => void; onError:
       </div>
       {open && (
         <div className="space-y-2 border-t border-border px-3 py-2 text-sm">
-          {s.state.type === "failed" && <p className="text-danger whitespace-pre-wrap">{s.state.reason}</p>}
+          {s.state.type === "failed" && (
+            <div className="space-y-1">
+              <p className="text-danger whitespace-pre-wrap">{s.state.reason}</p>
+              {(() => {
+                const hint = missingRuntimeHint(s.state.reason);
+                return hint ? (
+                  <p className="text-xs">
+                    <button type="button" className="text-accent underline" onClick={() => void openUrl(hint.url)}>
+                      {hint.label}
+                    </button>
+                    , then restart the server.
+                  </p>
+                ) : null;
+              })()}
+            </div>
+          )}
           {s.protocolVersion && <p className="text-xs text-fg-muted">Protocol {s.protocolVersion}</p>}
           {!s.builtin && (
             <>
