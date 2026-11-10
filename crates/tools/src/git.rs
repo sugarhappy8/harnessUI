@@ -1640,6 +1640,13 @@ mod fallback_tests {
 
     const TEST_WORKER_ENV: &str = "HARNISS_TOOLS_GIT_WORKER_TEST";
 
+    /// A checked-out file's text with CRLF read as LF: Git for Windows sets
+    /// `core.autocrlf=true` in its system config, and libgit2 honours it on checkout as git
+    /// does.
+    fn text(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+    }
+
     /// Runs as an ordinary (empty) test, or as the worker when started by
     /// [`test_worker`].
     #[test]
@@ -2234,10 +2241,7 @@ mod fallback_tests {
             before,
             "the checked-out branch moved"
         );
-        assert_eq!(
-            std::fs::read_to_string(clone.join("f.txt")).unwrap(),
-            "v1\n"
-        );
+        assert_eq!(text(&clone.join("f.txt")), "v1\n");
     }
 
     /// libgit2 takes the proxy from the repository's own config before the environment,
@@ -2424,10 +2428,7 @@ mod fallback_tests {
             "{out}"
         );
         let clone = top.join("clone");
-        assert_eq!(
-            std::fs::read_to_string(clone.join("f.txt")).unwrap(),
-            "v1\n"
-        );
+        assert_eq!(text(&clone.join("f.txt")), "v1\n");
         // Cloning into a folder that is no longer empty is refused before anyone asks.
         let d = describe(
             &s,
@@ -2470,10 +2471,7 @@ mod fallback_tests {
 
         let (_, out) = ok(&s, &c, "git_pull", cl.clone()).await;
         assert!(out.contains("Fast-forward"), "{out}");
-        assert_eq!(
-            std::fs::read_to_string(clone.join("f.txt")).unwrap(),
-            "v2\n"
-        );
+        assert_eq!(text(&clone.join("f.txt")), "v2\n");
         let (_, out) = ok(&s, &c, "git_status", cl.clone()).await;
         assert!(
             out.starts_with("exit code 0\n## main...origin/main"),
@@ -2505,10 +2503,7 @@ mod fallback_tests {
             "{}",
             out.joined_text()
         );
-        assert_eq!(
-            std::fs::read_to_string(clone.join("f.txt")).unwrap(),
-            "v2\n"
-        );
+        assert_eq!(text(&clone.join("f.txt")), "v2\n");
         // And a non-fast-forward push is rejected.
         let (_, out) = go(&s, &c, "git_push", cl.clone()).await.unwrap();
         assert!(out.is_error, "{}", out.joined_text());
@@ -2747,7 +2742,7 @@ printf '@@harniss-git-worker@@ {"kind":"done","text":"%s"}\n' "$r""#;
             v1.id(),
             "the fast-forward wrote outside the approved folders"
         );
-        assert_eq!(std::fs::read_to_string(work.join("f.txt")).unwrap(), "v1\n");
+        assert_eq!(text(&work.join("f.txt")), "v1\n");
     }
 
     /// Nothing is started once Stop has been pressed.

@@ -320,12 +320,24 @@ fn build(spec: &SpawnSpec, options: Options) -> CommandWrap {
         }
     }
     #[cfg(unix)]
-    match options.detach {
-        Detach::Group => {
-            wrap.wrap(ProcessGroup::leader());
+    {
+        match options.detach {
+            Detach::Group => {
+                wrap.wrap(ProcessGroup::leader());
+            }
+            Detach::Session => {
+                wrap.wrap(ProcessSession);
+            }
         }
-        Detach::Session => {
-            wrap.wrap(ProcessSession);
+        let limit = descriptor_limit();
+        // SAFETY: the closure runs in the forked child before exec and only calls fcntl (and
+        // close_range on Linux), which are async-signal-safe; it allocates nothing. It is
+        // registered first, so descriptors a later hook dup2s (spawn_with_fds) stay open.
+        unsafe {
+            wrap.command_mut().pre_exec(move || {
+                close_on_exec_from(3, limit);
+                Ok(())
+            });
         }
     }
     if options.kill_on_drop {
@@ -333,6 +345,62 @@ fn build(spec: &SpawnSpec, options: Options) -> CommandWrap {
         wrap.wrap(KillOnDrop);
     }
     wrap
+}
+
+/// The highest descriptor number to sweep in [`close_on_exec_from`], read before the fork.
+#[cfg(unix)]
+fn descriptor_limit() -> i32 {
+    // SAFETY: sysconf only reads a limit.
+    let n = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    // macOS answers -1 for an unlimited soft limit; the kernel still caps each process.
+    if n <= 0 {
+        1 << 16
+    } else {
+        n.min(1 << 20) as i32
+    }
+}
+
+/// Marks every descriptor from `first` up close-on-exec, in a forked child just before
+/// exec, so the new program gets only stdio and what is dup2'd after this runs.
+///
+/// Every descriptor std creates is close-on-exec, but on macOS std cannot create pipes and
+/// sockets that way atomically (no `pipe2`, no `SOCK_CLOEXEC`): one created by another
+/// thread at the moment of the fork would otherwise reach the child (an MCP server, the
+/// browser), and so would anything a C library opened without `O_CLOEXEC`.
+#[cfg(unix)]
+fn close_on_exec_from(first: i32, limit: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        // Linux 5.11+: one call for the whole range.
+        const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+        // SAFETY: a system call with integer arguments only.
+        let done = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first as libc::c_uint,
+                libc::c_uint::MAX,
+                CLOSE_RANGE_CLOEXEC,
+            )
+        } == 0;
+        if done {
+            return;
+        }
+    }
+    mark_close_on_exec(first, limit);
+}
+
+/// The descriptor-by-descriptor form of [`close_on_exec_from`] (macOS, older Linux).
+#[cfg(unix)]
+fn mark_close_on_exec(first: i32, limit: i32) {
+    for fd in first..limit {
+        // SAFETY: fcntl on a descriptor number; an unused number fails with EBADF.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
 }
 
 /// Starts a child described by `spec`. Must be called inside a Tokio runtime.
@@ -372,9 +440,10 @@ pub struct InheritedFd {
 /// Starts a child like [`spawn`] and additionally hands it `fds` at the descriptor numbers
 /// they name (Unix).
 ///
-/// Every other descriptor of the app stays closed in the child: the app's copies are
-/// close-on-exec, and each one handed over is first moved above the target numbers so
-/// two mappings can never overwrite each other. The app's copies are closed when this
+/// Every other descriptor of the app stays closed in the child: every child marks all its
+/// descriptors from 3 up close-on-exec before exec ([`close_on_exec_from`]), the dup2s
+/// here run after that, and each one handed over is first moved above the target numbers
+/// so two mappings can never overwrite each other. The app's copies are closed when this
 /// returns, so the app sees end-of-file when the child exits.
 #[cfg(unix)]
 pub fn spawn_with_fds(spec: SpawnSpec, fds: Vec<InheritedFd>) -> io::Result<ManagedChild> {
@@ -1173,6 +1242,44 @@ mod tests {
         // read ends at the child's exit instead of hanging.
         app_in.read_to_string(&mut got).expect("read");
         assert_eq!(got, "got ping\n");
+    }
+
+    /// A descriptor left inheritable in the app (a library that opened a file without
+    /// `O_CLOEXEC`, or one caught between `pipe()` and `fcntl()` on macOS, where std cannot
+    /// create pipes and sockets close-on-exec atomically) never reaches a child.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn children_never_inherit_descriptors_left_open_on_exec() {
+        use std::os::fd::AsRawFd;
+        let (r, _w) = std::io::pipe().expect("pipe");
+        let fd = r.as_raw_fd();
+        // SAFETY: clears the close-on-exec flag of a descriptor this test owns.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+        let sh = resolve_program("sh", None).expect("sh on PATH");
+        let script = format!("if [ -e /dev/fd/{fd} ]; then exit 7; fi; exit 0");
+        let spec = SpawnSpec::new(sh, std::env::temp_dir())
+            .args(["-c", script.as_str()])
+            .stdout(StdioMode::Null)
+            .stderr(StdioMode::Null);
+        let status = spawn(spec).expect("spawn").wait().await.expect("wait");
+        assert_eq!(status.code(), Some(0), "descriptor {fd} reached the child");
+        drop(r);
+    }
+
+    /// The loop macOS uses (Linux normally takes close_range), run in this process.
+    #[cfg(unix)]
+    #[test]
+    fn the_descriptor_loop_marks_close_on_exec() {
+        use std::os::fd::AsRawFd;
+        let (r, _w) = std::io::pipe().expect("pipe");
+        let fd = r.as_raw_fd();
+        // SAFETY: flag changes on a descriptor this test owns.
+        unsafe {
+            assert_eq!(libc::fcntl(fd, libc::F_SETFD, 0), 0);
+            mark_close_on_exec(fd, fd + 1);
+            assert_ne!(libc::fcntl(fd, libc::F_GETFD) & libc::FD_CLOEXEC, 0);
+        }
+        assert!(descriptor_limit() > fd);
     }
 
     #[cfg(unix)]
