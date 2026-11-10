@@ -38,7 +38,7 @@ Research turned up facts that affect some of these. Each item below has a defaul
 
 | # | Decision | Default | Why it needs you |
 |---|---|---|---|
-| D1 | What the Windows installer contains | **All four backends, as you asked.** The installer is about 1.0–1.2 GB and installs 2.3 GB. | Every app update re-downloads the whole installer, and Tauri's updater holds it in RAM while it does. The alternative is a ~150 MB installer with Vulkan + CPU, and CUDA and ROCm as one-click downloads in Settings. The backend code is identical either way, so this can change later without a rewrite. |
+| D1 | What the Windows installer contains | **All four backends, as you asked.** The installer is about 1.0–1.2 GB and installs about 1.9 GB. | Every app update re-downloads the whole installer, and Tauri's updater holds it in RAM while it does. The alternative is a ~150 MB installer with Vulkan + CPU, and CUDA and ROCm as one-click downloads in Settings. The backend code is identical either way, so this can change later without a rewrite. |
 | D2 | Where the ROCm build comes from | The AMD-sponsored `lemonade-sdk/llamacpp-rocm` build for RX 9000-series cards, pinned by SHA-256. | llama.cpp's own Windows ROCm build no longer includes the ROCm runtime and does not work on a clean PC. The lemonade build is self-contained, but it is a nightly built on a pre-release ROCm, and it has an open performance bug on the RX 9070 XT. |
 | D3 | Which backend "Auto" picks on AMD | **Vulkan.** ROCm is a manual choice in Settings. | On the RX 9070 XT, published numbers show Vulkan generating tokens faster than ROCm (104 vs 91 tokens/s on an 8B model) while ROCm reads prompts faster. AMD supports ROCm only on Windows 11 25H2. |
 | D4 | Which CUDA build to bundle | CUDA 13.5. It needs an RTX 20-series / GTX 16-series or newer card and driver 580 or newer. Older NVIDIA cards use Vulkan. | The CUDA 12.4 build covers older cards but is 0.5 GB larger, which pushes the four-backend installer past the 2 GB limit of Tauri's installer format. Using it needs a custom installer template. Neither of us can test CUDA: you have no NVIDIA card. |
@@ -57,7 +57,7 @@ Research turned up facts that affect some of these. Each item below has a defaul
 I had each subsystem researched against primary sources and then re-checked by a second, independent pass, because my own knowledge predates several large upstream changes. The ones that shaped this design:
 
 - **llama.cpp** now has stable version tags. This design pins **v0.9.0** (build `b12110`). Defaults changed: the port is 9931, `--jinja` is on by default, context and GPU layers auto-fit, and it starts four slots with an 8 GB prompt cache. The app overrides all of these explicitly.
-- **llama-server is no longer one file on Windows.** It is a small launcher plus about 20 DLLs, so each backend is a folder, not a sidecar binary.
+- **llama-server is no longer one file.** On Windows it is a small launcher plus about 20 DLLs; on macOS, a launcher plus 10 libraries. It ships as a folder, not as a single sidecar binary.
 - **A backend that fails to load does not crash.** The server silently runs on CPU. The app therefore always names the device it expects, which turns a silent fallback into a detectable error.
 - **llama-server reports capabilities itself.** `/props` returns whether the loaded chat template supports tool calls and whether vision is available. GGUF metadata gives the answer before load; `/props` is the authority after.
 - **Tool-call parsing in llama.cpp was rewritten.** When the model's output doesn't match the expected format the server returns an error instead of text, so the app's fallback parser needs its own recovery path (section 8.3).
@@ -131,7 +131,7 @@ One cancellation token is created per agent turn. Child tokens go to the inferen
 |---|---|---|
 | Inference | Drops the HTTP stream; llama-server stops generating when the client disconnects | < 100 ms |
 | Terminal and git commands | Kills the call's job / process group outright, with no graceful wait | < 200 ms |
-| Browser | Cancels pending CDP calls and sends `Page.stopLoading` | < 300 ms |
+| Browser | Cancels pending CDP calls, releases any held requests as failed, and sends `Page.stopLoading` | < 300 ms |
 | Computer use | Releases every key and mouse button the app has pressed (it tracks them), then hides the overlay | < 100 ms |
 | External MCP tool | Sends the protocol's cancel notification and stops waiting. If the server keeps working for 2 s it is restarted | immediate |
 | Pending approval card | Resolved as cancelled | immediate |
@@ -148,7 +148,7 @@ The Rust side is a Cargo workspace. Everything with logic worth testing lives in
 |---|---|---|
 | `policy` | Path sandbox, action descriptions, risk classification, grant matching, destructive-command detection. Pure logic. | none of the others |
 | `store` | SQLite schema and migrations, audit log, keychain access | none |
-| `runtime` | Spawn helper and process trees; llama.cpp backends: detect, probe, launch, health, restart | `store` |
+| `runtime` | Spawn helper and process trees; llama.cpp backends: detect, probe, launch, health, restart | none |
 | `models` | GGUF header reader, hardware detection, fit check, Hugging Face client, download manager, curated catalog | `store`, `runtime` |
 | `mcp-host` | Connections to MCP servers (in-memory, stdio, Streamable HTTP), tool registry, config import | `store`, `runtime` |
 | `tools` | The six built-in MCP servers | `policy`, `runtime`, `store` |
@@ -219,7 +219,7 @@ Search → repo detail (file sizes and SHA-256) → fit check → download each 
 
 ### 6.3 First run
 
-Detect hardware (RAM, GPUs, probe backends) → pick the best entry from the bundled catalog that the fit check rates green → show one card with a Download button → download → load → open a new chat. That is three clicks: Get started, Download, and nothing else until the chat box. The same screen offers "Use a model I already have" (file picker) and "Connect Ollama / LM Studio".
+Detect hardware (RAM, GPUs, probe backends) → pick the best entry from the bundled catalog that the fit check rates green → show one card with a Download button → download → load → open a new chat. That is two clicks, Get started and Download, and the download is the only wait. The same screen offers "Use a model I already have" (file picker) and "Connect Ollama / LM Studio".
 
 ---
 
@@ -266,10 +266,10 @@ The app chooses a free port, generates a random API key for this launch and star
 llama-server --host 127.0.0.1 --port <port> --no-webui --offline --jinja
              -m <model.gguf> [--mmproj <mmproj.gguf>]
              -c <context> -np 1 --device <device> -ngl <auto|n>
-             --cache-ram <small> 
+             --cache-ram <MiB>
 ```
 
-with the key in the `LLAMA_API_KEY` environment variable, so it never shows in the process list. `--jinja` is passed explicitly even though it is now the default. `--offline` stops llama-server from ever downloading anything. An explicit `-c` stops it from silently shrinking the context to fit.
+with the key in the `LLAMA_API_KEY` environment variable, so it never shows in the process list. `--jinja` is passed explicitly even though it is now the default. `--offline` stops llama-server from ever downloading anything. An explicit `-c` stops it from silently shrinking the context to fit. `-np 1` and a small `--cache-ram` replace defaults meant for multi-user servers (four slots and an 8 GB prompt cache), which would hurt on a 16 GB machine.
 
 The working directory of the server and probes is always the runtime directory, never a user folder. llama.cpp also loads backend DLLs from the current directory, so starting it inside a cloned repository would let a file in that repository run as code. On Windows the app sets the error mode that stops a missing DLL from raising a system dialog, and maps the resulting exit code to a plain message.
 
@@ -296,8 +296,8 @@ Stopped → Starting (progress) → Ready → Stopping → Stopped
 
 The agent loop talks to a `Provider` trait with two implementations:
 
-- **Local:** the managed llama-server. Adds exact token counts (`/tokenize`, `/apply-template`), capabilities from `/props`, and tokens/s from the `timings` object.
-- **OpenAI-compatible:** base URL + optional API key (keychain). Works with Ollama, LM Studio, vLLM and remote servers. The app probes what it can: model list from `/v1/models`, and context length and capabilities from Ollama's and LM Studio's native endpoints when they answer. Where the endpoint doesn't say, token counts are estimated and calibrated against the `usage` numbers it returns, and tool support is assumed until the endpoint rejects a tools request, at which point tools are switched off for that model with an explanation.
+- **Local:** the managed llama-server. Adds exact token counts (section 8.4), capabilities from `/props`, and tokens/s from the `timings` object.
+- **OpenAI-compatible:** base URL + optional API key (keychain). Works with Ollama, LM Studio, vLLM and remote servers. The app probes what it can: the model list from `/v1/models`, and context length and capabilities from each server's own endpoints where they exist (section 8.4). Tool support is assumed until the endpoint rejects a tools request, at which point tools are switched off for that model with an explanation.
 
 Both use streaming chat completions with `stream_options.include_usage`.
 
@@ -329,40 +329,53 @@ build request → stream → classify response
    └─ server parse error                 → recovery (8.3) → next step
 ```
 
-- **Step cap:** 25 model calls per turn by default (configurable). At the cap the loop stops and tells the user it hit the limit; it does not ask the model for one more summary.
-- **Order:** `parallel_tool_calls` is sent as false. If a model returns several calls anyway they run one at a time, in order.
+- **Step cap:** 25 model calls per turn by default (configurable). At the cap the loop makes one last request with tools switched off, asking the model to say what it did and what is left, so the user is not left with a half-finished trace.
+- **Loop detection:** the same tool with the same arguments three times in a row gets a note telling the model it is repeating itself; five times stops the turn.
+- **Order:** `parallel_tool_calls: false` is sent on every request, because llama-server's default depends on the model's template. If a model returns several calls anyway they run one at a time, in order.
 - **Cancellation:** checked between every stage and wired into the stream and each tool call (section 4.2).
-- **One turn at a time** across the app in v1, because one local model with one slot serves one request.
-- **Reasoning:** `reasoning_content` is streamed into a collapsible "Thinking" block and is not sent back in later requests unless the template says it supports that.
+- **One turn at a time** across the app in v1, because one local model with one slot serves one request. Side jobs that would need the model (chat titles) use a cheap rule instead of a model call, since any second request on the single slot throws away the conversation's cached state.
+- **Reasoning:** streamed into a collapsible "Thinking" block and not sent back in later requests unless the template says it supports that.
+- **Sampling:** the app sends no temperature of its own. llama-server applies the values the model's publisher stored in the GGUF, the catalog can override them per model, and the user can override both. Model families disagree too much for one default (one recommends 0.15, another warns never to go below 0.6).
+
+**Tolerant stream reader.** Servers that call themselves OpenAI-compatible differ in details, so the reader accepts all of these: tool-call arguments in fragments (llama.cpp, LM Studio) or whole in one chunk (Ollama); reasoning in `reasoning_content` or in `reasoning`; missing or duplicate tool-call ids (the app makes its own); keep-alive comment lines; a usage chunk with no choices; a stream that ends with an error object and no `[DONE]`. Tool calls count if any arrived, whatever `finish_reason` says. A call cut off by the output limit is never run.
 
 ### 8.3 Tool-call parsing, repair and retries
 
 1. **Native:** accumulate streamed `tool_calls` deltas by index.
-2. **Fallback parser:** runs only when tools are enabled and no native call arrived. It recognises a fixed set of text shapes: `<tool_call>{...}</tool_call>`, a fenced `json` block or bare JSON object/array with `name` + `arguments` (or `parameters`), `[TOOL_CALLS][...]`, `<|python_tag|>{...}`, `<function=name>{...}</function>`. A candidate counts only if the name is an enabled tool **and** its arguments validate against that tool's schema, which keeps ordinary JSON in an answer from being mistaken for a call. Recovered calls are removed from the visible text and the card is marked "recovered from text".
-3. **Server parse error:** when llama-server rejects the model's output as malformed (HTTP 500, or an error event mid-stream), the app retries the step once with thinking disabled, which is the known cause in most reports. A second failure is surfaced as an error.
-4. **Repair before validation:** arguments double-encoded as a JSON string are decoded; `"5"` becomes `5` and `"true"` becomes `true` only where the schema demands that type.
-5. **Validation:** against the tool's JSON Schema (compiled once per tool). On failure the tool is not run. The model gets a short error naming each bad field and what was expected.
-6. **Retry budget:** 2 corrections per call and 5 per turn. After that the turn stops with "The model kept producing invalid tool calls", plus the last error under Copy details.
+2. **Fallback parser:** runs only when tools were offered and no native call arrived. It tries, in order:
+   - known markers: `<tool_call>…</tool_call>` holding JSON, or holding `<function=name><parameter=key>value</parameter></function>` (the form current Qwen and Granite models use); `[TOOL_CALLS]`; `<|tool_call|>`; `<|python_tag|>`; `[TOOL_REQUEST]…[END_TOOL_REQUEST]`; `<function=name>{…}</function>`;
+   - a fenced `json` block;
+   - bare JSON, but only when the message starts with `{` or `[`.
 
-The parser is a pure function over text with a table-driven test suite, one fixture per model family.
+   Inside the JSON it accepts `name` + `arguments`, `name` + `parameters`, or `function.name` + `function.arguments`. A candidate counts only if the name is an enabled tool **and** its arguments validate against that tool's schema. That is what keeps ordinary JSON in an answer from being mistaken for a call. Text inside the Thinking block or quoted from a tool result is never searched. Recovered calls are removed from the visible text, marked "recovered from text" on the card, and go through the same approval path as native ones.
+3. **Server parse error:** when llama-server rejects the model's output as malformed (HTTP 500, or an error event mid-stream), the app retries the step once with thinking disabled, which is the known cause in most reports. A second failure is surfaced as an error.
+4. **Repair before validation**, guided by the schema and limited to what is unambiguous: arguments double-encoded as a JSON string are decoded; `"5"` becomes `5` and `"true"` becomes `true` where the schema demands that type; a null for an optional field is dropped; a single value is wrapped where the schema wants a list.
+5. **Validation:** against the tool's JSON Schema (compiled once per tool). On failure the tool is not run. The model gets a short error naming each bad field and what was expected.
+6. **Retry budget:** 2 corrections per call and 6 mistakes per turn. After that the turn stops with "The model kept producing invalid tool calls", plus the last error under Copy details.
+
+The parser is a pure function over text with a table-driven test suite, one fixture per model family. The format list is data, because new families appear every few months.
 
 ### 8.4 Context management
 
 Budget = context length − reserved output (the smaller of 4096 tokens and a quarter of the context) − a small margin.
 
-- **Counting:** exact for local models, by asking llama-server to render and tokenize the actual request before sending it. Estimated and self-calibrating for remote endpoints. The UI shows "used / total" from the last real `usage` numbers.
-- **Tool output cap:** each result is capped at the smaller of 8,000 tokens and 25% of the context, keeping the head and the tail, with a note in the middle: `[... 48,210 characters (about 12,000 tokens) omitted ...]`. The full output is stored and shown in the tool card. File and search tools take offset and limit arguments, so the model can page instead of relying on truncation.
+- **Counting:** exact for local models. llama-server has an endpoint that returns the token count of a full chat request without running it, and the app calls it before every request. If the server still rejects a request as too long, that triggers compaction and one retry.
+- **Remote endpoints:** the app asks each kind of server for the context actually in use: Ollama's list of running models, LM Studio's loaded-instance config, vLLM's model list. Otherwise it uses a user setting that defaults to a cautious 4,096. Token counts are estimated at 3 characters per token and corrected from the `usage` numbers the endpoint returns.
+- **Ollama warning:** through its OpenAI-compatible API, Ollama cannot be told to use a larger context, defaults to 4k on GPUs under 24 GB, and silently drops old messages when the window overflows. The app shows the window it detected, warns when it is 4k, explains how to raise it in Ollama, and flags a reply whose reported prompt size is far below what was sent.
+- **Tool output cap:** each result is capped at the smaller of 8,000 tokens and 20% of the context, keeping the head and the tail, with a note in the middle: `[... 48,210 characters (about 12,000 tokens) omitted ...]`. The full output is stored and shown in the tool card. File and search tools take offset and limit arguments, so the model can page instead of relying on truncation.
 - **Compaction, in two stages, when the next request would pass 80% of the budget:**
   1. Replace old tool results (not from the current turn) with one-line stubs.
-  2. If still over, summarise the oldest turns with the same model in a separate tool-free request, keeping the system prompt and the most recent turns verbatim. The summary is stored as its own row. The original messages stay in the database and in the UI, under a "Earlier messages were summarised" divider.
-- **Screenshots:** only the most recent few stay in context; older ones become stubs.
+  2. If still over, summarise the oldest turns with the same model in a separate request with tools and thinking off, a fixed template (goal, decisions, work done, what is left, exact paths and identifiers) and a capped length. The system prompt, any loaded skill instructions and the most recent turns (up to about 30% of the context) stay verbatim. The summary is stored as its own row. The original messages stay in the database and in the UI, under an "Earlier messages were summarised" divider.
+- **Screenshots:** only the most recent one or two stay in context; older ones become stubs.
 - **Tool schemas:** only tools that are enabled for this chat are sent. The UI warns past roughly 12 enabled tools, because small models get worse with many.
 
 ### 8.5 Prompt assembly
 
 `system` = the chat's system prompt (per chat, editable, with a global default) + a short agent preamble (only when tools are on) + the skills index (names and descriptions only).
 
-Tool results go back as tool-role messages wrapped in a delimiter that states the source and that the content is untrusted data. A closing delimiter appearing inside the content is escaped. The preamble tells the model that tool output is data and never instructions. That instruction is a courtesy to the model; the actual guarantee is structural and is described in section 13.5.
+Tool results go back as tool-role messages wrapped in a delimiter that carries a random value chosen per chat, the tool's name and the source path or URL. Because the random value is not known in advance, a web page cannot contain a matching closing delimiter. Chat-template control tokens that appear in tool output are neutralised. The preamble tells the model that everything inside the delimiters is data and never instructions.
+
+That instruction lowers the odds; it guarantees nothing, and small models follow injected text more readily than large ones. The guarantee is structural and is described in section 13.5.
 
 ### 8.6 Attachments
 
@@ -403,7 +416,7 @@ The host keeps one connection object per server. Built-in servers connect over a
 | `files` | `list_dir`, `read_file`, `search_files`, `write_file`, `edit_file`, `delete_file` | yes |
 | `terminal` | `run_command` | **no** |
 | `git` | `git_status`, `git_diff`, `git_log`, `git_commit`, `git_clone`, `git_pull`, `git_push` | yes |
-| `browser` | `browser_navigate`, `browser_snapshot`, `browser_read_text`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_screenshot`, `browser_back` | yes |
+| `browser` | `browser_navigate`, `browser_snapshot`, `browser_find`, `browser_read_text`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_screenshot`, `browser_back` | yes |
 | `computer` | `computer_screenshot`, `computer_click`, `computer_move`, `computer_drag`, `computer_scroll`, `computer_type`, `computer_key` | **no**, and only offered for vision models |
 | `skills` | `load_skill`, `read_skill_file` | yes, when any skill is enabled |
 
@@ -423,7 +436,7 @@ Every group and every tool can be toggled per chat.
 - *Launch:* the app finds the installed Chrome or Edge itself (standard install paths, the registry on Windows, a user override) and starts it with `--user-data-dir` inside the app's data folder. It never points at the user's own profile, so it never sees their cookies or logins. Chrome 136+ refuses remote debugging on the default profile; a custom directory is the supported route.
 - *Connection:* CDP over a pipe (`--remote-debugging-pipe`), so there is no listening port that another local program could attach to. The cost: Chrome marks a pipe-driven browser as automated (`navigator.webdriver` is true), and some sites refuse automated browsers. A setting switches to a loopback port for those sites, which hides the automation flag but leaves an unauthenticated local port open while the browser runs.
 - *CDP client:* a small one of our own. The maintained Rust crate defaults to headless mode, ignoring certificate errors and a fixed 800×600 viewport, and it silently drops events it can't parse, which is the wrong failure mode for something that holds form submissions. Most of the work is lifecycle, not method count: one session per tab and per cross-site iframe, adopting pop-ups, navigation waits, and always releasing paused requests.
-- *Reading pages:* an accessibility-tree snapshot with element references (`- button "Sign in" [ref=e12]`), limited to the viewport and capped at 2–4k tokens by default. A full snapshot of an ordinary page measures 15–19k tokens, which a small model cannot afford. `browser_read_text` returns readable text with its own cap, and a find tool returns only matching elements.
+- *Reading pages:* an accessibility-tree snapshot with element references (`- button "Sign in" [ref=e12]`), limited to the viewport and capped at 2–4k tokens by default. A full snapshot of an ordinary page measures 15–19k tokens, which a small model cannot afford. `browser_read_text` returns readable text with its own cap, and `browser_find` returns only the elements matching a phrase.
 - *Where the agent may go:* `http` and `https` only. `file:`, `chrome:` and `devtools:` URLs are blocked, and so are loopback and private-network addresses by default, which keeps a web page from steering the agent at the app's own llama-server or at the user's router. Downloads are off unless approved, and then go to a folder the user approved.
 - *Form submission gate:*
   1. Intent: a click that resolves to a submit control, Enter in a form field, or a script calling `submit()` asks first.
@@ -449,12 +462,15 @@ Every group and every tool can be toggled per chat.
 
 ## 10. Skills
 
-- **Format:** the Agent Skills format, unchanged: a folder with `SKILL.md` (YAML frontmatter with `name` and `description`, then Markdown) and optional `scripts/`, `references/`, `assets/`.
-- **Storage:** one folder per skill under the app's data directory, plus an enabled flag in the database.
-- **Progressive loading:** the system prompt carries only each enabled skill's name and description. `load_skill(name)` returns the full `SKILL.md` and the skill's folder path. `read_skill_file(name, path)` returns one referenced file, sandboxed to the skill's folder with the same path rules as the files tool.
+- **Format:** the Agent Skills format, unchanged: a folder with `SKILL.md` (YAML frontmatter, then Markdown) and optional `scripts/`, `references/`, `assets/`. The spec defines six frontmatter fields: `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`.
+- **Storage:** one folder per skill under the app's data directory, plus an enabled flag in the database. A setting, off by default, also loads the shared `~/.agents/skills` folder that other clients use.
+- **Two levels of checking,** as the format's own client guide recommends:
+  - *Loading is lenient,* so skills written for other clients work. A name that doesn't match its folder, an unknown field or a non-string metadata value produces a warning and the skill still loads. Only a missing description or unreadable YAML skips it.
+  - *The editor's Validate button is strict* and mirrors the reference validator: only the six fields; name 1–64 characters, lowercase letters, digits and single hyphens, matching the folder; description 1–1024 characters; compatibility up to 500.
+- **Progressive loading:** the system prompt carries one `<available_skills>` block with each enabled skill's name and description, about 50–100 tokens per skill. `load_skill(name)` returns the full `SKILL.md`, the skill's folder path and a list of its files; its `name` argument is restricted to the enabled skills. `read_skill_file(name, path)` returns one referenced file, sandboxed to the skill's folder with the same path rules as the files tool. Loaded skill instructions are exempt from compaction.
 - **Scripts** run only through the terminal tool with its normal approvals. If the terminal is off, `load_skill` says so, so the model doesn't try.
-- **UI:** import from a folder or a zip, create, edit with live frontmatter validation that follows the spec's rules, enable, disable, delete.
-- **Zip import** rejects absolute paths, `..`, symlinks and oversized archives.
+- **UI:** import from a folder or a zip, create, edit with live frontmatter validation, enable, disable, delete.
+- **Zip import** rejects absolute paths, `..`, symlinks, more than 512 files or more than 16 MiB unpacked.
 
 ---
 
@@ -559,7 +575,7 @@ The approved action travels with the call. The tool executes that action and re-
 | `run_command` | The same program in the same working directory. For interpreters (`python`, `node`, `bash`, `powershell`, ...) the grant also names the script file, so it covers re-running that script and nothing else | Recursive or forced deletes (`rm -r`, `rm -f`, `del /s`, `rmdir /s`, `Remove-Item -Recurse`), elevation (`sudo`, `runas`, `Start-Process -Verb RunAs`), disk and system commands (`format`, `diskpart`, `mkfs`, `dd`, `shutdown`, registry edits), `git push`, `git reset --hard`, `git clean`, inline code passed to an interpreter (`python -c`, `node -e`), and any command the parser cannot fully break down: redirections, variables, command substitution, subshells, `Invoke-Expression`, `-EncodedCommand`, `eval` |
 | `git_status`, `git_diff`, `git_log` | The same repository | n/a |
 | `git_commit`, `git_pull`, `git_clone` | The same repository (clone: the same remote host) | `git_push` |
-| `browser_navigate`, read and snapshot, click, type | The same site (scheme + host + port) | Form submission, file upload |
+| `browser_navigate`, read and snapshot, click, type | The same site (scheme + host + port) | Form submission, file upload, downloads |
 | `computer_*` | The same kind of action (look / pointer / keyboard) | n/a (the overlay and Stop are the control here) |
 | External MCP tool | That tool on that server | A tool whose server marks it destructive |
 | `load_skill`, `read_skill_file` | No prompt (D7) | n/a |
