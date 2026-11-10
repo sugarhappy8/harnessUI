@@ -49,6 +49,7 @@ pub fn stop_now(app: &AppHandle) {
         token.cancel();
     }
     crate::computer_cmd::release_all(app);
+    crate::turns::cancel_all_pending(app);
     let _ = app.emit_to(crate::MAIN_WINDOW, "stop-requested", ());
     tracing::info!("stop hotkey pressed");
 }

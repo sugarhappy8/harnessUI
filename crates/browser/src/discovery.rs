@@ -55,7 +55,7 @@ impl BrowserUnavailable {
 fn not_installed() -> BrowserUnavailable {
     BrowserUnavailable {
         message: "The browser tool needs Chrome or Edge, and neither is installed.".into(),
-        next_step: "Install Google Chrome, or choose a browser path in Settings → Tools → Browser."
+        next_step: "Install Google Chrome, or choose a browser path in Settings → Browser."
             .into(),
     }
 }
@@ -287,7 +287,7 @@ pub fn find_browser_in(
                     "The browser chosen in Settings ({}) was not found.",
                     choice.display()
                 ),
-                next_step: "Choose another browser path in Settings → Tools → Browser, or clear it to use Chrome or Edge.".into(),
+                next_step: "Choose another browser path in Settings → Browser, or clear it to use Chrome or Edge.".into(),
             });
     }
     if let Some(path) = env.env_override.as_deref().and_then(usable) {

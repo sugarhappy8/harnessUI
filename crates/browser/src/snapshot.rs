@@ -33,6 +33,11 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// Whether the point lies in the box (left and top edges in, right and bottom out).
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+
     /// Whether the two boxes overlap (an empty box overlaps nothing).
     pub fn intersects(&self, other: &Rect) -> bool {
         self.w > 0.0

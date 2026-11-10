@@ -284,12 +284,14 @@ pub async fn switch_branch(
 }
 
 #[tauri::command]
-pub async fn stop_generation(state: State<'_, AppState>) -> AppResult<()> {
+pub async fn stop_generation(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<()> {
     if let Ok(guard) = state.generation.lock()
         && let Some(token) = guard.as_ref()
     {
         token.cancel();
     }
+    crate::computer_cmd::release_all(&app);
+    crate::turns::cancel_all_pending(&app);
     Ok(())
 }
 

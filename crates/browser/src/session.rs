@@ -233,6 +233,8 @@ impl State {
         self.held.values().filter(|h| h.tab == tab).count()
     }
 
+    /// Tests only (the `test-hooks` feature): requests held right now.
+    #[cfg(feature = "test-hooks")]
     pub fn held_count(&self) -> usize {
         self.held.len()
     }
@@ -995,6 +997,7 @@ impl Browser {
         let Some(session) = params.get("sessionId").and_then(Value::as_str) else {
             return;
         };
+        self.cdp.fail_session(session, "the tab or frame went away");
         let mut s = self.lock();
         let Some(info) = s.sessions.remove(session) else {
             return;
@@ -1023,6 +1026,8 @@ impl Browser {
     }
 
     fn on_crashed(&self, session: &str) {
+        // Commands sent to the dead renderer are never answered.
+        self.cdp.fail_session(session, "the page crashed");
         let mut s = self.lock();
         let Some(tab) = s.sessions.get(session).map(|i| i.tab.clone()) else {
             return;
@@ -1672,6 +1677,88 @@ mod tests {
         s.frames.get_mut("T").unwrap().loader_id = "L2".into();
         assert!(!s.typed_on("T"), "a new document clears it");
         assert!(!s.typed_on("missing"));
+    }
+
+    fn tab(id: &str, opener: Option<&str>) -> Tab {
+        Tab {
+            target_id: id.into(),
+            session: format!("S-{id}"),
+            opener: opener.map(str::to_string),
+            granted_site: None,
+            typed_loader: None,
+            crashed: false,
+            refs: RefTable::default(),
+            screenshot_dpr: None,
+            nav_seq: 0,
+            stop_seq: 0,
+            loaded_loader: None,
+            loading: false,
+            last_nav_event: None,
+        }
+    }
+
+    #[test]
+    fn holds_belong_to_the_call_in_progress_and_its_chat() {
+        let mut s = State {
+            chat_id: 3,
+            ..Default::default()
+        };
+        s.tabs.push(tab("T", None));
+        s.tabs.push(tab("P", Some("T")));
+        s.tabs.push(tab("U", None));
+        // No call: the chat that ran the last call, nothing to cancel it.
+        let owner = s.hold_owner("U");
+        assert_eq!(owner.chat_id, 3);
+        assert!(owner.during_tool.is_none() && owner.call_cancel.is_none());
+        let cancel = CancellationToken::new();
+        s.call = Some(ActiveCall {
+            chat_id: 1,
+            tool: "browser_click".into(),
+            tab: "T".into(),
+            intent: None,
+            expected_navigation: None,
+            cancel: cancel.clone(),
+        });
+        for t in ["T", "P"] {
+            let owner = s.hold_owner(t);
+            assert_eq!(owner.chat_id, 1, "{t}");
+            assert_eq!(owner.during_tool.as_deref(), Some("browser_click"), "{t}");
+            assert!(owner.call_cancel.is_some(), "{t}");
+        }
+        // Another tab during the call: the call's chat, and its Stop fails it, but it is
+        // not attributed to the tool.
+        let owner = s.hold_owner("U");
+        assert_eq!(owner.chat_id, 1);
+        assert!(owner.during_tool.is_none());
+        cancel.cancel();
+        assert!(owner.call_cancel.unwrap().is_cancelled());
+    }
+
+    #[test]
+    fn stop_fails_the_holds_of_its_tab_and_its_chat_only() {
+        let mut s = State::default();
+        let mut tokens = Vec::new();
+        for (key, tab, chat) in [("a", "T", 1), ("b", "U", 1), ("c", "T", 2), ("d", "V", 2)] {
+            let token = CancellationToken::new();
+            tokens.push((key, token.clone()));
+            s.held.insert(
+                key.into(),
+                Held {
+                    session: "S".into(),
+                    request_id: key.into(),
+                    tab: tab.into(),
+                    chat_id: chat,
+                    token,
+                },
+            );
+        }
+        assert_eq!(s.cancel_holds_on_stop("T", 1), 3);
+        let cancelled: Vec<&str> = tokens
+            .iter()
+            .filter(|(_, t)| t.is_cancelled())
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(cancelled, ["a", "b", "c"]);
     }
 
     #[test]

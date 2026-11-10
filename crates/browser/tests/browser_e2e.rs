@@ -176,12 +176,7 @@ impl Approver {
 
 #[async_trait]
 impl NavigationApprover for Approver {
-    async fn approve(
-        &self,
-        chat: i64,
-        request: HeldNavigation,
-        cancel: CancellationToken,
-    ) -> bool {
+    async fn approve(&self, chat: i64, request: HeldNavigation, cancel: CancellationToken) -> bool {
         self.chats.lock().unwrap().push(chat);
         self.seen.lock().unwrap().push(request);
         let answer = *self.answer.lock().unwrap();
@@ -1177,7 +1172,6 @@ async fn the_browser_dies_with_shutdown_and_with_the_server() {
     }
 }
 
-
 // ----- regression tests from the review ---------------------------------------------------
 
 /// The harness configuration for a page that embeds a cross-site frame from `frame.test`.
@@ -1269,9 +1263,7 @@ async fn clicks_and_keys_into_a_cross_site_frame_are_judged_inside_it() {
     // Focus in the frame's field: a key press goes to the frame's site.
     let card = ref_of(&snap, "textbox \"Card\"");
     h.ok("browser_click", json!({"ref": card})).await;
-    let action = h
-        .describe("browser_press_key", json!({"key": "4"}))
-        .await;
+    let action = h.describe("browser_press_key", json!({"key": "4"})).await;
     assert_eq!(
         action.scope,
         policy::Scope::Site {
@@ -1400,9 +1392,7 @@ async fn fields_are_rechecked_before_a_fill_and_any_submit_button_is_one() {
 
     // Review fix: a button whose type the browser does not know is a submit button.
     let proceed = ref_of(&snap, "button \"Proceed\"");
-    let action = h
-        .describe("browser_click", json!({"ref": proceed}))
-        .await;
+    let action = h.describe("browser_click", json!({"ref": proceed})).await;
     assert_eq!(action.risk, policy::Risk::AlwaysAsk, "{}", action.preview);
 
     // Review fix: the page turns the approved checkbox into a submit button before the
@@ -1513,7 +1503,7 @@ async fn stop_fails_requests_held_in_other_tabs_of_the_chat() {
     pages.insert(
         "/opener",
         "<title>Opener</title><form method=post action=/submit><input name=q value=x></form>\
-         <a href=\"/popup\" target=\"_blank\">Open the pop-up</a>"
+         <button onclick=\"window.open('/popup')\">Open the pop-up</button>"
             .to_string(),
     );
     pages.insert(
@@ -1526,8 +1516,8 @@ async fn stop_fails_requests_held_in_other_tabs_of_the_chat() {
     let snap = h
         .ok("browser_navigate", json!({"url": site.url("/opener")}))
         .await;
-    let link = ref_of(&snap, "link \"Open the pop-up\"");
-    h.ok("browser_click", json!({"ref": link})).await;
+    let open = ref_of(&snap, "button \"Open the pop-up\"");
+    h.ok("browser_click", json!({"ref": open})).await;
     eventually_async(&h, |url| url.ends_with("/popup")).await;
     let found = h
         .ok("browser_find", json!({"query": "Send from the opener"}))
@@ -1546,7 +1536,11 @@ async fn stop_fails_requests_held_in_other_tabs_of_the_chat() {
     };
     let out = h.call_action("browser_click", a, &action, cancel).await;
     stopper.await.unwrap();
-    assert!(out.joined_text().contains("Stopped"), "{}", out.joined_text());
+    assert!(
+        out.joined_text().contains("Stopped"),
+        "{}",
+        out.joined_text()
+    );
     let mut held = usize::MAX;
     for _ in 0..20 {
         held = h.server.held_requests().await;
@@ -1555,7 +1549,81 @@ async fn stop_fails_requests_held_in_other_tabs_of_the_chat() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(held, 0, "the request held in the opener tab was failed on Stop");
+    assert_eq!(
+        held, 0,
+        "the request held in the opener tab was failed on Stop"
+    );
     assert_eq!(site.posts(), 0);
+    h.server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crashed_tab_recovers_by_navigating_again() {
+    // Review fix: after a crash every tool, browser_navigate included, answered "Navigate
+    // again to reload it", so the tab could never be used again.
+    if !have_browser() {
+        return;
+    }
+    let mut pages = HashMap::new();
+    pages.insert("/", "<title>Fine</title><h1>Fine again</h1>".to_string());
+    let site = start_site(routes(pages)).await;
+    let h = harness(&[site.port], Answer::Deny, ConnectionMode::Pipe);
+    h.ok("browser_navigate", json!({"url": site.url("/")}))
+        .await;
+    h.server.crash_active_tab().await;
+    let crashed_at = Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        match h
+            .server
+            .describe("browser_snapshot", &args(json!({})), &chat())
+            .await
+        {
+            Described::Invalid(why) if why.contains("crashed") => break,
+            _ => {}
+        }
+        assert!(Instant::now() < deadline, "the crash was never noticed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Commands in flight to the dead renderer fail at once instead of waiting 15 s.
+    assert!(
+        crashed_at.elapsed() < Duration::from_secs(8),
+        "noticing the crash took {:?}",
+        crashed_at.elapsed()
+    );
+    let text = h
+        .ok("browser_navigate", json!({"url": site.url("/")}))
+        .await;
+    assert!(text.contains("Fine again"), "{text}");
+    h.server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn acting_in_a_sandboxed_frame_always_asks() {
+    // Review fix: a sandboxed srcdoc frame has the opaque origin "null"; a grant for
+    // that scope would have covered such frames on every site.
+    if !have_browser() {
+        return;
+    }
+    let mut pages = HashMap::new();
+    pages.insert(
+        "/",
+        "<title>Sandbox</title><iframe sandbox=\"allow-scripts\" srcdoc=\"<button onclick='this.textContent=1'>Inner</button>\"></iframe>"
+            .to_string(),
+    );
+    let site = start_site(routes(pages)).await;
+    let h = harness(&[site.port], Answer::Deny, ConnectionMode::Pipe);
+    let snap = h
+        .ok("browser_navigate", json!({"url": site.url("/")}))
+        .await;
+    let inner = ref_of(&snap, "button \"Inner\"");
+    let action = h.describe("browser_click", json!({"ref": inner})).await;
+    assert_eq!(
+        action.scope,
+        policy::Scope::Site {
+            origin: "null".into()
+        }
+    );
+    assert_eq!(action.risk, policy::Risk::AlwaysAsk, "{}", action.preview);
     h.server.shutdown().await;
 }

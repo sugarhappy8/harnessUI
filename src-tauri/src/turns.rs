@@ -270,6 +270,20 @@ pub struct ApprovalDto {
     pub reason: policy::AskReason,
 }
 
+/// Stop: every card still waiting (including ones the browser raised outside a call) is
+/// answered as cancelled.
+pub fn cancel_all_pending(app: &AppHandle) {
+    let cards: Vec<PendingCard> = app
+        .state::<PendingApprovals>()
+        .0
+        .lock()
+        .map(|mut m| m.drain().map(|(_, c)| c).collect())
+        .unwrap_or_default();
+    for card in cards {
+        let _ = card.tx.send(Approval::Cancelled);
+    }
+}
+
 /// Answers a card. Only the main window can call this, and only with an id Rust made.
 #[tauri::command]
 pub async fn resolve_approval(

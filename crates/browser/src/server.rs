@@ -108,6 +108,18 @@ fn action(
     outbound: bool,
     payload: Value,
 ) -> Described {
+    // A frame with no site of its own (a sandboxed or srcdoc frame has the opaque origin
+    // "null") would share one grant scope with every such frame on every site, so nothing
+    // that acts there can be covered by a grant.
+    let opaque = origin == "null" && !read_only;
+    let risk = if opaque { Risk::AlwaysAsk } else { risk };
+    let preview = if opaque {
+        format!(
+            "{preview}\nThe target is in a frame with no site of its own (sandboxed or local content), so this always asks."
+        )
+    } else {
+        preview
+    };
     Described::Action(Action {
         server: "browser".into(),
         tool: tool.into(),
@@ -365,6 +377,24 @@ impl BrowserServer {
                 .filter(|i| i.kind == crate::session::TargetKind::Frame)
                 .count(),
             None => 0,
+        }
+    }
+
+    /// Tests only: crashes the active tab's renderer (`Page.crash`).
+    #[cfg(feature = "test-hooks")]
+    pub async fn crash_active_tab(&self) {
+        let Some(b) = self.running().await else {
+            return;
+        };
+        let session = {
+            let s = b.lock();
+            s.active
+                .as_deref()
+                .and_then(|t| s.tab(t))
+                .map(|t| t.session.clone())
+        };
+        if let Some(session) = session {
+            b.cdp.send_nowait("Page.crash", json!({}), Some(&session));
         }
     }
 
@@ -1149,8 +1179,13 @@ impl BrowserServer {
                 Ok(())
             }
         };
-        let main_session = match b.tab_info(tab) {
-            Ok(i) => i.session,
+        // Navigating reloads a crashed tab; every other tool refuses on one.
+        let main_session = match if tool == "browser_navigate" {
+            b.tab_session(tab)
+        } else {
+            b.tab_info(tab).map(|i| i.session)
+        } {
+            Ok(session) => session,
             Err(e) => return Ok(ToolOutput::error(e)),
         };
         let out: Result<ToolOutput, String> = async {
@@ -1533,6 +1568,74 @@ mod tests {
             p.contains("https://shop.example") && p.contains("any method"),
             "{p}"
         );
+    }
+
+    #[test]
+    fn acting_in_a_frame_without_a_site_always_asks() {
+        let act = |origin: &str, read_only: bool| {
+            let Described::Action(a) = action(
+                "browser_click",
+                "Click".into(),
+                "Click the button".into(),
+                origin,
+                Risk::Normal,
+                read_only,
+                !read_only,
+                Value::Null,
+            ) else {
+                panic!("expected an action");
+            };
+            a
+        };
+        let a = act("null", false);
+        assert_eq!(a.risk, Risk::AlwaysAsk);
+        assert!(a.preview.contains("no site of its own"), "{}", a.preview);
+        assert_eq!(act("https://a.example", false).risk, Risk::Normal);
+        assert_eq!(act("null", true).risk, Risk::Normal, "reads are unchanged");
+    }
+
+    #[test]
+    fn fills_are_only_for_fields_and_rechecked_by_kind() {
+        let checkbox = ElementInfo {
+            tag: "input".into(),
+            input_type: "checkbox".into(),
+            ..Default::default()
+        };
+        let text = ElementInfo {
+            tag: "input".into(),
+            input_type: "text".into(),
+            is_editable: true,
+            ..Default::default()
+        };
+        let select = ElementInfo {
+            tag: "select".into(),
+            ..Default::default()
+        };
+        let submit = ElementInfo {
+            tag: "input".into(),
+            input_type: "submit".into(),
+            is_submit_control: true,
+            is_button_like: true,
+            in_form: true,
+            ..Default::default()
+        };
+        let button = ElementInfo {
+            tag: "button".into(),
+            input_type: "button".into(),
+            is_button_like: true,
+            ..Default::default()
+        };
+        assert_eq!(fill_kind(&checkbox), Some("check"));
+        assert_eq!(fill_kind(&text), Some("text"));
+        assert_eq!(fill_kind(&select), Some("select"));
+        assert_eq!(fill_kind(&submit), None);
+        assert_eq!(fill_kind(&button), None);
+        assert!(still_fillable_as(Some("check"), &checkbox));
+        // The page turned the approved checkbox into a submit button, or a field into a
+        // list: refused.
+        assert!(!still_fillable_as(Some("check"), &submit));
+        assert!(!still_fillable_as(Some("text"), &select));
+        assert!(!still_fillable_as(None, &text));
     }
 
     #[test]

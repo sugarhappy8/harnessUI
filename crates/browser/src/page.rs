@@ -86,6 +86,24 @@ pub fn quad_center(quads: &[Vec<f64>]) -> Option<(f64, f64)> {
     })
 }
 
+/// The bounding box of one quad (8 numbers, CSS pixels).
+pub fn quad_bounds(q: &[f64]) -> Option<Rect> {
+    if q.len() < 8 {
+        return None;
+    }
+    let xs = [q[0], q[2], q[4], q[6]];
+    let ys = [q[1], q[3], q[5], q[7]];
+    let min = |v: [f64; 4]| v.into_iter().fold(f64::INFINITY, f64::min);
+    let max = |v: [f64; 4]| v.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    let (x, y) = (min(xs), min(ys));
+    Some(Rect {
+        x,
+        y,
+        w: max(xs) - x,
+        h: max(ys) - y,
+    })
+}
+
 /// Width and height from a base64 PNG's header.
 pub fn png_size(b64: &str) -> Option<(u32, u32)> {
     use base64::Engine;
@@ -141,6 +159,15 @@ impl Browser {
             session: t.session.clone(),
             url,
         })
+    }
+
+    /// The session of a tab's main frame, crashed or not: navigating is what reloads a
+    /// crashed tab, so navigation must not be refused for it.
+    pub(crate) fn tab_session(&self, tab: &str) -> Result<String, String> {
+        self.lock()
+            .tab(tab)
+            .map(|t| t.session.clone())
+            .ok_or_else(|| "That browser tab was closed. Take a new snapshot.".into())
     }
 
     /// The frame's address and origin as the page itself reports them right now (13.3:
@@ -372,9 +399,13 @@ impl Browser {
             let Some((child, child_session)) = self.remote_frame_of(&hit).await else {
                 return Ok(hit);
             };
-            let (cx, cy) = self.content_origin(&hit).await?;
-            vx -= cx;
-            vy -= cy;
+            let content = self.content_box(&hit).await?;
+            if !content.contains(vx, vy) {
+                // The frame element's border or padding: the click stays outside the frame.
+                return Ok(hit);
+            }
+            vx -= content.x;
+            vy -= content.y;
             session = child_session;
             root = child;
         }
@@ -421,9 +452,8 @@ impl Browser {
         (frame.session != owner.session).then(|| (child.to_string(), frame.session.clone()))
     }
 
-    /// The top-left corner of a frame element's content box, in the viewport of the
-    /// session's root frame.
-    async fn content_origin(&self, owner: &RefTarget) -> Result<(f64, f64), String> {
+    /// A frame element's content box, in the viewport of the session's root frame.
+    async fn content_box(&self, owner: &RefTarget) -> Result<Rect, String> {
         let model = self
             .cdp
             .call(
@@ -439,10 +469,7 @@ impl Browser {
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_f64).collect())
             .unwrap_or_default();
-        match content.as_slice() {
-            [x, y, ..] => Ok((*x, *y)),
-            _ => Err("could not find the frame on the page".into()),
-        }
+        quad_bounds(&content).ok_or_else(|| "could not find the frame on the page".into())
     }
 
     /// The device pixel ratio of the tab's main frame.
@@ -1267,7 +1294,7 @@ impl Browser {
         url: &str,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, String> {
-        let info = self.tab_info(tab)?;
+        let session = self.tab_session(tab)?;
         let started = Instant::now();
         let stop_before = self.lock().tab(tab).map(|t| t.stop_seq).unwrap_or(0);
         let budget = self.config.navigation_timeout + self.config.approval_timeout;
@@ -1276,7 +1303,7 @@ impl Browser {
             .call_cancellable(
                 "Page.navigate",
                 json!({"url": url}),
-                Some(&info.session),
+                Some(&session),
                 budget,
                 cancel,
             )
@@ -1520,6 +1547,26 @@ mod tests {
         assert_eq!(quad_center(&[empty]), None);
         assert_eq!(quad_center(&[vec![1.0, 2.0]]), None);
         assert_eq!(quad_center(&[]), None);
+    }
+
+    #[test]
+    fn quad_bounds_and_containment() {
+        let r = quad_bounds(&[100.0, 50.0, 300.0, 50.0, 300.0, 150.0, 100.0, 150.0]).unwrap();
+        assert_eq!(
+            r,
+            Rect {
+                x: 100.0,
+                y: 50.0,
+                w: 200.0,
+                h: 100.0
+            }
+        );
+        assert!(r.contains(100.0, 50.0));
+        assert!(r.contains(299.0, 149.0));
+        assert!(!r.contains(300.0, 100.0), "the right edge is outside");
+        assert!(!r.contains(99.0, 100.0));
+        assert!(!r.contains(150.0, 151.0));
+        assert_eq!(quad_bounds(&[1.0, 2.0]), None);
     }
 
     #[test]

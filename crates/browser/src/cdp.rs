@@ -46,7 +46,13 @@ pub struct Event {
     pub session_id: Option<String>,
 }
 
-type Pending = Arc<Mutex<HashMap<u64, (String, oneshot::Sender<Result<Value, CdpError>>)>>>;
+/// A command waiting for its answer: method, session, and where the answer goes.
+type Waiter = (
+    String,
+    Option<String>,
+    oneshot::Sender<Result<Value, CdpError>>,
+);
+type Pending = Arc<Mutex<HashMap<u64, Waiter>>>;
 
 /// A connection to one browser.
 #[derive(Clone)]
@@ -136,7 +142,7 @@ impl Cdp {
                 match parse_incoming(&text) {
                     Ok(Incoming::Response { id, result }) => {
                         let waiter = reader_pending.lock().ok().and_then(|mut p| p.remove(&id));
-                        if let Some((method, tx)) = waiter {
+                        if let Some((method, _, tx)) = waiter {
                             let _ = tx.send(
                                 result.map_err(|message| CdpError::Protocol { method, message }),
                             );
@@ -155,7 +161,7 @@ impl Cdp {
             }
             reader_closed.cancel();
             if let Ok(mut p) = reader_pending.lock() {
-                for (_, (_, tx)) in p.drain() {
+                for (_, (_, _, tx)) in p.drain() {
                     let _ = tx.send(Err(CdpError::Closed));
                 }
             }
@@ -213,7 +219,7 @@ impl Cdp {
         }
         let (tx, rx) = oneshot::channel();
         if let Ok(mut p) = self.pending.lock() {
-            p.insert(id, (method.to_string(), tx));
+            p.insert(id, (method.to_string(), session.map(str::to_string), tx));
         }
         if self.out.send(message.to_string()).is_err() {
             self.forget(id);
@@ -239,6 +245,28 @@ impl Cdp {
             message["sessionId"] = json!(session);
         }
         let _ = self.out.send(message.to_string());
+    }
+
+    /// Fails every command still waiting on `session` (its target crashed or went
+    /// away, so no answer will come) instead of letting each run into its timeout.
+    pub fn fail_session(&self, session: &str, why: &str) {
+        let waiters: Vec<Waiter> = match self.pending.lock() {
+            Ok(mut p) => {
+                let ids: Vec<u64> = p
+                    .iter()
+                    .filter(|(_, (_, s, _))| s.as_deref() == Some(session))
+                    .map(|(id, _)| *id)
+                    .collect();
+                ids.into_iter().filter_map(|id| p.remove(&id)).collect()
+            }
+            Err(_) => Vec::new(),
+        };
+        for (method, _, tx) in waiters {
+            let _ = tx.send(Err(CdpError::Protocol {
+                method,
+                message: why.to_string(),
+            }));
+        }
     }
 
     fn forget(&self, id: u64) {
@@ -327,6 +355,47 @@ mod tests {
         assert_eq!(
             events.recv().await.unwrap().method,
             "Target.attachedToTarget"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crashed_session_fails_its_waiting_calls_at_once() {
+        let (cdp, _events, mut sent, _browser) = fake();
+        let waiting = {
+            let cdp = cdp.clone();
+            tokio::spawn(async move {
+                cdp.call("DOM.focus", json!({}), Some("S1"), Duration::from_secs(30))
+                    .await
+            })
+        };
+        let other = {
+            let cdp = cdp.clone();
+            tokio::spawn(async move {
+                cdp.call(
+                    "DOM.focus",
+                    json!({}),
+                    Some("S2"),
+                    Duration::from_millis(300),
+                )
+                .await
+            })
+        };
+        sent.recv().await.unwrap();
+        sent.recv().await.unwrap();
+        cdp.fail_session("S1", "the page crashed");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            waiting.await.unwrap(),
+            Err(CdpError::Protocol {
+                method: "DOM.focus".into(),
+                message: "the page crashed".into()
+            })
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Another session's call is untouched (it runs into its own timeout).
+        assert_eq!(
+            other.await.unwrap(),
+            Err(CdpError::Timeout("DOM.focus".into()))
         );
     }
 

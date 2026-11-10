@@ -190,7 +190,7 @@ impl AddressPolicy {
             return Ok(());
         }
         let hint = if class.is_private_network() {
-            " Private networks can be allowed in Settings → Tools → Browser."
+            " Private networks can be allowed in Settings → Browser."
         } else {
             ""
         };
