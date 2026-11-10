@@ -48,6 +48,7 @@ Research turned up facts that affect some of these. Each item below has a defaul
 | D8 | How long "Allow for this chat" lasts | Until the app quits, or until you revoke it from the chat's permissions panel. It is not saved to disk. | Saving grants would mean a chat reopened next week acts without asking. |
 | D9 | Default stop hotkey | `Ctrl+Alt+Backspace` on Windows, `Ctrl+Option+Delete` on macOS. Configurable. | It must not collide with an OS shortcut or with AltGr typing on international keyboards, which rules out `Ctrl+Alt+<letter>`. |
 | D10 | Bundle identifier | `io.github.sugarhappy8.harnissui` | It names the data folder and keychain entries. It should not change after the first release. It is separate from the display name, which stays easy to change. |
+| D11 | Where the Allow / Deny buttons live | **Inline in the chat**, as approval cards. | The chat window also renders model output. Two layers stop that output from ever running as script (no raw HTML is rendered, and the CSP blocks inline and remote script). If both failed, a script in that window could press Allow. The stronger alternative is a separate small approval window, and a separate settings window, that never render model output; then the guarantee holds even if the chat window is compromised. It costs a floating approval panel instead of inline buttons. Section 13.5 has the detail. |
 
 ---
 
@@ -118,8 +119,8 @@ Three rules hold everywhere:
 
 Every child is started through one helper in the `runtime` crate. Nothing else in the codebase may spawn a process (enforced by a clippy `disallowed-methods` rule).
 
-- **Windows:** the app creates one Job Object with `KILL_ON_JOB_CLOSE` at startup and assigns every child to it. If the app exits for any reason, including a crash or Task Manager, Windows kills every process in the job. Each tool call also gets a nested job so one call's tree can be killed on its own. Children are started with `CREATE_NO_WINDOW` so no console flashes.
-- **macOS:** every child is the leader of its own process group, and Stop or quit signals the whole group. macOS has no kernel feature that kills children when the parent dies, so two more layers cover a crash of the app itself: (1) `llama-server` is started in its managed mode, in which it exits when its stdin closes; (2) other long-lived children are started through a small guard, which is the app's own binary re-executed in a `--guard` mode that watches the parent with kqueue and kills the group when the parent disappears.
+- **Windows:** the app creates one Job Object with `KILL_ON_JOB_CLOSE` at startup and assigns every child to it while the child is still suspended. If the app exits for any reason, including a crash or Task Manager, Windows kills every process in the job. Each tool call also gets a nested job so one call's tree can be killed on its own. Children are started with `CREATE_NO_WINDOW` so no console flashes. The app does not put itself in the job, so the updater's installer survives the app exiting. Tauri's own shell plugin does not set kill-on-close, which is one reason the app doesn't use it.
+- **macOS:** every child is the leader of its own process group, and Stop or quit signals the whole group. macOS has no kernel feature that kills children when the parent dies, so two more layers cover a crash of the app itself: (1) at launch the app starts one small reaper, which is the app's own binary re-executed with a hidden flag, in its own session and connected by a pipe. The app tells it the process group of every child it starts. When the pipe closes or the app's PID disappears, the reaper kills every registered group; (2) `llama-server` runs in its managed mode, in which it also exits by itself when its stdin closes. That second layer only takes effect once the model has finished loading, which is why it is not the only one. A child that deliberately detaches into its own session can still escape; the startup sweep below catches llama-server in that case.
 - **Both:** on startup the app reads a file of child PIDs it wrote in the previous run and kills any that are still alive and still match by executable path and start time.
 
 ### 4.2 Stop
@@ -228,27 +229,30 @@ Detect hardware (RAM, GPUs, probe backends) → pick the best entry from the bun
 
 `llama.lock.json` pins llama.cpp **v0.9.0 (`b12110`)** and lists every archive the build needs with URL, size and SHA-256. `scripts/fetch-llama` downloads, verifies and unpacks them before `tauri build`, locally and in CI. Nothing follows "latest": upstream publishes several builds a day and renames assets when toolkits change.
 
-A **backend** is a directory containing a complete `llama-server` and its libraries, plus a manifest entry. The runtime manager only ever sees "a directory and a manifest entry", whether the directory came from the installer or from a later download.
+A **runtime directory** contains a complete `llama-server` and its libraries. A **backend** is a manifest entry that names a runtime directory and the device prefix to ask it for. The runtime manager only ever sees those two things, whether the directory came from the installer or from a later download.
 
-| Platform | Backend | Source | Packaged as |
+| Platform | Backend | Source | Runtime directory |
 |---|---|---|---|
-| Windows | `vulkan` (default) | upstream `win-vulkan-x64` zip | `resources/llama/vulkan/` |
-| Windows | `cpu` | upstream `win-cpu-x64` zip | `resources/llama/cpu/` |
-| Windows | `cuda` | upstream `win-cuda-13.5-x64` + `cudart` zips (D4) | `resources/llama/cuda/` |
+| Windows | `cpu` | upstream `win-cpu-x64` zip | `resources/llama/main/` |
+| Windows | `vulkan` (default) | the Vulkan DLL from the upstream `win-vulkan-x64` zip | `resources/llama/main/` |
+| Windows | `cuda` | the CUDA DLL from `win-cuda-13.5-x64` plus NVIDIA's runtime DLLs from `cudart` (D4) | `resources/llama/main/` |
 | Windows | `rocm` | `lemonade-sdk/llamacpp-rocm` gfx120X zip (D2) | `resources/llama/rocm/` |
-| macOS | `metal` | upstream single-file `llama` binary (run as `llama serve`) | Tauri `externalBin`, so Tauri signs and notarizes it |
+| macOS | `metal` | built in CI from the pinned tag as one static binary | Tauri `externalBin` |
 
 Notes:
 
-- Windows backends go through Tauri's `bundle.resources` because `externalBin` flattens everything into one folder, and the four backends have DLLs with the same names.
-- The macOS binary goes through `externalBin` because Tauri does not sign anything under `Resources`, and unsigned code there fails notarization. The single-file build has no dylibs, so there is exactly one extra binary to sign. If that build proves unsuitable, the fallback is the upstream tarball with every dylib signed by a script before `tauri build`.
-- The Microsoft VC++ runtime DLLs are placed next to each Windows backend, because llama.cpp needs them and Windows does not always have them.
+- Every upstream Windows zip is the CPU build plus one backend DLL, and llama.cpp loads whichever backend DLLs sit beside it. CPU, Vulkan and CUDA therefore share one directory, and the app picks between them with `--device`. The ROCm build is linked differently and from a different commit, so it keeps its own directory.
+- Windows runtime directories go through Tauri's `bundle.resources`, because `externalBin` copies a single file and llama-server needs about 20 DLLs beside it. Tools the app doesn't use are removed from the bundle.
+- The three Microsoft VC++ runtime DLLs are placed in each runtime directory. Every llama.cpp binary needs them, they are not in the upstream zips, and without them the server exits before printing anything.
+- On macOS the upstream download is 11 separate binaries that must each be signed, and Tauri does not sign anything under `Resources`. Building llama-server from the pinned tag with static linking gives one binary, which goes through `externalBin` so Tauri signs and notarizes it with the app. The lock file pins the source commit. Fallback if the CI build is a problem: the upstream tarball, with a script that signs each file before `tauri build`.
+- Upstream release assets carry build attestations. CI verifies them as well as the SHA-256.
 - The ROCm folder must sit at a path of at most about 118 characters or its kernel files exceed Windows' path limit. The app checks this and explains it if a custom install path is too deep.
+- llama.cpp's version number covers only its C API. Flags, defaults, log lines and HTTP fields can change in any release, so every llama.cpp bump has to pass the contract tests in section 17 before it merges.
 
 ### 7.2 Choosing a backend
 
 1. List display adapters (vendor, name, dedicated VRAM) through DXGI on Windows. This only decides which backends are worth probing.
-2. Probe each candidate by running its `llama-server --list-devices` with a 15 s timeout and parsing lines of the form `Vulkan0: <name> (<total> MiB, <free> MiB free)`. A start failure, non-zero exit, timeout or `(none)` marks the backend unusable, with the reason kept for the UI.
+2. Probe each candidate by running its `llama-server --list-devices` with a 15 s timeout and parsing lines of the form `Vulkan0: <name> (<total> MiB, <free> MiB free)`. Rows are matched by name prefix (`Vulkan`, `CUDA`, `ROCm`, `MTL`), because the list also contains integrated GPUs and, on macOS, a CPU math-library row. A start failure, non-zero exit, timeout or no matching row marks the backend unusable, with the reason kept for the UI. A backend whose driver library is missing produces no log line at all, so the app also checks for the Vulkan loader itself in order to say "no Vulkan driver found" instead of "no GPU". Free memory comes from this probe, not from the OS adapter list, which reports only this process's usage.
 3. Pick by priority. NVIDIA: CUDA, then Vulkan, then CPU. AMD: Vulkan, then CPU (ROCm only if chosen, D3). Intel and others: Vulkan, then CPU. macOS: Metal.
 4. Cache the result per backend version and GPU driver version. Re-probe when either changes or when the user asks.
 
@@ -267,6 +271,10 @@ llama-server --host 127.0.0.1 --port <port> --no-webui --offline --jinja
 
 with the key in the `LLAMA_API_KEY` environment variable, so it never shows in the process list. `--jinja` is passed explicitly even though it is now the default. `--offline` stops llama-server from ever downloading anything. An explicit `-c` stops it from silently shrinking the context to fit.
 
+The working directory of the server and probes is always the runtime directory, never a user folder. llama.cpp also loads backend DLLs from the current directory, so starting it inside a cloned repository would let a file in that repository run as code. On Windows the app sets the error mode that stops a missing DLL from raising a system dialog, and maps the resulting exit code to a plain message.
+
+The server and both probe tools start with a scrubbed environment. llama-server reads a `LLAMA_ARG_*` variable for every flag, including ones that switch on its own built-in shell tool and a peer-to-peer tunnel, and `GGML_BACKEND_PATH` makes it load an arbitrary library. None of those are passed through. The tunnel helper (`llama-connect`) and the RPC server that ship in the upstream archives are left out of the bundle.
+
 The app never forwards an http(s) image URL to llama-server, because the server would fetch it itself. Images are always sent as inline data.
 
 ### 7.4 Lifecycle
@@ -282,7 +290,7 @@ Stopped → Starting (progress) → Ready → Stopping → Stopped
 - **Crash while Ready:** restart with the same arguments up to 3 times in 5 minutes, then stop and show the error. An in-flight turn ends with a clear message; nothing is retried silently.
 - **Load failure:** no blind retry. The stderr tail is classified (out of memory, invalid device, missing runtime DLL, port in use) and mapped to a plain-language error with a next step (section 15).
 - **Switching models:** stop the current server, start the new one, show progress. One local model at a time.
-- **After load:** if a GPU was expected, the app checks the "offloaded N/M layers" log line and warns if the model ended up on CPU.
+- **After load:** if a GPU was expected, the app checks the "offloaded N/M layers" log line and warns if the model ended up on CPU. It also times a short generation. On NVIDIA, the driver can spill into system memory when VRAM runs out and keep going many times slower instead of failing, so "loaded but slow" is reported as its own condition.
 
 ### 7.5 Providers
 
@@ -305,7 +313,7 @@ Both use streaming chat completions with `stream_options.include_usage`.
 | Vision | A projector file is paired with the model (`general.architecture == "clip"`, matching embedding size) | `/props` → `modalities.vision` |
 | Context length | `<arch>.context_length` | `/props` → `n_ctx` |
 
-The GGUF reader is about 200 lines of our own code. It reads only the header, skips the multi-megabyte tokenizer arrays, and also works over HTTP Range so the model browser can show badges before download. The existing crates either load whole arrays or bring in a full llama.cpp build.
+The GGUF reader is about 200 lines of our own code. It reads only the header, skips the multi-megabyte tokenizer arrays, and also works over HTTP Range so the model browser can show badges before download. The existing crates either load whole arrays or bring in a full llama.cpp build. The reader treats every file as hostile: counts in a GGUF are 64-bit, so it bounds the number of keys, checks every size multiplication, stops at 64 MiB of header (real headers are under 7 MiB) and is fuzz-tested.
 
 Badges show Tools, Vision and Context. When a model's template has no tool support, tools are switched off for chats using it and the UI says why: "This model's chat template has no tool-calling format, so it can't request tools. Pick a model with the Tools badge to use files, terminal or browser."
 
@@ -378,12 +386,15 @@ The host keeps one connection object per server. Built-in servers connect over a
 - **Config:** the same `mcpServers` JSON Claude Desktop uses (`command`, `args`, `env`), extended with `type`, `url` and `headers` for remote servers. The paste box also accepts the VS Code (`servers`) and Cursor shapes. Values in `env` and `headers` move to the keychain on save.
 - **Spawn:** resolve the command to an absolute path first. On Windows `npx` is a `.cmd` shim that a plain spawn does not find. On macOS, apps started from Finder don't inherit the shell's PATH, so the app computes the login-shell PATH once at startup, with a timeout, and passes it to children.
 - **Missing runtime:** if the command is `npx`/`node`, `uvx`/`uv`/`python` or `docker` and it can't be found, the server shows "This server needs Node.js, which isn't installed" with a link, instead of a spawn error.
-- **Handshake:** try the 2026-07-28 revision, fall back to the older handshake, and remember which one each server speaks. A 60 s start-up timeout applies, because the SDK has none.
+- **Environment:** a spawned server gets a short allowlist of variables (PATH, home and temp folders, the handful Windows programs need) plus the `env` from its config. It does not inherit the app's whole environment, so API keys that happen to be set in the user's shell are not handed to third-party servers. The official TypeScript client does the same; the Rust SDK does not, so the spawn helper does it.
+- **Handshake:** the app owns a small connect routine per server, because the SDK's automatic mode fails in two cases found in testing: servers built on older SDKs exit when the first message isn't the old handshake, and a server that takes more than 10 s to start (a first `npx -y` download) breaks the fallback. The routine starts with the older handshake, pinned to protocol 2025-11-25, which every current SDK still answers. If a server rejects it, the routine restarts the server and connects with the 2026-07-28 revision. The result is remembered per server. A 60 s start-up timeout applies, because the SDK has none.
+- **Calls:** the host sends tool calls through the SDK's cancellable-request API and runs the protocol's "server needs input" rounds itself. That is the only way to get a per-call timeout, progress matched to the right tool card, and a Stop that names its reason; the SDK's convenience call offers none of the three.
+- **HTTP:** one HTTP client configuration for all remote MCP traffic: no cross-origin redirects (so custom headers are never replayed to another host), connect and read timeouts, response size limits.
 - **Status and logs:** Starting / Ready / Failed (reason) / Stopped per server. stderr is drained into a ring buffer and a log file, and its tail is shown next to any start-up error.
 - **Transports not supported:** the legacy HTTP+SSE transport (the SDK removed it). Such an entry is first tried as Streamable HTTP, then reported as unsupported with a pointer to the `mcp-remote` bridge.
 - **Server-initiated requests:** sampling is refused, roots returns an empty list, elicitation is declined. These are the SDK defaults and they never hang.
 - **Trust warning:** adding a server shows a dialog that it runs with the user's own permissions and can read and change anything they can. The acknowledgement is recorded.
-- **Scope:** tools only. MCP resources and prompts are out of v1.
+- **Scope:** tools only. Out of v1: MCP resources and prompts, skills served over MCP (a new official extension; the skills registry is keyed by origin so they can be added later), and `.mcpb` server bundles.
 
 ### 9.3 Built-in servers
 
@@ -400,7 +411,10 @@ Every group and every tool can be toggled per chat.
 
 **Files.** All access is confined to folders the user approved (globally or for one chat). Sandbox rules are in section 13.4. Writes show a diff computed against the current file. The file's hash is recorded with the diff, and the write is refused if the file changed between preview and apply.
 
-**Terminal.** One command per call, in PowerShell on Windows and zsh on macOS, with a working directory that must be inside an approved folder. Output streams live into the tool card. Default timeout 120 s (configurable per call up to a ceiling), with a Kill button on the card. Kill and timeout take down the whole process tree.
+**Terminal.** One command per call, with a working directory that must be inside an approved folder. Output streams live into the tool card through plain pipes (no pseudo-terminal; nothing interactive is supported in v1). Output is capped at 1 MiB. Default timeout 120 s (configurable per call up to a ceiling), with a Kill button on the card. Kill and timeout take down the whole process tree.
+
+- *Windows:* `powershell.exe -NoLogo -NoProfile -NonInteractive -Command ...`. This is Windows PowerShell 5.1, the only shell every Windows machine has. The tool description tells the model so, because 5.1 has no `&&` or `||`. The app forces UTF-8 output and returns the real exit code, both of which 5.1 gets wrong by default. PowerShell 7 is used instead when it is installed and the user picks it.
+- *macOS:* `/bin/zsh -lc ...` with the environment captured once from the user's login shell, so Homebrew, nvm and similar tools are on PATH even though the app was started from Finder.
 
 **Git.** Uses the system `git` when it is on PATH and falls back to libgit2 when it isn't. Push always asks. With libgit2, operations that need credentials the app doesn't have fail with a message recommending installing git.
 
@@ -420,7 +434,7 @@ Every group and every tool can be toggled per chat.
 - *Capture and input:* screen capture through the `xcap` crate; keyboard through `enigo`; mouse on Windows through our own `SendInput` code, because `enigo` can only address the primary monitor there. Both sit behind two small traits so either can be swapped. On macOS a ScreenCaptureKit path is kept as a fallback, because the capture call `xcap` uses is deprecated.
 - *Coordinates:* one monitor per screenshot. The monitor's origin, pixel size and scale are stored with the image and used to map the model's answer back: physical pixels on Windows (the app is per-monitor DPI aware), points on macOS, negative origins included.
 - *Model conventions:* a per-model setting with three modes, because grounding models disagree: pixels of the resized image (Qwen2.5-VL family), a 0–1000 grid (Qwen3-VL / Qwen3.5 family), and 0–1000 boxes with y first (Gemma 4). The app resizes the screenshot itself to the exact size llama.cpp would resize it to, so the model's coordinates refer to the image the app knows. A one-click calibration test in Settings shows whether a model clicks where it should.
-- *Indicator:* a click-through, always-on-top overlay with a border and "AI is controlling this computer. Press <hotkey> to stop."
+- *Indicator:* a click-through, always-on-top overlay with a border and "AI is controlling this computer. Press <hotkey> to stop." The app's own screenshots leave the overlay out by excluding its window in the capture call.
 - *Stop:* all input goes through one injector that records every key and button it holds. Stop, a panic and normal exit all release everything recorded plus every modifier and mouse button.
 - *Limits, stated in the UI:* Windows blocks synthetic input into elevated windows without reporting an error, so the tool checks the target window first and returns "that window is running as administrator and can't be controlled".
 - *macOS permissions:* a guided screen checks Screen Recording and Accessibility without triggering the system prompt, opens the right Settings pane on a button click, polls for the grant, and offers Restart where macOS requires it.
@@ -440,11 +454,15 @@ Every group and every tool can be toggled per chat.
 
 ## 11. Model manager and first run
 
-**Search.** `GET https://huggingface.co/api/models?filter=gguf&search=...` with cursor paging. Each result shows downloads, license, and a gated badge. The detail view makes one call that returns every file with its size and SHA-256. Files are classified in a fixed order: not `.gguf` → ignored; projector (`mmproj`) → attached to its model; helper files (`imatrix`, draft-model sidecars) → hidden; split shards → grouped and summed; then the quantization label is read from the filename.
+**Search.** `GET https://huggingface.co/api/models?filter=gguf&filter=conversational&search=...` with cursor paging. The second filter matters: about a sixth of the most-downloaded GGUF repositories are speech, image or video models that llama-server cannot load. Each result shows downloads, license, and a gated badge. The detail view makes one call that returns every file with its size and SHA-256. Files are classified in a fixed order: not `.gguf` → ignored; projector (`mmproj`) → attached to its model; helper files (`imatrix`, draft-model sidecars) → hidden; split shards → grouped and summed; then the quantization label is read from the filename. If the model's architecture is one the pinned llama.cpp build doesn't know, the app says so before the download starts.
 
-**Download.** Two HTTP clients: one talks to `huggingface.co` with the optional token and never follows redirects; the other fetches the CDN URL with no credentials, only if the host is on an allowlist. Resume uses `Range` and re-resolves the signed URL every time, because it expires after an hour. The finished file is hashed and compared before it is renamed into place. Pause, resume and cancel are per download group. Interrupted downloads resume after an app restart.
+Model cards are untrusted remote content. The detail view shows the card as sanitised text with images blocked, plus an "Open on Hugging Face" link.
 
-**Gated models.** 401 means "add a Hugging Face token"; 403 means "open the model page and accept its terms". The token lives in the keychain and is validated when pasted.
+**Download.** Two HTTP clients: one talks to `huggingface.co` with the optional token and never follows redirects; the other fetches the redirect target with no credentials, and only when it is HTTPS on `huggingface.co` or a `*.hf.co` host. The CDN host depends on where the repository is stored, so a fixed two-host list would fail for EU-hosted models. Signed URLs are never logged. Resume uses `Range`, asks for uncompressed bytes, and re-resolves the signed URL every time, because it expires after an hour. A resume continues only if the file's published hash and size still match what was stored beside the partial file. The finished file is hashed and compared before it is renamed into place. Pause, resume and cancel are per download group. Interrupted downloads resume after an app restart.
+
+**Gated models.** 401 means "add a Hugging Face token"; 403 means "open the model page and accept its terms". The token lives in the keychain, is validated when pasted, is sent only to `huggingface.co`, and never reaches llama-server, MCP servers or the terminal tool's environment.
+
+**Mirror.** An advanced setting lets the user point the app at a different Hugging Face endpoint, for networks where `huggingface.co` is unreachable. It is off by default, and the allowed download hosts are derived from the setting, never from an environment variable.
 
 **Fit check**, two tiers:
 
@@ -453,7 +471,7 @@ Every group and every tool can be toggled per chat.
 
 The verdict is green (fits with at least 1 GB spare), yellow (fits only with a smaller context or with some layers on CPU) or red, each with one sentence, for example: "Needs about 13.1 GB; your GPU has 15.2 GB free. Fits."
 
-**Curated catalog.** `catalog/models.json` is bundled with the app and holds, per memory tier, a ranked list of models with pinned repo commit, files, sizes, SHA-256, context, capabilities and license. No model name appears in code. First run takes the highest-ranked entry that is green on the detected hardware. "Refresh" downloads a newer catalog from this repo's latest release; the app accepts it only if its signature verifies against the same public key the updater uses. Every catalog entry must pass a real tool-call round trip under the pinned llama.cpp before it is added.
+**Curated catalog.** `catalog/models.json` is bundled with the app and holds, per memory tier, a ranked list of models with pinned repo commit, files, sizes, SHA-256, recommended context, measured memory at that context, capabilities, license, the oldest llama.cpp build that runs the model, and the build and date it was last tested on. No model name appears in code. First run takes the highest-ranked entry that is green on the detected hardware. "Refresh" downloads a newer catalog from this repo's latest release; the app accepts it only if its signature verifies against the same public key the updater uses. Every catalog entry must pass a real tool-call round trip under the pinned llama.cpp before it is added.
 
 **Also:** delete models, disk usage per model and in total, import an existing GGUF (registered in place, not copied), and a configurable models folder.
 
@@ -475,9 +493,13 @@ The verdict is green (fits with at least 1 GB spare), yellow (fits only with a s
 | `models`, `downloads` | installed models with their GGUF summary; download state for resume |
 | `providers`, `mcp_servers`, `mcp_tool_prefs`, `skills`, `approved_folders`, `settings` | configuration, never secrets |
 
-**Keychain** (Windows Credential Manager, macOS Keychain): provider API keys, the Hugging Face token, MCP `env` and header values. One entry per secret, because Windows caps an entry at about 2.5 KB. The database stores only references. An exported MCP config omits secret values.
+**Keychain** (Windows Credential Manager, macOS Keychain): provider API keys, the Hugging Face token, MCP `env` and header values. One entry per secret, because Windows caps an entry at 2,560 bytes; a longer value is split across numbered entries. Writes are serialised on one thread, because Credential Manager can lose concurrent updates. The database stores only references. An exported MCP config omits secret values. On unsigned macOS builds the Keychain asks for the login password once per entry after every rebuild; that stops with a Developer ID.
 
-**Files on disk:** models folder (configurable), skills, attachments, the browser profile, logs. Logs rotate, stay local, and are reachable from "Open logs folder".
+**SQLite access:** one dedicated database thread owns the connection and async code talks to it over a channel, so no Tauri command ever blocks on disk. History search uses SQLite's FTS5 with the trigram tokenizer, which matches substrings and works for Chinese, Japanese and Korean text; queries shorter than three characters fall back to a plain scan.
+
+**Files on disk:** skills, attachments, the browser profile and logs live in the app's data folder. Logs rotate, stay local, and are reachable from "Open logs folder".
+
+**Models folder:** configurable, and by default a visible folder in the user's home directory (`<home>/<app name>/models`), not the app's data folder. The Windows uninstaller offers to delete app data, and that should not silently delete tens of gigabytes of models.
 
 **Nothing leaves the machine** unless the user starts one of the network actions in section 13.6.
 
@@ -502,7 +524,7 @@ The verdict is green (fits with at least 1 GB spare), yellow (fits only with a s
 
 ### 13.2 Webview lockdown
 
-- **Capabilities:** two explicit capability files. `main` gets core defaults plus open/save dialogs, opening external links and clipboard write. `overlay` can only listen to events. There is no shell, filesystem or HTTP plugin in the app at all. Process spawning and file access happen in Rust and are not reachable from JavaScript.
+- **Capabilities:** two explicit capability files, listed by name in the config so a stray file is never picked up. `main` gets core defaults plus open/save dialogs, opening external links and clipboard write. `overlay` can only listen to events. There is no shell, filesystem or HTTP plugin in the app at all. Process spawning and file access happen in Rust and are not reachable from JavaScript.
 - **Command ACL:** app commands are declared in the build script, so only the `main` window may call them. Without this, Tauri lets any local window call any command.
 - **CSP:** `default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'self'`. There is no `http://127.0.0.1` in `connect-src`: the webview never talks to llama-server; Rust proxies the stream.
 - **No remote content:** navigation to anything but the app's own origin is blocked in Rust, and so is `window.open`. Links open in the system browser. Markdown is rendered without raw HTML. Images in model output load only from `data:` or `blob:`, so a model cannot leak data through an image URL.
@@ -528,7 +550,7 @@ The approved action travels with the call. The tool executes that action and re-
 |---|---|---|
 | `read_file`, `list_dir`, `search_files` | Reads inside the same approved folder | n/a |
 | `write_file`, `edit_file` | Writes inside the same approved folder | `delete_file`; a write that would replace a file with an empty one |
-| `run_command` | The same program in the same working directory | Recursive or forced deletes (`rm -r`, `rm -f`, `del /s`, `rmdir /s`, `Remove-Item -Recurse`), elevation (`sudo`, `runas`, `Start-Process -Verb RunAs`), disk and system commands (`format`, `diskpart`, `mkfs`, `dd`, `shutdown`), `git push`, and any command the parser cannot fully break down: pipes into a shell, `Invoke-Expression`, `-EncodedCommand`, `eval`, command substitution |
+| `run_command` | The same program in the same working directory. For interpreters (`python`, `node`, `bash`, `powershell`, ...) the grant also names the script file, so it covers re-running that script and nothing else | Recursive or forced deletes (`rm -r`, `rm -f`, `del /s`, `rmdir /s`, `Remove-Item -Recurse`), elevation (`sudo`, `runas`, `Start-Process -Verb RunAs`), disk and system commands (`format`, `diskpart`, `mkfs`, `dd`, `shutdown`, registry edits), `git push`, `git reset --hard`, `git clean`, inline code passed to an interpreter (`python -c`, `node -e`), and any command the parser cannot fully break down: redirections, variables, command substitution, subshells, `Invoke-Expression`, `-EncodedCommand`, `eval` |
 | `git_status`, `git_diff`, `git_log` | The same repository | n/a |
 | `git_commit`, `git_pull`, `git_clone` | The same repository (clone: the same remote host) | `git_push` |
 | `browser_navigate`, read and snapshot, click, type | The same site (scheme + host + port) | Form submission, file upload |
@@ -536,7 +558,7 @@ The approved action travels with the call. The tool executes that action and re-
 | External MCP tool | That tool on that server | A tool whose server marks it destructive |
 | `load_skill`, `read_skill_file` | No prompt (D7) | n/a |
 
-The terminal classifier fails closed: a command is grantable only if it parses into simple commands that are each recognised as safe to grant. Anything else asks every time. It is a convenience boundary, not a sandbox. The terminal tool runs commands with the user's permissions, and the UI says so when the terminal is turned on.
+The terminal classifier fails closed. Commands are parsed with real grammars for bash/zsh and PowerShell (tree-sitter), the same approach OpenAI's open-source Codex CLI uses. A command can be covered by a grant only if it parses without errors into a plain sequence of simple commands made of literal words, and every one of them is covered. Anything else asks every time. Codex treats this kind of parsing as a convenience on top of an OS sandbox; this app has no OS sandbox in v1, so the same holds more strongly here: it is a guard against accidents and obvious abuse, not a security boundary. A script the model wrote a minute ago can do anything once it is allowed to run. The terminal tool runs commands with the user's permissions, and the UI says so when the terminal is turned on.
 
 A hint from an external server that a tool is read-only is never used to skip a prompt. A hint that a tool is destructive is honoured.
 
@@ -560,7 +582,9 @@ This is enforced by structure, not by prompt wording:
 - An approval is resolved by a random request ID created in Rust, delivered only to the main window.
 - Tool descriptions from external servers are length-capped and shown to the model as descriptions; they are not merged into the system prompt's instructions.
 
-Residual risk: a script running inside the main window could click "Allow" on the user's behalf. The CSP, the absence of raw HTML and the absence of remote content are what prevent that script from existing.
+**Residual risk, and D11.** The main window both renders model output and holds the commands that approve actions, add MCP servers and change settings. A script running in that window could use them. Three things stop such a script from existing: model and tool output is rendered as text and React elements, never as HTML (a lint rule bans `innerHTML`-style sinks); the CSP allows no inline script, no `eval` and no remote script; and the window never loads remote content. Where the webview supports it, the CSP also requires Trusted Types, which makes the browser itself refuse HTML-string sinks.
+
+The alternative in D11 removes the dependency on those layers. The chat window keeps only chat commands. Approval decisions, MCP server configuration, provider endpoints, approved folders and settings move to windows that render no model output, each with its own capability file. I have not made it the default because it changes the approval UX from inline cards to a floating panel, and because window parenting and fullscreen behaviour are the kind of thing I cannot test from Linux. It can be adopted at M3 without touching the policy engine.
 
 ### 13.6 Network use
 
@@ -578,6 +602,8 @@ All outbound HTTP from the app goes through one module, and each request carries
 Outside that module: `git clone/pull/push` (the git tool), whatever the browser tool's Chrome does (launched with background networking, sync and component updates disabled), and whatever an external MCP server does on its own.
 
 There is no telemetry, no crash upload and no account. With no model downloaded and nothing clicked, the app makes no network request.
+
+One thing outside the app's control: on Windows the UI runs in Microsoft's WebView2 runtime, which updates itself through Edge Update like any other installed copy of Edge. The app keeps WebView2's SmartScreen lookups switched off (Tauri's default) and never navigates the webview anywhere remote.
 
 ### 13.7 Audit log
 
@@ -617,14 +643,14 @@ Every error that reaches the UI has four parts: a code, a plain-language message
 
 ## 16. Packaging, CI and release
 
-- **`ci.yml`** (every push and PR): format, clippy, Rust tests, frontend lint and tests, then `tauri build` on `windows-latest` and `macos-latest`, uploading the unsigned installer and .dmg as workflow artifacts. Those artifacts are what you install to test a milestone. CI builds use a **lite** flavour (Vulkan + CPU) to stay fast; a manual run or a tag builds the **full** flavour.
-- **`release.yml`** (every `v*` tag): `tauri-apps/tauri-action@v1` builds NSIS (`--bundles nsis`) and macOS (`--target aarch64-apple-darwin --bundles app,dmg`), creates a draft GitHub release, and uploads the updater manifest.
-- **Windows installer:** NSIS, per-user install (no admin prompt), WebView2 offline installer embedded in the full flavour so installation needs no network.
+- **`ci.yml`** (every push and PR): format, clippy, Rust tests, frontend lint and tests, then `tauri build --no-sign` on pinned Windows and macOS runner images, uploading the unsigned installer and .dmg as workflow artifacts. Those artifacts are what you install to test a milestone. CI builds use a **lite** flavour (Vulkan + CPU) to stay fast; a manual run or a tag builds the **full** flavour.
+- **`release.yml`** (every `v*` tag): `tauri-apps/tauri-action@v1` builds NSIS (`--bundles nsis`) and macOS (`--target aarch64-apple-darwin --bundles app,dmg`), creates a draft GitHub release, and uploads the updater manifest. A final job fails the release if the manifest is missing either platform, which can happen when the two build jobs finish at the same moment.
+- **Windows installer:** NSIS, per-user install (no admin prompt), WebView2 offline installer embedded in the full flavour so installation needs no network. Minimum Windows 10 version 1903, the first that passes non-ASCII model paths to llama-server correctly.
 - **Signing, prepared with placeholders:**
-  - macOS: Developer ID + notarization through the `APPLE_*` secrets. Until they exist the build is ad-hoc signed.
-  - Windows: a `signCommand` in a separate config file, used only when the signing secrets exist.
+  - macOS: Developer ID + notarization through the `APPLE_*` secrets. Until they exist the build is ad-hoc signed. Ad-hoc builds are fine for chat and tools, but macOS forgets Screen Recording and Accessibility grants on every new ad-hoc build, so computer use is only practical with a Developer ID.
+  - Windows: a generic `signCommand` in a separate config file, used only when the signing secrets exist. It is deliberately not tied to one provider: Microsoft's own signing service accepts individual developers only in the USA and Canada, so you may need a different certificate route.
   - The README will document opening unsigned builds: right-click → Open (or Privacy & Security → Open Anyway) on macOS; "More info → Run anyway" on Windows SmartScreen.
-- **Updates:** Tauri's updater with its signature check. The app never checks on its own unless the user turns that on. The check runs in Rust; the webview has no updater permission.
+- **Updates:** Tauri's updater with its signature check. The app never checks on its own unless the user turns that on. The check runs in Rust; the webview has no updater permission. Before installing an update on Windows the app stops llama-server and every tool child, because the installer cannot replace files a running process holds open. The installer also kills any stray `llama-server.exe` under the install folder first.
 - **Licenses:** `LICENSE` (MIT) and a generated `THIRD-PARTY-NOTICES` covering llama.cpp, its embedded libraries, LLVM OpenMP, the ROCm components, a reference to the NVIDIA CUDA EULA, plus every Rust crate and npm package. It ships in the installer and is shown in About.
 
 ---
@@ -645,40 +671,66 @@ Every error that reaches the UI has four parts: a code, a plain-language message
 
 ## 18. Dependencies
 
-Each has a one-line reason. Exact versions are pinned in the lockfiles; the table is filled in fully as each dependency is added, and the milestone summary lists the new ones.
+Each has a one-line reason. Versions are the current stable ones, checked on 2026-11-10; lockfiles pin them exactly. A milestone summary lists every dependency it added.
+
+**Rust**
+
+| Dependency | Version | Why |
+|---|---|---|
+| `tauri`, `tauri-build` | 2.12 / 2.7 | The required shell. Pinned to 2.x: a 3.0 alpha is being published and is what `cargo search` shows |
+| `tauri-plugin-global-shortcut` | 2.4 | Global stop hotkey, registered from Rust |
+| `tauri-plugin-updater` | 2.14 | Signed, opt-in updates |
+| `tauri-plugin-dialog` | 2.8 | Native open and save dialogs |
+| `tauri-plugin-opener` | 2.7 | Open links and folders in the OS |
+| `tauri-plugin-single-instance` | 2.5 | One app instance, so one llama-server and one database writer |
+| `tauri-plugin-clipboard-manager` | 2.5 | Copy buttons and "Copy details" |
+| `rmcp` | 3.9 or newer | The official Rust MCP SDK, as required. 3.9.0 is the first release with a fix for a memory-exhaustion bug in its HTTP client, so it is the floor |
+| `tokio`, `tokio-util` | 1.54 / 0.7 | Async runtime; cancellation tokens |
+| `reqwest` | 0.13 | HTTP for providers, Hugging Face and remote MCP. Same major version rmcp uses, so one copy is compiled |
+| `serde`, `serde_json` | 1 | Serialisation |
+| `rusqlite` (bundled SQLite) | 0.40 | Storage with FTS5 built in and no system dependency. 0.40 because the migration helper does not accept 0.41 yet |
+| `rusqlite_migration` | 2.6 | Versioned schema migrations with a built-in validity test |
+| `keyring` | 4.2 | OS keychain on both platforms |
+| `jsonschema` | 0.61 | Validate tool arguments. Built with default features off, which removes its ability to fetch schemas over the network |
+| `process-wrap` | 10 | Job Objects and process groups; the same crate and version rmcp uses |
+| `windows` | 0.62 | DXGI adapter info, Job Objects, mouse input. Same version Tauri uses |
+| `sysinfo` | 0.40 | RAM, CPU name, GPU name and total VRAM |
+| `sha2` | 0.11 | Verify downloads |
+| `similar` | 3.2 | Diffs for write previews |
+| `dunce` | 1.0 | Canonical Windows paths without the `\\?\` prefix, for the sandbox and for display |
+| `ignore`, `globset`, `grep-searcher`, `grep-regex` | 0.4 / 0.4 / 0.1 / 0.1 | File walking and content search; these are ripgrep's own libraries |
+| `tree-sitter`, `tree-sitter-bash`, `tree-sitter-powershell` | 0.27 / 0.25 / 0.26 | Parse shell commands for the destructive-command classifier |
+| `git2` (vendored libgit2, HTTPS) | 0.21 | Git fallback when system git is missing. Uses the OS's own TLS, so no OpenSSL |
+| `zip` (deflate only) | 9.5 | Skill import, with its path-escape guard |
+| `serde-saphyr` | 2.1 | YAML frontmatter for skills. The older YAML crates are unmaintained or have security advisories |
+| `pdf-extract` | 0.12 | PDF text extraction in pure Rust. It can panic on odd files, so it runs on its own thread behind a guard with size and time limits |
+| `chardetng`, `encoding_rs` | 1.0 / 0.8 | Detect and decode non-UTF-8 text files |
+| `image`, `fast_image_resize` | 0.25 / 6.1 | Re-encode attachments; downscale screenshots quickly |
+| `tokio-tungstenite` | 0.30 | WebSocket for the browser tool's CDP client |
+| `xcap` | 0.9 | Screen capture for computer use |
+| `enigo` | 0.6 | Keyboard input for computer use (and mouse on macOS) |
+| `minisign-verify` | current | Verify the catalog's signature with the updater's key |
+| `tracing`, `tracing-subscriber`, `tracing-appender` | 0.1 / 0.3 / 0.2 | Local log files, rotated daily with a cap on how many are kept |
+| `thiserror` | 2 | Typed errors |
+| `ts-rs` | current | Export Rust types to TypeScript so the two sides cannot drift |
+| `proptest` (dev) | current | Property tests for the sandbox and the parser |
+| `cargo-deny` (CI tool) | current | Fails CI on security advisories and disallowed licenses; feeds the third-party notices |
+
+Deliberately not used: `tauri-plugin-shell`, `-fs`, `-http` and `-sql` (they would give the webview direct access to processes, files, the network and the database); `hf-hub` (it forces Hugging Face's Xet protocol and extra hosts); `chromiumoxide` (section 9.3); `sqlx` (cannot coexist with `rusqlite`).
+
+**Frontend**
 
 | Dependency | Why |
 |---|---|
-| `tauri` 2.12, `tauri-build` | The required shell |
-| `tauri-plugin-global-shortcut` | Global stop hotkey |
-| `tauri-plugin-updater` | Signed, opt-in updates |
-| `tauri-plugin-dialog` | Native open/save dialogs |
-| `tauri-plugin-opener` | Open links and folders in the OS |
-| `tauri-plugin-single-instance` | One app instance, so one llama-server and one database writer |
-| `tauri-plugin-clipboard-manager` | "Copy details" and copy buttons |
-| `rmcp` 3.9 (pinned) | The official Rust MCP SDK, as required |
-| `tokio`, `tokio-util` | Async runtime; cancellation tokens |
-| `reqwest` | HTTP client for providers, Hugging Face and remote MCP |
-| `serde`, `serde_json` | Serialisation |
-| `rusqlite` (bundled SQLite) | Storage with full-text search, no system dependency |
-| `keyring` | OS keychain on both platforms |
-| `jsonschema` | Validate tool arguments |
-| `process-wrap` | Job Objects and process groups; the same crate rmcp uses |
-| `windows` | DXGI adapter info, Job Objects |
-| `sysinfo` | RAM and CPU info |
-| `sha2` | Verify downloads |
-| `similar` | Diffs for write previews |
-| `git2` | Git fallback when system git is missing |
-| `zip` | Skill import |
-| `tracing`, `tracing-appender` | Local rotating logs |
-| `thiserror` | Typed errors |
-| `proptest` (dev) | Property tests for the sandbox and parser |
-| React, Vite, TypeScript, Tailwind | The required frontend stack |
-| Radix UI | Headless accessible components |
+| React 19, Vite, TypeScript, Tailwind 4 | The required stack |
+| Radix UI primitives | Headless, accessible dialogs, menus, tooltips |
 | Zustand | Small state store |
-| `react-markdown`, `remark-gfm` | Safe Markdown rendering |
+| `react-markdown`, `remark-gfm` | Markdown rendered to React elements, never to HTML strings |
+| A syntax highlighter that outputs tokens, not HTML | Code blocks without an HTML sink; chosen at M1 |
+| `@tanstack/react-virtual` | Long chats stay fast |
+| Vitest, Testing Library (dev) | Frontend tests |
 
-Still to choose, with the choice justified when it lands: PDF text extraction, CDP client, input and screen-capture crates, YAML frontmatter parser, syntax highlighter.
+One build detail is settled by CI at M0, not here: which TLS backend `reqwest` uses. The default needs an assembler on the Windows build machine; the alternative uses each OS's built-in TLS. Both trust the OS certificate store.
 
 ---
 
@@ -711,7 +763,7 @@ I work in a Linux container with no GPU, no Windows and no macOS. I can compile 
 | ROCm build is a nightly with an open regression on your card | Opt-in, pinned by hash, benchmarked against Vulkan in the M1 checklist, removable without code changes |
 | llama.cpp moves fast and its log and stdout formats are not a stable API | One pinned build; all parsing behind adapters with contract tests |
 | The load-progress protocol is internal to llama.cpp | Adapter with automatic fallback to stage text |
-| rmcp ships breaking changes often | Exact version pin; all SDK use confined to `mcp-host` and `tools` |
+| rmcp ships breaking changes often, and security fixes almost monthly | Version floor plus a committed lockfile; `cargo-deny` in CI flags advisories; all SDK use confined to `mcp-host` and `tools` so an upgrade touches two crates |
 | Small models call tools unreliably | Fallback parser, repair, bounded retries, tested catalog entries, few tools by default |
 | Third-party binaries (llama.cpp, ROCm, CUDA runtime) are unsigned | Tauri signs them when Windows signing is configured. Whether signing NVIDIA's DLLs is compatible with NVIDIA's license terms is a question for you before the first signed release |
 | A 1 GB+ installer makes updates heavy | D1 offers the small-installer alternative |
