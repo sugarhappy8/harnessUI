@@ -55,8 +55,7 @@ impl BrowserUnavailable {
 fn not_installed() -> BrowserUnavailable {
     BrowserUnavailable {
         message: "The browser tool needs Chrome or Edge, and neither is installed.".into(),
-        next_step: "Install Google Chrome, or choose a browser path in Settings → Browser."
-            .into(),
+        next_step: "Install Google Chrome, or choose a browser path in Settings → Browser.".into(),
     }
 }
 
