@@ -617,29 +617,29 @@ mod tests {
     fn classifies_missing_commands() {
         let opts = opts_with(&[("PATH", "/nonexistent-dir")]);
         let empty = BTreeMap::new();
+        // On macOS the search also covers Homebrew and user tool folders (by design), so
+        // a runtime installed there is found: only check the ones that are missing.
+        let search = lookup_path(&opts);
+        let installed =
+            |c: &str| runtime::spawn::resolve_program(c, Some(search.as_os_str())).is_some();
+        for (command, runtime) in [
+            ("npx", MissingRuntime::NodeJs),
+            ("uvx", MissingRuntime::UvPython),
+            ("docker", MissingRuntime::Docker),
+        ] {
+            if installed(command) {
+                continue;
+            }
+            assert!(
+                matches!(
+                    prepare(command, &[], &empty, None, &opts),
+                    Err(HostError::MissingRuntime { runtime: r, .. }) if r == runtime
+                ),
+                "{command}"
+            );
+        }
         assert!(matches!(
-            prepare("npx", &[], &empty, None, &opts),
-            Err(HostError::MissingRuntime {
-                runtime: MissingRuntime::NodeJs,
-                ..
-            })
-        ));
-        assert!(matches!(
-            prepare("uvx", &[], &empty, None, &opts),
-            Err(HostError::MissingRuntime {
-                runtime: MissingRuntime::UvPython,
-                ..
-            })
-        ));
-        assert!(matches!(
-            prepare("docker", &[], &empty, None, &opts),
-            Err(HostError::MissingRuntime {
-                runtime: MissingRuntime::Docker,
-                ..
-            })
-        ));
-        assert!(matches!(
-            prepare("some-server", &[], &empty, None, &opts),
+            prepare("some-server-that-does-not-exist", &[], &empty, None, &opts),
             Err(HostError::CommandNotFound { .. })
         ));
     }
@@ -695,7 +695,12 @@ mod tests {
             resolved.get("HOME").map(String::as_str),
             Some("/captured-home")
         );
-        assert_eq!(resolved.get("PATH"), Some(&path));
+        // macOS appends the package-manager folders to the captured PATH.
+        let expected_path = extend_with_tool_folders(OsString::from(&path), Some("/captured-home"));
+        assert_eq!(
+            resolved.get("PATH").map(OsString::from),
+            Some(expected_path)
+        );
         assert_eq!(resolved.get("API_KEY").map(String::as_str), Some("s3cret"));
         assert_eq!(resolved.get("PLAIN").map(String::as_str), Some("v"));
         assert_eq!(resolved.get("EXTRA_OK").map(String::as_str), Some("yes"));
