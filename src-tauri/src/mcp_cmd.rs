@@ -517,7 +517,35 @@ async fn chat_tool_list(
 ) -> Vec<(mcp_host::RegisteredTool, ToolDto)> {
     let prefs: crate::turns::ChatTools =
         serde_json::from_value(chat.tool_prefs.clone()).unwrap_or_default();
-    tool_list(state, Some(&prefs)).await
+    let mut list = tool_list(state, Some(&prefs)).await;
+    // Computer use: only for a model that can see, with a confirmed coordinate convention.
+    let why_not = computer_unavailable(state, chat).await;
+    for (_, dto) in list
+        .iter_mut()
+        .filter(|(_, d)| d.server == computer::SERVER_NAME)
+    {
+        if let Some(reason) = &why_not {
+            dto.available = false;
+            dto.schema_error.get_or_insert_with(|| reason.clone());
+        }
+    }
+    list
+}
+
+/// Why the computer tools cannot be offered in this chat, if they cannot.
+async fn computer_unavailable(state: &AppState, chat: &store::Chat) -> Option<String> {
+    let model = chat.model_ref.as_deref()?;
+    if let Some(path) = model.strip_prefix("local:") {
+        let status = state.runtime.status();
+        let same = status.model_path.as_deref() == Some(path);
+        if same && !status.vision {
+            return Some("this model cannot see images, which computer use needs".into());
+        }
+    }
+    match crate::computer_cmd::profile_for(state, model).await {
+        Some(p) if p.confirmed => None,
+        _ => Some("set up computer use for this model first (Settings → Computer use)".into()),
+    }
 }
 
 async fn tool_list(

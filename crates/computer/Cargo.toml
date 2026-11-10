@@ -1,0 +1,61 @@
+[package]
+name = "computer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The built-in computer-use tool server: capture, coordinate mapping, guarded input (ARCHITECTURE.md 9.3, D7, 13.5)."
+
+[lib]
+name = "computer"
+path = "src/lib.rs"
+
+[dependencies]
+mcp-host = { workspace = true }
+policy = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true }
+# Screenshots go to the model as base64 PNG (mcp_host::Content::Image).
+base64 = { workspace = true }
+# Resizing to llama.cpp's preprocessing size and PNG encoding.
+image = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Monitor capture (GDI BitBlt; honours WDA_EXCLUDEFROMCAPTURE).
+xcap = { workspace = true }
+# Keyboard input, routed through the main thread.
+enigo = { workspace = true }
+# SendInput for the pointer, window and process lookups, elevation, display affinity.
+# Same major as Tauri and the other crates.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Keyboard and pointer input (CGEvent), routed through the main thread.
+enigo = { workspace = true }
+objc2 = { workspace = true }
+# Completion handlers for ScreenCaptureKit.
+block2 = { workspace = true }
+objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSError", "NSString", "NSURL"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString", "CFCGTypes"] }
+objc2-core-graphics = { workspace = true, features = ["std", "libc", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGWindow"] }
+objc2-app-kit = { workspace = true, features = ["std", "libc", "NSRunningApplication", "NSWorkspace", "NSWindow", "NSResponder"] }
+objc2-screen-capture-kit = { workspace = true, features = ["std", "libc", "block2", "objc2-core-graphics", "SCShareableContent", "SCScreenshotManager", "SCStream", "SCError"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true

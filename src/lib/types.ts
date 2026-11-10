@@ -508,3 +508,33 @@ export interface UpdateInfo {
   date: string | null;
   notes: string | null;
 }
+
+// ---- Browser tool (M6) -------------------------------------------------------------
+
+export interface BrowserSettings {
+  path: string | null;
+  loopbackPort: boolean;
+  allowPrivateNetworks: boolean;
+  strictSites: string[];
+}
+
+export interface BrowserStatus {
+  settings: BrowserSettings;
+  found: string | null;
+  kind: string | null;
+  unavailable: string | null;
+  running: boolean;
+}
+
+// ---- Computer use (M7) -------------------------------------------------------------
+
+export type Convention = "pixels" | "grid1000" | "box1000" | "box1000Yx";
+
+export interface ComputerStatus {
+  available: boolean;
+  screenRecording: boolean;
+  accessibility: boolean;
+  screenRecordingUrl: string;
+  accessibilityUrl: string;
+  profile: { profile: { convention: Convention }; confirmed: boolean } | null;
+}

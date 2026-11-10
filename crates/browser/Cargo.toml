@@ -1,0 +1,64 @@
+[package]
+name = "browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The built-in browser tool server: Chrome/Edge over CDP with request enforcement (ARCHITECTURE.md 9.3, 13.3, D8)."
+
+[lib]
+name = "browser"
+path = "src/lib.rs"
+
+[features]
+# Tests only: lets the integration tests serve pages from 127.0.0.1 on chosen ports.
+# Never enabled by the app; see `BrowserConfig::test_allowed_loopback_ports`.
+test-hooks = []
+
+[dependencies]
+policy = { workspace = true }
+mcp-host = { workspace = true }
+# The browser child is started through the one spawn module (ARCHITECTURE.md 4.1).
+runtime = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "net", "io-util"] }
+tokio-util = { workspace = true }
+# Canonical browser paths without Windows' \\?\ prefix.
+dunce = { workspace = true }
+# Ids for held navigations, so the app can link each decision to its audit row.
+uuid = { workspace = true }
+# Reads the size of a PNG screenshot from its header.
+base64 = { workspace = true }
+# Loopback-port mode only (9.3, 18).
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Same major as Tauri and the runtime crate: the registry's App Paths lookup and the
+# anonymous pipes Chrome's pipe mode inherits.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio-util = { workspace = true }
+policy = { workspace = true }
+mcp-host = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
+# The integration tests need the test hooks of this very crate.
+browser = { path = ".", features = ["test-hooks"] }
+
+[lints]
+workspace = true

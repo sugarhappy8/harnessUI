@@ -1,0 +1,441 @@
+//! Per-model settings for computer use (ARCHITECTURE.md 9.3 "Model conventions"): how the
+//! model writes coordinates, and the exact image size llama.cpp would feed it.
+//!
+//! **Why the app resizes screenshots itself.** llama.cpp resizes every image to the size
+//! its projector expects before the model sees it. A model that answers in pixels answers
+//! in pixels of *that* resized image, not of the image the app sent. Sending exactly the
+//! size llama.cpp would resize to makes its resize a no-op, so the app knows what the model
+//! saw and can map the answer back.
+//!
+//! [`SmartResize::target_size`] is a line-by-line port of `calc_size_preserved_ratio` in
+//! llama.cpp `tools/mtmd/mtmd-image.cpp` at the pinned commit (`llama.lock.json`,
+//! cd959bae). It is computed in `f32` exactly as the C++ does, and the unit tests compare
+//! it against a table produced by compiling that C++ function verbatim (identical with
+//! g++ -O0/-O2 and clang++ -O3 -ffp-contract=fast). The parameters come from the
+//! projector:
+//!
+//! | Projector (llama.cpp) | `align` | tokens (default) | rounding |
+//! |---|---|---|---|
+//! | Qwen2-VL, Qwen2.5-VL (patch 14, merge 2) | 28 | 8–4096 | half to even |
+//! | Qwen3-VL (patch 16, merge 2) | 32 | 8–4096 | half to even |
+//!
+//! `min_pixels = min_tokens × align²`, `max_pixels = max_tokens × align²`. The server's
+//! `--image-min-tokens` / `--image-max-tokens` and the GGUF's own min/max pixel keys
+//! replace the defaults; the app must pass the values the server was started with (the
+//! research recommends `--image-min-tokens 1024` for Qwen-family grounders).
+//! `longest_edge` covers projectors that cap the longest side instead (Pixtral-style).
+//! Projectors that use one fixed square size use [`ResizeRule::Fixed`].
+
+use serde::{Deserialize, Serialize};
+
+/// How a model writes a screen position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Convention {
+    /// Pixels of the resized image the model saw (Qwen2.5-VL lineage: UI-TARS-1.5,
+    /// Fara-7B, Holo1.5).
+    #[default]
+    Pixels,
+    /// A 0–1000 grid over the image, `[x, y]` (Qwen3-VL, Qwen3.5, Holo2/3.1/4).
+    Grid1000,
+    /// 0–1000 boxes `[x1, y1, x2, y2]`; the centre is used.
+    Box1000,
+    /// 0–1000 boxes in `[y1, x1, y2, x2]` order (Gemma's `box_2d`; unverified, so such a
+    /// model must pass the calibration test).
+    Box1000Yx,
+}
+
+impl Convention {
+    /// One line for the model, after each screenshot, saying how to answer.
+    pub fn instructions(self, image: (u32, u32)) -> String {
+        match self {
+            Convention::Pixels => format!(
+                "Coordinates are pixels of this {}x{} image: [x, y] with x from 0 (left) to {} and y from 0 (top) to {}.",
+                image.0,
+                image.1,
+                image.0.saturating_sub(1),
+                image.1.saturating_sub(1)
+            ),
+            Convention::Grid1000 => "Coordinates are on a 0-1000 grid over this image: [x, y] with [0, 0] the top-left corner and [1000, 1000] the bottom-right corner.".to_string(),
+            Convention::Box1000 => "Coordinates are boxes on a 0-1000 grid over this image: [x1, y1, x2, y2] (the centre is used); [0, 0] is the top-left corner and [1000, 1000] the bottom-right corner.".to_string(),
+            Convention::Box1000Yx => "Coordinates are boxes on a 0-1000 grid over this image: [y1, x1, y2, x2] (the centre is used); [0, 0] is the top-left corner and [1000, 1000] the bottom-right corner.".to_string(),
+        }
+    }
+
+    /// Short name for cards and text lines.
+    pub fn label(self) -> &'static str {
+        match self {
+            Convention::Pixels => "pixels of the image",
+            Convention::Grid1000 => "0-1000 grid",
+            Convention::Box1000 => "0-1000 boxes [x1, y1, x2, y2]",
+            Convention::Box1000Yx => "0-1000 boxes [y1, x1, y2, x2]",
+        }
+    }
+}
+
+/// The parameters of llama.cpp's `calc_size_preserved_ratio` (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartResize {
+    /// Each side becomes a multiple of this (`patch_size × n_merge`). At least 1.
+    pub align: u32,
+    /// 0 = no lower bound.
+    pub min_pixels: u32,
+    /// 0 = no upper bound.
+    pub max_pixels: u32,
+    /// 0 = off. When set, the longest side is scaled to this first.
+    pub longest_edge: u32,
+    /// Python's `round()` (half to even) instead of C's `round()` (half away from zero).
+    pub round_half_even: bool,
+}
+
+impl SmartResize {
+    /// llama.cpp's default limit for Qwen-family projectors (`set_limit_image_tokens(8,
+    /// 4096)`).
+    pub const QWEN_DEFAULT_TOKENS: (u32, u32) = (8, 4096);
+
+    /// Qwen-family projectors: `align = patch_size × merge`, token limits converted to
+    /// pixels as llama.cpp's `set_limit_image_tokens` does.
+    pub fn qwen(patch_size: u32, merge: u32, min_tokens: u32, max_tokens: u32) -> Self {
+        let align = (patch_size * merge).max(1);
+        let area = align.saturating_mul(align);
+        Self {
+            align,
+            min_pixels: min_tokens.saturating_mul(area),
+            max_pixels: max_tokens.saturating_mul(area),
+            longest_edge: 0,
+            round_half_even: true,
+        }
+    }
+
+    /// Qwen2-VL / Qwen2.5-VL (patch 14, merge 2: align 28).
+    pub fn qwen2_vl(min_tokens: u32, max_tokens: u32) -> Self {
+        Self::qwen(14, 2, min_tokens, max_tokens)
+    }
+
+    /// Qwen3-VL (patch 16, merge 2: align 32).
+    pub fn qwen3_vl(min_tokens: u32, max_tokens: u32) -> Self {
+        Self::qwen(16, 2, min_tokens, max_tokens)
+    }
+
+    /// The size llama.cpp resizes a `width` × `height` image to. Port of
+    /// `calc_size_preserved_ratio` (mtmd-image.cpp), in `f32` like the original.
+    pub fn target_size(&self, width: u32, height: u32) -> (u32, u32) {
+        if width == 0 || height == 0 {
+            return (0, 0);
+        }
+        // Sizes past i32 are not images llama.cpp accepts either.
+        let width = width.min(i32::MAX as u32) as i32;
+        let height = height.min(i32::MAX as u32) as i32;
+        let align = self.align.clamp(1, i32::MAX as u32) as i32;
+        let f = align as f32;
+        let round_by_factor = |x: f32| -> i32 {
+            let q = x / f;
+            let r = if self.round_half_even {
+                q.round_ties_even()
+            } else {
+                q.round()
+            };
+            (r as i32).saturating_mul(align)
+        };
+        let ceil_by_factor = |x: f32| -> i32 { ((x / f).ceil() as i32).saturating_mul(align) };
+        let floor_by_factor = |x: f32| -> i32 { ((x / f).floor() as i32).saturating_mul(align) };
+
+        let (mut w_bar, mut h_bar);
+        if self.longest_edge > 0 {
+            let le = self.longest_edge as f32;
+            let scale = (le / width as f32).min(le / height as f32);
+            w_bar = ceil_by_factor(width as f32 * scale);
+            h_bar = ceil_by_factor(height as f32 * scale);
+        } else {
+            // always align up first
+            w_bar = align.max(round_by_factor(width as f32));
+            h_bar = align.max(round_by_factor(height as f32));
+        }
+
+        let area = i64::from(h_bar) * i64::from(w_bar);
+        if self.max_pixels > 0 && area > i64::from(self.max_pixels) {
+            let beta = (height as f32 * width as f32 / self.max_pixels as f32).sqrt();
+            h_bar = align.max(floor_by_factor(height as f32 / beta));
+            w_bar = align.max(floor_by_factor(width as f32 / beta));
+        } else if self.min_pixels > 0 && area < i64::from(self.min_pixels) {
+            let beta = (self.min_pixels as f32 / (height as f32 * width as f32)).sqrt();
+            h_bar = ceil_by_factor(height as f32 * beta);
+            w_bar = ceil_by_factor(width as f32 * beta);
+        }
+        (w_bar.max(1) as u32, h_bar.max(1) as u32)
+    }
+}
+
+/// How the app sizes a screenshot before sending it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum ResizeRule {
+    /// llama.cpp's aspect-preserving resize (Qwen-family projectors and the like).
+    Smart(SmartResize),
+    /// One fixed size (projectors that stretch to a square; the image is stretched the same
+    /// way so llama.cpp has nothing left to change).
+    Fixed { width: u32, height: u32 },
+    /// Send the capture as it is (remote providers that do their own resizing).
+    Original,
+}
+
+impl ResizeRule {
+    pub fn target_size(&self, width: u32, height: u32) -> (u32, u32) {
+        match *self {
+            ResizeRule::Smart(s) => s.target_size(width, height),
+            ResizeRule::Fixed { width, height } => (width.max(1), height.max(1)),
+            ResizeRule::Original => (width, height),
+        }
+    }
+}
+
+/// What the computer server needs to know about the model of a chat. The app keeps one
+/// per model (catalog value or the user's calibrated choice) and sets it per chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProfile {
+    pub convention: Convention,
+    pub resize: ResizeRule,
+}
+
+impl Default for ModelProfile {
+    /// Qwen2.5-VL lineage at llama.cpp's defaults: pixels of the resized image.
+    fn default() -> Self {
+        let (min, max) = SmartResize::QWEN_DEFAULT_TOKENS;
+        Self {
+            convention: Convention::Pixels,
+            resize: ResizeRule::Smart(SmartResize::qwen2_vl(min, max)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// (align, min_pixels, max_pixels, longest_edge, round_half_even, w, h, out_w, out_h),
+    /// produced by compiling llama.cpp's calc_size_preserved_ratio (pinned commit) verbatim.
+    type Row = (u32, u32, u32, u32, bool, u32, u32, u32, u32);
+    #[rustfmt::skip]
+    const GOLDEN: &[Row] = &[
+        (28, 6272, 3211264, 0, true, 1440, 900, 1428, 896),
+        (28, 6272, 3211264, 0, true, 1920, 1080, 1932, 1092),
+        (28, 6272, 3211264, 0, true, 2560, 1440, 2380, 1344),
+        (28, 6272, 3211264, 0, true, 3840, 2160, 2380, 1344),
+        (28, 6272, 3211264, 0, true, 1280, 800, 1288, 812),
+        (28, 6272, 3211264, 0, true, 1366, 768, 1372, 756),
+        (28, 6272, 3211264, 0, true, 2880, 1800, 2240, 1400),
+        (28, 6272, 3211264, 0, true, 3024, 1964, 2212, 1428),
+        (28, 6272, 3211264, 0, true, 3456, 2234, 2212, 1428),
+        (28, 6272, 3211264, 0, true, 5120, 2880, 2380, 1344),
+        (28, 6272, 3211264, 0, true, 1680, 1050, 1680, 1064),
+        (28, 6272, 3211264, 0, true, 1024, 768, 1036, 756),
+        (28, 6272, 3211264, 0, true, 800, 600, 812, 588),
+        (28, 6272, 3211264, 0, true, 3440, 1440, 2744, 1148),
+        (28, 6272, 3211264, 0, true, 2560, 1600, 2240, 1400),
+        (28, 6272, 3211264, 0, true, 1600, 900, 1596, 896),
+        (28, 6272, 3211264, 0, true, 6016, 3384, 2380, 1344),
+        (28, 6272, 3211264, 0, true, 100, 50, 112, 56),
+        (28, 6272, 3211264, 0, true, 13, 7, 112, 84),
+        (28, 6272, 3211264, 0, true, 1920, 1200, 1932, 1204),
+        (28, 802816, 3211264, 0, true, 1440, 900, 1428, 896),
+        (28, 802816, 3211264, 0, true, 1920, 1080, 1932, 1092),
+        (28, 802816, 3211264, 0, true, 2560, 1440, 2380, 1344),
+        (28, 802816, 3211264, 0, true, 3840, 2160, 2380, 1344),
+        (28, 802816, 3211264, 0, true, 1280, 800, 1288, 812),
+        (28, 802816, 3211264, 0, true, 1366, 768, 1372, 756),
+        (28, 802816, 3211264, 0, true, 2880, 1800, 2240, 1400),
+        (28, 802816, 3211264, 0, true, 3024, 1964, 2212, 1428),
+        (28, 802816, 3211264, 0, true, 3456, 2234, 2212, 1428),
+        (28, 802816, 3211264, 0, true, 5120, 2880, 2380, 1344),
+        (28, 802816, 3211264, 0, true, 1680, 1050, 1680, 1064),
+        (28, 802816, 3211264, 0, true, 1024, 768, 1036, 784),
+        (28, 802816, 3211264, 0, true, 800, 600, 1036, 784),
+        (28, 802816, 3211264, 0, true, 3440, 1440, 2744, 1148),
+        (28, 802816, 3211264, 0, true, 2560, 1600, 2240, 1400),
+        (28, 802816, 3211264, 0, true, 1600, 900, 1596, 896),
+        (28, 802816, 3211264, 0, true, 6016, 3384, 2380, 1344),
+        (28, 802816, 3211264, 0, true, 100, 50, 1288, 644),
+        (28, 802816, 3211264, 0, true, 13, 7, 1232, 672),
+        (28, 802816, 3211264, 0, true, 1920, 1200, 1932, 1204),
+        (32, 8192, 4194304, 0, true, 1440, 900, 1440, 896),
+        (32, 8192, 4194304, 0, true, 1920, 1080, 1920, 1088),
+        (32, 8192, 4194304, 0, true, 2560, 1440, 2560, 1440),
+        (32, 8192, 4194304, 0, true, 3840, 2160, 2720, 1536),
+        (32, 8192, 4194304, 0, true, 1280, 800, 1280, 800),
+        (32, 8192, 4194304, 0, true, 1366, 768, 1376, 768),
+        (32, 8192, 4194304, 0, true, 2880, 1800, 2560, 1600),
+        (32, 8192, 4194304, 0, true, 3024, 1964, 2528, 1632),
+        (32, 8192, 4194304, 0, true, 3456, 2234, 2528, 1632),
+        (32, 8192, 4194304, 0, true, 5120, 2880, 2720, 1536),
+        (32, 8192, 4194304, 0, true, 1680, 1050, 1664, 1056),
+        (32, 8192, 4194304, 0, true, 1024, 768, 1024, 768),
+        (32, 8192, 4194304, 0, true, 800, 600, 800, 608),
+        (32, 8192, 4194304, 0, true, 3440, 1440, 3136, 1312),
+        (32, 8192, 4194304, 0, true, 2560, 1600, 2560, 1600),
+        (32, 8192, 4194304, 0, true, 1600, 900, 1600, 896),
+        (32, 8192, 4194304, 0, true, 6016, 3384, 2720, 1536),
+        (32, 8192, 4194304, 0, true, 100, 50, 128, 64),
+        (32, 8192, 4194304, 0, true, 13, 7, 128, 96),
+        (32, 8192, 4194304, 0, true, 1920, 1200, 1920, 1216),
+        (32, 1048576, 4194304, 0, true, 1440, 900, 1440, 896),
+        (32, 1048576, 4194304, 0, true, 1920, 1080, 1920, 1088),
+        (32, 1048576, 4194304, 0, true, 2560, 1440, 2560, 1440),
+        (32, 1048576, 4194304, 0, true, 3840, 2160, 2720, 1536),
+        (32, 1048576, 4194304, 0, true, 1280, 800, 1312, 832),
+        (32, 1048576, 4194304, 0, true, 1366, 768, 1376, 768),
+        (32, 1048576, 4194304, 0, true, 2880, 1800, 2560, 1600),
+        (32, 1048576, 4194304, 0, true, 3024, 1964, 2528, 1632),
+        (32, 1048576, 4194304, 0, true, 3456, 2234, 2528, 1632),
+        (32, 1048576, 4194304, 0, true, 5120, 2880, 2720, 1536),
+        (32, 1048576, 4194304, 0, true, 1680, 1050, 1664, 1056),
+        (32, 1048576, 4194304, 0, true, 1024, 768, 1184, 896),
+        (32, 1048576, 4194304, 0, true, 800, 600, 1184, 896),
+        (32, 1048576, 4194304, 0, true, 3440, 1440, 3136, 1312),
+        (32, 1048576, 4194304, 0, true, 2560, 1600, 2560, 1600),
+        (32, 1048576, 4194304, 0, true, 1600, 900, 1600, 896),
+        (32, 1048576, 4194304, 0, true, 6016, 3384, 2720, 1536),
+        (32, 1048576, 4194304, 0, true, 100, 50, 1472, 736),
+        (32, 1048576, 4194304, 0, true, 13, 7, 1408, 768),
+        (32, 1048576, 4194304, 0, true, 1920, 1200, 1920, 1216),
+        (28, 78400, 12845056, 0, false, 1440, 900, 1428, 896),
+        (28, 78400, 12845056, 0, false, 1920, 1080, 1932, 1092),
+        (28, 78400, 12845056, 0, false, 2560, 1440, 2548, 1428),
+        (28, 78400, 12845056, 0, false, 3840, 2160, 3836, 2156),
+        (28, 78400, 12845056, 0, false, 1280, 800, 1288, 812),
+        (28, 78400, 12845056, 0, false, 1366, 768, 1372, 756),
+        (28, 78400, 12845056, 0, false, 2880, 1800, 2884, 1792),
+        (28, 78400, 12845056, 0, false, 3024, 1964, 3024, 1960),
+        (28, 78400, 12845056, 0, false, 3456, 2234, 3444, 2240),
+        (28, 78400, 12845056, 0, false, 5120, 2880, 4760, 2688),
+        (28, 78400, 12845056, 0, false, 1680, 1050, 1680, 1064),
+        (28, 78400, 12845056, 0, false, 1024, 768, 1036, 756),
+        (28, 78400, 12845056, 0, false, 800, 600, 812, 588),
+        (28, 78400, 12845056, 0, false, 3440, 1440, 3444, 1428),
+        (28, 78400, 12845056, 0, false, 2560, 1600, 2548, 1596),
+        (28, 78400, 12845056, 0, false, 1600, 900, 1596, 896),
+        (28, 78400, 12845056, 0, false, 6016, 3384, 4760, 2688),
+        (28, 78400, 12845056, 0, false, 100, 50, 420, 224),
+        (28, 78400, 12845056, 0, false, 13, 7, 392, 224),
+        (28, 78400, 12845056, 0, false, 1920, 1200, 1932, 1204),
+        (16, 0, 0, 1024, false, 1440, 900, 1024, 640),
+        (16, 0, 0, 1024, false, 1920, 1080, 1024, 576),
+        (16, 0, 0, 1024, false, 2560, 1440, 1024, 576),
+        (16, 0, 0, 1024, false, 3840, 2160, 1024, 576),
+        (16, 0, 0, 1024, false, 1280, 800, 1024, 640),
+        (16, 0, 0, 1024, false, 1366, 768, 1024, 576),
+        (16, 0, 0, 1024, false, 2880, 1800, 1024, 640),
+        (16, 0, 0, 1024, false, 3024, 1964, 1024, 672),
+        (16, 0, 0, 1024, false, 3456, 2234, 1024, 672),
+        (16, 0, 0, 1024, false, 5120, 2880, 1024, 576),
+        (16, 0, 0, 1024, false, 1680, 1050, 1024, 640),
+        (16, 0, 0, 1024, false, 1024, 768, 1024, 768),
+        (16, 0, 0, 1024, false, 800, 600, 1024, 768),
+        (16, 0, 0, 1024, false, 3440, 1440, 1024, 432),
+        (16, 0, 0, 1024, false, 2560, 1600, 1024, 640),
+        (16, 0, 0, 1024, false, 1600, 900, 1024, 576),
+        (16, 0, 0, 1024, false, 6016, 3384, 1024, 576),
+        (16, 0, 0, 1024, false, 100, 50, 1024, 512),
+        (16, 0, 0, 1024, false, 13, 7, 1024, 560),
+        (16, 0, 0, 1024, false, 1920, 1200, 1024, 656),
+        (14, 0, 1000000, 0, true, 1440, 900, 1260, 784),
+        (14, 0, 1000000, 0, true, 1920, 1080, 1330, 742),
+        (14, 0, 1000000, 0, true, 2560, 1440, 1330, 742),
+        (14, 0, 1000000, 0, true, 3840, 2160, 1330, 742),
+        (14, 0, 1000000, 0, true, 1280, 800, 1260, 784),
+        (14, 0, 1000000, 0, true, 1366, 768, 1330, 742),
+        (14, 0, 1000000, 0, true, 2880, 1800, 1260, 784),
+        (14, 0, 1000000, 0, true, 3024, 1964, 1232, 798),
+        (14, 0, 1000000, 0, true, 3456, 2234, 1232, 798),
+        (14, 0, 1000000, 0, true, 5120, 2880, 1330, 742),
+        (14, 0, 1000000, 0, true, 1680, 1050, 1260, 784),
+        (14, 0, 1000000, 0, true, 1024, 768, 1022, 770),
+        (14, 0, 1000000, 0, true, 800, 600, 798, 602),
+        (14, 0, 1000000, 0, true, 3440, 1440, 1540, 644),
+        (14, 0, 1000000, 0, true, 2560, 1600, 1260, 784),
+        (14, 0, 1000000, 0, true, 1600, 900, 1330, 742),
+        (14, 0, 1000000, 0, true, 6016, 3384, 1330, 742),
+        (14, 0, 1000000, 0, true, 100, 50, 98, 56),
+        (14, 0, 1000000, 0, true, 13, 7, 14, 14),
+        (14, 0, 1000000, 0, true, 1920, 1200, 1260, 784),
+    ];
+
+    #[test]
+    fn target_size_matches_llama_cpp_bit_for_bit() {
+        for &(align, min_pixels, max_pixels, longest_edge, round_half_even, w, h, ow, oh) in GOLDEN
+        {
+            let s = SmartResize {
+                align,
+                min_pixels,
+                max_pixels,
+                longest_edge,
+                round_half_even,
+            };
+            assert_eq!(s.target_size(w, h), (ow, oh), "{w}x{h} with {s:?}");
+        }
+    }
+
+    #[test]
+    fn known_published_sizes() {
+        // Fara-7B's card: "The screen's resolution is 1428x896" for a 1440x900 screen.
+        let q25 = SmartResize::qwen2_vl(8, 4096);
+        assert_eq!(q25.target_size(1440, 900), (1428, 896));
+        assert_eq!(q25.align, 28);
+        assert_eq!(q25.max_pixels, 4096 * 28 * 28);
+        // Qwen3-VL: align 32.
+        let q3 = SmartResize::qwen3_vl(1024, 4096);
+        assert_eq!(q3.align, 32);
+        assert_eq!(q3.min_pixels, 1024 * 32 * 32);
+        assert_eq!(q3.target_size(1920, 1080), (1920, 1088));
+        // Degenerate input.
+        assert_eq!(q25.target_size(0, 100), (0, 0));
+    }
+
+    #[test]
+    fn output_is_aligned_and_within_the_token_budget() {
+        let s = SmartResize::qwen2_vl(1024, 4096);
+        for &(w, h) in &[
+            (1920, 1080),
+            (3840, 2160),
+            (5120, 1440),
+            (1024, 768),
+            (800, 600),
+        ] {
+            let (ow, oh) = s.target_size(w, h);
+            assert_eq!(ow % 28, 0);
+            assert_eq!(oh % 28, 0);
+            assert!(ow * oh <= s.max_pixels, "{w}x{h} -> {ow}x{oh}");
+            assert!(ow * oh >= s.min_pixels, "{w}x{h} -> {ow}x{oh}");
+        }
+    }
+
+    #[test]
+    fn rules_and_conventions() {
+        assert_eq!(
+            ResizeRule::Fixed {
+                width: 896,
+                height: 896
+            }
+            .target_size(1920, 1080),
+            (896, 896)
+        );
+        assert_eq!(ResizeRule::Original.target_size(1920, 1080), (1920, 1080));
+        assert!(
+            Convention::Pixels
+                .instructions((1428, 896))
+                .contains("0 (left) to 1427")
+        );
+        assert!(Convention::Grid1000.instructions((1, 1)).contains("0-1000"));
+        assert!(
+            Convention::Box1000Yx
+                .instructions((1, 1))
+                .contains("[y1, x1, y2, x2]")
+        );
+        let p = ModelProfile::default();
+        assert_eq!(p.convention, Convention::Pixels);
+        // Profiles round-trip through the settings JSON.
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<ModelProfile>(&json).unwrap(), p);
+    }
+}

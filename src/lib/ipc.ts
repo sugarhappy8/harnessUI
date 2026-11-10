@@ -16,6 +16,10 @@ import type {
   McpImportPreview,
   ApprovalRequest,
   SkillList,
+  BrowserSettings,
+  ComputerStatus,
+  Convention,
+  BrowserStatus,
   UpdateInfo,
   UpdateStatus,
   ChatSummary,
@@ -256,3 +260,13 @@ export const installUpdate = () => invoke<void>("install_update");
 export const getTerminalPassThrough = () => invoke<string[]>("get_terminal_pass_through");
 export const setTerminalPassThrough = (names: string[]) =>
   invoke<string[]>("set_terminal_pass_through", { names });
+
+// Browser tool
+export const browserStatus = () => invoke<BrowserStatus>("browser_status");
+export const setBrowserSettings = (settings: BrowserSettings) => invoke<void>("set_browser_settings", { settings });
+export const chooseBrowserPath = (clear: boolean) => invoke<string | null>("choose_browser_path", { clear });
+
+// Computer use
+export const computerStatus = (modelRef: string | null) => invoke<ComputerStatus>("computer_status", { modelRef });
+export const setComputerProfile = (modelRef: string, convention: Convention, confirmed: boolean) =>
+  invoke<void>("set_computer_profile", { modelRef, convention, confirmed });

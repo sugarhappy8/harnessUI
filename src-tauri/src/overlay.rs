@@ -31,6 +31,21 @@ pub fn show(app: &AppHandle, monitor: Option<tauri::Monitor>) -> bool {
     ) else {
         return false;
     };
+    #[cfg(target_os = "macos")]
+    for w in [&border, &indicator] {
+        // Over full-screen Spaces too (9.3). AppKit calls must run on the main thread.
+        if let Ok(ptr) = w.ns_window() {
+            let addr = ptr as usize;
+            let _ = app.run_on_main_thread(move || {
+                // SAFETY: the window is one of this app's live NSWindows.
+                if let Err(e) =
+                    unsafe { computer::set_overlay_window_behavior(addr as *mut std::ffi::c_void) }
+                {
+                    tracing::warn!("overlay window behaviour: {e}");
+                }
+            });
+        }
+    }
     let monitor = monitor.or_else(|| border.primary_monitor().ok().flatten());
     let Some(monitor) = monitor else { return false };
     let pos = *monitor.position();

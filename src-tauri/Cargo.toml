@@ -38,6 +38,8 @@ rand = { workspace = true }
 models = { workspace = true }
 policy = { workspace = true }
 tools = { workspace = true }
+browser = { workspace = true }
+computer = { workspace = true }
 mcp-host = { workspace = true }
 # Signed, opt-in updates (registered only when the build carries the updater key).
 tauri-plugin-updater = { workspace = true }
@@ -52,7 +54,11 @@ sha2 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Reading the Windows build number (ROCm needs Windows 11 25H2); same major as Tauri.
-windows = { version = "0.62", features = ["Win32_System_Registry"] }
+windows = { version = "0.62", features = ["Win32_System_Registry", "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Reads the overlay window's number so the computer-use injector can look through it.
+objc2 = { workspace = true }

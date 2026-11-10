@@ -107,6 +107,11 @@
     "allow-install-update",
     "allow-overlay-stop",
     "allow-get-terminal-pass-through",
-    "allow-set-terminal-pass-through"
+    "allow-set-terminal-pass-through",
+    "allow-browser-status",
+    "allow-set-browser-settings",
+    "allow-choose-browser-path",
+    "allow-computer-status",
+    "allow-set-computer-profile"
   ]
 }

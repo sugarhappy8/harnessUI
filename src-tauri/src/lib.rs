@@ -4,9 +4,11 @@
 //! This crate wires them to Tauri. See ARCHITECTURE.md section 5.
 
 mod attachments;
+mod browser_cmd;
 mod chat;
 mod children;
 mod commands;
+mod computer_cmd;
 mod diagnostics;
 mod downloads;
 mod dto;
@@ -165,6 +167,11 @@ pub fn run() {
             overlay::overlay_stop,
             toolset::get_terminal_pass_through,
             toolset::set_terminal_pass_through,
+            browser_cmd::browser_status,
+            browser_cmd::set_browser_settings,
+            browser_cmd::choose_browser_path,
+            computer_cmd::computer_status,
+            computer_cmd::set_computer_profile,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -203,6 +210,14 @@ pub fn run() {
                 skills.clone(),
                 pass_through,
             ));
+            let browser = tauri::async_runtime::block_on(browser_cmd::build(&handle, &store));
+            host.add_builtin(browser.clone());
+            app.manage(browser_cmd::BrowserHandle(browser));
+            let computer = computer_cmd::build(&handle);
+            if let Some(server) = &computer {
+                host.add_builtin(server.clone());
+            }
+            app.manage(computer_cmd::ComputerHandle(computer));
             app.manage(state::AppState {
                 store,
                 secrets,
@@ -259,7 +274,18 @@ pub fn run() {
             if let Some(state) = handle.try_state::<state::AppState>() {
                 let runtime = state.runtime.clone();
                 let host = state.host.clone();
+                let browser = handle
+                    .try_state::<browser_cmd::BrowserHandle>()
+                    .map(|b| b.0.clone());
+                if let Some(c) = handle.try_state::<computer_cmd::ComputerHandle>()
+                    && let Some(server) = c.0.clone()
+                {
+                    server.shutdown();
+                }
                 tauri::async_runtime::block_on(async move {
+                    if let Some(b) = browser {
+                        b.shutdown().await;
+                    }
                     host.shutdown().await;
                     runtime.shutdown().await;
                 });

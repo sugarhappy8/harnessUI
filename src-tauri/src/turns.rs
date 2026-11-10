@@ -345,8 +345,6 @@ pub struct DuringCall {
     pub preview: String,
 }
 
-// TODO(M6): remove the allow once the browser server's approver uses it.
-#[allow(dead_code)]
 pub async fn ask_during_call(
     app: &AppHandle,
     held: DuringCall,
@@ -1086,6 +1084,7 @@ pub async fn run(
 
     // Tools enabled for this chat.
     let host = state.host.clone();
+    crate::computer_cmd::prepare_turn(app, chat_id.0, &req.model_ref).await;
     let enabled = crate::mcp_cmd::enabled_for_chat(&state, &req.chat).await;
     let mut tool_prefs = HashMap::new();
     for t in &enabled {
@@ -1258,6 +1257,7 @@ pub async fn run(
         });
     }
     sink.flush_deltas();
+    crate::computer_cmd::end_turn(app);
     drop(sink);
     let _ = persister.await;
     let (status, message) = match &outcome.status {

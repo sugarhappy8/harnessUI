@@ -10,6 +10,8 @@ const SERVER_LABEL: Record<string, string> = {
   terminal: "Terminal",
   git: "Git",
   skills: "Skills",
+  browser: "Browser",
+  computer: "Computer",
 };
 
 /**

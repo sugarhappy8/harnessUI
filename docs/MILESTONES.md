@@ -183,3 +183,61 @@ page).
 chats show their latest 80 messages with a "Show earlier" button rather than a
 virtualised list; Rust types
 are mirrored by hand in `src/lib/types.ts` rather than generated.
+
+---
+
+## M6 — Browser tool
+
+**Works:** the `browser` tools (navigate, snapshot, find, read text, click, type, fill a
+form, press a key, screenshot, back) drive the agent's own Chrome or Edge window with a
+separate profile in the app's data folder, over a pipe (no listening port) or, as a
+setting, a loopback port. Every document request on every tab and frame is checked in
+the browser itself: `http`/`https` only, and this computer's own addresses (including the
+local model server) and, unless allowed, private networks are blocked, including after
+redirects. Form submissions and anything that sends data with a navigation are held until
+you approve them; leaving a site asks; file choosers and downloads are refused. Settings →
+Browser chooses the browser, the port mode, private networks and strict sites.
+
+Automated: the browser crate's tests run against a real Chromium (blocking, held
+submissions released or failed, pop-ups, Stop releasing held requests); `e2e/m6_browser.py`
+checks the integration in the app.
+
+**Manual test — both machines** (a vision model is not required):
+1. Tools panel → switch on Browser. Ask: "Open https://example.com and tell me the page's heading." A navigate card shows the host; allow it. A Chrome window opens (not your own profile: no bookmarks, not signed in); the model reads the heading.
+2. Ask it to search something on a site with a search box: typing asks per site; pressing Enter in the search field shows a submission card (D8). Deny: the page does not change.
+3. Ask it to open `http://127.0.0.1:8080` or your router's address: refused without a card (private networks are off by default).
+4. Press Stop while a card is open: the card closes and the held request is cancelled.
+
+**Known issues:** see CHANGELOG (M6).
+
+---
+
+## M7 — Computer use
+
+**Works (Windows and macOS only):** screenshots of one monitor with this app's windows
+left out and a cursor marker drawn in, resized exactly as llama.cpp resizes them for the
+model; clicks, moves, drags, scrolls, typing and key combinations through one injector
+that refuses any input that would land on this app (including WebView2's processes),
+re-checks the target app before every event, refuses elevated windows on Windows, and
+releases every held key and button on Stop, a panic or exit. Grants are per kind of input
+and per application (D7); terminals, system settings and password managers always ask.
+While it acts, a red border and an "AI is controlling this computer" bar with a Stop
+button stay on screen. Settings → Computer use shows the macOS permissions and sets each
+model's coordinate convention.
+
+**Manual test — Windows PC** (needs a vision model with known coordinates, e.g. a
+Qwen2.5-VL-based model such as UI-TARS-1.5-7B):
+1. Settings → Computer use → pick the model, choose "Pixels of the image the model saw", tick the confirmation, Save. Tools panel → switch on Computer.
+2. Open Notepad. Ask: "Take a screenshot, then click in the Notepad window and type hello." Approve the screenshot card, then the pointer card (it names notepad.exe) and the keyboard card.
+3. While it works the red border and the Stop bar are visible; press Ctrl+Alt+Backspace: everything stops, no key stays pressed.
+4. Ask it to click on harnissUI's own window: refused ("covered by this app's window").
+5. Run an admin Command Prompt and ask it to type there: refused ("running as administrator").
+
+**Manual test — Mac:**
+1. Settings → Computer use: Screen Recording and Accessibility show "not allowed"; *Open System Settings*, allow harnissUI, come back, *Check again* (restart the app if macOS asks).
+2. Steps 1–4 as above with TextEdit; the stop hotkey is Ctrl+Option+Delete.
+3. Put TextEdit in full screen: the border and Stop bar still show on that Space.
+
+**Known issues:** unsigned macOS builds lose the two permissions on every new build (a
+Developer ID fixes that). The automated calibration test of 9.3 is replaced by a
+confirmed per-model convention for now (see the 4pm report).

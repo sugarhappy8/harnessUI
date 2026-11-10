@@ -270,6 +270,11 @@ struct Options {
     detach: Detach,
     kill_on_drop: bool,
     register_with_reaper: bool,
+    /// Windows: take the shared side of the inheritance gate while the process is created,
+    /// so a child never inherits pipe handles meant for another one (see
+    /// [`spawn_with_handles`]). Off only for the spawn that holds the exclusive side.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    inherit_gate: bool,
 }
 
 impl Options {
@@ -277,6 +282,7 @@ impl Options {
         detach: Detach::Group,
         kill_on_drop: true,
         register_with_reaper: true,
+        inherit_gate: true,
     };
 }
 
@@ -309,6 +315,9 @@ fn build(spec: &SpawnSpec, options: Options) -> CommandWrap {
         let _ = options.detach;
         wrap.wrap(CreationFlags(CREATE_NO_WINDOW));
         wrap.wrap(JobObject);
+        if options.inherit_gate {
+            wrap.wrap(inherit_gate::Gate::default());
+        }
     }
     #[cfg(unix)]
     match options.detach {
@@ -343,13 +352,257 @@ pub(crate) fn spawn_reaper(spec: &SpawnSpec) -> io::Result<ManagedChild> {
             detach: Detach::Session,
             kill_on_drop: false,
             register_with_reaper: false,
+            inherit_gate: true,
         },
     )
+}
+
+/// A pipe end handed to a child at a fixed descriptor number, besides stdin, stdout and
+/// stderr (Unix). Chrome's `--remote-debugging-pipe`, for example, reads commands from
+/// fd 3 and writes replies to fd 4.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct InheritedFd {
+    /// The descriptor number the child sees. Must be 3 or higher, and unique.
+    pub child_fd: i32,
+    /// The app's end to hand over. The app's copy is closed once the child has started.
+    pub fd: std::os::fd::OwnedFd,
+}
+
+/// Starts a child like [`spawn`] and additionally hands it `fds` at the descriptor numbers
+/// they name (Unix).
+///
+/// Every other descriptor of the app stays closed in the child: the app's copies are
+/// close-on-exec, and each one handed over is first moved above the target numbers so
+/// two mappings can never overwrite each other. The app's copies are closed when this
+/// returns, so the app sees end-of-file when the child exits.
+#[cfg(unix)]
+pub fn spawn_with_fds(spec: SpawnSpec, fds: Vec<InheritedFd>) -> io::Result<ManagedChild> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let mut seen = Vec::new();
+    for entry in &fds {
+        if entry.child_fd < 3 || seen.contains(&entry.child_fd) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "inherited descriptor {} must be 3 or higher and unique",
+                    entry.child_fd
+                ),
+            ));
+        }
+        seen.push(entry.child_fd);
+    }
+    let floor = seen.iter().copied().max().unwrap_or(2) + 1;
+    // Copies above every target number, close-on-exec in the app, so no other child the
+    // app starts meanwhile inherits them and a dup2 below never clobbers a source.
+    let mut moved: Vec<(OwnedFd, i32)> = Vec::with_capacity(fds.len());
+    for entry in &fds {
+        // SAFETY: F_DUPFD_CLOEXEC only creates a new descriptor referring to the same open
+        // file; the source stays owned by `entry`.
+        let raw = unsafe { libc::fcntl(entry.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, floor) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `raw` was just returned by fcntl and is owned by nothing else.
+        moved.push((unsafe { OwnedFd::from_raw_fd(raw) }, entry.child_fd));
+    }
+    drop(fds);
+    let pairs: Vec<(i32, i32)> = moved
+        .iter()
+        .map(|(fd, target)| (fd.as_raw_fd(), *target))
+        .collect();
+
+    init_parent_error_mode();
+    let mut wrap = build(&spec, Options::CHILD);
+    // SAFETY: the closure runs in the forked child before exec. It only calls dup2, which
+    // is async-signal-safe, and reads `pairs`, which was allocated before the fork; it
+    // allocates nothing. dup2 clears close-on-exec on the new descriptor, so exactly the
+    // target numbers survive the exec.
+    unsafe {
+        wrap.command_mut().pre_exec(move || {
+            for &(source, target) in &pairs {
+                if libc::dup2(source, target) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let child = finish_spawn(wrap.spawn()?, Options::CHILD);
+    // The app's copies of the child's ends close here.
+    drop(moved);
+    Ok(child)
+}
+
+/// Starts a child like [`spawn`] and lets it inherit `handles` (Windows). The caller
+/// tells the child the handle values, for example on its command line (Chrome's
+/// `--remote-debugging-io-pipes=<read>,<write>`).
+///
+/// `std` creates every child with handle inheritance on, so any inheritable handle in
+/// the app would reach every child started at the same moment. The handles are therefore
+/// made inheritable only while the exclusive side of a process-wide gate is held; every
+/// other spawn in this module, and every command built by [`command_wrap`], holds the
+/// shared side while its process is created. The handles are closed in the app before
+/// the gate opens again. Processes the app does not create through this module (the
+/// webview's own) are outside the gate.
+#[cfg(windows)]
+pub fn spawn_with_handles(
+    spec: SpawnSpec,
+    handles: Vec<std::os::windows::io::OwnedHandle>,
+) -> io::Result<ManagedChild> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{
+        HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,
+    };
+
+    init_parent_error_mode();
+    let options = Options {
+        inherit_gate: false,
+        ..Options::CHILD
+    };
+    let mut wrap = build(&spec, options);
+    let gate = inherit_gate::Exclusive::acquire();
+    for handle in &handles {
+        // SAFETY: the handle is owned by `handles` and stays open for the whole call.
+        unsafe {
+            SetHandleInformation(
+                HANDLE(handle.as_raw_handle()),
+                HANDLE_FLAG_INHERIT.0,
+                HANDLE_FLAG_INHERIT,
+            )
+        }
+        .map_err(io::Error::other)?;
+    }
+    let spawned = wrap.spawn();
+    for handle in &handles {
+        // SAFETY: as above. Clearing the flag before closing keeps the window minimal
+        // even if a close were delayed.
+        let _ = unsafe {
+            SetHandleInformation(
+                HANDLE(handle.as_raw_handle()),
+                HANDLE_FLAG_INHERIT.0,
+                HANDLE_FLAGS(0),
+            )
+        };
+    }
+    drop(handles);
+    drop(gate);
+    Ok(finish_spawn(spawned?, options))
+}
+
+/// The process-wide gate for handle inheritance on Windows (see [`spawn_with_handles`]).
+#[cfg(windows)]
+mod inherit_gate {
+    use std::sync::{Condvar, Mutex, MutexGuard};
+
+    use process_wrap::tokio::{CommandWrap, CommandWrapper};
+
+    struct State {
+        shared: usize,
+        exclusive: bool,
+    }
+
+    static STATE: Mutex<State> = Mutex::new(State {
+        shared: 0,
+        exclusive: false,
+    });
+    static CHANGED: Condvar = Condvar::new();
+
+    fn lock() -> MutexGuard<'static, State> {
+        STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Held while an ordinary child is created.
+    #[derive(Debug)]
+    pub(super) struct Shared(());
+
+    impl Shared {
+        pub(super) fn acquire() -> Self {
+            let mut state = lock();
+            while state.exclusive {
+                state = CHANGED
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            state.shared += 1;
+            Self(())
+        }
+    }
+
+    impl Drop for Shared {
+        fn drop(&mut self) {
+            let mut state = lock();
+            state.shared = state.shared.saturating_sub(1);
+            CHANGED.notify_all();
+        }
+    }
+
+    /// Held while handles are inheritable for one child.
+    #[derive(Debug)]
+    pub(super) struct Exclusive(());
+
+    impl Exclusive {
+        pub(super) fn acquire() -> Self {
+            let mut state = lock();
+            while state.exclusive || state.shared > 0 {
+                state = CHANGED
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            state.exclusive = true;
+            Self(())
+        }
+    }
+
+    impl Drop for Exclusive {
+        fn drop(&mut self) {
+            let mut state = lock();
+            state.exclusive = false;
+            CHANGED.notify_all();
+        }
+    }
+
+    /// Wrapper that holds [`Shared`] from just before the process is created until just
+    /// after, also for commands spawned by other crates from [`super::command_wrap`].
+    /// If the spawn fails, the guard is released when the command is dropped.
+    #[derive(Debug, Default)]
+    pub(super) struct Gate {
+        held: Option<Shared>,
+    }
+
+    impl CommandWrapper for Gate {
+        fn pre_spawn(
+            &mut self,
+            _command: &mut tokio::process::Command,
+            _core: &CommandWrap,
+        ) -> std::io::Result<()> {
+            self.held = Some(Shared::acquire());
+            Ok(())
+        }
+
+        fn post_spawn(
+            &mut self,
+            _command: &mut tokio::process::Command,
+            _child: &mut tokio::process::Child,
+            _core: &CommandWrap,
+        ) -> std::io::Result<()> {
+            self.held = None;
+            Ok(())
+        }
+    }
 }
 
 fn spawn_with(spec: &SpawnSpec, options: Options) -> io::Result<ManagedChild> {
     init_parent_error_mode();
     let inner = build(spec, options).spawn()?;
+    Ok(finish_spawn(inner, options))
+}
+
+/// Wraps a freshly started child and registers it with the reaper when asked to.
+fn finish_spawn(inner: Box<dyn ChildWrapper>, options: Options) -> ManagedChild {
     let pid = inner.id();
     let child = ManagedChild {
         inner,
@@ -369,7 +622,7 @@ fn spawn_with(spec: &SpawnSpec, options: Options) -> io::Result<ManagedChild> {
     };
     #[cfg(not(unix))]
     let _ = options.register_with_reaper;
-    Ok(child)
+    child
 }
 
 /// Sets the Windows error mode of the app process once, so that a child whose DLL is
@@ -880,6 +1133,77 @@ mod tests {
             Some(Some(3))
         );
         assert!(child.finished, "the empty group is never signalled again");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_with_fds_hands_over_exactly_the_named_descriptors() {
+        use std::io::{Read, Write};
+        let sh = resolve_program("sh", None).expect("sh on PATH");
+        // fd 3 is the child's input, fd 4 its output, as Chrome's pipe mode uses them.
+        let (child_in, mut app_out) = std::io::pipe().expect("pipe");
+        let (mut app_in, child_out) = std::io::pipe().expect("pipe");
+        let spec = SpawnSpec::new(sh, std::env::temp_dir())
+            .args([
+                "-c",
+                "read line <&3; echo \"got $line\" >&4; [ -e /dev/fd/5 ] && echo leaked >&4; exit 0",
+            ])
+            .stdout(StdioMode::Null)
+            .stderr(StdioMode::Null);
+        let mut child = spawn_with_fds(
+            spec,
+            vec![
+                InheritedFd {
+                    child_fd: 3,
+                    fd: child_in.into(),
+                },
+                InheritedFd {
+                    child_fd: 4,
+                    fd: child_out.into(),
+                },
+            ],
+        )
+        .expect("spawn with fds");
+        app_out.write_all(b"ping\n").expect("write");
+        drop(app_out);
+        let status = child.wait().await.expect("wait");
+        assert!(status.success());
+        let mut got = String::new();
+        // The app's copy of the child's write end was closed by spawn_with_fds, so this
+        // read ends at the child's exit instead of hanging.
+        app_in.read_to_string(&mut got).expect("read");
+        assert_eq!(got, "got ping\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_with_fds_rejects_stdio_numbers_and_duplicates() {
+        let (r, w) = std::io::pipe().expect("pipe");
+        let error = spawn_with_fds(
+            SpawnSpec::new("/bin/true", "/"),
+            vec![InheritedFd {
+                child_fd: 1,
+                fd: r.into(),
+            }],
+        )
+        .expect_err("fd 1 is refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let (r2, _w2) = std::io::pipe().expect("pipe");
+        let error = spawn_with_fds(
+            SpawnSpec::new("/bin/true", "/"),
+            vec![
+                InheritedFd {
+                    child_fd: 3,
+                    fd: w.into(),
+                },
+                InheritedFd {
+                    child_fd: 3,
+                    fd: r2.into(),
+                },
+            ],
+        )
+        .expect_err("duplicates are refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[cfg(unix)]

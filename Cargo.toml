@@ -8,6 +8,8 @@ members = [
     "crates/mcp-host",
     "crates/tools",
     "crates/agent",
+    "crates/computer",
+    "crates/browser",
     "src-tauri",
 ]
 
@@ -28,6 +30,8 @@ models = { path = "crates/models" }
 mcp-host = { path = "crates/mcp-host" }
 tools = { path = "crates/tools" }
 agent = { path = "crates/agent" }
+computer = { path = "crates/computer" }
+browser = { path = "crates/browser" }
 
 # Shell. Pinned to the 2.x line: a 3.0 alpha is published and `cargo search` shows it.
 tauri = { version = "2.12", features = [] }
@@ -91,6 +95,29 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 serde-saphyr = "2.1"
 zip = { version = "9.5", default-features = false, features = ["deflate"] }
 tempfile = "3"
+
+# Browser tool (ARCHITECTURE.md 9.3, 18): WebSocket client for the optional loopback-port
+# CDP mode only; client handshake, no TLS, no default features (pure Rust).
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
+# Computer use (ARCHITECTURE.md 9.3). Only the computer crate uses these.
+# Screenshot resizing (bicubic, as llama.cpp resizes Qwen-VL images) and PNG encoding;
+# already in the lock through Tauri, no default features.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Windows monitor capture (9.3 names it); compiled on Windows only.
+xcap = { version = "0.9.10", default-features = false }
+# Keyboard input on Windows and macOS, pointer input on macOS (9.3); called on the main
+# thread only. No default features: the X11 backend is never used.
+enigo = { version = "0.6.1", default-features = false }
+# macOS only: ScreenCaptureKit, CoreGraphics and AppKit bindings from the objc2 family
+# Tauri already uses (no Swift build step, unlike the screencapturekit crate).
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false }
+objc2-core-foundation = { version = "0.3", default-features = false }
+objc2-core-graphics = { version = "0.3", default-features = false }
+objc2-app-kit = { version = "0.3", default-features = false }
+objc2-screen-capture-kit = { version = "0.3", default-features = false }
 
 # Dev
 proptest = "1"

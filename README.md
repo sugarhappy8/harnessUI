@@ -6,7 +6,7 @@ A local-first desktop app that gives AI models running on your own hardware the 
 - No account, no telemetry, no remote crash reporting. Logs stay on disk.
 - Chats, settings and the audit log are stored locally.
 
-**Status:** under construction. Chat with a local GGUF model or an OpenAI-compatible endpoint works (M1); the model manager and first-run flow are in progress (M2); the agent loop with tools, approvals, MCP servers and the audit log works (M3). See [CHANGELOG.md](CHANGELOG.md) for what each milestone delivered and [ARCHITECTURE.md](ARCHITECTURE.md) section 19 for the plan.
+**Status:** under construction. Chat with a local GGUF model or an OpenAI-compatible endpoint works (M1); the model manager and first-run flow are in progress (M2); the agent loop with tools, approvals, MCP servers and the audit log works (M3), with terminal, git, skills, browser and computer-use tools (M4–M7). See [CHANGELOG.md](CHANGELOG.md) for what each milestone delivered and [ARCHITECTURE.md](ARCHITECTURE.md) section 19 for the plan.
 
 ## What works today
 
@@ -17,6 +17,8 @@ A local-first desktop app that gives AI models running on your own hardware the 
 
 - **Tools and approvals.** Approve a folder (*Settings → Permissions*), then ask the model to read, search or edit files in it. Every tool call shows a card; actions ask first (*Allow once*, *Allow for this chat*, *Deny*), and every call is recorded in *Settings → Audit log*. The chat's *Tools* panel switches tool groups on and off and shows what they cost in context. The terminal and git tools exist but are off by default.
 - **MCP servers.** *Settings → MCP servers → Add servers* takes a Claude Desktop, Cursor or VS Code config. Secrets go to the system keychain; a new server's tools start off until you turn them on.
+- **Browser.** Switch on *Browser* in a chat's Tools panel: the model drives its own Chrome or Edge window with a separate profile (never your own cookies or logins). Leaving a site and submitting forms always ask; this computer's own addresses and, by default, private networks are blocked. *Settings → Browser*.
+- **Computer use (Windows and macOS).** For a vision model whose coordinate convention you set in *Settings → Computer use*: screenshots, clicks and typing, each kind of input approved per application. Input to harnissUI itself is always refused, and a red border with a Stop button stays on screen while it acts.
 - **Stop.** The Stop button, Esc, or the global hotkey (Ctrl+Alt+Backspace on Windows, Ctrl+Option+Delete on macOS) stops the reply and cancels any running tool.
 
 ## Download a test build

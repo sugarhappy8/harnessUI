@@ -123,6 +123,14 @@ pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppRe
     {
         t.cancel();
     }
+    if let Some(browser) = app.try_state::<crate::browser_cmd::BrowserHandle>() {
+        browser.0.shutdown().await;
+    }
+    if let Some(c) = app.try_state::<crate::computer_cmd::ComputerHandle>()
+        && let Some(server) = c.0.clone()
+    {
+        server.release_all();
+    }
     state.host.shutdown().await;
     state.runtime.shutdown().await;
     update.install(bytes).map_err(|e| {

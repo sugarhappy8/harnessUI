@@ -2,6 +2,26 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## M7 — Computer use (in progress)
+
+### Added
+- `crates/computer`: screenshots of one monitor (xcap on Windows; ScreenCaptureKit on macOS 14+, the older call on 13) with this app's windows left out and a cursor marker drawn in, resized exactly as llama.cpp resizes images for the model (a port of its size calculation, checked bit for bit against the C++); clicks, moves, drags, scrolls, typing and key combinations (SendInput for the mouse on Windows, enigo on the main thread for the keyboard) through one injector that refuses input to this app and its WebView processes, re-checks the target application before every event, refuses elevated windows on Windows, refuses the indicator's Stop button, and releases every held key and button on Stop, panic or exit. Grants per kind of input and per application (D7); terminals, system settings, password managers and OS-level shortcuts always ask. Coordinate conventions per model: pixels of the resized image, a 0–1000 grid, 0–1000 boxes (and Gemma's y-x boxes). 69 tests with fake capture and input.
+- App: the computer server on Windows and macOS; the indicator (red border, "AI is controlling this computer" bar with a Stop button whose window may call nothing but stop) shown while it acts and hidden when the turn ends; input refused when the indicator or the stop hotkey is missing, or (macOS) the indicator is not on the active Space; the stop hotkey and the Stop button release held input. Settings → Computer use: macOS Screen Recording and Accessibility checks with links to System Settings, and each model's convention. The tools are offered only for models that can see images and whose convention the user confirmed.
+
+### Known issues
+- The one-click calibration test of 9.3 is replaced by a convention the user confirms per model (the app's windows are excluded from screenshots, so the model cannot see targets the app draws). See docs/MILESTONES.md.
+- Not run on real Windows or macOS yet; CI compiles and unit-tests both.
+
+## M6 — Browser tool (in progress)
+
+### Added
+- `crates/browser`: the built-in browser server with its own CDP client over a pipe (fds 3/4 on macOS; `--remote-debugging-io-pipes` handles on Windows, through a spawn-module change that keeps other children from inheriting them) or, as a setting, a loopback port. Request enforcement in the browser for every tab, pop-up, frame and redirect: http(s) only; loopback, link-local and (unless allowed) private addresses blocked on the resolved IP; leaving a site held for approval; form submissions and non-GET navigations held until approved and failed on Deny, Stop or timeout; file choosers and downloads refused. Accessibility-tree snapshots with element refs sized to the result cap, find, readable text, click (refused when another element covers the target), type, fill a form, keys, screenshots, back. Every read, click and type re-checks the frame's actual origin. 75 unit tests and 18 end-to-end tests against Chromium.
+- App: the browser registered as a built-in (off in new chats, D10); held navigations become always-ask cards in the chat with their own audit rows; Settings → Browser (browser path chosen in a native dialog, port mode with its warning, private networks, strict sites); the browser closes on quit and before an update installs. CI runs the browser's end-to-end tests on Windows to check the pipe mode there.
+
+### Known issues
+- One browser profile is shared by all chats; DNS rebinding and service-worker cache answers are not re-checked; consequential-verb detection is English only.
+- On networks where this computer cannot resolve host names itself (proxy-only), pages are refused (the check fails closed).
+
 ## M8 — Polish (in progress)
 
 ### Added

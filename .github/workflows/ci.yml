@@ -121,6 +121,12 @@ jobs:
             cp src-tauri/binaries/llama-fit-params-aarch64-apple-darwin .cache/llama-mac/llama-fit-params
             echo "LLAMA_SERVER_BIN=$PWD/.cache/llama-mac/llama-server" >> "$GITHUB_ENV"
           fi
+      # The browser tool's end-to-end tests run against the runner's Chrome on Windows,
+      # which is the only check of its pipe mode there.
+      - name: Browser end-to-end tests on (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "HARNISS_BROWSER_E2E=1" >> "$GITHUB_ENV"
       - name: Workspace tests (${{ matrix.name }}, with llama-server contract tests)
         run: cargo test --workspace --target ${{ matrix.target }}
       - name: Build the app
