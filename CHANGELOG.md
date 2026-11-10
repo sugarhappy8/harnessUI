@@ -2,7 +2,41 @@
 
 All notable changes, by milestone. Dates are UTC.
 
-## M8 — Polish (2026-11-10; signing and in-app updates wait for your keys)
+## Final audit (2026-11-10)
+
+A read-only audit of the whole app against ARCHITECTURE.md, the security rules and the docs (five independent reviewers, each finding checked by a second one that tried to refute it) confirmed 41 distinct problems. 33 are fixed below; the other 8 are larger features, listed under known issues in docs/MILESTONES.md.
+
+### Security
+- Credentials written into a git push URL no longer reach the approval card, the audit log, the chat database or the model's prompt (both git backends); every URL in git's output and errors is masked. A URL's host is read as git and curl read it (the authority ends at the first `/`, `?` or `#`), so a card never shows a host other than the one git connects to.
+- The file and git tools cannot write into skill folders (the app's skills folder and, when used, `~/.agents/skills`): a new skill there would otherwise be loaded without the user adding it. Skills are added in *Settings → Skills* only; the terminal still runs in skill folders.
+- An external tool whose input schema puts model control tokens where they cannot be cleaned (property names, enum, const, default or example values) is not offered to the model; the chat says which tool and why.
+- *Forget everything I allowed in this chat* and revoked tool grants now apply to a turn that is already running (grants stay in memory only, D12).
+- A pasted MCP config that already contains `${secret:…}` placeholders is refused (it could have pulled another server's saved secret); two servers whose names would share saved secrets are refused.
+- Every Unix child (llama-server, MCP servers, tool commands, workers, the browser) starts with only stdio and the descriptors meant for it: on macOS, std cannot create pipes and sockets close-on-exec atomically, so one created at the moment of a fork could leak into a child.
+- macOS: Apple's `/usr/bin/git` stub is never run when the developer tools are missing (it opened an installer dialog at every start); the git tools use the built-in library or a Homebrew git. The app's logs folder is out of the tools' reach on macOS too.
+- Windows: model replies containing HTML entities such as `&amp;` no longer break rendering. The markdown parser's browser build decoded them through `innerHTML`, which the app's Trusted Types policy refuses in WebView2; the table-based build is used instead.
+
+### Fixed
+- Auto never picks CUDA or ROCm (D3: Metal, Vulkan or CPU); ROCm launches show only the chosen card to HIP (`HIP_VISIBLE_DEVICES`).
+- Remote endpoints that do not report a context size get *Settings → Endpoints → Context size when a server does not report one* (4,096 by default) instead of a fixed 8,192.
+- Imported skills start turned off, with a note that a skill's text becomes instructions to the model.
+- The automatic update check's result is shown (a notice in the main window and in *Settings → General → Updates*); before, nothing listened for it.
+- macOS *Open System Settings* buttons in *Settings → Computer use* work (the opener scope allows the two Privacy panes) and show an error if opening fails.
+- First run preselects a model only when a catalog entry has been tested on real hardware; no entry is marked tested yet.
+- The release workflow fetches the pinned llama.cpp runtime before building, signs and uploads the catalog when the updater key exists, and fails if the update manifest misses a platform or the catalog is missing. Catalog Refresh reports an up-to-date catalog as such, not as an error.
+- The Windows installer stops a stray `llama-server.exe` running from the install folder before copying files.
+- The offline gate (`e2e/m8_offline.py`) visits all twelve settings pages.
+- Docs: the catalog test command, the backend-check steps, the crate table, the keychain names in the MCP test step, the Windows signing note and the Linux runtime example were wrong and are corrected.
+
+### Added
+- Chat *Tools* panel: *Folders for this chat* (approve a folder for this chat only, remove it, choose the chat's working folder) and *Skills loaded in this chat* with *Unload*.
+- *Settings → General*: a default system prompt for new chats, and *Model catalog* (version and *Refresh catalog*, disabled with the reason until the updater key exists).
+- *Settings → Diagnostics → Open logs folder*.
+- A warning bar in the main window while the stop hotkey is not registered.
+- Syntax highlighting in fenced code blocks that name a language (`rehype-highlight`: it produces React elements, no HTML strings, so the strict CSP is unaffected).
+- docs/skills-guide.md: how to write a skill for harnissUI.
+
+## M8 — Polish (2026-11-10; macOS signing and in-app updates wait for your keys; Windows signing is not set up yet)
 
 ### Added
 - Opt-in updates: the updater plugin is registered only in builds that carry the updater public key (release builds with `src-tauri/tauri.updater.conf.json`, merged when the signing secret exists). *Settings → General → Updates*: *Check now*, *Install and restart* (stops llama-server and every tool child first), and an automatic check at start that is off by default. The check runs in Rust; the webview has no updater permission.
@@ -109,7 +143,7 @@ All notable changes, by milestone. Dates are UTC.
 - `crates/runtime`: the only place processes are created (Job Object with kill-on-close on Windows, own process group on Unix, scrubbed environment, no console window); the stale-child registry and the macOS reaper process; backend discovery and probing (`--list-devices`), launch arguments, the managed-child protocol, load-failure classification, `/props`; and the supervisor with restart (3 in 5 minutes), step-down (ROCm/CUDA → Vulkan → CPU) and new-port policies. Contract tests run against the real pinned llama-server.
 - `crates/agent` (provider layer): OpenAI-compatible client with SSE parsing hardened against split chunks, CRLF, BOM and vendor quirks (Ollama, LM Studio, vLLM), tool-call accumulation, context-overflow and parse-error mapping, token counting, and a loopback client that never uses a proxy.
 - `crates/store`: SQLite on one dedicated thread (WAL, foreign keys, FTS5 trigram search), chats with a message tree for regenerate and edit-and-resend, settings, providers, models, downloads, MCP and skills configuration, approved folders, and the append-only audit log with JSON Lines and CSV export; OS keychain secrets with chunking for Windows' 2,560-byte limit.
-- App: model loading with progress, streaming chat, stop, regenerate, branch switching, edit-and-resend, history search, rename, delete, per-chat model and system prompt, tokens/s, OpenAI-compatible endpoints with keychain-stored keys, and *Settings → Diagnostics → Run backend check* (the in-app probe build: devices per backend and a timed generation on each, saved to the logs folder).
+- App: model loading with progress, streaming chat, stop, regenerate, branch switching, edit-and-resend, history search, rename, delete, per-chat model and system prompt, tokens/s, OpenAI-compatible endpoints with keychain-stored keys, and *Settings → Diagnostics → Run backend check* (the in-app probe build: devices per backend and, with a model loaded, a timed generation on each, saved to the logs folder).
 - `e2e/`: a standard-library WebDriver client and an M1 scenario that drives the real app through `tauri-driver`.
 
 ### Changed

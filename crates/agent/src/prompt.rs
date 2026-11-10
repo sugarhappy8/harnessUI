@@ -548,7 +548,8 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
 /// [`Sanitizer::clean`]. A server writes those texts and the chat template renders them into
 /// the prompt, where llama-server would parse a control token in them as a real one (13.5).
 /// Values the model has to reproduce exactly (`enum`, `const`, `default`, `examples`) and
-/// property names are left as they are.
+/// property names are left as they are; a tool with a control token there is not offered at
+/// all (see [`schema_has_raw_control_tokens`]).
 pub fn sanitize_schema(schema: &serde_json::Value, sanitizer: &Sanitizer) -> serde_json::Value {
     use serde_json::Value;
     match schema {
@@ -574,6 +575,34 @@ pub fn sanitize_schema(schema: &serde_json::Value, sanitizer: &Sanitizer) -> ser
         ),
         other => other.clone(),
     }
+}
+
+/// True when a control token (or a reserved tag) sits in a tool's schema somewhere
+/// [`sanitize_schema`] leaves as written: a property name or any other object key, an
+/// `enum`, `const`, `default` or `examples` value (with everything inside it), or any other
+/// string that is not a `description` or `title` text. Such a tool is not offered to the
+/// model, because changing those values would break calls and leaving them would put a
+/// real control token into the prompt (13.5).
+pub fn schema_has_raw_control_tokens(schema: &serde_json::Value, sanitizer: &Sanitizer) -> bool {
+    fn raw(value: &serde_json::Value, sanitizer: &Sanitizer, in_data: bool) -> bool {
+        use serde_json::Value;
+        match value {
+            Value::Object(map) => map.iter().any(|(key, value)| {
+                sanitizer.clean(key) != *key
+                    || match (in_data, key.as_str(), value) {
+                        (false, "description" | "title", Value::String(_)) => false,
+                        (false, "enum" | "const" | "default" | "examples", _) => {
+                            raw(value, sanitizer, true)
+                        }
+                        _ => raw(value, sanitizer, in_data),
+                    }
+            }),
+            Value::Array(items) => items.iter().any(|item| raw(item, sanitizer, in_data)),
+            Value::String(text) => sanitizer.clean(text) != *text,
+            _ => false,
+        }
+    }
+    raw(schema, sanitizer, false)
 }
 
 /// The delimiter value for one result: unpredictable to content written before the call,

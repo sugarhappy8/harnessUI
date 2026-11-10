@@ -167,10 +167,19 @@ pub async fn set_setting(
 ) -> AppResult<()> {
     // Only plain UI preferences go through this generic command; anything with a
     // policy meaning has its own command (ARCHITECTURE.md 13.5).
-    const ALLOWED: &[&str] = &["theme", settings::DEFAULT_SYSTEM_PROMPT];
+    const ALLOWED: &[&str] = &[
+        "theme",
+        settings::DEFAULT_SYSTEM_PROMPT,
+        settings::REMOTE_CONTEXT_LENGTH,
+    ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(AppError::bad_request(
             "That setting cannot be changed this way.",
+        ));
+    }
+    if key == settings::REMOTE_CONTEXT_LENGTH && settings::parse_remote_context(&value).is_none() {
+        return Err(AppError::bad_request(
+            "The context size must be a whole number of tokens from 1,024 to 1,048,576.",
         ));
     }
     state.store.set_setting(&key, &value).await?;

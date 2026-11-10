@@ -70,24 +70,44 @@ fn is_broad(app: &AppHandle, path: &Path) -> bool {
     is_root || is_users_dir || home.as_deref() == Some(p.as_path())
 }
 
-fn forbidden_folders(app: &AppHandle) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(d) = app.path().app_local_data_dir() {
-        out.push(d);
-    }
-    if let Ok(d) = app.path().app_data_dir() {
-        out.push(d);
-    }
-    if let Some(d) = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-    {
-        out.push(d);
-    }
-    out
+/// The app's own folders, as Tauri resolves them on this OS.
+struct AppDirs {
+    local_data: Option<PathBuf>,
+    data: Option<PathBuf>,
+    /// Logs, diagnostics reports and MCP server logs. On macOS this is
+    /// ~/Library/Logs/<id>, outside the data folders; elsewhere it is inside local data.
+    logs: Option<PathBuf>,
+    install: Option<PathBuf>,
 }
 
-/// The folders tools may never reach (13.4 step 1): app data, install folder, browser profile.
+impl AppDirs {
+    fn forbidden(self) -> Vec<PathBuf> {
+        [self.local_data, self.data, self.logs, self.install]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+}
+
+fn forbidden_folders(app: &AppHandle) -> Vec<PathBuf> {
+    AppDirs {
+        local_data: app.path().app_local_data_dir().ok(),
+        data: app.path().app_data_dir().ok(),
+        logs: app.path().app_log_dir().ok(),
+        install: std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf)),
+    }
+    .forbidden()
+}
+
+/// Whether approving `path` would let tools reach `forbidden`: it is inside it, or holds it.
+fn overlaps(path: &Path, forbidden: &Path) -> bool {
+    path.starts_with(forbidden) || forbidden.starts_with(path)
+}
+
+/// The folders tools may never reach (13.4 step 1): app data, logs, install folder, browser
+/// profile.
 pub fn forbidden_for_tools(app: &AppHandle) -> Vec<String> {
     forbidden_folders(app)
         .into_iter()
@@ -119,7 +139,7 @@ pub async fn approve_folder(
     // The app's own folders can never be approved.
     for f in forbidden_folders(&app) {
         let f = dunce::canonicalize(&f).unwrap_or(f);
-        if path.starts_with(&f) || f.starts_with(&path) {
+        if overlaps(&path, &f) {
             return Err(AppError::bad_request(
                 "That folder contains the app's own data or program files, which tools can never reach. Pick a different folder.",
             ));
@@ -156,6 +176,43 @@ pub async fn approve_folder(
         path: path.display().to_string(),
         chat_id,
     }))
+}
+
+/// Sets the chat's working folder, which relative paths resolve against (ARCHITECTURE.md
+/// 9.3). `None` goes back to the default, the first approved folder. Only a folder
+/// approved for this chat, globally or for the chat itself, can be chosen.
+#[tauri::command]
+pub async fn set_chat_working_folder(
+    state: State<'_, AppState>,
+    chat_id: i64,
+    path: Option<String>,
+) -> AppResult<()> {
+    set_working_folder(&state.store, store::ChatId(chat_id), path).await
+}
+
+async fn set_working_folder(
+    store: &store::Store,
+    chat: store::ChatId,
+    path: Option<String>,
+) -> AppResult<()> {
+    if let Some(p) = &path {
+        let approved = store.approved_folders_for_chat(chat).await?;
+        if !approved.iter().any(|f| &f.path == p) {
+            return Err(AppError::bad_request(
+                "Only a folder approved for this chat can be its working folder.",
+            ));
+        }
+    }
+    store
+        .update_chat(
+            chat,
+            store::ChatPatch {
+                working_folder: Some(path),
+                ..Default::default()
+            },
+        )
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -246,4 +303,97 @@ pub async fn export_audit(
         )
     })?;
     Ok(Some(dest.display().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn working_folder(store: &store::Store, chat: store::ChatId) -> Option<String> {
+        store.get_chat(chat).await.unwrap().unwrap().working_folder
+    }
+
+    /// ARCHITECTURE.md 9.3: a chat's working folder can only be a folder approved for
+    /// that chat, globally or for the chat itself.
+    #[tokio::test]
+    async fn the_working_folder_must_be_approved_for_the_chat() {
+        let store = store::Store::open_in_memory().unwrap();
+        let new_chat = || store::NewChat {
+            title: "t".into(),
+            model_ref: None,
+            system_prompt: None,
+        };
+        let a = store.create_chat(new_chat()).await.unwrap();
+        let b = store.create_chat(new_chat()).await.unwrap();
+        store
+            .add_approved_folder("/work/global".into(), None)
+            .await
+            .unwrap();
+        store
+            .add_approved_folder("/work/a".into(), Some(a))
+            .await
+            .unwrap();
+        store
+            .add_approved_folder("/work/b".into(), Some(b))
+            .await
+            .unwrap();
+
+        set_working_folder(&store, a, Some("/work/global".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            working_folder(&store, a).await.as_deref(),
+            Some("/work/global")
+        );
+        set_working_folder(&store, a, Some("/work/a".into()))
+            .await
+            .unwrap();
+        assert_eq!(working_folder(&store, a).await.as_deref(), Some("/work/a"));
+
+        // Another chat's folder, an unapproved folder, one inside an approved folder and
+        // an empty path are refused, and the stored folder stays as it was.
+        for refused in ["/work/b", "/elsewhere", "/work/a/sub", "/work/a/../b", ""] {
+            let err = set_working_folder(&store, a, Some(refused.into()))
+                .await
+                .expect_err(refused);
+            assert_eq!(err.code, "bad_request", "{refused}");
+            assert_eq!(
+                working_folder(&store, a).await.as_deref(),
+                Some("/work/a"),
+                "{refused} changed the working folder"
+            );
+        }
+
+        // None goes back to the default (the first approved folder).
+        set_working_folder(&store, a, None).await.unwrap();
+        assert_eq!(working_folder(&store, a).await, None);
+        // A chat that does not exist is an error.
+        assert!(
+            set_working_folder(&store, store::ChatId(999), None)
+                .await
+                .is_err()
+        );
+    }
+
+    /// macOS keeps logs in ~/Library/Logs/<id>, outside the data folders: tools never
+    /// reach them, and ~/Library/Logs itself cannot be approved.
+    #[test]
+    fn the_log_folder_is_forbidden() {
+        let home = Path::new("/Users/me");
+        let logs = home.join("Library/Logs/app.harniss");
+        let forbidden = AppDirs {
+            local_data: Some(home.join("Library/Application Support/app.harniss")),
+            data: Some(home.join("Library/Application Support/app.harniss")),
+            logs: Some(logs.clone()),
+            install: Some(PathBuf::from("/Applications/harnissUI.app/Contents/MacOS")),
+        }
+        .forbidden();
+        assert!(forbidden.contains(&logs));
+        let refused = |p: &Path| forbidden.iter().any(|f| overlaps(p, f));
+        assert!(refused(&home.join("Library/Logs")));
+        assert!(refused(&logs.join("harniss.2026-11-10.log")));
+        assert!(refused(&home.join("Library")));
+        assert!(!refused(&home.join("Library/Logs/OtherApp")));
+        assert!(!refused(&home.join("Documents")));
+    }
 }

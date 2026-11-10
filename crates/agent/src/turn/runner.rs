@@ -29,7 +29,8 @@ use crate::parse::{
     strip_tool_markup,
 };
 use crate::prompt::{
-    Preamble, Projection, SystemParts, append_result_note, project, sanitize_schema, system_message,
+    Preamble, Projection, SystemParts, append_result_note, project, sanitize_schema,
+    schema_has_raw_control_tokens, system_message,
 };
 use crate::stream::{
     AccumulatedToolCall, ArgumentsStatus, FinishReason, StreamEvent, Timings, ToolCallAccumulator,
@@ -156,6 +157,9 @@ pub(super) struct Turn<'a> {
     input: TurnInput,
     cancel: CancellationToken,
     tools: Vec<ToolInfo>,
+    /// Enabled tools left out because their schema has a control token where it cannot
+    /// be cleaned.
+    withheld_tools: Vec<String>,
     tools_on: bool,
     specs: Vec<ToolSpec>,
     exact_counting: bool,
@@ -220,11 +224,20 @@ impl<'a> Turn<'a> {
                 _ => false,
             })
         });
-        let tools = if input.caps.tools {
-            deps.tools.tools()
+        // A tool whose schema has a control token where it cannot be cleaned is not offered
+        // (and so cannot be called); the user is told at the start of the turn.
+        let (tools, withheld): (Vec<ToolInfo>, Vec<ToolInfo>) = if input.caps.tools {
+            deps.tools.tools().into_iter().partition(|tool| {
+                !schema_has_raw_control_tokens(&tool.input_schema, deps.sanitizer)
+                    && deps
+                        .tools
+                        .llama_schema(&tool.name)
+                        .is_none_or(|s| !schema_has_raw_control_tokens(&s, deps.sanitizer))
+            })
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
+        let withheld_tools = withheld.into_iter().map(|tool| tool.name).collect();
         let tools_on = !tools.is_empty();
         let exact_counting =
             input.caps.local && deps.client.config().kind == ProviderKind::LlamaServer;
@@ -234,6 +247,7 @@ impl<'a> Turn<'a> {
             deps,
             cancel,
             tools,
+            withheld_tools,
             tools_on,
             specs: Vec::new(),
             exact_counting,
@@ -290,6 +304,16 @@ impl<'a> Turn<'a> {
                 "no_user_message",
                 "There is no message to answer: the chat does not end with a user message.",
             );
+        }
+        if !self.withheld_tools.is_empty() {
+            self.emit(TurnEvent::AppNote {
+                text: format!(
+                    "Not offered to the model: {}. Their settings from the server contain text \
+                     the model could mistake for chat markup. Turn them off, or ask the \
+                     server's author to fix them.",
+                    self.withheld_tools.join(", ")
+                ),
+            });
         }
         if let Err(status) = self.measure().await {
             return status;

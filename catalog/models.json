@@ -100,11 +100,7 @@
       "gated": false,
       "sampling": {},
       "minLlamaBuild": null,
-      "tested": {
-        "llamaBuild": "b12110",
-        "date": "2026-11-10",
-        "hardware": "Linux x86_64, CPU (development container)"
-      },
+      "tested": null,
       "memoryAtRecommendedCtx": null
     },
     "gemma-4-e4b-q40": {

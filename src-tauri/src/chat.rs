@@ -46,6 +46,7 @@ fn chat_dto(c: &store::Chat) -> ChatDto {
         thinking: !serde_json::from_value::<crate::turns::ChatTools>(c.tool_prefs.clone())
             .unwrap_or_default()
             .thinking_off,
+        working_folder: c.working_folder.clone(),
     }
 }
 
@@ -455,7 +456,21 @@ async fn resolve_target(state: &AppState, model_ref: Option<&str>) -> AppResult<
             .map_err(|_| AppError::bad_request("This chat's model reference is malformed."))?;
         let (client, _provider) =
             crate::providers::client_for(state, store::ProviderId(id)).await?;
-        let n_ctx = client.context_length(model).await.ok().flatten();
+        // A model that reports no context (or a failed check) gets the user's setting,
+        // 4,096 by default (8.4).
+        let n_ctx = match client.context_length(model).await.ok().flatten() {
+            Some(n) => n,
+            None => {
+                let stored: Option<serde_json::Value> = state
+                    .store
+                    .get_setting(crate::settings::REMOTE_CONTEXT_LENGTH)
+                    .await
+                    .ok()
+                    .flatten();
+                crate::settings::remote_context_length(stored.as_ref())
+            }
+        };
+        let n_ctx = Some(n_ctx);
         return Ok(Target {
             client,
             model: model.to_string(),
@@ -499,7 +514,9 @@ async fn generate(
             true
         },
         vision: if target.local { status.vision } else { true },
-        n_ctx: target.n_ctx.unwrap_or(8192),
+        n_ctx: target
+            .n_ctx
+            .unwrap_or(crate::settings::DEFAULT_REMOTE_CONTEXT),
         local: target.local,
         thinking: target.local && status.thinking,
         preserve_reasoning: target.local && status.preserve_reasoning,
@@ -526,4 +543,32 @@ async fn generate(
         *guard = None;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chat sent to the webview carries its working folder as `workingFolder`
+    /// (src/lib/types.ts `Chat`).
+    #[test]
+    fn the_chat_dto_carries_the_working_folder() {
+        let mut chat = store::Chat {
+            id: store::ChatId(3),
+            title: "t".into(),
+            model_ref: None,
+            system_prompt: None,
+            leaf_message_id: None,
+            tool_prefs: json!({}),
+            working_folder: Some("/work/a".into()),
+            created_at: 1,
+            updated_at: 2,
+            archived: false,
+        };
+        let v = serde_json::to_value(chat_dto(&chat)).unwrap();
+        assert_eq!(v["workingFolder"], json!("/work/a"));
+        chat.working_folder = None;
+        let v = serde_json::to_value(chat_dto(&chat)).unwrap();
+        assert_eq!(v["workingFolder"], serde_json::Value::Null);
+    }
 }

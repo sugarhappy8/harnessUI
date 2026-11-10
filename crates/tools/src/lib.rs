@@ -9,6 +9,7 @@ pub mod git;
 mod git_fallback;
 mod git_worker;
 pub mod pdf;
+mod skill_guard;
 pub mod skills;
 pub mod terminal;
 

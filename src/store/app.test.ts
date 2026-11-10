@@ -14,6 +14,7 @@ const detail: ChatDetail = {
     createdAt: 0,
     updatedAt: 0,
     thinking: true,
+    workingFolder: null,
   },
   messages: [],
 };

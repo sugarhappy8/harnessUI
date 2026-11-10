@@ -1,7 +1,8 @@
 //! The global stop hotkey (ARCHITECTURE.md 4.2, decision D14), registered from Rust so
 //! it works when the window is not focused. It cancels the running turn's root token.
 //! A user-chosen combination is test-registered before it is saved; if the hotkey
-//! cannot be registered the UI shows a persistent warning.
+//! cannot be registered the UI shows a persistent warning. Every change of its status is
+//! sent to the main window as a `stop-hotkey-status` event.
 
 use std::sync::Mutex;
 
@@ -16,6 +17,9 @@ use crate::state::AppState;
 /// Not Ctrl+Alt+<letter>, which AltGr keyboards type with.
 pub const DEFAULT_HOTKEY: &str = "Control+Alt+Backspace";
 const SETTING: &str = "stopHotkey";
+/// Sent to the main window with a [`HotkeyStatus`] when the hotkey is registered at start
+/// and whenever `set_stop_hotkey` changes it. The window warns while it is not registered.
+pub const STATUS_EVENT: &str = "stop-hotkey-status";
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +40,26 @@ impl Hotkey {
             .ok()
             .filter(|s| s.registered)
             .map(|s| s.accelerator.clone())
+    }
+}
+
+/// Stores the hotkey's status and sends it to the main window.
+fn publish(app: &AppHandle, status: HotkeyStatus) {
+    if let Some(h) = app.try_state::<Hotkey>()
+        && let Ok(mut s) = h.0.lock()
+    {
+        *s = status.clone();
+    }
+    let _ = app.emit_to(crate::MAIN_WINDOW, STATUS_EVENT, status);
+}
+
+/// The status after a new combination could not be registered: the previous one, if it
+/// could be registered again.
+fn after_failed_change(previous: String, restored: bool, error: String) -> HotkeyStatus {
+    HotkeyStatus {
+        accelerator: previous,
+        registered: restored,
+        error: (!restored).then_some(error),
     }
 }
 
@@ -81,15 +105,14 @@ pub async fn init(app: &AppHandle) {
     if let Err(e) = &result {
         tracing::warn!("stop hotkey not registered: {e}");
     }
-    if let Some(h) = app.try_state::<Hotkey>()
-        && let Ok(mut s) = h.0.lock()
-    {
-        *s = HotkeyStatus {
+    publish(
+        app,
+        HotkeyStatus {
             accelerator,
             registered: result.is_ok(),
             error: result.err(),
-        };
-    }
+        },
+    );
 }
 
 #[tauri::command]
@@ -123,20 +146,12 @@ pub async fn set_stop_hotkey(
                 registered: true,
                 error: None,
             };
-            if let Ok(mut s) = hotkey.0.lock() {
-                *s = status.clone();
-            }
+            publish(&app, status.clone());
             Ok(status)
         }
         Err(e) => {
             let restored = register(&app, &previous).is_ok();
-            if let Ok(mut s) = hotkey.0.lock() {
-                *s = HotkeyStatus {
-                    accelerator: previous,
-                    registered: restored,
-                    error: if restored { None } else { Some(e.clone()) },
-                };
-            }
+            publish(&app, after_failed_change(previous, restored, e.clone()));
             Err(AppError::new(
                 "hotkey_unavailable",
                 "That key combination cannot be used.",
@@ -144,5 +159,45 @@ pub async fn set_stop_hotkey(
                 e,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `stop-hotkey-status` payload the main window reads (src/lib/types.ts
+    /// `HotkeyStatus`).
+    #[test]
+    fn the_status_event_has_the_shape_the_window_reads() {
+        assert_eq!(STATUS_EVENT, "stop-hotkey-status");
+        let v = serde_json::to_value(HotkeyStatus {
+            accelerator: DEFAULT_HOTKEY.into(),
+            registered: false,
+            error: Some("another program is using it".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "accelerator": "Control+Alt+Backspace",
+                "registered": false,
+                "error": "another program is using it",
+            })
+        );
+    }
+
+    /// A combination that cannot be used keeps the previous hotkey. If that cannot be
+    /// registered again either, the status says so and the window keeps warning.
+    #[test]
+    fn a_failed_change_reports_whether_the_previous_hotkey_still_works() {
+        let kept = after_failed_change("Control+Alt+Backspace".into(), true, "busy".into());
+        assert!(kept.registered);
+        assert_eq!(kept.accelerator, "Control+Alt+Backspace");
+        assert_eq!(kept.error, None);
+        let lost = after_failed_change("Control+Alt+Backspace".into(), false, "busy".into());
+        assert!(!lost.registered);
+        assert_eq!(lost.accelerator, "Control+Alt+Backspace");
+        assert_eq!(lost.error.as_deref(), Some("busy"));
     }
 }

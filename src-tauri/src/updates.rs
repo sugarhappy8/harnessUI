@@ -37,14 +37,52 @@ pub struct UpdateStatus {
     pub configured: bool,
     pub auto_check: bool,
     pub current_version: String,
+    /// The newer version the last check since start found (automatic or *Check now*).
+    pub available: Option<UpdateInfo>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     pub version: String,
     pub date: Option<String>,
     pub notes: Option<String>,
+}
+
+impl UpdateInfo {
+    fn of(u: &tauri_plugin_updater::Update) -> Self {
+        Self {
+            version: u.version.clone(),
+            date: u.date.map(|d| d.to_string()),
+            notes: u.body.clone(),
+        }
+    }
+}
+
+/// The answer of the last successful check since start. The startup check can finish
+/// before the window listens for `update-available` (events are not replayed), so the
+/// window also reads it from `update_status`.
+#[derive(Default)]
+pub struct LastFound(std::sync::Mutex<Option<UpdateInfo>>);
+
+impl LastFound {
+    /// Records a check's answer: the newer version, or `None` when there is none.
+    pub fn set(&self, found: Option<UpdateInfo>) {
+        if let Ok(mut g) = self.0.lock() {
+            *g = found;
+        }
+    }
+
+    pub fn get(&self) -> Option<UpdateInfo> {
+        self.0.lock().ok().and_then(|g| g.clone())
+    }
+}
+
+/// Records a successful check's answer, if the app manages a [`LastFound`].
+fn remember(app: &AppHandle, found: Option<UpdateInfo>) {
+    if let Some(last) = app.try_state::<LastFound>() {
+        last.set(found);
+    }
 }
 
 fn not_configured() -> AppError {
@@ -68,6 +106,7 @@ pub async fn update_status(app: AppHandle, state: State<'_, AppState>) -> AppRes
             .flatten()
             .unwrap_or(false),
         current_version: app.package_info().version.to_string(),
+        available: app.try_state::<LastFound>().and_then(|l| l.get()),
     })
 }
 
@@ -96,11 +135,9 @@ async fn find(app: &AppHandle) -> AppResult<Option<tauri_plugin_updater::Update>
 
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> AppResult<Option<UpdateInfo>> {
-    Ok(find(&app).await?.map(|u| UpdateInfo {
-        version: u.version.clone(),
-        date: u.date.map(|d| d.to_string()),
-        notes: u.body.clone(),
-    }))
+    let found = find(&app).await?.as_ref().map(UpdateInfo::of);
+    remember(&app, found.clone());
+    Ok(found)
 }
 
 /// Downloads, verifies and installs the update, then restarts the app.
@@ -145,7 +182,7 @@ pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppRe
 }
 
 /// At start-up, when the user turned automatic checks on: tells the main window about
-/// a newer version. Never installs on its own.
+/// a newer version (and keeps it for `update_status`). Never installs on its own.
 pub async fn auto_check(app: AppHandle) {
     let state = app.state::<AppState>();
     let on: bool = state
@@ -160,17 +197,58 @@ pub async fn auto_check(app: AppHandle) {
     }
     match find(&app).await {
         Ok(Some(u)) => {
-            let _ = app.emit_to(
-                crate::MAIN_WINDOW,
-                "update-available",
-                UpdateInfo {
-                    version: u.version.clone(),
-                    date: u.date.map(|d| d.to_string()),
-                    notes: u.body.clone(),
-                },
-            );
+            let info = UpdateInfo::of(&u);
+            remember(&app, Some(info.clone()));
+            let _ = app.emit_to(crate::MAIN_WINDOW, "update-available", info);
         }
-        Ok(None) => {}
+        Ok(None) => remember(&app, None),
         Err(e) => tracing::info!("update check failed: {}", e.message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(version: &str) -> UpdateInfo {
+        UpdateInfo {
+            version: version.into(),
+            date: None,
+            notes: Some("Fixes.".into()),
+        }
+    }
+
+    /// The last check's answer is kept: a found version until a later check says there is
+    /// none; a failed check (which records nothing) leaves it as it was.
+    #[test]
+    fn the_last_found_update_is_kept() {
+        let last = LastFound::default();
+        assert_eq!(last.get(), None);
+        last.set(Some(info("1.2.0")));
+        assert_eq!(last.get(), Some(info("1.2.0")));
+        last.set(Some(info("1.3.0")));
+        assert_eq!(last.get().map(|i| i.version), Some("1.3.0".to_string()));
+        last.set(None);
+        assert_eq!(last.get(), None);
+    }
+
+    /// `update_status` as the window reads it (src/lib/types.ts `UpdateStatus`).
+    #[test]
+    fn the_status_carries_the_available_update() {
+        let mut status = UpdateStatus {
+            configured: true,
+            auto_check: true,
+            current_version: "1.0.0".into(),
+            available: Some(info("1.2.0")),
+        };
+        let v = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            v["available"],
+            serde_json::json!({"version": "1.2.0", "date": null, "notes": "Fixes."})
+        );
+        assert_eq!(v["currentVersion"], "1.0.0");
+        status.available = None;
+        let v = serde_json::to_value(&status).unwrap();
+        assert_eq!(v["available"], serde_json::Value::Null);
     }
 }

@@ -8,6 +8,8 @@
 //!   preview and apply (13.3: what runs is what was shown).
 //! - Reads and searches are cut by whole lines to the per-result cap and end with an
 //!   instruction the model can follow (8.4).
+//! - Nothing inside a skill folder (`ChatContext::skill_roots`) is written, edited or
+//!   deleted: that is a hard limit, checked again before the write (9.3, 10).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,8 @@ use policy::path::{Flavor, PathSandbox, RealFs, volume_case};
 use policy::{Action, CheckedPath, Risk, Scope, WriteKind, always_ask_reason};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+
+use crate::skill_guard::{self, Reach};
 
 /// Bytes read from a file at most (8.4 raw limit).
 pub const RAW_LIMIT: u64 = 1024 * 1024;
@@ -263,6 +267,11 @@ impl FilesServer {
     }
 }
 
+/// The tools that create, change or delete files.
+fn is_write(tool: &str) -> bool {
+    matches!(tool, "write_file" | "edit_file" | "delete_file")
+}
+
 fn capitalise(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -372,6 +381,12 @@ impl BuiltinServer for FilesServer {
             Ok(v) => v,
             Err(why) => return Self::hard_limit(tool, &path, why),
         };
+        if is_write(tool)
+            && let Err(why) =
+                skill_guard::check(&c.canonical, &chat.skill_roots, self.flavor, Reach::Inside)
+        {
+            return Self::hard_limit(tool, &path, why);
+        }
         let shown = policy::sanitize::visible(&c.canonical);
         match tool {
             "list_dir" => Self::read_action(tool, &c, &root, format!("List {shown}")),
@@ -499,6 +514,18 @@ impl BuiltinServer for FilesServer {
             Ok(p) => p,
             Err(why) => return ToolOutput::error(why),
         };
+        // A skill folder may have appeared since the preview (the shared one created as a
+        // link to this folder).
+        if is_write(tool)
+            && let Err(why) = skill_guard::check(
+                &path.display().to_string(),
+                &ctx.chat.skill_roots,
+                self.flavor,
+                Reach::Inside,
+            )
+        {
+            return ToolOutput::error(why);
+        }
         let budget = budget_chars(&ctx.chat);
         match tool {
             "list_dir" => {
@@ -907,12 +934,178 @@ mod tests {
             working_folder: None,
             forbidden_folders: vec![],
             skill_folders: vec![],
+            skill_roots: vec![],
             result_cap_tokens: 2000,
         }
     }
 
     fn args(v: Value) -> Map<String, Value> {
         v.as_object().cloned().unwrap()
+    }
+
+    /// Skill folders are written only by the skills UI: the file tools refuse to create,
+    /// change or delete anything inside one, whatever was approved, and still read them.
+    #[tokio::test]
+    async fn skill_folders_cannot_be_written_edited_or_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let skills = root.join("skills");
+        std::fs::create_dir_all(skills.join("x")).unwrap();
+        std::fs::write(skills.join("x/SKILL.md"), "---\nname: x\n---\nbody\n").unwrap();
+        let shared = root.join("home/.agents/skills"); // does not exist yet
+        let c = ChatContext {
+            working_folder: Some(root.display().to_string()),
+            skill_roots: vec![skills.display().to_string(), shared.display().to_string()],
+            ..chat(&root)
+        };
+        let fs = FilesServer::default();
+        let refused = |why: &str| why.contains("Settings → Skills");
+        for (tool, a) in [
+            (
+                "write_file",
+                json!({"path": skills.join("y/SKILL.md").display().to_string(), "content": "x"}),
+            ),
+            // Relative to the working folder.
+            ("write_file", json!({"path": "skills/z.md", "content": "x"})),
+            (
+                "write_file",
+                json!({"path": skills.join("x/SKILL.md").display().to_string(), "content": "x"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": skills.join("x/SKILL.md").display().to_string(), "old_text": "body", "new_text": "obey"}),
+            ),
+            (
+                "delete_file",
+                json!({"path": skills.join("x/SKILL.md").display().to_string()}),
+            ),
+            // A skill folder that does not exist yet would be created.
+            (
+                "write_file",
+                json!({"path": shared.join("evil/SKILL.md").display().to_string(), "content": "x"}),
+            ),
+        ] {
+            let why = run(&fs, &c, tool, a.clone()).await.unwrap_err();
+            assert!(refused(&why), "{tool} {a}: {why}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(skills.join("x/SKILL.md")).unwrap(),
+            "---\nname: x\n---\nbody\n"
+        );
+        assert!(!skills.join("y").exists() && !root.join("home").exists());
+        // Reading is fine, and so is writing next to the skill folders.
+        let (_, out) = run(
+            &fs,
+            &c,
+            "read_file",
+            json!({"path": skills.join("x/SKILL.md").display().to_string()}),
+        )
+        .await
+        .unwrap();
+        assert!(out.joined_text().contains("body"));
+        let (_, out) = run(
+            &fs,
+            &c,
+            "write_file",
+            json!({"path": "skillsx/notes.md", "content": "x"}),
+        )
+        .await
+        .unwrap();
+        assert!(!out.is_error, "{out:?}");
+    }
+
+    /// A link to a skill folder, or a skill folder named through a link, is still one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skill_folders_reached_through_links_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let skills = root.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::os::unix::fs::symlink(&skills, root.join("link")).unwrap();
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("named")).unwrap();
+        let c = ChatContext {
+            skill_roots: vec![
+                skills.display().to_string(),
+                root.join("named").display().to_string(),
+            ],
+            ..chat(&root)
+        };
+        let fs = FilesServer::default();
+        for path in [root.join("link/a/SKILL.md"), real.join("b/SKILL.md")] {
+            let why = run(
+                &fs,
+                &c,
+                "write_file",
+                json!({"path": path.display().to_string(), "content": "x"}),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                why.contains("Settings → Skills"),
+                "{}: {why}",
+                path.display()
+            );
+        }
+    }
+
+    /// An approved write cannot land in a skill folder that appeared after the preview (the
+    /// shared folder created as a link to the folder being written).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_write_is_checked_against_skill_folders_again_before_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let shared = root.join("home/.agents/skills");
+        let c = ChatContext {
+            skill_roots: vec![shared.display().to_string()],
+            ..chat(&root)
+        };
+        let fs = FilesServer::default();
+        let a = args(json!({"path": "project/x/SKILL.md", "content": "x"}));
+        let Described::Action(action) = fs.describe("write_file", &a, &c).await else {
+            panic!("not described")
+        };
+        assert!(action.hard_limit.is_none(), "{action:?}");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&project, &shared).unwrap();
+        let out = fs.call("write_file", &a, &action, ctx(c.clone())).await;
+        assert!(out.is_error, "{out:?}");
+        assert!(out.joined_text().contains("Settings → Skills"), "{out:?}");
+        assert!(!project.join("x").exists());
+    }
+
+    #[test]
+    fn skill_folders_compare_by_the_volume_case_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("skills")).unwrap();
+        let roots = vec![root.join("skills").display().to_string()];
+        let other_case = root.join("SKILLS/x/SKILL.md").display().to_string();
+        let insensitive = |_: &str| policy::CaseRule::Insensitive;
+        let sensitive = |_: &str| policy::CaseRule::Sensitive;
+        let found = crate::skill_guard::skill_root_for(
+            &other_case,
+            &roots,
+            Flavor::native(),
+            crate::skill_guard::Reach::Inside,
+            &RealFs,
+            &insensitive,
+        );
+        assert!(found.is_some());
+        let found = crate::skill_guard::skill_root_for(
+            &other_case,
+            &roots,
+            Flavor::native(),
+            crate::skill_guard::Reach::Inside,
+            &RealFs,
+            &sensitive,
+        );
+        assert!(found.is_none());
     }
 
     fn ctx(c: ChatContext) -> CallContext {

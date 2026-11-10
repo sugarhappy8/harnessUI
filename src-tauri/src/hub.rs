@@ -1022,15 +1022,19 @@ pub async fn refresh_catalog(app: AppHandle, state: State<'_, AppState>) -> AppR
     let json = fetch(format!("{base}/models.json")).await?;
     let sig = fetch(format!("{base}/models.json.minisig")).await?;
     let current = current_catalog(&app).await.sequence;
-    let catalog =
-        models::catalog::verify_refresh(&json, &sig, Some(&key), current).map_err(|e| {
-            AppError::new(
+    let catalog = match models::catalog::verify_refresh(&json, &sig, Some(&key), current) {
+        Ok(c) => c,
+        // The release's catalog is the one this build already has: up to date, not an error.
+        Err(models::catalog::CatalogError::NotNewer) => return Ok(current),
+        Err(e) => {
+            return Err(AppError::new(
                 "catalog_rejected",
                 "The downloaded catalog was rejected.",
                 "Nothing changed; the current catalog stays.",
                 e.to_string(),
-            )
-        })?;
+            ));
+        }
+    };
     state.store.set_setting(SETTING_CATALOG, &json).await?;
     Ok(catalog.sequence)
 }

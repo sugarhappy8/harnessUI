@@ -105,3 +105,55 @@ body {
 body.overlay-body {
   background: transparent;
 }
+
+/* Code highlighting in chat (src/components/Markdown.tsx). The highlighter only adds
+   hljs-* classes; colours come from the theme tokens above, so light and dark follow. */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-doctag {
+  color: var(--accent);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-template-tag {
+  color: var(--success);
+}
+
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-property {
+  color: var(--warning);
+}
+
+.hljs-comment,
+.hljs-quote,
+.hljs-meta {
+  color: var(--fg-muted);
+}
+
+.hljs-comment,
+.hljs-quote,
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-type,
+.hljs-strong {
+  font-weight: 600;
+}
+
+.hljs-deletion {
+  color: var(--danger);
+}

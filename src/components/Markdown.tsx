@@ -1,6 +1,7 @@
 import { memo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
 import { AlertDialog } from "radix-ui";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isTauri } from "../lib/ipc";
@@ -95,11 +96,34 @@ const components: Components = {
   ),
 };
 
+// Built once: react-markdown runs its plugins on every render, which happens on each
+// streamed chunk. Only fenced blocks that name a language are highlighted (no guessing).
+const highlight = rehypeHighlight({ detect: false });
+
+/** Code highlighting as tokens (ARCHITECTURE.md 14, 18): the highlighter adds hast
+ *  spans with hljs-* classes, which react-markdown renders as React elements, so no
+ *  HTML string is ever built. An unknown language stays plain text, and a highlighter
+ *  failure leaves the code plain instead of breaking the message. */
+function safeHighlight(): ReturnType<typeof rehypeHighlight> {
+  return (tree, file) => {
+    try {
+      highlight(tree, file);
+    } catch {
+      // The code stays plain text.
+    }
+  };
+}
+
 /** Markdown rendered to React elements. Raw HTML in the source is shown as text,
  *  never parsed (react-markdown's default; no rehype-raw). */
 export const Markdown = memo(function Markdown(props: { text: string }) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} skipHtml={false}>
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[safeHighlight]}
+      components={components}
+      skipHtml={false}
+    >
       {props.text}
     </ReactMarkdown>
   );

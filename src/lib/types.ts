@@ -25,6 +25,8 @@ export interface Chat {
   updatedAt: number;
   /** Thinking is on for this chat (when the model can think). */
   thinking: boolean;
+  /** The folder relative file paths start from. Null: the first approved folder. */
+  workingFolder: string | null;
 }
 
 export type Role = "system" | "user" | "assistant" | "tool";
@@ -501,6 +503,8 @@ export interface UpdateStatus {
   configured: boolean;
   autoCheck: boolean;
   currentVersion: string;
+  /** An update found by the automatic or manual check since the app started. */
+  available: UpdateInfo | null;
 }
 
 export interface UpdateInfo {

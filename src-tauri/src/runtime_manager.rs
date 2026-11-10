@@ -203,8 +203,14 @@ impl RuntimeManager {
             .collect()
     }
 
-    /// Backends that passed their probe, each with the device to use, in Auto order:
-    /// Metal, Vulkan, CUDA, ROCm, CPU (decision D3 puts Vulkan before ROCm).
+    /// Backends that passed their probe, each with the device to use, in the order Metal,
+    /// Vulkan, CUDA, ROCm, CPU. An explicit backend choice is looked up in this list, and
+    /// the supervisor steps down through it after a failed start. Auto picks only Metal,
+    /// Vulkan or CPU from it (D3, [`auto_choice`]): CUDA and ROCm are manual choices.
+    ///
+    /// ROCm is launched with only the chosen card visible to the HIP runtime
+    /// (`HIP_VISIBLE_DEVICES`), which then numbers it `ROCm0`: with the integrated GPU still
+    /// visible ROCm can crash even when the card is passed by name (7.2).
     fn candidates(found: &[(Backend, ProbeResult)], wanted_device: Option<&str>) -> Vec<Candidate> {
         let order = [
             BackendKind::Metal,
@@ -229,10 +235,17 @@ impl RuntimeManager {
                 if kind != BackendKind::Cpu && device.is_none() {
                     continue;
                 }
+                let (device, hip_visible_devices) = match device {
+                    Some(d) => {
+                        let (name, hip) = launch_device(kind, d);
+                        (Some(name), hip)
+                    }
+                    None => (None, None),
+                };
                 out.push(Candidate {
                     backend: b.clone(),
-                    device: device.map(|d| d.name.clone()),
-                    hip_visible_devices: None,
+                    device,
+                    hip_visible_devices,
                 });
             }
         }
@@ -271,11 +284,16 @@ impl RuntimeManager {
                     ));
                 }
             },
-            None => candidates.first().cloned().ok_or_else(|| {
+            None => auto_choice(&candidates).cloned().ok_or_else(|| {
                 AppError::new(
                     "no_usable_backend",
                     "No llama.cpp backend could start on this computer.",
-                    "Run the backend check in Settings → Diagnostics and copy the report into a bug report.",
+                    if candidates.is_empty() {
+                        "Run the backend check in Settings → Diagnostics and copy the report into a bug report."
+                    } else {
+                        // Only CUDA or ROCm work here; Auto never picks them (D3).
+                        "Pick CUDA or ROCm in Settings → Local models, or run the backend check in Settings → Diagnostics."
+                    },
                     found
                         .iter()
                         .map(|(b, p)| format!("{}: {:?}", b.kind, p.error))
@@ -322,7 +340,10 @@ impl RuntimeManager {
             *s = RuntimeStatusDto {
                 state: RuntimeStateDto::Starting,
                 backend: Some(kind_name(first.backend.kind).to_string()),
-                device: first.device.clone(),
+                device: shown_device(
+                    first.device.as_deref(),
+                    first.hip_visible_devices.as_deref(),
+                ),
                 model_path: Some(model.display().to_string()),
                 model_name: Some(model_name.clone()),
                 ..Default::default()
@@ -393,7 +414,10 @@ impl RuntimeManager {
                         s.state = RuntimeStateDto::Ready;
                         s.progress = Some(1.0);
                         s.backend = Some(kind_name(running.backend.kind).to_string());
-                        s.device = running.launch.device.clone();
+                        s.device = shown_device(
+                            running.launch.device.as_deref(),
+                            running.launch.hip_visible_devices.as_deref(),
+                        );
                         s.n_ctx = Some(props.n_ctx);
                         s.supports_tools = props.chat_template_caps.supports_tool_calls;
                         s.preserve_reasoning = props.chat_template_caps.supports_preserve_reasoning;
@@ -527,6 +551,38 @@ pub fn kind_name(kind: BackendKind) -> &'static str {
     kind.as_str()
 }
 
+/// Auto's pick (D3): the first of Metal, Vulkan or CPU. CUDA and ROCm are only used when
+/// the user picks them, even when Vulkan does not work.
+fn auto_choice(candidates: &[Candidate]) -> Option<&Candidate> {
+    candidates
+        .iter()
+        .find(|c| !matches!(c.backend.kind, BackendKind::Cuda | BackendKind::Rocm))
+}
+
+/// The `--device` name and `HIP_VISIBLE_DEVICES` for a probed device. The probe's
+/// `ROCm<N>` comes from the unmasked HIP enumeration, the numbering `HIP_VISIBLE_DEVICES`
+/// uses; with only that card visible, llama.cpp names it `ROCm0`.
+fn launch_device(kind: BackendKind, device: &Device) -> (String, Option<String>) {
+    if kind == BackendKind::Rocm
+        && let Some(index) = device.name.strip_prefix("ROCm")
+        && !index.is_empty()
+        && index.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(index) = index.parse::<u32>()
+    {
+        return ("ROCm0".to_string(), Some(index.to_string()));
+    }
+    (device.name.clone(), None)
+}
+
+/// The device as the probe and Settings name it: a ROCm launch masked to one card passes
+/// it as `ROCm0`, but the user picked it by its unmasked number.
+fn shown_device(device: Option<&str>, hip_visible_devices: Option<&str>) -> Option<String> {
+    match (device, hip_visible_devices) {
+        (Some("ROCm0"), Some(index)) => Some(format!("ROCm{index}")),
+        (device, _) => device.map(str::to_string),
+    }
+}
+
 fn load_error(failure: &LoadFailure, tail: String) -> AppError {
     AppError::new(
         "load_failed",
@@ -595,4 +651,152 @@ pub fn local_client(base_url: String, key: String) -> AppResult<agent::OpenAiCli
     config.request_timeout = None;
     config.connect_timeout = Duration::from_secs(5);
     agent::OpenAiClient::new(config).map_err(AppError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend(kind: BackendKind) -> Backend {
+        Backend {
+            kind,
+            dir: PathBuf::from("/b"),
+            server: PathBuf::from("/b/llama-server"),
+            fit_params: None,
+            build: "b1".into(),
+            source: runtime::BackendSource::Installed,
+        }
+    }
+
+    fn device(name: &str, description: &str, total_mib: u64) -> Device {
+        Device {
+            name: name.into(),
+            description: description.into(),
+            total_mib,
+            free_mib: total_mib,
+        }
+    }
+
+    fn usable(kind: BackendKind, devices: Vec<Device>) -> (Backend, ProbeResult) {
+        (
+            backend(kind),
+            ProbeResult {
+                backend_kind: kind,
+                devices,
+                error: None,
+            },
+        )
+    }
+
+    fn broken(kind: BackendKind) -> (Backend, ProbeResult) {
+        (
+            backend(kind),
+            ProbeResult {
+                backend_kind: kind,
+                devices: Vec::new(),
+                error: Some(runtime::ProbeError::NoMatchingDevice { backend: kind }),
+            },
+        )
+    }
+
+    /// 7.2: ROCm sees only the chosen card (HIP_VISIBLE_DEVICES), which is then ROCm0.
+    #[test]
+    fn rocm_is_masked_to_the_chosen_card() {
+        let found = vec![usable(
+            BackendKind::Rocm,
+            vec![
+                device("ROCm0", "AMD Radeon(TM) Graphics", 50246),
+                device("ROCm1", "AMD Radeon RX 9070 XT", 16304),
+            ],
+        )];
+        let rocm = RuntimeManager::candidates(&found, None);
+        assert_eq!(rocm.len(), 1);
+        assert_eq!(rocm[0].device.as_deref(), Some("ROCm0"));
+        assert_eq!(rocm[0].hip_visible_devices.as_deref(), Some("1"));
+        assert_eq!(
+            shown_device(
+                rocm[0].device.as_deref(),
+                rocm[0].hip_visible_devices.as_deref()
+            )
+            .as_deref(),
+            Some("ROCm1"),
+            "the status names the card as the user picked it"
+        );
+        // A card the user picked in Settings is masked the same way.
+        let picked = RuntimeManager::candidates(&found, Some("ROCm0"));
+        assert_eq!(picked[0].device.as_deref(), Some("ROCm0"));
+        assert_eq!(picked[0].hip_visible_devices.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn other_backends_pass_the_device_unmasked() {
+        let found = vec![
+            usable(
+                BackendKind::Vulkan,
+                vec![
+                    device("Vulkan0", "AMD Radeon(TM) Graphics", 512),
+                    device("Vulkan1", "AMD Radeon RX 9070 XT", 16304),
+                ],
+            ),
+            usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
+        ];
+        let c = RuntimeManager::candidates(&found, None);
+        assert_eq!(c[0].device.as_deref(), Some("Vulkan1"));
+        assert_eq!(c[0].hip_visible_devices, None);
+        assert_eq!(
+            (c[1].device.as_deref(), c[1].hip_visible_devices.as_deref()),
+            (None, None)
+        );
+        assert_eq!(
+            launch_device(BackendKind::Rocm, &device("ROCm+1", "x", 1)),
+            ("ROCm+1".to_string(), None),
+            "an unexpected name is passed as it is"
+        );
+    }
+
+    /// D3: Auto takes Metal, Vulkan or CPU; CUDA and ROCm only when the user picks them.
+    #[test]
+    fn auto_never_picks_cuda_or_rocm() {
+        let gpu = || vec![device("D0", "NVIDIA GeForce RTX 4070", 12000)];
+        // Vulkan has no driver, but CUDA and ROCm packs pass their probe.
+        let found = vec![
+            broken(BackendKind::Vulkan),
+            usable(BackendKind::Cuda, gpu()),
+            usable(
+                BackendKind::Rocm,
+                vec![device("ROCm0", "AMD Radeon RX 9070 XT", 16304)],
+            ),
+            usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
+        ];
+        let candidates = RuntimeManager::candidates(&found, None);
+        let kinds: Vec<BackendKind> = candidates.iter().map(|c| c.backend.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![BackendKind::Cuda, BackendKind::Rocm, BackendKind::Cpu],
+            "the explicit-choice and step-down order is unchanged"
+        );
+        assert_eq!(
+            auto_choice(&candidates).map(|c| c.backend.kind),
+            Some(BackendKind::Cpu)
+        );
+        // Vulkan, when it works, comes first.
+        let found = vec![
+            usable(
+                BackendKind::Vulkan,
+                vec![device("Vulkan0", "NVIDIA GeForce RTX 4070", 12000)],
+            ),
+            usable(BackendKind::Cuda, gpu()),
+            usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
+        ];
+        let candidates = RuntimeManager::candidates(&found, None);
+        assert_eq!(
+            auto_choice(&candidates).map(|c| c.backend.kind),
+            Some(BackendKind::Vulkan)
+        );
+        // Only CUDA works: Auto finds nothing (the user can still pick CUDA).
+        let found = vec![usable(BackendKind::Cuda, gpu())];
+        let candidates = RuntimeManager::candidates(&found, None);
+        assert!(auto_choice(&candidates).is_none());
+        assert_eq!(candidates.len(), 1);
+    }
 }

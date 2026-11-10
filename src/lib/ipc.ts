@@ -70,6 +70,9 @@ export const setChatModel = (chatId: number, modelRef: string | null) =>
   invoke<void>("set_chat_model", { chatId, modelRef });
 export const setSystemPrompt = (chatId: number, systemPrompt: string | null) =>
   invoke<void>("set_system_prompt", { chatId, systemPrompt });
+/** Picks one of the chat's approved folders as its working folder; null goes back to the first one. */
+export const setChatWorkingFolder = (chatId: number, path: string | null) =>
+  invoke<void>("set_chat_working_folder", { chatId, path });
 export const switchBranch = (chatId: number, messageId: number) =>
   invoke<void>("switch_branch", { chatId, messageId });
 
@@ -113,6 +116,7 @@ export const setLocalModelSettings = (settings: LocalModelSettings) =>
   invoke<void>("set_local_model_settings", { settings });
 export const runDiagnostics = (modelPath: string | null) =>
   invoke<DiagnosticsReport>("run_diagnostics", { modelPath });
+export const openLogsFolder = () => invoke<void>("open_logs_folder");
 
 export function onRuntimeStatus(handler: (s: RuntimeStatus) => void): Promise<UnlistenFn> {
   return listen<RuntimeStatus>("runtime-status", (e) => handler(e.payload));
@@ -193,6 +197,10 @@ export const exportAudit = (filter: AuditFilter, format: "jsonl" | "csv") =>
   invoke<string | null>("export_audit", { filter, format });
 export const stopHotkeyStatus = () => invoke<HotkeyStatus>("stop_hotkey_status");
 export const setStopHotkey = (accelerator: string) => invoke<HotkeyStatus>("set_stop_hotkey", { accelerator });
+/** Sent when the hotkey is registered at start and whenever it changes. */
+export function onStopHotkeyStatus(handler: (s: HotkeyStatus) => void): Promise<UnlistenFn> {
+  return listen<HotkeyStatus>("stop-hotkey-status", (e) => handler(e.payload));
+}
 export function onStopRequested(handler: () => void): Promise<UnlistenFn> {
   return listen("stop-requested", () => handler());
 }
@@ -257,6 +265,10 @@ export const updateStatus = () => invoke<UpdateStatus>("update_status");
 export const setUpdateAutoCheck = (on: boolean) => invoke<void>("set_update_auto_check", { on });
 export const checkForUpdate = () => invoke<UpdateInfo | null>("check_for_update");
 export const installUpdate = () => invoke<void>("install_update");
+/** Sent by the automatic check at start when a newer version exists. */
+export function onUpdateAvailable(handler: (u: UpdateInfo) => void): Promise<UnlistenFn> {
+  return listen<UpdateInfo>("update-available", (e) => handler(e.payload));
+}
 
 // Terminal
 export const getTerminalPassThrough = () => invoke<string[]>("get_terminal_pass_through");

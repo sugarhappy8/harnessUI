@@ -60,9 +60,9 @@ export function PermissionsSettings() {
       <section>
         <h3 className="mb-1 font-medium">Folders tools may use in every chat</h3>
         <p className="mb-2 text-xs text-fg-muted">
-          File tools can only read and write inside approved folders. You can also approve a folder
-          for a single chat from that chat's permissions. The app's own data and program folders are
-          never reachable.
+          File tools can only read and write inside approved folders. To approve a folder for one
+          chat only, open Tools in that chat and use Folders for this chat. The app&apos;s own data and
+          program folders are never reachable.
         </p>
         <ul className="space-y-1">
           {folders.map((f) => (

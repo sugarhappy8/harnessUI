@@ -9,6 +9,8 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use crate::error::{AppError, AppResult};
+
 /// Keeps the background log writer alive for the life of the process.
 static GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
@@ -57,4 +59,19 @@ pub fn init(app: &AppHandle) {
         .with(file_layer)
         .with(stderr_layer)
         .try_init();
+}
+
+/// Opens the folder that holds the app's logs, diagnostics reports and tool server logs
+/// in the file manager (ARCHITECTURE.md 12).
+#[tauri::command]
+pub async fn open_logs_folder(app: AppHandle) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    std::fs::create_dir_all(&dir).map_err(AppError::internal)?;
+    app.opener()
+        .open_path(dir.display().to_string(), None::<&str>)
+        .map_err(|e| AppError::internal(e.to_string()))
 }

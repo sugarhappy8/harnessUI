@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Popover } from "radix-ui";
-import { AlertTriangle, Wrench } from "lucide-react";
+import { AlertTriangle, FolderPlus, Trash2, Wrench } from "lucide-react";
 import * as ipc from "../lib/ipc";
-import type { ToolDto } from "../lib/types";
+import type { ApprovedFolder, ToolDto } from "../lib/types";
 import { useApp, toErrorInfo } from "../store/app";
 
 const SERVER_LABEL: Record<string, string> = {
@@ -16,18 +16,40 @@ const SERVER_LABEL: Record<string, string> = {
 
 /**
  * The tools switched on for this chat (9.3). Only switched-on tools are offered to the
- * model; each costs context, shown as an estimate.
+ * model; each costs context, shown as an estimate. Also the chat's loaded skills (10)
+ * and the folders its file tools may use, with the working folder.
  */
-export function ToolsPanel(props: { chatId: number; nCtx: number | null; unsupported?: boolean }) {
+export function ToolsPanel(props: {
+  chatId: number;
+  nCtx: number | null;
+  unsupported?: boolean;
+  /** The chat's stored working folder (null: the first approved folder). */
+  workingFolder?: string | null;
+}) {
   const [tools, setTools] = useState<ToolDto[]>([]);
+  const [folders, setFolders] = useState<ApprovedFolder[]>([]);
+  const [loaded, setLoaded] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
   const [gitFallback, setGitFallback] = useState<string | null>(null);
   const showError = useApp((s) => s.showError);
+  const openChat = useApp((s) => s.openChat);
 
   const refresh = useCallback(() => {
     ipc
       .listChatTools(props.chatId)
       .then(setTools)
+      .catch((e) => showError(toErrorInfo(e)));
+  }, [props.chatId, showError]);
+
+  // Global folders and this chat's own; loaded skills. Read when the panel opens.
+  const refreshChatState = useCallback(() => {
+    ipc
+      .listApprovedFolders(props.chatId)
+      .then(setFolders)
+      .catch((e) => showError(toErrorInfo(e)));
+    ipc
+      .loadedSkills(props.chatId)
+      .then(setLoaded)
       .catch((e) => showError(toErrorInfo(e)));
   }, [props.chatId, showError]);
 
@@ -71,8 +93,56 @@ export function ToolsPanel(props: { chatId: number; nCtx: number | null; unsuppo
     void save([...current]);
   }
 
+  // The folder the backend uses: the stored one while it is still approved, else the first.
+  const stored = props.workingFolder ?? null;
+  const workingId = (folders.find((f) => f.path === stored) ?? folders[0])?.id ?? null;
+
+  async function approveFolder() {
+    try {
+      if (await ipc.approveFolder(props.chatId)) setFolders(await ipc.listApprovedFolders(props.chatId));
+    } catch (e) {
+      showError(toErrorInfo(e));
+    }
+  }
+
+  async function removeFolder(id: number) {
+    try {
+      await ipc.removeApprovedFolder(id);
+      setFolders(await ipc.listApprovedFolders(props.chatId));
+    } catch (e) {
+      showError(toErrorInfo(e));
+    }
+  }
+
+  async function chooseWorkingFolder(path: string) {
+    try {
+      await ipc.setChatWorkingFolder(props.chatId, path);
+      if (useApp.getState().activeChatId === props.chatId) await openChat(props.chatId);
+    } catch (e) {
+      showError(toErrorInfo(e));
+    }
+  }
+
+  async function unload(name: string) {
+    try {
+      await ipc.unloadSkill(props.chatId, name);
+      setLoaded((l) => l.filter((n) => n !== name));
+    } catch (e) {
+      showError(toErrorInfo(e));
+    }
+  }
+
   return (
-    <Popover.Root open={open} onOpenChange={(o) => (setOpen(o), o && refresh())}>
+    <Popover.Root
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        if (o) {
+          refresh();
+          refreshChatState();
+        }
+      }}
+    >
       <Popover.Trigger asChild>
         <button
           type="button"
@@ -160,6 +230,78 @@ export function ToolsPanel(props: { chatId: number; nCtx: number | null; unsuppo
               </section>
             );
           })}
+          {loaded.length > 0 && (
+            <section className="mb-3 border-t border-border pt-2" aria-labelledby={`loaded-skills-${props.chatId}`}>
+              <h3 id={`loaded-skills-${props.chatId}`} className="font-medium">
+                Skills loaded in this chat
+              </h3>
+              <p className="text-xs text-fg-muted">
+                A loaded skill&apos;s full text is sent with every message. Unload the ones this chat no longer needs.
+              </p>
+              <ul className="mt-1 space-y-1">
+                {loaded.map((name) => (
+                  <li key={name} className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs" title={name}>
+                      {name}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`Unload ${name}`}
+                      onClick={() => void unload(name)}
+                      className="text-xs text-fg-muted underline hover:text-fg"
+                    >
+                      Unload
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          <section className="mb-3 border-t border-border pt-2" aria-labelledby={`chat-folders-${props.chatId}`}>
+            <h3 id={`chat-folders-${props.chatId}`} className="font-medium">
+              Folders for this chat
+            </h3>
+            <p className="text-xs text-fg-muted">
+              File tools work only inside these folders. The selected one is the working folder, where relative paths
+              start.
+            </p>
+            <div role="radiogroup" aria-label="Working folder">
+              <ul className="mt-1 space-y-1">
+                {folders.map((f) => (
+                  <li key={f.id} className="flex items-center gap-2">
+                    <label className="flex min-w-0 flex-1 items-center gap-2" title={f.path}>
+                      <input
+                        type="radio"
+                        name={`working-folder-${props.chatId}`}
+                        checked={f.id === workingId}
+                        onChange={() => void chooseWorkingFolder(f.path)}
+                      />
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs">{f.path}</span>
+                      {f.chatId === null && <span className="shrink-0 text-xs text-fg-muted">all chats</span>}
+                    </label>
+                    {f.chatId === props.chatId && (
+                      <button
+                        type="button"
+                        aria-label={`Remove ${f.path} from this chat`}
+                        onClick={() => void removeFolder(f.id)}
+                        className="text-fg-muted hover:text-danger"
+                      >
+                        <Trash2 size={13} aria-hidden />
+                      </button>
+                    )}
+                  </li>
+                ))}
+                {folders.length === 0 && <li className="text-xs text-fg-muted">No folders approved yet.</li>}
+              </ul>
+            </div>
+            <button
+              type="button"
+              onClick={() => void approveFolder()}
+              className="mt-1 flex items-center gap-1 text-xs text-accent"
+            >
+              <FolderPlus size={13} aria-hidden /> Approve a folder for this chat…
+            </button>
+          </section>
           <button
             type="button"
             className="mt-1 text-xs text-fg-muted underline hover:text-fg"

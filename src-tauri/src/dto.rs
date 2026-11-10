@@ -27,6 +27,9 @@ pub struct ChatDto {
     pub updated_at: i64,
     /// Thinking is on for this chat (when the model can think).
     pub thinking: bool,
+    /// The folder the user chose for relative paths; `None` means the first approved
+    /// folder. A turn uses it only while it is still approved for the chat.
+    pub working_folder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

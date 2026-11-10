@@ -120,6 +120,11 @@ pub struct ChatContext {
     pub forbidden_folders: Vec<String>,
     /// Folders of enabled skills (a terminal working directory may be one of them).
     pub skill_folders: Vec<String>,
+    /// The folders skills are loaded from (the app's own and, when switched on, the shared
+    /// `~/.agents/skills`). The file and git tools never write inside them, because a
+    /// skill added there would be loaded (9.3, 10); only the skills UI writes skills. They
+    /// may not exist yet. The terminal is not limited by this.
+    pub skill_roots: Vec<String>,
     /// The per-result cap in tokens (8.4); tools size what the model sees to it.
     pub result_cap_tokens: usize,
 }

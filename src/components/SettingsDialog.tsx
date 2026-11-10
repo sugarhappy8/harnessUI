@@ -5,7 +5,15 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { applyTheme, loadTheme, type ThemeChoice } from "../lib/theme";
 import * as ipc from "../lib/ipc";
 import type { AppInfo } from "../lib/ipc";
-import type { BackendInfo, LocalModelSettings, Provider, ProviderKind, UpdateInfo, UpdateStatus } from "../lib/types";
+import type {
+  BackendInfo,
+  FirstRunInfo,
+  LocalModelSettings,
+  Provider,
+  ProviderKind,
+  UpdateInfo,
+  UpdateStatus,
+} from "../lib/types";
 import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
@@ -70,8 +78,128 @@ function General() {
           THIRD-PARTY-NOTICES.md next to the app.
         </p>
       </section>
+      {ipc.isTauri() && <DefaultSystemPrompt />}
       {ipc.isTauri() && <Updates />}
+      {ipc.isTauri() && <ModelCatalog />}
     </div>
+  );
+}
+
+/** The system prompt for chats without their own (setting "defaultSystemPrompt"). */
+function DefaultSystemPrompt() {
+  const [text, setText] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    ipc
+      .getSetting<unknown>("defaultSystemPrompt")
+      .then((v) => alive && setText(typeof v === "string" ? v : ""))
+      .catch((err) => alive && setError(toErrorInfo(err)));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  async function save() {
+    setError(null);
+    try {
+      // An empty box means no default of our own: the built-in prompt is used.
+      await ipc.setSetting("defaultSystemPrompt", text.trim() ? text : null);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    } catch (err) {
+      setError(toErrorInfo(err));
+    }
+  }
+  return (
+    <section aria-label="Default system prompt">
+      <label htmlFor="default-system-prompt" className="mb-1 block text-sm font-medium">
+        Default system prompt
+      </label>
+      <p id="default-system-prompt-help" className="mb-2 text-xs text-fg-muted">
+        Used by chats that have no system prompt of their own. Leave empty for the built-in one.
+      </p>
+      <textarea
+        id="default-system-prompt"
+        aria-describedby="default-system-prompt-help"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={5}
+        className="w-full rounded-md border border-border bg-bg-subtle p-2 font-mono text-xs"
+      />
+      <button
+        type="button"
+        onClick={() => void save()}
+        className="mt-1 rounded-md border border-border px-3 py-1 text-sm hover:bg-bg-muted"
+      >
+        {saved ? "Saved" : "Save"}
+      </button>
+      {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+    </section>
+  );
+}
+
+function catalogInfo(i: FirstRunInfo) {
+  return { sequence: i.catalogSequence, disabledReason: i.refreshDisabledReason };
+}
+
+/** The model catalog's version, and a signed refresh from the project's releases (11). */
+function ModelCatalog() {
+  const [info, setInfo] = useState<ReturnType<typeof catalogInfo> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    ipc
+      .firstRunInfo()
+      .then((i) => alive && setInfo(catalogInfo(i)))
+      .catch((err) => alive && setError(toErrorInfo(err)));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  async function refresh() {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    const before = info?.sequence;
+    try {
+      const now = await ipc.refreshCatalog();
+      setResult(now === before ? "The catalog is up to date." : `Updated to version ${now}.`);
+      setInfo(catalogInfo(await ipc.firstRunInfo()));
+    } catch (err) {
+      setError(toErrorInfo(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section aria-label="Model catalog">
+      <h3 className="mb-1 text-sm font-medium">Model catalog</h3>
+      <p className="mb-2 text-xs text-fg-muted">
+        The list of suggested models. Refresh downloads a newer signed list from github.com.
+      </p>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        {info && <span>Catalog version {info.sequence}</span>}
+        <button
+          type="button"
+          disabled={busy || !info || info.disabledReason !== null}
+          aria-describedby={info?.disabledReason ? "catalog-refresh-reason" : undefined}
+          onClick={() => void refresh()}
+          className="flex items-center gap-1 rounded-md border border-border px-3 py-1 hover:bg-bg-muted disabled:opacity-40"
+        >
+          <RefreshCw size={12} aria-hidden className={busy ? "animate-spin" : ""} /> Refresh catalog
+        </button>
+        {result !== null && <span className="text-fg-muted">{result}</span>}
+      </div>
+      {info?.disabledReason && (
+        <p id="catalog-refresh-reason" className="mt-1 text-xs text-fg-muted">
+          {info.disabledReason}
+        </p>
+      )}
+      {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+    </section>
   );
 }
 
@@ -82,7 +210,26 @@ function Updates() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorInfo | null>(null);
   useEffect(() => {
-    ipc.updateStatus().then(setStatus).catch(() => setStatus(null));
+    let alive = true;
+    let off: (() => void) | undefined;
+    ipc
+      .updateStatus()
+      .then((s) => {
+        if (!alive) return;
+        setStatus(s);
+        // Found by the check at start (or an earlier "Check now") since the app started.
+        const available = s.available;
+        if (available) setFound((cur) => cur ?? available);
+      })
+      .catch(() => alive && setStatus(null));
+    void ipc.onUpdateAvailable(setFound).then((u) => {
+      if (alive) off = u;
+      else u();
+    });
+    return () => {
+      alive = false;
+      off?.();
+    };
   }, []);
   if (!status) return null;
   async function run<T>(f: () => Promise<T>, then: (v: T) => void) {
@@ -414,7 +561,74 @@ function Endpoints() {
           <Plus size={14} aria-hidden /> Add an endpoint
         </button>
       )}
+      <RemoteContext onError={setError} />
     </div>
+  );
+}
+
+const REMOTE_CTX_OPTIONS = [2048, 4096, 8192, 16384, 32768];
+const REMOTE_CTX_DEFAULT = 4096;
+
+/** Context size for an endpoint whose model reports none (8.4; setting "remoteContextLength"). */
+function RemoteContext(props: { onError: (e: ErrorInfo) => void }) {
+  const [ctx, setCtx] = useState<number | null>(null);
+  const { onError } = props;
+  useEffect(() => {
+    let alive = true;
+    ipc
+      .getSetting<unknown>("remoteContextLength")
+      .then((v) => {
+        if (!alive) return;
+        // Missing or invalid means the default, as on the Rust side.
+        setCtx(typeof v === "number" && Number.isInteger(v) && v > 0 ? v : REMOTE_CTX_DEFAULT);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setCtx(REMOTE_CTX_DEFAULT);
+        onError(toErrorInfo(err));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [onError]);
+  if (ctx === null) return null;
+  const options = REMOTE_CTX_OPTIONS.includes(ctx)
+    ? REMOTE_CTX_OPTIONS
+    : [...REMOTE_CTX_OPTIONS, ctx].sort((a, b) => a - b);
+  async function save(n: number) {
+    const before = ctx;
+    setCtx(n);
+    try {
+      await ipc.setSetting("remoteContextLength", n);
+    } catch (err) {
+      setCtx(before);
+      onError(toErrorInfo(err));
+    }
+  }
+  return (
+    <section className="space-y-1 border-t border-border pt-4 text-sm">
+      <label htmlFor="remote-ctx" className="block font-medium">
+        Context size when a server does not report one
+      </label>
+      <p id="remote-ctx-help" className="text-xs text-fg-muted">
+        Most servers say how much context their model uses. For one that does not, the app plans
+        with this size. If it is larger than what the server really uses, older messages can be
+        dropped without warning.
+      </p>
+      <select
+        id="remote-ctx"
+        aria-describedby="remote-ctx-help"
+        value={ctx}
+        onChange={(e) => void save(Number(e.target.value))}
+        className="rounded-md border border-border bg-bg px-2 py-1"
+      >
+        {options.map((n) => (
+          <option key={n} value={n}>
+            {n.toLocaleString()} tokens{n === REMOTE_CTX_DEFAULT ? " (default)" : ""}
+          </option>
+        ))}
+      </select>
+    </section>
   );
 }
 
@@ -569,14 +783,23 @@ function Diagnostics() {
         anywhere; the report is saved to the logs folder.
       </p>
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
-      <button
-        type="button"
-        onClick={() => void run()}
-        disabled={busy}
-        className="rounded-md bg-accent px-3 py-1.5 text-sm text-accent-fg disabled:opacity-50"
-      >
-        {busy ? "Running… (this can take a few minutes)" : "Run backend check"}
-      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void run()}
+          disabled={busy}
+          className="rounded-md bg-accent px-3 py-1.5 text-sm text-accent-fg disabled:opacity-50"
+        >
+          {busy ? "Running… (this can take a few minutes)" : "Run backend check"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void ipc.openLogsFolder().catch((err) => setError(toErrorInfo(err)))}
+          className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-muted"
+        >
+          Open logs folder
+        </button>
+      </div>
       {report && (
         <>
           <pre className="max-h-72 overflow-auto rounded-md bg-bg-muted p-3 text-xs whitespace-pre-wrap">{report}</pre>

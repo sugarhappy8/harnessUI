@@ -175,11 +175,44 @@ fn captured_var(
         .or_else(|| std::env::var(key).ok())
 }
 
+/// The system git the tools run, if any. On macOS without the developer tools, Apple's
+/// `/usr/bin/git` is a stub that opens an installer dialog, so it is never run (9.2, 9.3):
+/// a git found elsewhere in `PATH` (Homebrew) is used instead, else none, and the git
+/// tools use the built-in library.
+async fn system_git(path: Option<&str>) -> Option<PathBuf> {
+    let search = path.map(std::ffi::OsStr::new);
+    let found = runtime::resolve_program("git", search);
+    let stub = is_git_stub(found.as_deref(), cfg!(target_os = "macos"));
+    // The developer-tools check runs `xcode-select`, so only for the stub on macOS.
+    let stub_without_tools = stub && !mcp_host::developer_tools_installed().await;
+    choose_git(found, stub_without_tools, || {
+        search.and_then(|s| mcp_host::alternative_to_stub("git", s))
+    })
+}
+
+/// Whether `found` is Apple's git stub. Only on macOS: elsewhere `/usr/bin/git` is git.
+fn is_git_stub(found: Option<&std::path::Path>, macos: bool) -> bool {
+    macos && found.is_some_and(mcp_host::is_developer_tools_stub)
+}
+
+/// `found`, unless it is Apple's stub and the developer tools are missing: then another
+/// git in `PATH` that is not a stub, else none.
+fn choose_git(
+    found: Option<PathBuf>,
+    stub_without_tools: bool,
+    alternative: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if !stub_without_tools {
+        return found;
+    }
+    alternative().filter(|g| !mcp_host::is_developer_tools_stub(g))
+}
+
 async fn git_config(
     captured: Option<&std::collections::BTreeMap<String, String>>,
 ) -> tools::GitConfig {
     let path = captured_var(captured, "PATH");
-    let git = runtime::resolve_program("git", path.as_deref().map(std::ffi::OsStr::new));
+    let git = system_git(path.as_deref()).await;
     let mut env: Vec<(String, String)> = Vec::new();
     for key in [
         "PATH",
@@ -197,6 +230,7 @@ async fn git_config(
             env.push((key.to_string(), v));
         }
     }
+    // No usable system git (or only Apple's stub): nothing is run to ask for helpers.
     let credential_helpers = match &git {
         Some(g) => user_credential_helpers(g, &env).await,
         None => Vec::new(),
@@ -420,6 +454,55 @@ async fn remember_lifecycle(app: &AppHandle, host: &Host, server: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    /// macOS without the developer tools: Apple's /usr/bin/git is never used.
+    #[test]
+    fn apples_git_stub_is_never_used_without_the_developer_tools() {
+        let stub = PathBuf::from("/usr/bin/git");
+        let brew = PathBuf::from("/opt/homebrew/bin/git");
+        assert!(super::is_git_stub(Some(&stub), true));
+        assert!(
+            !super::is_git_stub(Some(&stub), false),
+            "elsewhere /usr/bin/git is the real git"
+        );
+        assert!(!super::is_git_stub(Some(&brew), true));
+        assert!(!super::is_git_stub(None, true));
+
+        // No other git: none, so the tools use the built-in library.
+        assert_eq!(super::choose_git(Some(stub.clone()), true, || None), None);
+        // A Homebrew git later in PATH is used instead.
+        assert_eq!(
+            super::choose_git(Some(stub.clone()), true, || Some(brew.clone())),
+            Some(brew.clone())
+        );
+        // Another stub is never picked as the alternative.
+        assert_eq!(
+            super::choose_git(Some(stub.clone()), true, || Some(stub.clone())),
+            None
+        );
+        // With the developer tools, /usr/bin/git is the real git; no search is made.
+        assert_eq!(
+            super::choose_git(Some(stub.clone()), false, || panic!("not searched")),
+            Some(stub)
+        );
+        assert_eq!(
+            super::choose_git(Some(brew.clone()), false, || panic!("not searched")),
+            Some(brew)
+        );
+    }
+
+    /// Without a git, no credential helper is asked for (nothing is run).
+    #[tokio::test]
+    async fn no_git_means_no_credential_helper_probe() {
+        let empty = std::env::temp_dir().join("harniss-no-git-here");
+        let captured =
+            std::collections::BTreeMap::from([("PATH".to_string(), empty.display().to_string())]);
+        let config = super::git_config(Some(&captured)).await;
+        assert_eq!(config.git, None);
+        assert!(config.credential_helpers.is_empty());
+    }
+
     #[test]
     fn env0_is_parsed() {
         let env =

@@ -96,6 +96,7 @@ pub fn run() {
             models_cmd::get_local_model_settings,
             models_cmd::set_local_model_settings,
             models_cmd::run_diagnostics,
+            logging::open_logs_folder,
             providers::list_providers,
             providers::save_provider,
             providers::delete_provider,
@@ -134,6 +135,7 @@ pub fn run() {
             permissions::list_approved_folders,
             permissions::approve_folder,
             permissions::remove_approved_folder,
+            permissions::set_chat_working_folder,
             permissions::list_audit,
             permissions::export_audit,
             turns::resolve_approval,
@@ -240,6 +242,8 @@ pub fn run() {
                 grants: Default::default(),
             });
             app.manage(turns::PendingApprovals::default());
+            // Before the startup check below, which records what it finds here.
+            app.manage(updates::LastFound::default());
             toolset::forward_events(handle.clone(), host);
             {
                 let handle = handle.clone();

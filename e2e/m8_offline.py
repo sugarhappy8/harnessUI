@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline gate (ARCHITECTURE.md 17): the app, with every proxy variable pointing at a
 recording proxy that refuses everything, starts, loads a local model, answers a chat
-and shows its settings pages without a single outbound request.
+and opens every settings page without a single outbound request.
 
 Loopback is exempt (NO_PROXY): the UI is served from the dev server and llama-server
 listens on 127.0.0.1. The app's loopback client never uses a proxy anyway.
@@ -28,6 +28,22 @@ APP = os.environ.get("APP_BIN", str(ROOT / "target" / "debug" / "app"))
 MODEL = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
 LLAMA_DIR = os.environ.get("APP_DEV_LLAMA_DIR", str(ROOT / ".cache" / "llama-linux"))
 OUT = pathlib.Path(os.environ.get("E2E_OUT", tempfile.mkdtemp(prefix="e2e-m8-")))
+
+# Every tab of the settings dialog, in the order src/components/SettingsDialog.tsx shows them.
+SETTINGS_PAGES = [
+    "General",
+    "Local models",
+    "Endpoints",
+    "Hugging Face",
+    "MCP servers",
+    "Skills",
+    "Git",
+    "Browser",
+    "Computer use",
+    "Permissions",
+    "Audit log",
+    "Diagnostics",
+]
 
 SEEN: list[str] = []
 
@@ -98,8 +114,18 @@ def main() -> int:
         msgs = s.invoke("get_chat", {"chatId": chat_id})["messages"]
         assert msgs[-1]["role"] == "assistant" and msgs[-1]["text"].strip(), msgs[-1]
         s.click_button("Settings")
-        for tab in ["General", "Local models", "Endpoints", "Hugging Face", "MCP servers", "Skills", "Permissions", "Audit log"]:
+        for tab in SETTINGS_PAGES:
             s.click_button(tab)
+            # The page must really open, or the gate would pass without loading it.
+            s.wait_for(
+                lambda tab=tab: s.execute(
+                    "return [...document.querySelectorAll('[role=tab][aria-selected=true]')]"
+                    ".some(t => t.innerText.trim() === arguments[0]);",
+                    tab,
+                ),
+                10,
+                f"settings page {tab!r}",
+            )
             time.sleep(0.6)
         time.sleep(2)
         if SEEN:

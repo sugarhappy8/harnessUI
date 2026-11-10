@@ -48,3 +48,4 @@ pub use result::MAX_RESULT_BYTES;
 pub use schema::{CompiledSchema, SchemaError, canonical_json, simplify_for_llama};
 pub use secrets::SecretResolver;
 pub use stderr::{MAX_LINE_BYTES, MAX_LOG_FILE_BYTES, TAIL_LINES};
+pub use stdio::{alternative_to_stub, developer_tools_installed, is_developer_tools_stub};

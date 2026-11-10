@@ -37,7 +37,8 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
       .then((i) => {
         if (!alive) return;
         setInfo(i);
-        setSelected(i.pick ?? i.suggestions.find((s) => s.fits)?.id ?? null);
+        // Only a tested pick is preselected; an untested entry never is (ARCHITECTURE.md 11).
+        setSelected(i.pick ?? null);
       })
       .catch((err) => alive && setError(toErrorInfo(err)));
     return () => {
@@ -142,7 +143,7 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
         {info && !info.pick && info.suggestions.some((s) => s.fits) && (
           <p className="text-xs text-fg-muted">
             No suggestion has passed the tool-calling test on real hardware yet, so none is
-            preselected automatically.
+            preselected automatically. Choose one above to download it.
           </p>
         )}
         <div className="flex flex-wrap gap-2">

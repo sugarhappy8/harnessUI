@@ -28,7 +28,7 @@ export function SystemPromptDialog(props: {
           </div>
           <Dialog.Description className="mb-2 text-sm text-fg-muted">
             Instructions the model sees before every message in this chat. Leave empty for the
-            default.
+            default from Settings → General.
           </Dialog.Description>
           <textarea
             aria-label="System prompt"

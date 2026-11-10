@@ -13,7 +13,7 @@ this when you add a server, and records that you did.
 
 ## Adding a server
 
-Open **Settings → Tools → Add MCP server** and paste a configuration. The app accepts the
+Open **Settings → MCP servers → Add servers** and paste a configuration. The app accepts the
 formats other apps use, so you can usually copy a server's README example as it is.
 
 Claude Desktop and Cursor format:

@@ -131,6 +131,7 @@ export function SkillsSettings() {
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
+          aria-describedby="skill-import-notice"
           onClick={() => act(() => ipc.importSkill(false))}
           className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm"
         >
@@ -138,6 +139,7 @@ export function SkillsSettings() {
         </button>
         <button
           type="button"
+          aria-describedby="skill-import-notice"
           onClick={() => act(() => ipc.importSkill(true))}
           className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm"
         >
@@ -158,6 +160,10 @@ export function SkillsSettings() {
           Open skills folder
         </button>
       </div>
+      <p id="skill-import-notice" className="text-xs text-fg-muted">
+        Imported skills start turned off. A skill&apos;s text becomes instructions to the model, so turn one on only if
+        you trust where it came from.
+      </p>
       {editing !== undefined && (
         <SkillEditor
           folder={editing}

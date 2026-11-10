@@ -16,6 +16,7 @@ pub struct AppState {
     pub host: mcp_host::Host,
     /// The skills server (also registered in `host`), for the prompt's skills index.
     pub skills: Arc<tools::SkillsServer>,
-    /// "Allow for this chat" grants (memory only, D12).
-    pub grants: crate::turns::Grants,
+    /// "Allow for this chat" grants (memory only, D12). Shared with the policy gate of a
+    /// running turn, which reads them on every decision.
+    pub grants: Arc<crate::turns::Grants>,
 }

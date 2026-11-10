@@ -533,6 +533,7 @@ mod tests {
             working_folder: None,
             forbidden_folders: vec![],
             skill_folders: vec![],
+            skill_roots: vec![],
             result_cap_tokens: 2000,
         }
     }
@@ -699,6 +700,41 @@ mod tests {
         assert!(matches!(a.scope, Scope::Commands { .. }));
         let a = describe(&s, &c, json!({"command": "echo $(whoami)"})).await;
         assert_eq!(a.risk, Risk::AlwaysAsk);
+    }
+
+    /// The file and git tools do not write in skill folders; the terminal still runs there
+    /// (an enabled skill's folder is a valid working directory).
+    #[tokio::test]
+    async fn commands_still_run_in_skill_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let skills = root.join("skills");
+        std::fs::create_dir_all(skills.join("pdf")).unwrap();
+        std::fs::write(skills.join("pdf/SKILL.md"), "x").unwrap();
+        std::fs::create_dir_all(root.join("work")).unwrap();
+        let s = server(&[]);
+        let c = ChatContext {
+            skill_folders: vec![skills.join("pdf").display().to_string()],
+            skill_roots: vec![skills.display().to_string()],
+            ..chat(&root.join("work"))
+        };
+        let cwd = skills.join("pdf").display().to_string();
+        let a = describe(&s, &c, json!({"command": "ls", "cwd": cwd})).await;
+        assert!(a.hard_limit.is_none(), "{a:?}");
+        let out = s
+            .call(
+                "run_command",
+                &Map::new(),
+                &a,
+                CallContext {
+                    chat: c,
+                    cancel: CancellationToken::new(),
+                    progress: None,
+                },
+            )
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        assert!(out.joined_text().contains("SKILL.md"));
     }
 
     #[test]

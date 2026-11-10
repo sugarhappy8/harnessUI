@@ -201,18 +201,54 @@ pub struct ChatTools {
 
 /// "Allow for this chat" grants, per chat. They live in memory only: they end when the
 /// app quits or the user revokes them (D12), and are never written to disk.
+///
+/// This is the only copy: the policy gate of a running turn reads it on every decision.
 #[derive(Default)]
 pub struct Grants(Mutex<HashMap<i64, BTreeSet<policy::Scope>>>);
 
-/// This chat's grants.
-pub async fn load_grants(state: &AppState, chat: i64) -> BTreeSet<policy::Scope> {
-    state
-        .grants
-        .0
-        .lock()
-        .ok()
-        .and_then(|g| g.get(&chat).cloned())
-        .unwrap_or_default()
+impl Grants {
+    /// One chat's grants.
+    pub fn of_chat(&self, chat: i64) -> BTreeSet<policy::Scope> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&chat).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Replaces one chat's grants.
+    pub fn replace(&self, chat: i64, grants: &BTreeSet<policy::Scope>) {
+        if let Ok(mut g) = self.0.lock() {
+            if grants.is_empty() {
+                g.remove(&chat);
+            } else {
+                g.insert(chat, grants.clone());
+            }
+        }
+    }
+
+    /// Adds grants to one chat.
+    pub fn add(&self, chat: i64, scopes: Vec<policy::Scope>) {
+        if scopes.is_empty() {
+            return;
+        }
+        if let Ok(mut g) = self.0.lock() {
+            g.entry(chat).or_default().extend(scopes);
+        }
+    }
+
+    /// Removes every grant for one external tool, in every chat.
+    pub fn revoke_external(&self, server: &str, tool: &str) {
+        if let Ok(mut all) = self.0.lock() {
+            for grants in all.values_mut() {
+                grants.retain(|g| {
+                    !matches!(g,
+                        policy::Scope::ExternalExact { server: s, tool: t, .. } | policy::Scope::ExternalAny { server: s, tool: t }
+                        if s == server && t == tool)
+                });
+            }
+        }
+    }
 }
 
 /// Replaces this chat's grants.
@@ -221,27 +257,13 @@ pub async fn save_grants(
     chat: i64,
     grants: &BTreeSet<policy::Scope>,
 ) -> AppResult<()> {
-    if let Ok(mut g) = state.grants.0.lock() {
-        if grants.is_empty() {
-            g.remove(&chat);
-        } else {
-            g.insert(chat, grants.clone());
-        }
-    }
+    state.grants.replace(chat, grants);
     Ok(())
 }
 
 /// Removes every grant for one external tool, in every chat.
 pub fn revoke_external_tool(state: &AppState, server: &str, tool: &str) {
-    if let Ok(mut all) = state.grants.0.lock() {
-        for grants in all.values_mut() {
-            grants.retain(|g| {
-                !matches!(g,
-                    policy::Scope::ExternalExact { server: s, tool: t, .. } | policy::Scope::ExternalAny { server: s, tool: t }
-                    if s == server && t == tool)
-            });
-        }
-    }
+    state.grants.revoke_external(server, tool);
 }
 
 // ---- Approvals ----------------------------------------------------------------------
@@ -344,8 +366,6 @@ struct AppApprover {
     app: AppHandle,
     chat_id: i64,
     cancel: CancellationToken,
-    /// Shared with the policy gate so a new grant applies to the rest of the turn.
-    grants: Arc<Mutex<BTreeSet<policy::Scope>>>,
 }
 
 /// An always-ask card raised while a call is running (ARCHITECTURE.md 13.3, "Approvals
@@ -473,26 +493,43 @@ impl Approver for AppApprover {
         };
         drop(guard);
         if answer == Approval::AllowForChat && req.card == policy::CardKind::Grantable {
-            let state = self.app.state::<AppState>();
-            let mut grants = load_grants(&state, self.chat_id).await;
-            match &req.action.scope {
-                policy::Scope::Commands { parts } => grants.extend(parts.iter().cloned()),
-                s => {
-                    grants.insert(s.clone());
-                }
-            }
-            let _ = save_grants(&state, self.chat_id, &grants).await;
-            if let Ok(mut shared) = self.grants.lock() {
-                *shared = grants;
-            }
+            let scopes = match &req.action.scope {
+                policy::Scope::Commands { parts } => parts.clone(),
+                s => vec![s.clone()],
+            };
+            // Added under the lock, so a "Forget" at the same moment is not undone. The
+            // policy gate reads the app state, so this applies to the turn's next call.
+            self.app
+                .state::<AppState>()
+                .grants
+                .add(self.chat_id, scopes);
         }
         answer
     }
 }
 
+/// The policy gate of one turn. It reads the chat's grants from the app state on every
+/// decision and keeps no copy, so a grant given during the turn applies to its next call,
+/// and "Forget everything I allowed in this chat" or a revoked tool apply at once, also in
+/// a turn that is already running (D12).
 struct AppPolicy {
-    grants: Arc<Mutex<BTreeSet<policy::Scope>>>,
+    grants: Arc<Grants>,
+    chat_id: i64,
     ready: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+}
+
+impl AppPolicy {
+    fn for_chat(
+        grants: Arc<Grants>,
+        chat_id: i64,
+        ready: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    ) -> Self {
+        Self {
+            grants,
+            chat_id,
+            ready,
+        }
+    }
 }
 
 impl PolicyGate for AppPolicy {
@@ -510,7 +547,7 @@ impl PolicyGate for AppPolicy {
             recovered_from_text: recovered,
             untrusted_in_turn,
         };
-        let grants = self.grants.lock().map(|g| g.clone()).unwrap_or_default();
+        let grants = self.grants.of_chat(self.chat_id);
         policy::evaluate(action, &turn, &grants)
     }
 }
@@ -1072,6 +1109,15 @@ async fn persist_loop(
     parent
 }
 
+/// The folder relative paths resolve against (ARCHITECTURE.md 9.3): the one the user
+/// chose while it is still approved for the chat, otherwise the first approved folder.
+fn working_folder_for(stored: Option<&str>, approved: &[String]) -> Option<String> {
+    stored
+        .filter(|w| approved.iter().any(|a| a == w))
+        .or_else(|| approved.first().map(String::as_str))
+        .map(str::to_string)
+}
+
 /// Everything the turn needs that the chat command already resolved.
 pub struct TurnRequest {
     pub chat: store::Chat,
@@ -1120,11 +1166,7 @@ pub async fn run(
     skills_srv.set_terminal_enabled(enabled.iter().any(|t| t.server == "terminal"));
     let chat_ctx = ChatContext {
         chat_id: chat_id.0,
-        working_folder: req
-            .chat
-            .working_folder
-            .clone()
-            .or_else(|| folders.first().cloned()),
+        working_folder: working_folder_for(req.chat.working_folder.as_deref(), &folders),
         approved_folders: folders.clone(),
         forbidden_folders: crate::permissions::forbidden_for_tools(app),
         skill_folders: skills_srv
@@ -1132,6 +1174,25 @@ pub async fn run(
             .iter()
             .map(|s| s.dir.display().to_string())
             .collect(),
+        // Where skills are loaded from (as in `toolset::reload_skills`): the file and git
+        // tools never write there.
+        skill_roots: {
+            let shared: bool = state
+                .store
+                .get_setting(crate::toolset::SHARED_SKILLS)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            let mut roots: Vec<String> = crate::toolset::skills_root(app)
+                .map(|r| r.display().to_string())
+                .into_iter()
+                .collect();
+            if shared && let Ok(home) = app.path().home_dir() {
+                roots.push(home.join(".agents").join("skills").display().to_string());
+            }
+            roots
+        },
         result_cap_tokens: 2000,
     };
     let result_cap = Arc::new(AtomicUsize::new(2000));
@@ -1150,16 +1211,15 @@ pub async fn run(
         })),
     };
     let ready_host = host.clone();
-    let grants = Arc::new(Mutex::new(load_grants(&state, chat_id.0).await));
-    let policy = AppPolicy {
-        grants: grants.clone(),
-        ready: Arc::new(move |tool: &str| ready_host.tool_ready(tool)),
-    };
+    let policy = AppPolicy::for_chat(
+        state.grants.clone(),
+        chat_id.0,
+        Arc::new(move |tool: &str| ready_host.tool_ready(tool)),
+    );
     let approver = AppApprover {
         app: app.clone(),
         chat_id: chat_id.0,
         cancel: cancel.clone(),
-        grants,
     };
     let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
     let sink = AppSink {
@@ -1394,6 +1454,89 @@ mod tests {
             decision_name(&CallDecision::Cancelled).1,
             store::AuditDecision::Cancelled
         );
+    }
+
+    fn action_with(scope: policy::Scope) -> policy::Action {
+        policy::Action {
+            server: "files".into(),
+            tool: "write_file".into(),
+            summary: String::new(),
+            preview: String::new(),
+            scope,
+            risk: policy::Risk::Normal,
+            read_only: false,
+            outbound: false,
+            hard_limit: None,
+            payload: Value::Null,
+        }
+    }
+
+    /// D12: revoking grants takes effect from the next tool call, also in a turn that is
+    /// already running ("Forget everything I allowed in this chat", a narrowed or changed
+    /// external tool).
+    #[test]
+    fn revoked_grants_reach_a_running_turn() {
+        let grants = Arc::new(Grants::default());
+        let write = policy::Scope::FileWrite {
+            folder: "/work".into(),
+        };
+        let external = policy::Scope::ExternalAny {
+            server: "weather".into(),
+            tool: "forecast".into(),
+        };
+        grants.replace(7, &BTreeSet::from([write.clone(), external.clone()]));
+        grants.replace(8, &BTreeSet::from([write.clone()]));
+        let gate = AppPolicy::for_chat(grants.clone(), 7, Arc::new(|_: &str| true));
+        let asks = |d: policy::Decision| matches!(d, policy::Decision::Ask { .. });
+        let decide =
+            |scope: &policy::Scope| gate.decide("t", &action_with(scope.clone()), false, false);
+
+        assert_eq!(decide(&write), policy::Decision::AllowedByGrant);
+        assert_eq!(decide(&external), policy::Decision::AllowedByGrant);
+
+        // One external tool's grants are revoked while the turn runs.
+        grants.revoke_external("weather", "forecast");
+        assert!(
+            asks(decide(&external)),
+            "a revoked tool grant still applied"
+        );
+        assert_eq!(decide(&write), policy::Decision::AllowedByGrant);
+
+        // "Forget everything I allowed in this chat" while the turn runs.
+        grants.replace(7, &BTreeSet::new());
+        assert!(asks(decide(&write)), "a cleared grant still applied");
+        // Another chat keeps its own grants.
+        assert_eq!(grants.of_chat(8), BTreeSet::from([write.clone()]));
+
+        // A grant given later in the turn ("Allow for this chat") applies to its next call.
+        grants.add(7, vec![write.clone()]);
+        assert_eq!(decide(&write), policy::Decision::AllowedByGrant);
+        assert_eq!(grants.of_chat(8), BTreeSet::from([write.clone()]));
+        // Nothing to add leaves no empty entry behind.
+        grants.add(9, Vec::new());
+        assert!(grants.0.lock().unwrap().get(&9).is_none());
+    }
+
+    /// ARCHITECTURE.md 9.3: the chosen working folder is used only while it is still
+    /// approved; otherwise the first approved folder, as when none was chosen.
+    #[test]
+    fn a_revoked_working_folder_is_not_used() {
+        let approved = vec!["/work/a".to_string(), "/work/b".to_string()];
+        assert_eq!(
+            working_folder_for(Some("/work/b"), &approved).as_deref(),
+            Some("/work/b")
+        );
+        assert_eq!(
+            working_folder_for(None, &approved).as_deref(),
+            Some("/work/a")
+        );
+        assert_eq!(
+            working_folder_for(Some("/work/revoked"), &approved).as_deref(),
+            Some("/work/a"),
+            "a folder that is no longer approved was used"
+        );
+        assert_eq!(working_folder_for(Some("/work/revoked"), &[]), None);
+        assert_eq!(working_folder_for(None, &[]), None);
     }
 
     #[test]

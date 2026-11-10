@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../lib/ipc";
 import type { ComputerStatus, Convention, ErrorInfo } from "../lib/types";
+import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
 
@@ -34,6 +35,22 @@ export function ComputerSettings() {
       .catch((e) => setError(toErrorInfo(e)));
   }, [model]);
   useEffect(refresh, [refresh]);
+
+  function openSettingsPane(url: string) {
+    openUrl(url).catch((e) => {
+      const info = toErrorInfo(e);
+      // The opener plugin rejects with a plain string; say what failed and what to do instead.
+      setError(
+        info.code === "unexpected"
+          ? {
+              ...info,
+              message: "System Settings could not be opened.",
+              nextStep: "Open System Settings yourself and follow the steps below.",
+            }
+          : info,
+      );
+    });
+  }
 
   async function save() {
     if (!model) return;
@@ -78,14 +95,14 @@ export function ComputerSettings() {
                 {p.name}: {p.ok ? "allowed" : "not allowed"}
               </span>
               {!p.ok && (
-                <button type="button" className="text-accent underline" onClick={() => void openUrl(p.url)}>
+                <button type="button" className="text-accent underline" onClick={() => openSettingsPane(p.url)}>
                   Open System Settings
                 </button>
               )}
             </div>
           ))}
           <p className="text-xs text-fg-muted">
-            In System Settings → Privacy &amp; Security, turn on harnissUI under Screen Recording and Accessibility, then
+            In System Settings → Privacy &amp; Security, turn on {APP_NAME} under Screen Recording and Accessibility, then
             come back here (macOS may ask you to restart the app). Unsigned builds lose these permissions on every update.
           </p>
           <button type="button" className="rounded-md border border-border px-3 py-1" onClick={refresh}>

@@ -41,21 +41,24 @@ model and system prompt, tokens/s; OpenAI-compatible endpoints with keys in the
 keychain; *Settings → Diagnostics → Run backend check*.
 
 **Manual test — Windows PC:**
-1. *Settings → Diagnostics → Run backend check*. Expect Vulkan listing your RX 9070 XT and CPU, each with a timed generation; note both tokens/s numbers (this decides D3's Auto order).
-2. Model picker → *Open a GGUF file…* → pick any GGUF. The indicator goes from loading (with progress) to ready; the header shows backend and context.
+1. Model picker → *Open a GGUF file…* → pick any GGUF. The indicator goes from loading (with progress) to ready; the header shows backend and context.
+2. With that model loaded, *Settings → Diagnostics → Run backend check*. Expect Vulkan listing your RX 9070 XT and CPU, each with a timed generation; note both tokens/s numbers (this decides D3's Auto order). Without a loaded model the report lists devices only. *Open logs folder* shows the saved report.
 3. Send a message; tokens stream, tokens/s appears. Press Stop mid-reply: "Stopped". Regenerate: "2 / 2" arrows switch versions. Edit your message and resend: the old branch stays reachable.
 4. Task Manager: one `llama-server.exe` under the app. End the app's process tree from Task Manager → `llama-server.exe` disappears too.
-5. *Settings → Endpoints*: add LM Studio or Ollama if you have one; pick its model in a new chat.
+5. *Settings → Endpoints*: add LM Studio or Ollama if you have one; pick its model in a new chat. If the server does not report its context size, *Context size when a server does not report one* on the same page sets what the app plans with (default 4,096 tokens).
 
 **Manual test — Mac:**
-1. Backend check: Metal (Apple M5) and CPU.
-2. Steps 2, 3 and 5 as above.
-3. Activity Monitor: one `llama-server`. Force-quit the app → `llama-server` exits within a few seconds (the reaper).
-4. Keychain: adding an endpoint key may raise a keychain prompt on this unsigned build (see Known issues).
+1. Step 1 as above.
+2. With the model loaded, backend check: Metal (Apple M5) and CPU, each with a timed generation.
+3. Steps 3 and 5 as above.
+4. Activity Monitor: one `llama-server`. Force-quit the app → `llama-server` exits within a few seconds (the reaper).
+5. Keychain: adding an endpoint key may raise a keychain prompt on this unsigned build (see Known issues).
 
 **Known issues:** WebView2 crash reporting is disabled by command-line switches only (wry
 does not expose the documented setting; unverified on real Windows). (Since M8: the
 header warns "Loaded but slow" or "N of M layers on the GPU" after a load.) Unsigned macOS builds can trigger repeated keychain prompts.
+Upstream llama.cpp build attestations are not verified; downloads are checked against the
+SHA-256 pins in `llama.lock.json`.
 
 **Dependencies:** from section 18 only: `reqwest` (native TLS, the OS proxy and
 certificate store), `rusqlite` (bundled SQLite), `keyring-core` with the platform stores,
@@ -83,12 +86,14 @@ ROCm and CUDA backend packs downloaded on demand and verified by SHA-256.
 1. First run: the suggestion should fit 16 GB (about an 8B-class model at ~16k context).
 2. Steps 2, 3 and 5 as above (no backend packs on macOS).
 
-**Known issues:** the catalog's entries are not yet marked tested on your machines, so
-first run never preselects one (run `scripts/catalog_test.py`, see below). Catalog
-Refresh is disabled until the updater key exists.
+**Known issues:**
+- The catalog's entries are not yet marked tested on your machines, so first run never preselects one (run `scripts/catalog_test.py`, see below).
+- *Refresh catalog* (*Settings → General → Model catalog*) is disabled until the updater key exists. With the key, each release attaches the signed catalog.
+- CI does not run the catalog's template-shape and tool round-trip tests; `scripts/catalog_test.py` is run by hand.
+- The bundled `llama-fit-params` is not run yet, so the fit verdict stays the estimate from the GGUF header even once the file is local.
+- The ROCm and CUDA license texts are not shown in the app before download or saved beside the pack; the dialog names the license and links to it.
 
-**TODO for you:** `python3 scripts/catalog_test.py <entry>` on each machine records a
-tested entry.
+**TODO for you:** on each machine run `python3 scripts/catalog_test.py --entry <id> --server <path to llama-server> [--device Vulkan0]` (`--list` shows the ids). When it passes, copy the printed `tested` object into that entry's `"tested"` field in `catalog/models.json`.
 
 **Dependencies:** from section 18 only: `minisign-verify` (signed catalog), `pdf-extract`
 (PDF attachments, in a worker process), `sha2`.
@@ -110,19 +115,21 @@ Automated: `e2e/m3_agent.py` passes against the real llama-server with Qwen3 0.6
 open, audit rows).
 
 **Manual test — both machines** (use a tool-capable model, e.g. Qwen3 8B):
-1. *Settings → Permissions → Approve a folder* → pick a test folder with a text file in it. Approving your home folder shows a warning; the app's own folders are refused.
+1. *Settings → Permissions → Approve a folder* → pick a test folder with a text file in it. Approving your home folder shows a warning; the app's own folders are refused. In a chat, *Tools → Folders for this chat* lists it; *Approve a folder for this chat…* adds one for that chat only, and the selected folder is where relative paths start.
 2. New chat: "Read notes.txt in my folder and summarise it." A `read_file` card appears with the full path. Click *Allow once*: the result card shows the file, the model answers.
 3. Ask again with *Allow for this chat*; a third read in the same chat runs without a card. Check *Settings → Audit log*: allow_once, allow_for_chat, allowed_by_grant.
 4. "Create hello.txt containing hi." The card shows a diff. *Deny* with a note: nothing is written, the model mentions your note.
 5. Ask for a write, and while the card is up press the global stop hotkey (Windows Ctrl+Alt+Backspace, Mac Ctrl+Option+Delete) with another app in front: the card closes, the call shows Cancelled.
 6. *Tools* panel: switch on Terminal; ask "what is in this folder? use run_command". Windows runs PowerShell 5.1, Mac runs zsh. `dir`/`ls` can be granted; `rm`/`Remove-Item` always asks.
 7. MCP: *Settings → MCP servers → Add servers*, paste e.g. `{"mcpServers":{"everything":{"command":"npx","args":["-y","@modelcontextprotocol/server-everything"]}}}` (needs Node.js). Confirm the warning. The server goes Running; open it, switch on `echo`; in a chat ask the model to echo something: card shows server, tool and arguments.
-8. Paste a config with `"env": {"API_KEY": "abc"}`: after adding, the stored config shows a `${secret:…}` placeholder (Windows Credential Manager / macOS Keychain Access holds the value under the app's name).
+8. Paste a config with `"env": {"API_KEY": "abc"}`: the preview reads *Saved in the system keychain: API_KEY*. After adding, the server row does not show the value. Windows Credential Manager (*Windows Credentials → Generic Credentials*) has `mcp-secret:<server name>.env.API_KEY.io.github.sugarhappy8.harnissui`; macOS Keychain Access has an item for `io.github.sugarhappy8.harnissui` with account `mcp-secret:<server name>.env.API_KEY`. Either holds `abc`. (The app's database keeps only `${secret:<server name>.env.API_KEY}`.)
 
 Also: a per-chat *Thinking on/off* switch in the header for local thinking models.
 
-**Known issues:** MCP servers that need OAuth
-sign-in are not supported yet.
+**Known issues:**
+- MCP servers that need OAuth sign-in are not supported yet.
+- Regenerate and edit-and-resend do not list what the replaced reply changed (files written, commands run) and do not ask before running again.
+- When a remote endpoint rejects a request that carries tools, the reply fails; the app does not yet retry with built-in tools only or switch tools off for that model.
 
 **TODOs:** count image tokens against the per-result cap; verify Ollama's thinking-off
 field on a real Ollama; replace the bounded echo look-back in the text-call parser with a
@@ -157,7 +164,8 @@ process that Stop kills; private repositories use a token per host from Settings
 the app uses the built-in library like on Windows).
 
 **Known issues:** the built-in library cannot use Git's credential helpers (tokens per
-host instead) and has no SSH remotes.
+host instead) and has no SSH remotes. A running terminal card has no Kill button; Stop ends
+the whole turn.
 
 **Dependencies:** `git2` 0.21 with vendored libgit2 (the fallback when Git is missing;
 https through WinHTTP / SecureTransport, no ssh); on macOS `vendored-openssl`, because
@@ -179,10 +187,12 @@ prompt".
 Automated: `e2e/m5_skills.py` (create in the editor, the model loads it, audit row,
 disable, delete).
 
+How to write a skill: [skills-guide.md](skills-guide.md).
+
 **Manual test — both machines:**
 1. *Settings → Skills → New skill*, name `magic-number`, body "The magic number is 4242". *Validate* → no problems → *Save*.
 2. New chat: "What is the magic number? Load the skill." The `load_skill` card runs without asking; the model answers 4242.
-3. *Import zip…* with a skill zip from another agent app; it appears enabled. Disable it: it disappears from new chats' prompts.
+3. *Import zip…* with a skill zip from another agent app; it appears turned off. Turn it on: new chats can load it. Turn it off again: it disappears from new chats' prompts.
 
 **Dependencies:** none new.
 
@@ -246,7 +256,8 @@ Qwen2.5-VL-based model such as UI-TARS-1.5-7B):
 
 **Known issues:** unsigned macOS builds lose the two permissions on every new build (a
 Developer ID fixes that). The automated calibration test of 9.3 is replaced by a
-confirmed per-model convention for now (see the 4pm report).
+confirmed per-model convention for now: the app's windows are excluded from screenshots, so
+the model cannot see calibration targets the app draws.
 
 **Dependencies:** `image` 0.25 (bicubic resize identical to llama.cpp's, PNG; already in
 the lock through Tauri); `xcap` 0.9 (Windows monitor capture, named in 9.3); `enigo` 0.6
@@ -261,18 +272,24 @@ CoreGraphics, AppKit; the same bindings Tauri uses, no Swift build step).
 restart*, automatic check off by default); keyboard shortcut sheet (Ctrl+/ or Cmd+/) and
 chat-list toggle (Ctrl+B or Cmd+B); the 8.1 message for models without tool support;
 third-party notices generated and checked in CI; an offline gate (`e2e/m8_offline.py`:
-no outbound request through any proxy during start, a local chat and every settings
-page).
+no outbound request through any proxy during start, a local chat and all twelve settings
+pages). The release workflow fetches the pinned llama.cpp runtime, signs and attaches the
+catalog when the updater key is set, and fails if the draft release is missing an
+installer, a platform in `latest.json` or the catalog. The Windows installer stops a stray
+`llama-server.exe` running from the install folder before it copies files.
 
 **Manual test — both machines:**
 1. *Settings → General → Updates* says this build cannot update itself (no key yet). After you set up the key (README, "Signing") and tag a release, a release build offers *Check now*.
 2. Press Ctrl+/ (Cmd+/): the shortcut list opens, including your stop hotkey. Ctrl+B hides and shows the chat list.
 3. Offline: turn off Wi-Fi / unplug the network, start the app, load a downloaded model and chat; everything works and nothing reports a network error except Hugging Face search.
+4. Windows: quit the app, start `llama-server.exe -m <any .gguf>` from the install folder's `llama\main` (by default `%LOCALAPPDATA%\harnissUI\llama\main`) in a terminal, then run the installer again: it stops that server and installs without an "Error opening file for writing" prompt.
 
 **Known issues:** the offline gate sees proxied traffic only (not direct DNS lookups); long
 chats show their latest 80 messages with a "Show earlier" button rather than a
 virtualised list; Rust types
-are mirrored by hand in `src/lib/types.ts` rather than generated.
+are mirrored by hand in `src/lib/types.ts` rather than generated. Outbound HTTP does not
+yet go through one network module with a reason on every request and a lint against other
+clients; each crate makes its own HTTP client.
 
 **Dependencies:** `tauri-plugin-updater` (listed in section 18; registered only in builds
 that carry the updater key).

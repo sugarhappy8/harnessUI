@@ -296,7 +296,9 @@ fn comspec(opts: &HostOptions) -> PathBuf {
 }
 
 /// macOS: Apple's stubs that open the developer-tools installer instead of running.
-pub(crate) fn is_developer_tools_stub(program: &Path) -> bool {
+/// Only the path is compared, so this is safe to call on any OS; callers apply it on
+/// macOS only, where `/usr/bin/git` is a stub (elsewhere it is the real git).
+pub fn is_developer_tools_stub(program: &Path) -> bool {
     matches!(
         program.to_str(),
         Some("/usr/bin/python3" | "/usr/bin/pip3" | "/usr/bin/git")
@@ -326,7 +328,7 @@ pub(crate) async fn check_developer_tools(prepared: &mut Prepared) -> Result<(),
 
 /// The first program named `command` in `search` that is not one of Apple's stubs
 /// (`/usr/bin` is skipped). `None` for a command given with a folder.
-fn alternative_to_stub(command: &str, search: &OsStr) -> Option<PathBuf> {
+pub fn alternative_to_stub(command: &str, search: &OsStr) -> Option<PathBuf> {
     if Path::new(command).components().count() != 1 {
         return None;
     }
@@ -339,8 +341,9 @@ fn alternative_to_stub(command: &str, search: &OsStr) -> Option<PathBuf> {
 }
 
 /// Whether Apple's command line tools (or Xcode) are installed: the tools folder exists,
-/// or `xcode-select -p` succeeds and names a folder that holds git. Checked once.
-async fn developer_tools_installed() -> bool {
+/// or `xcode-select -p` succeeds and names a folder that holds git. Checked once. macOS
+/// only: it runs `/usr/bin/xcode-select`.
+pub async fn developer_tools_installed() -> bool {
     static INSTALLED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
     *INSTALLED
         .get_or_init(|| async {

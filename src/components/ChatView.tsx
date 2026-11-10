@@ -122,6 +122,7 @@ export function ChatView() {
           <ToolsPanel
             chatId={detail.chat.id}
             nCtx={nCtx}
+            workingFolder={detail.chat.workingFolder ?? null}
             unsupported={!!modelRef?.startsWith("local:") && runtime?.state === "ready" && !runtime.supportsTools}
           />
         )}

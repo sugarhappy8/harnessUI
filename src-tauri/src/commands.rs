@@ -77,6 +77,44 @@ mod tests {
         }
     }
 
+    /// The webview may open http(s), mailto and tel links, plus exactly the two macOS
+    /// Privacy panes the computer-use settings link to (the scope is a glob; `[?]` is a
+    /// literal `?`).
+    #[test]
+    fn open_url_scope_is_the_two_privacy_panes() {
+        let main: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
+        let perms = main["permissions"].as_array().unwrap();
+        assert!(perms.contains(&serde_json::json!("opener:allow-default-urls")));
+        assert!(
+            !perms.contains(&serde_json::json!("opener:allow-open-url")),
+            "open_url is granted only with its scope"
+        );
+        let scoped: Vec<&serde_json::Value> = perms
+            .iter()
+            .filter(|p| p["identifier"] == "opener:allow-open-url")
+            .collect();
+        assert_eq!(scoped.len(), 1);
+        let patterns: Vec<&str> = scoped[0]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["url"].as_str().unwrap())
+            .collect();
+        // No wildcard: a bare `?` would match any one character.
+        assert!(patterns.iter().all(|p| !p.replace("[?]", "").contains('?')));
+        let mut urls: Vec<String> = patterns.iter().map(|p| p.replace("[?]", "?")).collect();
+        urls.sort();
+        let mut want = vec![
+            computer::MACOS_ACCESSIBILITY_URL.to_string(),
+            computer::MACOS_SCREEN_RECORDING_URL.to_string(),
+        ];
+        want.sort();
+        assert_eq!(urls, want);
+        assert!(urls.iter().all(|u| !u.contains('*') && !u.contains('[')));
+        assert!(scoped[0].get("deny").is_none());
+    }
+
     /// The config names its capabilities explicitly, so a stray file is never enabled.
     #[test]
     fn capabilities_are_listed_explicitly() {

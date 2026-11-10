@@ -110,18 +110,58 @@ pub(crate) fn host_key(url: &str) -> Option<String> {
     policy::sanitize::display_host(&u).map(|h| h.to_ascii_lowercase())
 }
 
-/// A URL as an approval card shows it: punycode host, and any password in it replaced
-/// by `***` (credentials are never shown or logged, 9.2). Anything else is unchanged.
+/// A URL as an approval card shows it: punycode host, and any user name and password in it
+/// replaced by `***` (credentials are never shown or logged, 9.2; a token is often the
+/// user name alone). Anything else is unchanged.
 pub(crate) fn display_url(url: &str) -> String {
     match url::Url::parse(url) {
-        Ok(mut u) if u.has_host() => {
-            if u.password().is_some() {
-                let _ = u.set_password(Some("***"));
-            }
-            u.to_string()
-        }
-        _ => url.to_string(),
+        Ok(u) if u.has_host() => mask_userinfo(u.as_str()),
+        _ => mask_userinfo(url),
     }
+}
+
+/// One `scheme://…` URL with its user name and password replaced by `***`: everything
+/// before the last `@` of the authority, which is the text after `://` up to the first `/`,
+/// `?` or `#` (as git and curl read it, see `git_url_host`). The rest is unchanged byte for
+/// byte, so the card still shows the host git connects to. Text without `://` is returned
+/// as it is.
+pub(crate) fn mask_userinfo(url: &str) -> String {
+    let Some(start) = url.find("://").map(|i| i + 3) else {
+        return url.to_string();
+    };
+    let rest = &url[start..];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    match authority.rfind('@') {
+        Some(at) => format!("{}***{}", &url[..start], &rest[at..]),
+        None => url.to_string(),
+    }
+}
+
+/// Free text (git's output, an error message) with the user name and password of every
+/// `scheme://…` URL in it replaced by `***`. A URL's authority ends at `/`, `?`, `#` or
+/// white space.
+pub(crate) fn hide_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let start = i + 3;
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let end = after
+            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
+            .unwrap_or(after.len());
+        let authority = &after[..end];
+        match authority.rfind('@') {
+            Some(at) => {
+                out.push_str("***");
+                out.push_str(&authority[at..]);
+            }
+            None => out.push_str(authority),
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1161,12 +1201,12 @@ mod tests {
                 other => panic!("{bad}: {other:?}"),
             }
         }
-        // The message names the standard form, with any password hidden.
+        // The message names the standard form, with any user name and password hidden.
         let Err(why) = fallback_remote("https://u:pw@GitHub.com/a/b.git", false) else {
             panic!()
         };
         assert!(
-            why.message().contains("https://u:***@github.com/a/b.git"),
+            why.message().contains("https://***@github.com/a/b.git"),
             "{why:?}"
         );
         for good in [
@@ -1205,7 +1245,12 @@ mod tests {
     fn display_urls_hide_passwords_and_use_punycode() {
         assert_eq!(
             display_url("https://user:ghp_secret@github.com/a/b.git"),
-            "https://user:***@github.com/a/b.git"
+            "https://***@github.com/a/b.git"
+        );
+        // A token is often the user name alone.
+        assert_eq!(
+            display_url("https://ghp_secret@github.com/a/b.git"),
+            "https://***@github.com/a/b.git"
         );
         assert_eq!(
             display_url("https://github.com/a/b.git"),
@@ -1218,6 +1263,67 @@ mod tests {
         assert_eq!(
             display_url("git@github.com:a/b.git"),
             "git@github.com:a/b.git"
+        );
+    }
+
+    #[test]
+    fn user_names_and_passwords_are_masked_in_urls_as_written() {
+        // One URL: everything before the last '@' of the authority, as git reads it; the
+        // rest stays byte for byte.
+        for (url, shown) in [
+            (
+                "https://user:ghp_x@GitHub.com/a/b.git",
+                "https://***@GitHub.com/a/b.git",
+            ),
+            (
+                "https://ghp_x@github.com/a/b.git",
+                "https://***@github.com/a/b.git",
+            ),
+            ("https://a.com\\@b.com/x", "https://***@b.com/x"),
+            ("https://u:p@ss@host:8443", "https://***@host:8443"),
+            ("ssh://git@host:22/x", "ssh://***@host:22/x"),
+            ("https://github.com/a@b.git", "https://github.com/a@b.git"),
+            ("https://github.com/a/b.git", "https://github.com/a/b.git"),
+            ("git@github.com:a/b.git", "git@github.com:a/b.git"),
+            ("https://us er:tok@host/r", "https://***@host/r"),
+            // The authority ends at the first '/', '?' or '#', as git and curl read it, so
+            // the card never shows a host other than the one git connects to.
+            (
+                "https://evil.example?@github.com/r.git",
+                "https://evil.example?@github.com/r.git",
+            ),
+            (
+                "https://evil.example#@github.com/r.git",
+                "https://evil.example#@github.com/r.git",
+            ),
+            (
+                "https://u:t@evil.example#@github.com/x",
+                "https://***@evil.example#@github.com/x",
+            ),
+        ] {
+            assert_eq!(mask_userinfo(url), shown, "{url}");
+        }
+        // Free text such as an error message from git: every URL in it.
+        let text = "fatal: unable to access 'https://user:ghp_1@host.example/r.git/': 403\n\
+                    To https://ghp_2@mirror.example/r.git\n\
+                    mail me@example.com, see https://example.com/a@b";
+        let hidden = hide_credentials(text);
+        assert!(!hidden.contains("ghp_"), "{hidden}");
+        assert_eq!(
+            hide_credentials("to https://evil.example?@github.com/r and https://u:t@h.example#@x"),
+            "to https://evil.example?@github.com/r and https://***@h.example#@x"
+        );
+        assert!(
+            hidden.contains("'https://***@host.example/r.git/'"),
+            "{hidden}"
+        );
+        assert!(
+            hidden.contains("To https://***@mirror.example/r.git"),
+            "{hidden}"
+        );
+        assert!(
+            hidden.contains("me@example.com, see https://example.com/a@b"),
+            "{hidden}"
         );
     }
 

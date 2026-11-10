@@ -28,3 +28,41 @@ describe("Markdown safety", () => {
     expect(container.textContent).toContain("js");
   });
 });
+
+describe("Markdown code highlighting", () => {
+  it("highlights a fenced block that names a language, as elements", () => {
+    const { container } = render(<Markdown text={"```js\nconst x = 'a'; // note\n```"} />);
+    expect(container.querySelector("pre code.hljs.language-js")).not.toBeNull();
+    expect(container.querySelector("span.hljs-keyword")?.textContent).toBe("const");
+    expect(container.querySelector("span.hljs-string")?.textContent).toBe("'a'");
+    expect(container.querySelector("span.hljs-comment")?.textContent).toBe("// note");
+    expect(container.textContent).toContain("const x = 'a'; // note");
+  });
+
+  it("does not guess the language of a block without a tag", () => {
+    const { container } = render(<Markdown text={"```\nconst x = 1;\n```"} />);
+    expect(container.querySelector("[class*='hljs']")).toBeNull();
+    expect(container.textContent).toContain("const x = 1;");
+  });
+
+  it("shows a block in an unknown language as plain text", () => {
+    const { container } = render(<Markdown text={"```no-such-language\nconst x = 1;\n```"} />);
+    expect(container.querySelector("[class*='hljs-']")).toBeNull();
+    expect(container.textContent).toContain("const x = 1;");
+  });
+
+  it("leaves inline code alone", () => {
+    const { container } = render(<Markdown text={"Use `const x = 1` here."} />);
+    expect(container.querySelector("[class*='hljs']")).toBeNull();
+  });
+
+  it("keeps HTML inside a highlighted block as text", () => {
+    const { container } = render(
+      <Markdown text={"```html\n<script>alert(1)</script><img src=x onerror=\"alert(2)\">\n```"} />,
+    );
+    expect(container.querySelector("span.hljs-tag")).not.toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toContain("<script>alert(1)</script>");
+  });
+});

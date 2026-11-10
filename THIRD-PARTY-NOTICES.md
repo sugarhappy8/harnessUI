@@ -18165,7 +18165,9 @@ freely, subject to the following restrictions:
 | extend | 3.0.2 | MIT |
 | get-nonce | 1.0.1 | MIT |
 | hast-util-to-jsx-runtime | 2.3.7 | MIT |
+| hast-util-to-text | 4.0.3 | MIT |
 | hast-util-whitespace | 3.0.0 | MIT |
+| highlight.js | 11.11.2 | BSD-3-Clause |
 | html-url-attributes | 3.0.1 | MIT |
 | inline-style-parser | 0.2.9 | MIT |
 | is-alphabetical | 2.0.1 | MIT |
@@ -18174,6 +18176,7 @@ freely, subject to the following restrictions:
 | is-hexadecimal | 2.0.1 | MIT |
 | is-plain-obj | 4.1.0 | MIT |
 | longest-streak | 3.1.0 | MIT |
+| lowlight | 3.3.0 | MIT |
 | lucide-react | 1.71.0 | ISC |
 | markdown-table | 3.1.0 | MIT |
 | mdast-util-find-and-replace | 3.0.4 | MIT |
@@ -18232,6 +18235,7 @@ freely, subject to the following restrictions:
 | react-remove-scroll | 2.7.2 | MIT |
 | react-remove-scroll-bar | 2.3.8 | MIT |
 | react-style-singleton | 2.2.3 | MIT |
+| rehype-highlight | 7.0.2 | MIT |
 | remark-gfm | 4.0.1 | MIT |
 | remark-parse | 11.0.0 | MIT |
 | remark-rehype | 11.1.2 | MIT |
@@ -18780,7 +18784,7 @@ WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN 
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-Used by: decode-named-character-reference 1.3.0, hast-util-to-jsx-runtime 2.3.7, markdown-table 3.1.0, mdast-util-find-and-replace 3.0.4, mdast-util-from-markdown 2.1.0, mdast-util-gfm 3.1.0, mdast-util-gfm-autolink-literal 2.1.0, mdast-util-gfm-footnote 2.1.0, mdast-util-gfm-strikethrough 2.0.1, mdast-util-gfm-table 2.0.1, mdast-util-gfm-task-list-item 2.0.1, mdast-util-mdx-jsx 3.2.1, mdast-util-to-markdown 2.2.3, micromark 4.0.3, micromark-core-commonmark 2.0.4, micromark-extension-gfm-table 2.1.2, micromark-factory-destination 2.0.1, micromark-factory-label 2.0.1, micromark-factory-space 2.1.0, micromark-factory-title 2.0.1, micromark-factory-whitespace 2.0.1, micromark-util-character 2.1.1, micromark-util-chunked 2.0.1, micromark-util-classify-character 2.0.1, micromark-util-combine-extensions 2.0.1, micromark-util-decode-numeric-character-reference 2.0.2, micromark-util-decode-string 2.0.1, micromark-util-edit-map 1.0.0, micromark-util-encode 2.0.1, micromark-util-html-tag-name 2.0.1, micromark-util-normalize-identifier 2.0.1, micromark-util-resolve-all 2.0.1, micromark-util-sanitize-uri 2.0.1, micromark-util-subtokenize 2.1.0, micromark-util-symbol 2.0.1, micromark-util-types 2.0.3, remark-gfm 4.0.1, remark-rehype 11.1.2, unist-util-visit 5.2.0, unist-util-visit-parents 6.1.0, vfile-message 4.0.4
+Used by: decode-named-character-reference 1.3.0, hast-util-to-jsx-runtime 2.3.7, hast-util-to-text 4.0.3, lowlight 3.3.0, markdown-table 3.1.0, mdast-util-find-and-replace 3.0.4, mdast-util-from-markdown 2.1.0, mdast-util-gfm 3.1.0, mdast-util-gfm-autolink-literal 2.1.0, mdast-util-gfm-footnote 2.1.0, mdast-util-gfm-strikethrough 2.0.1, mdast-util-gfm-table 2.0.1, mdast-util-gfm-task-list-item 2.0.1, mdast-util-mdx-jsx 3.2.1, mdast-util-to-markdown 2.2.3, micromark 4.0.3, micromark-core-commonmark 2.0.4, micromark-extension-gfm-table 2.1.2, micromark-factory-destination 2.0.1, micromark-factory-label 2.0.1, micromark-factory-space 2.1.0, micromark-factory-title 2.0.1, micromark-factory-whitespace 2.0.1, micromark-util-character 2.1.1, micromark-util-chunked 2.0.1, micromark-util-classify-character 2.0.1, micromark-util-combine-extensions 2.0.1, micromark-util-decode-numeric-character-reference 2.0.2, micromark-util-decode-string 2.0.1, micromark-util-edit-map 1.0.0, micromark-util-encode 2.0.1, micromark-util-html-tag-name 2.0.1, micromark-util-normalize-identifier 2.0.1, micromark-util-resolve-all 2.0.1, micromark-util-sanitize-uri 2.0.1, micromark-util-subtokenize 2.1.0, micromark-util-symbol 2.0.1, micromark-util-types 2.0.3, rehype-highlight 7.0.2, remark-gfm 4.0.1, remark-rehype 11.1.2, unist-util-visit 5.2.0, unist-util-visit-parents 6.1.0, vfile-message 4.0.4
 
 ```text
 (The MIT License)
@@ -18964,6 +18968,40 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+Used by: highlight.js 11.11.2
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2006, Ivan Sagalaev.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 Used by: html-url-attributes 3.0.1

@@ -161,26 +161,116 @@ async fn pick(app: &AppHandle, zip: bool) -> Option<PathBuf> {
     rx.await.ok().flatten().and_then(|p| p.into_path().ok())
 }
 
-/// Imports a skill from a folder or a zip the user picks; returns its name.
+/// The name the skill in `dir` loads with, read as `load_all` reads it: its frontmatter
+/// name, or its folder name when it has none. The disabled list matches on this name.
+fn loaded_name(dir: &Path) -> Result<String, tools::skills::SkillError> {
+    let text = std::fs::read_to_string(dir.join("SKILL.md"))?;
+    Ok(tools::skills::parse(&text, dir)?.name)
+}
+
+/// A skill unpacked into a staging folder inside the skills folder. A folder whose name
+/// starts with `.import-` holds no SKILL.md of its own, so it is never loaded.
+struct Staged {
+    /// Removed when the import ends, whatever happens.
+    stage: PathBuf,
+    /// The skill's folder inside `stage`.
+    dir: PathBuf,
+    /// Its folder name in the skills folder.
+    folder: String,
+    /// The name it loads with.
+    name: String,
+}
+
+fn stage_import(src: &Path, zip: bool, root: &Path) -> Result<Staged, tools::skills::SkillError> {
+    let stage = root.join(format!(".import-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&stage)?;
+    let staged = (|| -> Result<Staged, tools::skills::SkillError> {
+        let dir = if zip {
+            tools::skills::import_zip(src, &stage)?
+        } else {
+            tools::skills::import_folder(src, &stage)?
+        };
+        let folder = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = loaded_name(&dir)?;
+        Ok(Staged {
+            stage: stage.clone(),
+            dir,
+            folder,
+            name,
+        })
+    })();
+    if staged.is_err() {
+        let _ = std::fs::remove_dir_all(&stage);
+    }
+    staged
+}
+
+/// Imports a skill into `root` turned off (ARCHITECTURE.md 10: import is a trust decision).
+/// Its name goes on the disabled list before its folder is moved into place, so no reload
+/// of the skills can offer it to the model. Returns its folder name.
+async fn install_disabled(
+    store: &store::Store,
+    src: PathBuf,
+    zip: bool,
+    root: PathBuf,
+) -> AppResult<String> {
+    let staged = {
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || stage_import(&src, zip, &root))
+            .await
+            .map_err(AppError::internal)?
+            .map_err(skill_error)?
+    };
+    let result = finish_install(store, &staged, &root).await;
+    let _ = std::fs::remove_dir_all(&staged.stage);
+    result.map(|()| staged.folder)
+}
+
+async fn finish_install(store: &store::Store, staged: &Staged, root: &Path) -> AppResult<()> {
+    let dest = root.join(&staged.folder);
+    if dest.exists() {
+        return Err(skill_error(tools::skills::SkillError::Import(format!(
+            "a skill named \"{}\" is already installed",
+            staged.folder
+        ))));
+    }
+    // A list that cannot be read is an error: writing a fresh one would turn back on
+    // every skill the user turned off.
+    let mut off: Vec<String> = store.get_setting(DISABLED).await?.unwrap_or_default();
+    let added = !off.contains(&staged.name);
+    if added {
+        off.push(staged.name.clone());
+        store.set_setting(DISABLED, &off).await?;
+    }
+    if let Err(e) = std::fs::rename(&staged.dir, &dest) {
+        if added {
+            off.retain(|n| n != &staged.name);
+            let _ = store.set_setting(DISABLED, &off).await;
+        }
+        return Err(AppError::internal(e));
+    }
+    Ok(())
+}
+
+/// Imports a skill from a folder or a zip the user picks; returns its folder name. The
+/// skill starts turned off: its text becomes instructions to the model (10).
 #[tauri::command]
-pub async fn import_skill(app: AppHandle, zip: bool) -> AppResult<Option<String>> {
+pub async fn import_skill(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    zip: bool,
+) -> AppResult<Option<String>> {
     let Some(src) = pick(&app, zip).await else {
         return Ok(None);
     };
     let root = skills_root(&app).ok_or_else(|| AppError::internal("no app data folder"))?;
     std::fs::create_dir_all(&root).map_err(AppError::internal)?;
-    let dest = tokio::task::spawn_blocking(move || {
-        if zip {
-            tools::skills::import_zip(&src, &root)
-        } else {
-            tools::skills::import_folder(&src, &root)
-        }
-    })
-    .await
-    .map_err(AppError::internal)?
-    .map_err(skill_error)?;
+    let folder = install_disabled(&state.store, src, zip, root).await?;
     reload_skills(&app).await;
-    Ok(dest.file_name().map(|n| n.to_string_lossy().into_owned()))
+    Ok(Some(folder))
 }
 
 #[tauri::command]
@@ -327,4 +417,125 @@ pub fn loaded_skills(state: State<'_, AppState>, chat_id: store::ChatId) -> Vec<
 #[tauri::command]
 pub fn unload_skill(state: State<'_, AppState>, chat_id: store::ChatId, name: String) {
     state.skills.unload(chat_id.0, &name);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh folder under the system temp folder, removed by the test.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "harniss-skills-{tag}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_skill(dir: &Path, frontmatter: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\n{frontmatter}\n---\nDo the thing.\n"),
+        )
+        .unwrap();
+    }
+
+    async fn off(store: &store::Store) -> Vec<String> {
+        store
+            .get_setting(DISABLED)
+            .await
+            .unwrap()
+            .unwrap_or_default()
+    }
+
+    /// ARCHITECTURE.md 10: an imported skill starts turned off. The disabled list holds
+    /// the name the skill loads with, which can differ from its folder name.
+    #[tokio::test]
+    async fn an_imported_skill_starts_disabled() {
+        let tmp = scratch("import");
+        let root = tmp.join("skills");
+        std::fs::create_dir_all(&root).unwrap();
+        // A frontmatter name that is not a valid folder name.
+        let named = tmp.join("src-a");
+        write_skill(&named, "name: My Skill\ndescription: Has a name.");
+        // No name: it loads with its folder name, which the import changes.
+        let unnamed = tmp.join("Cool Tool");
+        write_skill(&unnamed, "description: Has no name.");
+
+        let store = store::Store::open_in_memory().unwrap();
+        store
+            .set_setting(DISABLED, &vec!["older".to_string()])
+            .await
+            .unwrap();
+        let a = install_disabled(&store, named, false, root.clone())
+            .await
+            .unwrap();
+        let b = install_disabled(&store, unnamed, false, root.clone())
+            .await
+            .unwrap();
+        assert_eq!((a.as_str(), b.as_str()), ("my-skill", "cool-tool"));
+
+        let (loaded, _) = tools::skills::load_all(&root);
+        let names: Vec<&str> = loaded.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["cool-tool", "My Skill"]);
+        let off = off(&store).await;
+        for name in &names {
+            assert!(
+                off.iter().any(|n| n == name),
+                "the imported skill \"{name}\" is not turned off: {off:?}"
+            );
+        }
+        assert!(
+            off.iter().any(|n| n == "older"),
+            "an earlier entry was lost"
+        );
+        // What `reload_skills` offers to the model: nothing that was just imported.
+        assert!(loaded.iter().all(|s| off.contains(&s.name)));
+        // No staging folder is left behind.
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".import-"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Importing a skill that is already installed fails, changes nothing and leaves no
+    /// staging folder.
+    #[tokio::test]
+    async fn a_second_import_of_the_same_skill_is_refused() {
+        let tmp = scratch("twice");
+        let root = tmp.join("skills");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = tmp.join("helper");
+        write_skill(&src, "name: helper\ndescription: Helps.");
+        let store = store::Store::open_in_memory().unwrap();
+        install_disabled(&store, src.clone(), false, root.clone())
+            .await
+            .unwrap();
+        // The user turned it on.
+        store
+            .set_setting(DISABLED, &Vec::<String>::new())
+            .await
+            .unwrap();
+        let err = install_disabled(&store, src, false, root.clone())
+            .await
+            .unwrap_err();
+        assert!(err.details.contains("already installed"), "{err:?}");
+        assert!(
+            off(&store).await.is_empty(),
+            "a refused import changed the disabled list"
+        );
+        let entries: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["helper".to_string()]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

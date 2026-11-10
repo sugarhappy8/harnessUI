@@ -15,7 +15,13 @@
 //! - a repository whose own config defines filter or merge drivers is refused, because
 //!   git has no switch to turn those off.
 //!
-//! `git_push` always asks, and its card shows the push URL resolved when it runs.
+//! `git_push` always asks, and its card shows the push URL resolved when it runs. A user
+//! name or password in a remote URL (often a token) is shown as `***` on cards, in errors
+//! and in the output of clone, pull and push, and the push URL is kept out of the payload
+//! key the agent stores as a result's source (9.2).
+//!
+//! Clone, pull and commit never write inside a skill folder (`ChatContext::skill_roots`):
+//! skills are added only through the skills UI (9.3, 10).
 //!
 //! When git is not installed (`GitConfig::git` is `None`) the same seven tools run on
 //! libgit2 instead (`git_fallback`, `git_worker`), with the same actions and scopes:
@@ -36,9 +42,10 @@ use serde_json::{Map, Value, json};
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::git_fallback::{self, RemoteRefusal, display_url};
+use crate::git_fallback::{self, RemoteRefusal, display_url, hide_credentials, mask_userinfo};
 use crate::git_worker::{self, Job, WorkerCommand};
 pub use crate::git_worker::{WORKER_FLAG, worker_main};
+use crate::skill_guard::{self, Reach};
 
 /// Output kept at most.
 const OUTPUT_LIMIT: usize = 1024 * 1024;
@@ -46,6 +53,9 @@ const OUTPUT_LIMIT: usize = 1024 * 1024;
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Time limit for local operations.
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// The payload key of `git_push`'s approved push URLs. Deliberately not `url`, which the
+/// agent reads as the result's source.
+const PUSH_URL_KEY: &str = "pushUrl";
 
 #[derive(Debug, Clone)]
 pub struct GitConfig {
@@ -178,11 +188,12 @@ pub(crate) fn check_remote_url(url: &str) -> Result<String, String> {
     Err("only https:// and ssh remotes are allowed".into())
 }
 
-/// The host git connects to for a `scheme://` URL: the text after the last `@` and
-/// before the first `/` of the part after `://`, without a port or brackets, lowercased.
+/// The host git connects to for a `scheme://` URL: in the authority (the part after `://`
+/// up to the first `/`, `?` or `#`, as git's credential code and curl read it), the text
+/// after the last `@`, without a port or brackets, lowercased.
 fn git_url_host(url: &str) -> Option<String> {
     let rest = url.split_once("://")?.1;
-    let authority = rest.split('/').next().unwrap_or(rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let hostport = authority.rsplit('@').next().unwrap_or(authority);
     let host = if let Some(stripped) = hostport.strip_prefix('[') {
         stripped.split(']').next().unwrap_or(stripped).to_string()
@@ -231,16 +242,30 @@ impl GitServer {
         self.config.git.is_none()
     }
 
-    /// A remote URL as the card shows it. System git: exactly as git will be given it, as
-    /// before the fallback existed (git and the url crate can read a URL differently, and
-    /// a card rewritten into the url crate's reading would hide that). Fallback: the URL
-    /// is in standard form already (`fallback_remote`), so only a password is hidden.
+    /// A remote URL as the card shows it, with any user name and password replaced by
+    /// `***` (credentials never reach the card, the audit log or the chat, 9.2). System
+    /// git: otherwise exactly as git will be given it, as before the fallback existed (git
+    /// and the url crate can read a URL differently, and a card rewritten into the url
+    /// crate's reading would hide that). Fallback: the URL is in standard form already
+    /// (`fallback_remote`).
     fn card_url(&self, url: &str) -> String {
         if self.fallback() {
             display_url(url)
         } else {
-            url.to_string()
+            mask_userinfo(url)
         }
+    }
+
+    /// Skill folders are written only by the skills UI (9.3, 10): a clone or pull refuses a
+    /// folder in a skill folder or holding one, and a commit (which writes the repository's
+    /// git folder) a repository in one. The other tools do not write the working tree.
+    fn skill_check(&self, tool: &str, path: &str, chat: &ChatContext) -> Result<(), String> {
+        let reach = match tool {
+            "git_clone" | "git_pull" => Reach::InsideOrAround,
+            "git_commit" => Reach::Inside,
+            _ => return Ok(()),
+        };
+        skill_guard::check(path, &chat.skill_roots, self.flavor, reach)
     }
 
     /// The host a clone grant covers, or why the URL is refused.
@@ -720,6 +745,9 @@ impl BuiltinServer for GitServer {
                 Ok(c) => c,
                 Err(e) => return Self::deny(tool, e.to_string()),
             };
+            if let Err(why) = self.skill_check(tool, &checked.canonical, chat) {
+                return Self::deny(tool, why);
+            }
             if checked.exists
                 && std::fs::read_dir(&checked.canonical)
                     .map(|mut d| d.next().is_some())
@@ -753,6 +781,9 @@ impl BuiltinServer for GitServer {
             Ok(r) => r,
             Err(e) => return Self::deny(tool, e),
         };
+        if let Err(why) = self.skill_check(tool, &root, chat) {
+            return Self::deny(tool, why);
+        }
         // libgit2 never runs the programs a repository's config can name, so the
         // fallback has nothing to refuse here.
         if !self.fallback()
@@ -867,7 +898,10 @@ impl BuiltinServer for GitServer {
                     Risk::AlwaysAsk,
                     false,
                     true,
-                    json!({"root": root, "remote": remote, "url": url}),
+                    // Not under "url": the agent stores that key as the result's source
+                    // (with the chat, and in every later prompt), and a push URL read from
+                    // the repository's config can hold a token.
+                    json!({"root": root, "remote": remote, PUSH_URL_KEY: url}),
                 )
             }
             other => Described::Invalid(format!("the git server has no tool named {other}")),
@@ -881,10 +915,19 @@ impl BuiltinServer for GitServer {
         action: &Action,
         ctx: CallContext,
     ) -> ToolOutput {
+        // Output of the network tools can name a remote with its credentials (a URL from
+        // the repository's config, or an error from git or libgit2): hide them.
+        let shown = |text: String| {
+            if matches!(tool, "git_clone" | "git_pull" | "git_push") {
+                hide_credentials(&text)
+            } else {
+                text
+            }
+        };
         if self.fallback() {
             return match self.call_fallback(tool, args, action, &ctx).await {
-                Ok(text) => sized_output(0, text, &ctx),
-                Err(e) => ToolOutput::error(e),
+                Ok(text) => sized_output(0, shown(text), &ctx),
+                Err(e) => ToolOutput::error(shown(e)),
             };
         }
         let p = &action.payload;
@@ -907,6 +950,9 @@ impl BuiltinServer for GitServer {
                 ) else {
                     return ToolOutput::error("internal error: the approved action has no URL");
                 };
+                if let Err(why) = self.skill_check(tool, dest, &ctx.chat) {
+                    return ToolOutput::error(why);
+                }
                 let dest = PathBuf::from(dest);
                 let parent = dest.parent().map(Path::to_path_buf).unwrap_or_default();
                 if let Err(e) = std::fs::create_dir_all(&parent) {
@@ -936,6 +982,9 @@ impl BuiltinServer for GitServer {
                 // Re-check what was approved immediately before running.
                 if let Err(e) = self.check_repo_config(&root.display().to_string()).await {
                     return ToolOutput::error(e);
+                }
+                if let Err(why) = self.skill_check(tool, &root.display().to_string(), &ctx.chat) {
+                    return ToolOutput::error(why);
                 }
                 match tool {
                     "git_status" => {
@@ -1034,7 +1083,7 @@ impl BuiltinServer for GitServer {
                             .unwrap_or("origin")
                             .to_string();
                         let approved_url = p
-                            .get("url")
+                            .get(PUSH_URL_KEY)
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string();
@@ -1042,8 +1091,10 @@ impl BuiltinServer for GitServer {
                         match self.push_url(&root.display().to_string(), &remote).await {
                             Ok(now) if now == approved_url => {}
                             Ok(now) => {
+                                let shown: Vec<String> = now.lines().map(mask_userinfo).collect();
                                 return ToolOutput::error(format!(
-                                    "the push URL changed after approval (now {now}); nothing was pushed"
+                                    "the push URL changed after approval (now {}); nothing was pushed",
+                                    shown.join(", ")
                                 ));
                             }
                             Err(e) => return ToolOutput::error(e),
@@ -1068,8 +1119,8 @@ impl BuiltinServer for GitServer {
             }
         };
         match result {
-            Ok((code, text)) => sized_output(code, text, &ctx),
-            Err(e) => ToolOutput::error(e),
+            Ok((code, text)) => sized_output(code, shown(text), &ctx),
+            Err(e) => ToolOutput::error(shown(e)),
         }
     }
 }
@@ -1160,6 +1211,7 @@ impl GitServer {
                     checked.canonical
                 ));
             }
+            self.skill_check(tool, dest, &ctx.chat)?;
             let dest = PathBuf::from(dest);
             let parent = dest.parent().map(Path::to_path_buf).unwrap_or_default();
             std::fs::create_dir_all(&parent)
@@ -1184,6 +1236,7 @@ impl GitServer {
             return Err("internal error: the approved action has no repository".into());
         };
         self.fallback_recheck(&ctx.chat, &root).await?;
+        self.skill_check(tool, &root.display().to_string(), &ctx.chat)?;
         match tool {
             "git_status" => Self::local(cancel, move |c| git_fallback::status(&root, &c)).await,
             "git_diff" => {
@@ -1245,7 +1298,7 @@ impl GitServer {
             }
             "git_push" => {
                 let remote = payload_str(p, "remote").unwrap_or("origin").to_string();
-                let approved_url = payload_str(p, "url").unwrap_or("").to_string();
+                let approved_url = payload_str(p, PUSH_URL_KEY).unwrap_or("").to_string();
                 // The push URL resolved now must be the one on the card; the worker
                 // checks it once more on the object that pushes.
                 let now = self.push_url(&root.display().to_string(), &remote).await?;
@@ -1532,10 +1585,125 @@ mod tests {
         assert!(out.joined_text().contains("changed after approval"));
     }
 
+    /// The payload keys `source_of` in the agent reads for a result's source (stored with
+    /// the chat and repeated in every later prompt).
+    const SOURCE_KEYS: [&str; 5] = ["source", "path", "url", "canonicalPath", "canonical_path"];
+
+    fn no_secret_in_source(act: &Action, secrets: &[&str]) {
+        for key in SOURCE_KEYS {
+            if let Some(v) = act.payload.get(key).and_then(Value::as_str) {
+                for s in secrets {
+                    assert!(!v.contains(s), "{key} holds {s}: {v}");
+                }
+            }
+        }
+    }
+
+    /// Credentials in a push URL never reach the card, the audit preview, the result's
+    /// source or an error message.
+    #[tokio::test]
+    async fn push_urls_never_show_credentials() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        init_repo(&s, &root).await;
+        let cancel = CancellationToken::new();
+        let git = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let s = s.clone();
+            let root = root.clone();
+            let cancel = cancel.clone();
+            async move {
+                s.run(&root, &args, &cancel, Duration::from_secs(20))
+                    .await
+                    .unwrap()
+            }
+        };
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://user:ghp_secret1@example.com/r.git",
+        ])
+        .await;
+        let a = json!({}).as_object().cloned().unwrap();
+        let Described::Action(act) = s.describe("git_push", &a, &chat(&root)).await else {
+            panic!()
+        };
+        assert!(
+            act.preview.contains("https://***@example.com/r.git"),
+            "{}",
+            act.preview
+        );
+        assert!(!act.preview.contains("ghp_") && !act.summary.contains("ghp_"));
+        assert!(!act.preview.contains("user:"), "{}", act.preview);
+        no_secret_in_source(&act, &["ghp_"]);
+        // A token used as the user name, on a second push URL.
+        git(&[
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            "https://user:ghp_secret1@example.com/r.git",
+        ])
+        .await;
+        git(&[
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            "https://ghp_tok2@mirror.example/r.git",
+        ])
+        .await;
+        let Described::Action(both) = s.describe("git_push", &a, &chat(&root)).await else {
+            panic!()
+        };
+        assert!(
+            both.preview.contains("https://***@mirror.example/r.git"),
+            "{}",
+            both.preview
+        );
+        assert!(!both.preview.contains("ghp_") && !both.summary.contains("ghp_"));
+        no_secret_in_source(&both, &["ghp_"]);
+        // The URL changes after approval: the error names the new one without credentials.
+        git(&["config", "--unset-all", "remote.origin.pushurl"]).await;
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "https://ghp_new3@evil.example/r.git",
+        ])
+        .await;
+        let out = s
+            .call(
+                "git_push",
+                &a,
+                &act,
+                CallContext {
+                    chat: chat(&root),
+                    cancel: CancellationToken::new(),
+                    progress: None,
+                },
+            )
+            .await;
+        let text = out.joined_text();
+        assert!(
+            out.is_error && text.contains("changed after approval"),
+            "{text}"
+        );
+        assert!(
+            text.contains("evil.example") && !text.contains("ghp_"),
+            "{text}"
+        );
+    }
+
     /// The system-git card shows the URL exactly as git will be given it, as before the
     /// fallback existed: git and the url crate can read a URL differently
     /// (`https://github.com\@evil.example/` reaches evil.example through git), and a
-    /// card rewritten into the url crate's reading would hide that from the user.
+    /// card rewritten into the url crate's reading would hide that from the user. Only a
+    /// user name and password are replaced by `***` (credentials are never shown, 9.2).
     #[tokio::test]
     async fn the_system_git_card_shows_the_url_as_given() {
         let s = GitServer::new(GitConfig {
@@ -1559,7 +1727,17 @@ mod tests {
                 .is_some_and(|h| h.contains("backslash")),
             "{act:?}"
         );
-        for url in ["https://user:pw@GitHub.com/r.git"] {
+        for (url, shown) in [
+            (
+                "https://user:pw@GitHub.com/r.git",
+                "https://***@GitHub.com/r.git",
+            ),
+            (
+                "https://ghp_x@GitHub.com/r.git",
+                "https://***@GitHub.com/r.git",
+            ),
+            ("https://GitHub.com/r.git", "https://GitHub.com/r.git"),
+        ] {
             let a = json!({"url": url, "destination": "c"});
             let Described::Action(act) = s
                 .describe("git_clone", a.as_object().unwrap(), &chat(&root))
@@ -1569,11 +1747,12 @@ mod tests {
             };
             assert!(act.hard_limit.is_none(), "{url}");
             assert!(
-                act.preview.contains(&format!("git clone {url}\n")),
+                act.preview.contains(&format!("git clone {shown}\n")),
                 "{url}: {}",
                 act.preview
             );
-            assert_eq!(act.summary, format!("Clone {url}"));
+            assert_eq!(act.summary, format!("Clone {shown}"));
+            // What runs is the URL the model wrote.
             assert_eq!(act.payload["url"], url);
         }
     }
@@ -1620,6 +1799,15 @@ mod tests {
             git_url_host("https://u:p@Host.example/x").as_deref(),
             Some("host.example")
         );
+        // git and curl end the authority at the first '/', '?' or '#'; an '@' after that
+        // is not a user name.
+        for url in [
+            "https://evil.example?@github.com/r.git",
+            "https://evil.example#@github.com/r.git",
+            "https://u:t@evil.example#@github.com/r.git",
+        ] {
+            assert_eq!(git_url_host(url).as_deref(), Some("evil.example"), "{url}");
+        }
     }
 
     #[test]
@@ -1993,17 +2181,25 @@ mod fallback_tests {
             }
         );
         assert!(
-            act.preview.contains("https://user:***@example.com/r.git"),
+            act.preview.contains("https://***@example.com/r.git"),
             "{}",
             act.preview
         );
         assert!(!act.preview.contains("hunter2") && !act.summary.contains("hunter2"));
+        assert!(!act.preview.contains("user:"), "{}", act.preview);
+        // The result's source (stored with the chat, repeated in later prompts) is read
+        // from these payload keys; none may hold the URL with its password.
+        for key in ["source", "path", "url", "canonicalPath", "canonical_path"] {
+            if let Some(v) = act.payload.get(key).and_then(Value::as_str) {
+                assert!(!v.contains("hunter2"), "{key}: {v}");
+            }
+        }
         // pushInsteadOf in the repository's config changes the URL after approval:
-        // nothing is pushed.
+        // nothing is pushed, and the error does not show the new URL's credentials.
         repo.config()
             .unwrap()
             .set_str(
-                "url.https://evil.example/.pushInsteadOf",
+                "url.https://ghp_evil@evil.example/.pushInsteadOf",
                 "https://user:hunter2@example.com/",
             )
             .unwrap();
@@ -2015,6 +2211,94 @@ mod fallback_tests {
             out.joined_text()
         );
         assert!(out.joined_text().contains("evil.example"));
+        assert!(
+            !out.joined_text().contains("ghp_evil"),
+            "{}",
+            out.joined_text()
+        );
+    }
+
+    /// Skill folders are written only by the skills UI: no clone into one (or into a
+    /// folder that would hold one), and no commit or pull in a repository inside one.
+    #[tokio::test]
+    async fn the_git_tools_never_write_into_skill_folders() {
+        let s = server();
+        let (_d, root) = canonical_tempdir();
+        let skills = root.join("skills");
+        let in_skill = skills.join("repo");
+        std::fs::create_dir_all(&in_skill).unwrap();
+        init(&in_skill, false);
+        let around = root.join("dotfiles");
+        std::fs::create_dir_all(around.join(".agents/skills")).unwrap();
+        init(&around, false);
+        let c = ChatContext {
+            skill_roots: vec![
+                skills.display().to_string(),
+                around.join(".agents/skills").display().to_string(),
+                root.join("home/.agents/skills").display().to_string(), // not there yet
+            ],
+            ..chat(&root)
+        };
+        let refused = |d: Described| match d {
+            Described::Action(a) => a
+                .hard_limit
+                .is_some_and(|h| h.contains("Settings → Skills")),
+            Described::Invalid(_) => false,
+        };
+        let url = "https://github.com/a/b.git";
+        for dest in [
+            skills.join("new"),
+            root.join("home"),
+            root.join("home/.agents"),
+            root.join("home/.agents/skills/x"),
+        ] {
+            let a = json!({"url": url, "destination": dest.display().to_string()});
+            assert!(
+                refused(describe(&s, &c, "git_clone", &a).await),
+                "clone into {}",
+                dest.display()
+            );
+        }
+        let repo = |p: &Path| json!({"repo": p.display().to_string()});
+        for tool in ["git_commit", "git_pull"] {
+            let mut a = repo(&in_skill);
+            a["message"] = json!("m");
+            assert!(refused(describe(&s, &c, tool, &a).await), "{tool}");
+        }
+        // A pull could write into a skill folder inside the repository.
+        assert!(refused(describe(&s, &c, "git_pull", &repo(&around)).await));
+        // Reading still works, and so does a clone elsewhere.
+        let Described::Action(a) = describe(&s, &c, "git_status", &repo(&in_skill)).await else {
+            panic!()
+        };
+        assert!(a.hard_limit.is_none(), "{a:?}");
+        let a = json!({"url": url, "destination": root.join("work").display().to_string()});
+        let Described::Action(a) = describe(&s, &c, "git_clone", &a).await else {
+            panic!()
+        };
+        assert!(a.hard_limit.is_none(), "{a:?}");
+    }
+
+    /// A token used as the user name alone is hidden too.
+    #[tokio::test]
+    async fn push_cards_hide_a_token_used_as_the_user_name() {
+        let s = server();
+        let (_d, root) = canonical_tempdir();
+        init(&root, false);
+        let repo = git2::Repository::open(&root).unwrap();
+        repo.remote("origin", "https://ghp_x@example.com/r.git")
+            .unwrap();
+        let Described::Action(act) = describe(&s, &chat(&root), "git_push", &json!({})).await
+        else {
+            panic!("push was not described")
+        };
+        assert!(
+            act.preview.contains("https://***@example.com/r.git"),
+            "{}",
+            act.preview
+        );
+        assert!(!act.preview.contains("ghp_x") && !act.summary.contains("ghp_x"));
+        assert!(act.payload.get("url").is_none(), "{:?}", act.payload);
     }
 
     #[tokio::test]

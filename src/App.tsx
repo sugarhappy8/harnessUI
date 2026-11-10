@@ -5,6 +5,7 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { ModelsDialog } from "./components/ModelsDialog";
 import { FirstRun } from "./components/FirstRun";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
+import { AppNotices } from "./components/AppNotices";
 import { useApp, toErrorInfo } from "./store/app";
 import * as ipc from "./lib/ipc";
 
@@ -88,39 +89,53 @@ export default function App() {
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </>
   );
+  const notices = (
+    <AppNotices
+      onOpenSettings={(tab) => {
+        setSettingsTab(tab);
+        setSettingsOpen(true);
+      }}
+    />
+  );
 
   if (firstRunDone === null) return null;
   if (!firstRunDone) {
     return (
-      <>
-        <FirstRun
-          onDone={() => {
-            setFirstRunDone(true);
-            void refreshModelOptions();
-          }}
-          onOpenEndpoints={() => {
-            setSettingsTab("endpoints");
-            setSettingsOpen(true);
-          }}
-          onOpenModels={() => setModelsOpen(true)}
-        />
+      <div className="flex h-full flex-col">
+        {notices}
+        <div className="min-h-0 flex-1">
+          <FirstRun
+            onDone={() => {
+              setFirstRunDone(true);
+              void refreshModelOptions();
+            }}
+            onOpenEndpoints={() => {
+              setSettingsTab("endpoints");
+              setSettingsOpen(true);
+            }}
+            onOpenModels={() => setModelsOpen(true)}
+          />
+        </div>
         {dialogs}
-      </>
+      </div>
     );
   }
 
   return (
-    <div className="flex h-full">
-      {sidebarOpen && (
-        <Sidebar
-          onOpenSettings={() => {
-            setSettingsTab(undefined);
-            setSettingsOpen(true);
-          }}
-          onOpenModels={() => setModelsOpen(true)}
-        />
-      )}
-      <ChatView />
+    <div className="flex h-full flex-col">
+      {notices}
+      <div className="flex min-h-0 flex-1">
+        {sidebarOpen && (
+          <Sidebar
+            onOpenSettings={() => {
+              setSettingsTab(undefined);
+              setSettingsOpen(true);
+            }}
+            onOpenModels={() => setModelsOpen(true)}
+          />
+        )}
+        <ChatView />
+      </div>
       {dialogs}
     </div>
   );

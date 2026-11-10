@@ -18,6 +18,7 @@ list_model_options
 get_local_model_settings
 set_local_model_settings
 run_diagnostics
+open_logs_folder
 list_providers
 save_provider
 delete_provider
@@ -57,6 +58,7 @@ set_stop_hotkey
 list_approved_folders
 approve_folder
 remove_approved_folder
+set_chat_working_folder
 list_audit
 export_audit
 resolve_approval

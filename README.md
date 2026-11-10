@@ -6,17 +6,17 @@ A local-first desktop app that gives AI models running on your own hardware the 
 - No account, no telemetry, no remote crash reporting. Logs stay on disk.
 - Chats, settings and the audit log are stored locally.
 
-**Status:** all milestones of ARCHITECTURE.md section 19 are implemented (M0–M8): local and OpenAI-compatible chat, the model manager, the agent loop with approvals and an audit log, MCP servers, files, terminal, git (with a built-in fallback), skills, a browser tool and computer use. It has been tested automatically on Linux and built and unit-tested on Windows and macOS in CI; testing on real Windows and Mac hardware is the next step (docs/MILESTONES.md has the checklists). Code signing and in-app updates wait for the signing keys. See [CHANGELOG.md](CHANGELOG.md).
+**Status:** all milestones of ARCHITECTURE.md section 19 are implemented (M0–M8): local and OpenAI-compatible chat, the model manager, the agent loop with approvals and an audit log, MCP servers, files, terminal, git (with a built-in fallback), skills, a browser tool and computer use. It has been tested automatically on Linux and built and unit-tested on Windows and macOS in CI; testing on real Windows and Mac hardware is the next step (docs/MILESTONES.md has the checklists). macOS code signing and in-app updates wait for the signing keys; Windows code signing is not set up yet. See [CHANGELOG.md](CHANGELOG.md).
 
 ## What works today
 
 - **Chat with a local model.** Pick a `.gguf` file (model picker → *Open a GGUF file…*, or *Models → Installed → Import*). The app starts llama.cpp's `llama-server` on 127.0.0.1 with a random port and key, shows load progress, and streams replies with tokens/s. Stop, regenerate (with version arrows), edit-and-resend, per-chat model and system prompt, history search, rename and delete.
-- **Backends.** Windows ships Vulkan and CPU; macOS ships Metal (with CPU as the fallback). A backend that fails to load steps down (ROCm/CUDA → Vulkan → CPU) and a crashed server restarts up to three times in five minutes. *Settings → Diagnostics → Run backend check* lists every device per backend and times a short generation on each, and saves the report to the logs folder.
+- **Backends.** Windows ships Vulkan and CPU; macOS ships Metal (with CPU as the fallback). A backend that fails to load steps down (ROCm/CUDA → Vulkan → CPU) and a crashed server restarts up to three times in five minutes. *Settings → Diagnostics → Run backend check* lists every device per backend and, when a model is loaded, times a short generation on each, and saves the report to the logs folder (*Open logs folder*).
 - **OpenAI-compatible endpoints.** *Settings → Endpoints* adds Ollama, LM Studio, vLLM or any OpenAI-compatible server; API keys go to the system keychain.
 - **Model manager.** *Models* (Ctrl+M) searches Hugging Face for GGUF chat models, shows every quantization with a fit verdict for your hardware, downloads with resume and SHA-256 verification, and lists installed models with badges read from the GGUF header. First run suggests a model from the bundled catalog. Vision models take image attachments; PDFs and text files can be attached too. ROCm and CUDA backends are one-click downloads in *Settings → Local models*, verified by SHA-256.
-- **Tools and approvals.** Approve a folder (*Settings → Permissions*), then ask the model to read, search or edit files in it. Every tool call shows a card; actions ask first (*Allow once*, *Allow for this chat*, *Deny*), and every call is recorded in *Settings → Audit log*. The chat's *Tools* panel switches tool groups on and off and shows what they cost in context. The terminal and git tools are off by default; git works without Git installed through a built-in library (*Settings → Git*).
-- **MCP servers.** *Settings → MCP servers → Add servers* takes a Claude Desktop, Cursor or VS Code config. Secrets go to the system keychain; a new server's tools start off until you turn them on.
-- **Skills.** *Settings → Skills* imports skill folders or zips (SKILL.md, as used by other agent apps), creates and edits them; the model loads a skill when it needs it.
+- **Tools and approvals.** Approve a folder (*Settings → Permissions*, or for one chat under *Folders for this chat* in its *Tools* panel), then ask the model to read, search or edit files in it. Every tool call shows a card; actions ask first (*Allow once*, *Allow for this chat*, *Deny*), and every call is recorded in *Settings → Audit log*. The chat's *Tools* panel switches tool groups on and off and shows what they cost in context. The terminal and git tools are off by default; git works without Git installed through a built-in library (*Settings → Git*).
+- **MCP servers.** *Settings → MCP servers → Add servers* takes a Claude Desktop, Cursor or VS Code config. Secrets go to the system keychain; a new server's tools start off until you turn them on. See [docs/mcp-guide.md](docs/mcp-guide.md).
+- **Skills.** *Settings → Skills* imports skill folders or zips (SKILL.md, as used by other agent apps), creates and edits them; imported skills start turned off. The model loads a skill when it needs it. How to write one: [docs/skills-guide.md](docs/skills-guide.md).
 - **Browser.** Switch on *Browser* in a chat's Tools panel: the model drives its own Chrome or Edge window with a separate profile (never your own cookies or logins). Leaving a site and submitting forms always ask; this computer's own addresses and, by default, private networks are blocked. *Settings → Browser*.
 - **Computer use (Windows and macOS).** For a vision model whose coordinate convention you set in *Settings → Computer use*: screenshots, clicks and typing, each kind of input approved per application. Input to harnissUI itself is always refused, and a red border with a Stop button stays on screen while it acts.
 - **Stop.** The Stop button, Esc, or the global hotkey (Ctrl+Alt+Backspace on Windows, Ctrl+Option+Delete on macOS) stops the reply and cancels any running tool.
@@ -67,10 +67,14 @@ npm run lint && npm run typecheck && npm test
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
-For development without an installer, point the app at a folder that holds `llama-server` (for example one unpacked by `python3 scripts/fetch_llama.py`):
+For development without an installer on Linux, unpack the pinned CPU build of `llama-server` (it goes to `.cache/llama-linux/`, and the script prints that path), then point the app at it:
 
 ```bash
-APP_DEV_LLAMA_DIR=/path/to/llama-folder npx tauri dev
+python3 scripts/fetch_llama.py linux
+```
+
+```bash
+APP_DEV_LLAMA_DIR="$PWD/.cache/llama-linux" npx tauri dev
 ```
 
 Contract tests against the real llama-server run when `LLAMA_SERVER_BIN` and `TEST_GGUF` are set (`python3 scripts/fetch_test_model.py` downloads the pinned test model). End-to-end tests that drive the real app are described in [e2e/README.md](e2e/README.md).
@@ -88,14 +92,16 @@ A Tauri 2 app: a Rust core and a React + TypeScript webview with no privileges. 
 | `crates/runtime` | Process spawning and llama-server lifecycle |
 | `crates/models` | GGUF reader, hardware detection, Hugging Face downloads |
 | `crates/mcp-host` | MCP connections and tool registry |
-| `crates/tools` | Built-in tools (files, terminal, git, browser, computer use, skills) |
+| `crates/tools` | Built-in tools (files, terminal, git, skills, PDF text extraction worker) |
+| `crates/browser` | Built-in browser tool: the agent's own Chrome or Edge over CDP, with request checks |
+| `crates/computer` | Built-in computer-use tool: screen capture, input injection and the input guard |
 | `crates/agent` | Providers, agent loop, tool-call parsing, context management |
 
 The app's display name is `productName` in `src-tauri/tauri.conf.json`; everything else reads it from there.
 
 ## Signing
 
-Release builds (`.github/workflows/release.yml`, on `v*` tags) are prepared for signing. Add these repository secrets when you have them; until then builds are unsigned.
+Release builds (`.github/workflows/release.yml`, on `v*` tags) fetch the pinned llama.cpp runtime, build both installers into a draft GitHub release, and are prepared for signing. Add these repository secrets when you have them; until then builds are unsigned.
 
 | Secret | For |
 |---|---|
@@ -109,9 +115,9 @@ Release builds (`.github/workflows/release.yml`, on `v*` tags) are prepared for 
 2. Add the private key's contents and its password as the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets.
 3. Commit the public key (the `.pub` file's contents) as `plugins.updater.pubkey` in `src-tauri/tauri.updater.conf.json`.
 
-Release builds then include signed update files and `latest.json`, and *Settings → General → Updates* offers *Check now* and an opt-in automatic check. Builds without the key show that they cannot update themselves. The app never checks for updates unless you click *Check now* or turn the automatic check on.
+Release builds then include signed update files and `latest.json`. The release workflow also signs `catalog/models.json` and attaches it with `models.json.minisig`, which *Settings → General → Model catalog → Refresh catalog* downloads. A last job fails the run if the draft release is missing an installer or, with the key set, a platform in `latest.json` or the catalog. *Settings → General → Updates* offers *Check now* and an opt-in automatic check. Builds without the key show that they cannot update themselves. The app never checks for updates unless you click *Check now* or turn the automatic check on.
 
-Windows code signing uses a `signCommand` added in M8 once you have chosen a certificate route.
+Windows code signing is not set up yet, so the Windows installer is unsigned. Once you have chosen a certificate route, add a separate config file that holds only `bundle.windows.signCommand` (for example `src-tauri/tauri.winsign.conf.json`), and pass it with `--config` in the Windows build of `release.yml`, only when that route's secrets are set.
 
 ## License
 
