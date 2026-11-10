@@ -96,3 +96,8 @@ set_browser_settings
 choose_browser_path
 computer_status
 set_computer_profile
+git_info
+set_git_token
+remove_git_token
+set_git_identity
+minimize_main_window

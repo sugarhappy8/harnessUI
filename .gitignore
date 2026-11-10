@@ -10,3 +10,4 @@
 /.cache
 *.tsbuildinfo
 /target-*
+__pycache__/

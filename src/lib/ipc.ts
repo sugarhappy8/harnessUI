@@ -18,6 +18,8 @@ import type {
   SkillList,
   BrowserSettings,
   ComputerStatus,
+  GitIdentity,
+  GitInfo,
   Convention,
   BrowserStatus,
   UpdateInfo,
@@ -270,3 +272,10 @@ export const chooseBrowserPath = (clear: boolean) => invoke<string | null>("choo
 export const computerStatus = (modelRef: string | null) => invoke<ComputerStatus>("computer_status", { modelRef });
 export const setComputerProfile = (modelRef: string, convention: Convention, confirmed: boolean) =>
   invoke<void>("set_computer_profile", { modelRef, convention, confirmed });
+
+// Git
+export const gitInfo = () => invoke<GitInfo>("git_info");
+export const setGitToken = (host: string, token: string) => invoke<string[]>("set_git_token", { host, token });
+export const removeGitToken = (host: string) => invoke<string[]>("remove_git_token", { host });
+export const setGitIdentity = (identity: GitIdentity) => invoke<void>("set_git_identity", { identity });
+export const minimizeMainWindow = () => invoke<void>("minimize_main_window");

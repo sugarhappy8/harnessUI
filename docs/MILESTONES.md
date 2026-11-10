@@ -126,7 +126,7 @@ sha2 were already listed in section 18 and are now used by `mcp-host` and `agent
 
 ---
 
-## M4 — Terminal and git (in progress)
+## M4 — Terminal and git
 
 **Works:** terminal (`run_command`): PowerShell 5.1 via `-EncodedCommand` on Windows, `zsh
 -lc` with the login environment captured at start on macOS; secret-looking variables
@@ -136,11 +136,21 @@ fsmonitor, external diff, pager and repository credential helpers off; repositor
 whose own config defines filter/merge/diff drivers are refused; push always asks and
 re-checks its URL.
 
-**Manual test:** M3 step 6; for git: switch on Git, ask for `git status` in a repository
-folder, then a commit (card), then a push (always asks, card shows the push URL).
+When Git is not installed (most Windows PCs), the same seven git tools run through a
+built-in libgit2: no hooks, no LFS, https only; clone, pull and push run in a worker
+process that Stop kills; private repositories use a token per host from Settings → Git
+(kept in the keychain). Settings → Git also sets the name and email for commits.
 
-**Known issues / TODOs:** the libgit2 fallback for machines without git is not built
-yet; on such machines the git tools say "Git is not installed" with install steps.
+**Manual test — Windows PC:**
+1. Switch on Git in a chat; ask for `git status` in a repository folder you approved, then a commit (card), then a push (always asks; the card shows the push URL).
+2. If Git is not installed: Settings → Git says the built-in library is in use. Add a token for github.com, then ask the model to clone a private repository of yours into an approved folder.
+3. Start a large clone and press Stop: it ends within a second.
+
+**Manual test — Mac:** step 1 (macOS ships git with the developer tools; without them
+the app uses the built-in library like on Windows).
+
+**Known issues:** the built-in library cannot use Git's credential helpers (tokens per
+host instead) and has no SSH remotes.
 
 ---
 

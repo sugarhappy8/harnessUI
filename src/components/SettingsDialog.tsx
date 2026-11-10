@@ -15,6 +15,7 @@ import { McpSettings } from "./McpSettings";
 import { SkillsSettings } from "./SkillsSettings";
 import { BrowserSettings } from "./BrowserSettings";
 import { ComputerSettings } from "./ComputerSettings";
+import { GitSettings } from "./GitSettings";
 import type { ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -616,6 +617,7 @@ export function SettingsDialog(props: {
               <Tabs.Trigger value="huggingface" className={tabClass}>Hugging Face</Tabs.Trigger>
               <Tabs.Trigger value="mcp" className={tabClass}>MCP servers</Tabs.Trigger>
               <Tabs.Trigger value="skills" className={tabClass}>Skills</Tabs.Trigger>
+              <Tabs.Trigger value="git" className={tabClass}>Git</Tabs.Trigger>
               <Tabs.Trigger value="browser" className={tabClass}>Browser</Tabs.Trigger>
               <Tabs.Trigger value="computer" className={tabClass}>Computer use</Tabs.Trigger>
               <Tabs.Trigger value="permissions" className={tabClass}>Permissions</Tabs.Trigger>
@@ -629,6 +631,7 @@ export function SettingsDialog(props: {
               <Tabs.Content value="huggingface"><HuggingFace /></Tabs.Content>
               <Tabs.Content value="mcp"><McpSettings /></Tabs.Content>
               <Tabs.Content value="skills"><SkillsSettings /></Tabs.Content>
+              <Tabs.Content value="git"><GitSettings /></Tabs.Content>
               <Tabs.Content value="browser"><BrowserSettings /></Tabs.Content>
               <Tabs.Content value="computer"><ComputerSettings /></Tabs.Content>
               <Tabs.Content value="permissions"><PermissionsSettings /></Tabs.Content>

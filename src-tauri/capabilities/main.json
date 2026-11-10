@@ -112,6 +112,11 @@
     "allow-set-browser-settings",
     "allow-choose-browser-path",
     "allow-computer-status",
-    "allow-set-computer-profile"
+    "allow-set-computer-profile",
+    "allow-git-info",
+    "allow-set-git-token",
+    "allow-remove-git-token",
+    "allow-set-git-identity",
+    "allow-minimize-main-window"
   ]
 }

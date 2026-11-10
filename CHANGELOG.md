@@ -2,11 +2,18 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## M4 — Git fallback
+
+### Added
+- The libgit2 fallback for the git tools when Git is not installed: the same seven tools and approval cards, no hooks, no LFS, https only; clone, pull and push run in a worker process (the app binary with a hidden flag) that Stop kills; private repositories authenticate with a token per host from the keychain, sent only to the approved remote's host after it asks.
+- Settings → Git: which Git the tools use, tokens per host, and the name and email for commits. The Tools panel marks the Git group when the built-in library is in use.
+- THIRD-PARTY-NOTICES.md lists the C libraries built into the app (libgit2, zlib, and OpenSSL on macOS); CI checks the macOS app binary links nothing outside the system.
+
 ## M7 — Computer use (in progress)
 
 ### Added
 - `crates/computer`: screenshots of one monitor (xcap on Windows; ScreenCaptureKit on macOS 14+, the older call on 13) with this app's windows left out and a cursor marker drawn in, resized exactly as llama.cpp resizes images for the model (a port of its size calculation, checked bit for bit against the C++); clicks, moves, drags, scrolls, typing and key combinations (SendInput for the mouse on Windows, enigo on the main thread for the keyboard) through one injector that refuses input to this app and its WebView processes, re-checks the target application before every event, refuses elevated windows on Windows, refuses the indicator's Stop button, and releases every held key and button on Stop, panic or exit. Grants per kind of input and per application (D7); terminals, system settings, password managers and OS-level shortcuts always ask. Coordinate conventions per model: pixels of the resized image, a 0–1000 grid, 0–1000 boxes (and Gemma's y-x boxes). 69 tests with fake capture and input.
-- App: the computer server on Windows and macOS; the indicator (red border, "AI is controlling this computer" bar with a Stop button whose window may call nothing but stop) shown while it acts and hidden when the turn ends; input refused when the indicator or the stop hotkey is missing, or (macOS) the indicator is not on the active Space; the stop hotkey and the Stop button release held input. Settings → Computer use: macOS Screen Recording and Accessibility checks with links to System Settings, and each model's convention. The tools are offered only for models that can see images and whose convention the user confirmed.
+- App: the computer server on Windows and macOS; the indicator (red border, "AI is controlling this computer" bar with a Stop button whose window may call nothing but stop) shown while it acts and hidden when the turn ends; input refused when the indicator or the stop hotkey is missing, or (macOS) the indicator is not on the active Space; the stop hotkey and the Stop button release held input. Settings → Computer use: macOS Screen Recording and Accessibility checks with links to System Settings, and each model's convention. When a click is refused because harnissUI's own window covers the point, the tool card offers to minimise the window. The tools are offered only for models that can see images and whose convention the user confirmed.
 
 ### Known issues
 - The one-click calibration test of 9.3 is replaced by a convention the user confirms per model (the app's windows are excluded from screenshots, so the model cannot see targets the app draws). See docs/MILESTONES.md.

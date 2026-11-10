@@ -31,6 +31,7 @@ pub async fn build_host(
     secrets: Arc<dyn store::secrets::SecretStore>,
     skills: Arc<tools::SkillsServer>,
     pass_through: Vec<String>,
+    identity: crate::git_cmd::GitIdentity,
 ) -> Host {
     let resolver_secrets = secrets.clone();
     let captured = captured_env().await;
@@ -52,15 +53,49 @@ pub async fn build_host(
         captured.as_ref(),
         pass_through,
     ))));
-    host.add_builtin(Arc::new(tools::GitServer::new(
-        git_config(captured.as_ref()).await,
-    )));
+    let base = git_config(captured.as_ref()).await;
+    let _ = GIT_BASE.set(base.clone());
+    let git = crate::git_cmd::server(base, secrets.clone(), &identity);
+    record_backend(&git);
+    host.add_builtin(Arc::new(git));
     host.add_builtin(skills);
     host
 }
 
 /// System git, with the user's own credential helpers (global and system config only;
 /// repository config never chooses a helper).
+/// The git configuration found at start (before the commit identity), to rebuild the
+/// git server when the identity changes.
+static GIT_BASE: std::sync::OnceLock<tools::GitConfig> = std::sync::OnceLock::new();
+/// Whether the git tools use the built-in library (true) or system git.
+static GIT_FALLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn record_backend(git: &tools::GitServer) {
+    GIT_FALLBACK.store(
+        git.backend() == tools::GitBackend::Libgit2,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Which git the tools use.
+pub fn git_backend() -> tools::GitBackend {
+    if GIT_FALLBACK.load(std::sync::atomic::Ordering::Relaxed) {
+        tools::GitBackend::Libgit2
+    } else {
+        tools::GitBackend::System
+    }
+}
+
+/// Rebuilds the git server with a new commit identity.
+pub async fn rebuild_git(state: &AppState, identity: &crate::git_cmd::GitIdentity) {
+    let Some(base) = GIT_BASE.get().cloned() else {
+        return;
+    };
+    let git = crate::git_cmd::server(base, state.secrets.clone(), identity);
+    record_backend(&git);
+    state.host.add_builtin(Arc::new(git));
+}
+
 /// The captured login environment (macOS), kept to rebuild the terminal server.
 static CAPTURED: std::sync::OnceLock<Option<std::collections::BTreeMap<String, String>>> =
     std::sync::OnceLock::new();

@@ -21,6 +21,7 @@ const SERVER_LABEL: Record<string, string> = {
 export function ToolsPanel(props: { chatId: number; nCtx: number | null; unsupported?: boolean }) {
   const [tools, setTools] = useState<ToolDto[]>([]);
   const [open, setOpen] = useState(false);
+  const [gitFallback, setGitFallback] = useState<string | null>(null);
   const showError = useApp((s) => s.showError);
 
   const refresh = useCallback(() => {
@@ -29,6 +30,13 @@ export function ToolsPanel(props: { chatId: number; nCtx: number | null; unsuppo
       .then(setTools)
       .catch((e) => showError(toErrorInfo(e)));
   }, [props.chatId, showError]);
+
+  useEffect(() => {
+    void ipc
+      .gitInfo()
+      .then((i) => setGitFallback(i.notice))
+      .catch(() => setGitFallback(null));
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -115,6 +123,11 @@ export function ToolsPanel(props: { chatId: number; nCtx: number | null; unsuppo
                   {SERVER_LABEL[server] ?? server}
                   {server === "terminal" && (
                     <span className="text-xs font-normal text-fg-muted">— runs commands as you; not a sandbox</span>
+                  )}
+                  {server === "git" && gitFallback && (
+                    <span className="text-xs font-normal text-warning" title={gitFallback}>
+                      — built-in Git library (no hooks, https only)
+                    </span>
                   )}
                 </label>
                 <ul className="mt-1 space-y-1 pl-6">

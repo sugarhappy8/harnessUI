@@ -95,6 +95,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 serde-saphyr = "2.1"
 zip = { version = "9.5", default-features = false, features = ["deflate"] }
 tempfile = "3"
+# Git fallback when system git is missing (ARCHITECTURE.md 9.3, 18): libgit2 built from the
+# vendored source with HTTPS (WinHTTP on Windows, SecureTransport on macOS); no ssh.
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "https"] }
 
 # Browser tool (ARCHITECTURE.md 9.3, 18): WebSocket client for the optional loopback-port
 # CDP mode only; client handshake, no TLS, no default features (pure Rust).

@@ -13,6 +13,7 @@ mod diagnostics;
 mod downloads;
 mod dto;
 mod error;
+mod git_cmd;
 mod hotkey;
 mod hub;
 mod logging;
@@ -165,6 +166,7 @@ pub fn run() {
             updates::check_for_update,
             updates::install_update,
             overlay::overlay_stop,
+            overlay::minimize_main_window,
             toolset::get_terminal_pass_through,
             toolset::set_terminal_pass_through,
             browser_cmd::browser_status,
@@ -172,6 +174,10 @@ pub fn run() {
             browser_cmd::choose_browser_path,
             computer_cmd::computer_status,
             computer_cmd::set_computer_profile,
+            git_cmd::git_info,
+            git_cmd::set_git_token,
+            git_cmd::remove_git_token,
+            git_cmd::set_git_identity,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -204,11 +210,17 @@ pub fn run() {
                     .ok()
                     .flatten()
                     .unwrap_or_default();
+            let identity: git_cmd::GitIdentity =
+                tauri::async_runtime::block_on(store.get_setting(git_cmd::IDENTITY))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
             let host = tauri::async_runtime::block_on(toolset::build_host(
                 &handle,
                 secrets.clone(),
                 skills.clone(),
                 pass_through,
+                identity,
             ));
             let browser = tauri::async_runtime::block_on(browser_cmd::build(&handle, &store));
             host.add_builtin(browser.clone());

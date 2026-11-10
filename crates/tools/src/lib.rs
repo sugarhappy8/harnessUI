@@ -6,11 +6,13 @@
 
 pub mod files;
 pub mod git;
+mod git_fallback;
+mod git_worker;
 pub mod pdf;
 pub mod skills;
 pub mod terminal;
 
 pub use files::FilesServer;
-pub use git::{GitConfig, GitServer};
+pub use git::{GitBackend, GitConfig, GitServer, TokenSource};
 pub use skills::{Skill, SkillsServer};
 pub use terminal::{TerminalConfig, TerminalServer, TerminalShell};

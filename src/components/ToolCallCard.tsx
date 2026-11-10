@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { minimizeMainWindow } from "../lib/ipc";
 import { Ban, CheckCircle2, ChevronDown, ChevronRight, Hand, Loader2, Wrench, XCircle } from "lucide-react";
 
 /** How much of a result is shown before "Show all". */
@@ -99,6 +100,15 @@ export function ToolCallCard(props: { call: ToolCallView }) {
                 </button>
               )}
             </div>
+          )}
+          {c.name.startsWith("computer_") && result.includes("this app's own window") && (
+            <button
+              type="button"
+              onClick={() => void minimizeMainWindow()}
+              className="rounded-md border border-border px-2 py-1 text-xs"
+            >
+              Minimise this window while the agent works
+            </button>
           )}
           <div className="flex gap-3 text-xs text-fg-muted">
             {c.decision && <span>{c.decision}</span>}

@@ -75,6 +75,14 @@ pub fn show(app: &AppHandle, monitor: Option<tauri::Monitor>) -> bool {
     ok
 }
 
+/// Minimises the main window so computer use can reach what is behind it (9.3).
+#[tauri::command]
+pub fn minimize_main_window(app: AppHandle) {
+    if let Some(w) = app.get_webview_window(crate::MAIN_WINDOW) {
+        let _ = w.minimize();
+    }
+}
+
 /// Hides both indicator windows.
 pub fn hide(app: &AppHandle) {
     for label in [crate::OVERLAY_WINDOW, INDICATOR_WINDOW] {

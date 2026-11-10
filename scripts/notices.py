@@ -107,6 +107,11 @@ def render() -> str:
     for title, f, note in [
         ("llama.cpp (llama-server, llama-fit-params) — MIT", "llama.cpp-LICENSE", "Pinned build b12110; see llama.lock.json."),
         ("LLVM OpenMP runtime (Windows, libomp.dll) — Apache-2.0 WITH LLVM-exception", "LLVM-OpenMP-LICENSE", ""),
+        ("libgit2 (built into the app for the git tools when Git is not installed) — GPL-2.0 WITH linking exception",
+         "libgit2-COPYING", "Linked statically through the git2 / libgit2-sys crates."),
+        ("zlib (built into the app, used by libgit2) — Zlib", "zlib-LICENSE", ""),
+        ("OpenSSL (macOS only, built into the app for libgit2's HTTPS) — Apache-2.0", "OpenSSL-LICENSE",
+         "Built from source through the openssl-src crate; nothing is loaded from the system."),
     ]:
         lines += [f"### {title}", ""]
         if note:

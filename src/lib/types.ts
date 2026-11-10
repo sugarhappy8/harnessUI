@@ -538,3 +538,17 @@ export interface ComputerStatus {
   accessibilityUrl: string;
   profile: { profile: { convention: Convention }; confirmed: boolean } | null;
 }
+
+// ---- Git (M4) ----------------------------------------------------------------------
+
+export interface GitIdentity {
+  name: string;
+  email: string;
+}
+
+export interface GitInfo {
+  backend: "system" | "libgit2";
+  notice: string | null;
+  tokenHosts: string[];
+  identity: GitIdentity;
+}

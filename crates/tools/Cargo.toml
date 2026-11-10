@@ -34,6 +34,14 @@ base64 = { workspace = true }
 runtime = { workspace = true }
 # PDF text extraction in pure Rust, run only inside the worker process (8.6).
 pdf-extract = { workspace = true }
+# The git tools' libgit2 fallback for machines without git (9.3).
+git2 = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# libgit2-sys calls openssl_sys::init() on every Unix, macOS included, although its TLS
+# there is SecureTransport; build OpenSSL from source and link it statically so the app
+# never loads a Homebrew libssl/libcrypto (9.3 build note).
+git2 = { workspace = true, features = ["vendored-openssl"] }
 
 [target.'cfg(unix)'.dependencies]
 # setrlimit: the PDF worker's memory cap.

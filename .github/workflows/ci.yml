@@ -131,6 +131,18 @@ jobs:
         run: cargo test --workspace --target ${{ matrix.target }}
       - name: Build the app
         run: npx tauri build ${{ matrix.args }}
+      # libgit2's HTTPS links OpenSSL on macOS: it must be built in, never loaded from
+      # Homebrew or anywhere else outside the system (ARCHITECTURE.md 9.3, build note).
+      - name: App binary links system libraries only (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bin=$(ls -d target/aarch64-apple-darwin/release/bundle/macos/*.app)/Contents/MacOS/app
+          [ -x "$bin" ] || bin=$(ls target/aarch64-apple-darwin/release/bundle/macos/*.app/Contents/MacOS/* | head -1)
+          otool -L "$bin"
+          if otool -L "$bin" | tail -n +2 | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/)'; then
+            echo "::error::the app binary links a library outside the system"; exit 1
+          fi
       - name: Installer size check (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
