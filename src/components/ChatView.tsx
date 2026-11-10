@@ -14,6 +14,9 @@ import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
 import type { MessageDto, ToolResultDto } from "../lib/types";
 
+/** Messages rendered at first in a long chat. */
+const RECENT_MESSAGES = 80;
+
 export function ChatView() {
   const {
     detail,
@@ -31,6 +34,8 @@ export function ChatView() {
     openChat,
   } = useApp();
   const [promptOpen, setPromptOpen] = useState(false);
+  // Long chats render their latest messages; earlier ones on request.
+  const [earlier, setEarlier] = useState<{ chatId: number | null; count: number }>({ chatId: null, count: 0 });
   const bottomRef = useRef<HTMLDivElement>(null);
   const busy = generation !== null;
   const messages = useMemo(
@@ -44,6 +49,10 @@ export function ChatView() {
     return map;
   }, [detail]);
   const lastAssistantId = [...messages].reverse().find((m) => m.role === "assistant")?.id;
+  const chatKey = detail?.chat.id ?? null;
+  const extra = earlier.chatId === chatKey ? earlier.count : 0;
+  const hidden = Math.max(0, messages.length - RECENT_MESSAGES - extra);
+  const shown = messages.slice(hidden);
   const live = generation && detail && generation.chatId === detail.chat.id ? generation : null;
   const chatApprovals = approvals.filter((a) => detail && a.chatId === detail.chat.id);
   const scrollKey =
@@ -135,9 +144,25 @@ export function ChatView() {
               {detail ? "Send a message to start." : "Start a new chat or pick one from the list."}
             </div>
           )}
-          {messages.map((m) => (
+          {hidden > 0 && (
+            <div className="text-center">
+              <button
+                type="button"
+                onClick={() => setEarlier({ chatId: chatKey, count: extra + RECENT_MESSAGES })}
+                className="rounded-md border border-border px-3 py-1 text-sm text-fg-muted hover:bg-bg-muted"
+              >
+                Show {Math.min(hidden, RECENT_MESSAGES)} earlier messages ({hidden} hidden)
+              </button>
+            </div>
+          )}
+          {shown.map((m) => (
             <div key={m.id} className="space-y-2">
-              {(m.text || m.reasoning || m.role === "user" || m.error || m.toolCalls.length === 0) && (
+              {(m.text ||
+                m.reasoning ||
+                m.role === "user" ||
+                m.error ||
+                m.toolCalls.length === 0 ||
+                m.siblingIds.length > 1) && (
                 <MessageItem
                   message={m}
                   isLastAssistant={m.id === lastAssistantId}

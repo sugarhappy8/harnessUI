@@ -179,6 +179,7 @@ page).
 2. Press Ctrl+/ (Cmd+/): the shortcut list opens, including your stop hotkey. Ctrl+B hides and shows the chat list.
 3. Offline: turn off Wi-Fi / unplug the network, start the app, load a downloaded model and chat; everything works and nothing reports a network error except Hugging Face search.
 
-**Known issues:** the offline gate sees proxied traffic only (not direct DNS lookups); the
-message list is not virtualised yet (very long chats render every message); Rust types
+**Known issues:** the offline gate sees proxied traffic only (not direct DNS lookups); long
+chats show their latest 80 messages with a "Show earlier" button rather than a
+virtualised list; Rust types
 are mirrored by hand in `src/lib/types.ts` rather than generated.

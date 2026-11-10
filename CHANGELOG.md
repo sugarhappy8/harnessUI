@@ -11,6 +11,8 @@ All notable changes, by milestone. Dates are UTC.
 - After every load (7.4): a 24-token timed generation; a GPU backend below 5 tokens/s shows "Loaded but slow", and a partial offload shows "N of M layers on the GPU" next to the backend.
 - The backend list says "No Vulkan driver was found" when the Vulkan loader is missing, instead of listing no GPU (7.2).
 - Streamed text reaches the webview in batches of about 30 ms (14).
+- Long chats render their latest 80 messages, with "Show earlier messages".
+- Version arrows also show on a regenerated turn that starts with a tool call.
 - `e2e/m8_offline.py`: the app behind a recording proxy that refuses everything starts, loads a local model, answers and shows every settings page without one outbound request.
 - Frontend tests for the streamed-turn reducer and approval bookkeeping.
 
