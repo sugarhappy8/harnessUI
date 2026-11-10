@@ -13,6 +13,10 @@ serde_json = { workspace = true }
 url = { workspace = true }
 # Strips Windows' \\?\ verbatim prefix from canonical paths when it is safe to.
 dunce = { workspace = true }
+# The terminal classifier parses commands with real shell grammars (13.3, D5).
+tree-sitter = { workspace = true }
+tree-sitter-bash = { workspace = true }
+tree-sitter-powershell = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # pathconf(_PC_CASE_SENSITIVE) to tell case-insensitive volumes apart.

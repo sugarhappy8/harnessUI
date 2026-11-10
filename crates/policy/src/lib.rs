@@ -4,6 +4,7 @@
 //! Nothing here changes policy state. Grants and approved folders are inputs; they are
 //! changed only by commands the UI sends.
 
+pub mod command;
 pub mod engine;
 pub mod files;
 pub mod path;

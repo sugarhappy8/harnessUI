@@ -38,6 +38,10 @@ pub enum Scope {
     ReadOnlyProgram {
         program: String,
     },
+    /// A plain sequence of commands (`a && b | c`): covered only when every part is.
+    Commands {
+        parts: Vec<Scope>,
+    },
     GitRead {
         repo: String,
     },
@@ -156,6 +160,9 @@ impl Grants for std::collections::BTreeSet<Scope> {
                     server: server.clone(),
                     tool: tool.clone(),
                 }),
+                Scope::Commands { parts } => {
+                    !parts.is_empty() && parts.iter().all(|p| self.covers(p))
+                }
                 _ => false,
             }
     }
@@ -471,6 +478,26 @@ mod tests {
             evaluate(&different_args, &ready(), &exact),
             Decision::Ask { .. }
         ));
+    }
+
+    #[test]
+    fn command_sequences_need_every_part_covered() {
+        let ls = Scope::ReadOnlyProgram {
+            program: "/bin/ls".into(),
+        };
+        let test = Scope::Command {
+            program: "/usr/bin/cargo".into(),
+            args: vec!["test".into()],
+            cwd: "/p".into(),
+        };
+        let seq = Scope::Commands {
+            parts: vec![ls.clone(), test.clone()],
+        };
+        let only_ls: BTreeSet<Scope> = [ls.clone()].into();
+        assert!(!only_ls.covers(&seq));
+        let both: BTreeSet<Scope> = [ls, test].into();
+        assert!(both.covers(&seq));
+        assert!(!both.covers(&Scope::Commands { parts: vec![] }));
     }
 
     #[test]
