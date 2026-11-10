@@ -43,6 +43,8 @@ jobs:
       - run: npm run build
       - run: cargo fmt --all --check
       - run: bash scripts/check-spawn.sh
+      # Every crate and npm package in the release targets must be listed with its license.
+      - run: python3 scripts/notices.py --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Cache llama.cpp and the test model
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

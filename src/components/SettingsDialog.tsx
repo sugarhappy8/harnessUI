@@ -10,6 +10,9 @@ import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
 import { BackendDownloads } from "./BackendDownloads";
+import { AuditLogView, PermissionsSettings } from "./PermissionsSettings";
+import { McpSettings } from "./McpSettings";
+import { SkillsSettings } from "./SkillsSettings";
 import type { ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -533,6 +536,10 @@ export function SettingsDialog(props: {
               <Tabs.Trigger value="runtime" className={tabClass}>Local models</Tabs.Trigger>
               <Tabs.Trigger value="endpoints" className={tabClass}>Endpoints</Tabs.Trigger>
               <Tabs.Trigger value="huggingface" className={tabClass}>Hugging Face</Tabs.Trigger>
+              <Tabs.Trigger value="mcp" className={tabClass}>MCP servers</Tabs.Trigger>
+              <Tabs.Trigger value="skills" className={tabClass}>Skills</Tabs.Trigger>
+              <Tabs.Trigger value="permissions" className={tabClass}>Permissions</Tabs.Trigger>
+              <Tabs.Trigger value="audit" className={tabClass}>Audit log</Tabs.Trigger>
               <Tabs.Trigger value="diagnostics" className={tabClass}>Diagnostics</Tabs.Trigger>
             </Tabs.List>
             <div className="min-w-0 flex-1 overflow-y-auto p-5">
@@ -540,6 +547,10 @@ export function SettingsDialog(props: {
               <Tabs.Content value="runtime"><Runtime /></Tabs.Content>
               <Tabs.Content value="endpoints"><Endpoints /></Tabs.Content>
               <Tabs.Content value="huggingface"><HuggingFace /></Tabs.Content>
+              <Tabs.Content value="mcp"><McpSettings /></Tabs.Content>
+              <Tabs.Content value="skills"><SkillsSettings /></Tabs.Content>
+              <Tabs.Content value="permissions"><PermissionsSettings /></Tabs.Content>
+              <Tabs.Content value="audit"><AuditLogView /></Tabs.Content>
               <Tabs.Content value="diagnostics"><Diagnostics /></Tabs.Content>
             </div>
           </Tabs.Root>

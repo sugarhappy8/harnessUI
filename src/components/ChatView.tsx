@@ -1,13 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileText } from "lucide-react";
-import { useApp } from "../store/app";
+import { Brain, FileText } from "lucide-react";
+import * as ipc from "../lib/ipc";
+import { useApp, toErrorInfo } from "../store/app";
 import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { ModelPicker } from "./ModelPicker";
 import { RuntimeIndicator } from "./RuntimeIndicator";
 import { SystemPromptDialog } from "./SystemPromptDialog";
 import { ErrorBanner } from "./ErrorBanner";
-import type { MessageDto } from "../lib/types";
+import { ToolCallCard, type ToolCallView } from "./ToolCallCard";
+import { ToolsPanel } from "./ToolsPanel";
+import { ApprovalCard } from "./ApprovalCard";
+import { Markdown } from "./Markdown";
+import type { MessageDto, ToolResultDto } from "../lib/types";
 
 export function ChatView() {
   const {
@@ -21,6 +26,9 @@ export function ChatView() {
     switchBranch,
     setSystemPrompt,
     showError,
+    approvals,
+    decideApproval,
+    openChat,
   } = useApp();
   const [promptOpen, setPromptOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -29,12 +37,21 @@ export function ChatView() {
     () => (detail?.messages ?? []).filter((m) => m.role === "user" || m.role === "assistant"),
     [detail],
   );
+  // Tool results by call id, shown inside the card of the call that asked for them.
+  const results = useMemo(() => {
+    const map = new Map<string, ToolResultDto>();
+    for (const m of detail?.messages ?? []) if (m.toolResult) map.set(m.toolResult.callId, m.toolResult);
+    return map;
+  }, [detail]);
   const lastAssistantId = [...messages].reverse().find((m) => m.role === "assistant")?.id;
-  const lastText = messages[messages.length - 1]?.text.length ?? 0;
+  const live = generation && detail && generation.chatId === detail.chat.id ? generation : null;
+  const chatApprovals = approvals.filter((a) => detail && a.chatId === detail.chat.id);
+  const scrollKey =
+    messages.length + (live ? live.text.length + live.tools.length * 1000 + live.reasoning.length : 0) + chatApprovals.length;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, lastText]);
+  }, [scrollKey]);
 
   const modelRef = detail?.chat.modelRef ?? null;
   let disabledReason: string | null = null;
@@ -47,12 +64,14 @@ export function ChatView() {
   // Context usage: the last known prompt + completion tokens against the context size.
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
   const used =
-    generation?.promptTokens !== null && generation?.promptTokens !== undefined
-      ? generation.promptTokens + (generation.completionTokens ?? 0)
-      : lastAssistant?.promptTokens !== null && lastAssistant?.promptTokens !== undefined
-        ? lastAssistant.promptTokens + (lastAssistant.completionTokens ?? 0)
-        : null;
-  const nCtx = modelRef?.startsWith("local:") ? (runtime?.nCtx ?? null) : null;
+    live?.contextUsed != null
+      ? live.contextUsed
+      : live?.promptTokens != null
+        ? live.promptTokens + (live.completionTokens ?? 0)
+        : lastAssistant?.promptTokens !== null && lastAssistant?.promptTokens !== undefined
+          ? lastAssistant.promptTokens + (lastAssistant.completionTokens ?? 0)
+          : null;
+  const nCtx = live?.nCtx ?? (modelRef?.startsWith("local:") ? (runtime?.nCtx ?? null) : null);
 
   function editResend(m: MessageDto, text: string) {
     void send(text, m.parentId);
@@ -71,9 +90,26 @@ export function ChatView() {
               : `${used.toLocaleString()} tokens`}
           </span>
         )}
-        {generation?.tokensPerSecond != null && (
-          <span className="text-xs text-fg-muted">{generation.tokensPerSecond.toFixed(1)} tokens/s</span>
+        {live?.tokensPerSecond != null && (
+          <span className="text-xs text-fg-muted">{live.tokensPerSecond.toFixed(1)} tokens/s</span>
         )}
+        {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
+          <button
+            type="button"
+            aria-pressed={detail.chat.thinking}
+            title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
+            onClick={() =>
+              void ipc
+                .setChatThinking(detail.chat.id, !detail.chat.thinking)
+                .then(() => openChat(detail.chat.id))
+                .catch((e) => showError(toErrorInfo(e)))
+            }
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-sm hover:bg-bg-muted ${detail.chat.thinking ? "text-fg" : "text-fg-muted"}`}
+          >
+            <Brain size={14} aria-hidden /> Thinking {detail.chat.thinking ? "on" : "off"}
+          </button>
+        )}
+        {detail && <ToolsPanel chatId={detail.chat.id} nCtx={nCtx} />}
         {detail && (
           <button
             type="button"
@@ -94,15 +130,71 @@ export function ChatView() {
             </div>
           )}
           {messages.map((m) => (
-            <MessageItem
-              key={m.id}
-              message={m}
-              isLastAssistant={m.id === lastAssistantId}
-              busy={busy}
-              onRegenerate={(id) => void regenerate(id)}
-              onEditResend={editResend}
-              onSwitchBranch={(id) => void switchBranch(id)}
-            />
+            <div key={m.id} className="space-y-2">
+              {(m.text || m.reasoning || m.role === "user" || m.error || m.toolCalls.length === 0) && (
+                <MessageItem
+                  message={m}
+                  isLastAssistant={m.id === lastAssistantId}
+                  busy={busy}
+                  onRegenerate={(id) => void regenerate(id)}
+                  onEditResend={editResend}
+                  onSwitchBranch={(id) => void switchBranch(id)}
+                />
+              )}
+              {m.toolCalls.map((c) => {
+                const r = results.get(c.id);
+                const liveTool = live?.tools.find((t) => t.callId === c.id);
+                const waiting = chatApprovals.some((a) => a.callId === c.id);
+                const stored: ToolCallView = liveTool ?? {
+                  callId: c.id,
+                  name: c.name,
+                  arguments: c.arguments,
+                  recovered: c.recovered,
+                  status: r?.status ?? (busy ? "running" : "cancelled"),
+                  text: r?.text ?? "",
+                };
+                const view = waiting && stored.status === "running" ? { ...stored, status: "waiting" } : stored;
+                return <ToolCallCard key={c.id} call={view} />;
+              })}
+            </div>
+          ))}
+          {live && (
+            <div className="space-y-2" aria-live="polite">
+              {live.tools
+                .filter((t) => !messages.some((m) => m.toolCalls.some((c) => c.id === t.callId)))
+                .map((t) => (
+                  <ToolCallCard
+                    key={t.callId}
+                    call={
+                      t.status === "running" && chatApprovals.some((a) => a.callId === t.callId)
+                        ? { ...t, status: "waiting" }
+                        : t
+                    }
+                  />
+                ))}
+              {live.reasoning && (
+                <details className="rounded-md border border-border bg-bg-subtle px-3 py-1.5 text-sm" open>
+                  <summary className="cursor-pointer text-fg-muted select-none">Thinking…</summary>
+                  <div className="mt-1 whitespace-pre-wrap text-fg-muted">{live.reasoning}</div>
+                </details>
+              )}
+              {live.text ? (
+                <div className="leading-relaxed">
+                  <Markdown text={live.text} />
+                </div>
+              ) : (
+                live.tools.every((t) => t.status !== "running") &&
+                chatApprovals.length === 0 && <div className="text-fg-muted">…</div>
+              )}
+              {live.notes.map((n, i) => (
+                <p key={i} className="text-xs text-fg-muted">
+                  {n}
+                </p>
+              ))}
+            </div>
+          )}
+          {chatApprovals.map((a) => (
+            <ApprovalCard key={a.id} request={a} onDecide={(d, note) => void decideApproval(a.id, d, note)} />
           ))}
           <div ref={bottomRef} />
         </div>
@@ -116,7 +208,7 @@ export function ChatView() {
       <Composer
         busy={busy}
         disabledReason={disabledReason}
-        onSend={(t, images) => void send(t, undefined, images)}
+        onSend={(t, images, documents) => void send(t, undefined, images, documents)}
         onStop={() => void stop()}
       />
       <SystemPromptDialog

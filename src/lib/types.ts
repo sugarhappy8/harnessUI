@@ -23,6 +23,8 @@ export interface Chat {
   leafMessageId: number | null;
   createdAt: number;
   updatedAt: number;
+  /** Thinking is on for this chat (when the model can think). */
+  thinking: boolean;
 }
 
 export type Role = "system" | "user" | "assistant" | "tool";
@@ -45,6 +47,36 @@ export interface MessageDto {
   siblingIds: number[];
   /** Attached images (load with getAttachment). */
   imageIds: number[];
+  /** Attached text and PDF files. */
+  documents: { id: number; name: string }[];
+  /** Tool calls the model made in this message. */
+  toolCalls: ToolCallDto[];
+  /** For a tool message: the result. */
+  toolResult: ToolResultDto | null;
+}
+
+export interface ToolCallDto {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  /** Recovered from the model's text rather than a native tool call. */
+  recovered: boolean;
+}
+
+export interface ToolResultDto {
+  callId: string;
+  name: string;
+  /** ok, error, denied, cancelled, refused, ... */
+  status: string;
+  text: string;
+  imageCount: number;
+}
+
+/** A text or PDF file picked or dropped into the composer. */
+export interface DocumentInput {
+  fileName: string;
+  /** Base64 of the bytes. */
+  data: string;
 }
 
 /** An image picked, pasted or dropped into the composer. */
@@ -72,6 +104,9 @@ export interface RuntimeStatus {
   stage: string | null;
   nCtx: number | null;
   supportsTools: boolean;
+  preserveReasoning: boolean;
+  /** The model's chat template can think. */
+  thinking: boolean;
   vision: boolean;
   offloadedLayers: number | null;
   totalLayers: number | null;
@@ -118,14 +153,37 @@ export interface LocalModelSettings {
   device: string | null;
 }
 
-export type ChatStreamEvent =
-  | { type: "started"; userMessageId: number | null; assistantMessageId: number }
+/** Events streamed while an agent turn runs (src-tauri/src/turns.rs). */
+export type TurnStreamEvent =
+  | { type: "started"; userMessageId: number | null }
+  | { type: "step"; step: number }
   | { type: "content"; text: string }
   | { type: "reasoning"; text: string }
-  | { type: "usage"; promptTokens: number; completionTokens: number }
-  | { type: "timings"; predictedPerSecond: number | null; promptPerSecond: number | null }
-  | { type: "finished"; status: MessageStatus; finishReason: string | null }
-  | { type: "error"; error: ErrorInfo };
+  | { type: "discarded" }
+  | { type: "messageSaved"; messageId: number; role: Role }
+  | { type: "toolStarted"; callId: string; name: string; arguments: Record<string, unknown>; recovered: boolean }
+  | { type: "toolProgress"; callId: string; text: string }
+  | {
+      type: "toolFinished";
+      callId: string;
+      name: string;
+      status: string;
+      text: string;
+      decision: string;
+      durationMs: number;
+      ui: unknown;
+    }
+  | {
+      type: "usage";
+      promptTokens: number;
+      completionTokens: number;
+      tokensPerSecond: number | null;
+      contextUsed: number | null;
+      nCtx: number | null;
+    }
+  | { type: "note"; text: string }
+  | { type: "compacted"; stage: number }
+  | { type: "finished"; status: string; message: string | null };
 
 export interface DiagnosticsReport {
   text: string;
@@ -306,4 +364,129 @@ export interface PackProgress {
   unpacking: boolean;
   finished: boolean;
   error: ErrorInfo | null;
+}
+
+// ---- Tools, approvals, audit (M3) ------------------------------------------
+
+export interface ApprovalRequest {
+  /** Random id created in Rust; the decision is sent back with it. */
+  id: string;
+  chatId: number;
+  callId: string;
+  server: string;
+  tool: string;
+  summary: string;
+  preview: string;
+  card: "onceOnly" | "grantable";
+  reason: "normal" | "alwaysAsk" | "recoveredFromText" | "untrustedContentThenOutbound";
+}
+
+export interface ApprovedFolder {
+  id: number;
+  path: string;
+  chatId: number | null;
+}
+
+export interface AuditRow {
+  id: number;
+  ts: number;
+  chat_id: number | null;
+  server: string;
+  tool: string;
+  arguments: unknown;
+  preview: string;
+  risk: string;
+  decision: string;
+  decided_by: string;
+  note: string | null;
+  result_status: string | null;
+  result_summary: string | null;
+  duration_ms: number | null;
+}
+
+export interface AuditFilter {
+  chatId?: number | null;
+  tool?: string | null;
+  decision?: string | null;
+  since?: number | null;
+  limit?: number | null;
+}
+
+export interface HotkeyStatus {
+  accelerator: string;
+  registered: boolean;
+  error: string | null;
+}
+
+// ---- Tools and MCP servers (M3) ----------------------------------------------
+
+export interface ToolDto {
+  exposed: string;
+  server: string;
+  original: string;
+  description: string;
+  builtin: boolean;
+  enabledInChat: boolean;
+  /** External tools: switched on in the server's list, and this version reviewed. */
+  available: boolean;
+  /** External tools: changed since it was last reviewed. */
+  changed: boolean;
+  allowAnyArgs: boolean;
+  alwaysAsk: boolean;
+  destructive: boolean;
+  ready: boolean;
+  schemaError: string | null;
+  tokenEstimate: number;
+}
+
+export type ServerState =
+  | { type: "starting" }
+  | { type: "ready" }
+  | { type: "failed"; reason: string }
+  | { type: "stopped" };
+
+export interface McpServerDto {
+  id: number | null;
+  name: string;
+  kind: "builtin" | "stdio" | "http";
+  state: ServerState;
+  enabled: boolean;
+  builtin: boolean;
+  summary: string;
+  protocolVersion: string | null;
+  stderrTail: string[];
+  toolCount: number;
+}
+
+export interface McpImportPreview {
+  name: string;
+  kind: string;
+  summary: string;
+  exists: boolean;
+  findings: { what: string; name: string }[];
+  envKeys: string[];
+  headerKeys: string[];
+}
+
+// ---- Skills (M5) ---------------------------------------------------------------
+
+export interface SkillDto {
+  name: string;
+  description: string;
+  dir: string;
+  enabled: boolean;
+  /** Read from the shared ~/.agents/skills folder (not editable here). */
+  shared: boolean;
+  license: string | null;
+  compatibility: string | null;
+  allowedTools: string[];
+  warnings: string[];
+}
+
+export interface SkillList {
+  skills: SkillDto[];
+  problems: { path: string; error: string }[];
+  sharedEnabled: boolean;
+  sharedPath: string | null;
+  folder: string | null;
 }

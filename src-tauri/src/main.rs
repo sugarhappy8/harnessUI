@@ -5,9 +5,16 @@ fn main() {
     // The same binary is the macOS crash-safety reaper when started with the hidden
     // flag (ARCHITECTURE.md 4.1). It never opens a window.
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some(app_lib::REAPER_FLAG) {
-        let parent = args.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
-        runtime::reaper_main(parent);
+    match args.next().as_deref() {
+        Some(flag) if flag == app_lib::REAPER_FLAG => {
+            let parent = args.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+            runtime::reaper_main(parent);
+        }
+        // PDF parsing runs in this binary as a short-lived worker (ARCHITECTURE.md 8.6).
+        Some(flag) if flag == tools::pdf::WORKER_FLAG => {
+            tools::pdf::worker_main(&args.next().unwrap_or_default());
+        }
+        _ => {}
     }
     app_lib::run();
 }

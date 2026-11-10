@@ -46,15 +46,16 @@ pub async fn load_local_model(
     settings.mmproj = crate::hub::projector_for(&state, &path).await;
     // Never ask for more context than the model was trained for (read from its header).
     let header_path = model.clone();
-    let trained = tokio::task::spawn_blocking(move || {
+    let summary = tokio::task::spawn_blocking(move || {
         models::read_file(&header_path)
             .ok()
-            .map(|h| models::ModelSummary::from_header(&h).context_length)
+            .map(|h| models::ModelSummary::from_header(&h))
     })
     .await
     .ok()
-    .flatten()
     .flatten();
+    let thinking = summary.as_ref().is_some_and(|s| s.template_thinking);
+    let trained = summary.and_then(|s| s.context_length);
     if let Some(max) = trained.and_then(|t| u32::try_from(t).ok())
         && settings.ctx > max
     {
@@ -78,7 +79,9 @@ pub async fn load_local_model(
         return Ok(());
     }
     let runtime = state.runtime.clone();
-    runtime.load(model, settings).await
+    runtime.load(model, settings).await?;
+    state.runtime.set_thinking(thinking);
+    Ok(())
 }
 
 #[tauri::command]

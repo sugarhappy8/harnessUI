@@ -13,7 +13,17 @@ export default function App() {
   const [modelsOpen, setModelsOpen] = useState(false);
   // null while loading; true once first run was completed or skipped.
   const [firstRunDone, setFirstRunDone] = useState<boolean | null>(ipc.isTauri() ? null : true);
-  const { refreshChats, refreshModelOptions, setRuntime, newChat, stop, showError } = useApp();
+  const { refreshChats, refreshModelOptions, setRuntime, newChat, stop, showError, addApproval, removeApproval } =
+    useApp();
+
+  // Approval cards: Rust sends each request only to this window with a random id.
+  useEffect(() => {
+    if (!ipc.isTauri()) return;
+    const offs: (() => void)[] = [];
+    void ipc.onApprovalRequest(addApproval).then((u) => offs.push(u));
+    void ipc.onApprovalClosed(removeApproval).then((u) => offs.push(u));
+    return () => offs.forEach((f) => f());
+  }, [addApproval, removeApproval]);
 
   useEffect(() => {
     if (!ipc.isTauri()) return;

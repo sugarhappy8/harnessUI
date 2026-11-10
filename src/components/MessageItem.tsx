@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, Copy, Pencil, RotateCcw, Check } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { MessageDto } from "../lib/types";
 import { Markdown } from "./Markdown";
@@ -114,6 +114,15 @@ export function MessageItem(props: Props) {
               <div className="flex flex-wrap justify-end gap-2">
                 {m.imageIds.map((id) => (
                   <AttachedImage key={id} id={id} />
+                ))}
+              </div>
+            )}
+            {(m.documents ?? []).length > 0 && (
+              <div className="flex flex-wrap justify-end gap-1">
+                {m.documents.map((d) => (
+                  <span key={d.id} className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs">
+                    <FileText size={12} aria-hidden /> {d.name}
+                  </span>
                 ))}
               </div>
             )}

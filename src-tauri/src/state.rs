@@ -12,4 +12,10 @@ pub struct AppState {
     pub runtime: Arc<RuntimeManager>,
     /// Cancels the reply being generated (one at a time in v1).
     pub generation: Mutex<Option<CancellationToken>>,
+    /// Tool servers: built-in and the user's MCP servers.
+    pub host: mcp_host::Host,
+    /// The skills server (also registered in `host`), for the prompt's skills index.
+    pub skills: Arc<tools::SkillsServer>,
+    /// "Allow for this chat" grants (memory only, D12).
+    pub grants: crate::turns::Grants,
 }

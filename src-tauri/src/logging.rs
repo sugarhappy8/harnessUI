@@ -27,6 +27,12 @@ pub fn init(app: &AppHandle) {
         Ok(directive) => filter.add_directive(directive),
         Err(_) => filter,
     };
+    // rmcp logs transport errors whose text can hold the request URL after secret
+    // placeholders were resolved (query-string keys). The host reports failures itself.
+    let filter = match "rmcp=off".parse() {
+        Ok(directive) => filter.add_directive(directive),
+        Err(_) => filter,
+    };
     let file_layer = app.path().app_log_dir().ok().and_then(|dir| {
         std::fs::create_dir_all(&dir).ok()?;
         let appender = tracing_appender::rolling::Builder::new()

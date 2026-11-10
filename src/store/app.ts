@@ -1,24 +1,63 @@
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
 import type {
+  ApprovalRequest,
   ChatDetail,
-  ChatStreamEvent,
+  TurnStreamEvent,
   ChatSummary,
   ErrorInfo,
+  DocumentInput,
   ImageInput,
-  MessageDto,
   ModelOption,
   RuntimeStatus,
 } from "../lib/types";
 
-/** Live numbers for the message being generated. */
+/** A tool call while its turn runs (before its messages are stored). */
+export interface LiveTool {
+  callId: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  recovered: boolean;
+  status: string;
+  text: string;
+  decision: string | null;
+  durationMs: number | null;
+  progress: string;
+}
+
+/** The agent turn being generated. */
 export interface Generation {
   chatId: number;
-  assistantMessageId: number | null;
+  /** Text and thinking streamed since the last stored message. */
+  text: string;
+  reasoning: string;
+  tools: LiveTool[];
+  notes: string[];
+  step: number;
   tokensPerSecond: number | null;
   promptTokens: number | null;
   completionTokens: number | null;
+  contextUsed: number | null;
+  nCtx: number | null;
 }
+
+function newGeneration(chatId: number): Generation {
+  return {
+    chatId,
+    text: "",
+    reasoning: "",
+    tools: [],
+    notes: [],
+    step: 0,
+    tokensPerSecond: null,
+    promptTokens: null,
+    completionTokens: null,
+    contextUsed: null,
+    nCtx: null,
+  };
+}
+
+const PROGRESS_LIMIT = 8000;
 
 interface AppState {
   chats: ChatSummary[];
@@ -29,6 +68,8 @@ interface AppState {
   modelOptions: ModelOption[];
   generation: Generation | null;
   error: ErrorInfo | null;
+  /** Approval cards waiting for an answer (any chat). */
+  approvals: ApprovalRequest[];
 
   setSearch: (q: string) => void;
   refreshChats: () => Promise<void>;
@@ -36,7 +77,7 @@ interface AppState {
   newChat: () => Promise<void>;
   renameChat: (chatId: number, title: string) => Promise<void>;
   deleteChat: (chatId: number) => Promise<void>;
-  send: (text: string, parentId?: number | null, images?: ImageInput[]) => Promise<void>;
+  send: (text: string, parentId?: number | null, images?: ImageInput[], documents?: DocumentInput[]) => Promise<void>;
   regenerate: (assistantMessageId: number) => Promise<void>;
   stop: () => Promise<void>;
   switchBranch: (messageId: number) => Promise<void>;
@@ -45,6 +86,9 @@ interface AppState {
   setChatModel: (modelRef: string | null) => Promise<void>;
   setSystemPrompt: (prompt: string | null) => Promise<void>;
   showError: (e: ErrorInfo | null) => void;
+  addApproval: (r: ApprovalRequest) => void;
+  removeApproval: (id: string) => void;
+  decideApproval: (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) => Promise<void>;
 }
 
 /** Turns anything thrown by `invoke` into the four-part error the UI shows. */
@@ -67,68 +111,121 @@ function lastMessageId(detail: ChatDetail | null): number | null {
 }
 
 export const useApp = create<AppState>((set, get) => {
-  /** Applies streamed events to the message being generated. */
-  function onStreamEvent(chatId: number, e: ChatStreamEvent) {
-    const state = get();
-    if (state.activeChatId !== chatId) {
-      if (e.type === "finished" || e.type === "error") {
-        set({ generation: null });
-        void get().refreshChats();
-      }
-      return;
-    }
+  function reload(chatId: number) {
+    return ipc.getChat(chatId).then((detail) => {
+      if (get().activeChatId === chatId) set({ detail });
+    });
+  }
+
+  function updateGen(chatId: number, f: (g: Generation) => Generation) {
+    const g = get().generation;
+    if (g && g.chatId === chatId) set({ generation: f(g) });
+  }
+
+  /** Applies streamed turn events. */
+  function onStreamEvent(chatId: number, e: TurnStreamEvent) {
     switch (e.type) {
       case "started":
-        set({
-          generation: {
-            chatId,
-            assistantMessageId: e.assistantMessageId,
-            tokensPerSecond: null,
-            promptTokens: null,
-            completionTokens: null,
-          },
-        });
-        // Reload so the new user message and the placeholder appear with real ids.
-        void ipc.getChat(chatId).then((detail) => {
-          if (get().activeChatId === chatId) set({ detail });
-        });
+        void reload(chatId);
+        return;
+      case "step":
+        updateGen(chatId, (g) => ({ ...g, step: e.step }));
         return;
       case "content":
-      case "reasoning": {
-        const gen = state.generation;
-        const detail = state.detail;
-        if (!gen?.assistantMessageId || !detail) return;
-        const messages = detail.messages.map((m): MessageDto => {
-          if (m.id !== gen.assistantMessageId) return m;
-          return e.type === "content"
-            ? { ...m, text: m.text + e.text }
-            : { ...m, reasoning: (m.reasoning ?? "") + e.text };
-        });
-        set({ detail: { ...detail, messages } });
+        updateGen(chatId, (g) => ({ ...g, text: g.text + e.text }));
         return;
-      }
+      case "reasoning":
+        updateGen(chatId, (g) => ({ ...g, reasoning: g.reasoning + e.text }));
+        return;
+      case "discarded":
+        updateGen(chatId, (g) => ({ ...g, text: "", reasoning: "" }));
+        return;
+      case "messageSaved":
+        // The stored message replaces the streamed text; tool cards stay until their
+        // results are stored.
+        void reload(chatId).then(() => {
+          updateGen(chatId, (g) => {
+            const stored = new Set(
+              (get().detail?.messages ?? []).flatMap((m) => (m.toolResult ? [m.toolResult.callId] : [])),
+            );
+            return { ...g, text: "", reasoning: "", tools: g.tools.filter((t) => !stored.has(t.callId)) };
+          });
+        });
+        updateGen(chatId, (g) => ({ ...g, text: "", reasoning: "" }));
+        return;
+      case "toolStarted":
+        updateGen(chatId, (g) => ({
+          ...g,
+          tools: [
+            ...g.tools,
+            {
+              callId: e.callId,
+              name: e.name,
+              arguments: e.arguments,
+              recovered: e.recovered,
+              status: "running",
+              text: "",
+              decision: null,
+              durationMs: null,
+              progress: "",
+            },
+          ],
+        }));
+        return;
+      case "toolProgress":
+        updateGen(chatId, (g) => {
+          const tools = [...g.tools];
+          const i = e.callId
+            ? tools.findIndex((t) => t.callId === e.callId)
+            : tools.map((t) => t.status).lastIndexOf("running");
+          const tool = tools[i];
+          if (!tool) return g;
+          tools[i] = { ...tool, progress: (tool.progress + e.text).slice(-PROGRESS_LIMIT) };
+          return { ...g, tools };
+        });
+        return;
+      case "toolFinished":
+        updateGen(chatId, (g) => ({
+          ...g,
+          tools: g.tools.map((t) =>
+            t.callId === e.callId
+              ? { ...t, status: e.status, text: e.text, decision: e.decision, durationMs: e.durationMs }
+              : t,
+          ),
+        }));
+        return;
       case "usage":
-        if (state.generation) {
+        updateGen(chatId, (g) => ({
+          ...g,
+          promptTokens: e.promptTokens,
+          completionTokens: e.completionTokens,
+          tokensPerSecond: e.tokensPerSecond ?? g.tokensPerSecond,
+          contextUsed: e.contextUsed ?? g.contextUsed,
+          nCtx: e.nCtx ?? g.nCtx,
+        }));
+        return;
+      case "note":
+        updateGen(chatId, (g) => ({ ...g, notes: [...g.notes, e.text] }));
+        return;
+      case "compacted":
+        updateGen(chatId, (g) => ({
+          ...g,
+          notes: [...g.notes, "Earlier messages were summarised to make room in the context."],
+        }));
+        return;
+      case "finished":
+        if (e.message && e.status !== "error") {
           set({
-            generation: {
-              ...state.generation,
-              promptTokens: e.promptTokens,
-              completionTokens: e.completionTokens,
+            error: {
+              code: e.status,
+              message: e.message,
+              nextStep: "Ask the model to continue, or rephrase the request.",
+              details: "",
             },
           });
         }
-        return;
-      case "timings":
-        if (state.generation) {
-          set({ generation: { ...state.generation, tokensPerSecond: e.predictedPerSecond } });
-        }
-        return;
-      case "finished":
-      case "error":
-        if (e.type === "error") set({ error: e.error });
-        void ipc.getChat(chatId).then((detail) => {
-          if (get().activeChatId === chatId) set({ detail });
-          set({ generation: null });
+        void reload(chatId).then(() => {
+          if (get().generation?.chatId === chatId) set({ generation: null });
         });
         void get().refreshChats();
         return;
@@ -144,6 +241,7 @@ export const useApp = create<AppState>((set, get) => {
     modelOptions: [],
     generation: null,
     error: null,
+    approvals: [],
 
     setSearch: (q) => {
       set({ search: q });
@@ -185,7 +283,7 @@ export const useApp = create<AppState>((set, get) => {
       await get().refreshChats();
     },
 
-    send: async (text, parentId, images) => {
+    send: async (text, parentId, images, documents) => {
       let chatId = get().activeChatId;
       if (chatId === null) {
         await get().newChat();
@@ -193,19 +291,12 @@ export const useApp = create<AppState>((set, get) => {
       }
       if (chatId === null) return;
       const parent = parentId === undefined ? lastMessageId(get().detail) : parentId;
-      set({
-        generation: {
-          chatId,
-          assistantMessageId: null,
-          tokensPerSecond: null,
-          promptTokens: null,
-          completionTokens: null,
-        },
-        error: null,
-      });
+      set({ generation: newGeneration(chatId), error: null });
       const id = chatId;
       try {
-        await ipc.sendMessage({ chatId: id, text, parentId: parent, images }, (e) => onStreamEvent(id, e));
+        await ipc.sendMessage({ chatId: id, text, parentId: parent, images, documents }, (e) =>
+          onStreamEvent(id, e),
+        );
       } catch (err) {
         set({ generation: null, error: toErrorInfo(err) });
       }
@@ -214,16 +305,7 @@ export const useApp = create<AppState>((set, get) => {
     regenerate: async (assistantMessageId) => {
       const chatId = get().activeChatId;
       if (chatId === null) return;
-      set({
-        generation: {
-          chatId,
-          assistantMessageId: null,
-          tokensPerSecond: null,
-          promptTokens: null,
-          completionTokens: null,
-        },
-        error: null,
-      });
+      set({ generation: newGeneration(chatId), error: null });
       try {
         await ipc.regenerate(chatId, assistantMessageId, (e) => onStreamEvent(chatId, e));
       } catch (err) {
@@ -264,5 +346,16 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     showError: (e) => set({ error: e }),
+
+    addApproval: (r) => set({ approvals: [...get().approvals.filter((a) => a.id !== r.id), r] }),
+    removeApproval: (id) => set({ approvals: get().approvals.filter((a) => a.id !== id) }),
+    decideApproval: async (id, decision, note) => {
+      try {
+        await ipc.resolveApproval(id, decision, note);
+      } catch (err) {
+        set({ error: toErrorInfo(err) });
+      }
+      get().removeApproval(id);
+    },
   };
 });

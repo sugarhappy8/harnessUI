@@ -3,13 +3,23 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  ApprovedFolder,
+  AuditFilter,
+  AuditRow,
+  HotkeyStatus,
   BackendInfo,
   Chat,
   ChatDetail,
-  ChatStreamEvent,
+  TurnStreamEvent,
+  ToolDto,
+  McpServerDto,
+  McpImportPreview,
+  ApprovalRequest,
+  SkillList,
   ChatSummary,
   DiagnosticsReport,
   DiskUsage,
+  DocumentInput,
   DownloadGroup,
   FirstRunInfo,
   HardwareInfo,
@@ -61,10 +71,11 @@ export interface SendOptions {
   /** The message the new user message answers. Null for the first message. */
   parentId: number | null;
   images?: ImageInput[];
+  documents?: DocumentInput[];
 }
 
-export function sendMessage(opts: SendOptions, onEvent: (e: ChatStreamEvent) => void) {
-  const channel = new Channel<ChatStreamEvent>();
+export function sendMessage(opts: SendOptions, onEvent: (e: TurnStreamEvent) => void) {
+  const channel = new Channel<TurnStreamEvent>();
   channel.onmessage = onEvent;
   return invoke<void>("send_message", { ...opts, onEvent: channel });
 }
@@ -72,9 +83,9 @@ export function sendMessage(opts: SendOptions, onEvent: (e: ChatStreamEvent) => 
 export function regenerate(
   chatId: number,
   assistantMessageId: number,
-  onEvent: (e: ChatStreamEvent) => void,
+  onEvent: (e: TurnStreamEvent) => void,
 ) {
-  const channel = new Channel<ChatStreamEvent>();
+  const channel = new Channel<TurnStreamEvent>();
   channel.onmessage = onEvent;
   return invoke<void>("regenerate", { chatId, assistantMessageId, onEvent: channel });
 }
@@ -163,3 +174,72 @@ export function onPackProgress(handler: (p: PackProgress) => void): Promise<Unli
 export const getHfEndpoint = () => invoke<string | null>("get_hf_endpoint");
 export const setHfEndpoint = (endpoint: string | null) => invoke<void>("set_hf_endpoint", { endpoint });
 export const getAttachment = (id: number) => invoke<string>("get_attachment", { id });
+
+// Permissions and audit (M3)
+export const listApprovedFolders = (chatId: number | null) =>
+  invoke<ApprovedFolder[]>("list_approved_folders", { chatId });
+export const approveFolder = (chatId: number | null) => invoke<ApprovedFolder | null>("approve_folder", { chatId });
+export const removeApprovedFolder = (id: number) => invoke<void>("remove_approved_folder", { id });
+export const listAudit = (filter: AuditFilter) => invoke<AuditRow[]>("list_audit", { filter });
+export const exportAudit = (filter: AuditFilter, format: "jsonl" | "csv") =>
+  invoke<string | null>("export_audit", { filter, format });
+export const stopHotkeyStatus = () => invoke<HotkeyStatus>("stop_hotkey_status");
+export const setStopHotkey = (accelerator: string) => invoke<HotkeyStatus>("set_stop_hotkey", { accelerator });
+export function onStopRequested(handler: () => void): Promise<UnlistenFn> {
+  return listen("stop-requested", () => handler());
+}
+
+// Agent turns: approvals
+export const resolveApproval = (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) =>
+  invoke<void>("resolve_approval", { id, decision, note });
+
+// Tools and MCP servers
+export const listChatTools = (chatId: number) => invoke<ToolDto[]>("list_chat_tools", { chatId });
+export const setChatTools = (chatId: number, enabled: string[]) =>
+  invoke<void>("set_chat_tools", { chatId, enabled });
+export const clearChatGrants = (chatId: number) => invoke<void>("clear_chat_grants", { chatId });
+export const listMcpServers = () => invoke<McpServerDto[]>("list_mcp_servers");
+export const previewMcpConfig = (json: string) => invoke<McpImportPreview[]>("preview_mcp_config", { json });
+export const addMcpServers = (json: string, names: string[], moveCredentials: boolean) =>
+  invoke<void>("add_mcp_servers", { json, names, moveCredentials });
+export const removeMcpServer = (name: string) => invoke<void>("remove_mcp_server", { name });
+export const setMcpServerEnabled = (name: string, enabled: boolean) =>
+  invoke<void>("set_mcp_server_enabled", { name, enabled });
+export const restartMcpServer = (name: string) => invoke<void>("restart_mcp_server", { name });
+export const setMcpToolPref = (
+  server: string,
+  tool: string,
+  enabled: boolean,
+  allowAnyArgs: boolean,
+  alwaysAsk: boolean,
+) => invoke<void>("set_mcp_tool_pref", { server, tool, enabled, allowAnyArgs, alwaysAsk });
+export const mcpServerLog = (name: string) => invoke<string[]>("mcp_server_log", { name });
+
+export function onApprovalRequest(handler: (r: ApprovalRequest) => void): Promise<UnlistenFn> {
+  return listen<ApprovalRequest>("approval-request", (e) => handler(e.payload));
+}
+
+export function onApprovalClosed(handler: (id: string) => void): Promise<UnlistenFn> {
+  return listen<string>("approval-closed", (e) => handler(e.payload));
+}
+
+export function onMcpChanged(handler: () => void): Promise<UnlistenFn> {
+  return listen("mcp-changed", () => handler());
+}
+export const listServerTools = (server: string) => invoke<ToolDto[]>("list_server_tools", { server });
+
+// Skills
+export const listSkills = () => invoke<SkillList>("list_skills");
+export const importSkill = (zip: boolean) => invoke<string | null>("import_skill", { zip });
+export const setSkillEnabled = (name: string, enabled: boolean) =>
+  invoke<void>("set_skill_enabled", { name, enabled });
+export const deleteSkill = (name: string) => invoke<void>("delete_skill", { name });
+export const getSkillSource = (name: string) => invoke<string>("get_skill_source", { name });
+export const validateSkill = (text: string, folder: string) => invoke<string[]>("validate_skill", { text, folder });
+export const saveSkill = (folder: string, text: string, isNew: boolean) =>
+  invoke<string[]>("save_skill", { folder, text, isNew });
+export const setSharedSkills = (enabled: boolean) => invoke<void>("set_shared_skills", { enabled });
+export const openSkillsFolder = () => invoke<void>("open_skills_folder");
+export const loadedSkills = (chatId: number) => invoke<string[]>("loaded_skills", { chatId });
+export const unloadSkill = (chatId: number, name: string) => invoke<void>("unload_skill", { chatId, name });
+export const setChatThinking = (chatId: number, on: boolean) => invoke<void>("set_chat_thinking", { chatId, on });

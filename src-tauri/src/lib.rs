@@ -11,15 +11,21 @@ mod diagnostics;
 mod downloads;
 mod dto;
 mod error;
+mod hotkey;
 mod hub;
 mod logging;
+mod mcp_cmd;
 mod models_cmd;
 mod navigation;
 mod packs_cmd;
+mod permissions;
 mod providers;
 mod runtime_manager;
 mod settings;
+mod skills_cmd;
 mod state;
+mod toolset;
+mod turns;
 
 use std::sync::{Arc, Mutex};
 
@@ -116,6 +122,38 @@ pub fn run() {
             packs_cmd::download_pack,
             packs_cmd::cancel_pack_download,
             packs_cmd::remove_pack,
+            hotkey::stop_hotkey_status,
+            hotkey::set_stop_hotkey,
+            permissions::list_approved_folders,
+            permissions::approve_folder,
+            permissions::remove_approved_folder,
+            permissions::list_audit,
+            permissions::export_audit,
+            turns::resolve_approval,
+            mcp_cmd::list_mcp_servers,
+            mcp_cmd::preview_mcp_config,
+            mcp_cmd::add_mcp_servers,
+            mcp_cmd::remove_mcp_server,
+            mcp_cmd::set_mcp_server_enabled,
+            mcp_cmd::restart_mcp_server,
+            mcp_cmd::list_chat_tools,
+            mcp_cmd::list_server_tools,
+            mcp_cmd::set_chat_thinking,
+            mcp_cmd::set_chat_tools,
+            mcp_cmd::set_mcp_tool_pref,
+            mcp_cmd::clear_chat_grants,
+            mcp_cmd::mcp_server_log,
+            skills_cmd::list_skills,
+            skills_cmd::import_skill,
+            skills_cmd::set_skill_enabled,
+            skills_cmd::delete_skill,
+            skills_cmd::get_skill_source,
+            skills_cmd::validate_skill,
+            skills_cmd::save_skill,
+            skills_cmd::set_shared_skills,
+            skills_cmd::open_skills_folder,
+            skills_cmd::loaded_skills,
+            skills_cmd::unload_skill,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -142,13 +180,36 @@ pub fn run() {
                 handle.clone(),
                 runtime_manager::layout(&handle),
             ));
+            let skills = Arc::new(tools::SkillsServer::new());
+            let host = tauri::async_runtime::block_on(toolset::build_host(
+                &handle,
+                secrets.clone(),
+                skills.clone(),
+            ));
             app.manage(state::AppState {
                 store,
                 secrets,
                 runtime,
                 generation: Mutex::new(None),
+                host: host.clone(),
+                skills,
+                grants: Default::default(),
             });
+            app.manage(turns::PendingApprovals::default());
+            toolset::forward_events(handle.clone(), host);
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    toolset::reload_skills(&handle).await;
+                    toolset::start_saved_servers(&handle).await;
+                });
+            }
             app.manage(packs_cmd::PackDownloads::default());
+            app.manage(hotkey::Hotkey::default());
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move { hotkey::init(&handle).await });
+            }
             let downloads = Arc::new(downloads::DownloadManager::default());
             app.manage(downloads.clone());
             {
@@ -176,7 +237,11 @@ pub fn run() {
             // Stop llama-server cleanly; the Job Object / reaper is the backstop.
             if let Some(state) = handle.try_state::<state::AppState>() {
                 let runtime = state.runtime.clone();
-                tauri::async_runtime::block_on(runtime.shutdown());
+                let host = state.host.clone();
+                tauri::async_runtime::block_on(async move {
+                    host.shutdown().await;
+                    runtime.shutdown().await;
+                });
             }
             tracing::info!("stopped");
         }

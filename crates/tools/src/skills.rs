@@ -686,11 +686,14 @@ impl BuiltinServer for SkillsServer {
                 let files = list_files(&skill.dir);
                 let mut listing = String::new();
                 for f in &files {
+                    // Forward slashes on every OS: read_skill_file accepts them, and the
+                    // model sees the same listing everywhere.
                     let rel = f
                         .strip_prefix(&skill.dir)
                         .unwrap_or(f)
                         .display()
-                        .to_string();
+                        .to_string()
+                        .replace('\\', "/");
                     listing.push_str(&format!("- {rel}"));
                     if rel.starts_with("scripts")
                         && let Some(cmd) = script_command(f, windows)
@@ -903,8 +906,12 @@ mod tests {
         let t = out.joined_text();
         assert!(
             t.contains("# PDF tools")
-                && t.contains("scripts/extract.py")
-                && t.contains("run with: python3"),
+                && t.contains("- scripts/extract.py")
+                && t.contains(if cfg!(windows) {
+                    "run with: python "
+                } else {
+                    "run with: python3 "
+                }),
             "{t}"
         );
         assert!(

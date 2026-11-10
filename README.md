@@ -6,7 +6,7 @@ A local-first desktop app that gives AI models running on your own hardware the 
 - No account, no telemetry, no remote crash reporting. Logs stay on disk.
 - Chats, settings and the audit log are stored locally.
 
-**Status:** under construction. Chat with a local GGUF model or an OpenAI-compatible endpoint works (M1); the model manager and first-run flow are in progress (M2). See [CHANGELOG.md](CHANGELOG.md) for what each milestone delivered and [ARCHITECTURE.md](ARCHITECTURE.md) section 19 for the plan.
+**Status:** under construction. Chat with a local GGUF model or an OpenAI-compatible endpoint works (M1); the model manager and first-run flow are in progress (M2); the agent loop with tools, approvals, MCP servers and the audit log works (M3). See [CHANGELOG.md](CHANGELOG.md) for what each milestone delivered and [ARCHITECTURE.md](ARCHITECTURE.md) section 19 for the plan.
 
 ## What works today
 
@@ -14,6 +14,10 @@ A local-first desktop app that gives AI models running on your own hardware the 
 - **Backends.** Windows ships Vulkan and CPU; macOS ships Metal (with CPU as the fallback). A backend that fails to load steps down (ROCm/CUDA → Vulkan → CPU) and a crashed server restarts up to three times in five minutes. *Settings → Diagnostics → Run backend check* lists every device per backend and times a short generation on each, and saves the report to the logs folder.
 - **OpenAI-compatible endpoints.** *Settings → Endpoints* adds Ollama, LM Studio, vLLM or any OpenAI-compatible server; API keys go to the system keychain.
 - **Model manager (in progress).** *Models* (Ctrl+M) searches Hugging Face for GGUF chat models, shows every quantization with a fit verdict for your hardware, downloads with resume and SHA-256 verification, and lists installed models with badges read from the GGUF header. First run suggests a model from the bundled catalog.
+
+- **Tools and approvals.** Approve a folder (*Settings → Permissions*), then ask the model to read, search or edit files in it. Every tool call shows a card; actions ask first (*Allow once*, *Allow for this chat*, *Deny*), and every call is recorded in *Settings → Audit log*. The chat's *Tools* panel switches tool groups on and off and shows what they cost in context. The terminal and git tools exist but are off by default.
+- **MCP servers.** *Settings → MCP servers → Add servers* takes a Claude Desktop, Cursor or VS Code config. Secrets go to the system keychain; a new server's tools start off until you turn them on.
+- **Stop.** The Stop button, Esc, or the global hotkey (Ctrl+Alt+Backspace on Windows, Ctrl+Option+Delete on macOS) stops the reply and cancels any running tool.
 
 ## Download a test build
 

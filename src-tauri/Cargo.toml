@@ -9,7 +9,7 @@ description = "Local-first agentic desktop app for local AI models"
 
 [lib]
 name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { workspace = true }
@@ -37,6 +37,10 @@ chrono = { workspace = true }
 rand = { workspace = true }
 models = { workspace = true }
 policy = { workspace = true }
+tools = { workspace = true }
+mcp-host = { workspace = true }
+# The agent and MCP host traits are async-trait traits; the app implements them.
+async-trait = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 dunce = { workspace = true }

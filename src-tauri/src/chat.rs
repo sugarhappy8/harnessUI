@@ -1,23 +1,20 @@
 //! Chats, messages and streaming replies.
 //!
-//! M1 sends plain chat (no tools). The agent loop replaces `generate` in M3; the
-//! storage shape and the streaming events stay the same.
+//! Every reply is an agent turn (`turns::run`): the model may call the tools switched on
+//! for the chat, and each message of the turn is stored as it completes.
 
-use std::time::Instant;
-
-use agent::{ChatMessage, ChatRequest, OpenAiClient, StreamEvent};
-use futures_util::StreamExt;
+use agent::OpenAiClient;
 use serde_json::json;
 use tauri::State;
 use tauri::ipc::Channel;
 use tokio_util::sync::CancellationToken;
 
-use crate::dto::{ChatDetailDto, ChatDto, ChatStreamEvent, ChatSummaryDto, MessageDto};
+use crate::dto::{ChatDetailDto, ChatDto, ChatSummaryDto, MessageDto};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use crate::turns::TurnStreamEvent;
 
 const NEW_CHAT_TITLE: &str = "New chat";
-const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 
 /// Extracts the plain text of a stored message.
 pub fn text_of(content: &serde_json::Value) -> String {
@@ -46,18 +43,29 @@ fn chat_dto(c: &store::Chat) -> ChatDto {
         leaf_message_id: c.leaf_message_id,
         created_at: c.created_at,
         updated_at: c.updated_at,
+        thinking: !serde_json::from_value::<crate::turns::ChatTools>(c.tool_prefs.clone())
+            .unwrap_or_default()
+            .thinking_off,
     }
 }
 
 async fn message_dto(state: &AppState, m: &store::Message) -> AppResult<MessageDto> {
     let siblings = state.store.siblings(m.id).await?;
+    // The agent loop stores a placeholder answer when a turn is stopped, so the history
+    // stays valid for the next request; the chat shows it as a "Stopped" label.
+    let mut text = text_of(&m.content);
+    let mut status = m.status.as_str().to_string();
+    if m.role == store::Role::Assistant && text.trim() == agent::history::STOPPED_TEXT {
+        text.clear();
+        status = store::MessageStatus::Stopped.as_str().to_string();
+    }
     Ok(MessageDto {
         id: m.id,
         parent_id: m.parent_id,
         role: m.role.as_str().to_string(),
-        text: text_of(&m.content),
+        text,
         reasoning: m.reasoning.clone(),
-        status: m.status.as_str().to_string(),
+        status,
         model_ref: m.model_ref.clone(),
         prompt_tokens: m.prompt_tokens,
         completion_tokens: m.completion_tokens,
@@ -75,6 +83,47 @@ async fn message_dto(state: &AppState, m: &store::Message) -> AppResult<MessageD
         created_at: m.created_at,
         sibling_ids: siblings,
         image_ids: crate::attachments::image_ids(&m.content),
+        documents: crate::attachments::document_refs(&m.content)
+            .into_iter()
+            .map(|(id, name)| crate::dto::DocumentRef { id, name })
+            .collect(),
+        tool_calls: tool_calls_of(&m.content),
+        tool_result: tool_result_of(&m.content),
+    })
+}
+
+fn tool_calls_of(content: &serde_json::Value) -> Vec<crate::dto::ToolCallDto> {
+    let Some(parts) = content.as_array() else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("tool_calls"))
+        .filter_map(|p| {
+            serde_json::from_value::<Vec<agent::CallRecord>>(p.get("calls")?.clone()).ok()
+        })
+        .flatten()
+        .map(|c| crate::dto::ToolCallDto {
+            id: c.id,
+            name: c.name,
+            arguments: serde_json::Value::Object(c.arguments),
+            recovered: c.recovered,
+        })
+        .collect()
+}
+
+fn tool_result_of(content: &serde_json::Value) -> Option<crate::dto::ToolResultDto> {
+    let parts = content.as_array()?;
+    let p = parts
+        .iter()
+        .find(|p| p.get("type").and_then(|t| t.as_str()) == Some("tool_result"))?;
+    let r: agent::ResultRecord = serde_json::from_value(p.get("result")?.clone()).ok()?;
+    Some(crate::dto::ToolResultDto {
+        call_id: r.call_id,
+        name: r.name,
+        status: r.status.label().to_string(),
+        text: r.text,
+        image_count: r.images.len(),
     })
 }
 
@@ -245,6 +294,7 @@ pub async fn stop_generation(state: State<'_, AppState>) -> AppResult<()> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri commands take their arguments flat.
 pub async fn send_message(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -252,11 +302,13 @@ pub async fn send_message(
     text: String,
     parent_id: Option<store::MessageId>,
     images: Option<Vec<crate::attachments::ImageInput>>,
-    on_event: Channel<ChatStreamEvent>,
+    documents: Option<Vec<crate::attachments::DocumentInput>>,
+    on_event: Channel<TurnStreamEvent>,
 ) -> AppResult<()> {
     let text = text.trim().to_string();
     let images = images.unwrap_or_default();
-    if text.is_empty() && images.is_empty() {
+    let documents = documents.unwrap_or_default();
+    if text.is_empty() && images.is_empty() && documents.is_empty() {
         return Err(AppError::bad_request("The message is empty."));
     }
     let chat = state
@@ -276,6 +328,7 @@ pub async fn send_message(
     let mut content = text_content(&text);
     if let Some(parts) = content.as_array_mut() {
         parts.extend(crate::attachments::save_images(&app, &state, chat_id, &images).await?);
+        parts.extend(crate::attachments::save_documents(&app, &state, chat_id, &documents).await?);
     }
     let user_id = state
         .store
@@ -304,15 +357,25 @@ pub async fn send_message(
                 .await;
         }
     }
-    generate(&state, &chat, user_id, Some(user_id), target, on_event).await
+    generate(
+        &app,
+        &state,
+        &chat,
+        user_id,
+        Some(user_id),
+        target,
+        on_event,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn regenerate(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     chat_id: store::ChatId,
     assistant_message_id: store::MessageId,
-    on_event: Channel<ChatStreamEvent>,
+    on_event: Channel<TurnStreamEvent>,
 ) -> AppResult<()> {
     let chat = state
         .store
@@ -324,11 +387,17 @@ pub async fn regenerate(
         .get_message(assistant_message_id)
         .await?
         .ok_or_else(|| AppError::not_found("message"))?;
-    let parent = old
-        .parent_id
+    // A turn may hold several messages (tool calls and results); regenerate answers the
+    // user message the turn started from.
+    let path = state.store.path_to(chat_id, old.id).await?;
+    let parent = path
+        .iter()
+        .rev()
+        .find(|m| m.role == store::Role::User)
+        .map(|m| m.id)
         .ok_or_else(|| AppError::bad_request("This message has nothing to regenerate from."))?;
     let target = resolve_target(&state, chat.model_ref.as_deref()).await?;
-    generate(&state, &chat, parent, None, target, on_event).await
+    generate(&app, &state, &chat, parent, None, target, on_event).await
 }
 
 /// Where a request goes.
@@ -398,69 +467,14 @@ async fn resolve_target(state: &AppState, model_ref: Option<&str>) -> AppResult<
     ))
 }
 
-/// Builds the request history: the system prompt, then every message on the path
-/// from the root to `last_id`, normalised so any chat template accepts it.
-async fn build_messages(
-    state: &AppState,
-    chat: &store::Chat,
-    last_id: store::MessageId,
-) -> AppResult<Vec<ChatMessage>> {
-    let default_prompt: Option<String> = state
-        .store
-        .get_setting(crate::settings::DEFAULT_SYSTEM_PROMPT)
-        .await
-        .ok()
-        .flatten();
-    let system = chat
-        .system_prompt
-        .clone()
-        .or(default_prompt)
-        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
-    let mut out = vec![ChatMessage::system(system)];
-    for m in state.store.path_to(chat.id, last_id).await? {
-        let text = text_of(&m.content);
-        match m.role {
-            store::Role::User => {
-                let ids = crate::attachments::image_ids(&m.content);
-                if ids.is_empty() {
-                    out.push(ChatMessage::user(text));
-                } else {
-                    let mut parts = Vec::new();
-                    if !text.is_empty() {
-                        parts.push(agent::ContentPart::text(text));
-                    }
-                    for id in ids {
-                        let (mime, b64) = crate::attachments::load_base64(state, id).await?;
-                        let url = agent::ImageUrl::from_base64(&mime, &b64)
-                            .map_err(AppError::internal)?;
-                        parts.push(agent::ContentPart::image(url));
-                    }
-                    out.push(ChatMessage::user(parts));
-                }
-            }
-            store::Role::Assistant => {
-                // A turn that ended without an answer still needs an assistant message,
-                // or two user messages would follow each other (ARCHITECTURE.md 8.2).
-                let text = if text.trim().is_empty() {
-                    "(stopped)".to_string()
-                } else {
-                    text
-                };
-                out.push(ChatMessage::assistant(text));
-            }
-            _ => {}
-        }
-    }
-    Ok(out)
-}
-
 async fn generate(
+    app: &tauri::AppHandle,
     state: &AppState,
     chat: &store::Chat,
     reply_to: store::MessageId,
     user_message_id: Option<store::MessageId>,
     target: Target,
-    on_event: Channel<ChatStreamEvent>,
+    on_event: Channel<TurnStreamEvent>,
 ) -> AppResult<()> {
     let cancel = CancellationToken::new();
     {
@@ -475,161 +489,39 @@ async fn generate(
         }
         *guard = Some(cancel.clone());
     }
-    let result = generate_inner(
-        state,
-        chat,
+    let status = state.runtime.status();
+    let caps = agent::ModelCaps {
+        tools: if target.local {
+            status.supports_tools
+        } else {
+            true
+        },
+        vision: if target.local { status.vision } else { true },
+        n_ctx: target.n_ctx.unwrap_or(8192),
+        local: target.local,
+        thinking: target.local && status.thinking,
+        preserve_reasoning: target.local && status.preserve_reasoning,
+        images_in_tool_results: !target.local,
+    };
+    let mut template = agent::RequestTemplate {
+        model: target.model.clone(),
+        ..Default::default()
+    };
+    if target.local {
+        template.extra.insert("cache_prompt".into(), json!(true));
+    }
+    let req = crate::turns::TurnRequest {
+        chat: chat.clone(),
         reply_to,
         user_message_id,
-        target,
-        &on_event,
-        cancel,
-    )
-    .await;
+        client: target.client,
+        model_ref: target.model_ref,
+        caps,
+        template,
+    };
+    let result = crate::turns::run(app, req, on_event, cancel).await;
     if let Ok(mut guard) = state.generation.lock() {
         *guard = None;
     }
     result
-}
-
-async fn generate_inner(
-    state: &AppState,
-    chat: &store::Chat,
-    reply_to: store::MessageId,
-    user_message_id: Option<store::MessageId>,
-    target: Target,
-    on_event: &Channel<ChatStreamEvent>,
-    cancel: CancellationToken,
-) -> AppResult<()> {
-    let messages = build_messages(state, chat, reply_to).await?;
-    let assistant_id = state
-        .store
-        .insert_message(store::NewMessage {
-            chat_id: chat.id,
-            parent_id: Some(reply_to),
-            role: store::Role::Assistant,
-            content: text_content(""),
-            reasoning: None,
-            status: store::MessageStatus::Streaming,
-            model_ref: Some(target.model_ref.clone()),
-            search_text: String::new(),
-        })
-        .await?;
-    let _ = on_event.send(ChatStreamEvent::Started {
-        user_message_id,
-        assistant_message_id: assistant_id,
-    });
-
-    let mut request = ChatRequest::new(target.model.clone(), messages);
-    request.stream = true;
-    if target.local {
-        request.extra.insert("cache_prompt".into(), json!(true));
-        // Leave the rest of the context for the reply, but never less than 512 tokens.
-        if let (Some(n_ctx), Ok(Some(prompt))) =
-            (target.n_ctx, target.client.count_tokens(&request).await)
-        {
-            let room = n_ctx.saturating_sub(prompt);
-            request.max_tokens = Some(room.max(512).min(n_ctx));
-        }
-    }
-
-    let started = Instant::now();
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut prompt_tokens: Option<u64> = None;
-    let mut completion_tokens: Option<u64> = None;
-    let mut tps: Option<f64> = None;
-    let mut finish_reason: Option<String> = None;
-    let mut failure: Option<AppError> = None;
-
-    match target.client.stream_chat(&request, cancel.clone()).await {
-        Err(e) => failure = Some(AppError::from(e)),
-        Ok(stream) => {
-            futures_util::pin_mut!(stream);
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(StreamEvent::Content(t)) => {
-                        text.push_str(&t);
-                        let _ = on_event.send(ChatStreamEvent::Content { text: t });
-                    }
-                    Ok(StreamEvent::Reasoning(t)) => {
-                        reasoning.push_str(&t);
-                        let _ = on_event.send(ChatStreamEvent::Reasoning { text: t });
-                    }
-                    Ok(StreamEvent::Usage(u)) => {
-                        prompt_tokens = Some(u64::from(u.prompt_tokens));
-                        completion_tokens = Some(u64::from(u.completion_tokens));
-                        let _ = on_event.send(ChatStreamEvent::Usage {
-                            prompt_tokens: u.prompt_tokens,
-                            completion_tokens: u.completion_tokens,
-                        });
-                    }
-                    Ok(StreamEvent::Timings(t)) => {
-                        tps = t.predicted_per_second;
-                        let _ = on_event.send(ChatStreamEvent::Timings {
-                            predicted_per_second: t.predicted_per_second,
-                            prompt_per_second: t.prompt_per_second,
-                        });
-                    }
-                    Ok(StreamEvent::Finished { finish_reason: r }) => {
-                        finish_reason = Some(format!("{r:?}").to_lowercase());
-                    }
-                    Ok(StreamEvent::Done) => break,
-                    Ok(_) => {}
-                    Err(agent::ProviderError::Cancelled) => break,
-                    Err(e) => {
-                        failure = Some(AppError::from(e));
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Remote endpoints may not report timings; estimate from wall time.
-    if tps.is_none()
-        && let Some(n) = completion_tokens
-    {
-        let secs = started.elapsed().as_secs_f64();
-        if secs > 0.0 && n > 0 {
-            tps = Some(n as f64 / secs);
-        }
-    }
-    let status = if failure.is_some() {
-        store::MessageStatus::Error
-    } else if cancel.is_cancelled() {
-        store::MessageStatus::Stopped
-    } else {
-        store::MessageStatus::Complete
-    };
-    state
-        .store
-        .update_message(
-            assistant_id,
-            store::MessagePatch {
-                content: Some(text_content(&text)),
-                reasoning: (!reasoning.is_empty()).then_some(reasoning),
-                status: Some(status),
-                prompt_tokens,
-                completion_tokens,
-                tokens_per_second: tps,
-                error: failure
-                    .as_ref()
-                    .map(|e| serde_json::to_value(e).unwrap_or_default()),
-                search_text: Some(text.clone()),
-            },
-        )
-        .await?;
-    if let Some(err) = failure {
-        let _ = on_event.send(ChatStreamEvent::Error { error: err.clone() });
-        let _ = on_event.send(ChatStreamEvent::Finished {
-            status: "error".into(),
-            finish_reason,
-        });
-        return Ok(());
-    }
-    let _ = on_event.send(ChatStreamEvent::Finished {
-        status: status.as_str().to_string(),
-        finish_reason,
-    });
-    Ok(())
 }

@@ -1,10 +1,32 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, ImagePlus, Square, X } from "lucide-react";
-import type { ImageInput } from "../lib/types";
+import { ArrowUp, FileText, Paperclip, Square, X } from "lucide-react";
+import type { DocumentInput, ImageInput } from "../lib/types";
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_IMAGES = 8;
+const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
+/** Text-like files and PDFs the composer accepts besides images. */
+const DOCUMENT_EXTENSIONS = [
+  ".pdf", ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".log",
+  ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".c", ".h", ".cpp", ".cs", ".rb", ".sh", ".ps1", ".sql",
+];
+
+function readDocument(file: File): Promise<DocumentInput> {
+  return new Promise((resolve, reject) => {
+    if (file.size > MAX_DOCUMENT_BYTES) {
+      reject(new Error(`${file.name} is larger than 32 MB.`));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`${file.name} could not be read.`));
+    reader.onload = () => {
+      const url = String(reader.result);
+      resolve({ fileName: file.name || "document", data: url.slice(url.indexOf(",") + 1) });
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 /** Reads an image file into the shape the backend expects. */
 export function readImage(file: File): Promise<ImageInput> {
@@ -31,21 +53,26 @@ export function readImage(file: File): Promise<ImageInput> {
 export function Composer(props: {
   busy: boolean;
   disabledReason: string | null;
-  onSend: (text: string, images: ImageInput[]) => void;
+  onSend: (text: string, images: ImageInput[], documents: DocumentInput[]) => void;
   onStop: () => void;
 }) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageInput[]>([]);
+  const [documents, setDocuments] = useState<DocumentInput[]>([]);
   const [imageError, setImageError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   async function addFiles(files: Iterable<File>) {
     setImageError(null);
-    const list = [...files].filter((f) => f.type.startsWith("image/"));
+    const all = [...files];
+    const imgs = all.filter((f) => f.type.startsWith("image/"));
+    const docs = all.filter((f) => !f.type.startsWith("image/"));
     try {
-      const read = await Promise.all(list.map(readImage));
+      const read = await Promise.all(imgs.map(readImage));
       setImages((old) => [...old, ...read].slice(0, MAX_IMAGES));
+      const readDocs = await Promise.all(docs.map(readDocument));
+      setDocuments((old) => [...old, ...readDocs].slice(0, MAX_IMAGES));
     } catch (err) {
       setImageError(err instanceof Error ? err.message : String(err));
     }
@@ -61,10 +88,11 @@ export function Composer(props: {
 
   function submit() {
     const t = text.trim();
-    if ((!t && images.length === 0) || props.busy || props.disabledReason) return;
-    props.onSend(t, images);
+    if ((!t && images.length === 0 && documents.length === 0) || props.busy || props.disabledReason) return;
+    props.onSend(t, images, documents);
     setText("");
     setImages([]);
+    setDocuments([]);
   }
 
   return (
@@ -80,7 +108,7 @@ export function Composer(props: {
         }
       }}
     >
-      {(images.length > 0 || imageError) && (
+      {(images.length > 0 || documents.length > 0 || imageError) && (
         <div className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-2">
           {images.map((img, i) => (
             <div key={`${img.fileName}-${i}`} className="relative">
@@ -99,23 +127,35 @@ export function Composer(props: {
               </button>
             </div>
           ))}
+          {documents.map((d, i) => (
+            <span key={`${d.fileName}-${i}`} className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs">
+              <FileText size={12} aria-hidden /> {d.fileName}
+              <button
+                type="button"
+                aria-label={`Remove ${d.fileName}`}
+                onClick={() => setDocuments((old) => old.filter((_, j) => j !== i))}
+              >
+                <X size={11} aria-hidden />
+              </button>
+            </span>
+          ))}
           {imageError && <span className="text-xs text-danger">{imageError}</span>}
         </div>
       )}
       <div className="mx-auto flex max-w-3xl items-end gap-2 rounded-lg border border-border bg-bg px-3 py-2 focus-within:border-accent">
         <button
           type="button"
-          aria-label="Attach an image"
-          title="Attach an image"
+          aria-label="Attach files"
+          title="Attach images, PDFs or text files"
           onClick={() => fileInput.current?.click()}
           className="rounded-md p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
         >
-          <ImagePlus size={16} aria-hidden />
+          <Paperclip size={16} aria-hidden />
         </button>
         <input
           ref={fileInput}
           type="file"
-          accept={IMAGE_TYPES.join(",")}
+          accept={[...IMAGE_TYPES, ...DOCUMENT_EXTENSIONS].join(",")}
           multiple
           hidden
           onChange={(e) => {
@@ -162,7 +202,7 @@ export function Composer(props: {
           <button
             type="button"
             onClick={submit}
-            disabled={(!text.trim() && images.length === 0) || props.disabledReason !== null}
+            disabled={(!text.trim() && images.length === 0 && documents.length === 0) || props.disabledReason !== null}
             className="rounded-md bg-accent p-2 text-accent-fg disabled:opacity-40"
             aria-label="Send"
           >

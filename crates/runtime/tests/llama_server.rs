@@ -237,7 +237,9 @@ async fn cpu_probe_reports_the_synthetic_cpu_device() {
     let Some((bin, _)) = env_paths("cpu_probe_reports_the_synthetic_cpu_device") else {
         return;
     };
-    let result = probe(&backend(&bin, BackendKind::Cpu), Duration::from_secs(15)).await;
+    // The first start of a new binary on macOS is slow (the system scans it), so the
+    // probe gets the same allowance as the app's.
+    let result = probe(&backend(&bin, BackendKind::Cpu), Duration::from_secs(45)).await;
     assert_eq!(result.error, None);
     assert_eq!(result.backend_kind, BackendKind::Cpu);
     assert_eq!(result.devices, vec![runtime::llama::devices::cpu_device()]);

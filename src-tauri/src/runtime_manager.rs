@@ -72,6 +72,11 @@ impl RuntimeManager {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
+    /// Records whether the loaded model's template can think.
+    pub fn set_thinking(&self, thinking: bool) {
+        self.update(|s| s.thinking = thinking);
+    }
+
     fn update(&self, f: impl FnOnce(&mut RuntimeStatusDto)) {
         let snapshot = {
             let Ok(mut s) = self.status.lock() else {
@@ -102,7 +107,9 @@ impl RuntimeManager {
         }
         let mut out = Vec::new();
         for backend in runtime::discover(&self.layout) {
-            let probe = runtime::probe(&backend, Duration::from_secs(20)).await;
+            // 45 s: the first start of a new binary on macOS waits for the system's
+            // malware scan, which took longer than 15 s on CI.
+            let probe = runtime::probe(&backend, Duration::from_secs(45)).await;
             if let Some(e) = &probe.error {
                 tracing::warn!(backend = %backend.kind, "backend probe failed: {e}");
             }
@@ -333,6 +340,7 @@ impl RuntimeManager {
                         s.device = running.launch.device.clone();
                         s.n_ctx = Some(props.n_ctx);
                         s.supports_tools = props.chat_template_caps.supports_tool_calls;
+                        s.preserve_reasoning = props.chat_template_caps.supports_preserve_reasoning;
                         s.vision = props.modalities.vision;
                         s.error = None;
                     });

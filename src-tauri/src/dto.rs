@@ -25,6 +25,8 @@ pub struct ChatDto {
     pub leaf_message_id: Option<MessageId>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Thinking is on for this chat (when the model can think).
+    pub thinking: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,6 +47,38 @@ pub struct MessageDto {
     pub sibling_ids: Vec<MessageId>,
     /// Attached images, shown through `get_attachment`.
     pub image_ids: Vec<i64>,
+    /// Attached text and PDF files.
+    pub documents: Vec<DocumentRef>,
+    /// Tool calls the model made in this message.
+    pub tool_calls: Vec<ToolCallDto>,
+    /// For a tool message: the result.
+    pub tool_result: Option<ToolResultDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallDto {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub recovered: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultDto {
+    pub call_id: String,
+    pub name: String,
+    pub status: String,
+    pub text: String,
+    pub image_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentRef {
+    pub id: i64,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +110,10 @@ pub struct RuntimeStatusDto {
     pub stage: Option<String>,
     pub n_ctx: Option<u32>,
     pub supports_tools: bool,
+    /// The template accepts reasoning in earlier assistant messages.
+    pub preserve_reasoning: bool,
+    /// The model's chat template can think (from its GGUF header).
+    pub thinking: bool,
     pub vision: bool,
     pub offloaded_layers: Option<u32>,
     pub total_layers: Option<u32>,
@@ -94,6 +132,8 @@ impl Default for RuntimeStatusDto {
             stage: None,
             n_ctx: None,
             supports_tools: false,
+            preserve_reasoning: false,
+            thinking: false,
             vision: false,
             offloaded_layers: None,
             total_layers: None,
@@ -176,41 +216,6 @@ pub struct ModelOptionDto {
     pub label: String,
     pub source: String,
     pub context_length: Option<u32>,
-}
-
-/// Events streamed to the webview while a reply is generated.
-#[derive(Debug, Clone, Serialize)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChatStreamEvent {
-    Started {
-        user_message_id: Option<MessageId>,
-        assistant_message_id: MessageId,
-    },
-    Content {
-        text: String,
-    },
-    Reasoning {
-        text: String,
-    },
-    Usage {
-        prompt_tokens: u32,
-        completion_tokens: u32,
-    },
-    Timings {
-        predicted_per_second: Option<f64>,
-        prompt_per_second: Option<f64>,
-    },
-    Finished {
-        status: String,
-        finish_reason: Option<String>,
-    },
-    Error {
-        error: AppError,
-    },
 }
 
 #[derive(Debug, Clone, Serialize)]

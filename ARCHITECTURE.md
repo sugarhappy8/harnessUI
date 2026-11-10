@@ -462,7 +462,12 @@ The parser is a pure function over text with a table-driven test suite, one fixt
 | 8,192 | ~6,050 | ~1,300 | ~1,580 | ~4,840 |
 | 32,768 | ~28,500 | ~1,300 | ~6,550 | ~22,800 |
 
-The F figures are estimates. M3 measures the real schema cost and records it here.
+Measured at M3 (llama-server b12110, Qwen3-0.6B, exact counts from the server):
+
+- one tool, a one-line system prompt and the agent preamble: F = 291 tokens;
+- the default set for a new chat (files and skills, 8 tools), the default system prompt, the preamble and a one-line user message: 1,329 prompt tokens on the first request of a turn.
+
+So the ~1,300 estimate for "files only" holds; the per-result cap and trigger rows above stand. Each tool's cost is shown in the chat's Tools panel (an estimate at 3.5 characters per token) next to the total and its share of the context.
 
 **When tools do not fit.** If F exceeds 40% of the budget, the app does not start a tool turn. It says so with the numbers ("these 23 tools need about 3,500 tokens; this model's window is 8,192") and offers to turn tool groups off or raise the context. In practice a 4k window gets no tools, and an 8k window carries files plus one more group.
 

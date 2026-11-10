@@ -122,6 +122,160 @@ pub async fn save_images(
     Ok(parts)
 }
 
+/// Largest text or PDF document accepted.
+pub const MAX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
+/// Text kept from one document before the prompt builder trims it to the budget.
+const MAX_DOCUMENT_TEXT: usize = 2 * 1024 * 1024;
+
+/// A text or PDF file sent from the composer.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentInput {
+    pub file_name: String,
+    /// Base64 of the bytes.
+    pub data: String,
+}
+
+fn looks_like_text(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(8192)];
+    !sample.contains(&0) && std::str::from_utf8(sample).is_ok_or_cut()
+}
+
+trait Utf8Cut {
+    fn is_ok_or_cut(&self) -> bool;
+}
+impl Utf8Cut for Result<&str, std::str::Utf8Error> {
+    /// Valid UTF-8, or valid up to a character cut off by the sample boundary.
+    fn is_ok_or_cut(&self) -> bool {
+        match self {
+            Ok(_) => true,
+            Err(e) => e.error_len().is_none(),
+        }
+    }
+}
+
+/// Extracts and stores documents; returns content parts for the message.
+pub async fn save_documents(
+    app: &AppHandle,
+    state: &AppState,
+    chat_id: store::ChatId,
+    docs: &[DocumentInput],
+) -> AppResult<Vec<serde_json::Value>> {
+    if docs.len() > MAX_IMAGES {
+        return Err(AppError::bad_request(format!(
+            "Attach at most {MAX_IMAGES} files to one message."
+        )));
+    }
+    let dir = store_dir(app)?;
+    let mut parts = Vec::new();
+    for doc in docs {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(doc.data.as_bytes())
+            .map_err(|_| AppError::bad_request("An attached file could not be read."))?;
+        if bytes.len() > MAX_DOCUMENT_BYTES {
+            return Err(AppError::bad_request(format!(
+                "{} is larger than 32 MB.",
+                doc.file_name
+            )));
+        }
+        let sha: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let is_pdf = bytes.starts_with(b"%PDF-");
+        let ext = if is_pdf { "pdf" } else { "txt" };
+        let path = dir.join(format!("{sha}.{ext}"));
+        if !path.exists() {
+            std::fs::write(&path, &bytes).map_err(|e| AppError::internal(e.to_string()))?;
+        }
+        let (mime, text) = if is_pdf {
+            let exe = std::env::current_exe().map_err(|e| AppError::internal(e.to_string()))?;
+            let text = tools::pdf::extract_text(&exe, &path, std::time::Duration::from_secs(30))
+                .await
+                .map_err(|e| {
+                    AppError::new(
+                        "pdf_unreadable",
+                        format!("{} could not be read.", doc.file_name),
+                        "Try another file, or copy its text into the message.",
+                        e.to_string(),
+                    )
+                })?;
+            if text.trim().is_empty() {
+                return Err(AppError::new(
+                    "pdf_no_text",
+                    format!(
+                        "{} has no text the app can extract (it may be scanned pages).",
+                        doc.file_name
+                    ),
+                    "Attach the pages as images to a model with vision instead.",
+                    String::new(),
+                ));
+            }
+            ("application/pdf".to_string(), text)
+        } else if looks_like_text(&bytes) {
+            (
+                "text/plain".to_string(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            )
+        } else {
+            return Err(AppError::bad_request(format!(
+                "{} is neither text nor a PDF. Attach images with the image button.",
+                doc.file_name
+            )));
+        };
+        let mut text = text;
+        if text.len() > MAX_DOCUMENT_TEXT {
+            let mut cut = MAX_DOCUMENT_TEXT;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+        }
+        let name: String = doc
+            .file_name
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(200)
+            .collect();
+        let id = state
+            .store
+            .insert_attachment(store::NewAttachment {
+                chat_id,
+                sha256: sha,
+                mime,
+                file_name: name.clone(),
+                size_bytes: bytes.len() as u64,
+                bytes_path: path.display().to_string(),
+                extracted_text: Some(text),
+            })
+            .await?;
+        parts.push(serde_json::json!({ "type": "document", "attachment_id": id.0, "name": name }));
+    }
+    Ok(parts)
+}
+
+/// The documents referenced by a message's content: (attachment id, file name).
+pub fn document_refs(content: &serde_json::Value) -> Vec<(i64, String)> {
+    content
+        .as_array()
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("document"))
+                .filter_map(|p| {
+                    Some((
+                        p.get("attachment_id")?.as_i64()?,
+                        p.get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("document")
+                            .to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The attachment ids referenced by a message's content.
 pub fn image_ids(content: &serde_json::Value) -> Vec<i64> {
     content
@@ -176,6 +330,14 @@ mod tests {
         assert!(sniff("image/webp", b"RIFF\0\0\0\0WEBPVP8 "));
         assert!(!sniff("image/svg+xml", b"<svg"));
         assert!(!sniff("text/plain", b"hello"));
+    }
+
+    #[test]
+    fn text_detection() {
+        assert!(looks_like_text(b"hello\nworld"));
+        assert!(looks_like_text("héllo".as_bytes()));
+        assert!(!looks_like_text(&[0, 1, 2]));
+        assert!(!looks_like_text(&[0xff, 0xfe, 0x00, 0x41]));
     }
 
     #[test]
