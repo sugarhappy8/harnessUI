@@ -6,7 +6,7 @@ A local-first desktop app that gives AI models running on your own hardware the 
 - No account, no telemetry, no remote crash reporting. Logs stay on disk.
 - Chats, settings and the audit log are stored locally.
 
-**Status:** under construction. Chat with a local GGUF model or an OpenAI-compatible endpoint works (M1); the model manager and first-run flow are in progress (M2); the agent loop with tools, approvals, MCP servers and the audit log works (M3), with terminal, git, skills, browser and computer-use tools (M4–M7). See [CHANGELOG.md](CHANGELOG.md) for what each milestone delivered and [ARCHITECTURE.md](ARCHITECTURE.md) section 19 for the plan.
+**Status:** all milestones of ARCHITECTURE.md section 19 are implemented (M0–M8): local and OpenAI-compatible chat, the model manager, the agent loop with approvals and an audit log, MCP servers, files, terminal, git (with a built-in fallback), skills, a browser tool and computer use. It has been tested automatically on Linux and built and unit-tested on Windows and macOS in CI; testing on real Windows and Mac hardware is the next step (docs/MILESTONES.md has the checklists). Code signing and in-app updates wait for the signing keys. See [CHANGELOG.md](CHANGELOG.md).
 
 ## What works today
 

@@ -2,34 +2,7 @@
 
 All notable changes, by milestone. Dates are UTC.
 
-## M4 — Git fallback
-
-### Added
-- The libgit2 fallback for the git tools when Git is not installed: the same seven tools and approval cards, no hooks, no LFS, https only; clone, pull and push run in a worker process (the app binary with a hidden flag) that Stop kills; private repositories authenticate with a token per host from the keychain, sent only to the approved remote's host after it asks.
-- Settings → Git: which Git the tools use, tokens per host, and the name and email for commits. The Tools panel marks the Git group when the built-in library is in use.
-- THIRD-PARTY-NOTICES.md lists the C libraries built into the app (libgit2, zlib, and OpenSSL on macOS); CI checks the macOS app binary links nothing outside the system.
-
-## M7 — Computer use (in progress)
-
-### Added
-- `crates/computer`: screenshots of one monitor (xcap on Windows; ScreenCaptureKit on macOS 14+, the older call on 13) with this app's windows left out and a cursor marker drawn in, resized exactly as llama.cpp resizes images for the model (a port of its size calculation, checked bit for bit against the C++); clicks, moves, drags, scrolls, typing and key combinations (SendInput for the mouse on Windows, enigo on the main thread for the keyboard) through one injector that refuses input to this app and its WebView processes, re-checks the target application before every event, refuses elevated windows on Windows, refuses the indicator's Stop button, and releases every held key and button on Stop, panic or exit. Grants per kind of input and per application (D7); terminals, system settings, password managers and OS-level shortcuts always ask. Coordinate conventions per model: pixels of the resized image, a 0–1000 grid, 0–1000 boxes (and Gemma's y-x boxes). 69 tests with fake capture and input.
-- App: the computer server on Windows and macOS; the indicator (red border, "AI is controlling this computer" bar with a Stop button whose window may call nothing but stop) shown while it acts and hidden when the turn ends; input refused when the indicator or the stop hotkey is missing, or (macOS) the indicator is not on the active Space; the stop hotkey and the Stop button release held input. Settings → Computer use: macOS Screen Recording and Accessibility checks with links to System Settings, and each model's convention. When a click is refused because harnissUI's own window covers the point, the tool card offers to minimise the window. The tools are offered only for models that can see images and whose convention the user confirmed.
-
-### Known issues
-- The one-click calibration test of 9.3 is replaced by a convention the user confirms per model (the app's windows are excluded from screenshots, so the model cannot see targets the app draws). See docs/MILESTONES.md.
-- Not run on real Windows or macOS yet; CI compiles and unit-tests both.
-
-## M6 — Browser tool (in progress)
-
-### Added
-- `crates/browser`: the built-in browser server with its own CDP client over a pipe (fds 3/4 on macOS; `--remote-debugging-io-pipes` handles on Windows, through a spawn-module change that keeps other children from inheriting them) or, as a setting, a loopback port. Request enforcement in the browser for every tab, pop-up, frame and redirect: http(s) only; loopback, link-local and (unless allowed) private addresses blocked on the resolved IP; leaving a site held for approval; form submissions and non-GET navigations held until approved and failed on Deny, Stop or timeout; file choosers and downloads refused. Accessibility-tree snapshots with element refs sized to the result cap, find, readable text, click (refused when another element covers the target), type, fill a form, keys, screenshots, back. Every read, click and type re-checks the frame's actual origin. 75 unit tests and 18 end-to-end tests against Chromium.
-- App: the browser registered as a built-in (off in new chats, D10); held navigations become always-ask cards in the chat with their own audit rows; Settings → Browser (browser path chosen in a native dialog, port mode with its warning, private networks, strict sites); the browser closes on quit and before an update installs. CI runs the browser's end-to-end tests on Windows to check the pipe mode there.
-
-### Known issues
-- One browser profile is shared by all chats; DNS rebinding and service-worker cache answers are not re-checked; consequential-verb detection is English only.
-- On networks where this computer cannot resolve host names itself (proxy-only), pages are refused (the check fails closed).
-
-## M8 — Polish (in progress)
+## M8 — Polish (2026-11-10; signing and in-app updates wait for your keys)
 
 ### Added
 - Opt-in updates: the updater plugin is registered only in builds that carry the updater public key (release builds with `src-tauri/tauri.updater.conf.json`, merged when the signing secret exists). *Settings → General → Updates*: *Check now*, *Install and restart* (stops llama-server and every tool child first), and an automatic check at start that is off by default. The check runs in Rust; the webview has no updater permission.
@@ -51,9 +24,49 @@ All notable changes, by milestone. Dates are UTC.
 ### Changed
 - Dev builds keep debug info only for the workspace's own crates.
 
-## M3 — Agent loop, MCP host, approvals (in progress)
+## M7 — Computer use (2026-11-10, untested on real hardware)
 
 ### Added
+- `crates/computer`: screenshots of one monitor (xcap on Windows; ScreenCaptureKit on macOS 14+, the older call on 13) with this app's windows left out and a cursor marker drawn in, resized exactly as llama.cpp resizes images for the model (a port of its size calculation, checked bit for bit against the C++); clicks, moves, drags, scrolls, typing and key combinations (SendInput for the mouse on Windows, enigo on the main thread for the keyboard) through one injector that refuses input to this app and its WebView processes, re-checks the target application before every event, refuses elevated windows on Windows, refuses the indicator's Stop button, and releases every held key and button on Stop, panic or exit. Grants per kind of input and per application (D7); terminals, system settings, password managers and OS-level shortcuts always ask. Coordinate conventions per model: pixels of the resized image, a 0–1000 grid, 0–1000 boxes (and Gemma's y-x boxes). 69 tests with fake capture and input.
+- App: the computer server on Windows and macOS; the indicator (red border, "AI is controlling this computer" bar with a Stop button whose window may call nothing but stop) shown while it acts and hidden when the turn ends; input refused when the indicator or the stop hotkey is missing, or (macOS) the indicator is not on the active Space; the stop hotkey and the Stop button release held input. Settings → Computer use: macOS Screen Recording and Accessibility checks with links to System Settings, and each model's convention. When a click is refused because harnissUI's own window covers the point, the tool card offers to minimise the window. The tools are offered only for models that can see images and whose convention the user confirmed.
+
+### Known issues
+- The one-click calibration test of 9.3 is replaced by a convention the user confirms per model (the app's windows are excluded from screenshots, so the model cannot see targets the app draws). See docs/MILESTONES.md.
+- Not run on real Windows or macOS yet; CI compiles and unit-tests both.
+
+## M6 — Browser tool (2026-11-10)
+
+### Added
+- `crates/browser`: the built-in browser server with its own CDP client over a pipe (fds 3/4 on macOS; `--remote-debugging-io-pipes` handles on Windows, through a spawn-module change that keeps other children from inheriting them) or, as a setting, a loopback port. Request enforcement in the browser for every tab, pop-up, frame and redirect: http(s) only; loopback, link-local and (unless allowed) private addresses blocked on the resolved IP; leaving a site held for approval; form submissions and non-GET navigations held until approved and failed on Deny, Stop or timeout; file choosers and downloads refused. Accessibility-tree snapshots with element refs sized to the result cap, find, readable text, click (refused when another element covers the target), type, fill a form, keys, screenshots, back. Every read, click and type re-checks the frame's actual origin. 75 unit tests and 18 end-to-end tests against Chromium.
+- App: the browser registered as a built-in (off in new chats, D10); held navigations become always-ask cards in the chat with their own audit rows; Settings → Browser (browser path chosen in a native dialog, port mode with its warning, private networks, strict sites); the browser closes on quit and before an update installs. CI runs the browser's end-to-end tests on Windows to check the pipe mode there.
+
+### Known issues
+- One browser profile is shared by all chats; DNS rebinding and service-worker cache answers are not re-checked; consequential-verb detection is English only.
+- On networks where this computer cannot resolve host names itself (proxy-only), pages are refused (the check fails closed).
+
+## M5 — Skills (2026-11-10)
+
+### Added
+- `crates/tools` skills: lenient SKILL.md loading with warnings (skills written for other clients work) and the strict validator for the editor; the `<available_skills>` index with escaped, capped names and descriptions; zip and folder import refusing absolute paths, `..`, symlinks, more than 512 files or 16 MiB; `load_skill` (SKILL.md, the file list and quoted commands for scripts, the 30% context budget) and `read_skill_file` sandboxed to the skill's folder; `allowed-tools` shown, never granting anything.
+- Settings → Skills: import a folder or zip (native picker), create and edit with the strict validator, enable or disable, delete, open the folder, and optionally use `~/.agents/skills`. Skill reads never ask (D11) and are audited as "allowed without prompt".
+
+## M4 — Terminal and git (2026-11-10)
+
+### Added
+- Terminal (`run_command`): one command per call in an approved folder or an enabled skill's folder; Windows PowerShell 5.1 through `-EncodedCommand` (no quoting can change what runs), `zsh -lc` on macOS with the login environment; secret-looking variables removed, with a user-editable pass-through list; 1 MiB output cap streamed into the tool card; timeout and Stop kill the process tree.
+- The fail-closed command classifier in `crates/policy` (tree-sitter bash and PowerShell grammars): only plain sequences of literal-word commands can be covered by a grant; deletes, elevation, disk and system commands, `git push/clean/reset --hard`, `git -c` and aliases, inline interpreter code, wrappers and anything the parser cannot fully break down always ask.
+- Git tools on system git from fixed argument templates: hooks, fsmonitor, external diff, textconv and the pager off; `https` and `ssh` only; prompts off; repository credential helpers replaced by the user's own; repositories whose own config defines filter, merge or diff drivers refused; push always asks and re-checks every push URL at run time; URLs git and the app could read differently are refused.
+
+- The libgit2 fallback for the git tools when Git is not installed: the same seven tools and approval cards, no hooks, no LFS, https only; clone, pull and push run in a worker process (the app binary with a hidden flag) that Stop kills; private repositories authenticate with a token per host from the keychain, sent only to the approved remote's host after it asks.
+- Settings → Git: which Git the tools use, tokens per host, and the name and email for commits. The Tools panel marks the Git group when the built-in library is in use.
+- THIRD-PARTY-NOTICES.md lists the C libraries built into the app (libgit2, zlib, and OpenSSL on macOS); CI checks the macOS app binary links nothing outside the system.
+
+## M3 — Agent loop, MCP host, approvals (2026-11-10)
+
+### Added
+- `crates/policy`: the path sandbox (lexical checks first, so a network path causes no I/O; then canonical paths re-checked, case-insensitive where the volume is), the evaluation order of 13.3, grant scopes, always-ask write rules, and the sanitiser that makes control, bidi and zero-width characters visible on cards.
+- The files tool (`list_dir`, `read_file` with line paging, `search_files`, `write_file`, `edit_file`, `delete_file`) with diff previews and a hash re-check before every write; a symlink planted after the preview is refused.
+- PDF text extraction in a worker process with a timeout and a memory cap.
 - `crates/agent` (agent loop, ARCHITECTURE.md 8): `run_turn` drives a turn from the user's message to the answer: native tool calls with schema-guided argument repair, a fallback parser for calls written as text (Hermes, Qwen, Llama, Mistral, Gemma, GLM, gpt-oss and other marker formats; a recovered call always asks), validation against the full schema with one-line error messages back to the model, a step cap with a wrap-up, a mistake budget and repeat detection. One system message (chat prompt, preamble with approved folders and OS, skills index, loaded skills, summary); tool results and attachments in random-delimited untrusted blocks with the model's own control tokens broken. Context budget per 8.4 with result caps, stubbing of old results, image pruning, summarisation and truncation, exact counts from llama-server. 212 tests, including runs against the real llama-server.
 - `crates/mcp-host`: one registry for built-in and external tools; stdio servers through the runtime spawn module (scrubbed environment, process tree killed on Stop 500 ms later and restarted on next use) and Streamable HTTP through rmcp, both the 2025-11-25 handshake and the 2026-07-28 lifecycle with the working one remembered; config import from Claude Desktop, Cursor and VS Code JSON; credential scanning of arguments and URLs; `${secret:…}` placeholders resolved from the keychain at start; schemas compiled offline (no remote `$ref`) and simplified for llama-server; a generic describer that binds each approval to the exact arguments; tool fingerprints; Windows `.cmd` quoting; per-server stderr logs. 76 unit tests and 14 end-to-end tests against real rmcp servers.
 - App:
@@ -74,7 +87,7 @@ All notable changes, by milestone. Dates are UTC.
 ### Known issues
 - MCP OAuth (servers that answer 401 with a sign-in challenge) is reported as "needs sign-in" and not supported yet.
 
-## M2 — Model manager (in progress)
+## M2 — Model manager (2026-11-10; catalog entries wait for your test runs)
 
 ### Added
 - `crates/models`:
