@@ -199,8 +199,8 @@ impl FakeCapture {
         }
         let (w, h) = monitor.pixel_size();
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for px in rgba.chunks_exact_mut(4) {
-            px.copy_from_slice(&[20, 20, 20, 255]);
+        for px in rgba.as_chunks_mut::<4>().0 {
+            *px = [20, 20, 20, 255];
         }
         // Back to front, skipping this app's windows.
         for win in s.windows.iter().rev() {

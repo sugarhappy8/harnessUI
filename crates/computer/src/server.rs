@@ -442,6 +442,8 @@ impl ComputerServer {
             })
     }
 
+    // `Described` is the host's type; the error path is the rare one.
+    #[allow(clippy::result_large_err)]
     async fn pointer_target(&self, p: GlobalPoint, tool: &str) -> Result<Target, Described> {
         if let Some(r) = refuse_point(self.guard.self_process(), p) {
             return Err(Self::hard_limit(tool, "pointer", r.to_string()));
