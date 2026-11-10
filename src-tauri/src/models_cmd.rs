@@ -81,6 +81,8 @@ pub async fn load_local_model(
     let runtime = state.runtime.clone();
     runtime.load(model, settings).await?;
     state.runtime.set_thinking(thinking);
+    let checker = state.runtime.clone();
+    tauri::async_runtime::spawn(async move { checker.speed_check().await });
     Ok(())
 }
 

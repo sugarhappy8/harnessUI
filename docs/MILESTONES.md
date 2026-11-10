@@ -54,8 +54,8 @@ keychain; *Settings → Diagnostics → Run backend check*.
 4. Keychain: adding an endpoint key may raise a keychain prompt on this unsigned build (see Known issues).
 
 **Known issues:** WebView2 crash reporting is disabled by command-line switches only (wry
-does not expose the documented setting; unverified on real Windows). No "slow after
-load" check yet. Unsigned macOS builds can trigger repeated keychain prompts.
+does not expose the documented setting; unverified on real Windows). (Since M8: the
+header warns "Loaded but slow" or "N of M layers on the GPU" after a load.) Unsigned macOS builds can trigger repeated keychain prompts.
 
 ---
 
@@ -162,3 +162,23 @@ disable, delete).
 3. *Import zip…* with a skill zip from another agent app; it appears enabled. Disable it: it disappears from new chats' prompts.
 
 **Dependencies:** none new.
+
+---
+
+## M8 — Polish (in progress)
+
+**Works:** opt-in updater (only in builds with the updater key; *Check now*, *Install and
+restart*, automatic check off by default); keyboard shortcut sheet (Ctrl+/ or Cmd+/) and
+chat-list toggle (Ctrl+B or Cmd+B); the 8.1 message for models without tool support;
+third-party notices generated and checked in CI; an offline gate (`e2e/m8_offline.py`:
+no outbound request through any proxy during start, a local chat and every settings
+page).
+
+**Manual test — both machines:**
+1. *Settings → General → Updates* says this build cannot update itself (no key yet). After you set up the key (README, "Signing") and tag a release, a release build offers *Check now*.
+2. Press Ctrl+/ (Cmd+/): the shortcut list opens, including your stop hotkey. Ctrl+B hides and shows the chat list.
+3. Offline: turn off Wi-Fi / unplug the network, start the app, load a downloaded model and chat; everything works and nothing reports a network error except Hugging Face search.
+
+**Known issues:** the offline gate sees proxied traffic only (not direct DNS lookups); the
+message list is not virtualised yet (very long chats render every message); Rust types
+are mirrored by hand in `src/lib/types.ts` rather than generated.

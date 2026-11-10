@@ -114,6 +114,10 @@ pub struct RuntimeStatusDto {
     pub preserve_reasoning: bool,
     /// The model's chat template can think (from its GGUF header).
     pub thinking: bool,
+    /// Tokens/s of the short generation timed after the load.
+    pub speed_tps: Option<f64>,
+    /// A GPU backend generated far below expectation ("loaded but slow", 7.4).
+    pub slow: bool,
     pub vision: bool,
     pub offloaded_layers: Option<u32>,
     pub total_layers: Option<u32>,
@@ -134,6 +138,8 @@ impl Default for RuntimeStatusDto {
             supports_tools: false,
             preserve_reasoning: false,
             thinking: false,
+            speed_tps: None,
+            slow: false,
             vision: false,
             offloaded_layers: None,
             total_layers: None,

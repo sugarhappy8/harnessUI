@@ -107,6 +107,10 @@ export interface RuntimeStatus {
   preserveReasoning: boolean;
   /** The model's chat template can think. */
   thinking: boolean;
+  /** Tokens/s of the short generation timed after the load. */
+  speedTps: number | null;
+  /** A GPU backend generated far below expectation ("loaded but slow"). */
+  slow: boolean;
   vision: boolean;
   offloadedLayers: number | null;
   totalLayers: number | null;

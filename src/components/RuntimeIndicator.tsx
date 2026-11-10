@@ -25,10 +25,34 @@ export function RuntimeIndicator() {
   }
   if (runtime.state === "ready") {
     const where = runtime.device ? `${runtime.backend} · ${runtime.device}` : (runtime.backend ?? "");
+    const gpu = runtime.backend !== null && runtime.backend !== "cpu";
+    const partial =
+      gpu &&
+      runtime.offloadedLayers !== null &&
+      runtime.totalLayers !== null &&
+      runtime.offloadedLayers < runtime.totalLayers;
     return (
-      <span className="text-xs text-fg-muted" title={runtime.modelPath ?? undefined}>
-        {where}
-        {runtime.nCtx ? ` · ${runtime.nCtx.toLocaleString()} context` : ""}
+      <span className="flex items-center gap-2 text-xs text-fg-muted" title={runtime.modelPath ?? undefined}>
+        <span>
+          {where}
+          {runtime.nCtx ? ` · ${runtime.nCtx.toLocaleString()} context` : ""}
+        </span>
+        {partial && (
+          <span
+            className="text-warning"
+            title="The rest runs on the CPU, which is much slower. A smaller context or a smaller quantization fits fully on the GPU."
+          >
+            {runtime.offloadedLayers} of {runtime.totalLayers} layers on the GPU
+          </span>
+        )}
+        {runtime.slow && runtime.speedTps !== null && (
+          <span
+            className="text-warning"
+            title="The model loaded on the GPU but generates very slowly. It may have spilled into system memory: use a smaller context or model, or try another backend in Settings → Local models."
+          >
+            Loaded but slow ({runtime.speedTps.toFixed(1)} tokens/s)
+          </span>
+        )}
       </span>
     );
   }

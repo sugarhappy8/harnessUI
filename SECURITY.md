@@ -58,6 +58,11 @@ order is:
 6. A grant for this chat covers it → allowed and logged as "allowed by grant".
 7. Otherwise → a card with *Allow once*, *Allow for this chat* and *Deny*.
 
+*Allow for this chat* grants live in memory only: they end when the app quits or when you
+choose *Tools → Forget everything I allowed in this chat*, and are never written to disk.
+A card that offers only *Allow once* can never create a grant, whatever answer reaches it.
+Stop (the button, Esc or the global hotkey) closes an open card and cancels the call.
+
 The approved action travels with the call, and the tool re-checks it immediately before
 its side effect: a file that changed between the preview and the write is not written,
 and a symlink planted after the preview is refused.
@@ -98,7 +103,13 @@ acknowledgement is recorded. Every call to it goes through the policy engine. It
 descriptions and hints are untrusted: a server saying a tool is read-only never skips a
 prompt. New tools, and tools whose name, description or schema changed, start disabled.
 Servers get a short allow-list of environment variables plus the `env` from their config,
-not your whole environment. Secrets in `env` and `headers` are kept in the system keychain.
+not your whole environment. Every value in `env` and `headers`, and credentials found in
+arguments and URLs, are moved to the system keychain when you add the server; the saved
+config keeps `${secret:…}` placeholders, resolved only when the server starts. Removing a
+server deletes its secrets. An approval for an external tool is bound to that tool and those
+exact arguments (or the whole tool, if you ticked "allow any arguments"); a tool that
+changed since you reviewed it is switched off again and loses its grants. Servers that
+require OAuth sign-in are not supported in version 1.
 
 ## Secrets and privacy
 

@@ -8,6 +8,9 @@ All notable changes, by milestone. Dates are UTC.
 - Opt-in updates: the updater plugin is registered only in builds that carry the updater public key (release builds with `src-tauri/tauri.updater.conf.json`, merged when the signing secret exists). *Settings → General → Updates*: *Check now*, *Install and restart* (stops llama-server and every tool child first), and an automatic check at start that is off by default. The check runs in Rust; the webview has no updater permission.
 - Keyboard shortcut sheet (Ctrl+/ or Cmd+/) and a toggle for the chat list (Ctrl+B or Cmd+B).
 - Models whose template has no tool support: the Tools panel says so (8.1).
+- After every load (7.4): a 24-token timed generation; a GPU backend below 5 tokens/s shows "Loaded but slow", and a partial offload shows "N of M layers on the GPU" next to the backend.
+- The backend list says "No Vulkan driver was found" when the Vulkan loader is missing, instead of listing no GPU (7.2).
+- Streamed text reaches the webview in batches of about 30 ms (14).
 - `e2e/m8_offline.py`: the app behind a recording proxy that refuses everything starts, loads a local model, answers and shows every settings page without one outbound request.
 - Frontend tests for the streamed-turn reducer and approval bookkeeping.
 
@@ -69,7 +72,7 @@ All notable changes, by milestone. Dates are UTC.
 
 ### Known issues
 - WebView2's documented switch for not uploading crash dumps (`IsCustomCrashReportingEnabled`) is not exposed by the pinned wry 0.57; the app passes `--disable-breakpad --disable-crash-reporter` instead, which is unverified on real Windows.
-- Probe results are not yet cached per driver version (7.2), there is no Vulkan-loader check yet, and the "loaded but slow" check after load (7.4) is not implemented.
+- Probe results are not yet cached per driver version across restarts (7.2); they are cached for the app session. (The Vulkan-loader check and the "loaded but slow" check were added in M8.)
 - Keychain code paths have only been type-checked; the first real runs are on your Windows PC and Mac.
 
 ## M0 — Scaffold (2026-11-10)

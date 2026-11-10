@@ -663,6 +663,7 @@ struct AppSink {
     partial: Mutex<(String, String)>,
     /// The last stored message is an assistant answer (no tool calls).
     answered: std::sync::atomic::AtomicBool,
+    deltas: Mutex<DeltaBuffer>,
 }
 
 fn decision_name(d: &CallDecision) -> (&'static str, store::AuditDecision, Option<String>) {
@@ -689,11 +690,92 @@ fn decision_name(d: &CallDecision) -> (&'static str, store::AuditDecision, Optio
     }
 }
 
+/// Streamed text not yet sent to the webview.
+struct DeltaBuffer {
+    content: String,
+    reasoning: String,
+    since: std::time::Instant,
+}
+
+impl Default for DeltaBuffer {
+    fn default() -> Self {
+        Self {
+            content: String::new(),
+            reasoning: String::new(),
+            since: std::time::Instant::now(),
+        }
+    }
+}
+
+const DELTA_BATCH: std::time::Duration = std::time::Duration::from_millis(30);
+
+impl AppSink {
+    fn buffer_delta(&self, text: &str, reasoning: bool) {
+        let due = {
+            let Ok(mut b) = self.deltas.lock() else {
+                return;
+            };
+            // Thinking and answer text keep their order: switch kind → flush first.
+            let other_pending = if reasoning {
+                !b.content.is_empty()
+            } else {
+                !b.reasoning.is_empty()
+            };
+            if other_pending {
+                drop(b);
+                self.flush_deltas();
+                b = match self.deltas.lock() {
+                    Ok(b) => b,
+                    Err(_) => return,
+                };
+            }
+            if b.content.is_empty() && b.reasoning.is_empty() {
+                b.since = std::time::Instant::now();
+            }
+            if reasoning {
+                b.reasoning.push_str(text);
+            } else {
+                b.content.push_str(text);
+            }
+            b.since.elapsed() >= DELTA_BATCH
+        };
+        if due {
+            self.flush_deltas();
+        }
+    }
+
+    fn flush_deltas(&self) {
+        let (content, reasoning) = match self.deltas.lock() {
+            Ok(mut b) => (
+                std::mem::take(&mut b.content),
+                std::mem::take(&mut b.reasoning),
+            ),
+            Err(_) => return,
+        };
+        if !reasoning.is_empty() {
+            let _ = self
+                .channel
+                .send(TurnStreamEvent::Reasoning { text: reasoning });
+        }
+        if !content.is_empty() {
+            let _ = self
+                .channel
+                .send(TurnStreamEvent::Content { text: content });
+        }
+    }
+}
+
 impl TurnSink for AppSink {
     fn event(&self, e: TurnEvent) {
         let send = |ev: TurnStreamEvent| {
             let _ = self.channel.send(ev);
         };
+        // Text deltas are batched (about every 30 ms); anything else first flushes them,
+        // so the webview always sees events in order.
+        match &e {
+            TurnEvent::ContentDelta { .. } | TurnEvent::ReasoningDelta { .. } => {}
+            _ => self.flush_deltas(),
+        }
         match e {
             TurnEvent::StepStarted { step } => send(TurnStreamEvent::Step { step }),
             TurnEvent::Budget { budget } => {
@@ -704,13 +786,13 @@ impl TurnSink for AppSink {
                 if let Ok(mut p) = self.partial.lock() {
                     p.0.push_str(&text);
                 }
-                send(TurnStreamEvent::Content { text })
+                self.buffer_delta(&text, false);
             }
             TurnEvent::ReasoningDelta { text } => {
                 if let Ok(mut p) = self.partial.lock() {
                     p.1.push_str(&text);
                 }
-                send(TurnStreamEvent::Reasoning { text })
+                self.buffer_delta(&text, true);
             }
             TurnEvent::AttemptDiscarded { .. } => {
                 if let Ok(mut p) = self.partial.lock() {
@@ -1062,6 +1144,7 @@ pub async fn run(
         started: Mutex::new(HashMap::new()),
         partial: Mutex::new(Default::default()),
         answered: std::sync::atomic::AtomicBool::new(false),
+        deltas: Mutex::new(DeltaBuffer::default()),
     };
     let persister = tokio::spawn(persist_loop(
         app.clone(),
@@ -1155,6 +1238,7 @@ pub async fn run(
             error,
         });
     }
+    sink.flush_deltas();
     drop(sink);
     let _ = persister.await;
     let (status, message) = match &outcome.status {
