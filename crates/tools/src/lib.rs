@@ -7,8 +7,10 @@
 pub mod files;
 pub mod git;
 pub mod pdf;
+pub mod skills;
 pub mod terminal;
 
 pub use files::FilesServer;
 pub use git::{GitConfig, GitServer};
+pub use skills::{Skill, SkillsServer};
 pub use terminal::{TerminalConfig, TerminalServer, TerminalShell};

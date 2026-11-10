@@ -21,6 +21,11 @@ similar = { workspace = true }
 # search_files with regex = true.
 regex = { workspace = true }
 thiserror = { workspace = true }
+# SKILL.md frontmatter (YAML); serde_yml is RUSTSEC-flagged.
+serde-saphyr = { workspace = true }
+serde = { workspace = true }
+# Skill zip import with the format's limits.
+zip = { workspace = true }
 # Validating git remote URLs (https and ssh only).
 url = { workspace = true }
 # PowerShell -EncodedCommand (base64 of UTF-16LE): no quoting can change what runs.
@@ -39,6 +44,7 @@ libc = { workspace = true }
 windows = { version = "0.62", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
 
 [dev-dependencies]
+zip = { workspace = true }
 tempfile = { workspace = true }
 dunce = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
