@@ -7,6 +7,18 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde = { workspace = true }
+# Punycode hosts and origins on approval cards.
+url = { workspace = true }
+# Strips Windows' \\?\ verbatim prefix from canonical paths when it is safe to.
+dunce = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# pathconf(_PC_CASE_SENSITIVE) to tell case-insensitive volumes apart.
+libc = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
 
 [lints]
 workspace = true

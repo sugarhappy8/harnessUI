@@ -121,3 +121,156 @@ export interface DiagnosticsReport {
   text: string;
   savedTo: string | null;
 }
+
+// ---- Model manager (M2) -----------------------------------------------------
+
+export type Gated = "no" | "auto" | "manual";
+export type HubSort = "downloads" | "trendingScore" | "lastModified" | "likes";
+
+export interface RepoSummary {
+  id: string;
+  downloads: number;
+  likes: number;
+  gated: Gated;
+  license: string | null;
+  lastModified: string | null;
+  pipelineTag: string | null;
+}
+
+export interface SearchPage {
+  items: RepoSummary[];
+  next: string | null;
+}
+
+export interface RepoFile {
+  path: string;
+  size: number;
+  sha256: string | null;
+}
+
+export type Verdict = "green" | "yellow" | "red";
+
+export interface FitResult {
+  verdict: Verdict;
+  neededBytes: number;
+  availableBytes: number;
+  suggestedCtx: number | null;
+  partialOffload: boolean;
+  sentence: string;
+}
+
+export interface VariantView {
+  label: string;
+  files: RepoFile[];
+  totalSize: number;
+  bits: number | null;
+  fit: FitResult | null;
+  installed: boolean;
+  hasChecksum: boolean;
+}
+
+export interface RepoView {
+  id: string;
+  commit: string;
+  gated: Gated;
+  license: string | null;
+  architecture: string | null;
+  /** False when the bundled llama.cpp cannot load this architecture; null if unknown. */
+  architectureSupported: boolean | null;
+  contextLength: number | null;
+  parameters: number | null;
+  templateTools: boolean;
+  templateThinking: boolean;
+  projector: RepoFile | null;
+  variants: VariantView[];
+  incomplete: string[];
+  /** Model card as plain text (untrusted; never rendered as HTML). */
+  card: string | null;
+  fitContext: number;
+}
+
+export type DownloadStatus =
+  | "queued"
+  | "downloading"
+  | "paused"
+  | "verifying"
+  | "done"
+  | "error"
+  | "cancelled";
+
+export interface DownloadGroup {
+  id: string;
+  repo: string;
+  label: string;
+  fileCount: number;
+  bytesDone: number;
+  bytesTotal: number;
+  status: DownloadStatus;
+  error: ErrorInfo | null;
+  bytesPerSecond: number | null;
+  /** A file without a published checksum is part of this download. */
+  unverified: boolean;
+}
+
+export interface ModelSummaryView {
+  architecture: string;
+  quantization: string | null;
+  sizeLabel: string | null;
+  contextLength: number | null;
+  templateTools: boolean;
+  templateThinking: boolean;
+  isMoe: boolean;
+}
+
+export interface InstalledModel {
+  id: number;
+  path: string;
+  repo: string | null;
+  fileName: string;
+  sizeBytes: number;
+  source: "download" | "import";
+  projectorPath: string | null;
+  summary: ModelSummaryView | null;
+  architectureSupported: boolean | null;
+}
+
+export interface HardwareInfo {
+  target: "gpu" | "apple" | "cpu";
+  gpuName: string | null;
+  gpuFreeBytes: number | null;
+  ramTotalBytes: number | null;
+  ramAvailableBytes: number | null;
+  /** Memory the fit check compares against. */
+  usableBytes: number;
+  backend: string | null;
+}
+
+export interface CatalogSuggestion {
+  id: string;
+  name: string;
+  repo: string;
+  quant: string;
+  capabilities: string[];
+  license: string;
+  totalBytes: number;
+  memoryNeeded: number;
+  recommendedCtx: number;
+  tierGb: number;
+  fits: boolean;
+  tested: boolean;
+  installed: boolean;
+}
+
+export interface FirstRunInfo {
+  done: boolean;
+  hardware: HardwareInfo;
+  pick: string | null;
+  suggestions: CatalogSuggestion[];
+  catalogSequence: number;
+  refreshDisabledReason: string | null;
+}
+
+export interface DiskUsage {
+  modelsDir: string;
+  totalBytes: number;
+}

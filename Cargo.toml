@@ -66,8 +66,7 @@ rmcp = { version = "3.9", features = ["client", "server", "macros", "schemars", 
 schemars = "1"
 
 # Storage and secrets
-rusqlite = { version = "0.40", features = ["bundled"] }
-rusqlite_migration = "2.6"
+rusqlite = { version = "0.41", features = ["bundled"] }
 keyring-core = "1.0"
 
 # Processes
@@ -83,6 +82,7 @@ regex = "1"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
 base64 = "0.22"
+minisign-verify = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 serde-saphyr = "2.1"
 zip = { version = "9.5", default-features = false, features = ["deflate"] }

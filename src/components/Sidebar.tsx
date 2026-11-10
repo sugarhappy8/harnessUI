@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { MessageSquarePlus, Search, Settings, Trash2, Pencil } from "lucide-react";
+import { Boxes, MessageSquarePlus, Search, Settings, Trash2, Pencil } from "lucide-react";
 import { AlertDialog } from "radix-ui";
 import { useApp } from "../store/app";
 import { APP_NAME } from "../lib/app";
 
-export function Sidebar(props: { onOpenSettings: () => void }) {
+export function Sidebar(props: { onOpenSettings: () => void; onOpenModels: () => void }) {
   const { chats, activeChatId, search, setSearch, openChat, newChat, renameChat, deleteChat } =
     useApp();
   const [editing, setEditing] = useState<number | null>(null);
@@ -27,15 +27,26 @@ export function Sidebar(props: { onOpenSettings: () => void }) {
     >
       <div className="flex items-center justify-between px-3 py-3">
         <span className="font-semibold">{APP_NAME}</span>
-        <button
-          type="button"
-          className="rounded-md p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
-          aria-label="Settings"
-          title="Settings (Ctrl+,)"
-          onClick={props.onOpenSettings}
-        >
-          <Settings size={16} aria-hidden />
-        </button>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            className="rounded-md p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
+            aria-label="Models"
+            title="Models (Ctrl+M)"
+            onClick={props.onOpenModels}
+          >
+            <Boxes size={16} aria-hidden />
+          </button>
+          <button
+            type="button"
+            className="rounded-md p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
+            aria-label="Settings"
+            title="Settings (Ctrl+,)"
+            onClick={props.onOpenSettings}
+          >
+            <Settings size={16} aria-hidden />
+          </button>
+        </div>
       </div>
       <div className="space-y-2 px-3">
         <button

@@ -50,7 +50,8 @@
     "macos-aarch64": {
       "dir": "main",
       "backends": [
-        "metal"
+        "metal",
+        "cpu"
       ],
       "build_from_source": {
         "git": "https://github.com/ggml-org/llama.cpp",

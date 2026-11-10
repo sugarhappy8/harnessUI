@@ -1,1 +1,0 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/components/SettingsDialog.tsx","./src/lib/app.ts","./src/lib/ipc.ts","./src/lib/theme.test.ts","./src/lib/theme.ts","./src/overlay/main.tsx","./vite.config.ts"],"version":"6.0.3"}

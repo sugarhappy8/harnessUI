@@ -1,0 +1,16 @@
+0.00.001.503 I srv  llama_server: initializing ...
+0.00.012.799 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.012.976 I srv  init_listene: The UI is disabled
+0.00.012.989 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.014.697 I srv    load_model: loading model 'garbage.gguf'
+0.00.014.824 E gguf_init_from_reader: invalid magic characters: '??9?', expected 'GGUF'
+0.00.014.931 E llama_model_load: error loading model: llama_model_loader: failed to load model from garbage.gguf
+0.00.014.947 E llama_model_load_from_file_impl: failed to load model
+0.00.014.970 E common_fit_params: encountered an error while trying to fit params to free device memory: failed to load model
+0.00.014.993 E gguf_init_from_reader: invalid magic characters: '??9?', expected 'GGUF'
+0.00.015.010 E llama_model_load: error loading model: llama_model_loader: failed to load model from garbage.gguf
+0.00.015.018 E llama_model_load_from_file_impl: failed to load model
+0.00.015.022 E cmn  common_init_: failed to load model 'garbage.gguf'
+0.00.015.025 E srv    load_model: failed to load model, 'garbage.gguf'
+0.00.015.026 I srv    operator(): operator(): cleaning up before exit...
+0.00.015.965 E srv  server_run_i: exiting due to model loading error

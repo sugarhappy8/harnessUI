@@ -1,5 +1,6 @@
 [package]
 name = "store"
+description = "Local storage: SQLite (chats, messages, settings, audit log, configuration) and OS-keychain secrets."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,31 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# fallible_uint: u64 columns (sizes, token counts, durations) convert with a range check.
+rusqlite = { workspace = true, features = ["fallible_uint"] }
+keyring-core = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Legacy (file-based) keychain store: works without a provisioning profile.
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+# Only to read the OSStatus inside keyring-core's PlatformFailure, so a Deny or Cancel on
+# the keychain prompt maps to SecretError::NoAccess. Same version apple-native-keyring-store
+# uses (already in the dependency tree), which the downcast requires.
+security-framework = { version = "3.7", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+# default-features = false drops the `search` feature (and its regex dependency).
+windows-native-keyring-store = { version = "1.1.0", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

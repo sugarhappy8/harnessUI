@@ -183,7 +183,7 @@ function Runtime() {
           )}
         </ul>
         <p className="mt-2 text-xs text-fg-muted">
-          ROCm and CUDA downloads arrive with the model manager.
+          ROCm and CUDA backends are optional downloads; see Backend downloads below.
         </p>
       </section>
     </div>
@@ -388,7 +388,11 @@ function Diagnostics() {
   );
 }
 
-export function SettingsDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
+export function SettingsDialog(props: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  initialTab?: string;
+}) {
   return (
     <Dialog.Root open={props.open} onOpenChange={props.onOpenChange}>
       <Dialog.Portal>
@@ -401,7 +405,7 @@ export function SettingsDialog(props: { open: boolean; onOpenChange: (open: bool
             </Dialog.Close>
           </div>
           <Dialog.Description className="sr-only">App settings</Dialog.Description>
-          <Tabs.Root defaultValue="general" orientation="vertical" className="flex min-h-0 flex-1">
+          <Tabs.Root key={props.initialTab ?? "general"} defaultValue={props.initialTab ?? "general"} orientation="vertical" className="flex min-h-0 flex-1">
             <Tabs.List className="flex w-44 flex-col gap-1 border-r border-border p-3" aria-label="Settings sections">
               <Tabs.Trigger value="general" className={tabClass}>General</Tabs.Trigger>
               <Tabs.Trigger value="runtime" className={tabClass}>Local models</Tabs.Trigger>

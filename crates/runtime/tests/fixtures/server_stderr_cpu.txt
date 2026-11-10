@@ -1,0 +1,33 @@
+0.00.003.125 I srv  llama_server: initializing ...
+0.00.016.716 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.016.863 I srv  init_listene: The UI is disabled
+0.00.016.874 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.018.927 I srv    load_model: loading model 'Qwen3-0.6B-Q8_0.gguf'
+0.00.456.683 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.01.094.394 I cmn          init: llama threadpool init, n_threads = 4
+0.01.329.392 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 4096, kv_unified = 'false'
+0.01.338.836 I srv  server_run_i: model loaded
+0.01.338.858 I srv  server_on_li: listening on http://127.0.0.1:18080
+0.01.338.974 I srv    operator(): child server monitoring thread started, waiting for EOF on stdin...
+0.12.500.928 W srv    operator(): unauthorized: Invalid API Key
+0.12.511.628 I slot get_availabl: id  0 | task -1 | selected slot by LRU, n_tokens = 0, t_last = -1
+0.12.512.021 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+0.13.607.073 I slot print_timing: id  0 | task 0 | prompt eval time =     584.75 ms /   168 tokens (    3.48 ms per token,   287.30 tokens per second)
+0.13.607.093 I slot print_timing: id  0 | task 0 |        eval time =     510.22 ms /    20 tokens (   26.85 ms per token,    37.24 tokens per second)
+0.13.607.094 I slot print_timing: id  0 | task 0 |       total time =    1094.97 ms /   188 tokens
+0.13.607.101 I slot print_timing: id  0 | task 0 |    graphs reused =         19
+0.13.607.102 I slot print_timing: id  0 | task 0 |   graph reallocs =          0    /     0        (same size) / (changed size)
+0.13.607.147 I slot      release: id  0 | task 0 | stop processing: n_tokens = 187, truncated = 0
+0.24.591.961 I slot get_availabl: id  0 | task -1 | selected slot by LRU, n_tokens = 187, t_last = 1342758259
+0.24.608.803 I slot launch_slot_: id  0 | task 21 | processing task, is_child = 0
+0.26.940.223 I slot print_timing: id  0 | task 21 | prompt eval time =      60.97 ms /    13 tokens (    4.69 ms per token,   213.22 tokens per second)
+0.26.940.240 I slot print_timing: id  0 | task 21 |        eval time =    2270.17 ms /   120 tokens (   19.08 ms per token,    52.42 tokens per second)
+0.26.940.242 I slot print_timing: id  0 | task 21 |       total time =    2331.14 ms /   133 tokens
+0.26.940.243 I slot print_timing: id  0 | task 21 |    graphs reused =        137
+0.26.940.245 I slot print_timing: id  0 | task 21 |   graph reallocs =          0    /     0        (same size) / (changed size)
+0.26.940.469 I slot      release: id  0 | task 21 | stop processing: n_tokens = 133, truncated = 0
+0.26.976.818 I slot get_availabl: id  0 | task -1 | selected slot by LRU, n_tokens = 133, t_last = 1356091592
+0.26.988.683 I slot launch_slot_: id  0 | task 142 | processing task, is_child = 0
+0.26.988.721 E srv    send_error: task id = 142, error: request (5009 tokens) exceeds the available context size (4096 tokens), try increasing it
+0.26.988.738 I slot      release: id  0 | task 142 | stop processing: n_tokens = 133, truncated = 0
+0.26.988.861 W srv          stop: cancel task, id_task = 142

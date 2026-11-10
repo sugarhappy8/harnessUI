@@ -7,6 +7,37 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde = { workspace = true }
+# Hub API answers and the partial-download sidecar.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Quantization-label and split-shard patterns in file names.
+regex = { workspace = true }
+# Hub API and downloads (same TLS stack as the rest of the app).
+reqwest = { workspace = true }
+# Async file writes and timers for downloads.
+tokio = { workspace = true }
+# Cancellation of downloads.
+tokio-util = { workspace = true }
+# Streaming response bodies.
+futures-util = { workspace = true }
+# Verifying downloaded files against their published SHA-256.
+sha2 = { workspace = true }
+tracing = { workspace = true }
+# Catalog Refresh: the same signature format and verifier as Tauri's updater.
+minisign-verify = { workspace = true }
+base64 = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# sysctl and host_statistics64 for system memory.
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# GlobalMemoryStatusEx for system memory; same major as the runtime crate and Tauri.
+windows = { version = "0.62", features = ["Win32_System_SystemInformation"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

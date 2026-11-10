@@ -5,8 +5,45 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Spawn helper, process trees, reaper and the llama.cpp runtime manager (ARCHITECTURE.md 4 and 7)."
+
+[lib]
+name = "runtime"
+path = "src/lib.rs"
 
 [dependencies]
+tokio = { workspace = true, features = ["process", "io-util", "time", "sync", "rt", "macros", "net"] }
+tokio-util.workspace = true
+process-wrap.workspace = true
+which.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Same major as process-wrap and Tauri, so no second copy is compiled. Used for the
+# CREATE_NO_WINDOW creation flag, SetErrorMode and the stale-child sweep.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+# Doubles as the reaper process when started with the hidden flag (see the file header).
+[[test]]
+name = "reaper_process"
+path = "tests/reaper_process.rs"
+harness = false
 
 [lints]
 workspace = true

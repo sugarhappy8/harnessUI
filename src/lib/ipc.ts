@@ -9,11 +9,19 @@ import type {
   ChatStreamEvent,
   ChatSummary,
   DiagnosticsReport,
+  DiskUsage,
+  DownloadGroup,
+  FirstRunInfo,
+  HardwareInfo,
+  HubSort,
+  InstalledModel,
   LocalModelSettings,
   ModelOption,
   Provider,
   ProviderKind,
+  RepoView,
   RuntimeStatus,
+  SearchPage,
 } from "./types";
 
 export interface AppInfo {
@@ -103,3 +111,38 @@ export const testProvider = (id: number) => invoke<ModelOption[]>("test_provider
 // Settings
 export const getSetting = <T>(key: string) => invoke<T | null>("get_setting", { key });
 export const setSetting = (key: string, value: unknown) => invoke<void>("set_setting", { key, value });
+
+// Model manager (M2)
+
+export const hubSearch = (text: string, sort: HubSort, allGguf: boolean) =>
+  invoke<SearchPage>("hub_search", { query: { text, sort, allGguf } });
+export const hubSearchNext = (next: string) => invoke<SearchPage>("hub_search_next", { next });
+export const hubRepo = (repoId: string, ctx: number | null) =>
+  invoke<RepoView>("hub_repo", { repoId, ctx });
+export const hubTokenStatus = () => invoke<{ saved: boolean; account: string | null }>("hub_token_status");
+export const hubSetToken = (token: string) => invoke<string>("hub_set_token", { token });
+export const hubClearToken = () => invoke<void>("hub_clear_token");
+
+export const startDownload = (repoId: string, commit: string, label: string, withProjector: boolean) =>
+  invoke<string>("download_start", { repoId, commit, label, withProjector });
+export const startCatalogDownload = (entryId: string) =>
+  invoke<string>("download_catalog_entry", { entryId });
+export const pauseDownload = (groupId: string) => invoke<void>("download_pause", { groupId });
+export const resumeDownload = (groupId: string) => invoke<void>("download_resume", { groupId });
+export const cancelDownload = (groupId: string) => invoke<void>("download_cancel", { groupId });
+export const listDownloads = () => invoke<DownloadGroup[]>("list_downloads");
+export function onDownloadProgress(handler: (g: DownloadGroup) => void): Promise<UnlistenFn> {
+  return listen<DownloadGroup>("download-progress", (e) => handler(e.payload));
+}
+
+export const listInstalledModels = () => invoke<InstalledModel[]>("list_installed_models");
+export const importModel = (path: string) => invoke<InstalledModel>("import_model", { path });
+export const deleteModel = (id: number, deleteFiles: boolean) =>
+  invoke<void>("delete_model", { id, deleteFiles });
+export const diskUsage = () => invoke<DiskUsage>("disk_usage");
+export const setModelsDir = (path: string) => invoke<void>("set_models_dir", { path });
+export const hardwareInfo = () => invoke<HardwareInfo>("hardware_info");
+
+export const firstRunInfo = () => invoke<FirstRunInfo>("first_run_info");
+export const completeFirstRun = () => invoke<void>("complete_first_run");
+export const refreshCatalog = () => invoke<number>("refresh_catalog");

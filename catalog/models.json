@@ -1,0 +1,463 @@
+{
+  "schemaVersion": 1,
+  "sequence": 1,
+  "generated": "2026-11-10",
+  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). No entry has been run yet: 'tested' is null until the catalog test passes on real hardware.",
+  "tiers": {
+    "8": {
+      "recommendedCtx": 16384,
+      "models": [
+        "qwen3.5-4b-q4km",
+        "granite-4.2-3b-q4km",
+        "gemma-4-e4b-q40"
+      ]
+    },
+    "12": {
+      "recommendedCtx": 32768,
+      "models": [
+        "qwen3.5-9b-q4km",
+        "gemma-4-12b-qat",
+        "granite-4.2-8b-q4km"
+      ]
+    },
+    "16": {
+      "recommendedCtx": 32768,
+      "models": [
+        "gpt-oss-20b-mxfp4",
+        "ministral-3-14b-q4km",
+        "gemma-4-12b-qat"
+      ]
+    },
+    "24": {
+      "recommendedCtx": 32768,
+      "models": [
+        "qwen3.8-27b-udq4km",
+        "gemma-4-26b-a4b-qat",
+        "granite-4.2-30b-q4km"
+      ]
+    },
+    "32": {
+      "recommendedCtx": 65536,
+      "models": [
+        "qwen3.6-35b-a3b-q4km",
+        "qwen3.8-27b-udq6k",
+        "gemma-4-31b-qat"
+      ]
+    }
+  },
+  "models": {
+    "qwen3.5-4b-q4km": {
+      "name": "Qwen3.5 4B",
+      "repo": "unsloth/Qwen3.5-4B-GGUF",
+      "revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+      "files": [
+        {
+          "path": "Qwen3.5-4B-Q4_K_M.gguf",
+          "size": 2740937888,
+          "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"
+        }
+      ],
+      "mmproj": {
+        "path": "mmproj-F16.gguf",
+        "size": 672423616,
+        "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"
+      },
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "granite-4.2-3b-q4km": {
+      "name": "Granite 4.2 3B",
+      "repo": "ibm-granite/granite-4.2-3b-GGUF",
+      "revision": "c40945d71cd90f249a56985e8155551a9188dc30",
+      "files": [
+        {
+          "path": "granite-4.2-3b-Q4_K_M.gguf",
+          "size": 2244011552,
+          "sha256": "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5"
+        }
+      ],
+      "mmproj": null,
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "gemma-4-e4b-q40": {
+      "name": "Gemma 4 E4B",
+      "repo": "ggml-org/gemma-4-E4B-it-GGUF",
+      "revision": "27cd6836f8e2a6e5e6b57ea0e77fa72490706985",
+      "files": [
+        {
+          "path": "gemma-4-E4B-it-Q4_0.gguf",
+          "size": 4590807392,
+          "sha256": "a555b900214b477d8880e7832e0b8925e139b0159640036b09fe472b6f2097f2"
+        }
+      ],
+      "mmproj": {
+        "path": "mmproj-gemma-4-E4B-it-Q8_0.gguf",
+        "size": 559874848,
+        "sha256": "9257f21a0f5358204b4a612cff83fad2e56412f4f607f0049331ce60c0cf9d34"
+      },
+      "quant": "Q4_0",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "qwen3.5-9b-q4km": {
+      "name": "Qwen3.5 9B",
+      "repo": "unsloth/Qwen3.5-9B-GGUF",
+      "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+      "files": [
+        {
+          "path": "Qwen3.5-9B-Q4_K_M.gguf",
+          "size": 5680522464,
+          "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+        }
+      ],
+      "mmproj": {
+        "path": "mmproj-F16.gguf",
+        "size": 918166080,
+        "sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"
+      },
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "gemma-4-12b-qat": {
+      "name": "Gemma 4 12B (QAT)",
+      "repo": "google/gemma-4-12B-it-qat-q4_0-gguf",
+      "revision": "29d097773436b69ff9feafd636ab4cf873786537",
+      "files": [
+        {
+          "path": "gemma-4-12b-it-qat-q4_0.gguf",
+          "size": 6975879296,
+          "sha256": "93567e57a8fe10b23569b9d9ec38cd005deedf71e29477c421a4b83f418a538b"
+        }
+      ],
+      "mmproj": {
+        "path": "mmproj-gemma-4-12b-it-qat-q4_0.gguf",
+        "size": 175115616,
+        "sha256": "cb018338a7538a9814d994bfe54644c71eb7ed54e31eae2f721e45fd3c260da7"
+      },
+      "quant": "Q4_0",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "granite-4.2-8b-q4km": {
+      "name": "Granite 4.2 8B",
+      "repo": "ibm-granite/granite-4.2-8b-GGUF",
+      "revision": "93f3f6a8938ee922b784cf4e5b4203cd3428df8f",
+      "files": [
+        {
+          "path": "granite-4.2-8b-Q4_K_M.gguf",
+          "size": 5347917952,
+          "sha256": "16a9369d0805f80b7377d25d87f937a90c05dc04ad79173a52001e42c9aab311"
+        }
+      ],
+      "mmproj": null,
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "gpt-oss-20b-mxfp4": {
+      "name": "gpt-oss 20B",
+      "repo": "ggml-org/gpt-oss-20b-GGUF",
+      "revision": "15dcfc7e7c608c6161507211ed43c5b590801b4b",
+      "files": [
+        {
+          "path": "gpt-oss-20b-MXFP4.gguf",
+          "size": 12109566624,
+          "sha256": "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901"
+        }
+      ],
+      "mmproj": null,
+      "quant": "MXFP4",
+      "capabilities": [
+        "tools",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "ministral-3-14b-q4km": {
+      "name": "Ministral 3 14B",
+      "repo": "mistralai/Ministral-3-14B-Instruct-2512-GGUF",
+      "revision": "74fac473c43357d7fb2671713608183cc72496d0",
+      "files": [
+        {
+          "path": "Ministral-3-14B-Instruct-2512-Q4_K_M.gguf",
+          "size": 8239593024,
+          "sha256": "824e0f3373e69b84f2cae46fdcb9bd1ebc6ab3bfc7acc125d818b7b8178cc613"
+        }
+      ],
+      "mmproj": {
+        "path": "Ministral-3-14B-Instruct-2512-BF16-mmproj.gguf",
+        "size": 879258784,
+        "sha256": "ab7616148b7081030fd38e410c9213ce8346a8b0588291c8ca279058e78cfae7"
+      },
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "vision"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "qwen3.8-27b-udq4km": {
+      "name": "Qwen3.8 27B",
+      "repo": "unsloth/Qwen3.8-27B-GGUF",
+      "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+      "files": [
+        {
+          "path": "Qwen3.8-27B-UD-Q4_K_M.gguf",
+          "size": 16464440224,
+          "sha256": "322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482"
+        }
+      ],
+      "mmproj": {
+        "path": "mmproj-F16.gguf",
+        "size": 927607488,
+        "sha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e"
+      },
+      "quant": "UD-Q4_K_M",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "gemma-4-26b-a4b-qat": {
+      "name": "Gemma 4 26B A4B (QAT)",
+      "repo": "google/gemma-4-26B-A4B-it-qat-q4_0-gguf",
+      "revision": "d1c082be9cf3c8a514acf63b8761f4b41935842e",
+      "files": [
+        {
+          "path": "gemma-4-26B_q4_0-it.gguf",
+          "size": 14439363584,
+          "sha256": "3eca3b8f6d7baf218a7dd6bba5fb59a56ee25fe2d567b6f5f589b4f697eca51d"
+        }
+      ],
+      "mmproj": {
+        "path": "gemma-4-26B-it-mmproj.gguf",
+        "size": 1194828160,
+        "sha256": "a359953a076b877db30c31dbbb4c6d93b4a6e017ee5db5784247e4d4c0dd4f3b"
+      },
+      "quant": "Q4_0",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "granite-4.2-30b-q4km": {
+      "name": "Granite 4.2 30B",
+      "repo": "ibm-granite/granite-4.2-30b-GGUF",
+      "revision": "27b350a791e81d9a4d1ddca1c49282e9ec533768",
+      "files": [
+        {
+          "path": "granite-4.2-30b-Q4_K_M.gguf",
+          "size": 17721455328,
+          "sha256": "f299dace85d77ee0e24ca0b6720bd211b1f4cd1f65b9c0a2111e79692e29c9be"
+        }
+      ],
+      "mmproj": null,
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "qwen3.6-35b-a3b-q4km": {
+      "name": "Qwen3.6 35B A3B",
+      "repo": "ggml-org/Qwen3.6-35B-A3B-GGUF",
+      "revision": "eb0b3cc97fecddab7eee6e6ffdbe92d2a00afcea",
+      "files": [
+        {
+          "path": "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+          "size": 20542732576,
+          "sha256": "f4ffe03c9139e6a905a5d346f77d9fabdd179367c3280dfd005d1e75ca5ed8c8"
+        }
+      ],
+      "mmproj": {
+        "path": "mmproj-Qwen3.6-35B-A3B-Q8_0.gguf",
+        "size": 614194304,
+        "sha256": "904cbf8c8e876220066ab3bf676c7efa40f3da372276fdaf8b01d2fb2a37a51d"
+      },
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "qwen3.8-27b-udq6k": {
+      "name": "Qwen3.8 27B (higher precision)",
+      "repo": "unsloth/Qwen3.8-27B-GGUF",
+      "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+      "files": [
+        {
+          "path": "Qwen3.8-27B-UD-Q6_K.gguf",
+          "size": 21983677344,
+          "sha256": "c9c206812fbe4ac7b76a729e25928b63f2ae89d37f69da7a71c20aec763cd436"
+        }
+      ],
+      "mmproj": {
+        "path": "mmproj-F16.gguf",
+        "size": 927607488,
+        "sha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e"
+      },
+      "quant": "UD-Q6_K",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    },
+    "gemma-4-31b-qat": {
+      "name": "Gemma 4 31B (QAT)",
+      "repo": "google/gemma-4-31B-it-qat-q4_0-gguf",
+      "revision": "59dde24573e7e61570dba08b18a2e1fe246955ed",
+      "files": [
+        {
+          "path": "gemma-4-31B_q4_0-it.gguf",
+          "size": 17651001568,
+          "sha256": "179cfb99212709597eae5929112cfca677e1bbf566178b479ae1da0c4772874b"
+        }
+      ],
+      "mmproj": {
+        "path": "gemma-4-31B-it-mmproj.gguf",
+        "size": 1200726368,
+        "sha256": "6bd60bdb958548b4093196d38744b0f2290c12503a3fddd7486bffa9c5eb07a4"
+      },
+      "quant": "Q4_0",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null
+    }
+  }
+}

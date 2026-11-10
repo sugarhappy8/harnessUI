@@ -1,5 +1,5 @@
 import { DropdownMenu } from "radix-ui";
-import { ChevronDown, FolderOpen, HardDrive, Globe } from "lucide-react";
+import { Boxes, ChevronDown, FolderOpen, HardDrive, Globe } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useApp, toErrorInfo } from "../store/app";
 import * as ipc from "../lib/ipc";
@@ -97,6 +97,12 @@ export function ModelPicker() {
             className="flex cursor-default items-center gap-2 rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
           >
             <FolderOpen size={14} aria-hidden /> Open a GGUF file…
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            onSelect={() => window.dispatchEvent(new Event("app:open-models"))}
+            className="flex cursor-default items-center gap-2 rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
+          >
+            <Boxes size={14} aria-hidden /> Find and manage models…
           </DropdownMenu.Item>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>

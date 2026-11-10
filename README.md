@@ -6,7 +6,14 @@ A local-first desktop app that gives AI models running on your own hardware the 
 - No account, no telemetry, no remote crash reporting. Logs stay on disk.
 - Chats, settings and the audit log are stored locally.
 
-**Status:** under construction. See [CHANGELOG.md](CHANGELOG.md) for what each milestone delivered and [ARCHITECTURE.md](ARCHITECTURE.md) section 19 for the plan.
+**Status:** under construction. Chat with a local GGUF model or an OpenAI-compatible endpoint works (M1); the model manager and first-run flow are in progress (M2). See [CHANGELOG.md](CHANGELOG.md) for what each milestone delivered and [ARCHITECTURE.md](ARCHITECTURE.md) section 19 for the plan.
+
+## What works today
+
+- **Chat with a local model.** Pick a `.gguf` file (model picker → *Open a GGUF file…*, or *Models → Installed → Import*). The app starts llama.cpp's `llama-server` on 127.0.0.1 with a random port and key, shows load progress, and streams replies with tokens/s. Stop, regenerate (with version arrows), edit-and-resend, per-chat model and system prompt, history search, rename and delete.
+- **Backends.** Windows ships Vulkan and CPU; macOS ships Metal (with CPU as the fallback). A backend that fails to load steps down (ROCm/CUDA → Vulkan → CPU) and a crashed server restarts up to three times in five minutes. *Settings → Diagnostics → Run backend check* lists every device per backend and times a short generation on each, and saves the report to the logs folder.
+- **OpenAI-compatible endpoints.** *Settings → Endpoints* adds Ollama, LM Studio, vLLM or any OpenAI-compatible server; API keys go to the system keychain.
+- **Model manager (in progress).** *Models* (Ctrl+M) searches Hugging Face for GGUF chat models, shows every quantization with a fit verdict for your hardware, downloads with resume and SHA-256 verification, and lists installed models with badges read from the GGUF header. First run suggests a model from the bundled catalog.
 
 ## Download a test build
 
@@ -53,6 +60,14 @@ npm run lint && npm run typecheck && npm test
 ```bash
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
+
+For development without an installer, point the app at a folder that holds `llama-server` (for example one unpacked by `python3 scripts/fetch_llama.py`):
+
+```bash
+APP_DEV_LLAMA_DIR=/path/to/llama-folder npx tauri dev
+```
+
+Contract tests against the real llama-server run when `LLAMA_SERVER_BIN` and `TEST_GGUF` are set (`python3 scripts/fetch_test_model.py` downloads the pinned test model). End-to-end tests that drive the real app are described in [e2e/README.md](e2e/README.md).
 
 ## Architecture in one paragraph
 

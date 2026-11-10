@@ -1,0 +1,5 @@
+cmd_child_to_router:state:{"state":"loading","payload":{"stages":["text_model"],"current":"text_model","value":0.0}}
+cmd_child_to_router:state:{"state":"loading","payload":{"stages":["text_model"],"current":"text_model","value":0.0}}
+cmd_child_to_router:state:{"state":"loading","payload":{"stages":["text_model"],"current":"text_model","value":0.5681776404380798}}
+cmd_child_to_router:state:{"state":"loading","payload":{"stages":["text_model"],"current":"text_model","value":1.0}}
+cmd_child_to_router:state:{"state":"ready","payload":{"id":"Qwen3-0.6B-Q8_0.gguf","aliases":["Qwen3-0.6B-Q8_0.gguf"],"tags":[],"object":"model","architecture":{"input_modalities":["text"],"output_modalities":["text"]},"created":1794295605,"owned_by":"llamacpp","meta":{"vocab_type":2,"n_vocab":151936,"n_ctx":4096,"n_ctx_train":40960,"n_embd":1024,"n_params":596049920,"size":633495552,"ftype":"Q8_0"},"memory":{"n_ctx":4096,"devices":[{"kind":"host","name":"Host","model":165568512,"context":469762048,"compute":33572896},{"kind":"buffer_type","name":"AMX","model":707731456,"context":0,"compute":0}]}}}
