@@ -176,7 +176,8 @@ def main() -> int:
             assert n_cards == 0 and "allowed_by_grant" in decisions, decisions
 
         step("write_file: Deny; nothing is written")
-        assert ask_until_card("Use write_file to create hello.txt containing hi. /no_think"), "no tool call"
+        target = work / "hello.txt"
+        assert ask_until_card(f"Use write_file to create the file {target} containing hi. /no_think"), "no tool call"
         time.sleep(0.9)
         s.click_button("Deny")
         s.wait_for(idle, 240, "turn finished")
@@ -187,7 +188,7 @@ def main() -> int:
         assert denied, "the denial is in the history"
 
         step("Stop while a card is open cancels the call")
-        assert ask_until_card("Use write_file to create bye.txt containing bye. /no_think"), "no tool call"
+        assert ask_until_card(f"Use write_file to create the file {work / 'bye.txt'} containing bye. /no_think"), "no tool call"
         s.click_button("Stop")
         s.wait_for(idle, 60, "turn stopped")
         s.wait_for(lambda: not card_shown(), 10, "card gone")

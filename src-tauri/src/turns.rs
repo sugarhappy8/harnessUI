@@ -334,6 +334,94 @@ struct AppApprover {
     grants: Arc<Mutex<BTreeSet<policy::Scope>>>,
 }
 
+/// An always-ask card raised while a call is running (ARCHITECTURE.md 13.3, "Approvals
+/// raised during a call"), e.g. a navigation the browser holds. Allow once / Deny only;
+/// Deny, Stop and a timeout all refuse. Writes its own audit row.
+pub struct DuringCall {
+    pub chat_id: i64,
+    pub server: String,
+    pub tool: String,
+    pub summary: String,
+    pub preview: String,
+}
+
+// TODO(M6): remove the allow once the browser server's approver uses it.
+#[allow(dead_code)]
+pub async fn ask_during_call(
+    app: &AppHandle,
+    held: DuringCall,
+    cancel: CancellationToken,
+    timeout: std::time::Duration,
+) -> bool {
+    let DuringCall {
+        chat_id,
+        server,
+        tool,
+        summary,
+        preview,
+    } = held;
+    let id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if let Ok(mut m) = app.state::<PendingApprovals>().0.lock() {
+        m.insert(
+            id.clone(),
+            PendingCard {
+                tx,
+                grantable: false,
+            },
+        );
+    }
+    let dto = ApprovalDto {
+        id: id.clone(),
+        chat_id,
+        call_id: String::new(),
+        server: server.clone(),
+        tool: tool.clone(),
+        summary: summary.clone(),
+        preview: preview.clone(),
+        card: policy::CardKind::OnceOnly,
+        reason: policy::AskReason::AlwaysAsk,
+    };
+    let _ = app.emit_to(crate::MAIN_WINDOW, "approval-request", dto);
+    let guard = CardGuard {
+        app: app.clone(),
+        id,
+    };
+    let answer = tokio::select! {
+        r = rx => r.unwrap_or(Approval::Cancelled),
+        _ = cancel.cancelled() => Approval::Cancelled,
+        _ = tokio::time::sleep(timeout) => Approval::Cancelled,
+    };
+    drop(guard);
+    let allowed = matches!(answer, Approval::AllowOnce | Approval::AllowForChat);
+    let (decision, decided_by, note) = match &answer {
+        Approval::AllowOnce | Approval::AllowForChat => {
+            (store::AuditDecision::AllowOnce, "user", None)
+        }
+        Approval::Deny { note } => (store::AuditDecision::Denied, "user", note.clone()),
+        Approval::Cancelled => (store::AuditDecision::Cancelled, "stop", None),
+    };
+    let state = app.state::<AppState>();
+    let _ = state
+        .store
+        .append_audit(store::AuditEntry {
+            ts: None,
+            chat_id: Some(store::ChatId(chat_id)),
+            server,
+            tool,
+            arguments: json!({ "held": summary }),
+            preview: preview.chars().take(20_000).collect(),
+            risk: "alwaysAsk".into(),
+            decision,
+            decided_by: decided_by.into(),
+            note,
+            parent_audit_id: None,
+            result: None,
+        })
+        .await;
+    allowed
+}
+
 #[async_trait]
 impl Approver for AppApprover {
     async fn ask(&self, req: ApprovalRequest) -> Approval {

@@ -109,7 +109,13 @@ export function ChatView() {
             <Brain size={14} aria-hidden /> Thinking {detail.chat.thinking ? "on" : "off"}
           </button>
         )}
-        {detail && <ToolsPanel chatId={detail.chat.id} nCtx={nCtx} />}
+        {detail && (
+          <ToolsPanel
+            chatId={detail.chat.id}
+            nCtx={nCtx}
+            unsupported={!!modelRef?.startsWith("local:") && runtime?.state === "ready" && !runtime.supportsTools}
+          />
+        )}
         {detail && (
           <button
             type="button"

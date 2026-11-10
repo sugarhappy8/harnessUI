@@ -64,6 +64,23 @@ jobs:
               echo "$name: not set"
             fi
           done
+      # Updates: with the updater signing key set as a secret and its public key committed in
+      # src-tauri/tauri.updater.conf.json, the build also produces signed update artifacts
+      # and latest.json. A key without a committed public key stops the release.
+      - name: Updater configuration
+        id: updater
+        shell: bash
+        run: |
+          pubkey=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.updater.conf.json'))['plugins']['updater']['pubkey'])")
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            if [ -z "$pubkey" ]; then
+              echo "::error::TAURI_SIGNING_PRIVATE_KEY is set but tauri.updater.conf.json has no public key"; exit 1
+            fi
+            echo "args=--config src-tauri/tauri.updater.conf.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "No updater key: this release has no in-app updates."
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build and upload
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -74,4 +91,4 @@ jobs:
           releaseBody: "See CHANGELOG.md. Unsigned builds: see the README section on opening unsigned builds."
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ steps.updater.outputs.args }}

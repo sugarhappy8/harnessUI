@@ -4,6 +4,7 @@ import { ChatView } from "./components/ChatView";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { ModelsDialog } from "./components/ModelsDialog";
 import { FirstRun } from "./components/FirstRun";
+import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useApp, toErrorInfo } from "./store/app";
 import * as ipc from "./lib/ipc";
 
@@ -11,6 +12,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined);
   const [modelsOpen, setModelsOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   // null while loading; true once first run was completed or skipped.
   const [firstRunDone, setFirstRunDone] = useState<boolean | null>(ipc.isTauri() ? null : true);
   const { refreshChats, refreshModelOptions, setRuntime, newChat, stop, showError, addApproval, removeApproval } =
@@ -52,6 +55,12 @@ export default function App() {
         event.preventDefault();
         setSettingsTab(undefined);
         setSettingsOpen(true);
+      } else if (mod && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        setSidebarOpen((o) => !o);
+      } else if (mod && event.key === "/") {
+        event.preventDefault();
+        setShortcutsOpen(true);
       } else if (mod && event.key.toLowerCase() === "m") {
         event.preventDefault();
         setModelsOpen(true);
@@ -76,6 +85,7 @@ export default function App() {
     <>
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialTab={settingsTab} />
       <ModelsDialog open={modelsOpen} onOpenChange={setModelsOpen} />
+      <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </>
   );
 
@@ -101,13 +111,15 @@ export default function App() {
 
   return (
     <div className="flex h-full">
-      <Sidebar
-        onOpenSettings={() => {
-          setSettingsTab(undefined);
-          setSettingsOpen(true);
-        }}
-        onOpenModels={() => setModelsOpen(true)}
-      />
+      {sidebarOpen && (
+        <Sidebar
+          onOpenSettings={() => {
+            setSettingsTab(undefined);
+            setSettingsOpen(true);
+          }}
+          onOpenModels={() => setModelsOpen(true)}
+        />
+      )}
       <ChatView />
       {dialogs}
     </div>

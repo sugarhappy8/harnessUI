@@ -26,6 +26,7 @@ mod skills_cmd;
 mod state;
 mod toolset;
 mod turns;
+mod updates;
 
 use std::sync::{Arc, Mutex};
 
@@ -53,7 +54,9 @@ const DATABASE_FILE: &str = "app.db";
 /// Starts the app. Called from `main.rs`.
 pub fn run() {
     runtime::spawn::init_parent_error_mode();
-    let builder = tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let with_updater = updates::configured(context.config());
+    let mut builder = tauri::Builder::default()
         // Must be registered first: a second launch focuses the existing window
         // instead of starting a second llama-server and a second database writer.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -154,6 +157,10 @@ pub fn run() {
             skills_cmd::open_skills_folder,
             skills_cmd::loaded_skills,
             skills_cmd::unload_skill,
+            updates::update_status,
+            updates::set_update_auto_check,
+            updates::check_for_update,
+            updates::install_update,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -202,6 +209,7 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     toolset::reload_skills(&handle).await;
                     toolset::start_saved_servers(&handle).await;
+                    updates::auto_check(handle.clone()).await;
                 });
             }
             app.manage(packs_cmd::PackDownloads::default());
@@ -222,7 +230,10 @@ pub fn run() {
             Ok(())
         });
 
-    let app = match builder.build(tauri::generate_context!()) {
+    if with_updater {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    let app = match builder.build(context) {
         Ok(app) => app,
         Err(err) => {
             // There is no window to show an error in at this point; write it where a

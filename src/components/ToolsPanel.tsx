@@ -16,7 +16,7 @@ const SERVER_LABEL: Record<string, string> = {
  * The tools switched on for this chat (9.3). Only switched-on tools are offered to the
  * model; each costs context, shown as an estimate.
  */
-export function ToolsPanel(props: { chatId: number; nCtx: number | null }) {
+export function ToolsPanel(props: { chatId: number; nCtx: number | null; unsupported?: boolean }) {
   const [tools, setTools] = useState<ToolDto[]>([]);
   const [open, setOpen] = useState(false);
   const showError = useApp((s) => s.showError);
@@ -69,7 +69,7 @@ export function ToolsPanel(props: { chatId: number; nCtx: number | null }) {
           className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-fg-muted hover:bg-bg-muted hover:text-fg"
           title="Tools for this chat"
         >
-          <Wrench size={14} aria-hidden /> Tools ({enabled.length})
+          <Wrench size={14} aria-hidden /> {props.unsupported ? "Tools (unavailable)" : `Tools (${enabled.length})`}
         </button>
       </Popover.Trigger>
       <Popover.Portal>
@@ -85,6 +85,13 @@ export function ToolsPanel(props: { chatId: number; nCtx: number | null }) {
               {props.nCtx ? ` (${Math.round((cost / props.nCtx) * 100)}% of context)` : ""}
             </span>
           </div>
+          {props.unsupported && (
+            <p className="mb-2 flex items-start gap-1 text-xs text-warning">
+              <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden />
+              This model&apos;s chat template has no tool-calling format, so it can&apos;t request tools. Pick a model
+              with the Tools badge to use files, terminal or browser.
+            </p>
+          )}
           {props.nCtx && cost > props.nCtx * 0.25 && (
             <p className="mb-2 flex items-start gap-1 text-xs text-warning">
               <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden />

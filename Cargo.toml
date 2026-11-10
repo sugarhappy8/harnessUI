@@ -105,3 +105,8 @@ disallowed_methods = "deny"
 codegen-units = 1
 lto = "thin"
 strip = "symbols"
+
+# Dev builds keep debug info for our own crates only: dependencies without it take about
+# a third of the disk and link faster.
+[profile.dev.package."*"]
+debug = false

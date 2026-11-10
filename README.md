@@ -101,6 +101,14 @@ Release builds (`.github/workflows/release.yml`, on `v*` tags) are prepared for 
 | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | macOS notarization |
 | `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Update and catalog signatures (generate once with `npx tauri signer generate`, and back the key up; losing it means installed copies can never update) |
 
+**In-app updates** need the updater key pair:
+
+1. On your own machine run `npx tauri signer generate -w ~/.tauri/harnissui.key`, choose a password, and keep both the key file and the password in your password manager.
+2. Add the private key's contents and its password as the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets.
+3. Commit the public key (the `.pub` file's contents) as `plugins.updater.pubkey` in `src-tauri/tauri.updater.conf.json`.
+
+Release builds then include signed update files and `latest.json`, and *Settings → General → Updates* offers *Check now* and an opt-in automatic check. Builds without the key show that they cannot update themselves. The app never checks for updates unless you click *Check now* or turn the automatic check on.
+
 Windows code signing uses a `signCommand` added in M8 once you have chosen a certificate route.
 
 ## License

@@ -490,3 +490,17 @@ export interface SkillList {
   sharedPath: string | null;
   folder: string | null;
 }
+
+// ---- Updates (M8) ----------------------------------------------------------------
+
+export interface UpdateStatus {
+  configured: boolean;
+  autoCheck: boolean;
+  currentVersion: string;
+}
+
+export interface UpdateInfo {
+  version: string;
+  date: string | null;
+  notes: string | null;
+}

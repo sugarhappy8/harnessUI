@@ -16,6 +16,8 @@ import type {
   McpImportPreview,
   ApprovalRequest,
   SkillList,
+  UpdateInfo,
+  UpdateStatus,
   ChatSummary,
   DiagnosticsReport,
   DiskUsage,
@@ -243,3 +245,9 @@ export const openSkillsFolder = () => invoke<void>("open_skills_folder");
 export const loadedSkills = (chatId: number) => invoke<string[]>("loaded_skills", { chatId });
 export const unloadSkill = (chatId: number, name: string) => invoke<void>("unload_skill", { chatId, name });
 export const setChatThinking = (chatId: number, on: boolean) => invoke<void>("set_chat_thinking", { chatId, on });
+
+// Updates
+export const updateStatus = () => invoke<UpdateStatus>("update_status");
+export const setUpdateAutoCheck = (on: boolean) => invoke<void>("set_update_auto_check", { on });
+export const checkForUpdate = () => invoke<UpdateInfo | null>("check_for_update");
+export const installUpdate = () => invoke<void>("install_update");

@@ -2,6 +2,18 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## M8 — Polish (in progress)
+
+### Added
+- Opt-in updates: the updater plugin is registered only in builds that carry the updater public key (release builds with `src-tauri/tauri.updater.conf.json`, merged when the signing secret exists). *Settings → General → Updates*: *Check now*, *Install and restart* (stops llama-server and every tool child first), and an automatic check at start that is off by default. The check runs in Rust; the webview has no updater permission.
+- Keyboard shortcut sheet (Ctrl+/ or Cmd+/) and a toggle for the chat list (Ctrl+B or Cmd+B).
+- Models whose template has no tool support: the Tools panel says so (8.1).
+- `e2e/m8_offline.py`: the app behind a recording proxy that refuses everything starts, loads a local model, answers and shows every settings page without one outbound request.
+- Frontend tests for the streamed-turn reducer and approval bookkeeping.
+
+### Changed
+- Dev builds keep debug info only for the workspace's own crates.
+
 ## M3 — Agent loop, MCP host, approvals (in progress)
 
 ### Added

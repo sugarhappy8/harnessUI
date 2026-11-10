@@ -513,6 +513,7 @@ click Download in Settings, after their licenses are shown.
 | fastrand | 2.5.0 | Apache-2.0 OR MIT |
 | fax | 0.2.7 | MIT |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 |
+| filetime | 0.2.29 | MIT/Apache-2.0 |
 | flate2 | 1.1.11 | MIT OR Apache-2.0 |
 | fluent-uri | 0.4.1 | MIT |
 | fnv | 1.0.7 | Apache-2.0 / MIT |
@@ -600,6 +601,7 @@ click Download in Settings, after their licenses are shown.
 | micromap | 0.3.0 | MIT |
 | mime | 0.3.18 | MIT OR Apache-2.0 |
 | minisign-verify | 0.2.5 | MIT |
+| minisign-verify | 0.3.0 | MIT |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
 | mio | 1.2.4 | MIT |
@@ -629,11 +631,13 @@ click Download in Settings, after their licenses are shown.
 | objc2-exception-helper | 0.1.1 | Zlib OR Apache-2.0 OR MIT |
 | objc2-foundation | 0.3.2 | MIT |
 | objc2-io-surface | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
+| objc2-osa-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | objc2-quartz-core | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | objc2-web-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 |
 | open | 5.4.5 | MIT |
 | option-ext | 0.2.0 | MPL-2.0 |
+| osakit | 0.3.1 | MIT OR Apache-2.0 |
 | outref | 0.5.2 | MIT |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 |
@@ -682,6 +686,7 @@ click Download in Settings, after their licenses are shown.
 | rustix | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 |
+| rustls-platform-verifier | 0.7.1 | MIT OR Apache-2.0 |
 | rustls-webpki | 0.103.16 | ISC |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 |
 | same-file | 1.0.6 | Unlicense/MIT |
@@ -742,6 +747,7 @@ click Download in Settings, after their licenses are shown.
 | system-configuration | 0.7.0 | MIT OR Apache-2.0 |
 | system-configuration-sys | 0.6.0 | MIT OR Apache-2.0 |
 | tao | 0.37.2 | Apache-2.0 |
+| tar | 0.4.46 | MIT OR Apache-2.0 |
 | tauri | 2.12.5 | Apache-2.0 OR MIT |
 | tauri-codegen | 2.7.4 | Apache-2.0 OR MIT |
 | tauri-macros | 2.7.4 | Apache-2.0 OR MIT |
@@ -751,6 +757,7 @@ click Download in Settings, after their licenses are shown.
 | tauri-plugin-global-shortcut | 2.4.1 | Apache-2.0 OR MIT |
 | tauri-plugin-opener | 2.7.2 | Apache-2.0 OR MIT |
 | tauri-plugin-single-instance | 2.5.5 | Apache-2.0 OR MIT |
+| tauri-plugin-updater | 2.14.1 | Apache-2.0 OR MIT |
 | tauri-runtime | 2.12.2 | Apache-2.0 OR MIT |
 | tauri-runtime-wry | 2.12.3 | Apache-2.0 OR MIT |
 | tauri-utils | 2.10.2 | Apache-2.0 OR MIT |
@@ -843,6 +850,7 @@ click Download in Settings, after their licenses are shown.
 | winnow | 1.0.5 | MIT |
 | writeable | 0.6.4 | Unicode-3.0 |
 | wry | 0.57.2 | Apache-2.0 OR MIT |
+| xattr | 1.7.0 | MIT OR Apache-2.0 |
 | yoke | 0.8.4 | Unicode-3.0 |
 | yoke-derive | 0.8.4 | Unicode-3.0 |
 | zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT |
@@ -1114,7 +1122,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-Used by: aes 0.8.4, ahash 0.8.12, atomic-waker 1.1.2, base64 0.21.7, base64 0.22.1, base64 0.23.1, bit-set 0.8.0, bit-vec 0.8.0, bitflags 2.13.2, block-buffer 0.10.4, block-buffer 0.12.1, block-padding 0.3.3, bs58 0.5.1, bstr 1.13.1, bumpalo 3.20.3, bytemuck 1.25.2, camino 1.2.6, cbc 0.1.2, cff-parser 0.2.0, cfg-if 1.0.5, chacha20 0.10.2, cipher 0.4.4, const-oid 0.10.2, core-foundation 0.10.1, core-foundation 0.9.4, core-foundation-sys 0.8.7, core-graphics 0.25.0, core-graphics-types 0.2.0, core_detect 1.0.0, cpufeatures 0.2.17, cpufeatures 0.3.1, crossbeam-channel 0.5.17, crossbeam-utils 0.8.23, crypto-common 0.1.7, crypto-common 0.2.2, digest 0.10.7, digest 0.11.3, displaydoc 0.2.7, embed_plist 1.2.2, encoding_rs 0.8.44, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.14, euclid 0.20.14, fastrand 2.5.0, flate2 1.1.11, fnv 1.0.7, form_urlencoded 1.2.2, fraction 0.17.0, glob 0.3.4, global-hotkey 0.8.0, hashbrown 0.12.3, hashbrown 0.17.1, hashlink 0.12.2, heck 0.5.0, html5ever 0.39.0, httparse 1.10.1, hybrid-array 0.4.15, hyper-rustls 0.27.10, hyper-tls 0.6.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 1.9.3, indexmap 2.14.2, inout 0.1.4, keyboard-types 0.7.0, keyboard-types 0.8.3, lazy_static 1.5.1, lock_api 0.4.14, log 0.4.35, markup5ever 0.39.0, md-5 0.10.6, mime 0.3.18, muda 0.20.0, multiversion_no_op 1.0.0, nohash-hasher 0.2.0, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, once_cell 1.21.4, parking_lot 0.12.5, parking_lot_core 0.9.12, percent-encoding 2.3.2, png 0.18.1, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, rustix 1.1.6, rustls 0.23.46, scopeguard 1.2.0, security-framework 3.7.0, security-framework-sys 2.17.0, serde_with 3.24.0, serde_with_macros 3.24.0, serialize-to-javascript 0.1.2, serialize-to-javascript-impl 0.1.2, servo_arc 0.4.3, sha2 0.10.9, sha2 0.11.1, signal-hook-registry 1.4.8, similar 3.2.1, siphasher 1.0.4, smallvec 1.16.5, socket2 0.6.5, sse-stream 0.2.6, stable_deref_trait 1.2.1, string_cache 0.9.0, symlink 0.1.0, system-configuration 0.7.0, system-configuration-sys 0.6.0, tempfile 3.27.0, tendril 0.5.1, thread_local 1.1.10, tinyvec 1.13.3, tray-icon 0.25.1, ttf-parser 0.25.1, unicode-bidi 0.3.18, unicode-normalization 0.1.26, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-width 0.2.3, url 2.5.8, utf8_iter 1.1.0, utf_types 1.0.0, uuid 1.29.2, web_atoms 0.2.6, weezl 0.1.12, window-vibrancy 0.8.1, wry 0.57.2, zeroize 1.9.1, zeroize_derive 1.5.0, zune-core 0.5.3, zune-jpeg 0.5.15
+Used by: aes 0.8.4, ahash 0.8.12, atomic-waker 1.1.2, base64 0.21.7, base64 0.22.1, base64 0.23.1, bit-set 0.8.0, bit-vec 0.8.0, bitflags 2.13.2, block-buffer 0.10.4, block-buffer 0.12.1, block-padding 0.3.3, bs58 0.5.1, bstr 1.13.1, bumpalo 3.20.3, bytemuck 1.25.2, camino 1.2.6, cbc 0.1.2, cff-parser 0.2.0, cfg-if 1.0.5, chacha20 0.10.2, cipher 0.4.4, const-oid 0.10.2, core-foundation 0.10.1, core-foundation 0.9.4, core-foundation-sys 0.8.7, core-graphics 0.25.0, core-graphics-types 0.2.0, core_detect 1.0.0, cpufeatures 0.2.17, cpufeatures 0.3.1, crossbeam-channel 0.5.17, crossbeam-utils 0.8.23, crypto-common 0.1.7, crypto-common 0.2.2, digest 0.10.7, digest 0.11.3, displaydoc 0.2.7, embed_plist 1.2.2, encoding_rs 0.8.44, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.14, euclid 0.20.14, fastrand 2.5.0, filetime 0.2.29, flate2 1.1.11, fnv 1.0.7, form_urlencoded 1.2.2, fraction 0.17.0, glob 0.3.4, global-hotkey 0.8.0, hashbrown 0.12.3, hashbrown 0.17.1, hashlink 0.12.2, heck 0.5.0, html5ever 0.39.0, httparse 1.10.1, hybrid-array 0.4.15, hyper-rustls 0.27.10, hyper-tls 0.6.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 1.9.3, indexmap 2.14.2, inout 0.1.4, keyboard-types 0.7.0, keyboard-types 0.8.3, lazy_static 1.5.1, lock_api 0.4.14, log 0.4.35, markup5ever 0.39.0, md-5 0.10.6, mime 0.3.18, muda 0.20.0, multiversion_no_op 1.0.0, nohash-hasher 0.2.0, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, once_cell 1.21.4, parking_lot 0.12.5, parking_lot_core 0.9.12, percent-encoding 2.3.2, png 0.18.1, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, rustix 1.1.6, rustls 0.23.46, rustls-platform-verifier 0.7.1, scopeguard 1.2.0, security-framework 3.7.0, security-framework-sys 2.17.0, serde_with 3.24.0, serde_with_macros 3.24.0, serialize-to-javascript 0.1.2, serialize-to-javascript-impl 0.1.2, servo_arc 0.4.3, sha2 0.10.9, sha2 0.11.1, signal-hook-registry 1.4.8, similar 3.2.1, siphasher 1.0.4, smallvec 1.16.5, socket2 0.6.5, sse-stream 0.2.6, stable_deref_trait 1.2.1, string_cache 0.9.0, symlink 0.1.0, system-configuration 0.7.0, system-configuration-sys 0.6.0, tar 0.4.46, tempfile 3.27.0, tendril 0.5.1, thread_local 1.1.10, tinyvec 1.13.3, tray-icon 0.25.1, ttf-parser 0.25.1, unicode-bidi 0.3.18, unicode-normalization 0.1.26, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-width 0.2.3, url 2.5.8, utf8_iter 1.1.0, utf_types 1.0.0, uuid 1.29.2, web_atoms 0.2.6, weezl 0.1.12, window-vibrancy 0.8.1, wry 0.57.2, xattr 1.7.0, zeroize 1.9.1, zeroize_derive 1.5.0, zune-core 0.5.3, zune-jpeg 0.5.15
 
 ```text
 Apache License
@@ -1460,7 +1468,7 @@ Redistribution and use in source and binary forms, with or without modification,
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-Used by: allocator-api2 0.2.21, anyhow 1.0.104, arboard 3.7.0, async-trait 0.1.92, constant_time_eq 0.6.1, dtoa 1.0.11, dyn-clone 1.0.20, erased-serde 0.4.11, fdeflate 0.3.7, half 2.7.1, image 0.25.10, itoa 1.0.19, libc 0.2.191, miniz_oxide 0.8.9, miniz_oxide 0.9.1, num-conv 0.2.2, pastey 0.2.3, pin-project-lite 0.2.17, proc-macro2 1.0.107, process-wrap 10.0.1, quote 1.0.47, raw-window-handle 0.6.2, ref-cast 1.0.27, ref-cast-impl 1.0.27, rustc-hash 2.1.3, ryu 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 2.1.1, serde-untagged 0.1.9, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.29.1, serde_derive_internals 0.30.0, serde_json 1.0.154, serde_repr 0.1.21, serde_urlencoded 0.7.1, simdutf8 0.1.5, syn 2.0.119, syn 3.0.10, sync_wrapper 1.0.2, tauri 2.12.5, tauri-codegen 2.7.4, tauri-macros 2.7.4, tauri-plugin-clipboard-manager 2.5.0, tauri-plugin-dialog 2.8.4, tauri-plugin-fs 2.7.1, tauri-plugin-global-shortcut 2.4.1, tauri-plugin-opener 2.7.2, tauri-plugin-single-instance 2.5.5, tauri-runtime 2.12.2, tauri-runtime-wry 2.12.3, tauri-utils 2.10.2, thiserror 2.0.21, thiserror-impl 2.0.21, time 0.3.55, time-core 0.1.9, time-macros 0.2.32, typed-path 0.13.0, typeid 1.0.3, unicode-ident 1.0.27
+Used by: allocator-api2 0.2.21, anyhow 1.0.104, arboard 3.7.0, async-trait 0.1.92, constant_time_eq 0.6.1, dtoa 1.0.11, dyn-clone 1.0.20, erased-serde 0.4.11, fdeflate 0.3.7, half 2.7.1, image 0.25.10, itoa 1.0.19, libc 0.2.191, miniz_oxide 0.8.9, miniz_oxide 0.9.1, num-conv 0.2.2, osakit 0.3.1, pastey 0.2.3, pin-project-lite 0.2.17, proc-macro2 1.0.107, process-wrap 10.0.1, quote 1.0.47, raw-window-handle 0.6.2, ref-cast 1.0.27, ref-cast-impl 1.0.27, rustc-hash 2.1.3, ryu 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 2.1.1, serde-untagged 0.1.9, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.29.1, serde_derive_internals 0.30.0, serde_json 1.0.154, serde_repr 0.1.21, serde_urlencoded 0.7.1, simdutf8 0.1.5, syn 2.0.119, syn 3.0.10, sync_wrapper 1.0.2, tauri 2.12.5, tauri-codegen 2.7.4, tauri-macros 2.7.4, tauri-plugin-clipboard-manager 2.5.0, tauri-plugin-dialog 2.8.4, tauri-plugin-fs 2.7.1, tauri-plugin-global-shortcut 2.4.1, tauri-plugin-opener 2.7.2, tauri-plugin-single-instance 2.5.5, tauri-plugin-updater 2.14.1, tauri-runtime 2.12.2, tauri-runtime-wry 2.12.3, tauri-utils 2.10.2, thiserror 2.0.21, thiserror-impl 2.0.21, time 0.3.55, time-core 0.1.9, time-macros 0.2.32, typed-path 0.13.0, typeid 1.0.3, unicode-ident 1.0.27
 
 ```text
 Apache License
@@ -2893,7 +2901,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-Used by: cfg-if 1.0.5, socket2 0.6.5
+Used by: cfg-if 1.0.5, filetime 0.2.29, socket2 0.6.5
 
 ```text
 Copyright (c) 2014 Alex Crichton
@@ -8456,7 +8464,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-Used by: minisign-verify 0.2.5
+Used by: minisign-verify 0.2.5, minisign-verify 0.3.0
 
 ```text
 Copyright (c) 2019-2025 Frank Denis
@@ -9833,6 +9841,36 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
   This Source Code Form is "Incompatible With Secondary Licenses", as
   defined by the Mozilla Public License, v. 2.0.
+```
+
+Used by: osakit 0.3.1
+
+```text
+Copyright (c) 2024 Marat Dulin
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 Used by: outref 0.5.2
@@ -12465,6 +12503,32 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+Used by: rustls-platform-verifier 0.7.1
+
+```text
+MIT License
+
+Copyright (c) 2022 1Password
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 Used by: rustls-webpki 0.103.16
 
 ```text
@@ -13602,7 +13666,37 @@ PackageDownloadLocation: git+ssh://github.com/tauri-apps/tao.git
 Creator: Person: Daniel Thompson-Yvetot
 ```
 
-Used by: tauri 2.12.5, tauri-codegen 2.7.4, tauri-macros 2.7.4, tauri-plugin-clipboard-manager 2.5.0, tauri-plugin-dialog 2.8.4, tauri-plugin-fs 2.7.1, tauri-plugin-global-shortcut 2.4.1, tauri-plugin-opener 2.7.2, tauri-runtime 2.12.2, tauri-runtime-wry 2.12.3, tauri-utils 2.10.2
+Used by: tar 0.4.46
+
+```text
+Copyright (c) The tar-rs Project Contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+Used by: tauri 2.12.5, tauri-codegen 2.7.4, tauri-macros 2.7.4, tauri-plugin-clipboard-manager 2.5.0, tauri-plugin-dialog 2.8.4, tauri-plugin-fs 2.7.1, tauri-plugin-global-shortcut 2.4.1, tauri-plugin-opener 2.7.2, tauri-plugin-updater 2.14.1, tauri-runtime 2.12.2, tauri-runtime-wry 2.12.3, tauri-utils 2.10.2
 
 ```text
 MIT License
@@ -13628,7 +13722,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-Used by: tauri-plugin-clipboard-manager 2.5.0, tauri-plugin-dialog 2.8.4, tauri-plugin-fs 2.7.1, tauri-plugin-global-shortcut 2.4.1, tauri-plugin-opener 2.7.2, tauri-plugin-single-instance 2.5.5
+Used by: tauri-plugin-clipboard-manager 2.5.0, tauri-plugin-dialog 2.8.4, tauri-plugin-fs 2.7.1, tauri-plugin-global-shortcut 2.4.1, tauri-plugin-opener 2.7.2, tauri-plugin-single-instance 2.5.5, tauri-plugin-updater 2.14.1
 
 ```text
 SPDXVersion: SPDX-2.1
@@ -13679,7 +13773,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-Used by: tempfile 3.27.0
+Used by: tempfile 3.27.0, xattr 1.7.0
 
 ```text
 Copyright (c) 2015 Steven Allen

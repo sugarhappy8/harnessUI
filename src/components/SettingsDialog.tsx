@@ -5,7 +5,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { applyTheme, loadTheme, type ThemeChoice } from "../lib/theme";
 import * as ipc from "../lib/ipc";
 import type { AppInfo } from "../lib/ipc";
-import type { BackendInfo, LocalModelSettings, Provider, ProviderKind } from "../lib/types";
+import type { BackendInfo, LocalModelSettings, Provider, ProviderKind, UpdateInfo, UpdateStatus } from "../lib/types";
 import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
@@ -67,7 +67,83 @@ function General() {
           THIRD-PARTY-NOTICES.md next to the app.
         </p>
       </section>
+      {ipc.isTauri() && <Updates />}
     </div>
+  );
+}
+
+/** Opt-in updates: nothing is checked unless the user asks or turns on automatic checks. */
+function Updates() {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [found, setFound] = useState<UpdateInfo | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  useEffect(() => {
+    ipc.updateStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+  if (!status) return null;
+  async function run<T>(f: () => Promise<T>, then: (v: T) => void) {
+    setBusy(true);
+    setError(null);
+    try {
+      then(await f());
+    } catch (e) {
+      setError(toErrorInfo(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section aria-label="Updates">
+      <h3 className="mb-1 text-sm font-medium">Updates</h3>
+      {!status.configured ? (
+        <p className="text-sm text-fg-muted">
+          This build cannot update itself. New versions are on the project&apos;s GitHub releases page.
+        </p>
+      ) : (
+        <div className="space-y-2 text-sm">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={status.autoCheck}
+              onChange={(e) =>
+                void run(
+                  () => ipc.setUpdateAutoCheck(e.target.checked),
+                  () => setStatus({ ...status, autoCheck: e.target.checked }),
+                )
+              }
+            />
+            Check for updates when the app starts (off by default; contacts github.com)
+          </label>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void run(() => ipc.checkForUpdate(), setFound)}
+              className="rounded-md border border-border px-3 py-1 disabled:opacity-40"
+            >
+              Check now
+            </button>
+            {found === null && <span className="text-fg-muted">You have the latest version ({status.currentVersion}).</span>}
+            {found && (
+              <>
+                <span>Version {found.version} is available.</span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void run(() => ipc.installUpdate(), () => undefined)}
+                  className="rounded-md bg-accent px-3 py-1 text-accent-fg disabled:opacity-40"
+                >
+                  Install and restart
+                </button>
+              </>
+            )}
+          </div>
+          {found?.notes && <p className="whitespace-pre-wrap text-xs text-fg-muted">{found.notes}</p>}
+        </div>
+      )}
+      {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+    </section>
   );
 }
 
