@@ -41,7 +41,12 @@ tauri-plugin-clipboard-manager = "2.5"
 
 # Async, serialisation, errors
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs", "net"] }
-tokio-util = { version = "0.7.20", features = ["rt"] }
+tokio-util = { version = "0.7.20", features = ["rt", "io"] }
+tokio-stream = "0.1"
+bytes = "1"
+async-trait = "0.1"
+url = "2"
+libc = "0.2"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -51,11 +56,13 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "http2", "charset"] }
+# native-tls: the OS TLS stack (SChannel / Security.framework) and the OS certificate store;
+# avoids the aws-lc-rs assembler requirement on Windows CI.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "stream", "http2", "charset", "system-proxy", "query"] }
 http = "1"
 
 # MCP
-rmcp = { version = "3.9", features = ["client", "server", "macros", "schemars", "transport-child-process", "which-command", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "3.9", features = ["client", "server", "macros", "schemars", "transport-child-process", "which-command", "transport-streamable-http-client-reqwest", "reqwest-native-tls"] }
 schemars = "1"
 
 # Storage and secrets

@@ -3,10 +3,16 @@
 
 [graph]
 all-features = false
+# Release targets only. Linux is a development platform; its GTK/WebKit dependency
+# tree is not shipped.
+targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
 
 [advisories]
 version = 2
 yanked = "deny"
+# Unmaintained notices fail the build for our own direct dependencies only; for
+# transitive ones they are reported as warnings to review at each milestone.
+unmaintained = "workspace"
 ignore = []
 
 [licenses]

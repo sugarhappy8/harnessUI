@@ -1,0 +1,170 @@
+import { useState } from "react";
+import { ChevronLeft, ChevronRight, Copy, Pencil, RotateCcw, Check } from "lucide-react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import type { MessageDto } from "../lib/types";
+import { Markdown } from "./Markdown";
+import { ErrorBanner } from "./ErrorBanner";
+import { isTauri } from "../lib/ipc";
+
+interface Props {
+  message: MessageDto;
+  isLastAssistant: boolean;
+  busy: boolean;
+  onRegenerate: (id: number) => void;
+  onEditResend: (message: MessageDto, newText: string) => void;
+  onSwitchBranch: (messageId: number) => void;
+}
+
+function BranchSwitcher(props: { message: MessageDto; onSwitch: (id: number) => void; busy: boolean }) {
+  const ids = props.message.siblingIds;
+  if (ids.length < 2) return null;
+  const index = ids.indexOf(props.message.id);
+  const prev = index > 0 ? ids[index - 1] : undefined;
+  const next = index < ids.length - 1 ? ids[index + 1] : undefined;
+  return (
+    <span className="inline-flex items-center gap-1 text-xs text-fg-muted">
+      <button
+        type="button"
+        aria-label="Previous version"
+        disabled={prev === undefined || props.busy}
+        onClick={() => prev !== undefined && props.onSwitch(prev)}
+        className="disabled:opacity-30"
+      >
+        <ChevronLeft size={14} aria-hidden />
+      </button>
+      {index + 1} / {ids.length}
+      <button
+        type="button"
+        aria-label="Next version"
+        disabled={next === undefined || props.busy}
+        onClick={() => next !== undefined && props.onSwitch(next)}
+        className="disabled:opacity-30"
+      >
+        <ChevronRight size={14} aria-hidden />
+      </button>
+    </span>
+  );
+}
+
+export function MessageItem(props: Props) {
+  const m = props.message;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(m.text);
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      if (isTauri()) await writeText(m.text);
+      else await navigator.clipboard.writeText(m.text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  if (m.role === "user") {
+    return (
+      <div className="group flex flex-col items-end">
+        {editing ? (
+          <form
+            className="w-full max-w-[85%]"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const text = draft.trim();
+              if (text) props.onEditResend(m, text);
+              setEditing(false);
+            }}
+          >
+            <textarea
+              aria-label="Edit message"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              rows={Math.min(10, draft.split("\n").length + 1)}
+              className="w-full rounded-lg border border-accent bg-bg p-3"
+            />
+            <div className="mt-1 flex justify-end gap-2 text-sm">
+              <button type="button" onClick={() => setEditing(false)} className="px-2 py-1">
+                Cancel
+              </button>
+              <button type="submit" className="rounded-md bg-accent px-3 py-1 text-accent-fg">
+                Send
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="max-w-[85%] rounded-lg bg-bg-muted px-3 py-2 whitespace-pre-wrap">
+            {m.text}
+          </div>
+        )}
+        <div className="mt-1 flex items-center gap-2 opacity-70 group-hover:opacity-100">
+          <BranchSwitcher message={m} onSwitch={props.onSwitchBranch} busy={props.busy} />
+          {!editing && (
+            <button
+              type="button"
+              aria-label="Edit and resend"
+              title="Edit and resend"
+              disabled={props.busy}
+              onClick={() => {
+                setDraft(m.text);
+                setEditing(true);
+              }}
+              className="text-fg-muted hover:text-fg disabled:opacity-30"
+            >
+              <Pencil size={13} aria-hidden />
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (m.role !== "assistant") return null;
+
+  return (
+    <div className="group">
+      {m.reasoning && (
+        <details className="mb-2 rounded-md border border-border bg-bg-subtle px-3 py-1.5 text-sm">
+          <summary className="cursor-pointer text-fg-muted select-none">Thinking</summary>
+          <div className="mt-1 whitespace-pre-wrap text-fg-muted">{m.reasoning}</div>
+        </details>
+      )}
+      <div className="leading-relaxed">
+        {m.text ? (
+          <Markdown text={m.text} />
+        ) : m.status === "streaming" ? (
+          <span className="text-fg-muted" aria-live="polite">
+            …
+          </span>
+        ) : null}
+      </div>
+      {m.error && (
+        <div className="mt-2">
+          <ErrorBanner error={m.error} />
+        </div>
+      )}
+      <div className="mt-1 flex items-center gap-3 text-xs text-fg-muted opacity-70 group-hover:opacity-100">
+        <BranchSwitcher message={m} onSwitch={props.onSwitchBranch} busy={props.busy} />
+        {m.status === "stopped" && <span>Stopped</span>}
+        {m.tokensPerSecond !== null && m.status !== "streaming" && (
+          <span title="Generation speed">{m.tokensPerSecond.toFixed(1)} tokens/s</span>
+        )}
+        {m.text && (
+          <button type="button" aria-label="Copy message" onClick={() => void copy()}>
+            {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
+          </button>
+        )}
+        {props.isLastAssistant && !props.busy && (
+          <button
+            type="button"
+            aria-label="Regenerate"
+            title="Regenerate"
+            onClick={() => props.onRegenerate(m.id)}
+          >
+            <RotateCcw size={13} aria-hidden />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}

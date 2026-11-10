@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "comment": "Pinned llama.cpp builds. Compiled into the app (runtime::llama::lock) and read by scripts/fetch_llama.py at build time. Change only together with a passing contract-test run (ARCHITECTURE.md 7.1, 17).",
+  "llama_cpp": {
+    "tag": "b12110",
+    "version": "0.9.0",
+    "commit": "cd959bae99ff4bed22bef2604f45241c09bbb8c8",
+    "repository": "https://github.com/ggml-org/llama.cpp"
+  },
+  "keep_files": [
+    "llama-server.exe",
+    "llama-server-impl.dll",
+    "llama-fit-params.exe",
+    "llama-fit-params-impl.dll",
+    "llama-common.dll",
+    "llama.dll",
+    "mtmd.dll",
+    "ggml.dll",
+    "ggml-base.dll",
+    "ggml-cpu-*.dll",
+    "ggml-vulkan.dll",
+    "ggml-cuda.dll",
+    "libomp.dll",
+    "LICENSE-LLVM-OpenMP",
+    "cudart64_*.dll",
+    "cublas64_*.dll",
+    "cublasLt64_*.dll"
+  ],
+  "vc_runtime_files": [
+    "msvcp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll"
+  ],
+  "installer": {
+    "windows-x86_64": {
+      "dir": "main",
+      "backends": [
+        "cpu",
+        "vulkan"
+      ],
+      "files": [
+        {
+          "name": "llama-b12110-bin-win-vulkan-x64.zip",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-win-vulkan-x64.zip",
+          "size": 37661146,
+          "sha256": "9732a5e48887ca54d0bfe4af4324dc85fd56cd8cda19b52df3542fa6ebe6874f"
+        }
+      ]
+    },
+    "macos-aarch64": {
+      "dir": "main",
+      "backends": [
+        "metal"
+      ],
+      "build_from_source": {
+        "git": "https://github.com/ggml-org/llama.cpp",
+        "commit": "cd959bae99ff4bed22bef2604f45241c09bbb8c8",
+        "cmake_flags": [
+          "-DBUILD_SHARED_LIBS=OFF",
+          "-DGGML_METAL=ON",
+          "-DGGML_METAL_EMBED_LIBRARY=ON",
+          "-DGGML_NATIVE=OFF",
+          "-DGGML_BLAS=ON",
+          "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3",
+          "-DCMAKE_OSX_ARCHITECTURES=arm64",
+          "-DLLAMA_BUILD_IS_DEV=OFF",
+          "-DLLAMA_BUILD_TESTS=OFF",
+          "-DLLAMA_BUILD_EXAMPLES=OFF",
+          "-DLLAMA_CURL=OFF",
+          "-DCMAKE_BUILD_TYPE=Release"
+        ],
+        "targets": [
+          "llama-server",
+          "llama-fit-params"
+        ]
+      }
+    }
+  },
+  "packs": [
+    {
+      "id": "cuda",
+      "backend": "cuda",
+      "platform": "windows-x86_64",
+      "build": "b12110",
+      "dir": "cuda-b12110",
+      "title": "NVIDIA CUDA 13",
+      "requirements": "NVIDIA RTX 20 / GTX 16 series or newer, driver 580 or newer",
+      "license_name": "NVIDIA CUDA Toolkit End User License Agreement (runtime libraries); llama.cpp MIT",
+      "license_url": "https://docs.nvidia.com/cuda/eula/index.html",
+      "files": [
+        {
+          "name": "llama-b12110-bin-win-cuda-13.4-x64.zip",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-win-cuda-13.4-x64.zip",
+          "size": 169175655,
+          "sha256": "dc910a969190b5d42e189afd73117f6bbdd8dd8ed6586342c5e0b82cab62c673"
+        },
+        {
+          "name": "cudart-llama-bin-win-cuda-13.4-x64.zip",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12110/cudart-llama-bin-win-cuda-13.4-x64.zip",
+          "size": 423535356,
+          "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668"
+        }
+      ]
+    },
+    {
+      "id": "rocm",
+      "backend": "rocm",
+      "platform": "windows-x86_64",
+      "build": "lemonade-b1372",
+      "upstream_llama_cpp_commit": "0eebb6edd",
+      "dir": "rocm-b1372",
+      "title": "AMD ROCm (RX 9000 series)",
+      "requirements": "AMD Radeon RX 9000 series (gfx1200/gfx1201) on Windows 11 25H2 with a current Adrenalin driver",
+      "license_name": "llama.cpp MIT; ROCm components MIT, BSD-2-Clause, Apache-2.0 with LLVM exception, NCSA",
+      "license_url": "https://rocm.docs.amd.com/en/latest/about/license.html",
+      "keep_all": true,
+      "files": [
+        {
+          "name": "llama-b1372-windows-rocm-gfx120X-x64.zip",
+          "url": "https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/b1372/llama-b1372-windows-rocm-gfx120X-x64.zip",
+          "size": 688519474,
+          "sha256": "a98bbeee2e130ccffe73bea94492e097ac1dc753dcd7b7c1a42479dbe29ba897"
+        }
+      ]
+    }
+  ],
+  "dev": {
+    "linux-x86_64": {
+      "comment": "Linux is a development platform only; this build runs the contract tests in CI and local development.",
+      "name": "llama-b12110-bin-ubuntu-x64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-x64.tar.gz",
+      "size": 23051958,
+      "sha256": "368227edcc229be5f9bed16a2223d79b5e41d0ac2e19bcf5825e82291c060e55"
+    }
+  }
+}

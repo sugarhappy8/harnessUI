@@ -1,10 +1,23 @@
 import { useEffect, useState } from "react";
-import { MessageSquarePlus, Settings } from "lucide-react";
-import { APP_NAME } from "./lib/app";
+import { Sidebar } from "./components/Sidebar";
+import { ChatView } from "./components/ChatView";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { useApp, toErrorInfo } from "./store/app";
+import * as ipc from "./lib/ipc";
 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const { refreshChats, refreshModelOptions, setRuntime, newChat, stop, showError } = useApp();
+
+  useEffect(() => {
+    if (!ipc.isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    void ipc.onRuntimeStatus(setRuntime).then((u) => (unlisten = u));
+    Promise.all([refreshChats(), refreshModelOptions(), ipc.runtimeStatus().then(setRuntime)]).catch(
+      (err) => showError(toErrorInfo(err)),
+    );
+    return () => unlisten?.();
+  }, [refreshChats, refreshModelOptions, setRuntime, showError]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -12,52 +25,27 @@ export default function App() {
       if (mod && event.key === ",") {
         event.preventDefault();
         setSettingsOpen(true);
+      } else if (mod && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        void newChat();
+      } else if (mod && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        window.dispatchEvent(new Event("app:focus-search"));
+      } else if (mod && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        window.dispatchEvent(new Event("app:focus-input"));
+      } else if (event.key === "Escape" && useApp.getState().generation) {
+        void stop();
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [newChat, stop]);
 
   return (
     <div className="flex h-full">
-      <aside
-        className="flex w-64 shrink-0 flex-col border-r border-border bg-bg-subtle"
-        aria-label="Chats"
-      >
-        <div className="flex items-center justify-between px-3 py-3">
-          <span className="font-semibold">{APP_NAME}</span>
-          <button
-            type="button"
-            className="rounded-md p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
-            aria-label="Settings"
-            title="Settings (Ctrl+,)"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <Settings size={16} aria-hidden />
-          </button>
-        </div>
-        <div className="px-3">
-          <button
-            type="button"
-            disabled
-            className="flex w-full items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-fg-muted disabled:cursor-not-allowed"
-            title="Chat is not available in this build yet"
-          >
-            <MessageSquarePlus size={16} aria-hidden />
-            New chat
-          </button>
-        </div>
-        <p className="px-3 py-4 text-xs text-fg-muted">No chats yet.</p>
-      </aside>
-      <main className="flex flex-1 items-center justify-center p-8">
-        <div className="max-w-md text-center">
-          <h1 className="mb-2 text-xl font-semibold">{APP_NAME}</h1>
-          <p className="text-fg-muted">
-            This build contains the app shell only. Loading a model and chatting are not
-            available yet.
-          </p>
-        </div>
-      </main>
+      <Sidebar onOpenSettings={() => setSettingsOpen(true)} />
+      <ChatView />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
   );

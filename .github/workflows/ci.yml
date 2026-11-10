@@ -27,7 +27,7 @@ jobs:
       - name: System libraries for Tauri
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
@@ -44,7 +44,20 @@ jobs:
       - run: cargo fmt --all --check
       - run: bash scripts/check-spawn.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - name: Cache llama.cpp and the test model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .cache/llama
+            .cache/models
+          key: contract-linux-${{ hashFiles('llama.lock.json', 'scripts/fetch_test_model.py') }}
+      - name: Fetch the Linux llama-server and the test model
+        run: |
+          python3 scripts/fetch_llama.py linux
+          echo "LLAMA_SERVER_BIN=$PWD/.cache/llama-linux/llama-server" >> "$GITHUB_ENV"
+          echo "TEST_GGUF=$(python3 scripts/fetch_test_model.py .cache/models)" >> "$GITHUB_ENV"
+      - name: Workspace tests (with llama-server contract tests)
+        run: cargo test --workspace
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
@@ -79,7 +92,34 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Workspace tests (${{ matrix.name }})
+      - name: Cache llama.cpp runtime and the test model
+        id: llama-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .cache/llama
+            .cache/models
+            src-tauri/binaries
+          key: llama-${{ matrix.target }}-${{ hashFiles('llama.lock.json', 'scripts/fetch_llama.py', 'scripts/fetch_test_model.py') }}
+      - name: llama.cpp runtime (Windows, pinned Vulkan + CPU build)
+        if: runner.os == 'Windows'
+        run: python scripts/fetch_llama.py windows
+      - name: llama.cpp runtime (macOS, built from the pinned commit)
+        if: runner.os == 'macOS' && steps.llama-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/fetch_llama.py macos
+      - name: Contract-test environment
+        shell: bash
+        run: |
+          echo "TEST_GGUF=$(python3 scripts/fetch_test_model.py .cache/models)" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "LLAMA_SERVER_BIN=$(cygpath -w "$PWD/src-tauri/resources/llama/main/llama-server.exe")" >> "$GITHUB_ENV"
+          else
+            mkdir -p .cache/llama-mac
+            cp src-tauri/binaries/llama-server-aarch64-apple-darwin .cache/llama-mac/llama-server
+            cp src-tauri/binaries/llama-fit-params-aarch64-apple-darwin .cache/llama-mac/llama-fit-params
+            echo "LLAMA_SERVER_BIN=$PWD/.cache/llama-mac/llama-server" >> "$GITHUB_ENV"
+          fi
+      - name: Workspace tests (${{ matrix.name }}, with llama-server contract tests)
         run: cargo test --workspace --target ${{ matrix.target }}
       - name: Build the app
         run: npx tauri build ${{ matrix.args }}
