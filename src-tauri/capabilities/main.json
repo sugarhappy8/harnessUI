@@ -105,6 +105,8 @@
     "allow-set-update-auto-check",
     "allow-check-for-update",
     "allow-install-update",
-    "allow-overlay-stop"
+    "allow-overlay-stop",
+    "allow-get-terminal-pass-through",
+    "allow-set-terminal-pass-through"
   ]
 }

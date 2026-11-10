@@ -30,9 +30,11 @@ pub async fn build_host(
     app: &AppHandle,
     secrets: Arc<dyn store::secrets::SecretStore>,
     skills: Arc<tools::SkillsServer>,
+    pass_through: Vec<String>,
 ) -> Host {
     let resolver_secrets = secrets.clone();
     let captured = captured_env().await;
+    let _ = CAPTURED.set(captured.clone());
     let opts = HostOptions {
         captured_env: captured.clone(),
         stderr_log_dir: app.path().app_log_dir().ok(),
@@ -46,19 +48,103 @@ pub async fn build_host(
     };
     let host = Host::new(opts);
     host.add_builtin(Arc::new(tools::FilesServer::default()));
-    host.add_builtin(Arc::new(tools::TerminalServer::new(
-        tools::TerminalConfig::default(),
+    host.add_builtin(Arc::new(tools::TerminalServer::new(terminal_config(
+        captured.as_ref(),
+        pass_through,
+    ))));
+    host.add_builtin(Arc::new(tools::GitServer::new(
+        git_config(captured.as_ref()).await,
     )));
-    host.add_builtin(Arc::new(tools::GitServer::new(git_config().await)));
     host.add_builtin(skills);
     host
 }
 
 /// System git, with the user's own credential helpers (global and system config only;
 /// repository config never chooses a helper).
-async fn git_config() -> tools::GitConfig {
-    let path = std::env::var_os("PATH");
-    let git = runtime::resolve_program("git", path.as_deref());
+/// The captured login environment (macOS), kept to rebuild the terminal server.
+static CAPTURED: std::sync::OnceLock<Option<std::collections::BTreeMap<String, String>>> =
+    std::sync::OnceLock::new();
+
+/// The terminal's pass-through list.
+#[tauri::command]
+pub async fn get_terminal_pass_through(
+    state: tauri::State<'_, AppState>,
+) -> crate::error::AppResult<Vec<String>> {
+    Ok(state
+        .store
+        .get_setting(TERMINAL_PASS_THROUGH)
+        .await?
+        .unwrap_or_default())
+}
+
+/// Replaces the terminal's pass-through list and rebuilds the terminal server.
+#[tauri::command]
+pub async fn set_terminal_pass_through(
+    state: tauri::State<'_, AppState>,
+    names: Vec<String>,
+) -> crate::error::AppResult<Vec<String>> {
+    let mut clean: Vec<String> = names
+        .iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if let Some(bad) = clean
+        .iter()
+        .find(|n| n.len() > 128 || !n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    {
+        return Err(crate::error::AppError::bad_request(format!(
+            "\"{bad}\" is not a variable name (letters, digits and _ only)."
+        )));
+    }
+    clean.sort();
+    clean.dedup();
+    state
+        .store
+        .set_setting(TERMINAL_PASS_THROUGH, &clean)
+        .await?;
+    let captured = CAPTURED.get().cloned().flatten();
+    state
+        .host
+        .add_builtin(Arc::new(tools::TerminalServer::new(terminal_config(
+            captured.as_ref(),
+            clean.clone(),
+        ))));
+    Ok(clean)
+}
+
+/// Setting: environment variables the terminal passes through even though their names
+/// look secret (9.3, "Environment").
+pub const TERMINAL_PASS_THROUGH: &str = "terminalPassThrough";
+
+/// The terminal's configuration: the captured login environment on macOS, the app's own
+/// elsewhere, and the user's pass-through list.
+pub fn terminal_config(
+    captured: Option<&std::collections::BTreeMap<String, String>>,
+    pass_through: Vec<String>,
+) -> tools::TerminalConfig {
+    let mut config = tools::TerminalConfig::default();
+    if let Some(env) = captured {
+        config.base_env = env.clone();
+    }
+    config.pass_through = pass_through;
+    config
+}
+
+/// The variable from the captured login environment (macOS), else the app's own.
+fn captured_var(
+    captured: Option<&std::collections::BTreeMap<String, String>>,
+    key: &str,
+) -> Option<String> {
+    captured
+        .and_then(|c| c.get(key).cloned())
+        .or_else(|| std::env::var(key).ok())
+}
+
+async fn git_config(
+    captured: Option<&std::collections::BTreeMap<String, String>>,
+) -> tools::GitConfig {
+    let path = captured_var(captured, "PATH");
+    let git = runtime::resolve_program("git", path.as_deref().map(std::ffi::OsStr::new));
     let mut env: Vec<(String, String)> = Vec::new();
     for key in [
         "PATH",
@@ -72,7 +158,7 @@ async fn git_config() -> tools::GitConfig {
         "TEMP",
         "TMP",
     ] {
-        if let Ok(v) = std::env::var(key) {
+        if let Some(v) = captured_var(captured, key) {
             env.push((key.to_string(), v));
         }
     }

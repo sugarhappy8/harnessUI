@@ -13,6 +13,11 @@ All notable changes, by milestone. Dates are UTC.
 - Streamed text reaches the webview in batches of about 30 ms (14).
 - Long chats render their latest 80 messages, with "Show earlier messages".
 - Version arrows also show on a regenerated turn that starts with a tool call.
+- *Settings → Permissions → Terminal environment*: the user-editable list of variables the terminal passes through despite secret-looking names (9.3).
+- MCP servers whose runtime is missing (Node.js, uv, Docker) link to its installer.
+
+### Fixed
+- macOS: the terminal and git tools now get the login shell's environment captured at start (only the MCP host had it).
 - `e2e/m8_offline.py`: the app behind a recording proxy that refuses everything starts, loads a local model, answers and shows every settings page without one outbound request.
 - Frontend tests for the streamed-turn reducer and approval bookkeeping.
 

@@ -111,7 +111,55 @@ export function PermissionsSettings() {
           type characters.
         </p>
       </section>
+      <TerminalPassThrough onError={setError} />
     </div>
+  );
+}
+
+/** Variables the terminal passes through although their names look secret (9.3). */
+function TerminalPassThrough(props: { onError: (e: ErrorInfo) => void }) {
+  const [text, setText] = useState("");
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    void ipc
+      .getTerminalPassThrough()
+      .then((names) => setText(names.join(" ")))
+      .catch(() => undefined);
+  }, []);
+  async function save() {
+    try {
+      const names = await ipc.setTerminalPassThrough(text.split(/[\s,]+/).filter(Boolean));
+      setText(names.join(" "));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    } catch (e) {
+      props.onError(toErrorInfo(e));
+    }
+  }
+  return (
+    <section>
+      <h3 className="mb-1 font-medium">Terminal environment</h3>
+      <p className="mb-2 text-xs text-fg-muted">
+        Commands the terminal tool runs get your environment without variables whose names look secret (*_TOKEN,
+        *_KEY, *_SECRET, *PASSWORD*). List variables that commands need anyway, separated by spaces. Anything listed
+        here can end up in the model&apos;s context.
+      </p>
+      <div className="flex gap-2">
+        <label className="sr-only" htmlFor="pass-through">
+          Variables passed through
+        </label>
+        <input
+          id="pass-through"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="e.g. NPM_TOKEN"
+          className="w-80 rounded-md border border-border bg-bg px-2 py-1 font-mono text-xs"
+        />
+        <button type="button" onClick={() => void save()} className="rounded-md border border-border px-3 py-1 hover:bg-bg-muted">
+          {saved ? "Saved" : "Save"}
+        </button>
+      </div>
+    </section>
   );
 }
 

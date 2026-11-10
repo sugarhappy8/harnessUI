@@ -89,3 +89,5 @@ set_update_auto_check
 check_for_update
 install_update
 overlay_stop
+get_terminal_pass_through
+set_terminal_pass_through

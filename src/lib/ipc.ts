@@ -251,3 +251,8 @@ export const updateStatus = () => invoke<UpdateStatus>("update_status");
 export const setUpdateAutoCheck = (on: boolean) => invoke<void>("set_update_auto_check", { on });
 export const checkForUpdate = () => invoke<UpdateInfo | null>("check_for_update");
 export const installUpdate = () => invoke<void>("install_update");
+
+// Terminal
+export const getTerminalPassThrough = () => invoke<string[]>("get_terminal_pass_through");
+export const setTerminalPassThrough = (names: string[]) =>
+  invoke<string[]>("set_terminal_pass_through", { names });

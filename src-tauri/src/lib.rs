@@ -163,6 +163,8 @@ pub fn run() {
             updates::check_for_update,
             updates::install_update,
             overlay::overlay_stop,
+            toolset::get_terminal_pass_through,
+            toolset::set_terminal_pass_through,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -190,10 +192,16 @@ pub fn run() {
                 runtime_manager::layout(&handle),
             ));
             let skills = Arc::new(tools::SkillsServer::new());
+            let pass_through: Vec<String> =
+                tauri::async_runtime::block_on(store.get_setting(toolset::TERMINAL_PASS_THROUGH))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
             let host = tauri::async_runtime::block_on(toolset::build_host(
                 &handle,
                 secrets.clone(),
                 skills.clone(),
+                pass_through,
             ));
             app.manage(state::AppState {
                 store,
