@@ -22,8 +22,7 @@ pub fn overlay_stop(app: AppHandle) {
 /// Shows the border on `monitor` (or the primary monitor) and the Stop window at the top
 /// centre of it. Returns false when the indicator could not be shown; the computer tool
 /// then refuses to act (9.3).
-// TODO(M7): remove the allow when the computer tool calls it.
-#[allow(dead_code)]
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 pub fn show(app: &AppHandle, monitor: Option<tauri::Monitor>) -> bool {
     let (Some(border), Some(indicator)) = (
         app.get_webview_window(crate::OVERLAY_WINDOW),

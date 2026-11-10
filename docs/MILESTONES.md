@@ -57,6 +57,10 @@ keychain; *Settings → Diagnostics → Run backend check*.
 does not expose the documented setting; unverified on real Windows). (Since M8: the
 header warns "Loaded but slow" or "N of M layers on the GPU" after a load.) Unsigned macOS builds can trigger repeated keychain prompts.
 
+**Dependencies:** from section 18 only: `reqwest` (native TLS, the OS proxy and
+certificate store), `rusqlite` (bundled SQLite), `keyring-core` with the platform stores,
+`process-wrap`, `tracing-appender`.
+
 ---
 
 ## M2 — Model manager and first run
@@ -85,6 +89,9 @@ Refresh is disabled until the updater key exists.
 
 **TODO for you:** `python3 scripts/catalog_test.py <entry>` on each machine records a
 tested entry.
+
+**Dependencies:** from section 18 only: `minisign-verify` (signed catalog), `pdf-extract`
+(PDF attachments, in a worker process), `sha2`.
 
 ---
 
@@ -152,6 +159,12 @@ the app uses the built-in library like on Windows).
 **Known issues:** the built-in library cannot use Git's credential helpers (tokens per
 host instead) and has no SSH remotes.
 
+**Dependencies:** `git2` 0.21 with vendored libgit2 (the fallback when Git is missing;
+https through WinHTTP / SecureTransport, no ssh); on macOS `vendored-openssl`, because
+libgit2-sys calls OpenSSL's init on every Unix even when it does not use it for TLS (the
+macOS app links nothing outside the system, checked in CI). Tree-sitter grammars for the
+command classifier were already in section 18.
+
 ---
 
 ## M5 — Skills
@@ -199,6 +212,10 @@ checks the integration in the app.
 
 **Known issues:** see CHANGELOG (M6).
 
+**Dependencies:** `tokio-tungstenite` 0.30 (WebSocket client for the optional
+loopback-port mode only; no TLS, no default features); `windows` features for the
+Windows pipe handles (already in the lock).
+
 ---
 
 ## M7 — Computer use
@@ -231,6 +248,11 @@ Qwen2.5-VL-based model such as UI-TARS-1.5-7B):
 Developer ID fixes that). The automated calibration test of 9.3 is replaced by a
 confirmed per-model convention for now (see the 4pm report).
 
+**Dependencies:** `image` 0.25 (bicubic resize identical to llama.cpp's, PNG; already in
+the lock through Tauri); `xcap` 0.9 (Windows monitor capture, named in 9.3); `enigo` 0.6
+(keyboard input, pointer input on macOS); the `objc2` family (ScreenCaptureKit,
+CoreGraphics, AppKit; the same bindings Tauri uses, no Swift build step).
+
 ---
 
 ## M8 — Polish
@@ -251,3 +273,6 @@ page).
 chats show their latest 80 messages with a "Show earlier" button rather than a
 virtualised list; Rust types
 are mirrored by hand in `src/lib/types.ts` rather than generated.
+
+**Dependencies:** `tauri-plugin-updater` (listed in section 18; registered only in builds
+that carry the updater key).
