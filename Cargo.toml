@@ -1,0 +1,96 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/policy",
+    "crates/store",
+    "crates/runtime",
+    "crates/models",
+    "crates/mcp-host",
+    "crates/tools",
+    "crates/agent",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/sugarhappy8/harnissUI"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+policy = { path = "crates/policy" }
+store = { path = "crates/store" }
+runtime = { path = "crates/runtime" }
+models = { path = "crates/models" }
+mcp-host = { path = "crates/mcp-host" }
+tools = { path = "crates/tools" }
+agent = { path = "crates/agent" }
+
+# Shell. Pinned to the 2.x line: a 3.0 alpha is published and `cargo search` shows it.
+tauri = { version = "2.12", features = [] }
+tauri-build = { version = "2.7", features = [] }
+tauri-plugin-global-shortcut = "2.4"
+tauri-plugin-updater = "2.14"
+tauri-plugin-dialog = "2.8"
+tauri-plugin-opener = "2.7"
+tauri-plugin-single-instance = "2.5"
+tauri-plugin-clipboard-manager = "2.5"
+
+# Async, serialisation, errors
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs", "net"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+
+# HTTP
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "http2", "charset"] }
+http = "1"
+
+# MCP
+rmcp = { version = "3.9", features = ["client", "server", "macros", "schemars", "transport-child-process", "which-command", "transport-streamable-http-client-reqwest", "reqwest"] }
+schemars = "1"
+
+# Storage and secrets
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = "2.6"
+keyring-core = "1.0"
+
+# Processes
+process-wrap = { version = "10", features = ["tokio1"] }
+which = "8"
+
+# Text and data
+jsonschema = { version = "0.61", default-features = false }
+sha2 = "0.11"
+similar = "3.2"
+dunce = "1.0"
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.9"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+serde-saphyr = "2.1"
+zip = { version = "9.5", default-features = false, features = ["deflate"] }
+tempfile = "3"
+
+# Dev
+proptest = "1"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

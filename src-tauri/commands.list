@@ -1,0 +1,3 @@
+# One app command per line. build.rs generates an `allow-<name>` permission for each,
+# and only the `main` capability grants them (ARCHITECTURE.md 13.2).
+app_info

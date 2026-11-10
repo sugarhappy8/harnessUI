@@ -1,0 +1,7 @@
+# Every child process goes through the spawn helper in `crates/runtime` so it lands in a
+# Job Object (Windows) or a registered process group (macOS). See ARCHITECTURE.md 4.1.
+# tokio::process::Command::new is checked by scripts/check-spawn.sh (clippy cannot
+# resolve a path in crates that do not depend on tokio).
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "spawn through the runtime crate so the child cannot outlive the app" },
+]

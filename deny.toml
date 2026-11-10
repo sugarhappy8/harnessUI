@@ -1,0 +1,55 @@
+# cargo-deny: security advisories, licenses and banned crates.
+# Required in CI from the first commit (ARCHITECTURE.md 18).
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "BSL-1.0",
+    "0BSD",
+    "Unlicense",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "OpenSSL",
+    "bzip2-1.0.6",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+deny = [
+    # Unsound and unmaintained YAML crates (RUSTSEC-2025-0068 and friends).
+    { name = "serde_yml" },
+    { name = "serde_yaml" },
+    { name = "libyml" },
+    # These would give the webview direct access to processes, files, HTTP or SQL.
+    { name = "tauri-plugin-shell" },
+    { name = "tauri-plugin-http" },
+    { name = "tauri-plugin-sql" },
+    # Cannot coexist with rusqlite (libsqlite3-sys `links` conflict).
+    { name = "sqlx" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
