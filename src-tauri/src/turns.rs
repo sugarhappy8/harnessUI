@@ -648,6 +648,8 @@ enum Persist {
         status: store::MessageStatus,
         error: Option<Value>,
     },
+    /// The turn was stopped after its last message was stored: mark that message stopped.
+    MarkStopped,
     Audit(Box<store::AuditEntry>),
     Summary(String, Vec<i64>),
 }
@@ -1025,6 +1027,18 @@ async fn persist_loop(
                     Err(e) => tracing::error!("could not store a message: {e}"),
                 }
             }
+            Persist::MarkStopped => {
+                let _ = state
+                    .store
+                    .update_message(
+                        parent,
+                        store::MessagePatch {
+                            status: Some(store::MessageStatus::Stopped),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+            }
             Persist::Audit(entry) => {
                 if let Err(e) = state.store.append_audit(*entry).await {
                     tracing::error!("could not write the audit log: {e}");
@@ -1227,6 +1241,11 @@ pub async fn run(
                 String::new(),
             );
             Some((store::MessageStatus::Error, serde_json::to_value(err).ok()))
+        }
+        agent::turn::TurnStatus::Stopped => {
+            // The partial answer was already stored as a message.
+            let _ = sink.persist.send(Persist::MarkStopped);
+            None
         }
         _ => None,
     };

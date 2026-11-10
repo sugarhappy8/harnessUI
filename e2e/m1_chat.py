@@ -171,11 +171,23 @@ def main() -> int:
         assert len(detail["messages"][0]["siblingIds"]) == 2, detail["messages"][0]
 
         step("stop a long reply")
+        # Messages are stored as they complete; the UI finishes the turn a moment later.
+        s.wait_for(lambda: s.execute("return document.querySelector('button[aria-label=\"Stop\"]') === null;"), 60, "idle")
         box = s.find("textarea")
-        s.type(box, "Write a 2000 word essay about rivers. /no_think")
+        s.type(box, "Tell me a long story about rivers. /no_think")
         s.type(box, "")
-        time.sleep(2.0)
-        s.click_button("Stop")
+        # Press Stop as soon as the first words arrive (a small model's reply can be short).
+        clicked = False
+        deadline = time.time() + 60
+        while not clicked and time.time() < deadline:
+            clicked = s.execute(
+                "const b = document.querySelector('button[aria-label=\"Stop\"]');"
+                "const streaming = document.body.innerText.includes('rivers. /no_think');"
+                "if (b && streaming) { b.click(); return true; } return false;"
+            )
+            if not clicked:
+                time.sleep(0.05)
+        assert clicked, "the Stop button never appeared"
         s.wait_for(lambda: s.invoke("get_chat", {"chatId": chat_id})["messages"][-1]["status"] in ("stopped", "complete"), 30, "stopped reply")
         last = s.invoke("get_chat", {"chatId": chat_id})["messages"][-1]
         assert last["status"] == "stopped", last

@@ -506,7 +506,8 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
         };
         blocks.push(format!(
             "<agent_instructions>\n\
-             You can call tools to help with the user's request. Call one tool at a time and \
+             You can call tools to help with the user's request. Use a tool only when it helps; \
+             otherwise answer directly, as you would without tools. Call one tool at a time and \
              wait for its result.\n\
              Operating system: {os}. Path separator: {sep}\n\
              Folders you may work in:\n{folders}\n\
