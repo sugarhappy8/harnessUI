@@ -1,6 +1,6 @@
 # Architecture
 
-Status: **draft for approval**. No app code is written until this is approved.
+Status: **approved** (owner, 2026-11-10), with D1, D2 and D4 changed from the drafted defaults as recorded below.
 Sources last checked: 2026-11-10. The evidence is in [`docs/research/`](docs/research/README.md); the spec this answers is [`docs/SPEC.md`](docs/SPEC.md).
 
 The app is a local-first desktop app that gives locally run AI models chat, tools, skills and MCP. It ships as a Windows 10/11 x64 NSIS installer and a macOS Apple Silicon .dmg.
@@ -32,20 +32,20 @@ The app is a local-first desktop app that gives locally run AI models chat, tool
 
 ## 1. Decisions and limits
 
-Your earlier answers are recorded as: all four GPU builds inside the Windows installer (Vulkan, CUDA, ROCm, CPU); "Allow for this chat" is scoped to tool + scope; a stop after every milestone; MIT license; the Mac has 16 GB.
+Your answers are recorded as: a small Windows installer with Vulkan + CPU, with ROCm and CUDA as downloads (this replaced the earlier answer of bundling all four); "Allow for this chat" is scoped to tool + scope; MIT license; the Mac has 16 GB.
 
-Each decision below has a default. If you approve without comment, the defaults apply. Where a default departs from your spec or from an answer you gave, the row says so.
+The column "Decided" is what was approved. Where it departs from your spec or from an earlier answer, the row says so.
 
 ### 1.1 Installer and GPU backends
 
-| # | Decision | Default | Alternative, and why it needs you |
+| # | Decision | Decided | Alternative considered, and why it mattered |
 |---|---|---|---|
-| D1 | What the Windows installer contains | **All four backends, as you asked.** About 1.0–1.2 GB to download, about 1.9 GB installed. | A ~50 MB installer with Vulkan + CPU, and CUDA and ROCm as one-click downloads in Settings. A middle option keeps ROCm in and makes CUDA a download. See the cost table below. **Both research passes recommended the small installer; the default follows your answer instead.** The backend code is the same either way, so this can change later. |
-| D2 | Ship ROCm in v1? | Yes, in the installer, as you asked. It is the `lemonade-sdk/llamacpp-rocm` build for RX 9000-series cards, pinned by SHA-256. | (a) Offer it as a download in Settings; (b) leave it out of v1. It needs you because of what it is: a nightly build on a pre-release ROCm, from a project that gives no support commitment. llama.cpp's own Windows ROCm build no longer includes the ROCm runtime and does not work on a clean PC, so this is the only self-contained option. It is a second llama.cpp from a different commit, about 1.0 GB of the installer. It has an open bug on your card (prompt reading fell from about 1,100 to 400–480 tokens/s in recent builds). AMD supports ROCm on Windows 11 25H2 only. |
+| D1 | What the Windows installer contains | **Vulkan + CPU only**, about 50 MB to download. ROCm and CUDA are one-click downloads in Settings, pinned by SHA-256 and verified before use. | All four backends in the installer (1.0–1.2 GB download, 1.9 GB installed, close to the installer format's size limit, and re-downloaded on every update). The backend code is the same either way. |
+| D2 | Ship ROCm in v1? | **Yes, as a download in Settings.** It is the `lemonade-sdk/llamacpp-rocm` build for RX 9000-series cards, pinned by SHA-256. | In the installer, or not in v1. What it is: a nightly build on a pre-release ROCm, from a project that gives no support commitment. llama.cpp's own Windows ROCm build no longer includes the ROCm runtime and does not work on a clean PC, so this is the only self-contained option. It is a second llama.cpp from a different commit, about 0.7 GB to download and 1.0 GB installed. It has an open bug on your card (prompt reading fell from about 1,100 to 400–480 tokens/s in recent builds). AMD supports ROCm on Windows 11 25H2 only. |
 | D3 | Which backend "Auto" picks | **Vulkan on every GPU**, CPU if Vulkan fails. CUDA and ROCm are manual choices in Settings. | CUDA first on NVIDIA. I chose Vulkan because it is the one GPU path you can test, and your spec names it as the default. The evidence on your card is thin and points both ways; see below. The M1 checklist measures both backends on your RX 9070 XT, and the Auto order is confirmed or flipped from that. |
-| D4 | Which CUDA build to bundle | The CUDA 13 build that ships with the pinned llama.cpp (13.4). It needs an RTX 20 / GTX 16-series or newer card and driver 580 or newer; older NVIDIA cards use Vulkan. | CUDA 12.4 covers older cards but is 0.5 GB larger, which pushes the four-backend installer past the installer format's limit and would need a custom installer template. **Bundling CUDA makes you a redistributor of NVIDIA's runtime DLLs under NVIDIA's license; please confirm you accept that.** Neither of us can test CUDA. |
+| D4 | Which CUDA build to offer | **A download**, not bundled: the CUDA 13 build that ships with the pinned llama.cpp (13.4), fetched by the user's machine directly from llama.cpp's own GitHub release. It needs an RTX 20 / GTX 16-series or newer card and driver 580 or newer; older NVIDIA cards use Vulkan. The download dialog shows NVIDIA's license before it starts. | Bundling it would have made you a redistributor of NVIDIA's runtime files. CUDA 12.4 covers older cards and is 0.5 GB larger. Neither of us can test CUDA. |
 
-**D1 in numbers**
+**Backends in numbers**
 
 | Backend | Download | Installed | Serves | Who can test it |
 |---|---|---|---|---|
@@ -53,7 +53,7 @@ Each decision below has a default. If you approve without comment, the defaults 
 | CUDA 13 | 0.57 GB | 0.7 GB | NVIDIA RTX 20 / GTX 16 and newer, by manual choice | Nobody on this project |
 | ROCm | 0.69 GB | 1.0 GB | AMD RX 9000 on Windows 11 25H2, by manual choice | You |
 
-The installer format holds about 2.1 GB of unpacked files, and the four-backend default uses about 1.9 GB. If a llama.cpp, CUDA or ROCm update grows it past the limit, the release build fails. The order of retreat is: CUDA becomes a download, then ROCm. CI checks the size on every full build so this is never discovered on a release tag. Every app update re-downloads the whole installer, and Tauri's updater holds it in memory while it does.
+Only the first row is in the installer. The others are downloaded on request into the app's local data folder (section 7.1). Downloaded backends are unsigned third-party binaries; on a PC with Smart App Control on, Windows may block them.
 
 **D3 evidence, for your card**
 
@@ -66,7 +66,7 @@ Agent work is prompt-heavy, so prompt reading matters as much as generation. The
 
 ### 1.2 Safety
 
-| # | Decision | Default | Alternative, and why it needs you |
+| # | Decision | Decided | Alternative considered, and why it mattered |
 |---|---|---|---|
 | D5 | What a terminal grant covers | **The exact command**: the same arguments in the same folder repeat without a prompt. A small built-in list of read-only programs (`ls`, `cat`, `git status` and the like, with paths held to approved folders) can be granted per program. | "The same program in the same folder, any arguments", which is how I described this option when you picked it. **I am tightening it.** Under the looser rule, one grant for `curl` or `git` covers `curl -T <your ssh key> https://...` and `git -c alias.p=push p`. |
 | D6 | What a grant covers for an external MCP tool | The tool plus its exact arguments. A per-tool switch, set by you in the server's tool list, allows any arguments for a chat. | Whole tool, any arguments. The app cannot interpret a third-party tool's arguments, so a whole-tool grant on a fetch, SQL or shell tool is a grant for anything. |
@@ -83,7 +83,7 @@ The scope of every grant, tool by tool, is the table in section 13.3. Please rea
 
 ### 1.3 Scope and platform
 
-| # | Decision | Default | Why it needs you |
+| # | Decision | Decided | Why it mattered |
 |---|---|---|---|
 | D15 | Minimum macOS version | **13.3**, not 13.0 | llama.cpp's macOS builds target 13.3. |
 | D16 | Sign-in (OAuth) for remote MCP servers | Not in v1. Remote servers work with a URL plus static headers kept in the keychain. A server that demands sign-in gets a clear message. | Many hosted MCP servers use OAuth. The SDK supports it, so it can be added; it is extra scope. |
@@ -301,16 +301,17 @@ A **runtime directory** contains a complete `llama-server` and its libraries. A 
 |---|---|---|---|
 | Windows | `cpu` | `llama-b12110-bin-win-cpu-x64.zip` | `resources/llama/main/` |
 | Windows | `vulkan` (default) | the Vulkan DLL from `llama-b12110-bin-win-vulkan-x64.zip` | `resources/llama/main/` |
-| Windows | `cuda` | the CUDA DLL from `llama-b12110-bin-win-cuda-13.4-x64.zip` plus NVIDIA's runtime DLLs from `cudart-llama-bin-win-cuda-13.4-x64.zip` | `resources/llama/main/` |
-| Windows | `rocm` | `lemonade-sdk/llamacpp-rocm` gfx120X zip | `resources/llama/rocm/` |
+| Windows | `cuda` (download) | `llama-b12110-bin-win-cuda-13.4-x64.zip` plus NVIDIA's runtime DLLs from `cudart-llama-bin-win-cuda-13.4-x64.zip`, unpacked together | `<local data>/backends/cuda-b12110/` |
+| Windows | `rocm` (download) | `lemonade-sdk/llamacpp-rocm` gfx120X zip | `<local data>/backends/rocm-<build>/` |
 | macOS | `metal` | built in CI from the pinned tag, statically linked | Tauri `externalBin` |
 
-- **One build per directory.** Every upstream Windows zip is the CPU build plus one backend DLL, and llama.cpp loads whichever backend DLLs sit beside it. CPU, Vulkan and CUDA therefore share `main/`, and the app picks between them with `--device`. Every archive unpacked into `main/` must carry the same build tag; `fetch-llama` fails if the files the zips share differ. The ROCm build is linked differently and from a different commit, so it keeps its own directory, and the lock file records which llama.cpp commit it was built from.
+- **One build per directory.** Every upstream Windows zip is the CPU build plus one backend DLL, and llama.cpp loads whichever backend DLLs sit beside it. CPU and Vulkan therefore share `main/`, and the app picks between them with `--device`. The CUDA download is a complete runtime directory of its own (the upstream CUDA zip already contains the CPU build), so nothing is ever mixed into the installed folder. The ROCm build is linked differently and from a different commit; the lock file records which llama.cpp commit it was built from.
+- **Downloaded backends.** `llama.lock.json` is compiled into the app, so the app knows each pack's URLs, sizes and SHA-256 without asking the network. A pack is downloaded on a click in Settings, resumable, verified file by file against the lock, unpacked into a temporary folder and renamed into `<local data>/backends/` only when complete. Its directory name carries the build, so a llama.cpp bump in an app update downloads the matching pack again. Removing a pack is a button next to it. Downloads come from `github.com` release assets only.
 - **Windows** runtime directories go through Tauri's `bundle.resources`, because `externalBin` copies a single file. Tools the app doesn't use are removed, including the upstream tunnel helper and RPC server.
 - **VC++ runtime.** The three Microsoft runtime DLLs are placed in each runtime directory. Every llama.cpp binary needs them, they are not in the upstream zips, and without them the server exits before printing anything.
 - **macOS.** The upstream download is 11 separate binaries that must each be signed, and Tauri does not sign anything under `Resources`. The app builds two static binaries from the pinned tag, `llama-server` and `llama-fit-params`, as two `externalBin` entries that Tauri signs and notarizes with the app. Build flags: `-DBUILD_SHARED_LIBS=OFF -DGGML_METAL_EMBED_LIBRARY=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DGGML_NATIVE=OFF -DLLAMA_BUILD_IS_DEV=OFF`. CI checks that each binary's minimum OS is 13.3, that it links only system libraries, and that it runs. Fallback if the build is a problem: the upstream tarball, with a script that signs each file before `tauri build`.
 - **Attestation.** Upstream release assets carry build attestations. CI verifies them as well as the SHA-256.
-- **Path length.** The ROCm folder must sit at a path of at most about 118 characters or its kernel files exceed Windows' path limit. The app checks this and explains it.
+- **Path length.** The ROCm folder must sit at a path of at most about 118 characters or its kernel files exceed Windows' path limit. The default local data path is well inside that; the app checks it before downloading and explains it.
 - **No interface guarantee.** llama.cpp's version number covers only its C API. Flags, defaults, log lines and HTTP fields can change in any release, so every bump of either pin must pass the contract tests in section 17 before it merges.
 
 ### 7.2 Choosing a backend
@@ -675,7 +676,7 @@ The verdict is green (fits with at least 1 GB spare), yellow (fits only with a s
 
 **Keychain** (Windows Credential Manager, macOS Keychain): provider API keys, the Hugging Face token, git host tokens, MCP `env` and header values. One entry per secret, because Windows caps an entry at 2,560 bytes; a longer value is split across numbered entries. Writes are serialised on one thread, because Credential Manager can lose concurrent updates. Entries are stored as local to the machine, not roaming. The database stores only references. An exported MCP config omits secret values. On unsigned macOS builds the Keychain asks for the login password once per entry after every rebuild; that stops with a Developer ID.
 
-**Files on disk:** skills, attachments, the browser profile and logs live in the app's data folder. Logs rotate daily, are capped in size, stay local, and are reachable from "Open logs folder". llama-server's own output and tool output do not go into the log stream; they are kept in a bounded buffer per session so a chatty server cannot fill the disk. Secrets and prompt text are not logged.
+**Files on disk:** skills, attachments, the browser profile, downloaded backends (`backends/`) and logs live in the app's local data folder. Logs rotate daily, are capped in size, stay local, and are reachable from "Open logs folder". llama-server's own output and tool output do not go into the log stream; they are kept in a bounded buffer per session so a chatty server cannot fill the disk. Secrets and prompt text are not logged.
 
 **Models folder:** configurable, and by default a visible folder in the user's home directory (`<home>/<app name>/models`), not the app's data folder. The Windows uninstaller offers to delete app data, and that should not silently delete tens of gigabytes of models.
 
@@ -783,6 +784,7 @@ All outbound HTTP from the app goes through one module, and each request carries
 | Reason | Trigger | Hosts |
 |---|---|---|
 | Model search and download | User searches or downloads | `huggingface.co` and its CDN, or the configured mirror |
+| Backend download | User clicks Download next to ROCm or CUDA in Settings | `github.com` release assets of `ggml-org/llama.cpp` and `lemonade-sdk/llamacpp-rocm` (and GitHub's asset CDN) |
 | Catalog refresh | User clicks Refresh | this repo's GitHub releases |
 | Update check | User clicks Check, or turned on automatic checks (off by default) | this repo's GitHub releases |
 | Remote endpoint | User added it | the configured base URL |
@@ -836,8 +838,8 @@ Every error that reaches the UI has four parts: a code, a plain-language message
 
 ## 16. Packaging, CI and release
 
-- **`ci.yml`** (every push and PR): format, clippy, `cargo-deny`, Rust tests, frontend lint and tests, then `tauri build` on pinned Windows and macOS runner images, uploading the installer and .dmg as workflow artifacts. Windows builds pass `--no-sign`. macOS builds are ad-hoc signed (`signingIdentity: "-"`), because an Apple Silicon Mac refuses a completely unsigned app as "damaged". Push and PR builds use a **lite** flavour (Vulkan + CPU) to stay fast.
-- **Milestone hand-off:** a **full**-flavour build, started by hand on the milestone commit and linked in the milestone summary. That installer is the one you test, because from M1 on the checklist needs ROCm. The full build sums the unpacked payload and fails above 1.9 GiB with a message that names the response (D1).
+- **`ci.yml`** (every push and PR): format, clippy, `cargo-deny`, Rust tests, frontend lint and tests, then `tauri build` on pinned Windows and macOS runner images, uploading the installer and .dmg as workflow artifacts. Windows builds pass `--no-sign`. macOS builds are ad-hoc signed (`signingIdentity: "-"`), because an Apple Silicon Mac refuses a completely unsigned app as "damaged". There is one build flavour: the installer always contains Vulkan + CPU only.
+- **Milestone hand-off:** the CI build of the milestone commit, linked in the milestone summary. ROCm and CUDA are tested by downloading them from Settings inside that build. CI fails the Windows build if the installer grows past 150 MB, so a mistake that bundles something large is caught at once.
 - **`release.yml`** (every `v*` tag): `tauri-apps/tauri-action@v1` builds NSIS (`--bundles nsis`) and macOS (`--target aarch64-apple-darwin --bundles app,dmg`), creates a draft GitHub release, uploads the updater manifest, and signs and uploads the catalog. A final job fails the release if the manifest is missing either platform or the catalog. Third-party actions are pinned by commit hash, and signing secrets are exposed only to the signing step.
 - **Windows installer:** NSIS, per-user install (no admin prompt), with the small WebView2 bootstrapper embedded. Windows 10 and 11 ship WebView2, so the bootstrapper normally does nothing; the 127 MB offline installer is not worth its share of the size limit. Minimum Windows 10 version 1903, the first that passes non-ASCII model paths to llama-server correctly.
 - **Updater key.** You generate the key pair once on your own machine (`tauri signer generate`), keep the private key and its password in your password manager and as repository secrets, and commit the public key. Every release build needs it. If the private key is lost, installed copies can never accept another update or catalog. It is the one "secret" that cannot be a placeholder.
@@ -846,7 +848,7 @@ Every error that reaches the UI has four parts: a code, a plain-language message
   - Windows: a generic `signCommand` in a separate config file, used only when the signing secrets exist. It is not tied to one provider: Microsoft's own signing service accepts individual developers only in the USA and Canada, so you may need a different certificate route.
 - **Opening unsigned builds,** documented in the README: on macOS, right-click → Open, or Privacy & Security → Open Anyway, or `xattr -dr com.apple.quarantine <App>.app`. On Windows, "More info → Run anyway" on SmartScreen. **If Smart App Control is on (Windows 11), unsigned apps are blocked with no way through**; it has to be turned off on the test PC, or Windows signing has to come first.
 - **Updates:** Tauri's updater with its signature check, with `requireSignedVersion` on and downgrades off, so an old signed installer cannot be passed off as a new version. The app never checks on its own unless the user turns that on. The check runs in Rust; the webview has no updater permission. Before installing an update on Windows the app stops llama-server and every tool child, because the installer cannot replace files a running process holds open. The installer also kills any stray `llama-server.exe` under the install folder first.
-- **Licenses:** `LICENSE` (MIT) and a generated `THIRD-PARTY-NOTICES` covering llama.cpp and its embedded libraries, LLVM OpenMP, the ROCm components, the NVIDIA CUDA runtime under NVIDIA's license, the Microsoft Visual C++ runtime DLLs and WebView2 bootstrapper under Microsoft's redistribution terms, plus every Rust crate and npm package. It ships in the installer and is shown in About.
+- **Licenses:** `LICENSE` (MIT) and a generated `THIRD-PARTY-NOTICES` covering llama.cpp and its embedded libraries, LLVM OpenMP, the Microsoft Visual C++ runtime DLLs and WebView2 bootstrapper under Microsoft's redistribution terms, plus every Rust crate and npm package. It ships in the installer and is shown in About. The ROCm and CUDA packs are not shipped; their license texts (ROCm components; NVIDIA's CUDA license) are shown before download and saved beside the pack.
 
 ---
 
@@ -976,8 +978,8 @@ I work in a Linux container with no GPU, no Windows and no macOS. I can compile 
 | GPU paths (Vulkan on the RX 9070 XT, ROCm, Metal on the M5) can't be run in CI | Probe output and logs are captured in "Copy details"; the M1 checklist exercises each backend |
 | Vulkan may be slow on your card for some model families (one unresolved report, section 1.1) | The M1 probe measures both backends with the catalog's first-run model before the Auto order and catalog ranking are fixed; a short speed test runs after every model load |
 | Nobody on this project can test CUDA | Manual choice only, labelled best effort, with automatic step-down to Vulkan |
-| ROCm build is a nightly with an open regression on your card, and is a second llama.cpp build | Manual choice, pinned by hash, covered by the same contract tests, removable without code changes |
-| The four-backend installer is close to the installer format's size limit | Size check on every full build; a stated order of retreat (D1) |
+| ROCm build is a nightly with an open regression on your card, and is a second llama.cpp build | Optional download, pinned by hash, covered by the same contract tests, removable without code changes |
+| Downloaded backends are unsigned binaries; Smart App Control or antivirus may block them | Clear error naming the cause; Vulkan stays available; signing the packs is possible later by re-hosting them |
 | llama.cpp moves fast and its log and stdout formats are not a stable API | Two pinned builds; all parsing behind adapters with contract tests |
 | The load-progress protocol is internal to llama.cpp | Adapter with automatic fallback to stage text |
 | The macOS reaper is untested | Built and crash-tested first in M1 |
@@ -990,5 +992,4 @@ I work in a Linux container with no GPU, no Windows and no macOS. I can compile 
 | Third-party binaries (llama.cpp, ROCm, CUDA runtime) are unsigned | Tauri signs them when Windows signing is configured. Whether signing NVIDIA's DLLs is compatible with NVIDIA's license is a question for you before the first signed release |
 | Smart App Control blocks unsigned builds on Windows 11 | Checked before M0 (section 19) |
 | WebView2 collects required diagnostic data on Windows | Stated in section 1.4; crash-dump upload is switched off |
-| A 1 GB+ installer makes updates heavy | D1 offers the small-installer alternative |
 | macOS loses Screen Recording and Accessibility grants on each unsigned rebuild | Documented in the M7 checklist; goes away with Developer ID signing |
