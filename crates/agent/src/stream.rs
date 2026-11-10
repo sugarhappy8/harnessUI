@@ -15,6 +15,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::error::{ProviderError, as_u32, error_from_body, error_from_value};
@@ -22,7 +23,8 @@ use crate::sse::{SseDecoder, SseEvent};
 use crate::types::ToolCall;
 
 /// Token counts reported by the server for one response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Usage {
     /// Tokens in the prompt, including cached ones.
     pub prompt_tokens: u32,
@@ -34,7 +36,8 @@ pub struct Usage {
 
 /// llama-server's `timings` object. Every field is optional because other servers send none
 /// of it and llama-server may drop fields between builds.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Timings {
     /// Prompt tokens evaluated (not counting cached ones).
     pub prompt_n: Option<u32>,

@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 pub struct ToolDef {
     /// Short fixed name for built-ins (`read_file`); `<server>__<tool>` for external tools.
     pub name: String,
+    /// What the tool does, as offered to the model.
     pub description: String,
     /// JSON Schema of the arguments (an object schema).
     pub input_schema: Value,
@@ -43,8 +44,18 @@ pub struct ToolDef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum Content {
-    Text { text: String },
-    Image { mime: String, data_base64: String },
+    /// Plain text.
+    Text {
+        /// The text.
+        text: String,
+    },
+    /// An image, base64-encoded.
+    Image {
+        /// MIME type, e.g. `image/png`.
+        mime: String,
+        /// The image bytes in base64.
+        data_base64: String,
+    },
 }
 
 /// What a tool call returns. Failures are results the model can read
@@ -54,6 +65,7 @@ pub enum Content {
 pub struct ToolOutput {
     /// What the model sees (already sized to the per-result cap by the tool).
     pub content: Vec<Content>,
+    /// The call failed; `content` explains why.
     pub is_error: bool,
     /// The full, untruncated output for the tool card and storage, when the model
     /// saw a shortened version.
@@ -65,12 +77,14 @@ pub struct ToolOutput {
 }
 
 impl ToolOutput {
+    /// A successful result with one text block.
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             content: vec![Content::Text { text: text.into() }],
             ..Default::default()
         }
     }
+    /// An error result with one text block.
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             content: vec![Content::Text { text: text.into() }],
@@ -95,6 +109,7 @@ impl ToolOutput {
 /// permissions (13.5).
 #[derive(Debug, Clone, Default)]
 pub struct ChatContext {
+    /// The chat's database id.
     pub chat_id: i64,
     /// Approved folders for this chat (global plus the chat's own), as stored.
     pub approved_folders: Vec<String>,
@@ -115,9 +130,11 @@ pub type ProgressFn = Arc<dyn Fn(String) + Send + Sync>;
 /// Per-call context for [`BuiltinServer::call`].
 #[derive(Clone)]
 pub struct CallContext {
+    /// The chat the call belongs to.
     pub chat: ChatContext,
     /// Child of the turn's token; Stop cancels it (4.2).
     pub cancel: CancellationToken,
+    /// Where progress lines for the tool card go, if anywhere.
     pub progress: Option<ProgressFn>,
 }
 

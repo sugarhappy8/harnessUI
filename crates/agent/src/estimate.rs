@@ -37,7 +37,8 @@ fn tokens_for_chars(chars: usize, chars_per_token: f64) -> u32 {
 /// is clamped to `[1.5, 6.0]`. Samples are ignored when flagged truncated (a reply cut off, or
 /// an Ollama prompt it silently shortened), when either number is zero, or when the prompt is
 /// so small that template overhead dominates.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenCalibrator {
     chars_per_token: f64,
     samples: u32,

@@ -138,6 +138,15 @@ pub struct ModelInfo {
     pub context_length: Option<u32>,
 }
 
+/// One token from [`OpenAiClient::tokenize`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Token {
+    /// The token id in the model's vocabulary.
+    pub id: i64,
+    /// The token's text, when the server sent it and it is valid UTF-8.
+    pub piece: Option<String>,
+}
+
 /// A stream of chat events. Ends with [`StreamEvent::Done`], or with one error. Dropping it
 /// closes the HTTP connection, which is how llama-server learns to stop generating.
 pub struct ChatStream {
@@ -498,6 +507,68 @@ impl OpenAiClient {
             Err(err) if is_not_found(&err) => self.count_by_template(&body).await.map(Some),
             Err(err) => Err(err),
         }
+    }
+
+    /// llama-server's `GET /props` (chat template, special tokens, capabilities) as JSON.
+    /// `Ok(None)` for every other kind of server.
+    ///
+    /// # Errors
+    /// Any [`ProviderError`].
+    pub async fn props(&self) -> Result<Option<Value>, ProviderError> {
+        if self.config.kind != ProviderKind::LlamaServer {
+            return Ok(None);
+        }
+        self.get_json(join(&self.root, "props")).await.map(Some)
+    }
+
+    /// Tokenizes `content` with llama-server's `POST /tokenize`, with or without special-token
+    /// parsing, and returns each token with its text piece. `Ok(None)` for every other kind of
+    /// server.
+    ///
+    /// # Errors
+    /// Any [`ProviderError`]; [`ProviderError::Decode`] when the reply has no token list.
+    pub async fn tokenize(
+        &self,
+        content: &str,
+        parse_special: bool,
+    ) -> Result<Option<Vec<Token>>, ProviderError> {
+        if self.config.kind != ProviderKind::LlamaServer {
+            return Ok(None);
+        }
+        let reply = self
+            .post_json(
+                join(&self.root, "tokenize"),
+                &json!({
+                    "content": content,
+                    "add_special": false,
+                    "parse_special": parse_special,
+                    "with_pieces": true,
+                }),
+            )
+            .await?;
+        let tokens = reply
+            .get("tokens")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ProviderError::Decode("tokenize returned no tokens".to_owned()))?;
+        Ok(Some(
+            tokens
+                .iter()
+                .filter_map(|token| match token {
+                    // `with_pieces`: `{"id": 1, "piece": "text"}`; a piece that is not valid
+                    // UTF-8 comes as a byte array.
+                    Value::Object(map) => Some(Token {
+                        id: map.get("id").and_then(Value::as_i64)?,
+                        piece: map.get("piece").and_then(Value::as_str).map(str::to_owned),
+                    }),
+                    // An older build without `with_pieces`: ids only.
+                    Value::Number(id) => Some(Token {
+                        id: id.as_i64()?,
+                        piece: None,
+                    }),
+                    _ => None,
+                })
+                .collect(),
+        ))
     }
 
     async fn count_by_template(&self, body: &Value) -> Result<u32, ProviderError> {

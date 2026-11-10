@@ -323,3 +323,203 @@ async fn read_request(socket: &mut TcpStream) -> std::io::Result<Option<Recorded
         body,
     }))
 }
+
+// ---- Scripted chat completions (agent-loop tests) ----------------------------------------
+
+/// Builders for OpenAI-style streamed chat completions, shaped like llama-server's.
+pub mod sse {
+    use serde_json::{Value, json};
+
+    fn frame(value: &Value) -> String {
+        format!("data: {value}\n\n")
+    }
+
+    fn chunk(delta: Value, finish: Option<&str>) -> Value {
+        json!({
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+        })
+    }
+
+    fn usage(prompt: u32, completion: u32) -> Value {
+        json!({
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
+        })
+    }
+
+    /// Joins chunks into an event stream ending with `[DONE]`.
+    pub fn body(chunks: &[Value]) -> Vec<u8> {
+        let mut out: String = chunks.iter().map(frame).collect();
+        out.push_str("data: [DONE]\n\n");
+        out.into_bytes()
+    }
+
+    /// A plain answer.
+    pub fn text(text: &str) -> Vec<u8> {
+        body(&[
+            chunk(json!({"role": "assistant", "content": null}), None),
+            chunk(json!({"content": text}), None),
+            chunk(json!({}), Some("stop")),
+            usage(100, 10),
+        ])
+    }
+
+    /// Reasoning, then an answer.
+    pub fn reasoning_then_text(reasoning: &str, text: &str) -> Vec<u8> {
+        body(&[
+            chunk(json!({"reasoning_content": reasoning}), None),
+            chunk(json!({"content": text}), None),
+            chunk(json!({}), Some("stop")),
+            usage(100, 10),
+        ])
+    }
+
+    /// Native tool calls, arguments streamed in two fragments each.
+    pub fn tool_calls(calls: &[(&str, &str, Value)]) -> Vec<u8> {
+        let mut chunks = vec![chunk(json!({"role": "assistant", "content": null}), None)];
+        for (index, (id, name, args)) in calls.iter().enumerate() {
+            let args = args.to_string();
+            let (a, b) = args.split_at(args.len() / 2);
+            chunks.push(chunk(
+                json!({"tool_calls": [{"index": index, "id": id, "type": "function", "function": {"name": name, "arguments": a}}]}),
+                None,
+            ));
+            chunks.push(chunk(
+                json!({"tool_calls": [{"index": index, "function": {"arguments": b}}]}),
+                None,
+            ));
+        }
+        chunks.push(chunk(json!({}), Some("tool_calls")));
+        chunks.push(usage(100, 20));
+        body(&chunks)
+    }
+
+    /// One native tool call.
+    pub fn tool_call(id: &str, name: &str, args: Value) -> Vec<u8> {
+        tool_calls(&[(id, name, args)])
+    }
+
+    /// A tool call cut off by the output limit (`finish_reason: length`).
+    pub fn cut_tool_call(
+        id: &str,
+        name: &str,
+        partial_args: &str,
+        completion_tokens: u32,
+    ) -> Vec<u8> {
+        body(&[
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": id, "type": "function", "function": {"name": name, "arguments": partial_args}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("length")),
+            usage(100, completion_tokens),
+        ])
+    }
+
+    /// A reply with no content and no call.
+    pub fn empty() -> Vec<u8> {
+        body(&[
+            chunk(json!({"role": "assistant", "content": null}), None),
+            chunk(json!({}), Some("stop")),
+            usage(100, 0),
+        ])
+    }
+
+    /// A reply that only thought, cut off by the output limit.
+    pub fn reasoning_cut(reasoning: &str) -> Vec<u8> {
+        body(&[
+            chunk(json!({"reasoning_content": reasoning}), None),
+            chunk(json!({}), Some("length")),
+            usage(100, 512),
+        ])
+    }
+
+    /// Reasoning only, ending normally (a thinking model that put its call in its reasoning).
+    pub fn reasoning_only(reasoning: &str) -> Vec<u8> {
+        body(&[
+            chunk(json!({"reasoning_content": reasoning}), None),
+            chunk(json!({}), Some("stop")),
+            usage(100, 50),
+        ])
+    }
+
+    /// Some content, then llama-server's mid-stream parse error and no `[DONE]`.
+    pub fn content_then_parse_error(content: &str) -> Vec<u8> {
+        let mut out = frame(&chunk(json!({"content": content}), None));
+        out.push_str(&frame(&json!({"error": {
+            "code": 500,
+            "message": "The model produced output that does not match the expected peg-native format",
+            "type": "server_error"
+        }})));
+        out.into_bytes()
+    }
+
+    /// The HTTP 500 body llama-server sends for a parse error before streaming.
+    pub fn parse_error_body() -> Value {
+        json!({"error": {
+            "code": 500,
+            "message": "The model produced output that does not match the expected peg-native format",
+            "type": "server_error"
+        }})
+    }
+
+    /// The HTTP 400 overflow body.
+    pub fn overflow_body(n_prompt_tokens: u32, n_ctx: u32) -> Value {
+        json!({"error": {
+            "code": 400,
+            "message": format!("request ({n_prompt_tokens} tokens) exceeds the available context size ({n_ctx} tokens), try increasing it"),
+            "type": "exceed_context_size_error",
+            "n_prompt_tokens": n_prompt_tokens,
+            "n_ctx": n_ctx
+        }})
+    }
+}
+
+/// A queue of replies for `/v1/chat/completions`, with llama-server's token counter answered
+/// from the request size (about 4 bytes per token) so a LlamaServer-kind client works too.
+pub struct Script {
+    replies: Mutex<std::collections::VecDeque<Reply>>,
+    fallback: Reply,
+}
+
+impl Script {
+    pub fn new(replies: Vec<Reply>) -> Arc<Self> {
+        Arc::new(Self {
+            replies: Mutex::new(replies.into()),
+            fallback: Reply::sse(
+                &sse::text("(script exhausted)"),
+                4096,
+                Duration::ZERO,
+                StreamEnd::Clean,
+            ),
+        })
+    }
+
+    pub fn handler(self: &Arc<Self>) -> impl Fn(&Recorded) -> Reply + Send + Sync + 'static {
+        let script = Arc::clone(self);
+        move |request: &Recorded| script.reply(request)
+    }
+
+    fn reply(&self, request: &Recorded) -> Reply {
+        match request.path() {
+            "/v1/chat/completions/input_tokens" => Reply::json(
+                200,
+                &serde_json::json!({"object": "response.input_tokens", "input_tokens": request.body.len() / 4}),
+            ),
+            "/v1/chat/completions" => self
+                .replies
+                .lock()
+                .expect("lock")
+                .pop_front()
+                .unwrap_or_else(|| self.fallback.clone()),
+            _ => Reply::not_found(),
+        }
+    }
+}
+
+/// An SSE reply sent in one piece.
+pub fn sse_reply(body: Vec<u8>) -> Reply {
+    Reply::sse(&body, body.len().max(1), Duration::ZERO, StreamEnd::Clean)
+}
