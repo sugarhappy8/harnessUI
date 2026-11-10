@@ -421,23 +421,29 @@ Every group and every tool can be toggled per chat.
 **Browser.**
 
 - *Launch:* the app finds the installed Chrome or Edge itself (standard install paths, the registry on Windows, a user override) and starts it with `--user-data-dir` inside the app's data folder. It never points at the user's own profile, so it never sees their cookies or logins. Chrome 136+ refuses remote debugging on the default profile; a custom directory is the supported route.
-- *Connection:* `--remote-debugging-port=0`, then read the port Chrome writes into the profile folder. The port is on loopback only. Chrome rejects debugging connections that carry a web `Origin`, so a web page cannot attach; another program already running as the user could, which is the same access it already has to the profile folder.
-- *CDP client:* a small one of our own (about 25 methods and 10 events over a WebSocket). The maintained Rust crate pins an old protocol and silently drops events it can't parse, which would leave a paused form submission hanging forever. Its defaults (headless, ignore certificate errors, fixed 800×600 viewport) are also wrong for this job.
+- *Connection:* CDP over a pipe (`--remote-debugging-pipe`), so there is no listening port that another local program could attach to. The cost: Chrome marks a pipe-driven browser as automated (`navigator.webdriver` is true), and some sites refuse automated browsers. A setting switches to a loopback port for those sites, which hides the automation flag but leaves an unauthenticated local port open while the browser runs.
+- *CDP client:* a small one of our own. The maintained Rust crate defaults to headless mode, ignoring certificate errors and a fixed 800×600 viewport, and it silently drops events it can't parse, which is the wrong failure mode for something that holds form submissions. Most of the work is lifecycle, not method count: one session per tab and per cross-site iframe, adopting pop-ups, navigation waits, and always releasing paused requests.
 - *Reading pages:* an accessibility-tree snapshot with element references (`- button "Sign in" [ref=e12]`), limited to the viewport and capped at 2–4k tokens by default. A full snapshot of an ordinary page measures 15–19k tokens, which a small model cannot afford. `browser_read_text` returns readable text with its own cap, and a find tool returns only matching elements.
-- *Form submission gate, two layers:*
+- *Where the agent may go:* `http` and `https` only. `file:`, `chrome:` and `devtools:` URLs are blocked, and so are loopback and private-network addresses by default, which keeps a web page from steering the agent at the app's own llama-server or at the user's router. Downloads are off unless approved, and then go to a folder the user approved.
+- *Form submission gate:*
   1. Intent: a click that resolves to a submit control, Enter in a form field, or a script calling `submit()` asks first.
-  2. Enforcement: CDP pauses every non-GET document, XHR and fetch request that follows an agent action until the user approves, and fails it on Deny. Paused requests are always released on Stop, timeout or crash.
-- *Known gaps in that gate:* WebSocket messages, GET links that change state, and requests from service workers are not caught. It is defence in depth, and SECURITY.md will say so.
+  2. Enforcement: every non-GET page navigation and every form-submission navigation is held in CDP until the user approves, and failed on Deny. This does not depend on timing, because a hostile page can delay its request. Held requests are always released on Stop, timeout or crash.
+  3. Background requests (XHR, fetch) are not held by default; a strict mode holds them per site. They are how ordinary pages work, and holding them adds little: once the agent has typed something into a page, that page already has it. The real controls are which site the agent opens and what it types there, and both of those ask.
+- *Known gaps in the gate:* WebSocket messages, GET links that change state, and background requests outside strict mode. It is defence in depth, and SECURITY.md will say so.
+- *Vision clicks:* a screenshot is in device pixels and CDP clicks are in CSS pixels, so coordinates from a vision model are divided by the page's device pixel ratio before use.
 
 **Computer use.**
 
-- *Capture and input:* screen capture through the `xcap` crate; keyboard through `enigo`; mouse on Windows through our own `SendInput` code, because `enigo` can only address the primary monitor there. Both sit behind two small traits so either can be swapped. On macOS a ScreenCaptureKit path is kept as a fallback, because the capture call `xcap` uses is deprecated.
-- *Coordinates:* one monitor per screenshot. The monitor's origin, pixel size and scale are stored with the image and used to map the model's answer back: physical pixels on Windows (the app is per-monitor DPI aware), points on macOS, negative origins included.
-- *Model conventions:* a per-model setting with three modes, because grounding models disagree: pixels of the resized image (Qwen2.5-VL family), a 0–1000 grid (Qwen3-VL / Qwen3.5 family), and 0–1000 boxes with y first (Gemma 4). The app resizes the screenshot itself to the exact size llama.cpp would resize it to, so the model's coordinates refer to the image the app knows. A one-click calibration test in Settings shows whether a model clicks where it should.
-- *Indicator:* a click-through, always-on-top overlay with a border and "AI is controlling this computer. Press <hotkey> to stop." The app's own screenshots leave the overlay out by excluding its window in the capture call.
+- *Capture:* on Windows, the `xcap` crate. On macOS 14 and later, Apple's ScreenCaptureKit; the older capture call that `xcap` uses returns nothing on macOS 26 in some cases and is kept only for macOS 13. One monitor per screenshot. The app's own windows and the overlay are left out of the capture, and a cursor marker is drawn in, because OS screenshots don't include the pointer.
+- *Input:* keyboard through `enigo`, called only on the main thread (the released version crashes on macOS otherwise). Mouse on Windows through our own `SendInput` code, because `enigo` can only address the primary monitor there. Capture and input sit behind two small traits, compiled only on Windows and macOS.
+- *Coordinates:* the monitor's origin, pixel size and scale are stored with each screenshot and used to map the model's answer back: physical pixels on Windows, points on macOS, negative origins included. On Windows the app declares per-monitor DPI awareness in its manifest, so no call ever sees scaled values.
+- *Model conventions:* grounding models disagree about coordinates, and a fine-tune can differ from its base model. The setting is therefore stored per model, with three modes: pixels of the resized image, a 0–1000 grid, and 0–1000 boxes. The catalog marks a model's convention as verified only where its publisher documents it. Any other model must pass a one-click calibration test (click three known targets) before computer use turns on for it. The app resizes each screenshot itself to the exact size llama.cpp would resize it to, so the model's coordinates refer to an image the app knows.
+- *Speed:* this is slow on local hardware. The publisher of the strongest open grounding model reports about 17 seconds per action on an M4 Pro, and that model needs about 36 GB. The loop is built for it: only the last one or two screenshots stay in context, each step shows progress, Stop does not wait for the model, and any held key, button or drag has a time limit. On your 16 GB machines, expect computer use to work only with small models and modest accuracy.
+- *Indicator:* a click-through, always-on-top overlay with a border and "AI is controlling this computer. Press <hotkey> to stop."
 - *Stop:* all input goes through one injector that records every key and button it holds. Stop, a panic and normal exit all release everything recorded plus every modifier and mouse button.
 - *Limits, stated in the UI:* Windows blocks synthetic input into elevated windows without reporting an error, so the tool checks the target window first and returns "that window is running as administrator and can't be controlled".
-- *macOS permissions:* a guided screen checks Screen Recording and Accessibility without triggering the system prompt, opens the right Settings pane on a button click, polls for the grant, and offers Restart where macOS requires it.
+- *macOS permissions:* a guided screen checks Screen Recording and Accessibility without triggering the system prompt, opens the right Settings pane on a button click, polls for the grant, and offers Restart where macOS requires it. The Settings links are undocumented by Apple, so the screen also spells out the manual path.
+- *Left open on purpose:* the tool schema takes either pixel coordinates or an element reference. v1 implements pixels only. Element references through the OS accessibility APIs would let non-vision models drive apps at a fraction of the token cost, and can be added later without changing the tool's shape.
 
 ---
 
@@ -473,7 +479,7 @@ The verdict is green (fits with at least 1 GB spare), yellow (fits only with a s
 
 **Curated catalog.** `catalog/models.json` is bundled with the app and holds, per memory tier, a ranked list of models with pinned repo commit, files, sizes, SHA-256, recommended context, measured memory at that context, capabilities, license, the oldest llama.cpp build that runs the model, and the build and date it was last tested on. No model name appears in code. First run takes the highest-ranked entry that is green on the detected hardware. "Refresh" downloads a newer catalog from this repo's latest release; the app accepts it only if its signature verifies against the same public key the updater uses. Every catalog entry must pass a real tool-call round trip under the pinned llama.cpp before it is added.
 
-**Also:** delete models, disk usage per model and in total, import an existing GGUF (registered in place, not copied), and a configurable models folder.
+**Also:** delete models, disk usage per model and in total, import an existing GGUF (registered in place, not copied), and a configurable models folder. Downloads are stored under `<models>/<owner>/<repo>/<file>`, because several publishers use the same generic file names in every repository.
 
 ---
 
@@ -706,8 +712,9 @@ Each has a one-line reason. Versions are the current stable ones, checked on 202
 | `pdf-extract` | 0.12 | PDF text extraction in pure Rust. It can panic on odd files, so it runs on its own thread behind a guard with size and time limits |
 | `chardetng`, `encoding_rs` | 1.0 / 0.8 | Detect and decode non-UTF-8 text files |
 | `image`, `fast_image_resize` | 0.25 / 6.1 | Re-encode attachments; downscale screenshots quickly |
-| `tokio-tungstenite` | 0.30 | WebSocket for the browser tool's CDP client |
-| `xcap` | 0.9 | Screen capture for computer use |
+| `tokio-tungstenite` | 0.30 | WebSocket for the browser tool's optional loopback-port mode |
+| `xcap` | 0.9 | Screen capture on Windows, and on macOS 13 |
+| `objc2-screen-capture-kit` | 0.3 | Screen capture on macOS 14+, without needing a Swift toolchain in the build |
 | `enigo` | 0.6 | Keyboard input for computer use (and mouse on macOS) |
 | `minisign-verify` | current | Verify the catalog's signature with the updater's key |
 | `tracing`, `tracing-subscriber`, `tracing-appender` | 0.1 / 0.3 / 0.2 | Local log files, rotated daily with a cap on how many are kept |
