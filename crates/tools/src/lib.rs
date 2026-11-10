@@ -5,8 +5,10 @@
 //! re-checking it immediately before any side effect.
 
 pub mod files;
+pub mod git;
 pub mod pdf;
 pub mod terminal;
 
 pub use files::FilesServer;
+pub use git::{GitConfig, GitServer};
 pub use terminal::{TerminalConfig, TerminalServer, TerminalShell};

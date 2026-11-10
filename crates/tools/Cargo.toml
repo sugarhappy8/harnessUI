@@ -21,6 +21,8 @@ similar = { workspace = true }
 # search_files with regex = true.
 regex = { workspace = true }
 thiserror = { workspace = true }
+# Validating git remote URLs (https and ssh only).
+url = { workspace = true }
 # PowerShell -EncodedCommand (base64 of UTF-16LE): no quoting can change what runs.
 base64 = { workspace = true }
 # Starting the PDF worker through the one spawn module.
