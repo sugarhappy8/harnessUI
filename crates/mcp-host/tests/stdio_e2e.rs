@@ -280,9 +280,14 @@ async fn environment_is_scrubbed() {
     } else {
         runtime::spawn::UNIX_ENV_ALLOWLIST.to_vec()
     };
+    // macOS adds __CF_USER_TEXT_ENCODING to every process it starts; it is set by the
+    // system, not inherited from us.
+    let set_by_os = |name: &str| cfg!(target_os = "macos") && name == "__CF_USER_TEXT_ENCODING";
     for name in env.keys() {
         assert!(
-            name == "FROM_CONFIG" || allowed.iter().any(|a| a.eq_ignore_ascii_case(name)),
+            name == "FROM_CONFIG"
+                || set_by_os(name)
+                || allowed.iter().any(|a| a.eq_ignore_ascii_case(name)),
             "unexpected variable {name}"
         );
     }
