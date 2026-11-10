@@ -652,6 +652,8 @@ pub async fn set_chat_tools(
         .ok_or_else(|| AppError::not_found("chat"))?;
     let mut prefs: crate::turns::ChatTools =
         serde_json::from_value(chat.tool_prefs).unwrap_or_default();
+    // The last choice becomes the default for new chats (9.3).
+    state.store.set_setting(DEFAULT_TOOLS, &enabled).await?;
     prefs.enabled = Some(enabled);
     state
         .store
