@@ -1,0 +1,6 @@
+# Signed or byte-exact test fixtures: never convert line endings.
+crates/models/tests/fixtures/** -text
+*.minisig -text
+*.sse -text
+crates/runtime/tests/fixtures/** -text
+crates/agent/tests/fixtures/** -text

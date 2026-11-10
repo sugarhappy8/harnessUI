@@ -61,6 +61,13 @@
     "allow-set-models-dir",
     "allow-first-run-info",
     "allow-complete-first-run",
-    "allow-refresh-catalog"
+    "allow-refresh-catalog",
+    "allow-list-packs",
+    "allow-download-pack",
+    "allow-cancel-pack-download",
+    "allow-remove-pack",
+    "allow-get-hf-endpoint",
+    "allow-set-hf-endpoint",
+    "allow-get-attachment"
   ]
 }

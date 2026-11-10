@@ -90,6 +90,10 @@ pub struct Action {
     pub outbound: bool,
     /// Set when the describer found a hard limit (13.3 step 2): no prompt.
     pub hard_limit: Option<String>,
+    /// Tool-specific data the describer computed and the tool re-checks before its side
+    /// effect (canonical path, the file hash the diff was computed against, …).
+    #[serde(default)]
+    pub payload: serde_json::Value,
 }
 
 /// What the agent loop knows about this turn.
@@ -239,6 +243,7 @@ mod tests {
             read_only,
             outbound,
             hard_limit: None,
+            payload: serde_json::Value::Null,
         }
     }
 

@@ -44,6 +44,27 @@ pub async fn load_local_model(
     }
     settings::remember_local_model(&state, &path).await;
     settings.mmproj = crate::hub::projector_for(&state, &path).await;
+    // Never ask for more context than the model was trained for (read from its header).
+    let header_path = model.clone();
+    let trained = tokio::task::spawn_blocking(move || {
+        models::read_file(&header_path)
+            .ok()
+            .map(|h| models::ModelSummary::from_header(&h).context_length)
+    })
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+    if let Some(max) = trained.and_then(|t| u32::try_from(t).ok())
+        && settings.ctx > max
+    {
+        tracing::info!(
+            requested = settings.ctx,
+            trained = max,
+            "context capped at the model's trained length"
+        );
+        settings.ctx = max;
+    }
     // Picking the model that is already loaded with the same context is a no-op.
     let current = state.runtime.status();
     if current.state == crate::dto::RuntimeStateDto::Ready

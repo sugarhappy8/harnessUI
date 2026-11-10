@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 # Punycode hosts and origins on approval cards.
 url = { workspace = true }
 # Strips Windows' \\?\ verbatim prefix from canonical paths when it is safe to.

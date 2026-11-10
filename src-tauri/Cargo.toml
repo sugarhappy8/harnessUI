@@ -41,6 +41,12 @@ uuid = { workspace = true }
 regex = { workspace = true }
 dunce = { workspace = true }
 reqwest = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Reading the Windows build number (ROCm needs Windows 11 25H2); same major as Tauri.
+windows = { version = "0.62", features = ["Win32_System_Registry"] }
 
 [lints]
 workspace = true

@@ -18,6 +18,7 @@
 #![warn(missing_docs)]
 
 pub mod llama;
+pub mod packs;
 pub mod reaper;
 pub mod registry;
 pub mod spawn;

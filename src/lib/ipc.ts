@@ -14,9 +14,12 @@ import type {
   FirstRunInfo,
   HardwareInfo,
   HubSort,
+  ImageInput,
   InstalledModel,
   LocalModelSettings,
   ModelOption,
+  PackInfo,
+  PackProgress,
   Provider,
   ProviderKind,
   RepoView,
@@ -57,6 +60,7 @@ export interface SendOptions {
   text: string;
   /** The message the new user message answers. Null for the first message. */
   parentId: number | null;
+  images?: ImageInput[];
 }
 
 export function sendMessage(opts: SendOptions, onEvent: (e: ChatStreamEvent) => void) {
@@ -146,3 +150,16 @@ export const hardwareInfo = () => invoke<HardwareInfo>("hardware_info");
 export const firstRunInfo = () => invoke<FirstRunInfo>("first_run_info");
 export const completeFirstRun = () => invoke<void>("complete_first_run");
 export const refreshCatalog = () => invoke<number>("refresh_catalog");
+
+// Backend downloads (CUDA, ROCm)
+export const listPacks = () => invoke<PackInfo[]>("list_packs");
+export const downloadPack = (id: string, acceptLicense: boolean) =>
+  invoke<void>("download_pack", { id, acceptLicense });
+export const cancelPackDownload = (id: string) => invoke<void>("cancel_pack_download", { id });
+export const removePack = (id: string) => invoke<void>("remove_pack", { id });
+export function onPackProgress(handler: (p: PackProgress) => void): Promise<UnlistenFn> {
+  return listen<PackProgress>("pack-progress", (e) => handler(e.payload));
+}
+export const getHfEndpoint = () => invoke<string | null>("get_hf_endpoint");
+export const setHfEndpoint = (endpoint: string | null) => invoke<void>("set_hf_endpoint", { endpoint });
+export const getAttachment = (id: number) => invoke<string>("get_attachment", { id });

@@ -43,6 +43,8 @@ pub struct MessageDto {
     pub error: Option<AppError>,
     pub created_at: i64,
     pub sibling_ids: Vec<MessageId>,
+    /// Attached images, shown through `get_attachment`.
+    pub image_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

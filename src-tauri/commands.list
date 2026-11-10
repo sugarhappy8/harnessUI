@@ -45,3 +45,10 @@ set_models_dir
 first_run_info
 complete_first_run
 refresh_catalog
+list_packs
+download_pack
+cancel_pack_download
+remove_pack
+get_hf_endpoint
+set_hf_endpoint
+get_attachment

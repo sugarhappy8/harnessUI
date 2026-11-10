@@ -74,6 +74,7 @@ async fn message_dto(state: &AppState, m: &store::Message) -> AppResult<MessageD
             }),
         created_at: m.created_at,
         sibling_ids: siblings,
+        image_ids: crate::attachments::image_ids(&m.content),
     })
 }
 
@@ -245,14 +246,17 @@ pub async fn stop_generation(state: State<'_, AppState>) -> AppResult<()> {
 
 #[tauri::command]
 pub async fn send_message(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     chat_id: store::ChatId,
     text: String,
     parent_id: Option<store::MessageId>,
+    images: Option<Vec<crate::attachments::ImageInput>>,
     on_event: Channel<ChatStreamEvent>,
 ) -> AppResult<()> {
     let text = text.trim().to_string();
-    if text.is_empty() {
+    let images = images.unwrap_or_default();
+    if text.is_empty() && images.is_empty() {
         return Err(AppError::bad_request("The message is empty."));
     }
     let chat = state
@@ -261,13 +265,25 @@ pub async fn send_message(
         .await?
         .ok_or_else(|| AppError::not_found("chat"))?;
     let target = resolve_target(&state, chat.model_ref.as_deref()).await?;
+    if !images.is_empty() && target.local && !state.runtime.status().vision {
+        return Err(AppError::new(
+            "no_vision",
+            "This model cannot read images.",
+            "Use a model with the vision badge (it comes with an image projector), or remove the image.",
+            String::new(),
+        ));
+    }
+    let mut content = text_content(&text);
+    if let Some(parts) = content.as_array_mut() {
+        parts.extend(crate::attachments::save_images(&app, &state, chat_id, &images).await?);
+    }
     let user_id = state
         .store
         .insert_message(store::NewMessage {
             chat_id,
             parent_id,
             role: store::Role::User,
-            content: text_content(&text),
+            content,
             reasoning: None,
             status: store::MessageStatus::Complete,
             model_ref: None,
@@ -275,7 +291,12 @@ pub async fn send_message(
         })
         .await?;
     if chat.title == NEW_CHAT_TITLE {
-        let title: String = text.lines().next().unwrap_or("").chars().take(48).collect();
+        let first = if text.is_empty() {
+            "Image"
+        } else {
+            text.lines().next().unwrap_or("")
+        };
+        let title: String = first.chars().take(48).collect();
         if !title.trim().is_empty() {
             let _ = state
                 .store
@@ -399,7 +420,24 @@ async fn build_messages(
     for m in state.store.path_to(chat.id, last_id).await? {
         let text = text_of(&m.content);
         match m.role {
-            store::Role::User => out.push(ChatMessage::user(text)),
+            store::Role::User => {
+                let ids = crate::attachments::image_ids(&m.content);
+                if ids.is_empty() {
+                    out.push(ChatMessage::user(text));
+                } else {
+                    let mut parts = Vec::new();
+                    if !text.is_empty() {
+                        parts.push(agent::ContentPart::text(text));
+                    }
+                    for id in ids {
+                        let (mime, b64) = crate::attachments::load_base64(state, id).await?;
+                        let url = agent::ImageUrl::from_base64(&mime, &b64)
+                            .map_err(AppError::internal)?;
+                        parts.push(agent::ContentPart::image(url));
+                    }
+                    out.push(ChatMessage::user(parts));
+                }
+            }
             store::Role::Assistant => {
                 // A turn that ended without an answer still needs an assistant message,
                 // or two user messages would follow each other (ARCHITECTURE.md 8.2).

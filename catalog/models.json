@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "sequence": 1,
   "generated": "2026-11-10",
-  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). No entry has been run yet: 'tested' is null until the catalog test passes on real hardware.",
+  "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp.",
   "tiers": {
     "8": {
       "recommendedCtx": 16384,
@@ -100,7 +100,11 @@
       "gated": false,
       "sampling": {},
       "minLlamaBuild": null,
-      "tested": null,
+      "tested": {
+        "llamaBuild": "b12110",
+        "date": "2026-11-10",
+        "hardware": "Linux x86_64, CPU (development container)"
+      },
       "memoryAtRecommendedCtx": null
     },
     "gemma-4-e4b-q40": {

@@ -327,7 +327,12 @@ impl DownloadManager {
         let client = crate::hub::hf_client(app).await?;
         let rows = state.store.list_downloads(Some(group.to_string())).await?;
         for row in rows {
-            if row.status == DownloadStatus::Completed {
+            let finished_file = std::fs::metadata(&row.dest_path)
+                .map(|m| m.len() == row.size_bytes)
+                .unwrap_or(false);
+            if row.status == DownloadStatus::Completed
+                || (row.status == DownloadStatus::Verifying && finished_file)
+            {
                 continue;
             }
             let spec = FileSpec {
@@ -359,12 +364,13 @@ impl DownloadManager {
             };
             match download_file(&client, &spec, &dest, token, &progress).await {
                 Ok(_) => {
+                    // Verified; the group becomes "done" once the model is registered.
                     state
                         .store
                         .update_download(
                             row.id,
                             DownloadPatch {
-                                status: Some(DownloadStatus::Completed),
+                                status: Some(DownloadStatus::Verifying),
                                 bytes_done: Some(row.size_bytes),
                                 ..Default::default()
                             },
@@ -415,7 +421,20 @@ impl DownloadManager {
                 }
             }
         }
-        self.register_model(app, group, &meta).await
+        self.register_model(app, group, &meta).await?;
+        for row in state.store.list_downloads(Some(group.to_string())).await? {
+            state
+                .store
+                .update_download(
+                    row.id,
+                    DownloadPatch {
+                        status: Some(DownloadStatus::Completed),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     fn on_progress(

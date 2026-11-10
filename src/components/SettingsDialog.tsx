@@ -9,6 +9,7 @@ import type { BackendInfo, LocalModelSettings, Provider, ProviderKind } from "..
 import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
+import { BackendDownloads } from "./BackendDownloads";
 import type { ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -84,6 +85,7 @@ function Runtime() {
       setBusy(false);
     }
   }, []);
+  const reprobe = useCallback(() => void load(true), [load]);
   useEffect(() => {
     let alive = true;
     Promise.all([ipc.listBackends(false), ipc.getLocalModelSettings()])
@@ -182,10 +184,8 @@ function Runtime() {
             <li className="text-fg-muted">No llama.cpp runtime was found in this build.</li>
           )}
         </ul>
-        <p className="mt-2 text-xs text-fg-muted">
-          ROCm and CUDA backends are optional downloads; see Backend downloads below.
-        </p>
       </section>
+      <BackendDownloads onChanged={reprobe} />
     </div>
   );
 }
@@ -336,6 +336,128 @@ function Endpoints() {
   );
 }
 
+function HuggingFace() {
+  const [saved, setSaved] = useState<boolean | null>(null);
+  const [token, setToken] = useState("");
+  const [account, setAccount] = useState<string | null>(null);
+  const [mirror, setMirror] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([ipc.hubTokenStatus(), ipc.getHfEndpoint()])
+      .then(([t, m]) => {
+        if (!alive) return;
+        setSaved(t.saved);
+        setMirror(m ?? "");
+      })
+      .catch((err) => alive && setError(toErrorInfo(err)));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function saveToken() {
+    setBusy(true);
+    setError(null);
+    try {
+      setAccount(await ipc.hubSetToken(token));
+      setSaved(true);
+      setToken("");
+    } catch (err) {
+      setError(toErrorInfo(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearToken() {
+    await ipc.hubClearToken();
+    setSaved(false);
+    setAccount(null);
+  }
+
+  async function saveMirror() {
+    try {
+      await ipc.setHfEndpoint(mirror.trim() || null);
+    } catch (err) {
+      setError(toErrorInfo(err));
+    }
+  }
+
+  return (
+    <div className="space-y-5 text-sm">
+      {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+      <section>
+        <h3 className="mb-1 font-medium">Hugging Face token</h3>
+        <p className="mb-2 text-xs text-fg-muted">
+          Only needed for gated models. It is checked with Hugging Face, kept in your system
+          keychain, and sent only to huggingface.co.
+        </p>
+        {saved ? (
+          <div className="flex items-center gap-3">
+            <span>{account ? `Saved (signed in as ${account})` : "A token is saved."}</span>
+            <button type="button" className="text-xs underline" onClick={() => void clearToken()}>
+              Remove
+            </button>
+          </div>
+        ) : (
+          <form
+            className="flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void saveToken();
+            }}
+          >
+            <label className="sr-only" htmlFor="hf-token">
+              Hugging Face token
+            </label>
+            <input
+              id="hf-token"
+              type="password"
+              autoComplete="off"
+              value={token}
+              placeholder="hf_…"
+              onChange={(e) => setToken(e.target.value)}
+              className="flex-1 rounded-md border border-border bg-bg px-2 py-1"
+            />
+            <button
+              type="submit"
+              disabled={busy || !token.trim()}
+              className="rounded-md bg-accent px-3 py-1 text-accent-fg disabled:opacity-40"
+            >
+              {busy ? "Checking…" : "Save"}
+            </button>
+          </form>
+        )}
+      </section>
+      <section>
+        <h3 className="mb-1 font-medium">Mirror (advanced)</h3>
+        <p className="mb-2 text-xs text-fg-muted">
+          For networks where huggingface.co is unreachable. Must be https. The token is never
+          sent to a mirror, so gated models need the official site.
+        </p>
+        <div className="flex gap-2">
+          <label className="sr-only" htmlFor="hf-mirror">
+            Mirror address
+          </label>
+          <input
+            id="hf-mirror"
+            value={mirror}
+            placeholder="https://huggingface.co (default)"
+            onChange={(e) => setMirror(e.target.value)}
+            className="flex-1 rounded-md border border-border bg-bg px-2 py-1 font-mono text-xs"
+          />
+          <button type="button" onClick={() => void saveMirror()} className="rounded-md border border-border px-3 py-1 hover:bg-bg-muted">
+            Save
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function Diagnostics() {
   const [report, setReport] = useState<string | null>(null);
   const [savedTo, setSavedTo] = useState<string | null>(null);
@@ -410,12 +532,14 @@ export function SettingsDialog(props: {
               <Tabs.Trigger value="general" className={tabClass}>General</Tabs.Trigger>
               <Tabs.Trigger value="runtime" className={tabClass}>Local models</Tabs.Trigger>
               <Tabs.Trigger value="endpoints" className={tabClass}>Endpoints</Tabs.Trigger>
+              <Tabs.Trigger value="huggingface" className={tabClass}>Hugging Face</Tabs.Trigger>
               <Tabs.Trigger value="diagnostics" className={tabClass}>Diagnostics</Tabs.Trigger>
             </Tabs.List>
             <div className="min-w-0 flex-1 overflow-y-auto p-5">
               <Tabs.Content value="general"><General /></Tabs.Content>
               <Tabs.Content value="runtime"><Runtime /></Tabs.Content>
               <Tabs.Content value="endpoints"><Endpoints /></Tabs.Content>
+              <Tabs.Content value="huggingface"><HuggingFace /></Tabs.Content>
               <Tabs.Content value="diagnostics"><Diagnostics /></Tabs.Content>
             </div>
           </Tabs.Root>

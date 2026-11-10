@@ -22,6 +22,12 @@ thiserror.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
 rand.workspace = true
+# Verifying downloaded backend packs against the pinned SHA-256.
+sha2.workspace = true
+# Unpacking backend packs (GitHub release zips).
+zip.workspace = true
+# Streaming pack downloads.
+futures-util.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

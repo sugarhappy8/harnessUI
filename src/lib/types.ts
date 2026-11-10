@@ -43,6 +43,16 @@ export interface MessageDto {
   createdAt: number;
   /** All messages that share this message's parent, including itself, oldest first. */
   siblingIds: number[];
+  /** Attached images (load with getAttachment). */
+  imageIds: number[];
+}
+
+/** An image picked, pasted or dropped into the composer. */
+export interface ImageInput {
+  mime: string;
+  fileName: string;
+  /** Base64 of the bytes, without a data: prefix. */
+  data: string;
 }
 
 export interface ChatDetail {
@@ -273,4 +283,27 @@ export interface FirstRunInfo {
 export interface DiskUsage {
   modelsDir: string;
   totalBytes: number;
+}
+
+export interface PackInfo {
+  id: string;
+  title: string;
+  backend: string;
+  requirements: string;
+  licenseName: string;
+  licenseUrl: string;
+  downloadBytes: number;
+  state: "notInstalled" | "partial" | "downloading" | "installed";
+  bytesDone: number;
+  available: boolean;
+  reason: string | null;
+}
+
+export interface PackProgress {
+  id: string;
+  done: number;
+  total: number;
+  unpacking: boolean;
+  finished: boolean;
+  error: ErrorInfo | null;
 }

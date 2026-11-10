@@ -5,6 +5,7 @@ import type {
   ChatStreamEvent,
   ChatSummary,
   ErrorInfo,
+  ImageInput,
   MessageDto,
   ModelOption,
   RuntimeStatus,
@@ -35,7 +36,7 @@ interface AppState {
   newChat: () => Promise<void>;
   renameChat: (chatId: number, title: string) => Promise<void>;
   deleteChat: (chatId: number) => Promise<void>;
-  send: (text: string, parentId?: number | null) => Promise<void>;
+  send: (text: string, parentId?: number | null, images?: ImageInput[]) => Promise<void>;
   regenerate: (assistantMessageId: number) => Promise<void>;
   stop: () => Promise<void>;
   switchBranch: (messageId: number) => Promise<void>;
@@ -184,7 +185,7 @@ export const useApp = create<AppState>((set, get) => {
       await get().refreshChats();
     },
 
-    send: async (text, parentId) => {
+    send: async (text, parentId, images) => {
       let chatId = get().activeChatId;
       if (chatId === null) {
         await get().newChat();
@@ -204,7 +205,7 @@ export const useApp = create<AppState>((set, get) => {
       });
       const id = chatId;
       try {
-        await ipc.sendMessage({ chatId: id, text, parentId: parent }, (e) => onStreamEvent(id, e));
+        await ipc.sendMessage({ chatId: id, text, parentId: parent, images }, (e) => onStreamEvent(id, e));
       } catch (err) {
         set({ generation: null, error: toErrorInfo(err) });
       }

@@ -1,10 +1,26 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, Copy, Pencil, RotateCcw, Check } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { MessageDto } from "../lib/types";
 import { Markdown } from "./Markdown";
 import { ErrorBanner } from "./ErrorBanner";
-import { isTauri } from "../lib/ipc";
+import { getAttachment, isTauri } from "../lib/ipc";
+
+/** An attached image, loaded from the backend as a data: URI. */
+function AttachedImage(props: { id: number }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    getAttachment(props.id)
+      .then((s) => alive && setSrc(s))
+      .catch(() => alive && setSrc(null));
+    return () => {
+      alive = false;
+    };
+  }, [props.id]);
+  if (!src) return <div className="h-24 w-24 rounded-md bg-bg-muted" aria-label="Image" />;
+  return <img src={src} alt="Attached image" className="max-h-48 max-w-xs rounded-md border border-border object-contain" />;
+}
 
 interface Props {
   message: MessageDto;
@@ -93,8 +109,15 @@ export function MessageItem(props: Props) {
             </div>
           </form>
         ) : (
-          <div className="max-w-[85%] rounded-lg bg-bg-muted px-3 py-2 whitespace-pre-wrap">
-            {m.text}
+          <div className="flex max-w-[85%] flex-col items-end gap-2">
+            {(m.imageIds ?? []).length > 0 && (
+              <div className="flex flex-wrap justify-end gap-2">
+                {m.imageIds.map((id) => (
+                  <AttachedImage key={id} id={id} />
+                ))}
+              </div>
+            )}
+            {m.text && <div className="rounded-lg bg-bg-muted px-3 py-2 whitespace-pre-wrap">{m.text}</div>}
           </div>
         )}
         <div className="mt-1 flex items-center gap-2 opacity-70 group-hover:opacity-100">

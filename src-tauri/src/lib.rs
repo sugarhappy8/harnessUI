@@ -3,6 +3,7 @@
 //! Everything with logic worth testing lives in the workspace crates under `crates/`.
 //! This crate wires them to Tauri. See ARCHITECTURE.md section 5.
 
+mod attachments;
 mod chat;
 mod children;
 mod commands;
@@ -14,6 +15,7 @@ mod hub;
 mod logging;
 mod models_cmd;
 mod navigation;
+mod packs_cmd;
 mod providers;
 mod runtime_manager;
 mod settings;
@@ -72,6 +74,7 @@ pub fn run() {
             chat::send_message,
             chat::regenerate,
             chat::stop_generation,
+            attachments::get_attachment,
             models_cmd::runtime_status,
             models_cmd::list_backends,
             models_cmd::load_local_model,
@@ -93,6 +96,8 @@ pub fn run() {
             hub::hub_token_status,
             hub::hub_set_token,
             hub::hub_clear_token,
+            hub::get_hf_endpoint,
+            hub::set_hf_endpoint,
             hub::download_start,
             hub::download_catalog_entry,
             hub::download_pause,
@@ -107,6 +112,10 @@ pub fn run() {
             hub::first_run_info,
             hub::complete_first_run,
             hub::refresh_catalog,
+            packs_cmd::list_packs,
+            packs_cmd::download_pack,
+            packs_cmd::cancel_pack_download,
+            packs_cmd::remove_pack,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -139,6 +148,7 @@ pub fn run() {
                 runtime,
                 generation: Mutex::new(None),
             });
+            app.manage(packs_cmd::PackDownloads::default());
             let downloads = Arc::new(downloads::DownloadManager::default());
             app.manage(downloads.clone());
             {

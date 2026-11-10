@@ -392,6 +392,39 @@ pub async fn hub_set_token(
     Ok(account)
 }
 
+/// The mirror endpoint, or `None` for huggingface.co.
+#[tauri::command]
+pub async fn get_hf_endpoint(state: State<'_, AppState>) -> AppResult<Option<String>> {
+    Ok(state.store.get_setting(SETTING_HF_ENDPOINT).await?)
+}
+
+/// Sets or clears the mirror. It must be https; the token is never sent to it.
+#[tauri::command]
+pub async fn set_hf_endpoint(
+    state: State<'_, AppState>,
+    endpoint: Option<String>,
+) -> AppResult<()> {
+    match endpoint
+        .map(|e| e.trim().trim_end_matches('/').to_string())
+        .filter(|e| !e.is_empty())
+    {
+        None => {
+            state.store.delete_setting(SETTING_HF_ENDPOINT).await?;
+        }
+        Some(e) => {
+            let url = url::Url::parse(&e)
+                .map_err(|_| AppError::bad_request("The mirror address is not a valid URL."))?;
+            if url.scheme() != "https" || url.host_str().is_none() || !url.username().is_empty() {
+                return Err(AppError::bad_request(
+                    "The mirror must be an https:// address without a user name.",
+                ));
+            }
+            state.store.set_setting(SETTING_HF_ENDPOINT, &e).await?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn hub_clear_token(state: State<'_, AppState>) -> AppResult<()> {
     let _ = state.secrets.delete(HF_TOKEN_KEY);
