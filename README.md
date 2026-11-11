@@ -24,7 +24,7 @@ A local-first desktop app that gives AI models running on your own hardware the 
 
 ## Download
 
-Open the repository's **Releases** page and download the file for your computer from the latest release: the `-setup.exe` for Windows, or the `_universal.dmg` for any Mac. Version 0.0.1 is an early test build.
+Open the repository's **Releases** page and download the file for your computer from the latest release: the `-setup.exe` for Windows, or the `_universal.dmg` for any Mac. Versions 0.0.x are early test builds.
 
 Builds of work in progress: every push also builds both installers in GitHub Actions. Open the **Actions** tab, pick the latest green **CI** run, and under **Artifacts** download `windows-installer` or `macos-dmg` (a zip that contains the `-setup.exe` or the `.dmg`).
 

@@ -2,16 +2,20 @@
 
 All notable changes, by milestone. Dates are UTC.
 
-## Unreleased
+## 0.0.2 (2026-11-11)
+
+Fixes for the first two problems reported from a real Windows PC. The version number is new so the build can be told from 0.0.1 in *Settings → General*.
 
 ### Fixed
-- **No GPU on a Windows PC whose graphics driver came without the Vulkan runtime.** Reported on a PC with a Radeon RX 9070 XT: the driver was installed, but `vulkan-1.dll` (the Vulkan runtime every Vulkan program loads first) was not, which happens when a driver is installed without its maker's full package. llama.cpp's Vulkan library then cannot be loaded, and it says nothing: the device list is just empty. The Windows installer now carries its own copy of the Vulkan runtime (the Khronos loader, 1.4.363.0 from LunarG, pinned by SHA-256) in `llama\main\vulkan`, and llama-server gets that folder as the last entry of its `PATH`. Windows looks there last, so a runtime installed with the driver is always used when there is one.
+- **The app did not open again after its window was closed.** Closing the main window left the app running with no window: its two small helper windows (the computer-use overlay and indicator) are created hidden at startup and kept the process alive. Opening the app again only woke that invisible copy, which had no window to show. The app now quits when its main window closes, and a copy that is asked to show a main window it no longer has exits, so the next start works. Until this build is installed: end "harnessUI" in Task Manager, then open it again.
+- **No GPU on a Windows PC whose graphics driver came without the Vulkan runtime.** Reported on a PC with a Radeon RX 9070 XT: the driver was installed, but `vulkan-1.dll` (the Vulkan runtime every Vulkan program loads first) was not in `System32`. Why is not known: AMD's full Adrenalin package was installed and up to date on that PC. llama.cpp's Vulkan library then cannot be loaded, and it says nothing: the device list is just empty. The Windows installer now carries its own copy of the Vulkan runtime (the Khronos loader, 1.4.363.0 from LunarG, pinned by SHA-256) in `llama\main\vulkan`, and llama-server gets that folder as the last entry of its `PATH`. Windows looks there last, so a runtime installed with the driver is always used when there is one.
 - **A graphics card that Vulkan did not list was treated as the wrong card.** The app knew a PC's graphics card only from the Vulkan backend's device list, and counted the CPU as a card. When Vulkan listed nothing, the ROCm download said "supports only AMD Radeon RX 9000-series cards" and the CUDA download said "needs an NVIDIA graphics card", whatever card the PC had. The app now also asks Windows which display adapters are installed, and the downloads are decided from that.
 - The Vulkan backend's "no Vulkan device found" is replaced by a message that names the cards Windows sees and says what to do (or says that only a virtual adapter is visible, as in a virtual machine).
 
 ### Added
 - *Settings → Diagnostics → Run backend check* now lists the graphics adapters Windows reports with their driver versions, includes what llama-server printed when a backend found no device (the check now asks for the verbose listing, which names the backend libraries that were loaded), and repeats that check with the system's full environment to show whether a driver needs a variable the app does not pass on.
-- CI loads llama.cpp's Vulkan library on the Windows runner with and without the app's copy of the Vulkan runtime, which reproduces the reported PC's situation.
+- CI loads llama.cpp's Vulkan library on the Windows runner with and without the app's copy of the Vulkan runtime. The runner has a Vulkan runtime of its own, so this shows only that the app's copy does no harm; the missing-runtime case was confirmed by hand on the reported PC (with the same runtime file last on `PATH`, llama-server listed the RX 9070 XT), not in CI.
+- `e2e/m0_close.py`: closes the main window the way its close button does and checks that the app quits and starts again. It fails on 0.0.1.
 
 ## 0.0.1 (2026-11-11)
 
