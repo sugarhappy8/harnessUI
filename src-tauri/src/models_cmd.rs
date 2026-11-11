@@ -78,6 +78,10 @@ pub async fn load_local_model(
     {
         return Ok(());
     }
+    // The same model picked again while it loads: wait for that load, do not restart it.
+    if let Some(result) = state.runtime.join_load(&model, &settings).await {
+        return result;
+    }
     let runtime = state.runtime.clone();
     runtime.load(model, settings).await?;
     state.runtime.set_thinking(thinking);

@@ -5,7 +5,7 @@ import * as ipc from "../lib/ipc";
 import type { CatalogSuggestion, ErrorInfo, FirstRunInfo } from "../lib/types";
 import { formatBytes } from "../lib/format";
 import { APP_NAME } from "../lib/app";
-import { toErrorInfo } from "../store/app";
+import { toErrorInfo, useApp } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
 
 function hardwareLine(info: FirstRunInfo): string {
@@ -76,6 +76,8 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
       const m = await ipc.importModel(picked);
       const settings = await ipc.getLocalModelSettings();
       await ipc.loadLocalModel(m.path, settings);
+      // Open a chat with the model, so the first screen after this one is ready to use.
+      await useApp.getState().setChatModel(`local:${m.path}`);
     });
   }
 

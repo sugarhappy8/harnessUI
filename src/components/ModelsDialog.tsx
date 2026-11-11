@@ -551,10 +551,11 @@ export function ModelsDialog(props: { open: boolean; onOpenChange: (open: boolea
   async function use(m: InstalledModel) {
     try {
       const settings = await ipc.getLocalModelSettings();
-      await ipc.loadLocalModel(m.path, settings);
-      await refreshModelOptions();
+      // The chat gets the model first, so the header shows it loading.
       await setChatModel(`local:${m.path}`);
       props.onOpenChange(false);
+      await ipc.loadLocalModel(m.path, settings);
+      await refreshModelOptions();
     } catch (err) {
       showError(toErrorInfo(err));
     }

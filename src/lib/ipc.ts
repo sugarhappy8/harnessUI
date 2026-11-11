@@ -107,8 +107,19 @@ export const stopGeneration = () => invoke<void>("stop_generation");
 // Models and runtime
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
 export const listBackends = (reprobe: boolean) => invoke<BackendInfo[]>("list_backends", { reprobe });
-export const loadLocalModel = (path: string, settings: LocalModelSettings) =>
-  invoke<void>("load_local_model", { path, settings });
+/**
+ * Loads a local model and resolves when it is ready. Resolves to `false` when another
+ * model was picked meanwhile: that load replaced this one, which is not an error.
+ */
+export async function loadLocalModel(path: string, settings: LocalModelSettings): Promise<boolean> {
+  try {
+    await invoke<void>("load_local_model", { path, settings });
+    return true;
+  } catch (err) {
+    if (err && typeof err === "object" && (err as { code?: unknown }).code === "load_replaced") return false;
+    throw err;
+  }
+}
 export const unloadModel = () => invoke<void>("unload_model");
 export const listModelOptions = () => invoke<ModelOption[]>("list_model_options");
 export const getLocalModelSettings = () =>

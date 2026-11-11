@@ -2,6 +2,13 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## Unreleased
+
+### Fixed
+- **A model picked with no chat open seemed not to load, and picking it again said "Loading was cancelled."** Reported on 0.0.2. With no chat open, the picked model had no chat to belong to: it loaded in the background, the header kept saying "Choose a model" and showed no progress. Picking the file again then restarted the load, and the first attempt reported "Loading was cancelled" although the second went on to finish. Now picking a model with no chat open opens a new chat for it, so its name and loading progress show at once; picking the same model again while it loads waits for that load instead of restarting it; and a load that is replaced because another model was picked ends without an error.
+- A load that was replaced could take the newer load's server for its own and wait on it for ever, which also left that server running after an unload. Each load now touches only the server it started, and two loads never replace the server at the same time. Found while testing the fix above (it showed as a load request that never returned).
+- If the task that runs llama-server ended by itself, the app said "Loading was cancelled". It now says that the loader stopped unexpectedly and keeps the details.
+
 ## 0.0.2 (2026-11-11)
 
 Fixes for the first two problems reported from a real Windows PC. The version number is new so the build can be told from 0.0.1 in *Settings → General*.

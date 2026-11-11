@@ -17,6 +17,7 @@ mod git_cmd;
 mod gpu;
 mod hotkey;
 mod hub;
+mod load_tracker;
 mod logging;
 mod mcp_cmd;
 mod models_cmd;

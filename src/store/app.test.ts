@@ -29,6 +29,8 @@ vi.mock("../lib/ipc", () => ({
     });
   }),
   resolveApproval: vi.fn(async () => undefined),
+  createChat: vi.fn(async (modelRef: string | null) => ({ ...detail.chat, id: 7, modelRef })),
+  setChatModel: vi.fn(async () => undefined),
 }));
 
 const { useApp } = await import("./app");
@@ -178,5 +180,27 @@ describe("streamed turn events", () => {
     expect(useApp.getState().approvals).toHaveLength(1);
     await useApp.getState().decideApproval("a1", "deny", "no");
     expect(useApp.getState().approvals).toHaveLength(0);
+  });
+});
+
+// Reported from a real PC: a model picked with no chat open loaded in the background, but
+// nothing on screen changed, so it was picked again and the first load "was cancelled".
+describe("picking a model", () => {
+  it("opens a new chat for it when no chat is open", async () => {
+    const ipc = await import("../lib/ipc");
+    useApp.setState({ activeChatId: null, detail: null, error: null });
+    await useApp.getState().setChatModel("local:/models/a.gguf");
+    expect(ipc.createChat).toHaveBeenCalledWith("local:/models/a.gguf");
+    expect(ipc.setChatModel).not.toHaveBeenCalled();
+    expect(useApp.getState().activeChatId).toBe(7);
+  });
+
+  it("changes the open chat's model when there is one", async () => {
+    const ipc = await import("../lib/ipc");
+    vi.mocked(ipc.createChat).mockClear();
+    useApp.setState({ activeChatId: 1, detail, error: null });
+    await useApp.getState().setChatModel("local:/models/b.gguf");
+    expect(ipc.setChatModel).toHaveBeenCalledWith(1, "local:/models/b.gguf");
+    expect(ipc.createChat).not.toHaveBeenCalled();
   });
 });

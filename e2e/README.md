@@ -52,7 +52,7 @@ Each run uses a fresh temporary home folder, so it never touches your own app da
 | Script | Covers |
 |---|---|
 | `m0_close.py` | Closing the main window quits the app (no hidden copy left running), and it starts again. Needs `xdotool` |
-| `m1_chat.py` | First run, loading a GGUF, streaming, regenerate and versions, edit-and-resend, stop, search, rename, delete, an OpenAI-compatible endpoint |
+| `m1_chat.py` | First run, loading a GGUF, the same model picked again while it loads, another model picked while one loads, picking a model with no chat open, streaming, regenerate and versions, edit-and-resend, stop, search, rename, delete, an OpenAI-compatible endpoint |
 | `m2_models.py` | Hugging Face search, a real download with verification, installed models, a vision model with its projector |
 | `m3_agent.py` | A tool-calling turn: Allow once, Allow for this chat then a call under the grant, Deny, Stop with a card open, audit rows |
 | `m5_skills.py` | Creating a skill in the editor, the strict validator, the model loading it without a card, disable and delete |

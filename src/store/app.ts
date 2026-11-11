@@ -348,7 +348,14 @@ export const useApp = create<AppState>((set, get) => {
 
     setChatModel: async (modelRef) => {
       const chatId = get().activeChatId;
-      if (chatId === null) return;
+      if (chatId === null) {
+        // No chat is open: the model needs one to belong to, or picking it shows nothing.
+        if (modelRef === null) return;
+        const chat = await ipc.createChat(modelRef);
+        await get().refreshChats();
+        await get().openChat(chat.id);
+        return;
+      }
       await ipc.setChatModel(chatId, modelRef);
       await get().openChat(chatId);
     },
