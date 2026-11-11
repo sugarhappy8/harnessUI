@@ -714,7 +714,47 @@ struct AppSink {
     partial: Mutex<(String, String)>,
     /// The last stored message is an assistant answer (no tool calls).
     answered: std::sync::atomic::AtomicBool,
+    /// The agent loop's end-of-turn placeholder, held back until the turn's status is
+    /// known (see [`ending`]).
+    filler: Mutex<Option<(HistoryMessage, MessageUsage)>>,
     deltas: Mutex<DeltaBuffer>,
+}
+
+/// True for the "(stopped)" placeholder the agent loop appends when a turn ends without an
+/// answer. It is not an answer: storing it as one would show "Stopped" above every error
+/// and throw away the text streamed before a failure.
+fn is_end_filler(message: &HistoryMessage) -> bool {
+    message.role == Role::Assistant
+        && matches!(message.parts.as_slice(), [Part::Text(text)] if text == agent::history::STOPPED_TEXT)
+}
+
+/// What is stored when a turn ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// One last assistant message with this status and the text streamed so far.
+    Final(store::MessageStatus),
+    /// The partial answer is already stored: mark it stopped.
+    MarkStopped,
+    /// No answer and no error to show: the placeholder keeps the history valid.
+    StoreFiller,
+    Nothing,
+}
+
+fn ending(
+    status: &agent::turn::TurnStatus,
+    answered: bool,
+    has_partial: bool,
+    has_filler: bool,
+) -> Ending {
+    match status {
+        agent::turn::TurnStatus::Failed { .. } => Ending::Final(store::MessageStatus::Error),
+        agent::turn::TurnStatus::Stopped if !answered || has_partial => {
+            Ending::Final(store::MessageStatus::Stopped)
+        }
+        agent::turn::TurnStatus::Stopped => Ending::MarkStopped,
+        _ if has_filler => Ending::StoreFiller,
+        _ => Ending::Nothing,
+    }
 }
 
 fn decision_name(d: &CallDecision) -> (&'static str, store::AuditDecision, Option<String>) {
@@ -851,6 +891,14 @@ impl TurnSink for AppSink {
                 }
                 send(TurnStreamEvent::Discarded)
             }
+            TurnEvent::MessageCompleted { message } if is_end_filler(&message) => {
+                // Held back: whether it is stored depends on how the turn ended, and the
+                // text streamed so far must survive for the error or stopped message.
+                let usage = self.last_usage.lock().map(|u| *u).unwrap_or_default();
+                if let Ok(mut f) = self.filler.lock() {
+                    *f = Some((message, usage));
+                }
+            }
             TurnEvent::MessageCompleted { message } => {
                 if let Ok(mut p) = self.partial.lock() {
                     *p = Default::default();
@@ -898,7 +946,9 @@ impl TurnSink for AppSink {
                     call_id: result.call_id.clone(),
                     name: result.name.clone(),
                     status: result.status.label().to_string(),
-                    text: full_text.clone().unwrap_or_else(|| result.text.clone()),
+                    text: full_text
+                        .clone()
+                        .unwrap_or_else(|| shown_result_text(&result)),
                     decision: label.to_string(),
                     duration_ms,
                     ui,
@@ -1231,6 +1281,7 @@ pub async fn run(
         started: Mutex::new(HashMap::new()),
         partial: Mutex::new(Default::default()),
         answered: std::sync::atomic::AtomicBool::new(false),
+        filler: Mutex::new(None),
         deltas: Mutex::new(DeltaBuffer::default()),
     };
     let persister = tokio::spawn(persist_loop(
@@ -1248,6 +1299,7 @@ pub async fn run(
         .await
         .ok()
         .flatten();
+    let local_endpoint = req.caps.local;
     let mut input = agent::turn::TurnInput::new(history, req.caps, req.template);
     let chat_prefs: ChatTools =
         serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
@@ -1300,35 +1352,43 @@ pub async fn run(
     let outcome = agent::turn::run_turn(deps, input, cancel).await;
     let (partial_text, partial_reasoning) =
         sink.partial.lock().map(|p| p.clone()).unwrap_or_default();
-    let final_message = match &outcome.status {
-        agent::turn::TurnStatus::Stopped
-            if !sink.answered.load(Ordering::Relaxed) || !partial_text.is_empty() =>
-        {
-            Some((store::MessageStatus::Stopped, None))
+    let filler = sink.filler.lock().ok().and_then(|mut f| f.take());
+    match ending(
+        &outcome.status,
+        sink.answered.load(Ordering::Relaxed),
+        !partial_text.is_empty(),
+        filler.is_some(),
+    ) {
+        Ending::Final(status) => {
+            let error = match &outcome.status {
+                agent::turn::TurnStatus::Failed { code, message } => {
+                    serde_json::to_value(AppError::new(
+                        code,
+                        message.clone(),
+                        failure_next_step(code, local_endpoint),
+                        String::new(),
+                    ))
+                    .ok()
+                }
+                _ => None,
+            };
+            let _ = sink.persist.send(Persist::Final {
+                text: partial_text,
+                reasoning: (!partial_reasoning.is_empty()).then_some(partial_reasoning),
+                status,
+                error,
+            });
         }
-        agent::turn::TurnStatus::Failed { code, message } => {
-            let err = AppError::new(
-                code,
-                message.clone(),
-                failure_next_step(code),
-                String::new(),
-            );
-            Some((store::MessageStatus::Error, serde_json::to_value(err).ok()))
-        }
-        agent::turn::TurnStatus::Stopped => {
-            // The partial answer was already stored as a message.
+        // The partial answer was already stored as a message.
+        Ending::MarkStopped => {
             let _ = sink.persist.send(Persist::MarkStopped);
-            None
         }
-        _ => None,
-    };
-    if let Some((status, error)) = final_message {
-        let _ = sink.persist.send(Persist::Final {
-            text: partial_text,
-            reasoning: (!partial_reasoning.is_empty()).then_some(partial_reasoning),
-            status,
-            error,
-        });
+        Ending::StoreFiller => {
+            if let Some((message, usage)) = filler {
+                let _ = sink.persist.send(Persist::Message(message, usage));
+            }
+        }
+        Ending::Nothing => {}
     }
     sink.flush_deltas();
     crate::computer_cmd::end_turn(app);
@@ -1369,15 +1429,39 @@ pub async fn run(
     Ok(())
 }
 
-fn failure_next_step(code: &str) -> &'static str {
-    match code {
-        "tools_do_not_fit" => {
+/// The advice shown under a failed turn. `local` is true for the app's own llama-server;
+/// the app does not run a remote endpoint or choose its context size.
+fn failure_next_step(code: &str, local: bool) -> &'static str {
+    match (code, local) {
+        ("tools_do_not_fit", true) => {
             "Switch off some tools for this chat, or load the model with a larger context."
         }
-        "context_full" => "Start a new chat, or load the model with a larger context.",
-        "output_limit" => "Ask for a shorter answer, or regenerate.",
-        "no_answer" => "Regenerate, or try a different model.",
-        _ => "Check that the model is still running, then regenerate.",
+        ("tools_do_not_fit", false) => {
+            "Switch off some tools for this chat. If the server's model has a larger context, set it in Settings → Endpoints."
+        }
+        ("context_full" | "context_overflow", true) => {
+            "Start a new chat, or load the model with a larger context."
+        }
+        ("context_full" | "context_overflow", false) => {
+            "Start a new chat. If the server's model has a larger context, set it in Settings → Endpoints."
+        }
+        ("unauthorized", _) => "Check the API key in Settings → Endpoints, then regenerate.",
+        ("output_limit", _) => "Ask for a shorter answer, or regenerate.",
+        ("no_answer", _) => "Regenerate, or try a different model.",
+        (_, true) => "Check that the model is still running, then regenerate.",
+        (_, false) => {
+            "Check that the server is running and its address in Settings → Endpoints is right, then regenerate."
+        }
+    }
+}
+
+/// What a tool card shows as the result: the tool's output, or, for a call that did not
+/// run (invalid arguments, refused, denied, switched off), the app's notes saying why.
+pub fn shown_result_text(result: &ResultRecord) -> String {
+    if result.text.trim().is_empty() {
+        result.notes.join("\n")
+    } else {
+        result.text.clone()
     }
 }
 
@@ -1407,6 +1491,114 @@ async fn latest_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The agent loop ends a turn that has no answer with a "(stopped)" placeholder. It is
+    /// not an answer: a failed turn stores one error message that keeps the text streamed
+    /// so far, not the placeholder followed by an empty error.
+    #[test]
+    fn the_end_of_turn_placeholder_is_not_an_answer() {
+        assert!(is_end_filler(&HistoryMessage::stopped()));
+        assert!(!is_end_filler(&HistoryMessage::assistant("An answer.")));
+        assert!(!is_end_filler(&HistoryMessage::assistant(
+            "(stopped) early"
+        )));
+        assert!(!is_end_filler(&HistoryMessage::user("(stopped)")));
+
+        let failed = agent::turn::TurnStatus::Failed {
+            code: "http".into(),
+            message: "boom".into(),
+        };
+        // A failure always stores exactly one message, the error, whatever was streamed.
+        for (answered, partial, filler) in [
+            (false, false, true),
+            (false, true, true),
+            (true, false, false),
+        ] {
+            assert_eq!(
+                ending(&failed, answered, partial, filler),
+                Ending::Final(store::MessageStatus::Error),
+                "{answered} {partial} {filler}"
+            );
+        }
+        let stopped = agent::turn::TurnStatus::Stopped;
+        // Stopped before anything was stored: one stopped message with the partial text.
+        assert_eq!(
+            ending(&stopped, false, false, true),
+            Ending::Final(store::MessageStatus::Stopped)
+        );
+        // Stopped after the partial answer was stored as a message: that one is marked.
+        assert_eq!(ending(&stopped, true, false, false), Ending::MarkStopped);
+        // Any other ending without an answer keeps the placeholder, so the next request
+        // still has an assistant message after the user's.
+        assert_eq!(
+            ending(&agent::turn::TurnStatus::StepCapReached, false, false, true),
+            Ending::StoreFiller
+        );
+        assert_eq!(
+            ending(&agent::turn::TurnStatus::Completed, true, false, false),
+            Ending::Nothing
+        );
+    }
+
+    /// The advice under an error fits the error and where the model runs.
+    #[test]
+    fn the_next_step_fits_the_error_and_the_endpoint() {
+        // A rejected key is fixed in the endpoint's settings, not by regenerating.
+        let key = failure_next_step("unauthorized", false);
+        assert!(
+            key.contains("Settings → Endpoints") && key.contains("key"),
+            "{key}"
+        );
+        // A remote endpoint's context is a setting; a local model is loaded with one.
+        for code in ["tools_do_not_fit", "context_full", "context_overflow"] {
+            let local = failure_next_step(code, true);
+            let remote = failure_next_step(code, false);
+            assert!(
+                local.contains("load the model with a larger context"),
+                "{code}: {local}"
+            );
+            assert!(!remote.contains("load the model"), "{code}: {remote}");
+            assert!(remote.contains("Settings → Endpoints"), "{code}: {remote}");
+        }
+        // The app does not run a remote server, so it cannot say "still running".
+        for code in ["network", "http"] {
+            assert!(failure_next_step(code, true).contains("model is still running"));
+            let remote = failure_next_step(code, false);
+            assert!(
+                remote.contains("server") && remote.contains("Settings → Endpoints"),
+                "{remote}"
+            );
+        }
+        assert!(failure_next_step("no_answer", false).contains("Regenerate"));
+    }
+
+    /// A call that did not run has no output; the card shows the app's reason instead of
+    /// an empty box under "Failed".
+    #[test]
+    fn a_call_that_did_not_run_shows_its_reason() {
+        let call = CallRecord {
+            id: "c1".into(),
+            name: "git_push".into(),
+            arguments: Map::new(),
+            recovered: false,
+        };
+        let refused = ResultRecord::synthetic(
+            &call,
+            CallStatus::Error,
+            vec!["Invalid arguments for git_push: unexpected field \"path\".".into()],
+        );
+        assert_eq!(
+            shown_result_text(&refused),
+            "Invalid arguments for git_push: unexpected field \"path\"."
+        );
+        // Output wins when there is any; notes then are for the model (truncation and so on).
+        let mut ran = refused.clone();
+        ran.text = "pushed".into();
+        assert_eq!(shown_result_text(&ran), "pushed");
+        let mut two = refused;
+        two.notes.push("Second note.".into());
+        assert!(shown_result_text(&two).ends_with("\nSecond note."));
+    }
 
     #[test]
     fn agent_messages_are_stored_with_their_parts() {

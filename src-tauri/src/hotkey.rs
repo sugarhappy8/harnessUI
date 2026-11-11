@@ -66,11 +66,8 @@ fn after_failed_change(previous: String, restored: bool, error: String) -> Hotke
 /// Stops the turn (and, in M7, releases held input). Used by the hotkey and the
 /// computer-use indicator's Stop button.
 pub fn stop_now(app: &AppHandle) {
-    if let Some(state) = app.try_state::<AppState>()
-        && let Ok(guard) = state.generation.lock()
-        && let Some(token) = guard.as_ref()
-    {
-        token.cancel();
+    if let Some(state) = app.try_state::<AppState>() {
+        state.generation.cancel();
     }
     crate::computer_cmd::release_all(app);
     crate::turns::cancel_all_pending(app);

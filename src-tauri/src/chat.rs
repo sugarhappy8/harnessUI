@@ -7,7 +7,6 @@ use agent::OpenAiClient;
 use serde_json::json;
 use tauri::State;
 use tauri::ipc::Channel;
-use tokio_util::sync::CancellationToken;
 
 use crate::dto::{ChatDetailDto, ChatDto, ChatSummaryDto, MessageDto};
 use crate::error::{AppError, AppResult};
@@ -119,11 +118,12 @@ fn tool_result_of(content: &serde_json::Value) -> Option<crate::dto::ToolResultD
         .iter()
         .find(|p| p.get("type").and_then(|t| t.as_str()) == Some("tool_result"))?;
     let r: agent::ResultRecord = serde_json::from_value(p.get("result")?.clone()).ok()?;
+    let text = crate::turns::shown_result_text(&r);
     Some(crate::dto::ToolResultDto {
         call_id: r.call_id,
         name: r.name,
         status: r.status.label().to_string(),
-        text: r.text,
+        text,
         image_count: r.images.len(),
     })
 }
@@ -221,7 +221,24 @@ pub async fn rename_chat(
 }
 
 #[tauri::command]
-pub async fn delete_chat(state: State<'_, AppState>, chat_id: store::ChatId) -> AppResult<()> {
+pub async fn delete_chat(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    chat_id: store::ChatId,
+) -> AppResult<()> {
+    // A reply being generated in this chat is stopped first, with its tools: nothing keeps
+    // running, or acting under the chat's grants, for a chat that is gone. The turn then
+    // stores its last message before the chat's rows are deleted.
+    if state.generation.cancel_chat(chat_id.0) {
+        crate::computer_cmd::release_all(&app);
+        crate::turns::cancel_all_pending(&app);
+        for _ in 0..200 {
+            if !state.generation.running_in(chat_id.0) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
     state.store.delete_chat(chat_id).await?;
     Ok(())
 }
@@ -286,11 +303,7 @@ pub async fn switch_branch(
 
 #[tauri::command]
 pub async fn stop_generation(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<()> {
-    if let Ok(guard) = state.generation.lock()
-        && let Some(token) = guard.as_ref()
-    {
-        token.cancel();
-    }
+    state.generation.cancel();
     crate::computer_cmd::release_all(&app);
     crate::turns::cancel_all_pending(&app);
     Ok(())
@@ -493,19 +506,14 @@ async fn generate(
     target: Target,
     on_event: Channel<TurnStreamEvent>,
 ) -> AppResult<()> {
-    let cancel = CancellationToken::new();
-    {
-        let mut guard = state.generation.lock().map_err(AppError::internal)?;
-        if guard.as_ref().is_some_and(|t| !t.is_cancelled()) {
-            return Err(AppError::new(
-                "busy",
-                "A reply is already being generated.",
-                "Wait for it to finish or press Stop.",
-                String::new(),
-            ));
-        }
-        *guard = Some(cancel.clone());
-    }
+    let Some((generation_id, cancel)) = state.generation.start(chat.id.0) else {
+        return Err(AppError::new(
+            "busy",
+            "A reply is already being generated.",
+            "Wait for it to finish or press Stop.",
+            String::new(),
+        ));
+    };
     let status = state.runtime.status();
     let caps = agent::ModelCaps {
         tools: if target.local {
@@ -539,9 +547,7 @@ async fn generate(
         template,
     };
     let result = crate::turns::run(app, req, on_event, cancel).await;
-    if let Ok(mut guard) = state.generation.lock() {
-        *guard = None;
-    }
+    state.generation.finish(generation_id);
     result
 }
 

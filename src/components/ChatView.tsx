@@ -21,6 +21,7 @@ export function ChatView() {
   const {
     detail,
     generation,
+    turnNotes,
     runtime,
     error,
     send,
@@ -219,6 +220,15 @@ export function ChatView() {
                 chatApprovals.length === 0 && <div className="text-fg-muted">…</div>
               )}
               {live.notes.map((n, i) => (
+                <p key={i} className="text-xs text-fg-muted">
+                  {n}
+                </p>
+              ))}
+            </div>
+          )}
+          {!live && detail && turnNotes?.chatId === detail.chat.id && (
+            <div className="mb-6 space-y-1" aria-label="Notes from the last reply">
+              {turnNotes.notes.map((n, i) => (
                 <p key={i} className="text-xs text-fg-muted">
                   {n}
                 </p>

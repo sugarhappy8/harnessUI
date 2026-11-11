@@ -11,7 +11,8 @@
 //! - missing or duplicate tool-call ids are replaced with `call_<uuid>`;
 //! - a usage chunk with `choices: []`;
 //! - `data: {"error":...}` mid-stream ends the stream with an error;
-//! - a stream that ends without `[DONE]` still ends with [`StreamEvent::Done`].
+//! - a stream that ends without `[DONE]` still ends with [`StreamEvent::Done`]; when it also
+//!   had no finish reason, [`StreamEvent::Unfinished`] comes first.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -129,6 +130,10 @@ pub enum StreamEvent {
         /// Why it stopped.
         finish_reason: FinishReason,
     },
+    /// An event stream's input ended with neither a finish reason nor `[DONE]`: the server
+    /// or something between closed the connection early, so the reply may be cut short.
+    /// Sent just before [`StreamEvent::Done`].
+    Unfinished,
     /// The stream ended normally. Always the last event of a stream that did not fail.
     Done,
 }
@@ -514,6 +519,9 @@ impl StreamDecoder {
                  stream (check the base URL)"
                     .to_owned(),
             ));
+        }
+        if !self.parser.is_done() && !self.parser.finished_sent {
+            out.push(StreamEvent::Unfinished);
         }
         self.parser.finish(out);
         Ok(())
@@ -1068,9 +1076,14 @@ mod tests {
             .push(b"event: ping\ndata: {}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n", &mut out)
             .unwrap();
         decoder.finish(&mut out).unwrap();
+        // No finish reason and no [DONE]: the reply may be cut short.
         assert_eq!(
             out,
-            vec![StreamEvent::Content("a".into()), StreamEvent::Done]
+            vec![
+                StreamEvent::Content("a".into()),
+                StreamEvent::Unfinished,
+                StreamEvent::Done
+            ]
         );
     }
 
@@ -1104,9 +1117,14 @@ mod tests {
             )
             .unwrap();
         decoder.finish(&mut out).unwrap();
+        // No finish reason and no [DONE]: the reply may be cut short.
         assert_eq!(
             out,
-            vec![StreamEvent::Content("a".into()), StreamEvent::Done]
+            vec![
+                StreamEvent::Content("a".into()),
+                StreamEvent::Unfinished,
+                StreamEvent::Done
+            ]
         );
     }
 

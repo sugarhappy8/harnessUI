@@ -68,6 +68,8 @@ struct Reply {
     calls: Vec<AccumulatedToolCall>,
     finish: Option<FinishReason>,
     usage: Option<Usage>,
+    /// The stream ended without the server saying the reply was finished.
+    unfinished: bool,
 }
 
 enum Attempt {
@@ -984,6 +986,7 @@ impl<'a> Turn<'a> {
                     }
                     reply.reasoning.push_str(&text);
                 }
+                Some(Ok(StreamEvent::Unfinished)) => reply.unfinished = true,
                 Some(Ok(StreamEvent::Usage(usage))) => reply.usage = Some(usage),
                 Some(Ok(StreamEvent::Timings(t))) => timings = Some(t),
                 Some(Ok(event)) => accumulator.push(&event),
@@ -1023,7 +1026,15 @@ impl<'a> Turn<'a> {
             calls,
             finish,
             usage,
+            unfinished,
         } = reply;
+        if unfinished && calls.is_empty() {
+            self.emit(TurnEvent::AppNote {
+                text: "The server closed the connection without saying the reply was finished, \
+                       so it may be cut short."
+                    .to_owned(),
+            });
+        }
         let reasoning = non_empty(reasoning);
         let output_tokens = usage
             .map(|u| u.completion_tokens)

@@ -2,6 +2,20 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## Debugging pass (2026-11-11)
+
+The app was driven end to end against a fake model server with scripted replies (text, thinking, tool calls, HTTP errors, dropped streams), which makes the agent loop testable without a model. The script is now `e2e/scripted_agent.py` (16 checks).
+
+### Fixed
+- A failed reply (server error, rejected key, dropped connection) was stored as two messages: an empty "Stopped" one, then the error. The text streamed before a dropped connection was lost. A failed reply is now one message that keeps the text written so far.
+- A tool call that did not run (invalid arguments, not allowed, denied) showed "Failed" with an empty result. The card now shows the reason.
+- Deleting a chat while its reply was being written left the model, and any tool it called, running for a chat that no longer existed, and blocked new messages until it finished. Deleting a chat now stops its reply first.
+- The chat could stay stuck in "generating" (Stop button, disabled composer) when the chat could not be reloaded at the end of a turn.
+- Stopping a reply and sending a new message at once could leave the new reply unreachable by Stop (the old reply's end cleared the new one's handle).
+- Advice under errors fits the error and the endpoint: a rejected API key points to *Settings → Endpoints* instead of "check that the model is still running"; a remote endpoint's context size is a setting there, not something to "load the model" with.
+- A reply whose stream ended without the server saying it was finished is kept, with a note that it may be cut short.
+- Notes from a turn (a withheld tool, a summarised history, a cut-short reply) vanished the moment the turn ended. They stay under the reply until the next message.
+
 ## Final audit (2026-11-10)
 
 A read-only audit of the whole app against ARCHITECTURE.md, the security rules and the docs (five independent reviewers, each finding checked by a second one that tried to refute it) confirmed 41 distinct problems. 33 are fixed below; the other 8 are larger features, listed under known issues in docs/MILESTONES.md.

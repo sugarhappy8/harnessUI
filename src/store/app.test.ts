@@ -39,7 +39,7 @@ async function flush() {
 
 describe("streamed turn events", () => {
   beforeEach(async () => {
-    useApp.setState({ activeChatId: 1, detail, generation: null, error: null, approvals: [] });
+    useApp.setState({ activeChatId: 1, detail, generation: null, turnNotes: null, error: null, approvals: [] });
     void useApp.getState().send("hi", null);
     await flush();
   });
@@ -90,6 +90,34 @@ describe("streamed turn events", () => {
     emit({ type: "finished", status: "stepCap", message: "The step limit for one turn was reached." });
     await flush();
     expect(useApp.getState().error?.code).toBe("stepCap");
+    expect(useApp.getState().generation).toBeNull();
+    finishSend();
+  });
+
+  it("keeps a turn's notes readable after it ends, until the next message", async () => {
+    emit({ type: "content", text: "Half an ans" });
+    emit({ type: "note", text: "The reply may be cut short." });
+    emit({ type: "finished", status: "complete", message: null });
+    await flush();
+    expect(useApp.getState().generation).toBeNull();
+    expect(useApp.getState().turnNotes).toEqual({ chatId: 1, notes: ["The reply may be cut short."] });
+    finishSend();
+    void useApp.getState().send("next", null);
+    await flush();
+    expect(useApp.getState().turnNotes).toBeNull();
+    // A turn without notes leaves none behind.
+    emit({ type: "finished", status: "complete", message: null });
+    await flush();
+    expect(useApp.getState().turnNotes).toBeNull();
+    finishSend();
+  });
+
+  it("ends the generation even when the chat cannot be reloaded (deleted mid-reply)", async () => {
+    const ipc = await import("../lib/ipc");
+    vi.mocked(ipc.getChat).mockRejectedValueOnce({ code: "not_found", message: "gone", nextStep: "", details: "" });
+    emit({ type: "content", text: "still writ" });
+    emit({ type: "finished", status: "stopped", message: null });
+    await flush();
     expect(useApp.getState().generation).toBeNull();
     finishSend();
   });

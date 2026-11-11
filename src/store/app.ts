@@ -67,6 +67,9 @@ interface AppState {
   runtime: RuntimeStatus | null;
   modelOptions: ModelOption[];
   generation: Generation | null;
+  /** The notes of the last finished turn, shown until the next message is sent: a note
+   * that arrives as a turn ends would otherwise vanish before it can be read. */
+  turnNotes: { chatId: number; notes: string[] } | null;
   error: ErrorInfo | null;
   /** Approval cards waiting for an answer (any chat). */
   approvals: ApprovalRequest[];
@@ -111,10 +114,15 @@ function lastMessageId(detail: ChatDetail | null): number | null {
 }
 
 export const useApp = create<AppState>((set, get) => {
+  /** Re-reads a chat after a stream event. Never rejects: the chat may have been deleted
+   * while its reply was being written, and the turn still has to end in the UI. */
   function reload(chatId: number) {
-    return ipc.getChat(chatId).then((detail) => {
-      if (get().activeChatId === chatId) set({ detail });
-    });
+    return ipc
+      .getChat(chatId)
+      .then((detail) => {
+        if (get().activeChatId === chatId) set({ detail });
+      })
+      .catch(() => undefined);
   }
 
   function updateGen(chatId: number, f: (g: Generation) => Generation) {
@@ -224,9 +232,15 @@ export const useApp = create<AppState>((set, get) => {
             },
           });
         }
-        void reload(chatId).then(() => {
-          if (get().generation?.chatId === chatId) set({ generation: null });
-        });
+        {
+          const g = get().generation;
+          const notes = g && g.chatId === chatId ? g.notes : [];
+          void reload(chatId).then(() => {
+            if (get().generation?.chatId === chatId) {
+              set({ generation: null, turnNotes: notes.length > 0 ? { chatId, notes } : null });
+            }
+          });
+        }
         void get().refreshChats();
         return;
     }
@@ -240,6 +254,7 @@ export const useApp = create<AppState>((set, get) => {
     runtime: null,
     modelOptions: [],
     generation: null,
+    turnNotes: null,
     error: null,
     approvals: [],
 
@@ -291,7 +306,7 @@ export const useApp = create<AppState>((set, get) => {
       }
       if (chatId === null) return;
       const parent = parentId === undefined ? lastMessageId(get().detail) : parentId;
-      set({ generation: newGeneration(chatId), error: null });
+      set({ generation: newGeneration(chatId), turnNotes: null, error: null });
       const id = chatId;
       try {
         await ipc.sendMessage({ chatId: id, text, parentId: parent, images, documents }, (e) =>
@@ -305,7 +320,7 @@ export const useApp = create<AppState>((set, get) => {
     regenerate: async (assistantMessageId) => {
       const chatId = get().activeChatId;
       if (chatId === null) return;
-      set({ generation: newGeneration(chatId), error: null });
+      set({ generation: newGeneration(chatId), turnNotes: null, error: null });
       try {
         await ipc.regenerate(chatId, assistantMessageId, (e) => onStreamEvent(chatId, e));
       } catch (err) {

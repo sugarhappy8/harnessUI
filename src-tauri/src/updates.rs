@@ -155,11 +155,7 @@ pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppRe
         )
     })?;
     // Stop every child before the installer runs.
-    if let Ok(mut g) = state.generation.lock()
-        && let Some(t) = g.take()
-    {
-        t.cancel();
-    }
+    state.generation.cancel();
     if let Some(browser) = app.try_state::<crate::browser_cmd::BrowserHandle>() {
         browser.0.shutdown().await;
     }

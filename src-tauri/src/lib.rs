@@ -32,7 +32,7 @@ mod toolset;
 mod turns;
 mod updates;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, RunEvent, WebviewWindowBuilder};
@@ -236,7 +236,7 @@ pub fn run() {
                 store,
                 secrets,
                 runtime,
-                generation: Mutex::new(None),
+                generation: state::Generation::default(),
                 host: host.clone(),
                 skills,
                 grants: Default::default(),

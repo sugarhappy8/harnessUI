@@ -1956,3 +1956,54 @@ async fn tools_with_control_tokens_in_values_are_not_offered() {
         "{notes:?}"
     );
 }
+
+fn unfinished_notes(h: &Harness) -> Vec<String> {
+    h.sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            TurnEvent::AppNote { text } if text.contains("cut short") => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+fn raw_stream(chunks: &[Value], done: bool) -> Vec<u8> {
+    let mut out: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+    if done {
+        out.push_str("data: [DONE]\n\n");
+    }
+    out.into_bytes()
+}
+
+/// A stream that ends without a finish reason and without `[DONE]` (a proxy or a server
+/// that closed the connection early) is kept, but the user is told it may be cut short.
+#[tokio::test]
+async fn a_reply_whose_stream_never_finished_is_kept_with_a_note() {
+    let content = json!({"choices": [{"index": 0, "delta": {"content": "Half an ans"}}]});
+    let h = Harness::new(vec![reply_text(raw_stream(&[content], false))]).await;
+    let outcome = h.run(input("Hi")).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(last_text(&outcome), "Half an ans");
+    let notes = unfinished_notes(&h);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
+/// No note when the server said it finished, in either of the two usual ways.
+#[tokio::test]
+async fn a_finished_reply_has_no_cut_short_note() {
+    let content = json!({"choices": [{"index": 0, "delta": {"content": "Whole answer."}}]});
+    let stop = json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+    // A finish reason and no [DONE]; [DONE] and no finish reason; both.
+    for body in [
+        raw_stream(&[content.clone(), stop.clone()], false),
+        raw_stream(std::slice::from_ref(&content), true),
+        sse::text("Whole answer."),
+    ] {
+        let h = Harness::new(vec![reply_text(body)]).await;
+        let outcome = h.run(input("Hi")).await;
+        assert_eq!(outcome.status, TurnStatus::Completed);
+        assert_eq!(last_text(&outcome), "Whole answer.");
+        assert!(unfinished_notes(&h).is_empty());
+    }
+}
