@@ -14,6 +14,7 @@ mod downloads;
 mod dto;
 mod error;
 mod git_cmd;
+mod gpu;
 mod hotkey;
 mod hub;
 mod logging;
@@ -65,10 +66,15 @@ pub fn run() {
         // Must be registered first: a second launch focuses the existing window
         // instead of starting a second llama-server and a second database writer.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
+            match app.get_webview_window(MAIN_WINDOW) {
+                Some(window) => {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                // A copy without its main window is on its way out; make sure it goes, so
+                // the next start is a fresh one.
+                None => app.exit(0),
             }
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -289,6 +295,19 @@ pub fn run() {
         }
     };
     app.run(|handle, event| {
+        // Closing the main window quits the app. Without this the process lived on,
+        // invisibly: the hidden border and Stop bar of computer use are windows too, and
+        // the app only ends by itself when its last window is gone. Starting the app again
+        // then reached that invisible copy (single instance) and nothing appeared.
+        if let RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
+        } = &event
+            && label == MAIN_WINDOW
+        {
+            handle.exit(0);
+        }
         if let RunEvent::Exit = event {
             // Stop llama-server cleanly; the Job Object / reaper is the backstop.
             if let Some(state) = handle.try_state::<state::AppState>() {

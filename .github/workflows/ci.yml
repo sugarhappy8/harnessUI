@@ -24,10 +24,28 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The runner's default Ubuntu mirror (azure.archive.ubuntu.com) stopped answering on
+      # 2026-11-11 and this step hung for 37 minutes. Each apt-get call has a time limit;
+      # when the default mirror fails, Ubuntu's own archive is used, then the kernel.org
+      # mirror. apt checks every package against Ubuntu's signing keys whatever the mirror.
       - name: System libraries for Tauri
+        timeout-minutes: 30
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+          apt_get() { sudo timeout --kill-after=10 "$1" apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=120 -o APT::Update::Error-Mode=any "${@:2}"; }
+          install() { apt_get 150 update && apt_get 400 install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev; }
+          use_mirror() {
+            echo "The package install failed or timed out; switching apt to $1"
+            printf '%s\tpriority:1\n' "$1" | sudo tee /etc/apt/apt-mirrors.txt
+            for list in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+              if [ -f "$list" ]; then sudo sed -i -E "s#https?://azure\.archive\.ubuntu\.com/ubuntu/?#$1#g" "$list"; fi
+            done
+          }
+          install && exit 0
+          use_mirror https://archive.ubuntu.com/ubuntu/
+          install && exit 0
+          use_mirror https://mirrors.edge.kernel.org/ubuntu/
+          install && exit 0
+          exit 1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
@@ -116,6 +134,30 @@ jobs:
       - name: llama.cpp runtime (Windows, pinned Vulkan + CPU build)
         if: runner.os == 'Windows'
         run: python scripts/fetch_llama.py windows
+      # The reported bug: a PC whose graphics driver came without the Vulkan runtime
+      # (vulkan-1.dll). llama.cpp's Vulkan library then cannot be loaded and no GPU is
+      # listed, without any message. The app puts its own copy at the END of llama-server's
+      # PATH. This loads the Vulkan library the way Windows resolves its dependencies,
+      # once without and once with that PATH entry, each in a fresh process. A runner
+      # without a system Vulkan runtime is the same situation as that PC.
+      - name: The Vulkan library loads with the app's copy of the Vulkan runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = (Resolve-Path src-tauri/resources/llama/main).Path
+          $dll = Join-Path $dir 'ggml-vulkan.dll'
+          $fallback = Join-Path $dir 'vulkan'
+          if (-not (Test-Path (Join-Path $fallback 'vulkan-1.dll'))) { throw "The app's copy of vulkan-1.dll is missing from $fallback" }
+          $system = Test-Path "$env:SystemRoot\System32\vulkan-1.dll"
+          Write-Host "This runner has its own Vulkan runtime: $system"
+          $load = "try { [void][System.Runtime.InteropServices.NativeLibrary]::Load('$dll'); 'loaded' } catch { 'failed: ' + `$_.Exception.Message }"
+          $without = pwsh -NoProfile -Command $load
+          Write-Host "Without the app's copy: $without"
+          $env:PATH = "$env:PATH;$fallback"
+          $with = pwsh -NoProfile -Command $load
+          Write-Host "With the app's copy last on PATH: $with"
+          if ($with -ne 'loaded') { throw "ggml-vulkan.dll does not load even with the app's Vulkan runtime on PATH: $with" }
+          if (-not $system -and $without -eq 'loaded') { throw "Expected the load to fail without any Vulkan runtime; the check is not testing what it should." }
       - name: llama.cpp runtime (macOS, built from the pinned commit for both processors)
         if: runner.os == 'macOS' && steps.llama-cache.outputs.cache-hit != 'true'
         run: python3 scripts/fetch_llama.py macos
@@ -161,6 +203,16 @@ jobs:
           $exe = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           $mb = [math]::Round($exe.Length / 1MB, 1)
           Write-Host "Installer: $($exe.Name) $mb MB"
+          # The app's copy of the Vulkan runtime must be among the bundled resources.
+          # Looked for in the build's copy of the resources, then in the installer itself.
+          $copied = Get-ChildItem target/release -Recurse -Filter vulkan-1.dll -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'llama[\\/]main[\\/]vulkan' } | Select-Object -First 1
+          if ($copied) {
+            Write-Host "Vulkan runtime bundled: $($copied.FullName)"
+          } else {
+            $listing = & 7z l $exe.FullName 2>$null | Out-String
+            if ($listing -notmatch 'vulkan-1\.dll') { throw "vulkan/vulkan-1.dll was not bundled with the llama.cpp runtime." }
+            Write-Host "Vulkan runtime found inside the installer."
+          }
           if ($exe.Length -gt 150MB) { throw "The installer is $mb MB, over the 150 MB budget. Something large was bundled (see ARCHITECTURE.md 16)." }
       - name: Upload Windows installer
         if: runner.os == 'Windows'

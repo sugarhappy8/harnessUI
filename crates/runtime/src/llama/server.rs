@@ -30,7 +30,7 @@ pub use supervisor::{
 
 use super::backend::{Backend, BackendKind};
 use super::failure::{LoadFailure, classify};
-use super::launch::{LaunchConfig, REDACTED, build_args, build_env};
+use super::launch::{LaunchConfig, REDACTED, build_args, build_env_on};
 use super::lines::{LineReader, Tail};
 use super::props::Props;
 use super::protocol::{ChildState, LogEvent, LogInfo, parse_child_line};
@@ -259,7 +259,7 @@ async fn start_inner(
     let launch = &spec.launch;
     let process = SpawnSpec::new(&spec.backend.server, &spec.backend.dir)
         .args(build_args(launch))
-        .env(build_env(launch))
+        .env(build_env_on(spec.backend.base_env(), launch))
         .stdin(StdioMode::Piped)
         .stdout(StdioMode::Piped)
         .stderr(StdioMode::Piped);

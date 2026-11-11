@@ -131,6 +131,49 @@ exec "$@"
 """
 
 
+class VulkanRuntime(unittest.TestCase):
+    """The Windows fallback copy of vulkan-1.dll (llama.lock.json "vulkan_runtime")."""
+
+    def setUp(self):
+        self.spec = fetch_llama.LOCK["vulkan_runtime"]
+
+    def test_the_pin_is_complete_and_from_the_publisher(self):
+        for key in ("sha256", "member_sha256"):
+            self.assertRegex(self.spec[key], r"^[0-9a-f]{64}$")
+        self.assertGreater(self.spec["size"], 1_000_000)
+        self.assertTrue(self.spec["url"].startswith(fetch_llama.LUNARG))
+        self.assertTrue(self.spec["url"].endswith("/" + self.spec["name"]))
+        self.assertTrue(self.spec["member"].endswith("/x64/vulkan-1.dll"))
+        self.assertEqual(self.spec["dir"], "vulkan")
+
+    def test_only_the_named_host_is_allowed_for_a_download(self):
+        entry = dict(self.spec, name="not-cached-" + self.spec["name"])
+        # The default allow-list is GitHub only: the LunarG address is refused there.
+        with self.assertRaises(SystemExit) as refused:
+            fetch_llama.download(entry)
+        self.assertIn("refusing", str(refused.exception))
+        elsewhere = dict(entry, url="https://example.com/" + entry["name"])
+        with self.assertRaises(SystemExit):
+            fetch_llama.download(elsewhere, allowed=(fetch_llama.LUNARG,))
+
+    def test_a_changed_file_inside_the_archive_stops_the_build(self):
+        import io, tempfile, zipfile as zf
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            archive = tmp / "rt.zip"
+            with zf.ZipFile(archive, "w") as z:
+                z.writestr(self.spec["member"], b"not the real loader")
+            original = fetch_llama.download
+            fetch_llama.download = lambda entry, allowed=(): archive
+            try:
+                with self.assertRaises(SystemExit) as stopped:
+                    fetch_llama.install_vulkan_runtime(tmp / "main")
+            finally:
+                fetch_llama.download = original
+            self.assertIn("expected " + self.spec["member_sha256"], str(stopped.exception))
+            self.assertFalse((tmp / "main" / "vulkan" / "vulkan-1.dll").exists())
+
+
 class Naming(unittest.TestCase):
     def test_sidecar_names_are_the_ones_tauri_looks_for(self):
         self.assertEqual(fetch_llama.sidecar_name("llama-server", "aarch64-apple-darwin"), "llama-server-aarch64-apple-darwin")

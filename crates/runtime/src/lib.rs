@@ -23,9 +23,13 @@ pub mod reaper;
 pub mod registry;
 pub mod spawn;
 
-pub use llama::backend::{Backend, BackendKind, BackendSource, RuntimeLayout, discover};
+pub use llama::backend::{
+    Backend, BackendKind, BackendSource, RuntimeLayout, VULKAN_FALLBACK_DIR, VULKAN_RUNTIME_FILE,
+    discover,
+};
 pub use llama::devices::{
     Device, ProbeError, ProbeResult, backend_of, parse_list_devices, pick_device, probe,
+    probe_with_env,
 };
 pub use llama::failure::{LoadFailure, classify};
 pub use llama::launch::{

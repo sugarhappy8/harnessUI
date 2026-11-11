@@ -164,7 +164,13 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
 /// for ROCm, `HIP_VISIBLE_DEVICES`. Nothing else from the app's environment is passed, so
 /// `LLAMA_ARG_*`, `GGML_*`, `HF_TOKEN` and `HF_ENDPOINT` never reach the server.
 pub fn build_env(cfg: &LaunchConfig) -> EnvSpec {
-    let mut env = EnvSpec::minimal()
+    build_env_on(EnvSpec::minimal(), cfg)
+}
+
+/// [`build_env`] on top of a backend's own base environment
+/// ([`Backend::base_env`](crate::Backend::base_env)).
+pub fn build_env_on(base: EnvSpec, cfg: &LaunchConfig) -> EnvSpec {
+    let mut env = base
         .set(API_KEY_ENV, cfg.api_key.clone())
         .set(ROUTER_PORT_ENV, "1");
     if let Some(devices) = &cfg.hip_visible_devices {

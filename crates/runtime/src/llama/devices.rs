@@ -142,6 +142,10 @@ pub struct ProbeResult {
     pub devices: Vec<Device>,
     /// Why the backend is unusable, if it is.
     pub error: Option<ProbeError>,
+    /// The last lines the server printed (standard output, then standard error), for the
+    /// diagnostics report: "no device found" alone does not say why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output: Vec<String>,
 }
 
 impl ProbeResult {
@@ -168,14 +172,26 @@ pub fn cpu_device() -> Device {
 /// For GPU backends, rows of this backend's prefix with no memory are dropped, and an
 /// empty result is [`ProbeError::NoMatchingDevice`].
 pub async fn probe(backend: &Backend, timeout: Duration) -> ProbeResult {
+    probe_with_env(backend, timeout, backend.base_env()).await
+}
+
+/// [`probe`] with a chosen environment. The app always probes and launches with the
+/// minimal one; diagnostics repeat a probe that found nothing with a wider one, to tell
+/// whether a driver needs a variable the minimal environment leaves out.
+pub async fn probe_with_env(backend: &Backend, timeout: Duration, env: EnvSpec) -> ProbeResult {
     let fail = |error| ProbeResult {
         backend_kind: backend.kind,
         devices: Vec::new(),
         error: Some(error),
+        output: Vec::new(),
     };
     let spec = SpawnSpec::new(&backend.server, &backend.dir)
+        // `-v` first: llama-server then logs which backend libraries it loaded and why one
+        // could not be loaded. Without it a Vulkan library that fails to load is silent and
+        // the list is just "(none)". The device rows are the same either way.
+        .arg("-v")
         .arg("--list-devices")
-        .env(EnvSpec::minimal())
+        .env(env)
         .stdin(StdioMode::Null)
         .stdout(StdioMode::Piped)
         .stderr(StdioMode::Piped);
@@ -245,7 +261,13 @@ pub async fn probe(backend: &Backend, timeout: Duration) -> ProbeResult {
         output_tail.drain(..skip);
         return fail(ProbeError::NonZeroExit { code, output_tail });
     }
-    classify_devices(backend.kind, &stdout.join("\n"))
+    let mut result = classify_devices(backend.kind, &stdout.join("\n"));
+    let mut output = stdout;
+    output.extend(stderr);
+    let skip = output.len().saturating_sub(PROBE_TAIL_LINES);
+    output.drain(..skip);
+    result.output = output;
+    result
 }
 
 /// Turns successful `--list-devices` output into a [`ProbeResult`] for `kind`.
@@ -255,6 +277,7 @@ pub fn classify_devices(kind: BackendKind, stdout: &str) -> ProbeResult {
             backend_kind: kind,
             devices: vec![cpu_device()],
             error: None,
+            output: Vec::new(),
         };
     }
     let devices: Vec<Device> = parse_list_devices(stdout)
@@ -268,6 +291,7 @@ pub fn classify_devices(kind: BackendKind, stdout: &str) -> ProbeResult {
         backend_kind: kind,
         devices,
         error,
+        output: Vec::new(),
     }
 }
 
@@ -322,6 +346,101 @@ pub fn looks_integrated(description: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A probe that finds no device keeps what the server printed, on both streams: it is
+    /// the only way to tell a missing driver from a driver that failed to load.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_probe_keeps_what_the_server_printed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let server = dir.path().join("llama-server");
+        std::fs::write(
+            &server,
+            "#!/bin/sh\necho \"args: $*\" >&2\necho 'load_backend: failed to load ggml-vulkan.dll' >&2\necho 'Available devices:'\necho '  (none)'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let backend = Backend {
+            kind: BackendKind::Vulkan,
+            dir: dir.path().to_path_buf(),
+            server,
+            fit_params: None,
+            build: "test".into(),
+            source: crate::llama::backend::BackendSource::Installed,
+        };
+        let result = probe(&backend, Duration::from_secs(20)).await;
+        assert_eq!(
+            result.error,
+            Some(ProbeError::NoMatchingDevice {
+                backend: BackendKind::Vulkan
+            })
+        );
+        assert!(
+            result
+                .output
+                .iter()
+                .any(|l| l.contains("Available devices:")),
+            "{:?}",
+            result.output
+        );
+        assert!(
+            result
+                .output
+                .iter()
+                .any(|l| l.contains("load_backend: failed to load ggml-vulkan.dll")),
+            "{:?}",
+            result.output
+        );
+        // Verbose, so the server says which backend libraries it loaded or could not load;
+        // without it a failed load is silent and the list is just "(none)".
+        assert!(
+            result.output.iter().any(|l| l == "args: -v --list-devices"),
+            "{:?}",
+            result.output
+        );
+    }
+
+    /// The verbose listing as a Windows PC with a Radeon RX 9070 XT and an integrated
+    /// Radeon printed it (2026-11-11, llama.cpp b12110), log lines and all. The log lines
+    /// name the same cards in another form and must not be taken for device rows.
+    #[test]
+    fn the_verbose_listing_of_a_real_pc_is_read_correctly() {
+        let out = "0.00.452.470 D ggml_vulkan: Found 2 Vulkan devices:\r\n\
+                   0.00.454.294 D ggml_vulkan: 0 = AMD Radeon RX 9070 XT (AMD proprietary driver) | uma: 0 | fp16: 1 | bf16: 1 | fp4: 0 | warp size: 64 | shared memory: 32768 | int dot: 1 | matrix cores: KHR_coopmat\r\n\
+                   0.00.456.099 D ggml_vulkan: 1 = AMD Radeon(TM) Graphics (AMD proprietary driver) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 32768 | int dot: 1 | matrix cores: none\r\n\
+                   0.00.456.114 I load_backend: loaded Vulkan backend from C:\\Users\\u\\AppData\\Local\\harnessUI\\llama\\main\\ggml-vulkan.dll\r\n\
+                   0.00.485.747 I load_backend: loaded CPU backend from C:\\Users\\u\\AppData\\Local\\harnessUI\\llama\\main\\ggml-cpu-zen4.dll\r\n\
+                   Available devices:\r\n\
+                   \x20 Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15419 MiB free)\r\n\
+                   \x20 Vulkan1: AMD Radeon(TM) Graphics (16224 MiB, 15412 MiB free)\r\n";
+        let result = classify_devices(BackendKind::Vulkan, out);
+        assert_eq!(result.error, None);
+        let rows: Vec<(&str, &str, u64, u64)> = result
+            .devices
+            .iter()
+            .map(|d| {
+                (
+                    d.name.as_str(),
+                    d.description.as_str(),
+                    d.total_mib,
+                    d.free_mib,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Vulkan0", "AMD Radeon RX 9070 XT", 16304, 15419),
+                ("Vulkan1", "AMD Radeon(TM) Graphics", 16224, 15412),
+            ]
+        );
+        // The card, not the processor's own graphics, although both report about 16 GB.
+        assert_eq!(
+            pick_device(&result.devices).map(|d| d.name.as_str()),
+            Some("Vulkan0")
+        );
+    }
 
     #[test]
     fn parses_rows_and_ignores_noise() {

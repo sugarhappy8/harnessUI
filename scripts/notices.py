@@ -107,6 +107,8 @@ def render() -> str:
     for title, f, note in [
         ("llama.cpp (llama-server, llama-fit-params) — MIT", "llama.cpp-LICENSE", "Pinned build b12110; see llama.lock.json."),
         ("LLVM OpenMP runtime (Windows, libomp.dll) — Apache-2.0 WITH LLVM-exception", "LLVM-OpenMP-LICENSE", ""),
+        ("Vulkan runtime (Windows, vulkan-1.dll) — Apache-2.0 and MIT", "VulkanRT-License.txt",
+         "The Khronos Group's Vulkan loader, version 1.4.363.0 from LunarG's runtime components, unchanged. Used only when the graphics driver did not install its own; see llama.lock.json."),
         ("libgit2 (built into the app for the git tools when Git is not installed) — GPL-2.0 WITH linking exception",
          "libgit2-COPYING", "Linked statically through the git2 / libgit2-sys crates."),
         ("zlib (built into the app, used by libgit2) — Zlib", "zlib-LICENSE", ""),

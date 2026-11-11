@@ -163,6 +163,9 @@ impl RuntimeManager {
             let probe = runtime::probe(&backend, Duration::from_secs(45)).await;
             if let Some(e) = &probe.error {
                 tracing::warn!(backend = %backend.kind, "backend probe failed: {e}");
+                for line in probe.output.iter().take(40) {
+                    tracing::warn!(backend = %backend.kind, "  llama-server: {line}");
+                }
             }
             out.push((backend, probe));
         }
@@ -171,6 +174,7 @@ impl RuntimeManager {
     }
 
     pub async fn backend_dtos(&self, reprobe: bool) -> Vec<BackendDto> {
+        let adapters = crate::gpu::adapters();
         self.backends(reprobe)
             .await
             .into_iter()
@@ -193,12 +197,25 @@ impl RuntimeManager {
                         free_mib: d.free_mib,
                     })
                     .collect(),
-                error: p.error.as_ref().map(|e| e.to_string()).or_else(|| {
-                    // A missing Vulkan driver makes llama-server list no device and log
-                    // nothing (7.2): say so instead of "no GPU".
-                    (b.kind == runtime::BackendKind::Vulkan && p.devices.is_empty() && !vulkan_loader_present())
-                        .then(|| "No Vulkan driver was found. Install or update your graphics driver (AMD Adrenalin, NVIDIA or Intel), then run the backend check again.".to_string())
-                }),
+                // A Vulkan backend that lists no device says nothing about why (7.2): tell
+                // the user which cards Windows sees and what to do, not "no device found".
+                error: if b.kind == runtime::BackendKind::Vulkan && p.devices.is_empty() {
+                    match &p.error {
+                        Some(e) if !matches!(e, runtime::ProbeError::NoMatchingDevice { .. }) => {
+                            Some(e.to_string())
+                        }
+                        _ => Some(crate::gpu::vulkan_no_device_message(
+                            vulkan_loader_present()
+                                || b.dir
+                                    .join(runtime::VULKAN_FALLBACK_DIR)
+                                    .join(runtime::VULKAN_RUNTIME_FILE)
+                                    .is_file(),
+                            &adapters,
+                        )),
+                    }
+                } else {
+                    p.error.as_ref().map(|e| e.to_string())
+                },
             })
             .collect()
     }
@@ -718,6 +735,7 @@ mod tests {
                 backend_kind: kind,
                 devices,
                 error: None,
+                output: Vec::new(),
             },
         )
     }
@@ -729,6 +747,7 @@ mod tests {
                 backend_kind: kind,
                 devices: Vec::new(),
                 error: Some(runtime::ProbeError::NoMatchingDevice { backend: kind }),
+                output: Vec::new(),
             },
         )
     }
