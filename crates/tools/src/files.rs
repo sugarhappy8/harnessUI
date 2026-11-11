@@ -166,6 +166,8 @@ impl FilesServer {
             risk: Risk::Normal,
             read_only: true,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: Some(why),
             payload: Value::Null,
         })
@@ -244,6 +246,9 @@ impl FilesServer {
             risk,
             read_only: false,
             outbound: false,
+            // Allow all: deletes, emptying a file and sensitive places keep asking.
+            keep_asking: policy::files::keep_asking(&c.canonical, kind, self.flavor),
+            network: false,
             hard_limit: None,
             payload: Self::payload(c, extra),
         })
@@ -261,6 +266,8 @@ impl FilesServer {
             risk: Risk::Normal,
             read_only: true,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: Self::payload(c, Value::Null),
         })

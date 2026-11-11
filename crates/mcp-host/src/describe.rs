@@ -81,6 +81,8 @@ pub fn describe_external(
         risk: policy::external_risk(tool.destructive_hint, prefs.always_ask),
         read_only: false,
         outbound: true,
+        keep_asking: None,
+        network: false,
         hard_limit: None,
         payload: json!({
             "kind": "external",

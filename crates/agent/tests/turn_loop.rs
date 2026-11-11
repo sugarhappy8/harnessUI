@@ -176,6 +176,8 @@ impl ToolHost for FakeTools {
             risk: Risk::Normal,
             read_only,
             outbound,
+            keep_asking: None,
+            network: false,
             hard_limit: path
                 .starts_with("/etc")
                 .then(|| "outside approved folders".to_owned()),
@@ -241,6 +243,7 @@ impl PolicyGate for FakePolicy {
             server_ready: true,
             recovered_from_text: recovered,
             untrusted_in_turn: untrusted,
+            allow_all: false,
         };
         let grants = self.grants.lock().unwrap();
         policy::evaluate(action, &turn, &*grants)

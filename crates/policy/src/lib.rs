@@ -11,7 +11,7 @@ pub mod path;
 pub mod sanitize;
 
 pub use engine::{
-    Action, AskReason, CardKind, Decision, Grants, Risk, Scope, TurnContext, evaluate,
+    Action, AskReason, CardKind, Decision, Grants, KeepAsking, Risk, Scope, TurnContext, evaluate,
     external_risk,
 };
 pub use files::{WriteKind, always_ask_reason};

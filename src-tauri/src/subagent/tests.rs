@@ -252,6 +252,8 @@ impl ToolHost for Tools {
             risk: policy::Risk::Normal,
             read_only: name == "read_file",
             outbound: name == "fetch",
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: Value::Null,
         })
@@ -586,6 +588,7 @@ async fn the_tool_is_described_for_the_policy_engine() {
         server_ready: true,
         recovered_from_text: true,
         untrusted_in_turn: true,
+        allow_all: false,
     };
     let none = std::collections::BTreeSet::<policy::Scope>::new();
     assert_eq!(

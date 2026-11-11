@@ -10,6 +10,7 @@ members = [
     "crates/agent",
     "crates/computer",
     "crates/browser",
+    "crates/search",
     "src-tauri",
 ]
 
@@ -32,6 +33,7 @@ tools = { path = "crates/tools" }
 agent = { path = "crates/agent" }
 computer = { path = "crates/computer" }
 browser = { path = "crates/browser" }
+search = { path = "crates/search" }
 
 # Shell. Pinned to the 2.x line: a 3.0 alpha is published and `cargo search` shows it.
 tauri = { version = "2.12", features = [] }
@@ -94,6 +96,12 @@ tree-sitter-powershell = "0.26"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 serde-saphyr = "2.1"
 zip = { version = "9.5", default-features = false, features = ["deflate"] }
+# Web search (crates/search). All three are in the lock already (Tauri and reqwest use
+# them), so they add no package: dom_query turns a fetched page into a DOM (html5ever),
+# toml reads Cargo.toml and pyproject.toml, encoding_rs decodes pages that are not UTF-8.
+dom_query = { version = "0.28", default-features = false }
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+encoding_rs = "0.8"
 tempfile = "3"
 # Git fallback when system git is missing (ARCHITECTURE.md 9.3, 18): libgit2 built from the
 # vendored source with HTTPS (WinHTTP on Windows, SecureTransport on macOS); no ssh.

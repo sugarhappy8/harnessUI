@@ -378,6 +378,8 @@ impl ComputerServer {
             risk: Risk::Normal,
             read_only: false,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: Value::Null,
         }

@@ -11,6 +11,8 @@
 
 use tree_sitter::{Node, Parser};
 
+use crate::engine::KeepAsking;
+
 /// Which grammar to parse with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
@@ -44,6 +46,12 @@ pub struct Verdict {
     pub always_ask: Option<String>,
     /// Every simple command is on the read-only list.
     pub read_only: bool,
+    /// Allow all (0.0.4): why the command still asks while its chat is in Allow all, if it
+    /// does, with a sentence that names what was found.
+    pub keep_asking: Option<(KeepAsking, String)>,
+    /// Allow all (0.0.4): the command names a network program or cannot be fully broken
+    /// down, so it asks once untrusted content has entered the turn.
+    pub network: bool,
 }
 
 const BASH_KINDS: &[&str] = &[
@@ -709,6 +717,8 @@ pub fn classify(shell: Shell, line: &str) -> Verdict {
                 parsed,
                 always_ask,
                 read_only,
+                keep_asking: None,
+                network: false,
             }
         }
         Parsed::Complex { reason } => Verdict {
@@ -717,6 +727,8 @@ pub fn classify(shell: Shell, line: &str) -> Verdict {
             )),
             parsed,
             read_only: false,
+            keep_asking: None,
+            network: false,
         },
     }
 }

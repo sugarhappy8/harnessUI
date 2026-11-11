@@ -2,6 +2,7 @@
 //! deletes; replacing a file with an empty one; anything under a `.git` folder; shell
 //! start-up files; git and ssh configuration; autostart locations.
 
+use crate::engine::KeepAsking;
 use crate::path::Flavor;
 
 /// Shell and PowerShell start-up files, by file name.
@@ -100,6 +101,14 @@ pub fn always_ask_reason(canonical: &str, kind: WriteKind, flavor: Flavor) -> Op
     {
         return Some("changing a PowerShell profile always asks");
     }
+    None
+}
+
+/// Allow all (0.0.4): why a write still asks while its chat is in Allow all, if it does.
+/// Every write that always asks in Ask mode keeps asking: deleting a file and leaving one
+/// empty count as deleting, the sensitive locations as sensitive.
+pub fn keep_asking(canonical: &str, kind: WriteKind, flavor: Flavor) -> Option<KeepAsking> {
+    let _ = (canonical, kind, flavor);
     None
 }
 

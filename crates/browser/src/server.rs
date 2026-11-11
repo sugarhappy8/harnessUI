@@ -131,6 +131,8 @@ fn action(
         risk,
         read_only,
         outbound,
+        keep_asking: None,
+        network: false,
         hard_limit: None,
         payload,
     })
@@ -148,6 +150,8 @@ fn hard_limit(tool: &str, url: &str, why: String) -> Described {
         risk: Risk::Normal,
         read_only: true,
         outbound: false,
+        keep_asking: None,
+        network: false,
         hard_limit: Some(visible(&why)),
         payload: Value::Null,
     })

@@ -18,8 +18,10 @@ mod config;
 mod error;
 mod ids;
 mod models;
+mod outputs;
 mod schema;
 pub mod secrets;
+mod tasks;
 mod tools;
 
 pub use actor::Store;
@@ -43,10 +45,18 @@ pub use ids::{
 pub use models::{
     Download, DownloadPatch, DownloadStatus, ModelInput, ModelRecord, ModelSource, NewDownload,
 };
+pub use outputs::{
+    MAX_LINE_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUTS_PER_CHAT, NewToolOutput, OutputLine,
+    StoredToolOutput, ToolOutputInfo, output_lines,
+};
 pub use schema::MIGRATIONS;
 pub use secrets::{
     ChunkedSecretStore, KeychainSecretStore, MemorySecretStore, SecretError, SecretRef,
     SecretStore, platform_default,
+};
+pub use tasks::{
+    ChangedFile, FileChange, MAX_CHANGED_FILES, MAX_CHECKS, StepStatus, Task, TaskCheck, TaskNote,
+    TaskState, TaskStatus, TaskStep, UserMarks,
 };
 pub use tools::{
     Attachment, NewAttachment, NewSummary, NewToolCall, Summary, ToolCall, ToolCallFinish,

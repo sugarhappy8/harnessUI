@@ -200,6 +200,8 @@ impl ToolHost for Files {
             risk: Risk::Normal,
             read_only: true,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: json!({ "path": path }),
         })

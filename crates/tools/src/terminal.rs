@@ -290,6 +290,8 @@ impl BuiltinServer for TerminalServer {
                 risk: Risk::AlwaysAsk,
                 read_only: false,
                 outbound: true,
+                keep_asking: None,
+                network: true,
                 hard_limit: Some(why),
                 payload: Value::Null,
             })
@@ -370,6 +372,10 @@ impl BuiltinServer for TerminalServer {
             },
             read_only: verdict.read_only,
             outbound: true,
+            // Allow all: the classifier says whether the command still asks (deletes,
+            // destroys, publishes, hides what it runs) and whether it can reach the network.
+            keep_asking: verdict.keep_asking.as_ref().map(|(kind, _)| *kind),
+            network: verdict.network,
             hard_limit: None,
             payload: json!({
                 "cwd": cwd.canonical,

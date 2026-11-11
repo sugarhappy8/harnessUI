@@ -565,6 +565,10 @@ impl GitServer {
             risk,
             read_only,
             outbound,
+            // Allow all: a push publishes in the user's name and keeps asking. Clone, pull
+            // and push are the git tools that reach the network (the outbound ones).
+            keep_asking: (tool == "git_push").then_some(policy::KeepAsking::Publish),
+            network: outbound,
             hard_limit: None,
             payload,
         })
@@ -582,6 +586,8 @@ impl GitServer {
             risk: Risk::Normal,
             read_only: true,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: Some(why),
             payload: Value::Null,
         })
@@ -2395,6 +2401,8 @@ mod fallback_tests {
             risk: Risk::Normal,
             read_only: false,
             outbound: true,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: json!({"url": url, "dest": dest}),
         };

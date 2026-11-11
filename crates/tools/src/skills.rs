@@ -615,6 +615,8 @@ impl BuiltinServer for SkillsServer {
                         risk: Risk::Normal,
                         read_only: true,
                         outbound: false,
+                        keep_asking: None,
+                        network: false,
                         hard_limit: Some(format!(
                             "{e}; read_skill_file only reads inside the skill's folder"
                         )),
@@ -640,6 +642,8 @@ impl BuiltinServer for SkillsServer {
             risk: Risk::Normal,
             read_only: true,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload,
         })

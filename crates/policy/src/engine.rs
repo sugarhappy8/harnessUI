@@ -80,6 +80,30 @@ pub enum Scope {
     AppData,
 }
 
+/// Why an action still asks while its chat is in Allow all (0.0.4). The describer sets it;
+/// the engine only reads it. In Ask mode it changes nothing: there [`Risk`] decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeepAsking {
+    /// Deletes files or folders, or leaves a file empty.
+    Delete,
+    /// Discards work, changes the disk or the system, or runs with elevated rights.
+    Destroy,
+    /// Writes to a sensitive place: a `.git` folder, shell start-up files, git and ssh
+    /// configuration, autostart locations.
+    Sensitive,
+    /// Spends money, sends or publishes in the user's name: a pay, buy, send or post
+    /// button, `git push`.
+    Publish,
+    /// Input that reaches an application no grant covers (D7): a terminal or shell host,
+    /// system settings, a password manager, the system's own shortcuts.
+    ProtectedApp,
+    /// An external tool its server marks destructive, or the user marked always-ask.
+    MarkedDestructive,
+    /// A command that hides what it runs (an encoded command), so nothing can be checked.
+    Hidden,
+}
+
 /// A tool call, described for policy and for the approval card.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +120,18 @@ pub struct Action {
     pub read_only: bool,
     /// Sends data off the machine or to another program (network, terminal, MCP).
     pub outbound: bool,
+    /// Allow all (0.0.4): set when the action still asks while its chat is in Allow all,
+    /// with the kind of reason. `None` (the default for a new tool): Allow all may run it
+    /// without a card. Ask mode does not read this.
+    #[serde(default)]
+    pub keep_asking: Option<KeepAsking>,
+    /// Allow all (0.0.4): the action can send data off the machine (it reaches the
+    /// network, names a network program, or is a command that cannot be fully broken
+    /// down). In Allow all such an action asks once untrusted content has entered the
+    /// turn (D9). `false` for anything that stays on this machine. Ask mode does not read
+    /// this: there `outbound` decides.
+    #[serde(default)]
+    pub network: bool,
     /// Set when the describer found a hard limit (13.3 step 2): no prompt.
     pub hard_limit: Option<String>,
     /// Tool-specific data the describer computed and the tool re-checks before its side
@@ -115,6 +151,9 @@ pub struct TurnContext {
     pub recovered_from_text: bool,
     /// Untrusted content (a web page, file contents, a tool result) entered this turn (D9).
     pub untrusted_in_turn: bool,
+    /// The chat is in Allow all (0.0.4): the engine answers the card itself, except for
+    /// actions that keep asking. `false` is Ask mode, the behaviour of steps 3 to 7.
+    pub allow_all: bool,
 }
 
 /// The buttons a card offers.
@@ -135,6 +174,9 @@ pub enum AskReason {
     AlwaysAsk,
     RecoveredFromText,
     UntrustedContentThenOutbound,
+    /// The chat is in Allow all and this is one of the actions that still ask
+    /// ([`Action::keep_asking`] says which kind).
+    StillAsksInAllowAll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +188,8 @@ pub enum Decision {
     Denied { reason: String },
     /// Step 6.
     AllowedByGrant,
+    /// The chat is in Allow all and nothing about the action keeps asking (0.0.4).
+    AllowedByMode,
     /// Steps 3, 4, 5, 7.
     Ask { card: CardKind, reason: AskReason },
 }
@@ -254,6 +298,8 @@ mod tests {
             risk,
             read_only,
             outbound,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: serde_json::Value::Null,
         }
