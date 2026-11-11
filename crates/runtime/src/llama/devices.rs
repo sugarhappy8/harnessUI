@@ -186,6 +186,10 @@ pub async fn probe_with_env(backend: &Backend, timeout: Duration, env: EnvSpec) 
         output: Vec::new(),
     };
     let spec = SpawnSpec::new(&backend.server, &backend.dir)
+        // `-v` first: llama-server then logs which backend libraries it loaded and why one
+        // could not be loaded. Without it a Vulkan library that fails to load is silent and
+        // the list is just "(none)". The device rows are the same either way.
+        .arg("-v")
         .arg("--list-devices")
         .env(env)
         .stdin(StdioMode::Null)
@@ -353,7 +357,7 @@ mod tests {
         let server = dir.path().join("llama-server");
         std::fs::write(
             &server,
-            "#!/bin/sh\necho 'ggml_vulkan: no devices found' >&2\necho 'Available devices:'\n",
+            "#!/bin/sh\necho \"args: $*\" >&2\necho 'load_backend: failed to load ggml-vulkan.dll' >&2\necho 'Available devices:'\necho '  (none)'\n",
         )
         .unwrap();
         std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -384,7 +388,14 @@ mod tests {
             result
                 .output
                 .iter()
-                .any(|l| l.contains("ggml_vulkan: no devices found")),
+                .any(|l| l.contains("load_backend: failed to load ggml-vulkan.dll")),
+            "{:?}",
+            result.output
+        );
+        // Verbose, so the server says which backend libraries it loaded or could not load;
+        // without it a failed load is silent and the list is just "(none)".
+        assert!(
+            result.output.iter().any(|l| l == "args: -v --list-devices"),
             "{:?}",
             result.output
         );
