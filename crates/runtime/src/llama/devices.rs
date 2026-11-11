@@ -401,6 +401,47 @@ mod tests {
         );
     }
 
+    /// The verbose listing as a Windows PC with a Radeon RX 9070 XT and an integrated
+    /// Radeon printed it (2026-11-11, llama.cpp b12110), log lines and all. The log lines
+    /// name the same cards in another form and must not be taken for device rows.
+    #[test]
+    fn the_verbose_listing_of_a_real_pc_is_read_correctly() {
+        let out = "0.00.452.470 D ggml_vulkan: Found 2 Vulkan devices:\r\n\
+                   0.00.454.294 D ggml_vulkan: 0 = AMD Radeon RX 9070 XT (AMD proprietary driver) | uma: 0 | fp16: 1 | bf16: 1 | fp4: 0 | warp size: 64 | shared memory: 32768 | int dot: 1 | matrix cores: KHR_coopmat\r\n\
+                   0.00.456.099 D ggml_vulkan: 1 = AMD Radeon(TM) Graphics (AMD proprietary driver) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 32768 | int dot: 1 | matrix cores: none\r\n\
+                   0.00.456.114 I load_backend: loaded Vulkan backend from C:\\Users\\u\\AppData\\Local\\harnessUI\\llama\\main\\ggml-vulkan.dll\r\n\
+                   0.00.485.747 I load_backend: loaded CPU backend from C:\\Users\\u\\AppData\\Local\\harnessUI\\llama\\main\\ggml-cpu-zen4.dll\r\n\
+                   Available devices:\r\n\
+                   \x20 Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15419 MiB free)\r\n\
+                   \x20 Vulkan1: AMD Radeon(TM) Graphics (16224 MiB, 15412 MiB free)\r\n";
+        let result = classify_devices(BackendKind::Vulkan, out);
+        assert_eq!(result.error, None);
+        let rows: Vec<(&str, &str, u64, u64)> = result
+            .devices
+            .iter()
+            .map(|d| {
+                (
+                    d.name.as_str(),
+                    d.description.as_str(),
+                    d.total_mib,
+                    d.free_mib,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Vulkan0", "AMD Radeon RX 9070 XT", 16304, 15419),
+                ("Vulkan1", "AMD Radeon(TM) Graphics", 16224, 15412),
+            ]
+        );
+        // The card, not the processor's own graphics, although both report about 16 GB.
+        assert_eq!(
+            pick_device(&result.devices).map(|d| d.name.as_str()),
+            Some("Vulkan0")
+        );
+    }
+
     #[test]
     fn parses_rows_and_ignores_noise() {
         let out = "load_backend: loaded CPU backend from /x/libggml-cpu.so\r\n\
