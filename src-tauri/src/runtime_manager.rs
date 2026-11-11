@@ -205,7 +205,11 @@ impl RuntimeManager {
                             Some(e.to_string())
                         }
                         _ => Some(crate::gpu::vulkan_no_device_message(
-                            vulkan_loader_present(),
+                            vulkan_loader_present()
+                                || b.dir
+                                    .join(runtime::VULKAN_FALLBACK_DIR)
+                                    .join(runtime::VULKAN_RUNTIME_FILE)
+                                    .is_file(),
                             &adapters,
                         )),
                     }

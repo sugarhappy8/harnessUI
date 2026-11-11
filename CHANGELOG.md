@@ -5,11 +5,13 @@ All notable changes, by milestone. Dates are UTC.
 ## Unreleased
 
 ### Fixed
+- **No GPU on a Windows PC whose graphics driver came without the Vulkan runtime.** Reported on a PC with a Radeon RX 9070 XT: the driver was installed, but `vulkan-1.dll` (the Vulkan runtime every Vulkan program loads first) was not, which happens when a driver is installed without its maker's full package. llama.cpp's Vulkan library then cannot be loaded, and it says nothing: the device list is just empty. The Windows installer now carries its own copy of the Vulkan runtime (the Khronos loader, 1.4.363.0 from LunarG, pinned by SHA-256) in `llama\main\vulkan`, and llama-server gets that folder as the last entry of its `PATH`. Windows looks there last, so a runtime installed with the driver is always used when there is one.
 - **A graphics card that Vulkan did not list was treated as the wrong card.** The app knew a PC's graphics card only from the Vulkan backend's device list, and counted the CPU as a card. When Vulkan listed nothing, the ROCm download said "supports only AMD Radeon RX 9000-series cards" and the CUDA download said "needs an NVIDIA graphics card", whatever card the PC had. The app now also asks Windows which display adapters are installed, and the downloads are decided from that.
 - The Vulkan backend's "no Vulkan device found" is replaced by a message that names the cards Windows sees and says what to do (or says that only a virtual adapter is visible, as in a virtual machine).
 
 ### Added
-- *Settings → Diagnostics → Run backend check* now lists the graphics adapters Windows reports with their driver versions, includes what llama-server printed when a backend found no device, and repeats that check with the system's full environment to show whether a driver needs a variable the app does not pass on.
+- *Settings → Diagnostics → Run backend check* now lists the graphics adapters Windows reports with their driver versions, includes what llama-server printed when a backend found no device (the check now asks for the verbose listing, which names the backend libraries that were loaded), and repeats that check with the system's full environment to show whether a driver needs a variable the app does not pass on.
+- CI loads llama.cpp's Vulkan library on the Windows runner with and without the app's copy of the Vulkan runtime, which reproduces the reported PC's situation.
 
 ## 0.0.1 (2026-11-11)
 

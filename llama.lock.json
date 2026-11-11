@@ -7,6 +7,17 @@
     "commit": "cd959bae99ff4bed22bef2604f45241c09bbb8c8",
     "repository": "https://github.com/ggml-org/llama.cpp"
   },
+  "vulkan_runtime": {
+    "comment": "The Khronos Vulkan runtime (vulkan-1.dll) for Windows, shipped as a fallback for PCs whose graphics driver did not install one. From LunarG's runtime components archive; the size and SHA-256 match the publisher's own listing (vulkan.lunarg.com/sdk/files.json).",
+    "version": "1.4.363.0",
+    "name": "VulkanRT-X64-1.4.363.0-Components.zip",
+    "url": "https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/VulkanRT-X64-1.4.363.0-Components.zip",
+    "size": 18211191,
+    "sha256": "a25a927aa8b9f0371048f1861cf88ac3b9bc9b1fb332c42d897c8ab32695769a",
+    "member": "VulkanRT-X64-1.4.363.0-Components/x64/vulkan-1.dll",
+    "member_sha256": "e1fcfc9489beefa6a6d9d11d6c7517f6a2b7f16e0d3fb8f4103bee0210f314a3",
+    "dir": "vulkan"
+  },
   "keep_files": [
     "llama-server.exe",
     "llama-server-impl.dll",

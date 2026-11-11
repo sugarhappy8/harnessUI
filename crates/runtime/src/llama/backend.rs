@@ -105,6 +105,71 @@ pub struct Backend {
     pub source: BackendSource,
 }
 
+/// The folder inside the installed runtime directory that holds the app's own copy of the
+/// Vulkan runtime (`vulkan-1.dll`, Windows only).
+///
+/// The Vulkan backend library needs that file, which normally comes with the graphics
+/// driver. A driver installed without its maker's full package (through Windows Update,
+/// or "driver only") can lack it, and then llama-server silently lists no GPU at all. The
+/// copy is in a folder of its own, not beside llama-server, on purpose: Windows looks in
+/// the program's folder first and along `PATH` last, so the runtime installed with the
+/// driver wins whenever there is one.
+pub const VULKAN_FALLBACK_DIR: &str = "vulkan";
+
+/// The file the fallback folder must hold to count.
+pub const VULKAN_RUNTIME_FILE: &str = "vulkan-1.dll";
+
+/// `PATH` for a llama-server started from `dir`: `parent` (the app's own `PATH`) followed
+/// by the fallback folder. `None` when there is no bundled runtime: `PATH` is then
+/// inherited unchanged.
+pub fn path_with_vulkan_fallback(
+    dir: &Path,
+    parent: Option<&std::ffi::OsStr>,
+    has_fallback: bool,
+    separator: char,
+) -> Option<std::ffi::OsString> {
+    if !has_fallback {
+        return None;
+    }
+    let mut out = std::ffi::OsString::new();
+    if let Some(parent) = parent {
+        let text = parent.to_string_lossy();
+        let trimmed = text.trim_end_matches(separator);
+        if !trimmed.is_empty() {
+            // Keep the original bytes when nothing was trimmed.
+            if trimmed.len() == text.len() {
+                out.push(parent);
+            } else {
+                out.push(trimmed);
+            }
+            out.push(separator.to_string());
+        }
+    }
+    out.push(dir.join(VULKAN_FALLBACK_DIR));
+    Some(out)
+}
+
+impl Backend {
+    /// The variables every llama-server of this backend gets on top of the minimal
+    /// environment: on Windows, `PATH` with the bundled Vulkan runtime as the last entry
+    /// when the runtime directory has one.
+    pub fn base_env(&self) -> crate::spawn::EnvSpec {
+        let env = crate::spawn::EnvSpec::minimal();
+        if !cfg!(windows) {
+            return env;
+        }
+        let has = self
+            .dir
+            .join(VULKAN_FALLBACK_DIR)
+            .join(VULKAN_RUNTIME_FILE)
+            .is_file();
+        match path_with_vulkan_fallback(&self.dir, std::env::var_os("PATH").as_deref(), has, ';') {
+            Some(path) => env.set("PATH", path.to_string_lossy().into_owned()),
+            None => env,
+        }
+    }
+}
+
 /// Where to look for runtime directories.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeLayout {
@@ -276,6 +341,47 @@ fn existing_file(dir: &Path, name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reported bug: a PC with a graphics driver but without the Vulkan runtime
+    /// (`vulkan-1.dll`). llama-server finds the app's copy through `PATH`, where Windows
+    /// looks last, so a runtime installed with the driver is always preferred.
+    #[test]
+    fn the_bundled_vulkan_runtime_is_a_last_resort_on_the_search_path() {
+        use std::ffi::OsString;
+        let dir = Path::new(r"C:\Users\u\AppData\Local\harnessUI\llama\main");
+        let fallback = dir.join(VULKAN_FALLBACK_DIR);
+        let expect = |path: &str| Some(OsString::from(path));
+        // After everything already on PATH.
+        assert_eq!(
+            path_with_vulkan_fallback(
+                dir,
+                Some("C:\\Windows\\System32;C:\\Tools".as_ref()),
+                true,
+                ';'
+            ),
+            expect(&format!(
+                "C:\\Windows\\System32;C:\\Tools;{}",
+                fallback.display()
+            ))
+        );
+        // No PATH at all, or an empty one: just the folder.
+        for parent in [None, Some("".as_ref())] {
+            assert_eq!(
+                path_with_vulkan_fallback(dir, parent, true, ';'),
+                expect(&fallback.display().to_string())
+            );
+        }
+        // A trailing separator does not produce an empty entry (the current folder).
+        assert_eq!(
+            path_with_vulkan_fallback(dir, Some("C:\\A;".as_ref()), true, ';'),
+            expect(&format!("C:\\A;{}", fallback.display()))
+        );
+        // No bundled runtime (a downloaded pack, macOS, Linux): PATH is left alone.
+        assert_eq!(
+            path_with_vulkan_fallback(dir, Some("C:\\A".as_ref()), false, ';'),
+            None
+        );
+    }
 
     const LOCK: &str = r#"{
       "llama_cpp": {"tag": "b1", "version": "0.1.0", "commit": "c", "repository": "r"},

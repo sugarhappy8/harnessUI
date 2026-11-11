@@ -1,7 +1,8 @@
 {
   "bundle": {
     "resources": {
-      "resources/llama/main/": "llama/main/"
+      "resources/llama/main/": "llama/main/",
+      "resources/llama/main/vulkan/": "llama/main/vulkan/"
     }
   }
 }

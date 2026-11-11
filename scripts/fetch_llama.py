@@ -55,7 +55,13 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def download(entry: dict) -> Path:
+# Where pinned files may come from. Everything is on GitHub except the Vulkan runtime,
+# which its publisher (LunarG, for the Khronos Group) serves from its own site.
+GITHUB = "https://github.com/"
+LUNARG = "https://sdk.lunarg.com/"
+
+
+def download(entry: dict, allowed: tuple[str, ...] = (GITHUB,)) -> Path:
     """Download one lock-file entry into the cache and verify size and SHA-256."""
     CACHE.mkdir(parents=True, exist_ok=True)
     dest = CACHE / entry["name"]
@@ -63,8 +69,8 @@ def download(entry: dict) -> Path:
         log(f"cached: {entry['name']}")
         return dest
     url = entry["url"]
-    if not url.startswith("https://github.com/"):
-        raise SystemExit(f"refusing non-GitHub URL in lock file: {url}")
+    if not url.startswith(allowed):
+        raise SystemExit(f"refusing a URL outside {allowed} in the lock file: {url}")
     log(f"downloading {url}")
     tmp = dest.with_suffix(dest.suffix + ".part")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -111,6 +117,33 @@ def find_vc_runtime() -> Path | None:
     return Path(matches[-1]).parent if matches else None
 
 
+def install_vulkan_runtime(target: Path) -> Path:
+    """Put the pinned Vulkan runtime (vulkan-1.dll) into <target>/vulkan/.
+
+    A Windows graphics driver installed without its maker's full package can lack the
+    Vulkan runtime; llama-server then loads no Vulkan backend and lists no GPU, silently.
+    The app adds this folder to the END of llama-server's PATH, where Windows looks last,
+    so a runtime that came with the driver is always preferred (see
+    crates/runtime/src/llama/backend.rs).
+    """
+    spec = LOCK["vulkan_runtime"]
+    archive = download(spec, allowed=(LUNARG,))
+    folder = target / spec["dir"]
+    folder.mkdir(parents=True, exist_ok=True)
+    out = folder / "vulkan-1.dll"
+    with zipfile.ZipFile(archive) as z:
+        data = z.read(spec["member"])
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != spec["member_sha256"]:
+        raise SystemExit(
+            f"{spec['member']} has sha256 {digest}, expected {spec['member_sha256']}"
+        )
+    out.write_bytes(data)
+    shutil.copy2(ROOT / "third_party" / "licenses" / "VulkanRT-License.txt", folder / "LICENSE-VulkanRT.txt")
+    log(f"vulkan runtime {spec['version']} ready: {out} ({len(data) / 1e6:.1f} MB)")
+    return out
+
+
 def windows() -> None:
     spec = LOCK["installer"]["windows-x86_64"]
     target = ROOT / "src-tauri" / "resources" / "llama" / spec["dir"]
@@ -126,6 +159,7 @@ def windows() -> None:
                 name = info.filename.rsplit("/", 1)[-1]
                 with z.open(info) as src, (target / name).open("wb") as dst:
                     shutil.copyfileobj(src, dst)
+    install_vulkan_runtime(target)
     vc = find_vc_runtime()
     if vc is None:
         if sys.platform == "win32":

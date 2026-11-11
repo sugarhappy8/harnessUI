@@ -172,7 +172,7 @@ pub fn cpu_device() -> Device {
 /// For GPU backends, rows of this backend's prefix with no memory are dropped, and an
 /// empty result is [`ProbeError::NoMatchingDevice`].
 pub async fn probe(backend: &Backend, timeout: Duration) -> ProbeResult {
-    probe_with_env(backend, timeout, EnvSpec::minimal()).await
+    probe_with_env(backend, timeout, backend.base_env()).await
 }
 
 /// [`probe`] with a chosen environment. The app always probes and launches with the
