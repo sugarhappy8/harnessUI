@@ -541,7 +541,7 @@ impl Picked {
 /// 1. A chat whose tools all fit under the cap is shown all of them.
 /// 2. Otherwise, always: the companions, `run_subagent`, `load_skill`; and everything
 ///    this chat was shown before (the list never shrinks).
-/// 3. Then, while there is room: what the chat used or found, the core file tools, and
+/// 3. Then, while there is room: the core file tools, what the chat used or found, and
 ///    the tools of the groups the request is about, best first, the groups taking turns.
 pub fn select(input: &Selecting<'_>) -> Vec<String> {
     let tools = input.tools;
@@ -564,6 +564,11 @@ pub fn select(input: &Selecting<'_>) -> Vec<String> {
             picked.keep(index);
         }
     }
+    for (index, tool) in tools.iter().enumerate() {
+        if is_core(tool) {
+            picked.add(index);
+        }
+    }
     for name in input.wanted {
         if let Some(index) = position(name) {
             picked.add(index);
@@ -578,11 +583,6 @@ pub fn select(input: &Selecting<'_>) -> Vec<String> {
             {
                 picked.add(index);
             }
-        }
-    }
-    for (index, tool) in tools.iter().enumerate() {
-        if is_core(tool) {
-            picked.add(index);
         }
     }
     if !picked.full() {

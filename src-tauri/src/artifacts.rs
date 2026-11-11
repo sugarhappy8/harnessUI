@@ -202,15 +202,16 @@ async fn answer<R: Runtime>(
             let (Some((id, version)), Some(state)) = (page, app.try_state::<AppState>()) else {
                 return refuse(StatusCode::NOT_FOUND, "Nothing here.");
             };
-            let content = match state
+            let (kind, content) = match state
                 .store
                 .artifact_for_preview(ArtifactId(id), version)
                 .await
             {
-                Ok(Some((_, v))) => v.content,
+                Ok(Some((artifact, v))) => (artifact.kind, v.content),
                 _ => return refuse(StatusCode::NOT_FOUND, "Nothing here."),
             };
-            match protocol::slice(&protocol::normalise_newlines(&content), from, to) {
+            // Cut from the same text the page was made of.
+            match protocol::slice(&protocol::prepared(kind, &content), from, to) {
                 Some(text) => protocol::script(Scripts::On, &origin, text),
                 None => refuse(StatusCode::NOT_FOUND, "Nothing here."),
             }

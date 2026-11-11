@@ -332,6 +332,111 @@ pub fn normalise_newlines(content: &str) -> Cow<'_, str> {
     }
 }
 
+/// Link types that make a page connect to another server without a request the page's
+/// rules could stop: a browser opens the connection for the page to use later, and no
+/// rule covers a connection that carries no request yet.
+const CONNECTION_HINTS: [&str; 2] = ["preconnect", "dns-prefetch"];
+
+/// The text with the `rel` of every `<link rel="preconnect">` and `<link
+/// rel="dns-prefetch">` renamed to `data-rel`, so that showing the page does not open a
+/// connection to the servers named there (pages a model writes very often name a font
+/// service this way).
+///
+/// This reads tags as they are usually written. It is a courtesy to ordinary pages, not
+/// a barrier: a page that wants such a connection can still make one from a script (see
+/// the notes on what a preview can do in ARCHITECTURE.md).
+pub fn without_connection_hints(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    // Same length, same offsets: only ASCII letters change.
+    let lower = text.to_ascii_lowercase();
+    let space = |i: usize| bytes[i].is_ascii_whitespace();
+    let mut renames: Vec<usize> = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find("<link") {
+        let mut i = from + found + "<link".len();
+        from = i;
+        if i >= len || !(space(i) || bytes[i] == b'/') {
+            continue;
+        }
+        loop {
+            while i < len && (space(i) || bytes[i] == b'/') {
+                i += 1;
+            }
+            if i >= len || bytes[i] == b'>' {
+                break;
+            }
+            let name = i;
+            while i < len && !space(i) && !matches!(bytes[i], b'=' | b'>' | b'/') {
+                i += 1;
+            }
+            let name_end = i;
+            if name_end == name {
+                // A stray "=".
+                i += 1;
+                continue;
+            }
+            while i < len && space(i) {
+                i += 1;
+            }
+            let mut value = (i, i);
+            if i < len && bytes[i] == b'=' {
+                i += 1;
+                while i < len && space(i) {
+                    i += 1;
+                }
+                if i < len && matches!(bytes[i], b'"' | b'\'') {
+                    let quote = bytes[i];
+                    i += 1;
+                    let start = i;
+                    while i < len && bytes[i] != quote {
+                        i += 1;
+                    }
+                    value = (start, i);
+                    i = (i + 1).min(len);
+                } else {
+                    let start = i;
+                    while i < len && !space(i) && bytes[i] != b'>' {
+                        i += 1;
+                    }
+                    value = (start, i);
+                }
+            }
+            if &lower[name..name_end] == "rel"
+                && lower[value.0..value.1]
+                    .split_ascii_whitespace()
+                    .any(|token| CONNECTION_HINTS.contains(&token))
+            {
+                renames.push(name);
+            }
+        }
+        from = from.max(i);
+    }
+    if renames.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(len + renames.len() * 5);
+    let mut copied = 0;
+    for at in renames {
+        out.push_str(&text[copied..at]);
+        out.push_str("data-");
+        copied = at;
+    }
+    out.push_str(&text[copied..]);
+    Cow::Owned(out)
+}
+
+/// An artifact's text as it is served: line breaks as `\n`, and for pages and pictures
+/// without connection hints. The page, the copy of it the bootstrap searches and the
+/// pieces served as scripts are all cut from this one text.
+pub fn prepared(kind: ArtifactKind, content: &str) -> String {
+    let content = normalise_newlines(content);
+    match kind {
+        ArtifactKind::Html | ArtifactKind::Svg => without_connection_hints(&content).into_owned(),
+        ArtifactKind::Markdown | ArtifactKind::Mermaid => content.into_owned(),
+    }
+}
+
 /// JSON as it can stand inside a `<script>` element: no `<` (so no `</script>` and no
 /// `<!--` can end or bend the element) and no raw line separators.
 pub fn script_json(value: &serde_json::Value) -> String {
@@ -404,7 +509,7 @@ body{padding:12px}svg{max-width:100%;height:auto}\
 /// An HTML artifact with its scripts. The bootstrap is the very first thing in the page,
 /// on the page's first line, so the lines of the model's text keep their numbers.
 pub fn html_page(about: &About<'_>, content: &str) -> String {
-    let content = normalise_newlines(content);
+    let content = prepared(ArtifactKind::Html, content);
     format!(
         "{DOCUMENT_START}{}{SCRIPT_END}{content}",
         bootstrap(about, ArtifactKind::Html, &content)
@@ -414,7 +519,7 @@ pub fn html_page(about: &About<'_>, content: &str) -> String {
 /// An SVG artifact: a page of the app's own that reads the picture as XML, reports what
 /// does not parse and shows the rest.
 pub fn svg_page(about: &About<'_>, content: &str) -> String {
-    let content = normalise_newlines(content);
+    let content = prepared(ArtifactKind::Svg, content);
     format!(
         "{DOCUMENT_START}{}{SCRIPT_END}<meta charset=\"utf-8\">{PAGE_STYLE}<body><script>{}{SCRIPT_END}",
         bootstrap(about, ArtifactKind::Svg, &content),
@@ -425,7 +530,7 @@ pub fn svg_page(about: &About<'_>, content: &str) -> String {
 /// A Mermaid artifact: a page of the app's own that loads the bundled library and draws
 /// the diagram with the library's strict setting.
 pub fn mermaid_page(about: &About<'_>, content: &str) -> String {
-    let content = normalise_newlines(content);
+    let content = prepared(ArtifactKind::Mermaid, content);
     format!(
         "{DOCUMENT_START}{}{SCRIPT_END}<meta charset=\"utf-8\">{PAGE_STYLE}<body><div id=\"diagram\"></div>\
          <script src=\"{}/__lib/mermaid.min.js\">{SCRIPT_END}<script>{}{SCRIPT_END}",
@@ -444,7 +549,7 @@ fn escape_text(text: &str) -> String {
 /// A page for when scripts are off: the model's HTML as it is (nothing in it runs), the
 /// SVG as markup, and for a diagram its source, since drawing it needs a script.
 pub fn static_page(kind: ArtifactKind, content: &str) -> String {
-    let content = normalise_newlines(content);
+    let content = prepared(kind, content);
     match kind {
         ArtifactKind::Html => format!("<!doctype html>{content}"),
         ArtifactKind::Svg => {
@@ -853,6 +958,89 @@ mod tests {
             .unwrap();
         assert!(!policy.to_str().unwrap().contains("allow-scripts"));
         assert_eq!(responses[4].1.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn connection_hints_are_taken_out_of_link_tags_and_nothing_else_changes() {
+        let changed = [
+            (
+                "<link rel=\"preconnect\" href=\"https://fonts.example.com\">",
+                "<link data-rel=\"preconnect\" href=\"https://fonts.example.com\">",
+            ),
+            (
+                "<LINK REL=Preconnect HREF=x>",
+                "<LINK data-REL=Preconnect HREF=x>",
+            ),
+            (
+                "<link href=x rel='dns-prefetch preconnect' crossorigin>",
+                "<link href=x data-rel='dns-prefetch preconnect' crossorigin>",
+            ),
+            (
+                "<link\n  rel = \"preconnect\"\n  href=x\n/>",
+                "<link\n  data-rel = \"preconnect\"\n  href=x\n/>",
+            ),
+            ("<link/rel=preconnect>", "<link/data-rel=preconnect>"),
+            (
+                "é<link crossorigin rel=dns-prefetch>ü",
+                "é<link crossorigin data-rel=dns-prefetch>ü",
+            ),
+            (
+                "<link rel=preconnect href=a><p>x</p><link rel=\"stylesheet preconnect\">",
+                "<link data-rel=preconnect href=a><p>x</p><link data-rel=\"stylesheet preconnect\">",
+            ),
+        ];
+        for (before, after) in changed {
+            assert_eq!(without_connection_hints(before), after, "{before}");
+            // The lines stay where they are.
+            assert_eq!(before.lines().count(), after.lines().count());
+        }
+        for same in [
+            "<link rel=\"stylesheet\" href=\"x.css\">",
+            "<link rel=icon href=x>",
+            "<link rel=\"preload\" as=font href=x>",
+            "<linker rel=\"preconnect\">",
+            "<a rel=\"preconnect\" href=x>y</a>",
+            "rel=preconnect, in a sentence",
+            "<link title=\"rel=preconnect\" rel=icon>",
+            "<link data-rel=preconnect>",
+            "<link relx=preconnect>",
+            "<link rel=preconnected>",
+            "<p>plain</p>",
+            "",
+        ] {
+            assert!(
+                matches!(without_connection_hints(same), Cow::Borrowed(_)),
+                "{same}"
+            );
+        }
+        // Cut-off and odd tags do not trip it.
+        for odd in [
+            "<link",
+            "<link ",
+            "<link rel",
+            "<link rel=",
+            "<link rel=\"preconnect",
+            "<link =x rel=preconnect",
+            "<link rel=preconnect",
+        ] {
+            let _ = without_connection_hints(odd);
+        }
+        assert_eq!(
+            without_connection_hints("<link =x rel=preconnect>"),
+            "<link =x data-rel=preconnect>"
+        );
+        // A page is served without them; a diagram's text is left alone.
+        assert_eq!(
+            prepared(ArtifactKind::Html, "<link rel=preconnect href=x>\r\n<p>"),
+            "<link data-rel=preconnect href=x>\n<p>"
+        );
+        assert_eq!(
+            prepared(
+                ArtifactKind::Mermaid,
+                "graph TD\r\n A[<link rel=preconnect>]"
+            ),
+            "graph TD\n A[<link rel=preconnect>]"
+        );
     }
 
     #[test]
