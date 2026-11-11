@@ -1,7 +1,8 @@
 name: Release
 
-# Builds the signed (when secrets exist) Windows installer and macOS disk image on
-# every version tag and attaches them to a draft GitHub release. With the updater key it
+# Builds the signed (when secrets exist) Windows installer and the universal macOS disk
+# image (Apple silicon and Intel in one file) on every version tag and attaches them to a
+# draft GitHub release. With the updater key it
 # also signs and uploads the model catalog, and a final job checks the release has
 # everything before you publish it.
 on:
@@ -44,17 +45,21 @@ jobs:
           - name: Windows
             os: windows-2025
             target: x86_64-pc-windows-msvc
+            rust-targets: x86_64-pc-windows-msvc
             args: --bundles nsis
+          # One disk image for every Mac, as in ci.yml: the app and the llama.cpp sidecars
+          # are built for both processors and joined.
           - name: macOS
             os: macos-26
-            target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin --bundles app,dmg
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin --bundles app,dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust-targets }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-${{ matrix.target }}
@@ -66,7 +71,7 @@ jobs:
       # The pinned llama.cpp runtime is not in the repository (ARCHITECTURE.md 7.1); the
       # bundle needs it, as in ci.yml. Only the Windows download is cached: fetch_llama.py
       # checks it against the SHA-256 in llama.lock.json on every run. The macOS binaries
-      # are always built fresh from the pinned commit for a release.
+      # are always built fresh from the pinned commit for a release, for both processors.
       - name: Cache the llama.cpp download (Windows)
         if: runner.os == 'Windows'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -76,7 +81,7 @@ jobs:
       - name: llama.cpp runtime (Windows, pinned Vulkan + CPU build)
         if: runner.os == 'Windows'
         run: python scripts/fetch_llama.py windows
-      - name: llama.cpp runtime (macOS, built from the pinned commit)
+      - name: llama.cpp runtime (macOS, built from the pinned commit for both processors)
         if: runner.os == 'macOS'
         run: python3 scripts/fetch_llama.py macos
       # Signing secrets are placeholders until the owner adds them (README, "Signing").
@@ -132,6 +137,15 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }} ${{ steps.updater.outputs.args }}
+      # The draft already has the disk image at this point. A bundle that is missing a
+      # processor, or that loads a library from outside the system, fails the run here so
+      # the draft is not published (the verify job below does not run after a failure).
+      - name: App bundle is universal and links system libraries only (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app=$(ls -d target/universal-apple-darwin/release/bundle/macos/*.app | head -1)
+          python3 scripts/fetch_llama.py check-macos-app "$app"
 
   # Catalog Refresh (src-tauri/src/hub.rs) downloads models.json and models.json.minisig
   # from the latest release and accepts them only if the signature verifies against the
@@ -197,8 +211,12 @@ jobs:
           gh release upload "$tag" release-catalog/models.json release-catalog/models.json.minisig --clobber --repo "$GITHUB_REPOSITORY"
 
   # Fails the run when the draft release is incomplete: an installer missing, and with
-  # the updater key, latest.json without both platforms or the catalog missing. Reading a
+  # the updater key, latest.json without every platform or the catalog missing. Reading a
   # draft release needs the workflow's write permission.
+  #
+  # The macOS build is universal, so tauri-action lists the same update archive under both
+  # darwin-aarch64 and darwin-x86_64 (and darwin-universal, which no updater asks for). An
+  # Intel Mac asks for darwin-x86_64: without that entry it would never see an update.
   verify:
     name: Verify the release
     needs: [keys, publish, catalog]
@@ -220,6 +238,7 @@ jobs:
           has() { grep -qxF "$1" <<< "$assets"; }
           grep -qE -- '-setup\.exe$' <<< "$assets" || { echo "::error::$tag has no Windows installer"; fail=1; }
           grep -qE -- '\.dmg$' <<< "$assets" || { echo "::error::$tag has no macOS disk image"; fail=1; }
+          grep -qE -- '_universal\.dmg$' <<< "$assets" || { echo "::error::$tag has no universal macOS disk image (Apple silicon and Intel)"; fail=1; }
           if [ "$UPDATER" = "true" ]; then
             for name in latest.json models.json models.json.minisig; do
               has "$name" || { echo "::error::$tag has no $name"; fail=1; }
@@ -227,8 +246,8 @@ jobs:
             if has latest.json; then
               mkdir -p release-check
               gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir release-check
-              if ! jq -e '.platforms["windows-x86_64"] and .platforms["darwin-aarch64"]' release-check/latest.json > /dev/null; then
-                echo "::error::latest.json must list both windows-x86_64 and darwin-aarch64"
+              if ! jq -e '.platforms["windows-x86_64"] and .platforms["darwin-aarch64"] and .platforms["darwin-x86_64"]' release-check/latest.json > /dev/null; then
+                echo "::error::latest.json must list windows-x86_64, darwin-aarch64 and darwin-x86_64"
                 jq '.platforms | keys' release-check/latest.json || true
                 fail=1
               fi

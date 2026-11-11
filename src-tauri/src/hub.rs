@@ -126,6 +126,12 @@ async fn detect(state: &AppState) -> (Target, HardwareDto) {
         runtime::BackendKind::Cuda,
         runtime::BackendKind::Rocm,
     ] {
+        // A Mac with an Intel processor runs models on the CPU unless Metal is picked by
+        // hand, so its suggestion is sized for system memory, not for the GPU.
+        // TODO(M9): size it for the GPU when the user has picked Metal on such a Mac.
+        if kind == runtime::BackendKind::Metal && crate::runtime_manager::auto_prefers_cpu() {
+            continue;
+        }
         let Some((b, p)) = backends
             .iter()
             .find(|(b, p)| b.kind == kind && p.is_usable())

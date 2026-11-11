@@ -8,7 +8,12 @@ Usage:
   python3 scripts/fetch_llama.py windows          # Windows: unpack the Vulkan+CPU build into
                                                   # src-tauri/resources/llama/main/
   python3 scripts/fetch_llama.py macos            # macOS: build llama-server and llama-fit-params
-                                                  # from the pinned commit into src-tauri/binaries/
+                                                  # from the pinned commit for Apple silicon and
+                                                  # for Intel, and join them into universal files
+                                                  # in src-tauri/binaries/
+  python3 scripts/fetch_llama.py check-macos-app <App.app>
+                                                  # macOS: every program in a built app bundle has
+                                                  # both processor parts and links system libraries only
   python3 scripts/fetch_llama.py verify-packs     # check every pack URL answers with the pinned size
   python3 scripts/fetch_llama.py linux            # Linux (development only): unpack the CPU build
                                                   # into .cache/llama-linux/ and print the directory
@@ -23,12 +28,14 @@ import glob
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
 import urllib.request
 import zipfile
 from pathlib import Path
+from typing import Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = json.loads((ROOT / "llama.lock.json").read_text(encoding="utf-8"))
@@ -145,48 +152,219 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
+# macOS: one build per processor, joined into universal files (ARCHITECTURE.md 7.1).
+# Each row: the lock-file platform key, the processor's name for clang, lipo and otool,
+# and the Rust target triple.
+MACOS_SLICES = (
+    ("macos-aarch64", "arm64", "aarch64-apple-darwin"),
+    ("macos-x86_64", "x86_64", "x86_64-apple-darwin"),
+)
+MACOS_ARCHS = tuple(arch for _, arch, _ in MACOS_SLICES)
+# `tauri build --target universal-apple-darwin` bundles `<name>-universal-apple-darwin`.
+MACOS_UNIVERSAL_TRIPLE = "universal-apple-darwin"
+MACOS_MIN_OS = "13.3"
+
+
+def sidecar_name(program: str, triple: str) -> str:
+    """The file name Tauri looks for in src-tauri/binaries/ for an externalBin entry.
+
+    The universal build needs three files per program: one per processor, because the app
+    is compiled once for each and its build script copies that processor's file, and the
+    universal one, which is what goes into the app bundle.
+    """
+    return f"{program}-{triple}"
+
+
+def macos_plan(lock: dict) -> dict:
+    """What to build on macOS, from the lock file's two macOS entries.
+
+    Both must build the same programs from the pinned commit, as static binaries for
+    macOS 13.3, each for its own processor.
+    """
+    slices = []
+    for platform_key, arch, triple in MACOS_SLICES:
+        spec = (lock["installer"].get(platform_key) or {}).get("build_from_source")
+        if not spec:
+            raise SystemExit(f"llama.lock.json has no build_from_source for {platform_key}")
+        flags = list(spec["cmake_flags"])
+        arch_flags = [f for f in flags if f.startswith("-DCMAKE_OSX_ARCHITECTURES=")]
+        if arch_flags != [f"-DCMAKE_OSX_ARCHITECTURES={arch}"]:
+            raise SystemExit(f"{platform_key}: cmake_flags must set CMAKE_OSX_ARCHITECTURES={arch}, found {arch_flags}")
+        for required in (f"-DCMAKE_OSX_DEPLOYMENT_TARGET={MACOS_MIN_OS}", "-DBUILD_SHARED_LIBS=OFF", "-DGGML_NATIVE=OFF"):
+            if required not in flags:
+                raise SystemExit(f"{platform_key}: cmake_flags must contain {required}")
+        slices.append(
+            {"platform": platform_key, "arch": arch, "triple": triple, "cmake_flags": flags,
+             "git": spec["git"], "commit": spec["commit"], "targets": list(spec["targets"])}
+        )
+    first = slices[0]
+    for other in slices[1:]:
+        for key in ("git", "commit", "targets"):
+            if other[key] != first[key]:
+                raise SystemExit(f"{other['platform']} and {first['platform']} differ in {key}")
+    if first["commit"] != lock["llama_cpp"]["commit"]:
+        raise SystemExit("the macOS build commit is not the pinned llama.cpp commit")
+    if not first["targets"]:
+        raise SystemExit("the macOS build has no targets")
+    return {"git": first["git"], "commit": first["commit"], "targets": first["targets"], "slices": slices}
+
+
+def cmake_configure_command(src: Path, build: Path, flags: Sequence[str]) -> list[str]:
+    return ["cmake", "-S", str(src), "-B", str(build), *flags]
+
+
+def cmake_build_command(build: Path, targets: Sequence[str], jobs: int) -> list[str]:
+    return ["cmake", "--build", str(build), "--config", "Release", "-j", str(jobs), "--target", *targets]
+
+
+def lipo_create_command(parts: Sequence[Path], output: Path) -> list[str]:
+    return ["lipo", "-create", "-output", str(output), *(str(p) for p in parts)]
+
+
+def linked_libraries(otool_libraries: str) -> list[str]:
+    """Library paths from `otool -L` output. Header lines (the file name, with or without
+    an architecture) start at the first column; library lines are indented."""
+    libs = []
+    for line in otool_libraries.splitlines():
+        if line[:1] in (" ", "\t") and line.strip():
+            libs.append(line.split()[0])
+    return libs
+
+
+def non_system_libraries(otool_libraries: str) -> list[str]:
+    """Linked libraries that do not come with macOS (Homebrew, @rpath, a build folder)."""
+    return [lib for lib in linked_libraries(otool_libraries) if not lib.startswith(("/usr/lib/", "/System/"))]
+
+
+def minimum_os_versions(otool_load_commands: str) -> list[str]:
+    """Minimum macOS versions named in `otool -l` output (one per LC_BUILD_VERSION or
+    LC_VERSION_MIN_MACOSX load command)."""
+    versions = []
+    command = None
+    for line in otool_load_commands.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "cmd":
+            command = parts[1]
+        elif len(parts) == 2 and parts[0] == "minos" and command == "LC_BUILD_VERSION":
+            versions.append(parts[1])
+        elif len(parts) == 2 and parts[0] == "version" and command == "LC_VERSION_MIN_MACOSX":
+            versions.append(parts[1])
+    return versions
+
+
+def version_command(path: Path, arch: str, host_arch: str) -> tuple[list[str], bool] | None:
+    """How to run one processor's part of `path` on this Mac: the command, and whether it
+    runs natively. An Apple silicon Mac can try the Intel part through Rosetta; an Intel
+    Mac cannot run the Apple silicon part at all (None)."""
+    if arch == host_arch:
+        return [str(path), "--version"], True
+    if host_arch == "arm64" and arch == "x86_64":
+        return ["arch", "-x86_64", str(path), "--version"], False
+    return None
+
+
+def tool_output(cmd: list[str]) -> str:
+    done = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise SystemExit(f"{' '.join(cmd)} failed with exit code {done.returncode}: {done.stderr.strip()}")
+    return done.stdout
+
+
+def macos_archs(path: Path) -> list[str]:
+    return tool_output(["lipo", "-archs", str(path)]).split()
+
+
+def check_macos_linkage(path: Path, archs: Sequence[str]) -> dict[str, list[str]]:
+    """`path` must contain exactly `archs`, and each part must link only system libraries.
+    Returns each part's minimum macOS versions."""
+    found = macos_archs(path)
+    if sorted(found) != sorted(archs):
+        raise SystemExit(f"{path.name} is built for {found}, expected {list(archs)}")
+    minimum = {}
+    for arch in archs:
+        bad = non_system_libraries(tool_output(["otool", "-arch", arch, "-L", str(path)]))
+        if bad:
+            raise SystemExit(f"{path.name} ({arch}) links a non-system library: {', '.join(bad)}")
+        minimum[arch] = minimum_os_versions(tool_output(["otool", "-arch", arch, "-l", str(path)]))
+    return minimum
+
+
+def check_macos_binary(path: Path, archs: Sequence[str]) -> None:
+    """A sidecar must contain exactly `archs`; each part must link only system libraries
+    and target macOS 13.3; and the part for this Mac's processor must run."""
+    for arch, minos in check_macos_linkage(path, archs).items():
+        if not minos or any(v not in (MACOS_MIN_OS, MACOS_MIN_OS + ".0") for v in minos):
+            raise SystemExit(f"{path.name} ({arch}) has minimum OS {minos}, expected {MACOS_MIN_OS}")
+    host = platform.machine()
+    for arch in archs:
+        command = version_command(path, arch, host)
+        if command is None:
+            log(f"not run here: the {arch} part of {path.name} (this Mac is {host})")
+            continue
+        cmd, native = command
+        if native:
+            run(cmd)
+            continue
+        # Rosetta may be missing, and before macOS 15 it has no AVX. The Intel Mac job in
+        # CI runs this part on a real Intel processor.
+        log("$ " + " ".join(cmd))
+        code = subprocess.run(cmd, check=False).returncode
+        if code != 0:
+            log(f"warning: the {arch} part of {path.name} did not run through Rosetta (exit {code})")
+
+
 def macos() -> None:
-    spec = LOCK["installer"]["macos-aarch64"]["build_from_source"]
-    src = CACHE / f"llama.cpp-{spec['commit'][:12]}"
-    build = src / "build-app"
+    plan = macos_plan(LOCK)
+    src = CACHE / f"llama.cpp-{plan['commit'][:12]}"
     if not (src / ".git").exists():
         src.mkdir(parents=True, exist_ok=True)
         run(["git", "init", "-q"], cwd=src)
-        run(["git", "remote", "add", "origin", spec["git"]], cwd=src)
-    run(["git", "fetch", "-q", "--depth", "1", "origin", spec["commit"]], cwd=src)
-    run(["git", "checkout", "-q", "--force", spec["commit"]], cwd=src)
+        run(["git", "remote", "add", "origin", plan["git"]], cwd=src)
+    run(["git", "fetch", "-q", "--depth", "1", "origin", plan["commit"]], cwd=src)
+    run(["git", "checkout", "-q", "--force", plan["commit"]], cwd=src)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=src, capture_output=True, text=True, check=True).stdout.strip()
-    if head != spec["commit"]:
-        raise SystemExit(f"checked out {head}, expected {spec['commit']}")
-    run(["cmake", "-S", str(src), "-B", str(build), *spec["cmake_flags"]])
-    jobs = str(os.cpu_count() or 4)
-    run(["cmake", "--build", str(build), "--config", "Release", "-j", jobs, "--target", *spec["targets"]])
+    if head != plan["commit"]:
+        raise SystemExit(f"checked out {head}, expected {plan['commit']}")
+    jobs = os.cpu_count() or 4
     out_dir = ROOT / "src-tauri" / "binaries"
     out_dir.mkdir(parents=True, exist_ok=True)
-    triple = "aarch64-apple-darwin"
-    for name in spec["targets"]:
-        built = build / "bin" / name
-        if not built.exists():
-            raise SystemExit(f"build did not produce {built}")
-        dest = out_dir / f"{name}-{triple}"
-        shutil.copy2(built, dest)
+    parts: dict[str, list[Path]] = {name: [] for name in plan["targets"]}
+    for piece in plan["slices"]:
+        build = src / f"build-app-{piece['arch']}"
+        run(cmake_configure_command(src, build, piece["cmake_flags"]))
+        run(cmake_build_command(build, plan["targets"], jobs))
+        for name in plan["targets"]:
+            built = build / "bin" / name
+            if not built.exists():
+                raise SystemExit(f"build did not produce {built}")
+            dest = out_dir / sidecar_name(name, piece["triple"])
+            shutil.copy2(built, dest)
+            os.chmod(dest, 0o755)
+            check_macos_binary(dest, [piece["arch"]])
+            parts[name].append(dest)
+    for name, files in parts.items():
+        dest = out_dir / sidecar_name(name, MACOS_UNIVERSAL_TRIPLE)
+        dest.unlink(missing_ok=True)
+        run(lipo_create_command(files, dest))
         os.chmod(dest, 0o755)
-        check_macos_binary(dest)
+        check_macos_binary(dest, MACOS_ARCHS)
     log(f"macOS runtime ready in {out_dir}")
 
 
-def check_macos_binary(path: Path) -> None:
-    """The sidecar must link only system libraries and target macOS 13.3."""
-    libs = subprocess.run(["otool", "-L", str(path)], capture_output=True, text=True, check=True).stdout
-    for line in libs.splitlines()[1:]:
-        lib = line.strip().split(" ")[0]
-        if lib and not (lib.startswith("/usr/lib/") or lib.startswith("/System/")):
-            raise SystemExit(f"{path.name} links a non-system library: {lib}")
-    load = subprocess.run(["otool", "-l", str(path)], capture_output=True, text=True, check=True).stdout
-    minos = [l.split()[-1] for l in load.splitlines() if l.strip().startswith("minos")]
-    if not minos or minos[0] not in ("13.3", "13.3.0"):
-        raise SystemExit(f"{path.name} has minimum OS {minos}, expected 13.3")
-    run([str(path), "--version"])
+def check_macos_app(app: Path) -> None:
+    """Every program in a built universal app bundle (the app itself and the llama.cpp
+    sidecars) must have both processor parts and link only system libraries: libgit2's
+    OpenSSL must be built in, never loaded from Homebrew (ARCHITECTURE.md 9.3)."""
+    programs = sorted(p for p in (app / "Contents" / "MacOS").iterdir() if p.is_file())
+    names = [p.name for p in programs]
+    for sidecar in LOCK["installer"][MACOS_SLICES[0][0]]["build_from_source"]["targets"]:
+        if sidecar not in names:
+            raise SystemExit(f"{app.name} does not contain {sidecar}")
+    if len(programs) < 3:
+        raise SystemExit(f"{app.name} should contain the app and its sidecars, found {names}")
+    for program in programs:
+        minimum = check_macos_linkage(program, MACOS_ARCHS)
+        log(f"{program.name}: {' '.join(MACOS_ARCHS)}, system libraries only, minimum macOS {minimum}")
 
 
 def linux() -> None:
@@ -225,6 +403,9 @@ def verify_packs() -> None:
 
 def main() -> None:
     commands = {"windows": windows, "macos": macos, "linux": linux, "verify-packs": verify_packs}
+    if len(sys.argv) == 3 and sys.argv[1] == "check-macos-app":
+        check_macos_app(Path(sys.argv[2]))
+        return
     if len(sys.argv) != 2 or sys.argv[1] not in commands:
         print(__doc__)
         raise SystemExit(2)

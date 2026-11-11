@@ -1,6 +1,6 @@
 # harnissUI
 
-A local-first desktop app that gives AI models running on your own hardware the agentic features of the big desktop assistants: chat, tools, skills and MCP. Windows 10/11 x64 and macOS 13.3+ on Apple Silicon.
+A local-first desktop app that gives AI models running on your own hardware the agentic features of the big desktop assistants: chat, tools, skills and MCP. Windows 10 and 11 (x64) and macOS 13.3 or later, on Apple silicon and Intel Macs.
 
 - Works offline once a model is downloaded. Network use happens only when you start it.
 - No account, no telemetry, no remote crash reporting. Logs stay on disk.
@@ -11,7 +11,7 @@ A local-first desktop app that gives AI models running on your own hardware the 
 ## What works today
 
 - **Chat with a local model.** Pick a `.gguf` file (model picker → *Open a GGUF file…*, or *Models → Installed → Import*). The app starts llama.cpp's `llama-server` on 127.0.0.1 with a random port and key, shows load progress, and streams replies with tokens/s. Stop, regenerate (with version arrows), edit-and-resend, per-chat model and system prompt, history search, rename and delete.
-- **Backends.** Windows ships Vulkan and CPU; macOS ships Metal (with CPU as the fallback). A backend that fails to load steps down (ROCm/CUDA → Vulkan → CPU) and a crashed server restarts up to three times in five minutes. *Settings → Diagnostics → Run backend check* lists every device per backend and, when a model is loaded, times a short generation on each, and saves the report to the logs folder (*Open logs folder*).
+- **Backends.** Windows ships Vulkan and CPU; macOS ships Metal (with CPU as the fallback). A Mac with an Intel processor runs models on the CPU by default, and Metal can be picked in *Settings → Local models*. A backend that fails to load steps down (ROCm/CUDA → Vulkan → CPU) and a crashed server restarts up to three times in five minutes. *Settings → Diagnostics → Run backend check* lists every device per backend and, when a model is loaded, times a short generation on each, and saves the report to the logs folder (*Open logs folder*).
 - **OpenAI-compatible endpoints.** *Settings → Endpoints* adds Ollama, LM Studio, vLLM or any OpenAI-compatible server; API keys go to the system keychain.
 - **Model manager.** *Models* (Ctrl+M) searches Hugging Face for GGUF chat models, shows every quantization with a fit verdict for your hardware, downloads with resume and SHA-256 verification, and lists installed models with badges read from the GGUF header. First run suggests a model from the bundled catalog. Vision models take image attachments; PDFs and text files can be attached too. ROCm and CUDA backends are one-click downloads in *Settings → Local models*, verified by SHA-256.
 - **Tools and approvals.** Approve a folder (*Settings → Permissions*, or for one chat under *Folders for this chat* in its *Tools* panel), then ask the model to read, search or edit files in it. Every tool call shows a card; actions ask first (*Allow once*, *Allow for this chat*, *Deny*), and every call is recorded in *Settings → Audit log*. The chat's *Tools* panel switches tool groups on and off and shows what they cost in context. The terminal and git tools are off by default; git works without Git installed through a built-in library (*Settings → Git*).
@@ -29,6 +29,11 @@ Every push builds a Windows installer and a macOS disk image in GitHub Actions.
 2. Under **Artifacts**, download `windows-installer` or `macos-dmg`.
 3. Unzip the artifact; it contains the `-setup.exe` or the `.dmg`.
 
+What you need:
+
+- **Windows:** Windows 10 or 11, 64-bit (x64). The app needs Microsoft's WebView2, which is part of Windows 11 and of up-to-date Windows 10; if it is missing, the installer downloads it (this needs an internet connection once).
+- **macOS:** macOS 13.3 or later. There is one disk image for every Mac, with Apple silicon or an Intel processor, so you do not need to know which one you have. Macs with an Intel processor run models on the CPU by default, which is slower; Metal can be picked in *Settings → Local models* and is worth trying on a Mac with a Radeon graphics card.
+
 ### Opening unsigned builds
 
 Builds are not code-signed yet (see [Signing](#signing)).
@@ -41,8 +46,8 @@ Builds are not code-signed yet (see [Signing](#signing)).
 Prerequisites:
 
 - Rust stable (1.95 or newer) and Node.js 22.
-- **Windows:** Visual Studio Build Tools with the C++ workload. WebView2 ships with Windows 10/11.
-- **macOS:** Xcode Command Line Tools.
+- **Windows:** Visual Studio Build Tools with the C++ workload. WebView2 is part of Windows 11 and of up-to-date Windows 10.
+- **macOS:** Xcode Command Line Tools and CMake (for the llama.cpp build below).
 - **Linux (development only, not a release target):** `sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev`.
 
 ```bash
@@ -55,6 +60,20 @@ npx tauri dev
 
 ```bash
 npx tauri build
+```
+
+On a Mac, the installer build is universal (Apple silicon and Intel in one app). Add both Rust targets, build llama.cpp for both processors from the pinned commit (into `src-tauri/binaries/`), then build:
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+```
+
+```bash
+python3 scripts/fetch_llama.py macos
+```
+
+```bash
+npx tauri build --target universal-apple-darwin
 ```
 
 Tests and checks, the same ones CI runs:

@@ -206,7 +206,8 @@ impl RuntimeManager {
     /// Backends that passed their probe, each with the device to use, in the order Metal,
     /// Vulkan, CUDA, ROCm, CPU. An explicit backend choice is looked up in this list, and
     /// the supervisor steps down through it after a failed start. Auto picks only Metal,
-    /// Vulkan or CPU from it (D3, [`auto_choice`]): CUDA and ROCm are manual choices.
+    /// Vulkan or CPU from it (D3, [`auto_choice`]): CUDA and ROCm are manual choices, and
+    /// so is Metal on a Mac with an Intel processor ([`auto_prefers_cpu_on`]).
     ///
     /// ROCm is launched with only the chosen card visible to the HIP runtime
     /// (`HIP_VISIBLE_DEVICES`), which then numbers it `ROCm0`: with the integrated GPU still
@@ -268,7 +269,7 @@ impl RuntimeManager {
         }
         let candidates = Self::candidates(&found, settings.device.as_deref());
         let first = match settings.backend.as_deref() {
-            Some(choice) => match candidates.iter().find(|c| kind_name(c.backend.kind) == choice) {
+            Some(choice) => match explicit_choice(&candidates, choice) {
                 Some(c) => c.clone(),
                 None => {
                     let why = found
@@ -551,12 +552,45 @@ pub fn kind_name(kind: BackendKind) -> &'static str {
     kind.as_str()
 }
 
-/// Auto's pick (D3): the first of Metal, Vulkan or CPU. CUDA and ROCm are only used when
-/// the user picks them, even when Vulkan does not work.
+/// Auto's pick (D3) on the computer this build runs on.
 fn auto_choice(candidates: &[Candidate]) -> Option<&Candidate> {
+    auto_choice_on(std::env::consts::OS, std::env::consts::ARCH, candidates)
+}
+
+/// Auto's pick (D3) for an operating system and processor (`std::env::consts` names):
+/// the first of Metal, Vulkan or CPU. CUDA and ROCm are only used when the user picks
+/// them, even when Vulkan does not work. Where [`auto_prefers_cpu_on`] holds, the CPU is
+/// taken before Metal when both work.
+fn auto_choice_on<'a>(os: &str, arch: &str, candidates: &'a [Candidate]) -> Option<&'a Candidate> {
+    let auto = |skip_metal: bool| {
+        candidates.iter().find(|c| match c.backend.kind {
+            BackendKind::Cuda | BackendKind::Rocm => false,
+            BackendKind::Metal => !skip_metal,
+            BackendKind::Vulkan | BackendKind::Cpu => true,
+        })
+    };
+    auto(auto_prefers_cpu_on(os, arch)).or_else(|| auto(false))
+}
+
+/// Whether Auto leaves Metal to an explicit choice: on a Mac with an Intel processor.
+/// llama.cpp's Metal backend is unreliable on Intel integrated graphics, so such a Mac
+/// runs models on the CPU unless the user picks Metal in Settings → Local models (worth
+/// trying with a Radeon GPU). The universal app runs natively on both kinds of Mac, so
+/// the processor this build was compiled for is the processor it runs on.
+pub fn auto_prefers_cpu_on(os: &str, arch: &str) -> bool {
+    os == "macos" && arch == "x86_64"
+}
+
+/// [`auto_prefers_cpu_on`] for the computer this build runs on.
+pub fn auto_prefers_cpu() -> bool {
+    auto_prefers_cpu_on(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// The candidate for a backend the user picked in Settings, by its lower-case name.
+fn explicit_choice<'a>(candidates: &'a [Candidate], choice: &str) -> Option<&'a Candidate> {
     candidates
         .iter()
-        .find(|c| !matches!(c.backend.kind, BackendKind::Cuda | BackendKind::Rocm))
+        .find(|c| kind_name(c.backend.kind) == choice)
 }
 
 /// The `--device` name and `HIP_VISIBLE_DEVICES` for a probed device. The probe's
@@ -798,5 +832,111 @@ mod tests {
         let candidates = RuntimeManager::candidates(&found, None);
         assert!(auto_choice(&candidates).is_none());
         assert_eq!(candidates.len(), 1);
+    }
+
+    /// A Mac with an Intel processor runs models on the CPU unless the user picks Metal:
+    /// Metal is unreliable on Intel integrated graphics. Every other computer keeps D3's
+    /// order.
+    #[test]
+    fn auto_prefers_the_cpu_over_metal_only_on_an_intel_mac() {
+        let mac = vec![
+            usable(
+                BackendKind::Metal,
+                vec![device("MTL0", "Intel(R) Iris(TM) Plus Graphics 655", 1536)],
+            ),
+            usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
+        ];
+        let candidates = RuntimeManager::candidates(&mac, None);
+        let kinds: Vec<BackendKind> = candidates.iter().map(|c| c.backend.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![BackendKind::Metal, BackendKind::Cpu],
+            "the explicit-choice and step-down list is the same on every Mac"
+        );
+        for (os, arch, want) in [
+            ("macos", "x86_64", BackendKind::Cpu),
+            ("macos", "aarch64", BackendKind::Metal),
+            ("windows", "x86_64", BackendKind::Metal),
+            ("windows", "aarch64", BackendKind::Metal),
+        ] {
+            assert_eq!(
+                auto_choice_on(os, arch, &candidates).map(|c| c.backend.kind),
+                Some(want),
+                "{os} {arch}"
+            );
+            assert_eq!(
+                auto_prefers_cpu_on(os, arch),
+                want == BackendKind::Cpu,
+                "{os} {arch}"
+            );
+        }
+
+        // Metal stays an explicit choice on an Intel Mac (it helps one with a Radeon GPU),
+        // and CPU stays one on Apple silicon.
+        let metal = explicit_choice(&candidates, "metal").expect("metal can be picked");
+        assert_eq!(metal.backend.kind, BackendKind::Metal);
+        assert_eq!(metal.device.as_deref(), Some("MTL0"));
+        assert_eq!(
+            explicit_choice(&candidates, "cpu").map(|c| c.backend.kind),
+            Some(BackendKind::Cpu)
+        );
+        assert!(explicit_choice(&candidates, "vulkan").is_none());
+
+        // With no CPU candidate, Auto on an Intel Mac still takes Metal over nothing.
+        let metal_only = RuntimeManager::candidates(&mac[..1], None);
+        assert_eq!(
+            auto_choice_on("macos", "x86_64", &metal_only).map(|c| c.backend.kind),
+            Some(BackendKind::Metal)
+        );
+    }
+
+    /// The bundled runtime serves both backends on either kind of Mac. Without the Intel
+    /// entry in the lock file an Intel Mac would be offered the CPU only, and Metal could
+    /// not be picked.
+    #[test]
+    fn the_lock_file_offers_cpu_and_metal_on_both_kinds_of_mac() {
+        let installer = &runtime::llama::lock::embedded().installer;
+        let intel = installer.get("macos-x86_64").expect("Intel Mac entry");
+        assert_eq!(intel.backends, vec![BackendKind::Cpu, BackendKind::Metal]);
+        let arm = installer.get("macos-aarch64").expect("Apple silicon entry");
+        assert_eq!(arm.backends, vec![BackendKind::Metal, BackendKind::Cpu]);
+    }
+
+    /// The Intel Mac rule is about Metal only: a Windows PC with the same processor
+    /// family keeps Vulkan first, and CUDA and ROCm stay manual everywhere.
+    #[test]
+    fn the_intel_mac_rule_does_not_change_other_backends() {
+        let pc = vec![
+            usable(
+                BackendKind::Vulkan,
+                vec![device("Vulkan0", "AMD Radeon RX 9070 XT", 16304)],
+            ),
+            usable(
+                BackendKind::Cuda,
+                vec![device("CUDA0", "NVIDIA GeForce RTX 4070", 12000)],
+            ),
+            usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
+        ];
+        let candidates = RuntimeManager::candidates(&pc, None);
+        for (os, arch) in [
+            ("windows", "x86_64"),
+            ("windows", "aarch64"),
+            ("macos", "aarch64"),
+            ("linux", "x86_64"),
+        ] {
+            assert_eq!(
+                auto_choice_on(os, arch, &candidates).map(|c| c.backend.kind),
+                Some(BackendKind::Vulkan),
+                "{os} {arch}"
+            );
+        }
+        // Only CUDA works: Auto finds nothing, on an Intel Mac as anywhere.
+        let cuda_only = RuntimeManager::candidates(&pc[1..2], None);
+        for (os, arch) in [("macos", "x86_64"), ("windows", "x86_64")] {
+            assert!(
+                auto_choice_on(os, arch, &cuda_only).is_none(),
+                "{os} {arch}"
+            );
+        }
     }
 }

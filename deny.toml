@@ -3,9 +3,9 @@
 
 [graph]
 all-features = false
-# Release targets only. Linux is a development platform; its GTK/WebKit dependency
+# Release targets only (the Mac build is universal: both processors). Linux is a development platform; its GTK/WebKit dependency
 # tree is not shipped.
-targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
+targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin"]
 
 [advisories]
 version = 2

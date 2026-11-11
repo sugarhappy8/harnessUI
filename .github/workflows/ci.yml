@@ -45,6 +45,8 @@ jobs:
       - run: bash scripts/check-spawn.sh
       # Every crate and npm package in the release targets must be listed with its license.
       - run: python3 scripts/notices.py --check
+      # The macOS llama.cpp build needs a Mac; its plan, file names and checks do not.
+      - run: python3 scripts/fetch_llama_test.py
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Cache llama.cpp and the test model
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -75,17 +77,25 @@ jobs:
           - name: Windows
             os: windows-2025
             target: x86_64-pc-windows-msvc
+            rust-targets: x86_64-pc-windows-msvc
+            test-target: x86_64-pc-windows-msvc
             args: --bundles nsis --no-sign
+          # One disk image for every Mac: the app and the llama.cpp sidecars are built for
+          # Apple silicon and for Intel and joined (ARCHITECTURE.md 7.1). The runner is an
+          # Apple silicon Mac, so the tests run on that half; the Intel half is run by the
+          # intel-mac job below.
           - name: macOS
             os: macos-26
-            target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin --bundles app,dmg
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            test-target: aarch64-apple-darwin
+            args: --target universal-apple-darwin --bundles app,dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust-targets }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
@@ -106,7 +116,7 @@ jobs:
       - name: llama.cpp runtime (Windows, pinned Vulkan + CPU build)
         if: runner.os == 'Windows'
         run: python scripts/fetch_llama.py windows
-      - name: llama.cpp runtime (macOS, built from the pinned commit)
+      - name: llama.cpp runtime (macOS, built from the pinned commit for both processors)
         if: runner.os == 'macOS' && steps.llama-cache.outputs.cache-hit != 'true'
         run: python3 scripts/fetch_llama.py macos
       - name: Contract-test environment
@@ -117,8 +127,8 @@ jobs:
             echo "LLAMA_SERVER_BIN=$(cygpath -w "$PWD/src-tauri/resources/llama/main/llama-server.exe")" >> "$GITHUB_ENV"
           else
             mkdir -p .cache/llama-mac
-            cp src-tauri/binaries/llama-server-aarch64-apple-darwin .cache/llama-mac/llama-server
-            cp src-tauri/binaries/llama-fit-params-aarch64-apple-darwin .cache/llama-mac/llama-fit-params
+            cp src-tauri/binaries/llama-server-universal-apple-darwin .cache/llama-mac/llama-server
+            cp src-tauri/binaries/llama-fit-params-universal-apple-darwin .cache/llama-mac/llama-fit-params
             echo "LLAMA_SERVER_BIN=$PWD/.cache/llama-mac/llama-server" >> "$GITHUB_ENV"
           fi
       # The browser tool's end-to-end tests run against the runner's Chrome on Windows,
@@ -128,21 +138,22 @@ jobs:
         shell: bash
         run: echo "HARNISS_BROWSER_E2E=1" >> "$GITHUB_ENV"
       - name: Workspace tests (${{ matrix.name }}, with llama-server contract tests)
-        run: cargo test --workspace --target ${{ matrix.target }}
+        run: cargo test --workspace --target ${{ matrix.test-target }}
       - name: Build the app
         run: npx tauri build ${{ matrix.args }}
-      # libgit2's HTTPS links OpenSSL on macOS: it must be built in, never loaded from
-      # Homebrew or anywhere else outside the system (ARCHITECTURE.md 9.3, build note).
-      - name: App binary links system libraries only (macOS)
+      # Every program in the bundle (the app and the two llama.cpp sidecars) must contain
+      # both processors, or the app would not start on one kind of Mac. libgit2's HTTPS
+      # links OpenSSL on macOS: it must be built in, never loaded from Homebrew or anywhere
+      # else outside the system, on either processor (ARCHITECTURE.md 9.3, build note).
+      - name: App bundle is universal and links system libraries only (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          bin=$(ls -d target/aarch64-apple-darwin/release/bundle/macos/*.app)/Contents/MacOS/app
-          [ -x "$bin" ] || bin=$(ls target/aarch64-apple-darwin/release/bundle/macos/*.app/Contents/MacOS/* | head -1)
-          otool -L "$bin"
-          if otool -L "$bin" | tail -n +2 | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/)'; then
-            echo "::error::the app binary links a library outside the system"; exit 1
-          fi
+          app=$(ls -d target/universal-apple-darwin/release/bundle/macos/*.app | head -1)
+          for program in "$app"/Contents/MacOS/*; do
+            echo "$program: $(lipo -archs "$program")"
+          done
+          python3 scripts/fetch_llama.py check-macos-app "$app"
       - name: Installer size check (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -163,5 +174,30 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-dmg
-          path: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
+
+  # The Apple silicon runner above cannot run the Intel half of the disk image. This job
+  # opens the same disk image on a Mac with an Intel processor and runs it there: the
+  # app's own binary, the sidecars, and a short generation on the CPU, which is what Auto
+  # uses on these Macs (ARCHITECTURE.md 7.2).
+  intel-mac:
+    name: Intel Mac smoke test
+    needs: build
+    # Also when only the Windows build failed; without a disk image the download fails.
+    if: ${{ !cancelled() }}
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-dmg
+          path: dmg
+      - name: Cache the test model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/models
+          key: test-model-${{ hashFiles('scripts/fetch_test_model.py') }}
+      - name: Run the disk image's programs on an Intel processor
+        shell: bash
+        run: bash scripts/intel-mac-smoke.sh dmg/*.dmg "$(python3 scripts/fetch_test_model.py .cache/models)"

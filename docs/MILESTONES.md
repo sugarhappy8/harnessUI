@@ -20,12 +20,22 @@ two capability files (main, overlay), every command explicitly granted; strict C
 on Linux, Windows (NSIS installer) and macOS (dmg); release workflow with signing
 placeholders; cargo-deny.
 
+**Builds:** Windows 10 and 11, x64: one NSIS installer (it downloads WebView2 on a PC that
+does not have it). macOS 13.3 or later: one universal disk image for Apple silicon and
+Intel Macs. The app and the two llama.cpp programs are each built for both processors and
+joined; CI checks every program in the bundle has both parts and links only system
+libraries, then runs the Intel part on an Intel Mac runner (the app's binary, the
+llama.cpp programs, and a short generation on the CPU).
+
 **Manual test (both machines):**
-1. Install the build. Windows: SmartScreen → *More info → Run anyway*. Mac: right-click → *Open*.
+1. Install the build. Windows: SmartScreen → *More info → Run anyway*. Mac: right-click → *Open*. The same `.dmg` is used on an Apple silicon Mac and on an Intel Mac.
 2. The window opens with the sidebar and an empty chat. *Settings* (gear, or Ctrl+, / Cmd+,) opens; switch Light / Dark / System and check the whole UI follows.
 3. Close and reopen: a second launch focuses the first window instead of opening another.
 
-**Known issues:** builds are unsigned (SmartScreen, Gatekeeper).
+**Known issues:** builds are unsigned (SmartScreen, Gatekeeper). The Intel half of the
+Mac build has only been run on a CI runner, not on a real Intel Mac with a screen; an Intel
+Mac that is patched to run a newer macOS than Apple supports and lacks AVX2 cannot run the
+bundled llama.cpp.
 
 **Dependencies:** the workspace set of ARCHITECTURE.md section 18 (Tauri 2.12 and its
 plugins: dialog, opener, clipboard-manager, global-shortcut, single-instance).
@@ -50,6 +60,7 @@ keychain; *Settings → Diagnostics → Run backend check*.
 **Manual test — Mac:**
 1. Step 1 as above.
 2. With the model loaded, backend check: Metal (Apple M5) and CPU, each with a timed generation.
+   On an Intel Mac the check lists CPU first, then Metal, each with a timed generation; a model loaded with Backend on Auto shows `cpu` in the header, and picking Metal in *Settings → Local models* and loading again shows `metal`.
 3. Steps 3 and 5 as above.
 4. Activity Monitor: one `llama-server`. Force-quit the app → `llama-server` exits within a few seconds (the reaper).
 5. Keychain: adding an endpoint key may raise a keychain prompt on this unsigned build (see Known issues).
@@ -83,7 +94,7 @@ ROCm and CUDA backend packs downloaded on demand and verified by SHA-256.
 5. Attach an image to a chat with a vision model (e.g. SmolVLM, Qwen2.5-VL): the model describes it. Attach a PDF: the model can quote it.
 
 **Manual test — Mac:**
-1. First run: the suggestion should fit 16 GB (about an 8B-class model at ~16k context).
+1. First run: the suggestion should fit 16 GB (about an 8B-class model at ~16k context). On an Intel Mac the suggestion is sized for free system memory, because models run on the CPU there.
 2. Steps 2, 3 and 5 as above (no backend packs on macOS).
 
 **Known issues:**

@@ -78,6 +78,47 @@
           "llama-fit-params"
         ]
       }
+    },
+    "macos-x86_64": {
+      "comment": "Macs with an Intel processor. scripts/fetch_llama.py builds this next to macos-aarch64 and joins the two into one universal binary. Every Intel Mac that runs macOS 13 has AVX2, FMA, F16C and BMI2 (Kaby Lake or newer), so they are switched on by name with processor detection off: the build machine is an Apple silicon Mac. CPU is listed first: Auto uses the CPU on these Macs and Metal is a manual choice (ARCHITECTURE.md 7.2).",
+      "dir": "main",
+      "backends": [
+        "cpu",
+        "metal"
+      ],
+      "build_from_source": {
+        "git": "https://github.com/ggml-org/llama.cpp",
+        "commit": "cd959bae99ff4bed22bef2604f45241c09bbb8c8",
+        "cmake_flags": [
+          "-DBUILD_SHARED_LIBS=OFF",
+          "-DGGML_METAL=ON",
+          "-DGGML_METAL_EMBED_LIBRARY=ON",
+          "-DGGML_NATIVE=OFF",
+          "-DGGML_SSE42=ON",
+          "-DGGML_AVX=ON",
+          "-DGGML_AVX2=ON",
+          "-DGGML_FMA=ON",
+          "-DGGML_F16C=ON",
+          "-DGGML_BMI2=ON",
+          "-DGGML_AVX512=OFF",
+          "-DGGML_ACCELERATE=ON",
+          "-DGGML_BLAS=ON",
+          "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3",
+          "-DCMAKE_OSX_ARCHITECTURES=x86_64",
+          "-DLLAMA_BUILD_IS_DEV=OFF",
+          "-DLLAMA_BUILD_TESTS=OFF",
+          "-DLLAMA_BUILD_EXAMPLES=OFF",
+          "-DLLAMA_CURL=OFF",
+          "-DLLAMA_OPENSSL=OFF",
+          "-DLLAMA_USE_PREBUILT_UI=OFF",
+          "-DLLAMA_BUILD_UI=OFF",
+          "-DCMAKE_BUILD_TYPE=Release"
+        ],
+        "targets": [
+          "llama-server",
+          "llama-fit-params"
+        ]
+      }
     }
   },
   "packs": [
