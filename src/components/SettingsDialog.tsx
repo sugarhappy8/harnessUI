@@ -24,6 +24,7 @@ import { SkillsSettings } from "./SkillsSettings";
 import { BrowserSettings } from "./BrowserSettings";
 import { ComputerSettings } from "./ComputerSettings";
 import { GitSettings } from "./GitSettings";
+import { SearchSettings } from "./SearchSettings";
 import type { ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -907,6 +908,7 @@ export function SettingsDialog(props: {
               <Tabs.Trigger value="git" className={tabClass}>Git</Tabs.Trigger>
               <Tabs.Trigger value="browser" className={tabClass}>Browser</Tabs.Trigger>
               <Tabs.Trigger value="computer" className={tabClass}>Computer use</Tabs.Trigger>
+              <Tabs.Trigger value="search" className={tabClass}>Search</Tabs.Trigger>
               <Tabs.Trigger value="permissions" className={tabClass}>Permissions</Tabs.Trigger>
               <Tabs.Trigger value="audit" className={tabClass}>Audit log</Tabs.Trigger>
               <Tabs.Trigger value="diagnostics" className={tabClass}>Diagnostics</Tabs.Trigger>
@@ -921,6 +923,7 @@ export function SettingsDialog(props: {
               <Tabs.Content value="git"><GitSettings /></Tabs.Content>
               <Tabs.Content value="browser"><BrowserSettings /></Tabs.Content>
               <Tabs.Content value="computer"><ComputerSettings /></Tabs.Content>
+              <Tabs.Content value="search"><SearchSettings /></Tabs.Content>
               <Tabs.Content value="permissions"><PermissionsSettings /></Tabs.Content>
               <Tabs.Content value="audit"><AuditLogView /></Tabs.Content>
               <Tabs.Content value="diagnostics"><Diagnostics /></Tabs.Content>

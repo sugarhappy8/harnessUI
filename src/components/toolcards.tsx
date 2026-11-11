@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { ToolCallView } from "./ToolCallCard";
 import { calledToolExtra } from "./CalledTool";
 import { artifactCardExtra } from "./artifacts/ArtifactCardExtra";
+import { readSourceExtra, searchHitsExtra } from "./sources/SearchHits";
 
 /**
  * What a feature adds to the card of its own tools, by tool name: a button that opens the
@@ -17,4 +18,7 @@ export const TOOL_CARD_EXTRAS: Record<string, (call: ToolCallView) => ReactNode>
   // An artifact the call saved: "Open artifact" shows it in the panel beside the chat.
   create_artifact: artifactCardExtra,
   update_artifact: artifactCardExtra,
+  // The sources a search found (number, title, site); a click shows one in the panel.
+  web_search: searchHitsExtra,
+  read_source: readSourceExtra,
 };

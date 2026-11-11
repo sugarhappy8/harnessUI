@@ -1406,9 +1406,320 @@ def p_tool_selection(c, notes):
         s.invoke("set_tool_selection", {"auto": True})
 
 
+@probe("artifacts")
+def p_artifacts(c, notes):
+    """Artifacts beside the chat (0.0.4): a page the model makes opens in the panel and
+    what goes wrong in it comes back as the tool's result; a fixed version renders clean;
+    a hostile page cannot reach the app, the window, storage or the network; the user
+    edits, restores and exports; a diagram is drawn with the bundled library."""
+    import re
+    s = c.s
+    chat = new_chat(c, tools=["create_artifact", "update_artifact", "read_artifact", "list_artifacts"])
+    # The preview sandbox is checked when the window starts. Scripts run only after that.
+    s.wait_for(lambda: s.invoke("artifact_isolation")["state"] == "proven", 40, "the preview sandbox check")
+    visible = 'aside[aria-label="Workbench"] iframe[data-artifact]:not(.hidden)'
+    # A debug build loads the app from the dev server, without the app's own policy. The two
+    # rules of that policy the panel has to live with are put in place here, as configured:
+    # which addresses the app may frame, and Trusted Types.
+    csp = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text())["app"]["security"]["csp"]
+    rules = [d.strip() for d in csp.split(";") if d.strip().startswith(("frame-src ", "require-trusted-types-for "))]
+    assert len(rules) == 2 and "artifact" in rules[0], rules
+    s.execute(
+        """
+        const m = document.createElement('meta');
+        m.httpEquiv = 'Content-Security-Policy';
+        m.content = arguments[0];
+        document.head.appendChild(m);
+        window.__blocked = [];
+        document.addEventListener('securitypolicyviolation', e => window.__blocked.push(e.violatedDirective + ' ' + e.blockedURI));
+        """, "; ".join(rules))
+
+    def results():
+        return [m["toolResult"] for m in messages(s, chat) if m["role"] == "tool"]
+
+    def frame():
+        return s.execute(
+            "const f = document.querySelector(arguments[0]);"
+            "return f ? {key: f.getAttribute('data-artifact'), src: f.getAttribute('src'), sandbox: f.getAttribute('sandbox'),"
+            " referrer: f.getAttribute('referrerpolicy')} : null;", visible)
+
+    def in_frame(script):
+        el = s.find(visible)
+        s._req("POST", s._s("/frame"), {"id": {"element-6066-11e4-a52e-4f735466cecf": el}})
+        try:
+            return s.execute(script)
+        finally:
+            s._req("POST", s._s("/frame"), {"id": None})
+
+    def call(name, arguments, say, ask):
+        Fake.queue.append({"tool_calls": [{"name": name, "arguments": arguments}]})
+        Fake.queue.append({"content": say})
+        before = len(results())
+        # A real click first: after a look inside the preview frame, the keys would go there.
+        s.click(s.find("textarea"))
+        send(s, ask)
+        wait_idle(s)
+        assert "Allow once" not in s.page_text(), f"{name} showed an approval card"
+        assert len(results()) == before + 1, f"{name} was not called ({ask!r} was not sent?)"
+        return results()[-1]["text"]
+
+    # ---- A page with a mistake: the panel opens on it and the result names the error.
+    broken = ("<!doctype html>\n<html>\n<body>\n<h1>Counter</h1>\n<button id=\"add\">Add one</button>\n<p id=\"n\">0</p>\n<script>\n"
+              "let count = 0;\n"
+              "document.getElementById('add').addEventListener('click', () => { count += 1; document.getElementById('n').textContent = count; });\n"
+              "startCounter();\n"
+              "</script>\n</body>\n</html>\n")
+    text = call("create_artifact", {"title": "Counter", "kind": "html", "content": broken}, "I made a counter page.", "make a counter page")
+    notes.append("create result: " + text.replace("\n", " | "))
+    made = re.match(r'Artifact #(\d+) "Counter" \(html\), version 1 saved\.\n', text)
+    assert made, text
+    aid = int(made.group(1))
+    assert "The preview reported 1 problem:" in text and "startCounter" in text, text
+    assert re.search(r"^- 10:\d+ .*startCounter", text, re.M), "the error is not placed on line 10 of the page: " + text
+    assert text.rstrip().endswith("save a corrected version with update_artifact."), text
+    f = frame()
+    notes.append("frame: " + json.dumps(f))
+    assert f and f["key"] == f"{aid}:1", f
+    assert f["sandbox"] == "allow-scripts" and f["referrer"] == "no-referrer", f
+    assert f["src"] == f"artifact://sandbox.localhost/{aid}/1", f
+    panel = s.execute("return document.querySelector('aside[aria-label=\"Workbench\"]').innerText;")
+    assert "The preview reported a problem" in panel and "startCounter" in panel, panel[-400:]
+    assert "Open artifact" in s.page_text(), "the tool card has no button for the artifact"
+    audit = [(a["tool"], a["decision"]) for a in s.invoke("list_audit", {"filter": {"chatId": chat}})]
+    assert ("create_artifact", "allowed_without_prompt") in audit, audit
+    s.click_button("Ask the model to fix these")
+    time.sleep(0.4)
+    box = s.execute("return document.querySelector('textarea').value;")
+    assert "reported this problem" in box and "startCounter" in box and f"artifact #{aid}, version 1" in box, box
+    s.execute(
+        "const el = document.querySelector('textarea');"
+        "Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, '');"
+        "el.dispatchEvent(new Event('input', {bubbles: true}));")
+    s.screenshot(str(OUT / "artifacts-problem.png"))
+
+    # ---- The fix: one exact piece replaced, and the preview is clean. The page works.
+    text = call("update_artifact", {"id": aid, "old_text": "startCounter();\n", "new_text": ""}, "Fixed.", "fix it")
+    notes.append("update result: " + text.replace("\n", " | "))
+    assert text.startswith(f'Artifact #{aid} "Counter" (html), version 2 saved.'), text
+    assert text.rstrip().endswith("Rendered without errors."), text
+    assert frame()["key"] == f"{aid}:2", frame()
+    assert in_frame("document.getElementById('add').click(); return document.getElementById('n').textContent;") == "1"
+    assert "The preview reported" not in s.execute("return document.querySelector('aside[aria-label=\"Workbench\"]').innerText;")
+
+    # ---- A hostile page. Every way out must be closed.
+    class Leak(BaseHTTPRequestHandler):
+        seen = []
+
+        def log_message(self, *a):
+            pass
+
+        def _any(self):
+            Leak.seen.append(f"{self.command} {self.path}")
+            body = b"leak"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = do_HEAD = do_OPTIONS = _any
+
+    leak_port = free_port()
+    leak = ThreadingHTTPServer(("127.0.0.1", leak_port), Leak)
+    threading.Thread(target=leak.serve_forever, daemon=True).start()
+    counts = {}
+
+    def tcp_counter(name):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(8)
+        counts[name] = 0
+
+        def accept():
+            while True:
+                try:
+                    conn, _ = sock.accept()
+                    counts[name] += 1
+                    conn.close()
+                except OSError:
+                    return
+        threading.Thread(target=accept, daemon=True).start()
+        return sock.getsockname()[1]
+
+    hint_in_markup, hint_from_script = tcp_counter("markup"), tcp_counter("script")
+    L = f"http://127.0.0.1:{leak_port}"
+    hostile = (
+        "<!doctype html>\n<html><head>\n"
+        f"<link rel=\"preconnect\" href=\"http://127.0.0.1:{hint_in_markup}\">\n"
+        "</head><body><pre id=\"out\"></pre>\n<script>\n(async function () {\n"
+        "  var F = {};\n"
+        f"  var L = \"{L}\";\n"
+        "  function rec(k, v) { F[k] = String(v).slice(0, 160); }\n"
+        "  function attempt(k, f) { try { rec(k, f()); } catch (e) { rec(k, 'threw ' + e); } }\n"
+        "  async function net(k, f) { try { rec(k, await f()); } catch (e) { rec(k, 'failed ' + e); } }\n"
+        "  rec('origin', window.origin);\n"
+        "  rec('tauri_internals', typeof window.__TAURI_INTERNALS__);\n"
+        "  rec('tauri_global', typeof window.__TAURI__);\n"
+        "  rec('ipc', typeof window.ipc);\n"
+        "  attempt('raw_channel', function () { return typeof window.webkit.messageHandlers.ipc.postMessage; });\n"
+        "  attempt('raw_call', function () { window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({cmd: 'create_chat', callback: 1, error: 2, payload: {modelRef: 'forged-by-a-preview'}, __TAURI_INVOKE_KEY__: 'forged'})); return 'sent'; });\n"
+        "  attempt('localStorage', function () { localStorage.setItem('a', '1'); return 'available'; });\n"
+        "  attempt('sessionStorage', function () { sessionStorage.setItem('a', '1'); return 'available'; });\n"
+        "  attempt('indexedDB', function () { indexedDB.open('x'); return 'available'; });\n"
+        "  attempt('cookie', function () { document.cookie = 'a=1'; return document.cookie === '' ? 'blocked' : 'available'; });\n"
+        "  attempt('parent_document', function () { return 'reached ' + window.parent.document.title; });\n"
+        "  attempt('parent_internals', function () { return 'reached ' + typeof window.parent.__TAURI_INTERNALS__; });\n"
+        "  attempt('top_location_read', function () { return 'reached ' + window.top.location.href; });\n"
+        "  attempt('top_navigate', function () { window.top.location = L + '/leak-topnav'; return 'assigned'; });\n"
+        "  attempt('window_open', function () { return window.open(L + '/leak-open') ? 'opened' : 'blocked'; });\n"
+        "  await net('fetch', async function () { var r = await fetch(L + '/leak-fetch'); return 'ok ' + r.status; });\n"
+        "  await net('fetch_nocors', async function () { var r = await fetch(L + '/leak-nocors', {mode: 'no-cors'}); return 'ok ' + r.type; });\n"
+        "  await net('fetch_ipc', async function () { var r = await fetch('ipc://localhost/create_chat', {method: 'POST', body: '{}'}); return 'ok ' + r.status; });\n"
+        "  await net('fetch_app', async function () { var r = await fetch('tauri://localhost/index.html'); return 'ok ' + r.status; });\n"
+        "  await net('xhr', function () { return new Promise(function (res) { var x = new XMLHttpRequest(); x.open('GET', L + '/leak-xhr'); x.onload = function () { res('ok ' + x.status); }; x.onerror = function () { res('failed'); }; try { x.send(); } catch (e) { res('threw ' + e); } }); });\n"
+        f"  await net('websocket', function () {{ return new Promise(function (res) {{ try {{ var w = new WebSocket('ws://127.0.0.1:{leak_port}/leak-ws'); w.onopen = function () {{ res('ok open'); }}; w.onerror = function () {{ res('failed'); }}; }} catch (e) {{ res('threw ' + e); }} setTimeout(function () {{ res('failed timeout'); }}, 700); }}); }});\n"
+        "  await net('eventsource', function () { return new Promise(function (res) { try { var w = new EventSource(L + '/leak-es'); w.onopen = function () { res('ok open'); }; w.onerror = function () { res('failed'); }; } catch (e) { res('threw ' + e); } setTimeout(function () { res('failed timeout'); }, 700); }); });\n"
+        "  attempt('beacon', function () { navigator.sendBeacon(L + '/leak-beacon', 'x'); return 'tried'; });\n"
+        "  await net('img', function () { return new Promise(function (res) { var i = new Image(); i.onload = function () { res('ok loaded'); }; i.onerror = function () { res('failed'); }; i.src = L + '/leak-img'; }); });\n"
+        "  attempt('form', function () { var f = document.createElement('form'); f.action = L + '/leak-form'; document.body.appendChild(f); f.submit(); return 'tried'; });\n"
+        "  attempt('child_frame', function () { var i = document.createElement('iframe'); i.src = L + '/leak-frame'; document.body.appendChild(i); return 'tried'; });\n"
+        f"  attempt('hint', function () {{ var l = document.createElement('link'); l.rel = 'preconnect'; l.href = 'http://127.0.0.1:{hint_from_script}'; document.head.appendChild(l); return 'tried'; }});\n"
+        "  attempt('eval', function () { return 'ran ' + eval('1 + 1'); });\n"
+        "  document.getElementById('out').textContent = JSON.stringify(F, null, 1);\n"
+        "  window.parent.postMessage({source: 'isolation-probe', findings: F}, '*');\n"
+        "  window.parent.postMessage({source: 'artifact', id: 1, version: 1, kind: 'problem', message: 'for another artifact'}, '*');\n"
+        "  window.parent.postMessage('junk', '*');\n"
+        "  setTimeout(function () { location.href = L + '/leak-selfnav'; }, 400);\n"
+        "})();\n</script>\n</body></html>\n")
+    s.execute(
+        """
+        window.__isolation = [];
+        window.addEventListener('message', e => {
+          if (e.data && e.data.source === 'isolation-probe') {
+            const f = document.querySelector(arguments[0]);
+            window.__isolation.push({findings: e.data.findings, origin: e.origin, fromFrame: !!f && e.source === f.contentWindow});
+          }
+        });
+        """, visible)
+    chats_before = len(s.invoke("list_chats", {"query": None}))
+    app_url = s.execute("return location.href;")
+    text = call("create_artifact", {"title": "Probe", "kind": "html", "content": hostile}, "Here is the probe.", "make the probe page")
+    probe_id = int(re.match(r"Artifact #(\d+) ", text).group(1))
+    got = s.wait_for(lambda: s.execute("return window.__isolation.length ? window.__isolation[0] : null;"), 15, "the probe's report")
+    time.sleep(1.5)  # the page's last attempt (it sends itself to another address) runs after its report
+    F = got["findings"]
+    notes.append("isolation probe: " + json.dumps(F, sort_keys=True))
+    assert got["fromFrame"] is True and got["origin"] == "null", got
+    assert F["origin"] == "null", F["origin"]
+    for key in ("tauri_internals", "tauri_global", "ipc"):
+        assert F[key] == "undefined", f"{key}: {F[key]}"
+    must_fail = ["localStorage", "sessionStorage", "indexedDB", "cookie", "parent_document", "parent_internals", "top_location_read",
+                 "top_navigate", "window_open", "fetch", "fetch_nocors", "fetch_ipc", "fetch_app", "xhr", "websocket", "eventsource",
+                 "img", "eval"]
+    for key in must_fail:
+        assert F[key].startswith(("threw", "failed", "blocked")), f"{key} was not stopped: {F[key]}"
+    # Whatever the page thought happened: nothing reached the server, the window is where it was.
+    assert Leak.seen == [], f"a request left the preview: {Leak.seen}"
+    assert s.execute("return location.href;") == app_url, "the window was moved"
+    assert counts["markup"] == 0, "a preconnect hint in the page's markup opened a connection"
+    notes.append(f"preconnect hint made by a script: {counts['script']} connection(s) (a browser opens these outside any page rule; see ARCHITECTURE)")
+    # The raw message channel exists in a WebKit frame, but a call without the app's key is dropped.
+    notes.append(f"raw channel in the frame: {F['raw_channel']}; forged call: {F['raw_call']}")
+    time.sleep(0.5)
+    after = s.invoke("list_chats", {"query": None})
+    assert len(after) == chats_before, "a forged call from the preview created a chat"
+    assert s.invoke("artifact_isolation")["state"] == "proven"
+    # Messages that are not this preview's own are ignored: no problem shown, nothing broken.
+    panel = s.execute("return document.querySelector('aside[aria-label=\"Workbench\"]').innerText;")
+    assert "for another artifact" not in panel, panel[-300:]
+    leak.shutdown()
+    s.screenshot(str(OUT / "artifacts-isolation.png"))
+
+    # ---- The user edits the source and saves version 3.
+    s.execute(
+        """
+        const row = [...document.querySelectorAll('ul[aria-label="Artifacts of this chat"] button')].find(b => b.innerText.includes('Counter'));
+        row.click();
+        """)
+    s.wait_for(lambda: (frame() or {}).get("key") == f"{aid}:2", 10, "the counter is shown again")
+    s.execute("[...document.querySelectorAll('[aria-label=\"Artifact view\"] [role=tab]')].find(b => b.innerText === 'Source').click();")
+    time.sleep(0.4)
+    edited = broken.replace("startCounter();\n", "").replace("<h1>Counter</h1>", "<h1>My counter</h1>")
+    s.execute(
+        """
+        const el = document.querySelector('aside[aria-label="Workbench"] textarea');
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, arguments[0]);
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        """, edited)
+    # Unsaved text survives a look at the preview.
+    s.execute("[...document.querySelectorAll('[aria-label=\"Artifact view\"] [role=tab]')].find(b => b.innerText === 'Preview').click();")
+    time.sleep(0.3)
+    s.execute("[...document.querySelectorAll('[aria-label=\"Artifact view\"] [role=tab]')].find(b => b.innerText === 'Source').click();")
+    time.sleep(0.3)
+    assert s.execute("return document.querySelector('aside[aria-label=\"Workbench\"] textarea').value;") == edited
+    s.click_button("Save as new version")
+    s.wait_for(lambda: s.invoke("get_artifact", {"chatId": chat, "id": aid, "version": None})["artifact"]["latestVersion"] == 3, 10, "version 3")
+    d = s.invoke("get_artifact", {"chatId": chat, "id": aid, "version": None})
+    assert d["content"] == edited and d["versions"][-1]["author"] == "user", d["versions"]
+
+    # ---- Restoring version 1 makes version 4.
+    for _ in range(2):
+        s.click_button("Older version")
+        time.sleep(0.5)
+    s.wait_for(lambda: "Version 1 of 3" in s.page_text(), 10, "version 1 shown")
+    s.click_button("Restore this version")
+    s.wait_for(lambda: s.invoke("get_artifact", {"chatId": chat, "id": aid, "version": None})["artifact"]["latestVersion"] == 4, 10, "version 4")
+    d = s.invoke("get_artifact", {"chatId": chat, "id": aid, "version": None})
+    assert d["content"] == broken, "version 4 is not the content of version 1"
+    assert d["versions"][-1]["note"] == "Restored from version 1" and d["versions"][-1]["author"] == "user", d["versions"][-1]
+    assert [v["version"] for v in d["versions"]] == [1, 2, 3, 4]
+
+    # ---- Export writes the chosen version to the chosen file, and only as a document of its kind.
+    target = OUT / "exported-counter.html"
+    written = s.invoke("export_artifact", {"chatId": chat, "id": aid, "version": 3, "path": str(target)})
+    assert pathlib.Path(written).read_text() == edited, written
+    try:
+        s.invoke("export_artifact", {"chatId": chat, "id": aid, "version": 3, "path": str(OUT / "exported-counter.sh")})
+        raise AssertionError("an export under another extension was accepted")
+    except WebDriverError as e:
+        assert "ends in .html" in str(e), e
+
+    # ---- A diagram is drawn by the library bundled in the app.
+    text = call("create_artifact", {"title": "Flow", "kind": "mermaid", "content": "graph TD\n  A[Start] --> B{Ready?}\n  B -->|yes| C[Done]\n"},
+                "Here is the diagram.", "draw the flow")
+    notes.append("mermaid result: " + text.replace("\n", " | "))
+    assert text.rstrip().endswith("Rendered without errors."), text
+    drawn = in_frame("const svg = document.querySelector('#diagram svg'); return svg ? svg.querySelectorAll('g').length : -1;")
+    assert drawn > 0, f"no diagram was drawn ({drawn})"
+    text = call("update_artifact", {"id": int(re.match(r"Artifact #(\d+) ", text).group(1)), "content": "graph TD\n  A --> \n  B -->"},
+                "Updated.", "break the diagram")
+    assert "The preview reported 1 problem:" in text and "Parse error" in text, text
+    s.screenshot(str(OUT / "artifacts-diagram.png"))
+
+    # ---- With the sandbox not proven, nothing a page wrote runs.
+    s.invoke("artifact_canary", {"nonce": "e2e"})
+    s.wait_for(lambda: "Scripts are switched off in previews" in s.page_text(), 10, "the notice")
+    assert s.invoke("artifact_isolation")["state"] == "broken"
+    s.wait_for(lambda: (frame() or {}).get("sandbox") == "", 10, "the frame without scripts")
+    text = call("create_artifact", {"title": "Quiet", "kind": "html", "content": "<p>hello</p><script>parent.postMessage({source: 'isolation-probe', findings: {ran: true}}, '*')</script>"},
+                "Made.", "make a quiet page")
+    assert "Not checked: scripts are switched off in previews" in text, text
+    time.sleep(1.0)
+    assert s.execute("return window.__isolation.length;") == 1, "a script ran in a preview while scripts were off"
+    s.click_button("Check again")
+    s.wait_for(lambda: s.invoke("artifact_isolation")["state"] == "proven", 30, "the check passes again")
+    # Under the app's own rules: no preview was refused its frame, and the panel broke no rule.
+    blocked = s.execute("return window.__blocked;")
+    notes.append("refused by the app's frame and Trusted Types rules: " + json.dumps(blocked))
+    assert not any("artifact" in b for b in blocked), blocked
+    assert not any("trusted" in b.lower() for b in blocked), blocked
+    del probe_id
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
-          p_tool_selection]
+          p_tool_selection, p_artifacts]
 
 
 def main() -> int:
