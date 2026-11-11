@@ -188,7 +188,15 @@ fn add(conn: &mut Connection, new: NewToolOutput) -> Result<ToolOutputInfo, Stor
     tx.execute(
         "INSERT INTO tool_outputs (chat_id, call_id, tool, content, bytes, lines, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![new.chat_id, call_id, tool, content, bytes, lines, created_at],
+        params![
+            new.chat_id,
+            call_id,
+            tool,
+            content,
+            bytes,
+            lines,
+            created_at
+        ],
     )?;
     let id = tx.last_insert_rowid();
     // The chat keeps its newest outputs.

@@ -4,6 +4,7 @@
 //! policy action with a preview (no side effects) and `call` runs the approved action,
 //! re-checking it immediately before any side effect.
 
+pub mod errors;
 pub mod files;
 pub mod git;
 mod git_fallback;
@@ -11,6 +12,7 @@ mod git_worker;
 pub mod pdf;
 mod skill_guard;
 pub mod skills;
+pub mod symbols;
 pub mod terminal;
 
 pub use files::FilesServer;

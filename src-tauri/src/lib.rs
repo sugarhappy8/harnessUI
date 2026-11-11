@@ -3,6 +3,8 @@
 //! Everything with logic worth testing lives in the workspace crates under `crates/`.
 //! This crate wires them to Tauri. See ARCHITECTURE.md section 5.
 
+mod approvals;
+mod artifacts;
 mod attachments;
 mod browser_cmd;
 mod chat;
@@ -33,6 +35,7 @@ mod skills_cmd;
 mod state;
 mod subagent;
 mod task;
+mod tool_catalog;
 mod tool_select;
 mod toolset;
 mod turns;
@@ -85,6 +88,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Artifact previews load from this scheme, into a sandboxed frame (artifacts.rs).
+        .register_asynchronous_uri_scheme_protocol(artifacts::SCHEME, artifacts::serve)
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             chat::list_chats,
@@ -150,6 +155,10 @@ pub fn run() {
             permissions::list_audit,
             permissions::export_audit,
             turns::resolve_approval,
+            approvals::get_approval_mode,
+            approvals::set_approval_mode,
+            approvals::get_allow_all_default,
+            approvals::set_allow_all_default,
             mcp_cmd::list_mcp_servers,
             mcp_cmd::preview_mcp_config,
             mcp_cmd::add_mcp_servers,
@@ -256,6 +265,8 @@ pub fn run() {
                 grants: Default::default(),
             });
             app.manage(turns::PendingApprovals::default());
+            // "Allow all in every chat", if the user switched it on (a saved setting).
+            approvals::load_default(&handle);
             // Before the startup check below, which records what it finds here.
             app.manage(updates::LastFound::default());
             toolset::forward_events(handle.clone(), host);
@@ -361,8 +372,12 @@ fn create_windows(app: &mut tauri::App) -> tauri::Result<()> {
     let dev = cfg!(debug_assertions);
 
     for config in &window_configs {
+        // A frame inside the main window may load an artifact preview (artifacts.rs).
+        let previews = config.label == MAIN_WINDOW;
         let mut builder = WebviewWindowBuilder::from_config(app.handle(), config)?
-            .on_navigation(move |url| navigation::is_allowed(url, dev))
+            .on_navigation(move |url| {
+                navigation::is_allowed(url, dev) || (previews && artifacts::is_frame_navigation(url))
+            })
             .on_new_window(|_url, _features| NewWindowResponse::Deny);
         if config.label == MAIN_WINDOW {
             // Created hidden and shown below with the theme's background: a window is

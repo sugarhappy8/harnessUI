@@ -86,6 +86,8 @@ const PS_KINDS: &[&str] = &[
     "verbatim_string_characters",
 ];
 const PS_TOKENS: &[&str] = &[";", "|", "&&", "||", " ", "\n"];
+/// A PowerShell double-quoted string: never a plain word for [`parse`].
+const PS_EXPANDABLE: &str = "expandable_string_literal";
 
 fn complex(reason: impl Into<String>) -> Parsed {
     Parsed::Complex {
@@ -95,6 +97,17 @@ fn complex(reason: impl Into<String>) -> Parsed {
 
 /// Parses `line` with the grammar for `shell`.
 pub fn parse(shell: Shell, line: &str) -> Parsed {
+    parse_with(shell, line, false)
+}
+
+/// Like [`parse`], but a PowerShell double-quoted string with nothing to expand (no `$`,
+/// no backtick) counts as the literal it is. Only the Allow-all classification uses this
+/// (`crate::allow_all`): what a grant can cover is still decided by [`parse`].
+pub(crate) fn parse_lenient(shell: Shell, line: &str) -> Parsed {
+    parse_with(shell, line, true)
+}
+
+fn parse_with(shell: Shell, line: &str, lenient: bool) -> Parsed {
     if line.trim().is_empty() {
         return complex("the command is empty");
     }
@@ -118,7 +131,7 @@ pub fn parse(shell: Shell, line: &str) -> Parsed {
     }
     match shell {
         Shell::Posix => posix(root, line),
-        Shell::PowerShell => powershell(root, line),
+        Shell::PowerShell => powershell(root, line, lenient),
     }
 }
 
@@ -262,8 +275,15 @@ fn posix(root: Node, src: &str) -> Parsed {
     Parsed::Plain(commands)
 }
 
-fn powershell(root: Node, src: &str) -> Parsed {
-    if let Err(why) = all_allowed(root, src, PS_KINDS, PS_TOKENS) {
+fn powershell(root: Node, src: &str, lenient: bool) -> Parsed {
+    let checked = if lenient {
+        let mut kinds = PS_KINDS.to_vec();
+        kinds.push(PS_EXPANDABLE);
+        all_allowed(root, src, &kinds, PS_TOKENS)
+    } else {
+        all_allowed(root, src, PS_KINDS, PS_TOKENS)
+    };
+    if let Err(why) = checked {
         return complex(why);
     }
     let mut found: Vec<Node> = Vec::new();
@@ -304,7 +324,7 @@ fn powershell(root: Node, src: &str) -> Parsed {
                                     Some(t.to_string())
                                 }
                             }
-                            "array_literal_expression" => single_quoted(el, src),
+                            "array_literal_expression" => quoted(el, src, lenient),
                             _ => None,
                         };
                         match w {
@@ -331,14 +351,11 @@ fn powershell(root: Node, src: &str) -> Parsed {
     Parsed::Plain(commands)
 }
 
-/// `'text'` wrapped as array_literal_expression > unary_expression > string_literal.
-fn single_quoted(n: Node, src: &str) -> Option<String> {
+/// `'text'` wrapped as array_literal_expression > unary_expression > string_literal. With
+/// `lenient`, also `"text"` that holds nothing to expand.
+fn quoted(n: Node, src: &str, lenient: bool) -> Option<String> {
     let mut cur = n;
-    for want in [
-        "unary_expression",
-        "string_literal",
-        "verbatim_string_characters",
-    ] {
+    for want in ["unary_expression", "string_literal"] {
         let mut c = cur.walk();
         let kids: Vec<Node> = cur.named_children(&mut c).collect();
         match kids.as_slice() {
@@ -346,12 +363,29 @@ fn single_quoted(n: Node, src: &str) -> Option<String> {
             _ => return None,
         }
     }
-    let t = text(cur, src);
-    Some(
-        t.trim_start_matches('\'')
-            .trim_end_matches('\'')
-            .replace("''", "'"),
-    )
+    let mut c = cur.walk();
+    let kids: Vec<Node> = cur.named_children(&mut c).collect();
+    let [leaf] = kids.as_slice() else {
+        return None;
+    };
+    let t = text(*leaf, src);
+    match leaf.kind() {
+        "verbatim_string_characters" => Some(
+            t.trim_start_matches('\'')
+                .trim_end_matches('\'')
+                .replace("''", "'"),
+        ),
+        PS_EXPANDABLE if lenient => {
+            // A plain literal only: nothing inside it (a variable, a sub-expression), and
+            // no `$` or backtick in its text.
+            let inner = t.strip_prefix('"')?.strip_suffix('"')?;
+            if leaf.named_child_count() > 0 || inner.contains(['$', '`']) {
+                return None;
+            }
+            Some(inner.replace("\"\"", "\""))
+        }
+        _ => None,
+    }
 }
 
 /// The program's base name, lower-cased, without a Windows extension.
@@ -369,7 +403,7 @@ pub fn program_name(program: &str) -> String {
     base
 }
 
-const DELETES: &[&str] = &[
+pub(crate) const DELETES: &[&str] = &[
     "rm",
     "unlink",
     "rmdir",
@@ -383,8 +417,8 @@ const DELETES: &[&str] = &[
     "trash",
     "wipe",
 ];
-const ELEVATION: &[&str] = &["sudo", "doas", "su", "runas", "pkexec", "gsudo"];
-const SYSTEM: &[&str] = &[
+pub(crate) const ELEVATION: &[&str] = &["sudo", "doas", "su", "runas", "pkexec", "gsudo"];
+pub(crate) const SYSTEM: &[&str] = &[
     "format",
     "diskpart",
     "dd",
@@ -419,7 +453,7 @@ const SYSTEM: &[&str] = &[
     "vssadmin",
     "wbadmin",
 ];
-const WRAPPERS: &[&str] = &[
+pub(crate) const WRAPPERS: &[&str] = &[
     "env",
     "xargs",
     "nohup",
@@ -451,7 +485,7 @@ const WRAPPERS: &[&str] = &[
     "open",
 ];
 /// Interpreter → flags that take inline code.
-const INLINE: &[(&str, &[&str])] = &[
+pub(crate) const INLINE: &[(&str, &[&str])] = &[
     ("python", &["-c"]),
     ("python3", &["-c"]),
     ("py", &["-c"]),
@@ -487,7 +521,7 @@ const GIT_READ: &[&str] = &[
     "describe",
     "shortlog",
 ];
-const GIT_KNOWN: &[&str] = &[
+pub(crate) const GIT_KNOWN: &[&str] = &[
     "status",
     "log",
     "diff",
@@ -709,6 +743,7 @@ pub fn is_read_only(cmd: &SimpleCommand) -> bool {
 /// Classifies a command line for the policy engine.
 pub fn classify(shell: Shell, line: &str) -> Verdict {
     let parsed = parse(shell, line);
+    let mode = crate::allow_all::command_facts(shell, line, &parsed);
     match &parsed {
         Parsed::Plain(cmds) => {
             let always_ask = cmds.iter().find_map(always_ask);
@@ -717,8 +752,8 @@ pub fn classify(shell: Shell, line: &str) -> Verdict {
                 parsed,
                 always_ask,
                 read_only,
-                keep_asking: None,
-                network: false,
+                keep_asking: mode.keep_asking,
+                network: mode.network,
             }
         }
         Parsed::Complex { reason } => Verdict {
@@ -727,8 +762,8 @@ pub fn classify(shell: Shell, line: &str) -> Verdict {
             )),
             parsed,
             read_only: false,
-            keep_asking: None,
-            network: false,
+            keep_asking: mode.keep_asking,
+            network: mode.network,
         },
     }
 }

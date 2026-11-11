@@ -297,9 +297,7 @@ fn similarity(a: &str, a_pairs: &[(char, char)], b: &str) -> f64 {
         }
     }
     // Small counts; the precision of f64 is not a concern.
-    #[allow(clippy::cast_precision_loss)]
-    let score = (2 * common) as f64 / (a_pairs.len() + b_pairs.len()) as f64;
-    score
+    (2 * common) as f64 / (a_pairs.len() + b_pairs.len()) as f64
 }
 
 /// The lines of `text` most like `old_text`, best first, as `(line number, line)`. The
@@ -373,7 +371,12 @@ pub fn edit_problem_message(problem: &EditProblem, ctx: &EditContext<'_>) -> Str
         let mut out: Vec<String> = lines
             .iter()
             .take(MAX_MATCHES_LISTED)
-            .map(|n| format!("line {n}: {}", quote_line(all.get(n - 1).copied().unwrap_or(""))))
+            .map(|n| {
+                format!(
+                    "line {n}: {}",
+                    quote_line(all.get(n - 1).copied().unwrap_or(""))
+                )
+            })
             .collect();
         if lines.len() > MAX_MATCHES_LISTED {
             out.push(format!("(and {} more)", lines.len() - MAX_MATCHES_LISTED));
@@ -698,10 +701,12 @@ mod tests {
         // Not found: line numbers and the call that shows them, no text of the file.
         let missing = "let rate = 0.25;";
         for known in [Known::No, Known::Stale] {
-            let message =
-                edit_problem_message(&EditProblem::NotFound, &ctx(FILE, missing, known));
+            let message = edit_problem_message(&EditProblem::NotFound, &ctx(FILE, missing, known));
             for line in FILE.lines().filter(|l| l.trim().len() > 3) {
-                assert!(!message.contains(line.trim()), "{known:?} quoted {line:?}: {message}");
+                assert!(
+                    !message.contains(line.trim()),
+                    "{known:?} quoted {line:?}: {message}"
+                );
             }
         }
         assert_eq!(
@@ -821,7 +826,10 @@ mod tests {
         );
         // Several lines, with different indentation on each.
         assert_eq!(
-            near_miss(FILE, "fn tax() {\nlet total = price * qty;\n  let rate = 0.2;"),
+            near_miss(
+                FILE,
+                "fn tax() {\nlet total = price * qty;\n  let rate = 0.2;"
+            ),
             Some(NearMiss::Whitespace { line: 6 })
         );
         // Letter case.
@@ -829,7 +837,10 @@ mod tests {
             near_miss(FILE, "    Let Rate = 0.2;"),
             Some(NearMiss::WhitespaceAndCase { line: 8 })
         );
-        assert_eq!(near_miss(FILE, "FN TAX()"), Some(NearMiss::Case { line: 6 }));
+        assert_eq!(
+            near_miss(FILE, "FN TAX()"),
+            Some(NearMiss::Case { line: 6 })
+        );
         assert!(
             edit_problem_message(&EditProblem::NotFound, &ctx(FILE, "FN TAX()", Known::No))
                 .starts_with("old_text was not found in /w/calc.rs. The text at line 6 is the same apart from upper and lower case. The closest line is 6.")
@@ -857,10 +868,19 @@ mod tests {
     fn quoted_lines_are_cut_and_made_visible() {
         assert_eq!(quote_line("plain\r\n"), "plain");
         assert_eq!(quote_line("\tindented"), "\tindented");
-        assert_eq!(quote_line("a\u{202E}b\u{1b}[31m"), "a\\u{202E}b\\u{001B}[31m");
+        assert_eq!(
+            quote_line("a\u{202E}b\u{1b}[31m"),
+            "a\\u{202E}b\\u{001B}[31m"
+        );
         let long = "é".repeat(MAX_LINE_CHARS + 1);
-        assert_eq!(quote_line(&long), format!("{}…", "é".repeat(MAX_LINE_CHARS)));
-        assert_eq!(quote_line(&"é".repeat(MAX_LINE_CHARS)).chars().count(), MAX_LINE_CHARS);
+        assert_eq!(
+            quote_line(&long),
+            format!("{}…", "é".repeat(MAX_LINE_CHARS))
+        );
+        assert_eq!(
+            quote_line(&"é".repeat(MAX_LINE_CHARS)).chars().count(),
+            MAX_LINE_CHARS
+        );
     }
 
     #[test]
@@ -891,10 +911,7 @@ mod tests {
             similar_names("readme.md", folder.clone(), 5),
             ["README.md", "readme.txt"]
         );
-        assert_eq!(
-            similar_names("notes.md", folder.clone(), 5),
-            ["notes.txt"]
-        );
+        assert_eq!(similar_names("notes.md", folder.clone(), 5), ["notes.txt"]);
         assert_eq!(
             similar_names("ntoes.txt", folder.clone(), 5),
             ["nodes.txt", "notes.txt", "note.txt"]
@@ -903,12 +920,18 @@ mod tests {
             similar_names("config.json", folder.clone(), 5),
             ["config.yaml", "config.yml"]
         );
-        assert!(similar_names("main.rs", folder.clone(), 5).is_empty(), "the name itself is not offered");
+        assert!(
+            similar_names("main.rs", folder.clone(), 5).is_empty(),
+            "the name itself is not offered"
+        );
         assert!(similar_names("zzz", folder.clone(), 5).is_empty());
         assert!(similar_names("", folder.clone(), 5).is_empty());
         // Capped.
         let many: Vec<String> = (0..20).map(|i| format!("file{i:02}.txt")).collect();
-        assert_eq!(similar_names("file.txt", many, MAX_SIMILAR_NAMES).len(), MAX_SIMILAR_NAMES);
+        assert_eq!(
+            similar_names("file.txt", many, MAX_SIMILAR_NAMES).len(),
+            MAX_SIMILAR_NAMES
+        );
     }
 
     #[test]
@@ -939,11 +962,25 @@ mod tests {
         );
         // Numbers count from where the caller says the slice starts.
         let (found, _) = error_lines(&lines[10..], 11, 2);
-        assert_eq!(found, [(11, "Permission denied"), (12, "No such file or directory")]);
-        for plain in ["Compiling app", "warning: unused", "note: fine", "all good", ""] {
+        assert_eq!(
+            found,
+            [(11, "Permission denied"), (12, "No such file or directory")]
+        );
+        for plain in [
+            "Compiling app",
+            "warning: unused",
+            "note: fine",
+            "all good",
+            "",
+        ] {
             assert!(!looks_like_error(plain), "{plain}");
         }
-        for bad in ["FAIL src/a.test.ts", "--- FAIL: TestX", "undefined reference to `x'", "cannot find module"] {
+        for bad in [
+            "FAIL src/a.test.ts",
+            "--- FAIL: TestX",
+            "undefined reference to `x'",
+            "cannot find module",
+        ] {
             assert!(looks_like_error(bad), "{bad}");
         }
     }

@@ -631,6 +631,10 @@ impl PolicyGate for AppPolicy {
             server_ready: (self.ready)(tool),
             recovered_from_text: recovered,
             untrusted_in_turn,
+            // Read on every decision, like the grants below: a switch of the chat's mode
+            // reaches a turn that is already running, and a helper's gate (built for the
+            // same chat) is in the same mode.
+            allow_all: crate::approvals::for_decision(self.chat_id, untrusted_in_turn),
         };
         let grants = self.grants.of_chat(self.chat_id);
         policy::evaluate(action, &turn, &grants)
@@ -1027,6 +1031,12 @@ fn decision_name(d: &CallDecision) -> (&'static str, store::AuditDecision, Optio
             store::AuditDecision::AllowedByGrant,
             None,
         ),
+        // [0.0.4 allow all] the chat was in Allow all and the action is not one that asks.
+        CallDecision::AllowedByMode => (
+            "allowed by Allow all",
+            store::AuditDecision::AllowedByMode,
+            None,
+        ),
         CallDecision::Denied { note } => ("denied", store::AuditDecision::Denied, note.clone()),
         CallDecision::Cancelled => ("cancelled", store::AuditDecision::Cancelled, None),
         CallDecision::Refused { reason } => (
@@ -1075,6 +1085,7 @@ pub(crate) fn audit_entry(
         decision: audit_decision,
         decided_by: match decision {
             CallDecision::AllowedByGrant
+            | CallDecision::AllowedByMode
             | CallDecision::Refused { .. }
             | CallDecision::NotEvaluated => "policy".into(),
             CallDecision::Cancelled => "stop".into(),
@@ -1995,6 +2006,8 @@ mod tests {
             risk: policy::Risk::Normal,
             read_only: false,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: Value::Null,
         }

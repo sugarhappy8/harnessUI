@@ -28,6 +28,8 @@ sql_enum!(
         AllowedByGrant => "allowed_by_grant",
         /// The tool needs no approval (skill reads, decision D11).
         AllowedWithoutPrompt => "allowed_without_prompt",
+        /// The chat was in Allow all and the action is not one that still asks (0.0.4).
+        AllowedByMode => "allowed_by_mode",
         /// The user clicked Deny.
         Denied => "denied",
         /// The user pressed Stop, or the approval timed out.

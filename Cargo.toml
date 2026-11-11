@@ -96,10 +96,12 @@ tree-sitter-powershell = "0.26"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 serde-saphyr = "2.1"
 zip = { version = "9.5", default-features = false, features = ["deflate"] }
-# Web search (crates/search). All three are in the lock already (Tauri and reqwest use
-# them), so they add no package: dom_query turns a fetched page into a DOM (html5ever),
+# Web search (crates/search). All four are in the lock already (Tauri and reqwest use
+# them), so they add no package: dom_query turns a fetched page into a DOM, html5ever (the
+# version dom_query is built on) lets the page be parsed in pieces under a time limit,
 # toml reads Cargo.toml and pyproject.toml, encoding_rs decodes pages that are not UTF-8.
 dom_query = { version = "0.28", default-features = false }
+html5ever = "0.39"
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 encoding_rs = "0.8"
 tempfile = "3"

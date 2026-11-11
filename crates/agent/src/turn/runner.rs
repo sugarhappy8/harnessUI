@@ -1471,6 +1471,7 @@ impl<'a> Turn<'a> {
                 return processed;
             }
             policy::Decision::AllowedByGrant => CallDecision::AllowedByGrant,
+            policy::Decision::AllowedByMode => CallDecision::AllowedByMode,
             policy::Decision::Ask { card, reason } => {
                 let request = ApprovalRequest {
                     call_id: record.id.clone(),

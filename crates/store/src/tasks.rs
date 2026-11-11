@@ -619,10 +619,7 @@ mod tests {
         assert_eq!((task.status, task.updated_at), (TaskStatus::Active, 7));
 
         write(r#"{"goal": 12}"#).await;
-        assert!(matches!(
-            store.get_task(id).await,
-            Err(StoreError::Json(_))
-        ));
+        assert!(matches!(store.get_task(id).await, Err(StoreError::Json(_))));
         assert!(matches!(
             store.change_task(id, |_| ()).await,
             Err(StoreError::Json(_))

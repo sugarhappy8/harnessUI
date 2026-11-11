@@ -446,8 +446,8 @@ pub(super) fn mask(text: &str, rules: &Rules) -> Masked {
                     continue;
                 }
                 if b == b'"' || (b == b'\'' && rules.single == Single::Str) {
-                    let triple = (b == b'"' && rules.triple_double)
-                        || (b == b'\'' && rules.triple_single);
+                    let triple =
+                        (b == b'"' && rules.triple_double) || (b == b'\'' && rules.triple_single);
                     if triple && next == Some(b) && src.get(i + 2) == Some(&b) {
                         saw_string = true;
                         out.extend_from_slice(b"   ");
@@ -599,7 +599,7 @@ mod tests {
         for (masked, line) in m.lines.iter().zip(&original) {
             assert_eq!(masked.len(), line.len(), "{masked:?} / {line:?}");
         }
-        assert_eq!(m.lines, vec!["a     ", "    d    ", "     g", "", "h"]);
+        assert_eq!(m.lines, vec!["a     ", "    d     ", "     g", "", "h"]);
         assert_eq!(m.in_literal, vec![false, false, true, false, false]);
         assert_eq!(m.comment_only, vec![false, false, false, false, false]);
         // A trailing newline does not add an empty line.
@@ -645,9 +645,10 @@ mod tests {
             "let a = r#\"fn x() { \"quoted\" }\"#;\nlet b = r\"\\\";\n/* a /* b */ fn c() */ fn d() {}\n",
             &RUST,
         );
-        assert_eq!(l[0].trim_end(), "let a =");
+        assert_eq!(l[0].trim_end_matches(';').trim_end(), "let a =");
         assert!(l[0].ends_with(';'), "{:?}", l[0]);
-        assert_eq!(l[1], "let b =      ;");
+        // r"\" is four characters: a backslash does not escape in a raw string.
+        assert_eq!(l[1], format!("let b = {};", " ".repeat(4)));
         assert_eq!(l[2].trim(), "fn d() {}");
         // A raw string over several lines.
         let m = mask("let s = r#\"\nfn fake() {\n\"#;\nfn real() {}\n", &RUST);
@@ -659,13 +660,11 @@ mod tests {
     #[test]
     fn a_quote_with_no_partner_on_its_line_is_left_alone() {
         // JSX text with an apostrophe: the brace after it still counts.
-        let m = mask(
-            "<p>Don't {\n  x\n}</p>\nconst a = 'it''s';\n",
-            &JS,
-        );
+        let m = mask("<p>Don't {\n  x\n}</p>\nconst a = 'it''s';\n", &JS);
         assert_eq!(m.lines[0], "<p>Don't {");
         assert_eq!(m.curly, vec![0, 1, 1, 0]);
-        assert_eq!(m.lines[3], "const a =         ;");
+        // 'it' and 's' are two strings: seven characters blanked.
+        assert_eq!(m.lines[3], format!("const a = {};", " ".repeat(7)));
     }
 
     #[test]
@@ -720,7 +719,8 @@ mod tests {
         assert_eq!(m.lines[0].trim(), "");
         assert_eq!(m.lines[2].trim(), "");
         assert_eq!(m.lines[3], "int f(void) { return    ; }");
-        assert_eq!(m.lines[4], "const char *s =           ;");
+        // The raw string is nine characters long.
+        assert_eq!(m.lines[4], format!("const char *s = {};", " ".repeat(9)));
         assert_eq!(m.curly, vec![0, 0, 0, 0, 0]);
     }
 
@@ -763,6 +763,9 @@ mod tests {
         let m = mask("let s = \"héllo → wörld\"; // ünïcode\nlet é = 1;\n", &RUST);
         assert_eq!(m.lines[1], "let é = 1;");
         assert!(m.lines[0].starts_with("let s ="));
-        assert_eq!(m.lines[0].len(), "let s = \"héllo → wörld\"; // ünïcode".len());
+        assert_eq!(
+            m.lines[0].len(),
+            "let s = \"héllo → wörld\"; // ünïcode".len()
+        );
     }
 }

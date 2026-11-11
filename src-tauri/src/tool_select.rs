@@ -6,8 +6,12 @@
 //!
 //! Owned by the tool selection feature. This file starts as the agreed entry point only.
 
+pub mod finder;
+
 use agent::HistoryMessage;
 use mcp_host::RegisteredTool;
+
+pub use finder::ToolFinderServer;
 
 use crate::state::AppState;
 

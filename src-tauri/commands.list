@@ -62,6 +62,10 @@ set_chat_working_folder
 list_audit
 export_audit
 resolve_approval
+get_approval_mode
+set_approval_mode
+get_allow_all_default
+set_allow_all_default
 list_mcp_servers
 preview_mcp_config
 add_mcp_servers

@@ -31,8 +31,9 @@ futures-util = { workspace = true }
 sha2 = { workspace = true }
 # Version patterns in addresses, titles and requirement strings.
 regex = { workspace = true }
-# HTML to a DOM (html5ever underneath). The same version Tauri builds with.
+# HTML to a DOM (html5ever underneath). The same versions Tauri builds with.
 dom_query = { workspace = true }
+html5ever = { workspace = true }
 # Cargo.toml, Cargo.lock and pyproject.toml.
 toml = { workspace = true }
 # Pages that are not UTF-8. Already built for reqwest.

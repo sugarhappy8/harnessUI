@@ -168,6 +168,8 @@ pub enum CallDecision {
     AllowedForChat,
     /// A grant for the chat covered it.
     AllowedByGrant,
+    /// The chat is in Allow all and the action is not one that keeps asking.
+    AllowedByMode,
     /// The user denied it.
     Denied {
         /// The user's note.

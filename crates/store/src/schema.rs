@@ -334,6 +334,63 @@ CREATE TABLE tool_outputs (
 );
 CREATE INDEX tool_outputs_chat ON tool_outputs(chat_id, id);
 -- [/outputs]
+
+-- [allow all] The audit log learns one more decision, 'allowed_by_mode': a call that the
+-- chat's Allow all mode let through without a card. SQLite cannot change a CHECK in place,
+-- so the table is rebuilt: every row is copied with its id, then the indexes and the
+-- append-only triggers are created again exactly as in version 1. Dropping a table fires no
+-- triggers, and renaming the new table carries its own parent reference along.
+CREATE TABLE audit_log_v2 (
+    id               INTEGER PRIMARY KEY,
+    ts               INTEGER NOT NULL,
+    chat_id          INTEGER,
+    server           TEXT    NOT NULL,
+    tool             TEXT    NOT NULL,
+    arguments        TEXT    NOT NULL CHECK (json_valid(arguments)),
+    preview          TEXT    NOT NULL,
+    risk             TEXT    NOT NULL,
+    decision         TEXT    NOT NULL CHECK (decision IN
+                        ('allow_once', 'allow_for_chat', 'allowed_by_grant', 'allowed_without_prompt',
+                         'allowed_by_mode', 'denied', 'cancelled', 'refused_by_policy')),
+    decided_by       TEXT    NOT NULL,
+    note             TEXT,
+    result_status    TEXT,
+    result_summary   TEXT,
+    duration_ms      INTEGER,
+    parent_audit_id  INTEGER REFERENCES audit_log_v2(id)
+);
+INSERT INTO audit_log_v2 (id, ts, chat_id, server, tool, arguments, preview, risk, decision,
+    decided_by, note, result_status, result_summary, duration_ms, parent_audit_id)
+SELECT id, ts, chat_id, server, tool, arguments, preview, risk, decision,
+    decided_by, note, result_status, result_summary, duration_ms, parent_audit_id
+FROM audit_log ORDER BY id;
+DROP TABLE audit_log;
+ALTER TABLE audit_log_v2 RENAME TO audit_log;
+CREATE INDEX audit_log_ts ON audit_log(ts, id);
+CREATE INDEX audit_log_chat ON audit_log(chat_id, ts);
+CREATE INDEX audit_log_parent ON audit_log(parent_audit_id);
+
+CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+CREATE TRIGGER audit_log_no_rewrite BEFORE UPDATE ON audit_log
+WHEN OLD.result_status IS NOT NULL
+  OR NEW.id IS NOT OLD.id
+  OR NEW.ts IS NOT OLD.ts
+  OR NEW.chat_id IS NOT OLD.chat_id
+  OR NEW.server IS NOT OLD.server
+  OR NEW.tool IS NOT OLD.tool
+  OR NEW.arguments IS NOT OLD.arguments
+  OR NEW.preview IS NOT OLD.preview
+  OR NEW.risk IS NOT OLD.risk
+  OR NEW.decision IS NOT OLD.decision
+  OR NEW.decided_by IS NOT OLD.decided_by
+  OR NEW.note IS NOT OLD.note
+  OR NEW.parent_audit_id IS NOT OLD.parent_audit_id
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+-- [/allow all]
 "#;
 
 /// One schema step: the SQL that takes `user_version` from its index to index + 1.
