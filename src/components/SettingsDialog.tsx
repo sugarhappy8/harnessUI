@@ -78,10 +78,74 @@ function General() {
           THIRD-PARTY-NOTICES.md next to the app.
         </p>
       </section>
+      {ipc.isTauri() && <StepsPerTurn />}
       {ipc.isTauri() && <DefaultSystemPrompt />}
       {ipc.isTauri() && <Updates />}
       {ipc.isTauri() && <ModelCatalog />}
     </div>
+  );
+}
+
+const STEP_CHOICES = [25, 50, 100, 200];
+const DEFAULT_STEPS = 50;
+
+/** How many times the model may be called in one turn (setting "stepsPerTurn"). */
+export function StepsPerTurn() {
+  const [steps, setSteps] = useState<number>(DEFAULT_STEPS);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    ipc
+      .getSetting<unknown>("stepsPerTurn")
+      .then((v) => alive && setSteps(typeof v === "number" ? v : DEFAULT_STEPS))
+      .catch((err) => alive && setError(toErrorInfo(err)));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  async function choose(n: number) {
+    const before = steps;
+    setSteps(n);
+    setError(null);
+    try {
+      await ipc.setSetting("stepsPerTurn", n);
+    } catch (err) {
+      setSteps(before);
+      setError(toErrorInfo(err));
+    }
+  }
+  // A value set some other way still shows as the current choice.
+  const choices = STEP_CHOICES.includes(steps) ? STEP_CHOICES : [...STEP_CHOICES, steps].sort((a, b) => a - b);
+  return (
+    <fieldset>
+      <legend className="mb-1 text-sm font-medium">Steps per turn</legend>
+      <p className="mb-2 text-xs text-fg-muted">
+        How many times the model may act before it stops and reports. A long task, such as installing
+        software, needs more. When the limit is reached you can choose Continue.
+      </p>
+      <div className="flex gap-2" role="radiogroup" aria-label="Steps per turn">
+        {choices.map((n) => (
+          <button
+            key={n}
+            type="button"
+            role="radio"
+            aria-checked={steps === n}
+            onClick={() => void choose(n)}
+            className={
+              "rounded-md border px-3 py-1.5 text-sm " +
+              (steps === n ? "border-accent bg-accent text-accent-fg" : "border-border hover:bg-bg-muted")
+            }
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+      {error && (
+        <div className="mt-2">
+          <ErrorBanner error={error} onDismiss={() => setError(null)} />
+        </div>
+      )}
+    </fieldset>
   );
 }
 

@@ -251,7 +251,7 @@ sequenceDiagram
   participant M as MCP host
   participant L as llama-server / endpoint
   UI->>A: send_message(chat, text, attachments) + channel
-  loop up to 25 steps
+  loop up to the step cap (50)
     A->>A: normalise history, count tokens, compact if needed
     A->>L: chat completion (stream, enabled tool schemas)
     L-->>A: text / reasoning / tool-call deltas
@@ -404,7 +404,7 @@ normalise history → count, compact → stream → classify response
    └─ reply cut off at the output limit  → handled below → next step
 ```
 
-- **Step cap:** 25 model calls per turn by default (configurable). Tool calls in the response that reaches the cap are not run. The loop then makes one wrap-up request in which calling tools is disabled, asking the model to say what it did and what is left. The tool list stays in that request and only `tool_choice` changes to `none`, which keeps llama-server's cached prompt valid. Tool-call markup in the wrap-up reply is stripped, not shown and not run.
+- **Step cap:** 50 model calls per turn by default (25 until 0.0.2; a real task, installing a toolchain, needed more), set in *Settings → General* from 25 to 200 (setting `stepsPerTurn`, 5 to 500 accepted). When a turn stops at the cap the chat shows a notice, not an error, with a Continue button that sends "Continue where you left off." as the next message. Tool calls in the response that reaches the cap are not run. The loop then makes one wrap-up request in which calling tools is disabled, asking the model to say what it did and what is left. The tool list stays in that request and only `tool_choice` changes to `none`, which keeps llama-server's cached prompt valid. Tool-call markup in the wrap-up reply is stripped, not shown and not run.
 - **Order:** `parallel_tool_calls: false` is sent on every request, because llama-server's default depends on the model's template. If a model returns several calls anyway they run one at a time, in order. When one is denied or cancelled, the rest of that response is not run.
 - **Output limit:** `max_tokens` is sent on every request: the context left after the prompt, never less than the reply reserve (8.4). A reply that ends on the limit is handled by what it held. Only thinking: retry once with thinking disabled. A cut-off tool call: the call is not run, its partial arguments are not stored, and the model is told "your call was cut off after N tokens; write the file in smaller pieces or use `edit_file`". That counts as one mistake; a second cut-off of the same tool ends the turn with a message that names the output limit as the cause.
 - **Mistake budget:** 3 consecutive invalid calls to the same tool, or 6 consecutive mistakes overall, end the turn. Both reset on a successful call. A mistake is an invalid or unknown-tool call, a cut-off call or a server parse error. Denials and tool errors do not count.

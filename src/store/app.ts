@@ -227,7 +227,10 @@ export const useApp = create<AppState>((set, get) => {
             error: {
               code: e.status,
               message: e.message,
-              nextStep: "Ask the model to continue, or rephrase the request.",
+              nextStep:
+                e.status === "stepCap"
+                  ? "Choose Continue to let it carry on. The limit can be raised in Settings → General."
+                  : "Ask the model to continue, or rephrase the request.",
               details: "",
             },
           });

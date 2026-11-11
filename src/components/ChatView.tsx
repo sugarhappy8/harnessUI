@@ -244,7 +244,21 @@ export function ChatView() {
 
       {error && (
         <div className="mx-auto w-full max-w-3xl px-4 pb-2">
-          <ErrorBanner error={error} onDismiss={() => showError(null)} />
+          {error.code === "stepCap" ? (
+            // Not a failure: the turn stopped at the step limit, and the model can go on.
+            <ErrorBanner
+              error={error}
+              tone="notice"
+              onDismiss={() => showError(null)}
+              action={
+                busy
+                  ? undefined
+                  : { label: "Continue", onClick: () => void send("Continue where you left off.") }
+              }
+            />
+          ) : (
+            <ErrorBanner error={error} onDismiss={() => showError(null)} />
+          )}
         </div>
       )}
       <Composer

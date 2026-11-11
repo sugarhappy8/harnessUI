@@ -1579,6 +1579,13 @@ pub async fn run(
         .flatten();
     let local_endpoint = req.caps.local;
     let mut input = agent::turn::TurnInput::new(history, req.caps, req.template);
+    let stored_steps: Option<serde_json::Value> = state
+        .store
+        .get_setting(crate::settings::STEPS_PER_TURN)
+        .await
+        .ok()
+        .flatten();
+    input.step_cap = crate::settings::steps_per_turn(stored_steps.as_ref());
     let chat_prefs: ChatTools =
         serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
     input.thinking = !chat_prefs.thinking_off;
@@ -1696,7 +1703,7 @@ pub async fn run(
         agent::turn::TurnStatus::Stopped => ("stopped", None),
         agent::turn::TurnStatus::StepCapReached => (
             "stepCap",
-            Some("The step limit for one turn was reached.".to_string()),
+            Some("The model reached the step limit for one turn.".to_string()),
         ),
         agent::turn::TurnStatus::MistakeBudget => (
             "mistakes",

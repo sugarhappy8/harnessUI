@@ -976,8 +976,66 @@ def p_subagent(c, notes):
     assert "PARENT-EARLIER-QUESTION" in json.dumps(Fake.requests[-1]["messages"])
 
 
+@probe("step-limit")
+def p_step_limit(c, notes):
+    """Reported from a real PC: a long task stopped at "the step limit" with a red error
+    and no way on. The limit is a setting now, and the stop offers Continue."""
+    s = c.s
+    for bad in (0, 501, "50"):
+        try:
+            s.invoke("set_setting", {"key": "stepsPerTurn", "value": bad})
+            raise AssertionError(f"a step limit of {bad!r} was accepted")
+        except WebDriverError as e:
+            assert "whole number from 5 to 500" in str(e), e
+    s.invoke("set_setting", {"key": "stepsPerTurn", "value": 5})
+    try:
+        chat = new_chat(c)
+        s.invoke("set_chat_working_folder", {"chatId": chat, "path": str(c.work)})
+        for i in range(5):
+            (c.work / f"step{i}").mkdir(exist_ok=True)
+            Fake.queue.append({"tool_calls": [{"name": "list_dir", "arguments": {"path": f"step{i}"}}]})
+        Fake.queue.append({"content": "I listed five folders. One is left."})
+        Fake.requests.clear()
+        send(s, "list every folder")
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            time.sleep(0.4)
+            if "Allow once" in s.page_text():
+                time.sleep(0.9)
+                s.click_button("Allow for this chat")
+            elif idle(s):
+                break
+        # Five model calls, then the wrap-up request in which tools are off.
+        assert len(Fake.requests) == 6, len(Fake.requests)
+        assert Fake.requests[-1].get("tool_choice") == "none", Fake.requests[-1].get("tool_choice")
+        notice = s.execute("const n = document.querySelector('[role=status]'); return n ? n.innerText : null;")
+        notes.append("notice: " + str(notice).replace("\n", " | "))
+        assert notice and "step limit" in notice and "Continue" in notice, notice
+        assert s.execute("return document.querySelector('[role=alert]') === null"), "the stop is shown as an error"
+        assert messages(s, chat)[-1]["text"] == "I listed five folders. One is left."
+        s.screenshot(str(OUT / "step-limit.png"))
+        Fake.queue.append({"content": "The last one is listed too."})
+        s.click_button("Continue")
+        wait_idle(s)
+        msgs = [m for m in messages(s, chat) if m["role"] in ("user", "assistant")]
+        assert msgs[-2]["text"] == "Continue where you left off.", msgs[-2]
+        assert msgs[-1]["text"] == "The last one is listed too.", msgs[-1]
+        assert "step limit" not in s.page_text(), "the notice stayed after Continue"
+        # The setting shows in Settings, General.
+        s.click_button("Settings")
+        s.click_button("General")
+        time.sleep(0.5)
+        radios = "[...document.querySelectorAll('[aria-label=\"Steps per turn\"] [role=radio]')]"
+        chosen = s.execute(f"return {radios}.filter(b => b.getAttribute('aria-checked') === 'true').map(b => b.innerText);")
+        assert chosen == ["5"], chosen
+        s.execute(f"{radios}.find(b => b.innerText === '100').click();")
+        s.wait_for(lambda: s.invoke("get_setting", {"key": "stepsPerTurn"}) == 100, 10, "the choice is saved")
+    finally:
+        s.invoke("set_setting", {"key": "stepsPerTurn", "value": 50})
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
-          p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent]
+          p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit]
 
 
 def main() -> int:

@@ -4,6 +4,9 @@ All notable changes, by milestone. Dates are UTC.
 
 ## Unreleased
 
+### Changed
+- **The step limit is a setting, and reaching it is no longer a dead end.** Reported on 0.0.2: a task (installing Rust) stopped at "The step limit for one turn was reached", shown as a red error. A turn could make 25 model calls and that number could not be changed. The default is now 50, *Settings → General → Steps per turn* offers 25, 50, 100 and 200, and when a turn stops at the limit the chat shows a notice with a **Continue** button instead of an error.
+
 ### Fixed
 - **A model picked with no chat open seemed not to load, and picking it again said "Loading was cancelled."** Reported on 0.0.2. With no chat open, the picked model had no chat to belong to: it loaded in the background, the header kept saying "Choose a model" and showed no progress. Picking the file again then restarted the load, and the first attempt reported "Loading was cancelled" although the second went on to finish. Now picking a model with no chat open opens a new chat for it, so its name and loading progress show at once; picking the same model again while it loads waits for that load instead of restarting it; and a load that is replaced because another model was picked ends without an error.
 - A load that was replaced could take the newer load's server for its own and wait on it for ever, which also left that server running after an unload. Each load now touches only the server it started, and two loads never replace the server at the same time. Found while testing the fix above (it showed as a load request that never returned).
