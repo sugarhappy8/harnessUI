@@ -7,14 +7,14 @@ use std::path::{Path, PathBuf};
 
 /// Environment variable naming a browser executable; read before the standard locations
 /// (tests and CI).
-pub const ENV_OVERRIDE: &str = "HARNISS_BROWSER_PATH";
+pub const ENV_OVERRIDE: &str = "HARNESS_BROWSER_PATH";
 
 /// Which browser was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserKind {
     /// The path the user chose in Settings.
     UserChoice,
-    /// The `HARNISS_BROWSER_PATH` environment variable.
+    /// The `HARNESS_BROWSER_PATH` environment variable.
     Environment,
     /// Google Chrome.
     Chrome,
@@ -35,7 +35,7 @@ impl BrowserKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::UserChoice => "The browser you chose",
-            Self::Environment => "The browser named by HARNISS_BROWSER_PATH",
+            Self::Environment => "The browser named by HARNESS_BROWSER_PATH",
             Self::Chrome => "Google Chrome",
             Self::Edge => "Microsoft Edge",
             Self::Brave => "Brave",
@@ -92,7 +92,7 @@ fn not_installed(os: Os) -> BrowserUnavailable {
 /// What discovery reads from the environment, so tests can supply their own.
 #[derive(Debug, Clone, Default)]
 pub struct DiscoveryEnv {
-    /// `HARNISS_BROWSER_PATH`.
+    /// `HARNESS_BROWSER_PATH`.
     pub env_override: Option<PathBuf>,
     /// `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LocalAppData%` (Windows).
     pub program_files: Option<PathBuf>,
@@ -317,7 +317,7 @@ fn usable(path: &Path) -> Option<PathBuf> {
     canonical.is_file().then_some(canonical)
 }
 
-/// Finds the browser: the user's choice, `HARNISS_BROWSER_PATH` (tests and CI), the
+/// Finds the browser: the user's choice, `HARNESS_BROWSER_PATH` (tests and CI), the
 /// standard locations for `os` (Chrome, Edge, Brave, Vivaldi, Chromium), the agent's own
 /// downloaded browser, then Playwright's Chromium (tests).
 pub fn find_browser_in(

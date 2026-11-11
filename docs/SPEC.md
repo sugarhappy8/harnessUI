@@ -1,4 +1,4 @@
-# Build [harnissUI]: a local-first agentic desktop app for local AI models (owner's spec, verbatim)
+# Build [harnessUI]: a local-first agentic desktop app for local AI models (owner's spec, verbatim)
 
 ## Goal
 Build a cross-platform desktop app (Windows .exe installer, macOS .dmg) that gives local AI models the agentic capabilities of the Claude, ChatGPT and Kimi desktop apps: chat, tools, skills and MCP. It is for people who run models on their own hardware. Keep the app name in one config constant so it's easy to change.

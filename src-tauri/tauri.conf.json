@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "harnissUI",
-  "version": "0.1.0",
-  "identifier": "io.github.sugarhappy8.harnissui",
+  "productName": "harnessUI",
+  "version": "0.0.1",
+  "identifier": "io.github.sugarhappy8.harnessui",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

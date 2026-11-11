@@ -426,7 +426,7 @@ mod tests {
     /// A fresh folder under the system temp folder, removed by the test.
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "harniss-skills-{tag}-{}",
+            "harness-skills-{tag}-{}",
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&dir).unwrap();

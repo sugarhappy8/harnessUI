@@ -31,7 +31,7 @@ from webdriver import Session, WebDriverError  # noqa: E402
 APP = os.environ.get("APP_BIN", str(ROOT / "target" / "debug" / "app"))
 LLAMA_DIR = os.environ.get("APP_DEV_LLAMA_DIR", str(ROOT / ".cache" / "llama-linux"))
 OUT = pathlib.Path(os.environ.get("E2E_OUT", tempfile.mkdtemp(prefix="e2e-scripted-")))
-IDENTIFIER = "io.github.sugarhappy8.harnissui"
+IDENTIFIER = "io.github.sugarhappy8.harnessui"
 ONLY = set(filter(None, os.environ.get("PROBES", "").split(",")))
 
 RESULTS = []

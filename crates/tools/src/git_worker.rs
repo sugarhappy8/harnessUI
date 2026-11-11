@@ -36,7 +36,7 @@ use crate::git_fallback::{self, display_url, fallback_remote, host_key};
 pub const WORKER_FLAG: &str = "--internal-git-worker";
 
 /// Marks protocol lines on the worker's stdout.
-pub(crate) const LINE_PREFIX: &str = "@@harniss-git-worker@@ ";
+pub(crate) const LINE_PREFIX: &str = "@@harness-git-worker@@ ";
 /// Longest protocol line read in either direction.
 const MAX_LINE: usize = 256 * 1024;
 /// Stderr kept for the error message when the worker dies.

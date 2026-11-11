@@ -136,7 +136,7 @@ jobs:
       - name: Browser end-to-end tests on (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: echo "HARNISS_BROWSER_E2E=1" >> "$GITHUB_ENV"
+        run: echo "HARNESS_BROWSER_E2E=1" >> "$GITHUB_ENV"
       - name: Workspace tests (${{ matrix.name }}, with llama-server contract tests)
         run: cargo test --workspace --target ${{ matrix.test-target }}
       - name: Build the app

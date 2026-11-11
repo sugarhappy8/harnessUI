@@ -1,6 +1,6 @@
 # Adding MCP servers
 
-harnissUI can use tools from any [Model Context Protocol](https://modelcontextprotocol.io)
+harnessUI can use tools from any [Model Context Protocol](https://modelcontextprotocol.io)
 server, alongside its built-in tools (files, terminal, git, browser, computer use,
 skills). Every tool, built-in or added, goes through the same approval cards, per-chat
 toggles and audit log.

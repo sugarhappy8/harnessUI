@@ -497,7 +497,7 @@ mod tests {
     /// Without a git, no credential helper is asked for (nothing is run).
     #[tokio::test]
     async fn no_git_means_no_credential_helper_probe() {
-        let empty = std::env::temp_dir().join("harniss-no-git-here");
+        let empty = std::env::temp_dir().join("harness-no-git-here");
         let captured =
             std::collections::BTreeMap::from([("PATH".to_string(), empty.display().to_string())]);
         let config = super::git_config(Some(&captured)).await;

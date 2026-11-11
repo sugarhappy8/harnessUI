@@ -1,6 +1,6 @@
 # Security
 
-harnissUI lets a language model running on your computer use tools: read and write
+harnessUI lets a language model running on your computer use tools: read and write
 files, run commands, browse the web and, if you turn it on, control the mouse and
 keyboard. This document describes what protects you, what does not, and how to report a
 problem. The design behind it is in [ARCHITECTURE.md](ARCHITECTURE.md) section 13.

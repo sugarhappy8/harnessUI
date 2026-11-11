@@ -576,7 +576,7 @@ mod tests {
             2,
             Rect::new(500.0, 0.0, 500.0, 800.0),
             WEBVIEW,
-            app("harniss"),
+            app("harness"),
         );
         mine.root_pid = Some(ME);
         d.push_front(mine);

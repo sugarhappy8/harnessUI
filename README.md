@@ -1,4 +1,4 @@
-# harnissUI
+# harnessUI
 
 A local-first desktop app that gives AI models running on your own hardware the agentic features of the big desktop assistants: chat, tools, skills and MCP. Windows 10 and 11 (x64) and macOS 13.3 or later, on Apple silicon and Intel Macs.
 
@@ -18,17 +18,15 @@ A local-first desktop app that gives AI models running on your own hardware the 
 - **MCP servers.** *Settings → MCP servers → Add servers* takes a Claude Desktop, Cursor or VS Code config. Secrets go to the system keychain; a new server's tools start off until you turn them on. See [docs/mcp-guide.md](docs/mcp-guide.md).
 - **Skills.** *Settings → Skills* imports skill folders or zips (SKILL.md, as used by other agent apps), creates and edits them; imported skills start turned off. The model loads a skill when it needs it. How to write one: [docs/skills-guide.md](docs/skills-guide.md).
 - **Browser.** The model drives a browser window of its own with a separate profile (never your own cookies or logins). It uses Chrome, Edge, Brave, Vivaldi or Chromium if one is installed; on a Mac with none of these, *Settings → Browser* can download one for the agent (Google's Chrome for Testing, about 200 MB, checked against a checksum built into the app). The Browser tools are on in a new chat when a browser is available and the model's context is at least 8,192 tokens; otherwise they are one switch away in the chat's *Tools* panel. Leaving a site and submitting forms always ask; this computer's own addresses and, by default, private networks are blocked.
-- **Computer use (Windows and macOS).** Switch on *Computer* under *Tools* in a chat and a model that can see images can take screenshots and use the mouse and keyboard. There is nothing to set up per model: the app works out from the model's name how it writes screen positions, and *Settings → Computer use* lets you choose another way if clicks land in the wrong place. Every kind of input asks first for each application, input to harnissUI itself is always refused, and a red border with a Stop button stays on screen while it acts. On a Mac it needs the Screen Recording and Accessibility permissions.
+- **Computer use (Windows and macOS).** Switch on *Computer* under *Tools* in a chat and a model that can see images can take screenshots and use the mouse and keyboard. There is nothing to set up per model: the app works out from the model's name how it writes screen positions, and *Settings → Computer use* lets you choose another way if clicks land in the wrong place. Every kind of input asks first for each application, input to harnessUI itself is always refused, and a red border with a Stop button stays on screen while it acts. On a Mac it needs the Screen Recording and Accessibility permissions.
 - **Subagents.** Switch on *Subagents* under *Tools* in a chat and the model can hand a self-contained task (reading many files, checking several pages) to a helper that works in its own fresh context and returns only its answer, which keeps the main chat's context small. The helper has the same tools and asks for the same approvals; its cards start with "Subagent:". Off in new chats.
 - **Stop.** The Stop button, Esc, or the global hotkey (Ctrl+Alt+Backspace on Windows, Ctrl+Option+Delete on macOS) stops the reply and cancels any running tool.
 
-## Download a test build
+## Download
 
-Every push builds a Windows installer and a macOS disk image in GitHub Actions.
+Open the repository's **Releases** page and download the file for your computer from the latest release: the `-setup.exe` for Windows, or the `_universal.dmg` for any Mac. Version 0.0.1 is an early test build.
 
-1. Open the repository's **Actions** tab and pick the latest green **CI** run for the branch.
-2. Under **Artifacts**, download `windows-installer` or `macos-dmg`.
-3. Unzip the artifact; it contains the `-setup.exe` or the `.dmg`.
+Builds of work in progress: every push also builds both installers in GitHub Actions. Open the **Actions** tab, pick the latest green **CI** run, and under **Artifacts** download `windows-installer` or `macos-dmg` (a zip that contains the `-setup.exe` or the `.dmg`).
 
 What you need:
 
@@ -40,7 +38,7 @@ What you need:
 Builds are not code-signed yet (see [Signing](#signing)).
 
 - **Windows:** SmartScreen shows "Windows protected your PC". Click **More info → Run anyway**. If **Smart App Control** is on (Windows 11; Windows Security → App & browser control), unsigned apps are blocked with no way through. Turning it off is permanent unless you reinstall Windows.
-- **macOS:** the build is ad-hoc signed. Right-click the app → **Open**, or go to **System Settings → Privacy & Security → Open Anyway**. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine /Applications/harnissUI.app`.
+- **macOS:** the build is ad-hoc signed. Right-click the app → **Open**, or go to **System Settings → Privacy & Security → Open Anyway**. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine /Applications/harnessUI.app`.
 
 ## Build from source
 
@@ -131,7 +129,7 @@ Release builds (`.github/workflows/release.yml`, on `v*` tags) fetch the pinned 
 
 **In-app updates** need the updater key pair:
 
-1. On your own machine run `npx tauri signer generate -w ~/.tauri/harnissui.key`, choose a password, and keep both the key file and the password in your password manager.
+1. On your own machine run `npx tauri signer generate -w ~/.tauri/harnessui.key`, choose a password, and keep both the key file and the password in your password manager.
 2. Add the private key's contents and its password as the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets.
 3. Commit the public key (the `.pub` file's contents) as `plugins.updater.pubkey` in `src-tauri/tauri.updater.conf.json`.
 

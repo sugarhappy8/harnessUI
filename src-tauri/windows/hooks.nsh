@@ -6,7 +6,7 @@
 ; server; it keeps the runtime's files open, so copying the new ones over them would fail.
 ; Only processes whose program file is under $INSTDIR are stopped: a llama-server you run
 ; yourself, and the backend packs in the app's data folder, are left alone. A running
-; harnissUI is closed by Tauri's own check right after this hook, and its Job Object ends
+; harnessUI is closed by Tauri's own check right after this hook, and its Job Object ends
 ; the servers it started.
 ;
 ; The installer is a 32-bit program, so the PowerShell it starts is 32-bit too, and

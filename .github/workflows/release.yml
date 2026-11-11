@@ -2,9 +2,12 @@ name: Release
 
 # Builds the signed (when secrets exist) Windows installer and the universal macOS disk
 # image (Apple silicon and Intel in one file) on every version tag and attaches them to a
-# draft GitHub release. With the updater key it
-# also signs and uploads the model catalog, and a final job checks the release has
-# everything before you publish it.
+# draft GitHub release. With the updater key it also signs and uploads the model catalog.
+# A final job checks the draft has everything and only then publishes it, so a release
+# that failed a check is never public. Pushing the tag is the decision to release; so is
+# starting this workflow by hand (Actions, Release, Run workflow) on the commit to release:
+# the tag v<version> is then created from exactly that commit when the release is
+# published.
 on:
   push:
     tags: ["v*"]
@@ -133,9 +136,12 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "v__VERSION__"
-          releaseBody: "See CHANGELOG.md. Unsigned builds: see the README section on opening unsigned builds."
+          releaseBody: "Windows: download the file ending in -setup.exe (Windows 10 or 11, 64-bit). Mac: download the file ending in _universal.dmg (macOS 13.3 or later, Apple silicon or Intel). These builds are not code-signed: on Windows choose More info, then Run anyway; on a Mac right-click the app and choose Open. See README.md for details and CHANGELOG.md for what is in this version."
           releaseDraft: true
           prerelease: false
+          # When started by hand there is no tag yet: it must point at the commit built here,
+          # not at the default branch.
+          releaseCommitish: ${{ github.sha }}
           args: ${{ matrix.args }} ${{ steps.updater.outputs.args }}
       # The draft already has the disk image at this point. A bundle that is missing a
       # processor, or that loads a library from outside the system, fails the run here so
@@ -218,7 +224,7 @@ jobs:
   # darwin-aarch64 and darwin-x86_64 (and darwin-universal, which no updater asks for). An
   # Intel Mac asks for darwin-x86_64: without that entry it would never see an update.
   verify:
-    name: Verify the release
+    name: Verify and publish the release
     needs: [keys, publish, catalog]
     if: ${{ !cancelled() && needs.keys.result == 'success' && needs.publish.result == 'success' && needs.catalog.result != 'failure' }}
     runs-on: ubuntu-24.04
@@ -260,4 +266,9 @@ jobs:
           else
             echo "No updater key: skipping the latest.json and catalog checks."
           fi
-          exit "$fail"
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::$tag stays a draft: fix the problems above, then run this workflow again."
+            exit 1
+          fi
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+          echo "Published $tag."
