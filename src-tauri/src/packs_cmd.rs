@@ -77,6 +77,24 @@ fn windows_build() -> Option<u32> {
     s.trim().parse().ok()
 }
 
+/// The graphics cards this computer has: what Windows reports, plus the devices of every
+/// GPU backend that answered its probe. The CPU is not one of them (it used to be counted,
+/// which turned "the card is unknown" into "the card is the wrong one").
+async fn known_cards(state: &AppState) -> Vec<String> {
+    let mut cards = crate::gpu::card_names(&crate::gpu::adapters());
+    for (backend, probe) in state.runtime.backends(false).await {
+        if backend.kind == runtime::BackendKind::Cpu {
+            continue;
+        }
+        for d in probe.devices {
+            if !cards.contains(&d.description) {
+                cards.push(d.description);
+            }
+        }
+    }
+    cards
+}
+
 /// Whether this computer can use the pack, with the reason when not.
 async fn availability(state: &AppState, pack: &runtime::PackSpec) -> (bool, Option<String>) {
     match pack.backend {
@@ -94,50 +112,10 @@ async fn availability(state: &AppState, pack: &runtime::PackSpec) -> (bool, Opti
                     );
                 }
             }
-            let gpus: Vec<String> = state
-                .runtime
-                .backends(false)
-                .await
-                .into_iter()
-                .flat_map(|(_, p)| p.devices.into_iter().map(|d| d.description))
-                .collect();
-            let rdna4 = gpus.iter().any(|d| {
-                let d = d.to_ascii_lowercase();
-                d.contains("rx 90") || d.contains("gfx1200") || d.contains("gfx1201")
-            });
-            if gpus.is_empty() {
-                (true, Some("The GPU could not be identified; this build supports only RX 9000-series cards.".into()))
-            } else if rdna4 {
-                (true, None)
-            } else {
-                (
-                    false,
-                    Some("This ROCm build supports only AMD Radeon RX 9000-series cards.".into()),
-                )
-            }
+            crate::gpu::pack_availability(pack.backend, &known_cards(state).await)
         }
         runtime::BackendKind::Cuda => {
-            let gpus: Vec<String> = state
-                .runtime
-                .backends(false)
-                .await
-                .into_iter()
-                .flat_map(|(_, p)| p.devices.into_iter().map(|d| d.description))
-                .collect();
-            if gpus.iter().any(|d| {
-                d.to_ascii_lowercase().contains("nvidia")
-                    || d.contains("GeForce")
-                    || d.contains("RTX")
-            }) {
-                (true, None)
-            } else if gpus.is_empty() {
-                (
-                    true,
-                    Some("The GPU could not be identified; CUDA needs an NVIDIA card.".into()),
-                )
-            } else {
-                (false, Some("CUDA needs an NVIDIA graphics card.".into()))
-            }
+            crate::gpu::pack_availability(pack.backend, &known_cards(state).await)
         }
         _ => (true, None),
     }

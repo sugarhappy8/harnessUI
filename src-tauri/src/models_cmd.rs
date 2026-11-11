@@ -159,6 +159,25 @@ pub async fn get_setting(
     Ok(state.store.get_setting(&key).await?)
 }
 
+/// The app's environment for a diagnostic probe: every variable except the ones that
+/// steer llama.cpp or look like secrets, which never reach a child (4.1).
+fn full_environment(names: impl Iterator<Item = String>) -> runtime::EnvSpec {
+    let mut env = runtime::EnvSpec::minimal();
+    for name in names {
+        let upper = name.to_ascii_uppercase();
+        let steers = ["LLAMA_", "GGML_", "HF_", "HUGGING"]
+            .iter()
+            .any(|p| upper.starts_with(p));
+        let secret = ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL"]
+            .iter()
+            .any(|p| upper.contains(p));
+        if !steers && !secret {
+            env = env.inherit(name);
+        }
+    }
+    env
+}
+
 #[tauri::command]
 pub async fn set_setting(
     state: State<'_, AppState>,
@@ -210,6 +229,18 @@ pub async fn run_diagnostics(
         "llama.cpp pin: {} ({})",
         lock.llama_cpp.tag, lock.llama_cpp.commit
     );
+    let adapters = crate::gpu::adapters();
+    if !adapters.is_empty() {
+        let _ = writeln!(report, "graphics adapters (from the system):");
+        for a in &adapters {
+            let _ = writeln!(
+                report,
+                "  {} (driver {})",
+                a.name,
+                a.driver_version.as_deref().unwrap_or("unknown")
+            );
+        }
+    }
     let _ = writeln!(report);
     let backends = state.runtime.backends(true).await;
     for (b, p) in &backends {
@@ -223,6 +254,46 @@ pub async fn run_diagnostics(
         match &p.error {
             Some(e) => {
                 let _ = writeln!(report, "  unusable: {e}");
+                // What llama-server printed: "no device found" alone does not say why.
+                if p.output.is_empty() {
+                    let _ = writeln!(report, "  (llama-server printed nothing)");
+                }
+                for line in &p.output {
+                    let _ = writeln!(report, "  | {line}");
+                }
+                // The app starts llama-server with a short list of environment variables.
+                // If a graphics driver needs one that is not on it, the same check with
+                // the whole environment finds the card: say so, it names the fix.
+                if matches!(e, runtime::ProbeError::NoMatchingDevice { .. }) {
+                    let wide = runtime::probe_with_env(
+                        b,
+                        std::time::Duration::from_secs(45),
+                        full_environment(
+                            std::env::vars_os()
+                                .map(|(name, _)| name.to_string_lossy().into_owned()),
+                        ),
+                    )
+                    .await;
+                    if wide.devices.is_empty() {
+                        let _ = writeln!(
+                            report,
+                            "  the same check with the system's full environment: also no device"
+                        );
+                    } else {
+                        let _ = writeln!(
+                            report,
+                            "  the same check with the system's full environment FINDS {} device(s) (an environment variable the app does not pass on is needed):",
+                            wide.devices.len()
+                        );
+                        for d in &wide.devices {
+                            let _ = writeln!(
+                                report,
+                                "    {}: {} ({} MiB total)",
+                                d.name, d.description, d.total_mib
+                            );
+                        }
+                    }
+                }
             }
             None => {
                 for d in &p.devices {
@@ -293,4 +364,42 @@ pub async fn run_diagnostics(
         text: report,
         saved_to,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_diagnostic_environment_leaves_out_steering_and_secret_variables() {
+        let names = [
+            "ProgramData",
+            "NUMBER_OF_PROCESSORS",
+            "LLAMA_ARG_MODEL",
+            "GGML_BACKEND_PATH",
+            "HF_TOKEN",
+            "OPENAI_API_KEY",
+            "MY_PASSWORD",
+            "VK_ICD_FILENAMES",
+        ];
+        let env = super::full_environment(names.iter().map(|s| s.to_string()));
+        let passed: Vec<String> = env
+            .resolve_from(names.iter().map(|n| ((*n).into(), "v".into())))
+            .into_iter()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        for wanted in ["ProgramData", "NUMBER_OF_PROCESSORS", "VK_ICD_FILENAMES"] {
+            assert!(
+                passed.iter().any(|p| p == wanted),
+                "{wanted} missing: {passed:?}"
+            );
+        }
+        for refused in [
+            "LLAMA_ARG_MODEL",
+            "GGML_BACKEND_PATH",
+            "HF_TOKEN",
+            "OPENAI_API_KEY",
+            "MY_PASSWORD",
+        ] {
+            assert!(!passed.iter().any(|p| p == refused), "{refused} passed on");
+        }
+    }
 }

@@ -142,6 +142,10 @@ pub struct ProbeResult {
     pub devices: Vec<Device>,
     /// Why the backend is unusable, if it is.
     pub error: Option<ProbeError>,
+    /// The last lines the server printed (standard output, then standard error), for the
+    /// diagnostics report: "no device found" alone does not say why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output: Vec<String>,
 }
 
 impl ProbeResult {
@@ -168,14 +172,22 @@ pub fn cpu_device() -> Device {
 /// For GPU backends, rows of this backend's prefix with no memory are dropped, and an
 /// empty result is [`ProbeError::NoMatchingDevice`].
 pub async fn probe(backend: &Backend, timeout: Duration) -> ProbeResult {
+    probe_with_env(backend, timeout, EnvSpec::minimal()).await
+}
+
+/// [`probe`] with a chosen environment. The app always probes and launches with the
+/// minimal one; diagnostics repeat a probe that found nothing with a wider one, to tell
+/// whether a driver needs a variable the minimal environment leaves out.
+pub async fn probe_with_env(backend: &Backend, timeout: Duration, env: EnvSpec) -> ProbeResult {
     let fail = |error| ProbeResult {
         backend_kind: backend.kind,
         devices: Vec::new(),
         error: Some(error),
+        output: Vec::new(),
     };
     let spec = SpawnSpec::new(&backend.server, &backend.dir)
         .arg("--list-devices")
-        .env(EnvSpec::minimal())
+        .env(env)
         .stdin(StdioMode::Null)
         .stdout(StdioMode::Piped)
         .stderr(StdioMode::Piped);
@@ -245,7 +257,13 @@ pub async fn probe(backend: &Backend, timeout: Duration) -> ProbeResult {
         output_tail.drain(..skip);
         return fail(ProbeError::NonZeroExit { code, output_tail });
     }
-    classify_devices(backend.kind, &stdout.join("\n"))
+    let mut result = classify_devices(backend.kind, &stdout.join("\n"));
+    let mut output = stdout;
+    output.extend(stderr);
+    let skip = output.len().saturating_sub(PROBE_TAIL_LINES);
+    output.drain(..skip);
+    result.output = output;
+    result
 }
 
 /// Turns successful `--list-devices` output into a [`ProbeResult`] for `kind`.
@@ -255,6 +273,7 @@ pub fn classify_devices(kind: BackendKind, stdout: &str) -> ProbeResult {
             backend_kind: kind,
             devices: vec![cpu_device()],
             error: None,
+            output: Vec::new(),
         };
     }
     let devices: Vec<Device> = parse_list_devices(stdout)
@@ -268,6 +287,7 @@ pub fn classify_devices(kind: BackendKind, stdout: &str) -> ProbeResult {
         backend_kind: kind,
         devices,
         error,
+        output: Vec::new(),
     }
 }
 
@@ -322,6 +342,53 @@ pub fn looks_integrated(description: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A probe that finds no device keeps what the server printed, on both streams: it is
+    /// the only way to tell a missing driver from a driver that failed to load.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_probe_keeps_what_the_server_printed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let server = dir.path().join("llama-server");
+        std::fs::write(
+            &server,
+            "#!/bin/sh\necho 'ggml_vulkan: no devices found' >&2\necho 'Available devices:'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let backend = Backend {
+            kind: BackendKind::Vulkan,
+            dir: dir.path().to_path_buf(),
+            server,
+            fit_params: None,
+            build: "test".into(),
+            source: crate::llama::backend::BackendSource::Installed,
+        };
+        let result = probe(&backend, Duration::from_secs(20)).await;
+        assert_eq!(
+            result.error,
+            Some(ProbeError::NoMatchingDevice {
+                backend: BackendKind::Vulkan
+            })
+        );
+        assert!(
+            result
+                .output
+                .iter()
+                .any(|l| l.contains("Available devices:")),
+            "{:?}",
+            result.output
+        );
+        assert!(
+            result
+                .output
+                .iter()
+                .any(|l| l.contains("ggml_vulkan: no devices found")),
+            "{:?}",
+            result.output
+        );
+    }
 
     #[test]
     fn parses_rows_and_ignores_noise() {

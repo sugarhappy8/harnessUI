@@ -14,6 +14,7 @@ mod downloads;
 mod dto;
 mod error;
 mod git_cmd;
+mod gpu;
 mod hotkey;
 mod hub;
 mod logging;

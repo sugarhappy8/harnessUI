@@ -2,6 +2,15 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## Unreleased
+
+### Fixed
+- **A graphics card that Vulkan did not list was treated as the wrong card.** The app knew a PC's graphics card only from the Vulkan backend's device list, and counted the CPU as a card. When Vulkan listed nothing, the ROCm download said "supports only AMD Radeon RX 9000-series cards" and the CUDA download said "needs an NVIDIA graphics card", whatever card the PC had. The app now also asks Windows which display adapters are installed, and the downloads are decided from that.
+- The Vulkan backend's "no Vulkan device found" is replaced by a message that names the cards Windows sees and says what to do (or says that only a virtual adapter is visible, as in a virtual machine).
+
+### Added
+- *Settings → Diagnostics → Run backend check* now lists the graphics adapters Windows reports with their driver versions, includes what llama-server printed when a backend found no device, and repeats that check with the system's full environment to show whether a driver needs a variable the app does not pass on.
+
 ## 0.0.1 (2026-11-11)
 
 The first release: everything below, M0 to M9, under the app's corrected name, **harnessUI** (test builds before this were called "harnissUI"). An early test build. The installers are not code-signed (see the README for opening them), there are no in-app updates yet, and nothing has been tested on a real Windows PC or Mac; computer use is the least proven part.
