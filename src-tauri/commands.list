@@ -96,6 +96,9 @@ set_terminal_pass_through
 browser_status
 set_browser_settings
 choose_browser_path
+download_agent_browser
+cancel_agent_browser_download
+remove_agent_browser
 computer_status
 set_computer_profile
 git_info

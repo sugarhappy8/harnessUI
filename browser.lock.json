@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "comment": "The pinned Chrome for Testing build a Mac without a supported browser can download for the agent (ARCHITECTURE.md 9.3). Compiled into the app (browser::own). Each file is checked against its size and SHA-256 before it is unpacked. Not part of the installer.",
+  "chrome_for_testing": {
+    "version": "157.0.8103.50",
+    "source": "https://googlechromelabs.github.io/chrome-for-testing/"
+  },
+  "builds": [
+    {
+      "platform": "macos-aarch64",
+      "exe": "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+      "file": {
+        "name": "chrome-mac-arm64.zip",
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/157.0.8103.50/mac-arm64/chrome-mac-arm64.zip",
+        "size": 196583703,
+        "sha256": "aceb0578a1cc3631358b164dbbef04bf8936f96c690fb78c3ac25b7655e795e8"
+      }
+    },
+    {
+      "platform": "macos-x86_64",
+      "exe": "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+      "file": {
+        "name": "chrome-mac-x64.zip",
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/157.0.8103.50/mac-x64/chrome-mac-x64.zip",
+        "size": 207136222,
+        "sha256": "7b1c12bee8024f1193b28754aa0d46b7eaa08394de51bef84fd65a6cf08d61dc"
+      }
+    }
+  ]
+}

@@ -45,8 +45,18 @@ export default function App() {
 
   useEffect(() => {
     const onOpenModels = () => setModelsOpen(true);
+    // A component deep in the tree asks for Settings on one page (detail: the tab name).
+    const onOpenSettings = (event: Event) => {
+      const tab: unknown = (event as CustomEvent<unknown>).detail;
+      setSettingsTab(typeof tab === "string" ? tab : undefined);
+      setSettingsOpen(true);
+    };
     window.addEventListener("app:open-models", onOpenModels);
-    return () => window.removeEventListener("app:open-models", onOpenModels);
+    window.addEventListener("app:open-settings", onOpenSettings);
+    return () => {
+      window.removeEventListener("app:open-models", onOpenModels);
+      window.removeEventListener("app:open-settings", onOpenSettings);
+    };
   }, []);
 
   useEffect(() => {

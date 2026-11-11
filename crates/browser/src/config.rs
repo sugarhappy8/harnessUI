@@ -25,6 +25,9 @@ pub struct BrowserConfig {
     pub profile_dir: PathBuf,
     /// A browser executable the user chose in Settings, tried before any other.
     pub browser_path: Option<PathBuf>,
+    /// The folder the agent's own browser is downloaded into ([`crate::own`]), in the
+    /// app's data folder. Used when no installed browser is found.
+    pub own_browser_dir: Option<PathBuf>,
     /// Pipe (default) or loopback port.
     pub connection: ConnectionMode,
     /// Run without a window. The app shows a real window; tests run headless.
@@ -67,6 +70,7 @@ impl BrowserConfig {
         Self {
             profile_dir: profile_dir.into(),
             browser_path: None,
+            own_browser_dir: None,
             connection: ConnectionMode::Pipe,
             headless: false,
             allow_private_networks: false,

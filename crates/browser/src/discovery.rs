@@ -1,6 +1,7 @@
-//! Finding the browser to drive (ARCHITECTURE.md 9.3, 15): a user override, installed
-//! Chrome or Edge (standard install paths, the Windows registry's App Paths), Chromium,
-//! and for tests an environment override and the pre-installed Playwright Chromium.
+//! Finding the browser to drive (ARCHITECTURE.md 9.3, 15): a user override, an installed
+//! Chrome, Edge, Brave, Vivaldi or Chromium (standard install paths, the Windows
+//! registry's App Paths), then the agent's own downloaded browser ([`crate::own`]), and
+//! for tests an environment override and the pre-installed Playwright Chromium.
 
 use std::path::{Path, PathBuf};
 
@@ -19,8 +20,30 @@ pub enum BrowserKind {
     Chrome,
     /// Microsoft Edge.
     Edge,
+    /// Brave.
+    Brave,
+    /// Vivaldi.
+    Vivaldi,
     /// Chromium (including Playwright's build).
     Chromium,
+    /// The browser the app downloaded for the agent ([`crate::own`]).
+    Own,
+}
+
+impl BrowserKind {
+    /// The name shown in Settings.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::UserChoice => "The browser you chose",
+            Self::Environment => "The browser named by HARNISS_BROWSER_PATH",
+            Self::Chrome => "Google Chrome",
+            Self::Edge => "Microsoft Edge",
+            Self::Brave => "Brave",
+            Self::Vivaldi => "Vivaldi",
+            Self::Chromium => "Chromium",
+            Self::Own => "The agent's own browser (Chrome for Testing)",
+        }
+    }
 }
 
 /// A browser executable that exists.
@@ -52,10 +75,17 @@ impl BrowserUnavailable {
     }
 }
 
-fn not_installed() -> BrowserUnavailable {
+fn not_installed(os: Os) -> BrowserUnavailable {
+    let next_step = if crate::own::offered_on(os) {
+        "Install Google Chrome or Microsoft Edge, or download a browser for the agent in Settings → Browser."
+    } else {
+        "Install Google Chrome or Microsoft Edge, or choose a browser path in Settings → Browser."
+    };
     BrowserUnavailable {
-        message: "The browser tool needs Chrome or Edge, and neither is installed.".into(),
-        next_step: "Install Google Chrome, or choose a browser path in Settings → Browser.".into(),
+        message:
+            "The browser tool needs Chrome, Edge, Brave, Vivaldi or Chromium, and none was found."
+                .into(),
+        next_step: next_step.into(),
     }
 }
 
@@ -72,8 +102,11 @@ pub struct DiscoveryEnv {
     pub local_app_data: Option<PathBuf>,
     /// The home folder (macOS `~/Applications`).
     pub home: Option<PathBuf>,
-    /// App Paths entries from the Windows registry (chrome.exe, msedge.exe).
+    /// App Paths entries from the Windows registry (chrome.exe, msedge.exe, brave.exe,
+    /// vivaldi.exe).
     pub registry: Vec<(PathBuf, BrowserKind)>,
+    /// The executable of the browser the app downloaded for the agent, when installed.
+    pub own_browser: Option<PathBuf>,
     /// `PLAYWRIGHT_BROWSERS_PATH`, else `/opt/pw-browsers` on Linux.
     pub playwright_root: Option<PathBuf>,
     /// Directories of `PATH` (Linux).
@@ -91,6 +124,7 @@ impl DiscoveryEnv {
             local_app_data: var("LOCALAPPDATA"),
             home: var("HOME").or_else(|| var("USERPROFILE")),
             registry: registry_app_paths(),
+            own_browser: None,
             playwright_root: var("PLAYWRIGHT_BROWSERS_PATH")
                 .or_else(|| cfg!(target_os = "linux").then(|| PathBuf::from("/opt/pw-browsers"))),
             path_dirs: std::env::var_os("PATH")
@@ -128,56 +162,51 @@ impl Os {
     }
 }
 
-/// Where to look, in order (Chrome first, then Edge, then Chromium). Pure: no file-system
-/// access.
+/// Where to look, in order: Chrome, Edge, Brave, Vivaldi, then Chromium. Pure: no
+/// file-system access.
 pub fn candidates(os: Os, env: &DiscoveryEnv) -> Vec<(PathBuf, BrowserKind)> {
     let mut out: Vec<(PathBuf, BrowserKind)> = Vec::new();
     match os {
         Os::Windows => {
-            out.extend(
-                env.registry
-                    .iter()
-                    .filter(|(_, k)| *k == BrowserKind::Chrome)
-                    .cloned(),
-            );
-            let chrome = Path::new("Google")
-                .join("Chrome")
-                .join("Application")
-                .join("chrome.exe");
-            let edge = Path::new("Microsoft")
-                .join("Edge")
-                .join("Application")
-                .join("msedge.exe");
-            for base in [
-                &env.program_files,
-                &env.program_files_x86,
-                &env.local_app_data,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                out.push((base.join(&chrome), BrowserKind::Chrome));
-            }
-            out.extend(
-                env.registry
-                    .iter()
-                    .filter(|(_, k)| *k == BrowserKind::Edge)
-                    .cloned(),
-            );
-            for base in [&env.program_files_x86, &env.program_files]
-                .into_iter()
-                .flatten()
-            {
-                out.push((base.join(&edge), BrowserKind::Edge));
-            }
-            if let Some(local) = &env.local_app_data {
-                out.push((
-                    local
-                        .join("Chromium")
-                        .join("Application")
-                        .join("chrome.exe"),
+            let pf = env.program_files.as_ref();
+            let pf86 = env.program_files_x86.as_ref();
+            let local = env.local_app_data.as_ref();
+            // Per browser: where it installs (`\`-separated, under a base folder) and
+            // the bases in the order its installer prefers them.
+            let installs: [(BrowserKind, &str, [Option<&PathBuf>; 3]); 5] = [
+                (
+                    BrowserKind::Chrome,
+                    r"Google\Chrome\Application\chrome.exe",
+                    [pf, pf86, local],
+                ),
+                (
+                    BrowserKind::Edge,
+                    r"Microsoft\Edge\Application\msedge.exe",
+                    [pf86, pf, None],
+                ),
+                (
+                    BrowserKind::Brave,
+                    r"BraveSoftware\Brave-Browser\Application\brave.exe",
+                    [pf, pf86, local],
+                ),
+                (
+                    BrowserKind::Vivaldi,
+                    r"Vivaldi\Application\vivaldi.exe",
+                    [local, pf, pf86],
+                ),
+                (
                     BrowserKind::Chromium,
-                ));
+                    r"Chromium\Application\chrome.exe",
+                    [local, None, None],
+                ),
+            ];
+            for (kind, install, bases) in installs {
+                out.extend(env.registry.iter().filter(|(_, k)| *k == kind).cloned());
+                for base in bases.into_iter().flatten() {
+                    let mut path = base.clone();
+                    path.extend(install.split('\\'));
+                    out.push((path, kind));
+                }
             }
         }
         Os::Mac => {
@@ -190,6 +219,8 @@ pub fn candidates(os: Os, env: &DiscoveryEnv) -> Vec<(PathBuf, BrowserKind)> {
             let entries = [
                 (apps("Google Chrome", "Google Chrome"), BrowserKind::Chrome),
                 (apps("Microsoft Edge", "Microsoft Edge"), BrowserKind::Edge),
+                (apps("Brave Browser", "Brave Browser"), BrowserKind::Brave),
+                (apps("Vivaldi", "Vivaldi"), BrowserKind::Vivaldi),
                 (apps("Chromium", "Chromium"), BrowserKind::Chromium),
             ];
             for (rel, kind) in entries {
@@ -200,24 +231,42 @@ pub fn candidates(os: Os, env: &DiscoveryEnv) -> Vec<(PathBuf, BrowserKind)> {
             }
         }
         Os::Linux => {
-            let names = [
-                ("google-chrome-stable", BrowserKind::Chrome),
-                ("google-chrome", BrowserKind::Chrome),
-                ("microsoft-edge-stable", BrowserKind::Edge),
-                ("microsoft-edge", BrowserKind::Edge),
-                ("chromium", BrowserKind::Chromium),
-                ("chromium-browser", BrowserKind::Chromium),
+            // Per browser: names searched in `PATH`, then fixed install paths.
+            let installs: [(BrowserKind, &[&str], &[&str]); 5] = [
+                (
+                    BrowserKind::Chrome,
+                    &["google-chrome-stable", "google-chrome"],
+                    &["/opt/google/chrome/chrome"],
+                ),
+                (
+                    BrowserKind::Edge,
+                    &["microsoft-edge-stable", "microsoft-edge"],
+                    &["/opt/microsoft/msedge/msedge"],
+                ),
+                (
+                    BrowserKind::Brave,
+                    &["brave-browser-stable", "brave-browser", "brave"],
+                    &["/opt/brave.com/brave/brave", "/snap/bin/brave"],
+                ),
+                (
+                    BrowserKind::Vivaldi,
+                    &["vivaldi-stable", "vivaldi"],
+                    &["/opt/vivaldi/vivaldi"],
+                ),
+                (
+                    BrowserKind::Chromium,
+                    &["chromium", "chromium-browser"],
+                    &["/snap/bin/chromium"],
+                ),
             ];
-            for (name, kind) in names {
-                for dir in &env.path_dirs {
-                    out.push((dir.join(name), kind));
+            for (kind, names, fixed) in installs {
+                for name in names {
+                    for dir in &env.path_dirs {
+                        out.push((dir.join(name), kind));
+                    }
                 }
+                out.extend(fixed.iter().map(|p| (PathBuf::from(p), kind)));
             }
-            out.push((
-                PathBuf::from("/opt/google/chrome/chrome"),
-                BrowserKind::Chrome,
-            ));
-            out.push((PathBuf::from("/snap/bin/chromium"), BrowserKind::Chromium));
         }
     }
     out
@@ -268,8 +317,9 @@ fn usable(path: &Path) -> Option<PathBuf> {
     canonical.is_file().then_some(canonical)
 }
 
-/// Finds the browser: the user's choice, `HARNISS_BROWSER_PATH`, then the standard
-/// locations for `os`, then Playwright's Chromium.
+/// Finds the browser: the user's choice, `HARNISS_BROWSER_PATH` (tests and CI), the
+/// standard locations for `os` (Chrome, Edge, Brave, Vivaldi, Chromium), the agent's own
+/// downloaded browser, then Playwright's Chromium (tests).
 pub fn find_browser_in(
     user_choice: Option<&Path>,
     os: Os,
@@ -286,7 +336,7 @@ pub fn find_browser_in(
                     "The browser chosen in Settings ({}) was not found.",
                     choice.display()
                 ),
-                next_step: "Choose another browser path in Settings → Browser, or clear it to use Chrome or Edge.".into(),
+                next_step: "Choose another browser path in Settings → Browser, or clear it to use an installed browser.".into(),
             });
     }
     if let Some(path) = env.env_override.as_deref().and_then(usable) {
@@ -300,6 +350,12 @@ pub fn find_browser_in(
             return Ok(FoundBrowser { path, kind });
         }
     }
+    if let Some(path) = env.own_browser.as_deref().and_then(usable) {
+        return Ok(FoundBrowser {
+            path,
+            kind: BrowserKind::Own,
+        });
+    }
     if let Some(path) = env
         .playwright_root
         .as_deref()
@@ -311,15 +367,24 @@ pub fn find_browser_in(
             kind: BrowserKind::Chromium,
         });
     }
-    Err(not_installed())
+    Err(not_installed(os))
 }
 
-/// [`find_browser_in`] with the real environment.
-pub fn find_browser(user_choice: Option<&Path>) -> Result<FoundBrowser, BrowserUnavailable> {
-    find_browser_in(user_choice, Os::current(), &DiscoveryEnv::from_system())
+/// [`find_browser_in`] with the real environment. `own_root` is the folder the agent's
+/// own browser is downloaded into ([`crate::own`]), when the app has one.
+pub fn find_browser(
+    user_choice: Option<&Path>,
+    own_root: Option<&Path>,
+) -> Result<FoundBrowser, BrowserUnavailable> {
+    let mut env = DiscoveryEnv::from_system();
+    // Read only when it can matter: a chosen path wins or fails on its own.
+    if user_choice.is_none() {
+        env.own_browser = own_root.and_then(crate::own::installed).map(|b| b.exe);
+    }
+    find_browser_in(user_choice, Os::current(), &env)
 }
 
-/// `chrome.exe` and `msedge.exe` from `HKCU` and `HKLM`
+/// `chrome.exe`, `msedge.exe`, `brave.exe` and `vivaldi.exe` from `HKCU` and `HKLM`
 /// `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths`.
 #[cfg(windows)]
 fn registry_app_paths() -> Vec<(PathBuf, BrowserKind)> {
@@ -363,6 +428,8 @@ fn registry_app_paths() -> Vec<(PathBuf, BrowserKind)> {
     for (exe, kind) in [
         ("chrome.exe", BrowserKind::Chrome),
         ("msedge.exe", BrowserKind::Edge),
+        ("brave.exe", BrowserKind::Brave),
+        ("vivaldi.exe", BrowserKind::Vivaldi),
     ] {
         for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
             if let Some(p) = read_default(root, &format!("{base}{exe}")) {
@@ -491,8 +558,187 @@ mod tests {
         let err = find_browser_in(None, Os::Windows, &none).unwrap_err();
         assert_eq!(
             err.message,
-            "The browser tool needs Chrome or Edge, and neither is installed."
+            "The browser tool needs Chrome, Edge, Brave, Vivaldi or Chromium, and none was found."
         );
         assert!(err.for_model().contains("Install Google Chrome"));
+        assert!(err.next_step.contains("choose a browser path"));
+        assert!(
+            !err.next_step.contains("download"),
+            "no download is offered on Windows"
+        );
+    }
+
+    /// The order of the kinds in a candidate list, each kind once.
+    fn kind_order(c: &[(PathBuf, BrowserKind)]) -> Vec<BrowserKind> {
+        let mut out: Vec<BrowserKind> = Vec::new();
+        for (_, k) in c {
+            if out.last() != Some(k) {
+                assert!(!out.contains(k), "{k:?} appears in two places: {c:?}");
+                out.push(*k);
+            }
+        }
+        out
+    }
+
+    const ORDER: [BrowserKind; 5] = [
+        BrowserKind::Chrome,
+        BrowserKind::Edge,
+        BrowserKind::Brave,
+        BrowserKind::Vivaldi,
+        BrowserKind::Chromium,
+    ];
+
+    #[test]
+    fn every_os_looks_for_chrome_edge_brave_vivaldi_then_chromium() {
+        let env = DiscoveryEnv {
+            program_files: Some(PathBuf::from("PF")),
+            program_files_x86: Some(PathBuf::from("PF86")),
+            local_app_data: Some(PathBuf::from("L")),
+            home: Some(PathBuf::from("/Users/u")),
+            path_dirs: vec![PathBuf::from("/usr/bin"), PathBuf::from("/usr/local/bin")],
+            registry: vec![
+                (PathBuf::from("R/vivaldi.exe"), BrowserKind::Vivaldi),
+                (PathBuf::from("R/brave.exe"), BrowserKind::Brave),
+                (PathBuf::from("R/msedge.exe"), BrowserKind::Edge),
+                (PathBuf::from("R/chrome.exe"), BrowserKind::Chrome),
+            ],
+            ..Default::default()
+        };
+        for os in [Os::Windows, Os::Mac, Os::Linux] {
+            assert_eq!(kind_order(&candidates(os, &env)), ORDER, "{os:?}");
+        }
+    }
+
+    #[test]
+    fn brave_and_vivaldi_standard_locations() {
+        let env = DiscoveryEnv {
+            program_files: Some(PathBuf::from("PF")),
+            program_files_x86: Some(PathBuf::from("PF86")),
+            local_app_data: Some(PathBuf::from("L")),
+            home: Some(PathBuf::from("/Users/u")),
+            path_dirs: vec![PathBuf::from("/usr/bin")],
+            registry: vec![
+                (PathBuf::from("R/brave.exe"), BrowserKind::Brave),
+                (PathBuf::from("R/vivaldi.exe"), BrowserKind::Vivaldi),
+            ],
+            ..Default::default()
+        };
+        let has = |os: Os, kind: BrowserKind, path: &str| {
+            let c = candidates(os, &env);
+            assert!(
+                c.contains(&(PathBuf::from(path), kind)),
+                "{path} missing from {c:?}"
+            );
+        };
+        use BrowserKind::{Brave, Vivaldi};
+        for base in ["PF", "PF86", "L"] {
+            has(
+                Os::Windows,
+                Brave,
+                &format!("{base}/BraveSoftware/Brave-Browser/Application/brave.exe"),
+            );
+            has(
+                Os::Windows,
+                Vivaldi,
+                &format!("{base}/Vivaldi/Application/vivaldi.exe"),
+            );
+        }
+        // The registry's App Paths entry comes before the install folders.
+        let win = candidates(Os::Windows, &env);
+        let first = |kind: BrowserKind| win.iter().find(|(_, k)| *k == kind).unwrap().0.clone();
+        assert_eq!(first(Brave), PathBuf::from("R/brave.exe"));
+        assert_eq!(first(Vivaldi), PathBuf::from("R/vivaldi.exe"));
+        has(
+            Os::Mac,
+            Brave,
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        );
+        has(
+            Os::Mac,
+            Brave,
+            "/Users/u/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        );
+        has(
+            Os::Mac,
+            Vivaldi,
+            "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+        );
+        has(
+            Os::Mac,
+            Vivaldi,
+            "/Users/u/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+        );
+        has(Os::Linux, Brave, "/usr/bin/brave-browser");
+        has(Os::Linux, Brave, "/opt/brave.com/brave/brave");
+        has(Os::Linux, Vivaldi, "/usr/bin/vivaldi-stable");
+        has(Os::Linux, Vivaldi, "/opt/vivaldi/vivaldi");
+    }
+
+    #[test]
+    fn the_agents_own_browser_comes_after_installed_ones_and_before_the_test_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |rel: &str| {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "x").unwrap();
+            dunce::canonicalize(&p).unwrap()
+        };
+        let own = mk("agent-browser/1.2.3.4/app/own");
+        let playwright = mk("pw/chromium-1000/chrome-linux64/chrome");
+        let brave = mk("L/BraveSoftware/Brave-Browser/Application/brave.exe");
+        // Windows locations all come from the environment, so nothing installed on the
+        // machine running the test is found.
+        let mut env = DiscoveryEnv {
+            own_browser: Some(own.clone()),
+            playwright_root: Some(dir.path().join("pw")),
+            ..Default::default()
+        };
+        // Only the own browser and the test fallback exist: the own browser is used.
+        let found = find_browser_in(None, Os::Windows, &env).unwrap();
+        assert_eq!((found.path, found.kind), (own.clone(), BrowserKind::Own));
+        // An installed browser wins over it.
+        env.local_app_data = Some(dir.path().join("L"));
+        let found = find_browser_in(None, Os::Windows, &env).unwrap();
+        assert_eq!((found.path, found.kind), (brave, BrowserKind::Brave));
+        // Removed: back to the fallback.
+        env.local_app_data = None;
+        std::fs::remove_file(&own).unwrap();
+        let found = find_browser_in(None, Os::Windows, &env).unwrap();
+        assert_eq!(
+            (found.path, found.kind),
+            (playwright, BrowserKind::Chromium)
+        );
+    }
+
+    #[test]
+    fn the_next_step_offers_the_download_on_macos_only() {
+        let none = DiscoveryEnv {
+            // Nothing on this machine is under this home folder; /Applications does not
+            // exist on the Linux test machines and holds no browser on a Mac in CI only
+            // by luck, so the Mac case is checked through the message function.
+            home: Some(PathBuf::from("/nonexistent-home")),
+            ..Default::default()
+        };
+        let mac = not_installed(Os::Mac);
+        assert!(
+            mac.next_step
+                .contains("download a browser for the agent in Settings → Browser"),
+            "{}",
+            mac.next_step
+        );
+        for os in [Os::Windows, Os::Linux] {
+            let e = not_installed(os);
+            assert!(!e.next_step.contains("download"), "{os:?}: {}", e.next_step);
+            assert_eq!(e.message, mac.message);
+        }
+        let err = find_browser_in(None, Os::Windows, &none).unwrap_err();
+        assert_eq!(err, not_installed(Os::Windows));
+    }
+
+    #[test]
+    fn kinds_have_plain_names() {
+        assert_eq!(BrowserKind::Brave.label(), "Brave");
+        assert_eq!(BrowserKind::Chrome.label(), "Google Chrome");
+        assert!(BrowserKind::Own.label().contains("Chrome for Testing"));
     }
 }

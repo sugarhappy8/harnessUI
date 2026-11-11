@@ -525,9 +525,35 @@ export interface BrowserSettings {
 export interface BrowserStatus {
   settings: BrowserSettings;
   found: string | null;
+  /** The name of the browser in use, e.g. "Google Chrome". */
   kind: string | null;
   unavailable: string | null;
   running: boolean;
+  /** The browser the app can download for the agent. */
+  own: OwnBrowserStatus;
+}
+
+/** The agent's own browser (a pinned Chrome for Testing build). */
+export interface OwnBrowserStatus {
+  /** True where the download is offered (decided by the backend; macOS only). */
+  offered: boolean;
+  state: "notInstalled" | "partial" | "downloading" | "installed";
+  /** The installed version, when installed. */
+  version: string | null;
+  /** The version a download would install. */
+  pinnedVersion: string;
+  downloadBytes: number;
+  bytesDone: number;
+  /** True when the browser in use is this one. */
+  inUse: boolean;
+}
+
+export interface AgentBrowserProgress {
+  done: number;
+  total: number;
+  unpacking: boolean;
+  finished: boolean;
+  error: ErrorInfo | null;
 }
 
 // ---- Computer use (M7) -------------------------------------------------------------

@@ -5,8 +5,14 @@
 //!   stored in the OS keychain; the saved config keeps `${secret:<name>}` placeholders.
 //! - Tools of a new server start off (D10). A tool whose fingerprint changed starts off
 //!   again and loses its grants (9.2).
+//! - A new chat starts with the file and skill tools, and with the browser tools when a
+//!   browser is available and the model's context is at least 8,192 tokens (D10 as the
+//!   owner changed it on 2026-11-11). [`Selection`] is the one place that decides this,
+//!   for the Tools panel and for the turn.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use mcp_host::{ServerConfig, ServerKind, ServerState, ToolPrefs};
 use serde::Serialize;
@@ -20,8 +26,139 @@ use crate::toolset::mcp_secret_key;
 /// Setting: the tools of the last chat whose tools the user changed (new chats start so).
 const DEFAULT_TOOLS: &str = "defaultChatTools";
 
-/// Built-in servers whose tools are on in a new chat.
+/// Built-in servers whose tools are on in every new chat (D10).
 const DEFAULT_ON_BUILTIN: &[&str] = &["files", "skills"];
+
+/// The built-in browser server's name.
+const BROWSER_SERVER: &str = "browser";
+
+/// The Browser group is also on in a new chat when a browser is available and the chat
+/// model's context is at least this many tokens (D10 as the owner changed it on
+/// 2026-11-11). Its ten tools cost about 1,400 tokens on every request, which a 4,096
+/// window has no room for.
+pub const BROWSER_DEFAULT_MIN_CONTEXT: u32 = 8192;
+
+/// What is known about the chat model's context when a new chat's tools are decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownContext {
+    /// No model is chosen for the chat.
+    NoModel,
+    /// A local model: the context it runs with when it is the loaded model, and the
+    /// context setting the next load asks for.
+    Local {
+        loaded: Option<u32>,
+        configured: u32,
+    },
+    /// A remote endpoint: the context it reports for the model, if any, and the
+    /// `remoteContextLength` setting used when it reports none.
+    Remote { reported: Option<u32>, setting: u32 },
+}
+
+impl KnownContext {
+    /// The context size to decide on, in tokens.
+    pub fn tokens(self) -> Option<u32> {
+        match self {
+            Self::NoModel => None,
+            Self::Local { loaded, configured } => Some(loaded.unwrap_or(configured)),
+            Self::Remote { reported, setting } => Some(reported.unwrap_or(setting)),
+        }
+    }
+}
+
+/// Whether a built-in server's tools are on in a new chat that has no saved choice.
+fn default_on(server: &str, browser_available: bool, context: Option<u32>) -> bool {
+    DEFAULT_ON_BUILTIN.contains(&server)
+        || (server == BROWSER_SERVER
+            && browser_available
+            && context.is_some_and(|n| n >= BROWSER_DEFAULT_MIN_CONTEXT))
+}
+
+/// Which tools are on in the list being built. The Tools panel and the turn both go
+/// through this, so they cannot disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Selection<'a> {
+    /// No chat (a server's list in Settings): nothing is "on in the chat".
+    NoChat,
+    /// The chat's own saved choice.
+    Chat(&'a [String]),
+    /// A chat without its own choice, once the user has changed tools in any chat: that
+    /// last choice (9.3).
+    LastChoice(&'a [String]),
+    /// A chat without its own choice, and no last choice: the defaults.
+    Defaults {
+        browser_available: bool,
+        /// The model's context in tokens, when it is known or can be assumed.
+        context: Option<u32>,
+    },
+}
+
+impl<'a> Selection<'a> {
+    /// A chat's own choice wins, then the last choice, then the defaults.
+    fn for_chat(
+        own: Option<&'a [String]>,
+        last_choice: Option<&'a [String]>,
+        browser_available: bool,
+        context: Option<u32>,
+    ) -> Self {
+        match (own, last_choice) {
+            (Some(list), _) => Self::Chat(list),
+            (None, Some(list)) => Self::LastChoice(list),
+            (None, None) => Self::Defaults {
+                browser_available,
+                context,
+            },
+        }
+    }
+
+    /// Whether one tool is on.
+    fn on(&self, exposed: &str, server: &str, builtin: bool) -> bool {
+        match self {
+            Self::NoChat => false,
+            Self::Chat(list) | Self::LastChoice(list) => list.iter().any(|e| e == exposed),
+            Self::Defaults {
+                browser_available,
+                context,
+            } => builtin && default_on(server, *browser_available, *context),
+        }
+    }
+}
+
+/// What a remote endpoint last reported as a model's context when the tool list asked
+/// (`None`: it reports none).
+#[derive(Debug, Clone, Copy)]
+struct SeenContext {
+    tokens: Option<u32>,
+    at: Instant,
+}
+
+/// By model reference. In memory only.
+static REMOTE_CONTEXT: Mutex<BTreeMap<String, SeenContext>> = Mutex::new(BTreeMap::new());
+
+/// How long a report is used before the endpoint is asked again.
+const CONTEXT_FRESH: Duration = Duration::from_secs(60);
+
+/// How long the tool list waits for an endpoint to report its context.
+const CONTEXT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+fn seen_context(model_ref: &str) -> Option<SeenContext> {
+    REMOTE_CONTEXT.lock().ok()?.get(model_ref).copied()
+}
+
+fn remember_context(model_ref: &str, tokens: Option<u32>) {
+    if let Ok(mut map) = REMOTE_CONTEXT.lock() {
+        // A handful of models at most; never let it grow without bound.
+        if map.len() > 256 {
+            map.clear();
+        }
+        map.insert(
+            model_ref.to_string(),
+            SeenContext {
+                tokens,
+                at: Instant::now(),
+            },
+        );
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -565,37 +702,139 @@ fn token_estimate(t: &mcp_host::RegisteredTool) -> u32 {
     (chars as f64 / 3.5).ceil() as u32
 }
 
-/// Tools that are on in a chat, given its stored preferences.
+/// Tools that are on in a chat, given its stored preferences. `turn_context` is the
+/// context, in tokens, the turn asking will run with; the defaults of a new chat depend
+/// on it (see [`Selection`]).
 pub async fn enabled_for_chat(
     state: &AppState,
     chat: &store::Chat,
+    turn_context: Option<u32>,
 ) -> Vec<mcp_host::RegisteredTool> {
-    let list = chat_tool_list(state, chat).await;
+    let list = chat_tool_list(state, chat, turn_context).await;
     list.into_iter()
-        .filter(|(_, d)| d.enabled_in_chat && d.available && d.schema_error.is_none())
+        .filter(|(_, d)| d.offered())
         .map(|(t, _)| t)
         .collect()
+}
+
+impl ToolDto {
+    /// Whether the tool is offered to the model: on in the chat, and able to work.
+    fn offered(&self) -> bool {
+        self.enabled_in_chat && self.available && self.schema_error.is_none()
+    }
+
+    /// Marks a tool that cannot work right now; the Tools panel shows `reason`.
+    fn mark_unavailable(&mut self, reason: &str) {
+        self.available = false;
+        self.schema_error.get_or_insert_with(|| reason.to_string());
+    }
 }
 
 async fn chat_tool_list(
     state: &AppState,
     chat: &store::Chat,
+    turn_context: Option<u32>,
 ) -> Vec<(mcp_host::RegisteredTool, ToolDto)> {
     let prefs: crate::turns::ChatTools =
         serde_json::from_value(chat.tool_prefs.clone()).unwrap_or_default();
-    let mut list = tool_list(state, Some(&prefs)).await;
+    // The user's last choice of tools is the default for new chats (9.3).
+    let last_choice: Option<Vec<String>> =
+        state.store.get_setting(DEFAULT_TOOLS).await.ok().flatten();
+    // No browser found: the browser tools cannot work (and are not on by default).
+    let no_browser = crate::browser_cmd::unavailable_reason();
+    let needs_defaults = prefs.enabled.is_none() && last_choice.is_none();
+    // The context only matters for the browser default, so it is only looked up then.
+    let context = if needs_defaults && no_browser.is_none() {
+        match turn_context {
+            Some(n) => Some(n),
+            None => context_for_defaults(state, chat).await.tokens(),
+        }
+    } else {
+        None
+    };
+    let selection = Selection::for_chat(
+        prefs.enabled.as_deref(),
+        last_choice.as_deref(),
+        no_browser.is_none(),
+        context,
+    );
+    let mut list = tool_list(state, &selection).await;
     // Computer use: only for a model that can see, with a confirmed coordinate convention.
-    let why_not = computer_unavailable(state, chat).await;
-    for (_, dto) in list
-        .iter_mut()
-        .filter(|(_, d)| d.server == computer::SERVER_NAME)
-    {
-        if let Some(reason) = &why_not {
-            dto.available = false;
-            dto.schema_error.get_or_insert_with(|| reason.clone());
+    let no_computer = computer_unavailable(state, chat).await;
+    for (_, dto) in &mut list {
+        let why_not = match dto.server.as_str() {
+            computer::SERVER_NAME => no_computer.as_deref(),
+            BROWSER_SERVER => no_browser.as_deref(),
+            _ => None,
+        };
+        if let Some(reason) = why_not {
+            dto.mark_unavailable(reason);
         }
     }
     list
+}
+
+/// What is known about the context of the chat's model without starting a turn.
+async fn context_for_defaults(state: &AppState, chat: &store::Chat) -> KnownContext {
+    let Some(model) = chat.model_ref.as_deref() else {
+        return KnownContext::NoModel;
+    };
+    if let Some(path) = model.strip_prefix("local:") {
+        let status = state.runtime.status();
+        let loaded = (status.model_path.as_deref() == Some(path))
+            .then_some(status.n_ctx)
+            .flatten();
+        let configured = state
+            .store
+            .get_setting::<crate::dto::LocalModelSettings>(crate::settings::LOCAL_MODEL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .ctx;
+        return KnownContext::Local { loaded, configured };
+    }
+    if model.starts_with("remote:") {
+        let stored: Option<Value> = state
+            .store
+            .get_setting(crate::settings::REMOTE_CONTEXT_LENGTH)
+            .await
+            .ok()
+            .flatten();
+        return KnownContext::Remote {
+            reported: remote_context(state, model).await,
+            setting: crate::settings::remote_context_length(stored.as_ref()),
+        };
+    }
+    KnownContext::NoModel
+}
+
+/// The context a remote endpoint reports for a model, asked the way a turn asks: its
+/// report from the last minute, else its report now (waiting a few seconds at most), else
+/// its last report when it does not answer.
+async fn remote_context(state: &AppState, model_ref: &str) -> Option<u32> {
+    let seen = seen_context(model_ref);
+    if let Some(s) = seen
+        && s.at.elapsed() < CONTEXT_FRESH
+    {
+        return s.tokens;
+    }
+    let lookup = async {
+        let (id, model) = model_ref.strip_prefix("remote:")?.split_once(':')?;
+        let id: i64 = id.parse().ok()?;
+        let (client, _) = crate::providers::client_for(state, store::ProviderId(id))
+            .await
+            .ok()?;
+        client.context_length(model).await.ok()
+    };
+    let tokens = match tokio::time::timeout(CONTEXT_LOOKUP_TIMEOUT, lookup).await {
+        // The endpoint answered: its report, or none (then the setting decides).
+        Ok(Some(reported)) => reported,
+        // No answer: keep what was seen before, and do not ask again for a minute.
+        _ => seen.and_then(|s| s.tokens),
+    };
+    remember_context(model_ref, tokens);
+    tokens
 }
 
 /// Why the computer tools cannot be offered in this chat, if they cannot.
@@ -616,12 +855,9 @@ async fn computer_unavailable(state: &AppState, chat: &store::Chat) -> Option<St
 
 async fn tool_list(
     state: &AppState,
-    prefs: Option<&crate::turns::ChatTools>,
+    selection: &Selection<'_>,
 ) -> Vec<(mcp_host::RegisteredTool, ToolDto)> {
     let stored = state.store.list_mcp_servers().await.unwrap_or_default();
-    // The user's last choice of tools is the default for new chats (9.3).
-    let last_choice: Option<Vec<String>> =
-        state.store.get_setting(DEFAULT_TOOLS).await.ok().flatten();
     let mut out = Vec::new();
     for t in state.host.tools() {
         let builtin = !stored.iter().any(|r| r.name == t.server);
@@ -642,15 +878,7 @@ async fn tool_list(
                 None => (false, false, false, false),
             }
         };
-        let enabled_in_chat = match prefs.map(|p| &p.enabled) {
-            Some(Some(list)) => list.contains(&t.exposed),
-            Some(None) => match &last_choice {
-                Some(list) => list.contains(&t.exposed),
-                None if builtin => DEFAULT_ON_BUILTIN.contains(&t.server.as_str()),
-                None => false,
-            },
-            None => false,
-        };
+        let enabled_in_chat = selection.on(&t.exposed, &t.server, builtin);
         let dto = ToolDto {
             exposed: t.exposed.clone(),
             server: t.server.clone(),
@@ -682,7 +910,7 @@ pub async fn list_chat_tools(
         .get_chat(chat_id)
         .await?
         .ok_or_else(|| AppError::not_found("chat"))?;
-    Ok(chat_tool_list(&state, &chat)
+    Ok(chat_tool_list(&state, &chat, None)
         .await
         .into_iter()
         .map(|(_, d)| d)
@@ -723,7 +951,7 @@ pub async fn list_server_tools(
     state: State<'_, AppState>,
     server: String,
 ) -> AppResult<Vec<ToolDto>> {
-    Ok(tool_list(&state, None)
+    Ok(tool_list(&state, &Selection::NoChat)
         .await
         .into_iter()
         .map(|(_, d)| d)
@@ -845,6 +1073,182 @@ pub async fn mcp_server_log(app: AppHandle, name: String) -> AppResult<Vec<Strin
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// D10 as changed on 2026-11-11: files and skills always; the browser when one is
+    /// available and the context is at least 8,192 tokens; nothing else.
+    #[test]
+    fn a_new_chat_starts_with_files_skills_and_the_browser_when_it_fits() {
+        for (available, context, browser_on) in [
+            (true, Some(8192), true),
+            (true, Some(32768), true),
+            (true, Some(8191), false),
+            (true, Some(4096), false),
+            (true, None, false),
+            (false, Some(8192), false),
+            (false, Some(131_072), false),
+            (false, None, false),
+        ] {
+            assert_eq!(
+                default_on("browser", available, context),
+                browser_on,
+                "available {available}, context {context:?}"
+            );
+            assert!(default_on("files", available, context));
+            assert!(default_on("skills", available, context));
+            for off in ["terminal", "git", "computer", "weather"] {
+                assert!(!default_on(off, available, context), "{off}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_context_to_decide_on() {
+        // No model: nothing is known, so the browser stays off.
+        assert_eq!(KnownContext::NoModel.tokens(), None);
+        // A loaded local model: what it runs with, whatever the setting says.
+        let local = |loaded, configured| KnownContext::Local { loaded, configured }.tokens();
+        assert_eq!(local(Some(4096), 8192), Some(4096));
+        assert_eq!(local(Some(16384), 4096), Some(16384));
+        // Not loaded yet: the configured context.
+        assert_eq!(local(None, 8192), Some(8192));
+        assert_eq!(local(None, 4096), Some(4096));
+        // Remote: the reported context, else the remoteContextLength setting.
+        let remote = |reported, setting| KnownContext::Remote { reported, setting }.tokens();
+        assert_eq!(remote(Some(32768), 4096), Some(32768));
+        assert_eq!(remote(Some(2048), 16384), Some(2048));
+        assert_eq!(remote(None, 4096), Some(4096));
+        assert_eq!(remote(None, 16384), Some(16384));
+    }
+
+    /// The whole decision for a new chat, from what is known to browser on or off.
+    #[test]
+    fn browser_default_by_model_kind() {
+        let on = |known: KnownContext| {
+            Selection::for_chat(None, None, true, known.tokens()).on(
+                "browser_navigate",
+                "browser",
+                true,
+            )
+        };
+        // A local model with the default 8,192 setting, before it is loaded.
+        assert!(on(KnownContext::Local {
+            loaded: None,
+            configured: crate::dto::LocalModelSettings::default().ctx,
+        }));
+        assert!(!on(KnownContext::Local {
+            loaded: None,
+            configured: 4096,
+        }));
+        // Loaded with less than it was configured for (capped at the trained length).
+        assert!(!on(KnownContext::Local {
+            loaded: Some(4096),
+            configured: 8192,
+        }));
+        // A remote endpoint that reports nothing, with the default setting of 4,096.
+        assert!(!on(KnownContext::Remote {
+            reported: None,
+            setting: crate::settings::DEFAULT_REMOTE_CONTEXT,
+        }));
+        assert!(on(KnownContext::Remote {
+            reported: None,
+            setting: 8192,
+        }));
+        assert!(on(KnownContext::Remote {
+            reported: Some(32768),
+            setting: 4096,
+        }));
+        assert!(!on(KnownContext::NoModel));
+    }
+
+    #[test]
+    fn a_saved_choice_is_never_changed_by_the_defaults() {
+        let own = names(&["files_read"]);
+        let last = names(&["git_status", "browser_navigate"]);
+        // The chat's own choice wins over everything, browser or not, context or not.
+        for (available, context) in [(true, Some(32768)), (false, None), (true, Some(4096))] {
+            let s = Selection::for_chat(Some(&own), Some(&last), available, context);
+            assert_eq!(s, Selection::Chat(&own));
+            assert!(s.on("files_read", "files", true));
+            assert!(!s.on("browser_navigate", "browser", true));
+            assert!(!s.on("files_write", "files", true));
+            // No own choice: the last choice, exactly as it was saved.
+            let s = Selection::for_chat(None, Some(&last), available, context);
+            assert_eq!(s, Selection::LastChoice(&last));
+            assert!(s.on("browser_navigate", "browser", true));
+            assert!(s.on("git_status", "git", true));
+            assert!(!s.on("files_read", "files", true));
+            assert!(!s.on("browser_click", "browser", true));
+        }
+        // An own choice of nothing stays nothing.
+        let none: Vec<String> = Vec::new();
+        let s = Selection::for_chat(Some(&none), None, true, Some(32768));
+        assert!(!s.on("browser_navigate", "browser", true));
+        assert!(!s.on("files_read", "files", true));
+    }
+
+    #[test]
+    fn defaults_apply_to_built_in_tools_only_and_settings_lists_show_nothing_on() {
+        let s = Selection::for_chat(None, None, true, Some(8192));
+        assert!(s.on("browser_navigate", "browser", true));
+        assert!(s.on("files_read", "files", true));
+        assert!(!s.on("git_status", "git", true));
+        // An MCP server the user named "browser" or "files" gets nothing by default.
+        assert!(!s.on("browser_navigate", "browser", false));
+        assert!(!s.on("files_read", "files", false));
+        assert!(!Selection::NoChat.on("files_read", "files", true));
+    }
+
+    fn dto(server: &str, enabled_in_chat: bool) -> ToolDto {
+        ToolDto {
+            exposed: format!("{server}_tool"),
+            server: server.into(),
+            original: "tool".into(),
+            description: String::new(),
+            builtin: true,
+            enabled_in_chat,
+            available: true,
+            changed: false,
+            allow_any_args: false,
+            always_ask: false,
+            destructive: false,
+            ready: true,
+            schema_error: None,
+            token_estimate: 100,
+        }
+    }
+
+    /// A tool that cannot work is not offered to the model even when it is switched on,
+    /// and carries the reason for the Tools panel.
+    #[test]
+    fn an_unavailable_tool_is_not_offered_and_says_why() {
+        let mut t = dto("browser", true);
+        assert!(t.offered());
+        t.mark_unavailable("No browser was found.");
+        assert!(!t.offered());
+        assert!(!t.available);
+        assert_eq!(t.schema_error.as_deref(), Some("No browser was found."));
+        // A real schema error is kept.
+        let mut t = dto("browser", true);
+        t.schema_error = Some("bad schema".into());
+        t.mark_unavailable("No browser was found.");
+        assert_eq!(t.schema_error.as_deref(), Some("bad schema"));
+        assert!(!dto("files", false).offered());
+    }
+
+    #[test]
+    fn a_seen_context_is_remembered_per_model() {
+        remember_context("remote:991:test-a", Some(32768));
+        remember_context("remote:991:test-b", None);
+        let a = seen_context("remote:991:test-a").expect("a");
+        assert_eq!(a.tokens, Some(32768));
+        assert!(a.at.elapsed() < CONTEXT_FRESH);
+        assert_eq!(seen_context("remote:991:test-b").expect("b").tokens, None);
+        assert!(seen_context("remote:991:test-c").is_none());
+    }
 
     #[test]
     fn placeholders_are_recognised_only_whole() {

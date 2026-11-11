@@ -43,7 +43,7 @@ pub enum PackError {
     /// The user cancelled.
     #[error("the download was cancelled")]
     Cancelled,
-    /// A redirect left GitHub's hosts.
+    /// The URL or a redirect is on a host outside the allowed list.
     #[error("the download was redirected to a host the app does not trust: {0}")]
     BlockedHost(String),
     /// An archive's SHA-256 differs from the lock file.
@@ -155,19 +155,30 @@ fn part_name(f: &PackFile) -> String {
     format!("{}.{}.part", f.name, &f.sha256[..16.min(f.sha256.len())])
 }
 
+#[cfg(test)]
 fn host_allowed(url: &reqwest::Url) -> bool {
-    url.scheme() == "https" && url.host_str().is_some_and(|h| ALLOWED_HOSTS.contains(&h))
+    host_allowed_in(url, ALLOWED_HOSTS)
+}
+
+/// Whether `url` is https on exactly one of `hosts` (no subdomains, no other scheme).
+fn host_allowed_in(url: &reqwest::Url, hosts: &[&str]) -> bool {
+    url.scheme() == "https" && url.host_str().is_some_and(|h| hosts.contains(&h))
 }
 
 fn client() -> Result<reqwest::Client, PackError> {
+    client_for(ALLOWED_HOSTS)
+}
+
+/// A client whose redirects stay on `hosts`.
+fn client_for(hosts: &'static [&'static str]) -> Result<reqwest::Client, PackError> {
     reqwest::Client::builder()
         .user_agent(concat!("app-backend-download/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
         .read_timeout(Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() > 5 {
                 attempt.error("too many redirects")
-            } else if host_allowed(attempt.url()) {
+            } else if host_allowed_in(attempt.url(), hosts) {
                 attempt.follow()
             } else {
                 attempt.stop()
@@ -175,6 +186,21 @@ fn client() -> Result<reqwest::Client, PackError> {
         }))
         .build()
         .map_err(|e| PackError::Io(e.to_string()))
+}
+
+/// Downloads one pinned file to `dest` (resuming what is already there) and returns once
+/// its size and SHA-256 match the pin. The URL and every redirect must be https on one of
+/// `hosts`. For pinned downloads that are not llama.cpp backends (the agent's own
+/// browser); backends go through [`install`].
+pub async fn download_verified(
+    f: &PackFile,
+    dest: &Path,
+    hosts: &'static [&'static str],
+    cancel: &CancellationToken,
+    on_bytes: &(dyn Fn(u64) + Send + Sync),
+) -> Result<(), PackError> {
+    let client = client_for(hosts)?;
+    fetch(&client, f, dest, hosts, cancel, on_bytes).await
 }
 
 fn hex(b: &[u8]) -> String {
@@ -186,11 +212,12 @@ async fn fetch(
     client: &reqwest::Client,
     f: &PackFile,
     dest: &Path,
+    hosts: &[&str],
     cancel: &CancellationToken,
     on_bytes: &(dyn Fn(u64) + Send + Sync),
 ) -> Result<(), PackError> {
     let url = reqwest::Url::parse(&f.url).map_err(|_| PackError::BlockedHost(f.url.clone()))?;
-    if !host_allowed(&url) {
+    if !host_allowed_in(&url, hosts) {
         return Err(PackError::BlockedHost(
             url.host_str().unwrap_or("?").to_string(),
         ));
@@ -457,7 +484,7 @@ pub async fn install(
     for f in &pack.files {
         let dest = downloads.join(part_name(f));
         let base = finished_before;
-        fetch(&client, f, &dest, cancel, &|n| {
+        fetch(&client, f, &dest, ALLOWED_HOSTS, cancel, &|n| {
             progress(PackProgress {
                 done: base + n,
                 total,
@@ -551,6 +578,46 @@ mod tests {
         assert!(!ok("http://github.com/x"));
         assert!(!ok("https://github.com.evil.com/x"));
         assert!(!ok("https://example.com/x"));
+    }
+
+    /// A caller's own host list allows exactly those hosts: not GitHub's, no subdomains,
+    /// no look-alikes, https only.
+    #[test]
+    fn a_callers_host_list_allows_exactly_its_hosts() {
+        let only = &["storage.googleapis.com"];
+        let ok = |u: &str| host_allowed_in(&reqwest::Url::parse(u).unwrap(), only);
+        assert!(ok("https://storage.googleapis.com/bucket/file.zip"));
+        assert!(!ok("http://storage.googleapis.com/bucket/file.zip"));
+        assert!(!ok("https://evil.storage.googleapis.com/x"));
+        assert!(!ok("https://storage.googleapis.com.evil.example/x"));
+        assert!(!ok("https://googleapis.com/x"));
+        assert!(!ok("https://github.com/x"));
+        assert!(!ok("https://storage.googleapis.com@evil.example/x"));
+    }
+
+    #[tokio::test]
+    async fn a_pinned_file_on_another_host_is_refused_before_any_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = PackFile {
+            name: "x.zip".into(),
+            url: "https://github.com/x/y/releases/download/v1/x.zip".into(),
+            size: 1,
+            sha256: "0".repeat(64),
+        };
+        let err = download_verified(
+            &f,
+            &dir.path().join("x.part"),
+            &["storage.googleapis.com"],
+            &CancellationToken::new(),
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, PackError::BlockedHost(h) if h == "github.com"),
+            "{err}"
+        );
+        assert!(!dir.path().join("x.part").exists());
     }
 
     #[test]

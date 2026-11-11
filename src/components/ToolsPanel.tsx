@@ -60,12 +60,14 @@ export function ToolsPanel(props: {
       .catch(() => setGitFallback(null));
   }, []);
 
+  // Also re-read when the model's context becomes known or changes: whether the Browser
+  // group is on in a new chat depends on it.
   useEffect(() => {
     refresh();
     let un: (() => void) | undefined;
     void ipc.onMcpChanged(refresh).then((u) => (un = u));
     return () => un?.();
-  }, [refresh]);
+  }, [refresh, props.nCtx]);
 
   const enabled = tools.filter((t) => t.enabledInChat && t.available && !t.schemaError);
   const cost = enabled.reduce((n, t) => n + t.tokenEstimate, 0);
@@ -181,6 +183,11 @@ export function ToolsPanel(props: {
           {groups.map(([server, list]) => {
             const names = list.filter((t) => t.available && !t.schemaError).map((t) => t.exposed);
             const allOn = names.length > 0 && names.every((n) => list.find((t) => t.exposed === n)?.enabledInChat);
+            // The Browser group when no browser is installed: every tool carries the same
+            // reason, shown once on the group with the way to fix it.
+            const reason = list[0]?.schemaError ?? null;
+            const noBrowser =
+              server === "browser" && reason !== null && list.every((t) => !t.available && t.schemaError === reason);
             return (
               <section key={server} className="mb-3">
                 <label className="flex items-center gap-2 font-medium">
@@ -200,6 +207,24 @@ export function ToolsPanel(props: {
                     </span>
                   )}
                 </label>
+                {noBrowser && (
+                  <div className="mt-1 pl-6 text-xs">
+                    <p className="flex items-start gap-1 text-warning">
+                      <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden />
+                      {reason}
+                    </p>
+                    <button
+                      type="button"
+                      className="mt-1 rounded-md border border-border px-2 py-0.5 hover:bg-bg-muted"
+                      onClick={() => {
+                        setOpen(false);
+                        window.dispatchEvent(new CustomEvent("app:open-settings", { detail: "browser" }));
+                      }}
+                    >
+                      Set up the browser
+                    </button>
+                  </div>
+                )}
                 <ul className="mt-1 space-y-1 pl-6">
                   {list.map((t) => (
                     <li key={t.exposed}>
@@ -220,7 +245,9 @@ export function ToolsPanel(props: {
                           {!t.available && !t.changed && !t.builtin && (
                             <span className="ml-1 text-xs text-fg-muted">off in Settings → MCP servers</span>
                           )}
-                          {t.schemaError && <span className="ml-1 text-xs text-danger">{t.schemaError}</span>}
+                          {t.schemaError && !noBrowser && (
+                            <span className="ml-1 text-xs text-danger">{t.schemaError}</span>
+                          )}
                         </span>
                         <span className="text-xs text-fg-muted">~{t.tokenEstimate}</span>
                       </label>

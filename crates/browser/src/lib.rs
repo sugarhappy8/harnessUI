@@ -1,7 +1,8 @@
 //! The built-in `browser` tool server (ARCHITECTURE.md 9.3, 13.3–13.6, D8).
 //!
-//! The agent drives its own Chrome or Edge, with its own profile, over the Chrome DevTools
-//! Protocol (a pipe by default, a loopback port as a setting). Where the agent may go is
+//! The agent drives a Chromium-family browser (Chrome, Edge, Brave, Vivaldi, Chromium, or
+//! the build the app can download for it, [`own`]), with its own profile, over the Chrome
+//! DevTools Protocol (a pipe by default, a loopback port as a setting). Where the agent may go is
 //! enforced on the browser's actual requests, not only on the tool's arguments:
 //!
 //! - `http`/`https` only; loopback, private, link-local, CGNAT, unique-local and
@@ -22,6 +23,7 @@ pub mod intent;
 pub mod keys;
 pub mod launch;
 pub mod netpolicy;
+pub mod own;
 mod page;
 mod server;
 mod session;

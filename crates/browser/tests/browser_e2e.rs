@@ -203,7 +203,7 @@ fn have_browser() -> bool {
         );
         return false;
     }
-    match browser::find_browser(None) {
+    match browser::find_browser(None, None) {
         Ok(_) => true,
         Err(e) => {
             eprintln!("skipping browser end-to-end test: {e}");

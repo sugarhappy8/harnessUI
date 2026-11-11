@@ -3,6 +3,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AgentBrowserProgress,
   ApprovedFolder,
   AuditFilter,
   AuditRow,
@@ -279,6 +280,12 @@ export const setTerminalPassThrough = (names: string[]) =>
 export const browserStatus = () => invoke<BrowserStatus>("browser_status");
 export const setBrowserSettings = (settings: BrowserSettings) => invoke<void>("set_browser_settings", { settings });
 export const chooseBrowserPath = (clear: boolean) => invoke<string | null>("choose_browser_path", { clear });
+export const downloadAgentBrowser = () => invoke<void>("download_agent_browser");
+export const cancelAgentBrowserDownload = () => invoke<void>("cancel_agent_browser_download");
+export const removeAgentBrowser = () => invoke<void>("remove_agent_browser");
+export function onAgentBrowserProgress(handler: (p: AgentBrowserProgress) => void): Promise<UnlistenFn> {
+  return listen<AgentBrowserProgress>("agent-browser-progress", (e) => handler(e.payload));
+}
 
 // Computer use
 export const computerStatus = (modelRef: string | null) => invoke<ComputerStatus>("computer_status", { modelRef });

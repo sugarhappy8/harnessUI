@@ -258,16 +258,21 @@ fn launch_pipe(exe: &Path, config: &BrowserConfig) -> Result<Launched, String> {
     })
 }
 
-/// Whether `profile` is (or is inside, or contains) one of the user's own Chrome, Edge or
-/// Chromium profiles, which the agent must never use (9.3). Compared lexically.
+/// Whether `profile` is (or is inside, or contains) one of the user's own Chrome, Edge,
+/// Brave, Vivaldi or Chromium profiles, which the agent must never use (9.3). Compared
+/// lexically.
 pub fn is_users_own_profile(profile: &Path, home: &Path, local_app_data: Option<&Path>) -> bool {
     let mut own: Vec<std::path::PathBuf> = [
         ".config/google-chrome",
         ".config/google-chrome-beta",
         ".config/chromium",
         ".config/microsoft-edge",
+        ".config/BraveSoftware/Brave-Browser",
+        ".config/vivaldi",
         "Library/Application Support/Google/Chrome",
         "Library/Application Support/Microsoft Edge",
+        "Library/Application Support/BraveSoftware/Brave-Browser",
+        "Library/Application Support/Vivaldi",
         "Library/Application Support/Chromium",
     ]
     .iter()
@@ -277,6 +282,8 @@ pub fn is_users_own_profile(profile: &Path, home: &Path, local_app_data: Option<
         for rel in [
             "Google/Chrome/User Data",
             "Microsoft/Edge/User Data",
+            "BraveSoftware/Brave-Browser/User Data",
+            "Vivaldi/User Data",
             "Chromium/User Data",
         ] {
             own.push(local.join(rel));
@@ -422,6 +429,48 @@ mod tests {
             home,
             None
         ));
+    }
+
+    /// Brave and Vivaldi are driven like Chrome, so their own profiles are refused too.
+    #[test]
+    fn brave_and_vivaldi_profiles_are_refused() {
+        let home = Path::new("/Users/u");
+        let local = Path::new("C:/Users/u/AppData/Local");
+        for own in [
+            "/Users/u/Library/Application Support/BraveSoftware/Brave-Browser",
+            "/Users/u/Library/Application Support/Vivaldi/Default",
+            "/Users/u/.config/BraveSoftware/Brave-Browser/Default",
+            "/Users/u/.config/vivaldi",
+        ] {
+            assert!(is_users_own_profile(Path::new(own), home, None), "{own}");
+        }
+        for own in [
+            "C:/Users/u/AppData/Local/BraveSoftware/Brave-Browser/User Data",
+            "C:/Users/u/AppData/Local/Vivaldi/User Data/Default",
+        ] {
+            assert!(
+                is_users_own_profile(Path::new(own), Path::new("C:/Users/u"), Some(local)),
+                "{own}"
+            );
+        }
+    }
+
+    /// The switches are Chromium's own, not Chrome's or Edge's: the command line does not
+    /// depend on which Chromium-family browser is started.
+    #[test]
+    fn the_command_line_is_the_same_for_every_chromium_browser() {
+        let config = BrowserConfig::new("/p");
+        let args = browser_args(&config, Os::Mac, &DebugChannel::PipeFds);
+        assert!(has(&args, "--remote-debugging-pipe"));
+        assert!(has(&args, "--no-first-run"));
+        // Nothing names a browser, a channel or an executable.
+        for a in &args {
+            let lower = a.to_lowercase();
+            assert!(
+                !lower.contains("msedge") && !lower.contains("google-chrome"),
+                "{a}"
+            );
+        }
     }
 
     #[test]

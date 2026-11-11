@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ApprovedFolder } from "../lib/types";
+import type { ApprovedFolder, ToolDto } from "../lib/types";
 
 // Radix positions the popover with ResizeObserver, which jsdom does not have.
 globalThis.ResizeObserver ??= class {
@@ -14,7 +14,7 @@ let folders: ApprovedFolder[] = [];
 let loaded: string[] = [];
 
 const ipcMock = vi.hoisted(() => ({
-  listChatTools: vi.fn(async () => []),
+  listChatTools: vi.fn<(chatId: number) => Promise<ToolDto[]>>(async () => []),
   gitInfo: vi.fn(async () => ({ backend: "system", notice: null, tokenHosts: [], identity: { name: "", email: "" } })),
   onMcpChanged: vi.fn(async () => () => undefined),
   listApprovedFolders: vi.fn<(chatId: number | null) => Promise<ApprovedFolder[]>>(async () => []),
@@ -117,5 +117,96 @@ describe("ToolsPanel: folders and loaded skills", () => {
     expect(ipcMock.unloadSkill).toHaveBeenCalledWith(CHAT, "pdf-forms");
     expect(screen.queryByText("pdf-forms")).toBeNull();
     expect(screen.getByText("release-notes")).toBeTruthy();
+  });
+});
+
+function tool(server: string, name: string, over: Partial<ToolDto> = {}): ToolDto {
+  return {
+    exposed: name,
+    server,
+    original: name,
+    description: "",
+    builtin: true,
+    enabledInChat: false,
+    available: true,
+    changed: false,
+    allowAnyArgs: false,
+    alwaysAsk: false,
+    destructive: false,
+    ready: true,
+    schemaError: null,
+    tokenEstimate: 140,
+    ...over,
+  };
+}
+
+describe("ToolsPanel: the Browser group", () => {
+  const NO_BROWSER = "The browser tool needs Chrome, Edge, Brave, Vivaldi or Chromium, and none was found.";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listApprovedFolders.mockImplementation(async () => []);
+    ipcMock.loadedSkills.mockImplementation(async () => []);
+  });
+  afterEach(cleanup);
+
+  it("says why the browser cannot work and opens Settings on the Browser page", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "files_read", { enabledInChat: true }),
+      tool("browser", "browser_navigate", { available: false, schemaError: NO_BROWSER }),
+      tool("browser", "browser_click", { available: false, schemaError: NO_BROWSER }),
+    ]);
+    const opened: unknown[] = [];
+    const listener = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+    window.addEventListener("app:open-settings", listener);
+    try {
+      await openPanel();
+      // Once on the group, not once per tool.
+      expect(screen.getAllByText(NO_BROWSER)).toHaveLength(1);
+      const navigate = screen.getByText("browser_navigate").closest("label")!.querySelector("input")!;
+      expect(navigate.disabled).toBe(true);
+      expect(navigate.checked).toBe(false);
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Set up the browser" }));
+      });
+      expect(opened).toEqual(["browser"]);
+      // The panel closes so the Settings dialog is not behind it.
+      expect(screen.queryByText("Tools for this chat", { selector: "h2" })).toBeNull();
+    } finally {
+      window.removeEventListener("app:open-settings", listener);
+    }
+  });
+
+  it("shows no set-up button when a browser is available", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("browser", "browser_navigate", { enabledInChat: true }),
+      tool("browser", "browser_click", { enabledInChat: true }),
+    ]);
+    await openPanel();
+    expect(screen.queryByRole("button", { name: "Set up the browser" })).toBeNull();
+    expect(screen.getByTitle("Tools for this chat").textContent).toContain("Tools (2)");
+  });
+
+  it("keeps another group's per-tool reason on the tool", async () => {
+    const why = "set up computer use for this model first (Settings → Computer use)";
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("computer", "computer_screenshot", { available: false, schemaError: why }),
+      tool("computer", "computer_click", { available: false, schemaError: why }),
+    ]);
+    await openPanel();
+    expect(screen.getAllByText(why)).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Set up the browser" })).toBeNull();
+  });
+
+  it("reads the tools again when the model's context becomes known", async () => {
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(<ToolsPanel chatId={CHAT} nCtx={null} />);
+    });
+    const before = ipcMock.listChatTools.mock.calls.length;
+    await act(async () => {
+      view.rerender(<ToolsPanel chatId={CHAT} nCtx={8192} />);
+    });
+    expect(ipcMock.listChatTools.mock.calls.length).toBe(before + 1);
   });
 });

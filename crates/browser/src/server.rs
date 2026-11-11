@@ -279,7 +279,11 @@ impl BrowserServer {
     /// Which browser would be used, or why there is none (for the tool menu and
     /// Settings; section 15).
     pub fn availability(&self) -> Result<FoundBrowser, BrowserUnavailable> {
-        discovery::find_browser(self.config().browser_path.as_deref())
+        let config = self.config();
+        discovery::find_browser(
+            config.browser_path.as_deref(),
+            config.own_browser_dir.as_deref(),
+        )
     }
 
     /// Applies new settings. A running browser is closed (held requests are failed);
@@ -329,8 +333,11 @@ impl BrowserServer {
             old.close().await;
         }
         let config = self.config();
-        let found =
-            discovery::find_browser(config.browser_path.as_deref()).map_err(|e| e.for_model())?;
+        let found = discovery::find_browser(
+            config.browser_path.as_deref(),
+            config.own_browser_dir.as_deref(),
+        )
+        .map_err(|e| e.for_model())?;
         let launched = crate::launch::launch(&found.path, &config)
             .await
             .map_err(|e| format!("The browser could not be started: {e}"))?;

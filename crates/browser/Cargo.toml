@@ -35,6 +35,9 @@ dunce = { workspace = true }
 uuid = { workspace = true }
 # Reads the size of a PNG screenshot from its header.
 base64 = { workspace = true }
+# Unpacking the agent's own browser, a pinned Chrome for Testing archive (9.3). The
+# download and its checksum check are the runtime crate's.
+zip = { workspace = true }
 # Loopback-port mode only (9.3, 18).
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }

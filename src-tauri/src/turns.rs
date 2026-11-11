@@ -1195,7 +1195,7 @@ pub async fn run(
     // Tools enabled for this chat.
     let host = state.host.clone();
     crate::computer_cmd::prepare_turn(app, chat_id.0, &req.model_ref).await;
-    let enabled = crate::mcp_cmd::enabled_for_chat(&state, &req.chat).await;
+    let enabled = crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
     let mut tool_prefs = HashMap::new();
     for t in &enabled {
         tool_prefs.insert(
