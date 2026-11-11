@@ -3,10 +3,8 @@ import { BadgeCheck, CheckCircle2, CircleAlert, Globe } from "lucide-react";
 import { useApp } from "../../store/app";
 import { SafeLink } from "../Markdown";
 import { checkQuotes, type QuoteCheck } from "../sources/quotes";
-import { startSources, useSources } from "../sources/state";
+import { useSources } from "../sources/state";
 import type { Source } from "../sources/types";
-
-startSources();
 
 function when(ms: number): string {
   return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });

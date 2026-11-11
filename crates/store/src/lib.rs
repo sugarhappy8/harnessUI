@@ -30,7 +30,7 @@ pub use actor::Store;
 pub use artifacts::{
     Artifact, ArtifactAuthor, ArtifactId, ArtifactKind, ArtifactVersion, ArtifactVersionInfo,
     MAX_ARTIFACT_BYTES, MAX_ARTIFACT_TITLE_CHARS, MAX_ARTIFACT_VERSIONS, MAX_ARTIFACTS_PER_CHAT,
-    NewArtifact,
+    NewArtifact, Provenance,
 };
 pub use audit::{
     AUDIT_CSV_COLUMNS, AuditDecision, AuditEntry, AuditQuery, AuditResult, AuditRow,

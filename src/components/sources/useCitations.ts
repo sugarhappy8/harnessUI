@@ -1,11 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { useApp } from "../../store/app";
 import type { Citations } from "../Markdown";
-import { startSources, useSources } from "./state";
-
-// Message items are part of the app from its first render, so this is where the
-// `sources-changed` event starts being listened to (once, and only inside the app).
-startSources();
+import { useSources } from "./state";
 
 /** Opens the panel beside the chat on source `n`. */
 export function openSource(chatId: number, n: number): void {

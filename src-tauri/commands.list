@@ -121,6 +121,8 @@ set_git_identity
 minimize_main_window
 list_artifacts
 get_artifact
+artifact_frame
+allow_artifact_scripts
 save_artifact_version
 rename_artifact
 delete_artifact

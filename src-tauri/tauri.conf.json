@@ -60,7 +60,7 @@
       "dangerousDisableAssetCspModification": [
         "style-src"
       ],
-      "freezePrototype": true,
+      "freezePrototype": false,
       "capabilities": [
         "main",
         "overlay",

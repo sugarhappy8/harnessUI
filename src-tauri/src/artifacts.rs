@@ -10,6 +10,8 @@
 //!   scripts only after it has passed.
 //! - [`render`]: what a preview reported after it was shown, cleaned, on its way back to
 //!   the model as part of the tool's result.
+//! - [`outside`]: whether content from outside the conversation has entered a chat. A
+//!   page written after that runs its scripts only once the user allows it.
 //! - This file: the commands of the panel, and the scheme's handler.
 //!
 //! What a preview page can do is decided in `protocol.rs` and proven by the `artifacts`
@@ -17,6 +19,7 @@
 
 mod edit;
 mod isolation;
+mod outside;
 mod protocol;
 mod render;
 mod server;
@@ -33,7 +36,7 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 pub use isolation::Isolation;
-pub use protocol::{SCHEME, is_frame_navigation};
+pub use protocol::SCHEME;
 pub use server::ArtifactsServer;
 
 /// Sent to the main window when an artifact was created or got a new version
@@ -52,6 +55,12 @@ pub struct Shared {
     pub gate: isolation::Gate,
     /// Which page a script slice may be cut from.
     pub tokens: protocol::Tokens,
+    /// Which frames may load a page.
+    pub tickets: protocol::Tickets,
+    /// The chats that content from outside the conversation has entered.
+    pub outside: outside::Outside,
+    /// The versions whose scripts the user allowed although they were written after that.
+    pub allowed: outside::Allowed,
 }
 
 /// The one [`Shared`] of the app.
@@ -70,6 +79,54 @@ fn origin<R: Runtime>(app: &AppHandle<R>) -> String {
         .find(|w| w.label == crate::MAIN_WINDOW)
         .is_some_and(|w| w.use_https_scheme);
     protocol::frame_origin(cfg!(any(windows, target_os = "android")), https)
+}
+
+/// Whether the main window's webview may navigate to `url` because it is a preview.
+///
+/// The webview asks about navigations of frames on Linux and macOS, and cannot say whether
+/// it is a frame or the window itself that navigates. A navigation is let through only to
+/// a page the app itself made an address for a moment ago, for a frame it is creating: a
+/// version's page whose ticket is unused, or the page of the check that is running. A
+/// move inside a page that is already shown (an address with a fragment) is let through
+/// for the ticket that page was loaded with; it loads nothing. On Windows the webview asks
+/// about the window only, and the window must never show a preview.
+pub fn is_frame_navigation(url: &url::Url) -> bool {
+    if cfg!(windows) {
+        return false;
+    }
+    let shared = shared();
+    match protocol::frame_navigation(url) {
+        Some(protocol::FrameNavigation::Document {
+            id,
+            version,
+            ticket,
+            within_page,
+        }) => {
+            if within_page {
+                shared.tickets.was_used(&ticket, id, version)
+            } else {
+                shared.tickets.is_live(&ticket, id, version)
+            }
+        }
+        Some(protocol::FrameNavigation::Probe { nonce }) => shared.gate.is_current(&nonce),
+        None => false,
+    }
+}
+
+/// For the turn loop, before a tool runs. The result of a tool that is not the app's own
+/// data about the chat is content from outside the conversation.
+pub fn note_tool_run(chat_id: i64, action: &policy::Action) {
+    if !matches!(action.scope, policy::Scope::AppData) {
+        shared().outside.note(chat_id);
+    }
+}
+
+/// For the turn loop, when a turn starts: the chat's history may hold such results from
+/// earlier turns, also from before the app was started.
+pub fn note_history(chat_id: i64, history: &[agent::history::HistoryMessage]) {
+    if outside::in_history(history) {
+        shared().outside.note(chat_id);
+    }
 }
 
 fn announce_isolation<R: Runtime>(app: &AppHandle<R>) {
@@ -145,6 +202,14 @@ async fn answer<R: Runtime>(
                     "A preview is only shown inside the app.",
                 );
             }
+            // Only for a frame the app just made: its ticket, once.
+            let ticket = protocol::ticket_of_query(request.uri().query());
+            if !ticket.is_some_and(|t| shared.tickets.take(t, id, version)) {
+                return refuse(
+                    StatusCode::FORBIDDEN,
+                    "This preview is no longer open. Open it again from the Artifacts panel.",
+                );
+            }
             let Some(state) = app.try_state::<AppState>() else {
                 return refuse(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -155,8 +220,8 @@ async fn answer<R: Runtime>(
                 .store
                 .artifact_for_preview(ArtifactId(id), version)
                 .await;
-            let (artifact, content) = match found {
-                Ok(Some((artifact, v))) => (artifact, v.content),
+            let (artifact, shown) = match found {
+                Ok(Some(found)) => found,
                 Ok(None) => return refuse(StatusCode::NOT_FOUND, "No such version."),
                 Err(e) => {
                     tracing::error!("a preview could not be read from the database: {e}");
@@ -172,13 +237,13 @@ async fn answer<R: Runtime>(
                     "A document is shown by the app itself.",
                 );
             }
-            if scripts == Scripts::Off {
-                return protocol::page(
-                    Scripts::Off,
-                    &origin,
-                    protocol::static_page(artifact.kind, &content),
-                );
-            }
+            let content = shown.content;
+            let running = protocol::running(
+                artifact.kind,
+                shown.after_outside,
+                shared.allowed.is_allowed(id, version),
+                scripts == Scripts::On,
+            );
             let token = shared.tokens.issue(id, version);
             let about = protocol::About {
                 id,
@@ -186,14 +251,27 @@ async fn answer<R: Runtime>(
                 origin: &origin,
                 token: &token,
             };
-            let html = match artifact.kind {
-                ArtifactKind::Svg => protocol::svg_page(&about, &content),
-                ArtifactKind::Mermaid => protocol::mermaid_page(&about, &content),
-                ArtifactKind::Html | ArtifactKind::Markdown => {
-                    protocol::html_page(&about, &content)
+            match running {
+                protocol::Running::NotProven | protocol::Running::Held => protocol::page(
+                    Scripts::Off,
+                    &origin,
+                    protocol::static_page(artifact.kind, &content),
+                ),
+                protocol::Running::Page => {
+                    protocol::page(Scripts::On, &origin, protocol::html_page(&about, &content))
                 }
-            };
-            protocol::page(Scripts::On, &origin, html)
+                protocol::Running::AppOnly => {
+                    // A new mark for every page: only the scripts written into this
+                    // response carry it.
+                    let nonce = uuid::Uuid::new_v4().simple().to_string();
+                    let html = if artifact.kind == ArtifactKind::Mermaid {
+                        protocol::mermaid_page(&about, &content, &nonce)
+                    } else {
+                        protocol::svg_page(&about, &content, &nonce)
+                    };
+                    protocol::page(Scripts::AppOnly { nonce: &nonce }, &origin, html)
+                }
+            }
         }
         Route::Slice { token, from, to } => {
             let page = (scripts == Scripts::On)
@@ -283,8 +361,18 @@ pub struct ArtifactDetailDto {
     /// The version whose content this is.
     pub version: u32,
     pub content: String,
-    /// What the preview frame loads. `None` for a document, which the app shows itself.
-    pub frame_url: Option<String>,
+    /// Whether it is shown in a preview frame ([`artifact_frame`]). A document is not: the
+    /// app shows it itself.
+    pub framed: bool,
+}
+
+/// What a frame the panel is about to create loads, and what will run in it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameDto {
+    /// The page's address, good for one load.
+    pub url: String,
+    pub running: protocol::Running,
 }
 
 /// A check of the sandbox the main window is to run.
@@ -329,7 +417,6 @@ pub async fn list_artifacts(
 /// left out).
 #[tauri::command]
 pub async fn get_artifact(
-    app: AppHandle,
     state: State<'_, AppState>,
     chat_id: i64,
     id: i64,
@@ -347,19 +434,100 @@ pub async fn get_artifact(
         .await?
         .ok_or_else(|| AppError::not_found("version"))?;
     let versions = state.store.artifact_versions(chat, id).await?;
-    let frame_url = (artifact.kind != ArtifactKind::Markdown)
-        .then(|| protocol::frame_url(&origin(&app), id.0, shown.version));
+    let framed = artifact.kind != ArtifactKind::Markdown;
     Ok(ArtifactDetailDto {
         artifact: artifact.into(),
         versions: versions.into_iter().map(Into::into).collect(),
         version: shown.version,
         content: shown.content,
-        frame_url,
+        framed,
     })
 }
 
-/// Saves a version written by the user: `content` as edited in the panel, or the content
-/// of the earlier version `restore`. Exactly one of the two.
+/// Only the main window shows previews and decides what runs in them (the capability
+/// files grant these commands to it alone; this is the same rule checked again).
+fn only_main_window(label: &str) -> AppResult<()> {
+    if label == crate::MAIN_WINDOW {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "Only the main window shows previews.",
+        ))
+    }
+}
+
+/// The address for a frame the panel is about to create for one version of one of the
+/// chat's artifacts, and what will run in that frame. The address is good for one load
+/// (`protocol::Tickets`): the panel asks again for every frame it creates.
+#[tauri::command]
+pub async fn artifact_frame(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    chat_id: i64,
+    id: i64,
+    version: u32,
+) -> AppResult<FrameDto> {
+    only_main_window(window.label())?;
+    let (chat, artifact_id) = (ChatId(chat_id), ArtifactId(id));
+    let artifact = state
+        .store
+        .get_artifact(chat, artifact_id)
+        .await?
+        .ok_or_else(no_artifact)?;
+    if artifact.kind == ArtifactKind::Markdown {
+        return Err(AppError::bad_request(
+            "A document is shown by the app itself.",
+        ));
+    }
+    let shown = state
+        .store
+        .artifact_version(chat, artifact_id, Some(version))
+        .await?
+        .ok_or_else(|| AppError::not_found("version"))?;
+    let shared = shared();
+    let running = protocol::running(
+        artifact.kind,
+        shown.after_outside,
+        shared.allowed.is_allowed(id, version),
+        shared.gate.scripts_allowed(),
+    );
+    let ticket = shared.tickets.issue(id, version);
+    Ok(FrameDto {
+        url: protocol::frame_url(&origin(&app), id, version, &ticket),
+        running,
+    })
+}
+
+/// The user allows the scripts of one version that was written after content from outside
+/// the conversation entered the chat. Kept until the app quits; a later version is asked
+/// about again.
+#[tauri::command]
+pub async fn allow_artifact_scripts(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    chat_id: i64,
+    id: i64,
+    version: u32,
+) -> AppResult<()> {
+    only_main_window(window.label())?;
+    let (chat, artifact_id) = (ChatId(chat_id), ArtifactId(id));
+    state
+        .store
+        .artifact_version(chat, artifact_id, Some(version))
+        .await?
+        .ok_or_else(|| AppError::not_found("version"))?;
+    shared().allowed.allow(id, version);
+    tracing::info!(id, version, "the user allowed a preview's scripts");
+    Ok(())
+}
+
+/// Saves a version written by the user: `content` as edited in the panel (`base` is the
+/// version the edit started from), or the content of the earlier version `restore`.
+/// Exactly one of the two.
+///
+/// The new version keeps the "written after outside content" mark of the version its text
+/// comes from: an edit of a marked page is still mostly that page.
 #[tauri::command]
 pub async fn save_artifact_version(
     state: State<'_, AppState>,
@@ -367,8 +535,10 @@ pub async fn save_artifact_version(
     id: i64,
     content: Option<String>,
     restore: Option<u32>,
+    base: Option<u32>,
 ) -> AppResult<ArtifactDto> {
     let (chat, id) = (ChatId(chat_id), ArtifactId(id));
+    let based_on = restore.or(base);
     let (content, note) = match (content, restore) {
         (Some(content), None) => (content, None),
         (None, Some(version)) => {
@@ -390,7 +560,17 @@ pub async fn save_artifact_version(
     };
     let saved = state
         .store
-        .add_artifact_version(chat, id, content, ArtifactAuthor::User, note)
+        .add_artifact_version(
+            chat,
+            id,
+            content,
+            ArtifactAuthor::User,
+            note,
+            store::Provenance {
+                after_outside: false,
+                based_on,
+            },
+        )
         .await
         .map_err(refused)?;
     Ok(saved.into())
@@ -534,6 +714,7 @@ pub fn report_artifact_render(
 ) -> bool {
     let report = match not_shown.as_deref() {
         Some("cannot-draw") => render::RenderReport::NotShown(render::NotShown::CannotDraw),
+        Some("held") => render::RenderReport::NotShown(render::NotShown::Held),
         Some(_) => render::RenderReport::NotShown(render::NotShown::ScriptsOff),
         None => {
             let (problems, total) = render::clean_problems(&problems);

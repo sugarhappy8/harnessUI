@@ -32,8 +32,24 @@ export interface ArtifactDetail {
   /** The version whose content this is. */
   version: number;
   content: string;
-  /** What the preview frame loads; null for a document, which the app shows itself. */
-  frameUrl: string | null;
+  /** Shown in a preview frame (`artifactFrame`); false for a document, which the app shows itself. */
+  framed: boolean;
+}
+
+/**
+ * What runs in the preview of one version (src-tauri/src/artifacts/protocol.rs, `running`).
+ * - page: the page's own scripts.
+ * - appOnly: only the app's scripts, which draw a picture or a diagram.
+ * - notProven: nothing; the sandbox is not checked on this system, or the check failed.
+ * - held: nothing; the page was written after the model read content from outside the
+ *   conversation, and its scripts wait for the user to allow them.
+ */
+export type Running = "page" | "appOnly" | "notProven" | "held";
+
+/** What a frame that is about to be created loads. The address is good for one load. */
+export interface FrameInfo {
+  url: string;
+  running: Running;
 }
 
 /** Sent by Rust when a tool created an artifact or saved a new version of one. */

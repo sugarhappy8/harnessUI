@@ -1,7 +1,12 @@
 import { create } from "zustand";
-import { isTauri } from "../../lib/ipc";
 import * as api from "./api";
 import type { Source } from "./types";
+
+/** Whether this is the app's own window. Anywhere else (a test, a plain browser) nothing
+ *  is asked of the app. */
+function inApp(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
 
 /** The source the Sources tab is asked to show. `seq` makes every request a new one. */
 export interface SourceFocus {
@@ -30,6 +35,7 @@ export const useSources = create<SourcesState>((set, get) => ({
   byChat: {},
   focus: null,
   load: async (chatId) => {
+    startSources();
     try {
       const sources = await api.listSources(chatId);
       set({ byChat: { ...get().byChat, [chatId]: sources } });
@@ -39,7 +45,7 @@ export const useSources = create<SourcesState>((set, get) => ({
     }
   },
   ensure: (chatId) => {
-    if (asked.has(chatId) || !isTauri()) return;
+    if (asked.has(chatId) || !inApp()) return;
     asked.add(chatId);
     void get().load(chatId);
   },
@@ -48,18 +54,27 @@ export const useSources = create<SourcesState>((set, get) => ({
 
 let started = false;
 
-/** Starts listening for sources that searches store. Runs once, inside the app only. */
+/**
+ * Starts listening for sources that searches store: once, and only inside the app. It is
+ * started by the first read of a chat's sources, never by importing this module. If
+ * listening cannot start, the next read tries again.
+ */
 export function startSources(): void {
-  if (started || !isTauri()) return;
+  if (started || !inApp()) return;
   started = true;
-  void api.onSourcesChanged((chatId) => {
-    asked.add(chatId);
-    void useSources.getState().load(chatId);
-  });
+  api
+    .onSourcesChanged((chatId) => {
+      asked.add(chatId);
+      void useSources.getState().load(chatId);
+    })
+    .catch(() => {
+      started = false;
+    });
 }
 
 /** For tests: forgets everything. */
 export function resetSources(): void {
   asked.clear();
+  started = false;
   useSources.setState({ byChat: {}, focus: null });
 }

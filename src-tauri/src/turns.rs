@@ -866,6 +866,9 @@ impl ToolHost for AppTools {
         action: &policy::Action,
         cancel: CancellationToken,
     ) -> ToolOutput {
+        // [0.0.4 artifacts] From here on the chat may hold content from outside the
+        // conversation, unless the tool only touches the app's own data for the chat.
+        crate::artifacts::note_tool_run(self.chat.chat_id, action);
         // Built-in names are fixed (an external tool can never hold one), so this is the
         // app's own tool. It runs here, not in its server: a helper needs the turn's
         // client, policy gate, approver and sink.
@@ -1554,6 +1557,9 @@ pub async fn run(
     let chat_id = req.chat.id;
     let path = state.store.path_to(chat_id, req.reply_to).await?;
     let history = history_of(&state, &path).await?;
+    // [0.0.4 artifacts] A page the model writes after content from outside the
+    // conversation entered the chat runs no script until the user allows it.
+    crate::artifacts::note_history(chat_id.0, &history);
 
     // Tools enabled for this chat.
     let host = state.host.clone();

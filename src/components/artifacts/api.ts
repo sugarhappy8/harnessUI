@@ -1,7 +1,7 @@
 // The Artifacts panel's commands (src-tauri/src/artifacts.rs), as typed calls.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { ArtifactChanged, ArtifactDetail, ArtifactDto, Isolation, Problem } from "./types";
+import type { ArtifactChanged, ArtifactDetail, ArtifactDto, FrameInfo, Isolation, Problem } from "./types";
 
 export const listArtifacts = (chatId: number) => invoke<ArtifactDto[]>("list_artifacts", { chatId });
 
@@ -9,13 +9,24 @@ export const listArtifacts = (chatId: number) => invoke<ArtifactDto[]>("list_art
 export const getArtifact = (chatId: number, id: number, version: number | null) =>
   invoke<ArtifactDetail>("get_artifact", { chatId, id, version });
 
-/** Saves what the user wrote in the panel as a new version. */
-export const saveArtifactContent = (chatId: number, id: number, content: string) =>
-  invoke<ArtifactDto>("save_artifact_version", { chatId, id, content, restore: null });
+/**
+ * The address for a frame that is about to be created for one version, and what will run
+ * in it. Asked for again for every frame: an address loads once.
+ */
+export const artifactFrame = (chatId: number, id: number, version: number) =>
+  invoke<FrameInfo>("artifact_frame", { chatId, id, version });
+
+/** The user allows the scripts of a version that was written after outside content. */
+export const allowArtifactScripts = (chatId: number, id: number, version: number) =>
+  invoke<void>("allow_artifact_scripts", { chatId, id, version });
+
+/** Saves what the user wrote in the panel as a new version. `base` is the version the edit started from. */
+export const saveArtifactContent = (chatId: number, id: number, content: string, base: number) =>
+  invoke<ArtifactDto>("save_artifact_version", { chatId, id, content, restore: null, base });
 
 /** Saves the content of an earlier version as a new version. */
 export const restoreArtifactVersion = (chatId: number, id: number, version: number) =>
-  invoke<ArtifactDto>("save_artifact_version", { chatId, id, content: null, restore: version });
+  invoke<ArtifactDto>("save_artifact_version", { chatId, id, content: null, restore: version, base: null });
 
 export const renameArtifact = (chatId: number, id: number, title: string) =>
   invoke<ArtifactDto>("rename_artifact", { chatId, id, title });
@@ -34,7 +45,7 @@ export const reportRender = (
   id: number,
   version: number,
   problems: Problem[],
-  notShown: "scripts-off" | "cannot-draw" | null,
+  notShown: "scripts-off" | "cannot-draw" | "held" | null,
 ) => invoke<boolean>("report_artifact_render", { id, version, problems, notShown });
 
 export const artifactIsolation = () => invoke<Isolation>("artifact_isolation");

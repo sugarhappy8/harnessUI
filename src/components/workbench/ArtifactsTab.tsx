@@ -26,6 +26,7 @@ import { ProblemList } from "../artifacts/ProblemList";
 import { SourceEditor } from "../artifacts/SourceEditor";
 import { inApp, runIsolationCheck } from "../artifacts/startup";
 import { reportKey, useArtifacts } from "../artifacts/state";
+import { runsScripts, useFrame } from "../artifacts/useFrame";
 import {
   EXTENSION,
   KIND_LABEL,
@@ -60,7 +61,12 @@ const ICON_BUTTON = "rounded-lg p-1.5 text-fg-muted hover:bg-bg-muted hover:text
  * Tells the tool that waits for it how a version's preview went, once. A preview that
  * settles when no tool is waiting (the user opened it) reports nothing.
  */
-function report(id: number, version: number, problems: Problem[], notShown: "scripts-off" | "cannot-draw" | null) {
+function report(
+  id: number,
+  version: number,
+  problems: Problem[],
+  notShown: "scripts-off" | "cannot-draw" | "held" | null,
+) {
   const store = useArtifacts.getState();
   if (!store.pending[reportKey(id, version)]) return;
   store.clearReport(id, version);
@@ -71,7 +77,7 @@ function report(id: number, version: number, problems: Problem[], notShown: "scr
  * Shows a version out of sight, only to tell the waiting tool how it went. Used when the
  * panel is busy with something else: unsaved edits, or another artifact.
  */
-function Reporter(props: { chatId: number; id: number; version: number }) {
+function Reporter(props: { chatId: number; id: number; version: number; again: string }) {
   const { chatId, id, version } = props;
   const [detail, setDetail] = useState<ArtifactDetail | null>(null);
   useEffect(() => {
@@ -86,13 +92,19 @@ function Reporter(props: { chatId: number; id: number; version: number }) {
       stale = true;
     };
   }, [chatId, id, version]);
-  if (!detail?.frameUrl) return null;
+  const frame = useFrame(chatId, detail?.framed ? id : null, version, props.again);
+  // A page whose scripts wait for the user cannot be checked: say so at once.
+  const held = frame?.running === "held";
+  useEffect(() => {
+    if (held) report(id, version, [], "held");
+  }, [held, id, version]);
+  if (!detail || !frame || !runsScripts(frame)) return null;
   return (
     <ArtifactFrame
       id={id}
       version={version}
       kind={detail.artifact.kind}
-      url={detail.frameUrl}
+      url={frame.url}
       title=""
       scripts
       hidden
@@ -127,6 +139,26 @@ function IsolationNotice(props: { isolation: Isolation }) {
 }
 
 /**
+ * Says that a page is shown without its scripts because of when it was written, and lets
+ * the user run them.
+ */
+function HeldNotice(props: { busy: boolean; onAllow: () => void }) {
+  return (
+    <div role="status" className="flex items-start gap-2 border-b border-border bg-surface px-3 py-2 text-xs">
+      <ShieldAlert size={14} className="mt-0.5 shrink-0 text-warning" aria-hidden />
+      <p className="min-w-0 flex-1">
+        The model wrote this page after reading files, web pages or tool results in this chat, so its scripts are
+        off. A script in a preview cannot load anything or read your files, but it can connect to a server, and the
+        server&apos;s name can carry a little data out. Run the scripts if you trust what the model read.
+      </p>
+      <button type="button" className={SMALL_BUTTON} disabled={props.busy} onClick={props.onAllow}>
+        Run scripts
+      </button>
+    </div>
+  );
+}
+
+/**
  * The "Artifacts" tab of the panel beside the chat: the documents, pages, pictures and
  * diagrams the model made in this chat. Each can be previewed, read and edited as source,
  * stepped through its versions, restored, exported, renamed and deleted.
@@ -152,6 +184,8 @@ export function ArtifactsTab(props: { chatId: number }) {
   /** Counts the user's own changes here, so the list and the artifact are read again. */
   const [edits, setEdits] = useState(0);
   const [reload, setReload] = useState(0);
+  /** Counts the pages whose scripts the user allowed here, so their frames are made again. */
+  const [allowed, setAllowed] = useState(0);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -211,10 +245,24 @@ export function ArtifactsTab(props: { chatId: number }) {
 
   const shown = detail && detail.artifact.id === currentId ? detail : null;
   const scripts = isolation.state === "proven";
-  const visibleKey =
-    shown?.frameUrl && mode === "preview" ? reportKey(shown.artifact.id, shown.version) : null;
+  const inFrame = shown !== null && shown.framed && mode === "preview";
+  const visibleKey = inFrame ? reportKey(shown.artifact.id, shown.version) : null;
   const waiting = Object.values(pending).filter((p) => p.chatId === chatId);
   const waitingCount = waiting.length;
+  // The address of the frame on screen: a new one for every frame that is created.
+  const frame = useFrame(
+    chatId,
+    inFrame ? shown.artifact.id : null,
+    shown?.version ?? null,
+    `${reload}:${allowed}:${isolation.state}`,
+  );
+
+  // A page whose scripts wait for the user cannot be checked: say so to a tool that waits.
+  const heldId = frame?.running === "held" && inFrame ? shown.artifact.id : null;
+  const heldVersion = shown?.version ?? null;
+  useEffect(() => {
+    if (heldId !== null && heldVersion !== null) report(heldId, heldVersion, [], "held");
+  }, [heldId, heldVersion, waitingCount]);
 
   // With scripts off there is nothing to wait for: say so to the tools that wait.
   useEffect(() => {
@@ -494,7 +542,18 @@ export function ArtifactsTab(props: { chatId: number }) {
             )}
           </div>
 
-          {shown.frameUrl && <IsolationNotice isolation={isolation} />}
+          {shown.framed && <IsolationNotice isolation={isolation} />}
+          {inFrame && frame?.running === "held" && (
+            <HeldNotice
+              busy={busy}
+              onAllow={() =>
+                void act(async () => {
+                  await api.allowArtifactScripts(chatId, artifact.id, shown.version);
+                  setAllowed((n) => n + 1);
+                })
+              }
+            />
+          )}
           {mode === "preview" && (
             <ProblemList title={artifact.title} id={artifact.id} version={shown.version} problems={shownProblems} />
           )}
@@ -516,7 +575,7 @@ export function ArtifactsTab(props: { chatId: number }) {
                     className="btn-primary rounded-lg px-3 py-1.5 text-xs font-medium"
                     onClick={() =>
                       void act(async () => {
-                        await api.saveArtifactContent(chatId, artifact.id, sourceText);
+                        await api.saveArtifactContent(chatId, artifact.id, sourceText, draft?.base ?? shown.version);
                         setDraft(artifact.id, null);
                         select(artifact.id, null);
                         setEdits((n) => n + 1);
@@ -541,20 +600,24 @@ export function ArtifactsTab(props: { chatId: number }) {
                   </span>
                 </div>
               </div>
-            ) : shown.frameUrl ? (
-              <ArtifactFrame
-                id={artifact.id}
-                version={shown.version}
-                kind={artifact.kind}
-                url={shown.frameUrl}
-                title={`Preview of ${artifact.title}`}
-                scripts={scripts}
-                reload={reload}
-                onProblems={(list) => setProblems({ key: frameKey, list })}
-                onSettled={(o) =>
-                  report(artifact.id, shown.version, o.problems, o.unavailable ? "cannot-draw" : null)
-                }
-              />
+            ) : shown.framed ? (
+              frame ? (
+                <ArtifactFrame
+                  id={artifact.id}
+                  version={shown.version}
+                  kind={artifact.kind}
+                  url={frame.url}
+                  title={`Preview of ${artifact.title}`}
+                  scripts={runsScripts(frame)}
+                  reload={reload}
+                  onProblems={(list) => setProblems({ key: frameKey, list })}
+                  onSettled={(o) =>
+                    report(artifact.id, shown.version, o.problems, o.unavailable ? "cannot-draw" : null)
+                  }
+                />
+              ) : (
+                <p className="p-6 text-sm text-fg-muted">Loading…</p>
+              )
             ) : (
               <div className="chat-text h-full overflow-y-auto p-4">
                 <Markdown text={shown.content} />
@@ -568,7 +631,15 @@ export function ArtifactsTab(props: { chatId: number }) {
       {scripts &&
         waiting
           .filter((p) => reportKey(p.id, p.version) !== visibleKey)
-          .map((p) => <Reporter key={reportKey(p.id, p.version)} chatId={chatId} id={p.id} version={p.version} />)}
+          .map((p) => (
+            <Reporter
+              key={reportKey(p.id, p.version)}
+              chatId={chatId}
+              id={p.id}
+              version={p.version}
+              again={isolation.state}
+            />
+          ))}
 
       <AlertDialog.Root open={confirmDelete} onOpenChange={setConfirmDelete}>
         <AlertDialog.Portal>

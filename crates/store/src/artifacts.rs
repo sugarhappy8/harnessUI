@@ -91,6 +91,20 @@ pub struct NewArtifact {
     pub content: String,
     /// Who wrote that version.
     pub author: ArtifactAuthor,
+    /// Content from outside the conversation had entered the chat when it was written
+    /// (see [`ArtifactVersion::after_outside`]).
+    pub after_outside: bool,
+}
+
+/// Where a new version's text comes from, for the mark on [`ArtifactVersion::after_outside`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Provenance {
+    /// Content from outside the conversation (files, web pages, tool results) had entered
+    /// the chat when the model wrote this.
+    pub after_outside: bool,
+    /// The version the new one was made from: it keeps that version's mark. `None` is the
+    /// newest version.
+    pub based_on: Option<u32>,
 }
 
 /// A row of `artifacts`, with what its versions add up to.
@@ -129,6 +143,11 @@ pub struct ArtifactVersion {
     pub note: Option<String>,
     /// Unix ms.
     pub created_at: i64,
+    /// Content from outside the conversation (files, web pages, tool results) had entered
+    /// the chat before this version was written, or the version it was made from has the
+    /// mark. What the model writes then may be steered by that content, so a page with
+    /// the mark is shown without running its scripts until the user allows them.
+    pub after_outside: bool,
 }
 
 /// One version without its content, for the list of versions.
@@ -144,6 +163,8 @@ pub struct ArtifactVersionInfo {
     pub created_at: i64,
     /// Size of the content in bytes.
     pub bytes: u64,
+    /// See [`ArtifactVersion::after_outside`].
+    pub after_outside: bool,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -214,6 +235,7 @@ fn version_from_row(r: &Row<'_>) -> rusqlite::Result<ArtifactVersion> {
         author: r.get(3)?,
         note: r.get(4)?,
         created_at: r.get(5)?,
+        after_outside: r.get(6)?,
     })
 }
 
@@ -242,7 +264,7 @@ fn read_version(
     id: ArtifactId,
     version: Option<u32>,
 ) -> Result<Option<ArtifactVersion>, StoreError> {
-    const COLUMNS: &str = "artifact_id, version, content, author, note, created_at";
+    const COLUMNS: &str = "artifact_id, version, content, author, note, created_at, after_outside";
     let found = match version {
         Some(n) => conn
             .query_row(
@@ -293,9 +315,9 @@ fn create_artifact(conn: &mut Connection, new: NewArtifact) -> Result<Artifact, 
     )?;
     let id = ArtifactId(tx.last_insert_rowid());
     tx.execute(
-        "INSERT INTO artifact_versions (artifact_id, version, content, author, created_at) \
-         VALUES (?1, 1, ?2, ?3, ?4)",
-        params![id, new.content, new.author, now],
+        "INSERT INTO artifact_versions (artifact_id, version, content, author, created_at, \
+         after_outside) VALUES (?1, 1, ?2, ?3, ?4, ?5)",
+        params![id, new.content, new.author, now, new.after_outside],
     )?;
     let artifact = require_artifact(&tx, new.chat_id, id)?;
     tx.commit()?;
@@ -309,18 +331,31 @@ fn add_version(
     content: String,
     author: ArtifactAuthor,
     note: Option<String>,
+    provenance: Provenance,
 ) -> Result<Artifact, StoreError> {
     check_content(&content)?;
     let tx = conn.transaction()?;
     let current = require_artifact(&tx, chat, id)?;
     let next = current.latest_version + 1;
+    // The new version keeps the mark of the version it was made from. Of a version that
+    // is no longer kept nothing is known, so the mark is set.
+    let basis = provenance.based_on.unwrap_or(current.latest_version);
+    let inherited: bool = tx
+        .query_row(
+            "SELECT after_outside FROM artifact_versions WHERE artifact_id = ?1 AND version = ?2",
+            params![id, basis],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(true);
+    let after_outside = provenance.after_outside || inherited;
     // Later than every earlier change even when the clock stands still or steps back, so
     // "most recently changed first" is the order of the changes.
     let now = now_ms().max(current.updated_at);
     tx.execute(
-        "INSERT INTO artifact_versions (artifact_id, version, content, author, note, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![id, next, content, author, checked_note(note), now],
+        "INSERT INTO artifact_versions (artifact_id, version, content, author, note, created_at, \
+         after_outside) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, next, content, author, checked_note(note), now, after_outside],
     )?;
     tx.execute(
         "DELETE FROM artifact_versions WHERE artifact_id = ?1 AND version <= ?2",
@@ -393,8 +428,8 @@ impl Store {
     ) -> Result<Vec<ArtifactVersionInfo>, StoreError> {
         self.call(move |c| {
             let mut stmt = c.prepare_cached(
-                "SELECT v.version, v.author, v.note, v.created_at, length(CAST(v.content AS BLOB)) \
-                 FROM artifact_versions v JOIN artifacts a ON a.id = v.artifact_id \
+                "SELECT v.version, v.author, v.note, v.created_at, length(CAST(v.content AS BLOB)), \
+                 v.after_outside FROM artifact_versions v JOIN artifacts a ON a.id = v.artifact_id \
                  WHERE v.artifact_id = ?1 AND a.chat_id = ?2 ORDER BY v.version",
             )?;
             let rows = stmt.query_map(params![id, chat_id], |r| {
@@ -404,6 +439,7 @@ impl Store {
                     note: r.get(2)?,
                     created_at: r.get(3)?,
                     bytes: r.get(4)?,
+                    after_outside: r.get(5)?,
                 })
             })?;
             Ok(rows.collect::<Result<_, _>>()?)
@@ -424,8 +460,9 @@ impl Store {
         content: String,
         author: ArtifactAuthor,
         note: Option<String>,
+        provenance: Provenance,
     ) -> Result<Artifact, StoreError> {
-        self.call(move |c| add_version(c, chat_id, id, content, author, note))
+        self.call(move |c| add_version(c, chat_id, id, content, author, note, provenance))
             .await
     }
 
@@ -506,6 +543,7 @@ mod tests {
             kind,
             content: content.into(),
             author: ArtifactAuthor::Model,
+            after_outside: false,
         }
     }
 
@@ -550,7 +588,7 @@ mod tests {
             .await
             .expect("create");
         let a2 = store
-            .add_artifact_version(c, a.id, "two".into(), ArtifactAuthor::User, None)
+            .add_artifact_version(c, a.id, "two".into(), ArtifactAuthor::User, None, Provenance::default())
             .await
             .expect("second");
         assert_eq!((a2.latest_version, a2.versions), (2, 2));
@@ -562,6 +600,7 @@ mod tests {
                 "one".into(),
                 ArtifactAuthor::User,
                 Some("Restored from version 1".into()),
+                Provenance::default(),
             )
             .await
             .expect("third");
@@ -643,7 +682,7 @@ mod tests {
         assert!(store.list_artifacts(mine).await.expect("list").is_empty());
         assert!(matches!(
             store
-                .add_artifact_version(mine, theirs.id, "x".into(), ArtifactAuthor::Model, None)
+                .add_artifact_version(mine, theirs.id, "x".into(), ArtifactAuthor::Model, None, Provenance::default())
                 .await,
             Err(StoreError::NotFound { .. })
         ));
@@ -698,7 +737,7 @@ mod tests {
         );
         tokio::time::sleep(std::time::Duration::from_millis(3)).await;
         store
-            .add_artifact_version(c, a.id, "<svg></svg>".into(), ArtifactAuthor::Model, None)
+            .add_artifact_version(c, a.id, "<svg></svg>".into(), ArtifactAuthor::Model, None, Provenance::default())
             .await
             .expect("update a");
         assert_eq!(
@@ -760,7 +799,7 @@ mod tests {
         assert!(
             invalid(
                 store
-                    .add_artifact_version(c, a.id, big, ArtifactAuthor::User, None)
+                    .add_artifact_version(c, a.id, big, ArtifactAuthor::User, None, Provenance::default())
                     .await
             )
             .contains("1048576")
@@ -817,7 +856,7 @@ mod tests {
         let mut last = a.clone();
         for n in 2..=MAX_ARTIFACT_VERSIONS + 5 {
             last = store
-                .add_artifact_version(c, a.id, format!("v{n}"), ArtifactAuthor::Model, None)
+                .add_artifact_version(c, a.id, format!("v{n}"), ArtifactAuthor::Model, None, Provenance::default())
                 .await
                 .expect("add");
         }
@@ -875,7 +914,7 @@ mod tests {
         );
         assert!(matches!(
             store
-                .add_artifact_version(c, a.id, "x".into(), ArtifactAuthor::User, None)
+                .add_artifact_version(c, a.id, "x".into(), ArtifactAuthor::User, None, Provenance::default())
                 .await,
             Err(StoreError::NotFound { .. })
         ));
@@ -919,7 +958,7 @@ mod tests {
             .await
             .expect("create");
         store
-            .add_artifact_version(c, a.id, "<b>2</b>".into(), ArtifactAuthor::Model, None)
+            .add_artifact_version(c, a.id, "<b>2</b>".into(), ArtifactAuthor::Model, None, Provenance::default())
             .await
             .expect("add");
         let (artifact, version) = store
@@ -943,6 +982,91 @@ mod tests {
                 .expect("none"),
             None
         );
+    }
+
+    /// The mark that keeps a page's scripts off until the user allows them: set when the
+    /// model wrote after content from outside entered the chat, and kept by every version
+    /// made from a marked one.
+    #[tokio::test]
+    async fn a_version_keeps_the_outside_mark_of_what_it_was_made_from() {
+        let store = Store::open_in_memory().expect("open");
+        let c = chat(&store, "c").await;
+        let a = store
+            .create_artifact(new(c, "Page", ArtifactKind::Html, "one"))
+            .await
+            .expect("create");
+        let add = |author, provenance| {
+            let store = store.clone();
+            async move {
+                let saved = store
+                    .add_artifact_version(c, a.id, "x".into(), author, None, provenance)
+                    .await
+                    .expect("save");
+                store
+                    .artifact_version(c, a.id, Some(saved.latest_version))
+                    .await
+                    .expect("read")
+                    .expect("exists")
+                    .after_outside
+            }
+        };
+        let from = |after_outside, based_on| Provenance {
+            after_outside,
+            based_on,
+        };
+        let first = store.artifact_version(c, a.id, Some(1)).await.unwrap();
+        assert!(!first.expect("version 1").after_outside);
+
+        // 2: the model writes after it read something from outside.
+        assert!(add(ArtifactAuthor::Model, from(true, None)).await);
+        // 3: the user edits the newest version. Its text is still mostly the marked one's.
+        assert!(add(ArtifactAuthor::User, Provenance::default()).await);
+        // 4: the user restores version 1, which was written before: that text is clean.
+        assert!(!add(ArtifactAuthor::User, from(false, Some(1))).await);
+        // 5: the model updates the clean newest version while the chat is clean again.
+        assert!(!add(ArtifactAuthor::Model, Provenance::default()).await);
+        // 6: made from a version that is not kept: nothing is known, so it is marked.
+        assert!(add(ArtifactAuthor::User, from(false, Some(99))).await);
+
+        let marks: Vec<(u32, bool)> = store
+            .artifact_versions(c, a.id)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|v| (v.version, v.after_outside))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                (1, false),
+                (2, true),
+                (3, true),
+                (4, false),
+                (5, false),
+                (6, true)
+            ]
+        );
+        let (_, shown) = store
+            .artifact_for_preview(a.id, 2)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert!(shown.after_outside, "the preview is told about the mark");
+    }
+
+    #[tokio::test]
+    async fn an_artifact_made_after_outside_content_is_marked_from_its_first_version() {
+        let store = Store::open_in_memory().expect("open");
+        let c = chat(&store, "c").await;
+        let a = store
+            .create_artifact(NewArtifact {
+                after_outside: true,
+                ..new(c, "Page", ArtifactKind::Html, "<p>hi</p>")
+            })
+            .await
+            .expect("create");
+        let v = store.artifact_version(c, a.id, None).await.unwrap();
+        assert!(v.expect("version 1").after_outside);
     }
 
     #[test]

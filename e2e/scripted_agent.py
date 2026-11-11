@@ -165,6 +165,10 @@ def run(fn, c):
     except Exception as e:  # noqa: BLE001
         status = "FAIL"
         notes.append("".join(traceback.format_exception_only(type(e), e)).strip()[:1500])
+        if os.environ.get("E2E_TRACE"):
+            # Where in the scenario it happened.
+            notes.append("trace: " + " <- ".join(
+                f"{f.name}:{f.lineno}" for f in reversed(traceback.extract_tb(e.__traceback__)[-4:])))
         try:
             c.s.screenshot(str(OUT / f"fail-{fn.probe_name}.png"))
             notes.append("page: " + c.s.page_text()[-600:].replace("\n", " | "))
@@ -1456,6 +1460,8 @@ def p_artifacts(c, notes):
         Fake.queue.append({"content": say})
         before = len(results())
         # A real click first: after a look inside the preview frame, the keys would go there.
+        # A dialog that is closing still covers the page until its animation has ended.
+        s.wait_for(lambda: not s.execute("return !!document.querySelector('.dialog-overlay');"), 10, "dialogs closed")
         s.click(s.find("textarea"))
         send(s, ask)
         wait_idle(s)
@@ -1481,7 +1487,8 @@ def p_artifacts(c, notes):
     notes.append("frame: " + json.dumps(f))
     assert f and f["key"] == f"{aid}:1", f
     assert f["sandbox"] == "allow-scripts" and f["referrer"] == "no-referrer", f
-    assert f["src"] == f"artifact://sandbox.localhost/{aid}/1", f
+    # The address carries a ticket the app issued for this one frame.
+    assert re.fullmatch(rf"artifact://sandbox\.localhost/{aid}/1\?t=[0-9a-f]{{32}}", f["src"]), f
     panel = s.execute("return document.querySelector('aside[aria-label=\"Workbench\"]').innerText;")
     assert "The preview reported a problem" in panel and "startCounter" in panel, panel[-400:]
     assert "Open artifact" in s.page_text(), "the tool card has no button for the artifact"
@@ -1505,6 +1512,42 @@ def p_artifacts(c, notes):
     assert frame()["key"] == f"{aid}:2", frame()
     assert in_frame("document.getElementById('add').click(); return document.getElementById('n').textContent;") == "1"
     assert "The preview reported" not in s.execute("return document.querySelector('aside[aria-label=\"Workbench\"]').innerText;")
+
+    # ---- A frame's address loads once. The address of the frame on screen, loaded a second
+    # time, shows nothing; an address the app issues for a new frame does.
+    used = frame()["src"]
+    fresh = s.invoke("artifact_frame", {"chatId": chat, "id": aid, "version": 2})
+    assert fresh["running"] == "page" and fresh["url"] != used, fresh
+    s.execute(
+        """
+        window.__replay = {used: [], fresh: []};
+        for (const [name, url] of [['used', arguments[0]], ['fresh', arguments[1]]]) {
+          const f = document.createElement('iframe');
+          f.setAttribute('sandbox', 'allow-scripts');
+          f.style.display = 'none';
+          f.dataset.replay = name;
+          window.addEventListener('message', e => {
+            if (e.source === f.contentWindow && e.data && e.data.source === 'artifact') window.__replay[name].push(e.data.kind);
+          });
+          f.src = url;
+          document.body.appendChild(f);
+        }
+        """, used, fresh["url"])
+    s.wait_for(lambda: "ready" in s.execute("return window.__replay.fresh;"), 10, "a page loaded with a new ticket")
+    time.sleep(0.8)
+    replay = s.execute("return window.__replay;")
+    notes.append("a used address loaded again: " + json.dumps(replay))
+    assert replay["used"] == [], "a frame's address loaded a second time: " + json.dumps(replay)
+    s.execute("document.querySelectorAll('iframe[data-replay]').forEach(f => f.remove());")
+    # Without a ticket, and for an artifact of another chat, the app issues nothing.
+    for bad in ({"chatId": chat + 999, "id": aid, "version": 2}, {"chatId": chat, "id": aid, "version": 99}):
+        try:
+            s.invoke("artifact_frame", bad)
+            raise AssertionError(f"a frame address was issued for {bad}")
+        except AssertionError:
+            raise
+        except Exception:
+            pass
 
     # ---- A hostile page. Every way out must be closed.
     class Leak(BaseHTTPRequestHandler):
@@ -1697,6 +1740,34 @@ def p_artifacts(c, notes):
     assert "The preview reported 1 problem:" in text and "Parse error" in text, text
     s.screenshot(str(OUT / "artifacts-diagram.png"))
 
+    # ---- A document is shown by the app itself, as text; it can be renamed and deleted.
+    text = call("create_artifact", {"title": "Plan", "kind": "markdown",
+                                    "content": "# Trip plan\n\n- pack\n\n<script>window.__pwned = 1</script>\n<img src=x onerror=\"window.__pwned = 2\">\n"},
+                "Here is the plan.", "write the plan")
+    plan = re.fullmatch(r'Artifact #(\d+) "Plan" \(markdown\), version 1 saved\.', text.strip())
+    assert plan, text
+    plan_id = int(plan.group(1))
+    s.wait_for(lambda: s.execute("const h = document.querySelector('aside[aria-label=\"Workbench\"] h1'); return h ? h.innerText : null;") == "Trip plan",
+               10, "the document's heading")
+    assert frame() is None, "a document was put into a frame"
+    assert s.execute("return window.__pwned || null;") is None, "markup in a document ran"
+    s.click_button("Rename")
+    time.sleep(0.3)
+    s.execute(
+        """
+        const el = document.querySelector('aside[aria-label="Workbench"] input[aria-label="Title"]');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, arguments[0]);
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        """, "Trip plan (final)")
+    s.click_button("Rename")
+    titles = lambda: {a["id"]: a["title"] for a in s.invoke("list_artifacts", {"chatId": chat})}  # noqa: E731
+    s.wait_for(lambda: titles().get(plan_id) == "Trip plan (final)", 10, "the new title")
+    s.click_button("Delete artifact")
+    s.wait_text("Delete this artifact?", 10)
+    s.execute("[...document.querySelectorAll('[role=alertdialog] button')].find(b => b.innerText === 'Delete artifact').click();")
+    s.wait_for(lambda: plan_id not in titles(), 10, "the artifact is gone")
+    assert aid in titles(), "deleting one artifact removed another"
+
     # ---- With the sandbox not proven, nothing a page wrote runs.
     s.invoke("artifact_canary", {"nonce": "e2e"})
     s.wait_for(lambda: "Scripts are switched off in previews" in s.page_text(), 10, "the notice")
@@ -1716,10 +1787,283 @@ def p_artifacts(c, notes):
     assert not any("trusted" in b.lower() for b in blocked), blocked
     del probe_id
 
+    # ---- A page the model writes after it read something from outside the conversation
+    # is shown without its scripts until the user allows them, version by version.
+    tools = ["create_artifact", "update_artifact", "read_artifact", "list_artifacts", "read_file"]
+    chat2 = new_chat(c, tools=tools)
+    s.execute(
+        "window.__held = [];"
+        "window.addEventListener('message', e => { if (e.data && e.data.source === 'held-probe') window.__held.push(e.data.n); });")
+    after = "<p id=\"o\">static</p><script>parent.postMessage({source: 'held-probe', n: %d}, '*')</script>"
+
+    def tool_texts():
+        return [m["toolResult"]["text"] for m in messages(s, chat2) if m["role"] == "tool"]
+
+    Fake.queue.append({"tool_calls": [{"name": "read_file", "arguments": {"path": str(c.work / "notes.txt")}}]})
+    Fake.queue.append({"tool_calls": [{"name": "create_artifact", "arguments": {"title": "From notes", "kind": "html", "content": after % 1}}]})
+    Fake.queue.append({"content": "I made a page from your notes."})
+    s.click(s.find("textarea"))
+    send(s, "read my notes and make a page of them")
+    answer_card(s, "Allow once")
+    wait_idle(s)
+    held_text = tool_texts()[-1]
+    notes.append("held result: " + held_text.replace("\n", " | "))
+    held = re.match(r'Artifact #(\d+) "From notes" \(html\), version 1 saved\.\nNot checked: this page was written after content from outside the conversation', held_text)
+    assert held, held_text
+    hid = int(held.group(1))
+    s.wait_for(lambda: (frame() or {}).get("key") == f"{hid}:1", 10, "the held page is shown")
+    assert frame()["sandbox"] == "", frame()
+    assert s.invoke("artifact_frame", {"chatId": chat2, "id": hid, "version": 1})["running"] == "held"
+    panel = s.execute("return document.querySelector('aside[aria-label=\"Workbench\"]').innerText;")
+    assert "its scripts are off" in panel and "Run scripts" in panel, panel[-500:]
+    time.sleep(1.0)
+    assert s.execute("return window.__held;") == [], "a held page ran its script"
+    s.screenshot(str(OUT / "artifacts-held.png"))
+    # The user allows it: the page is loaded again, with its scripts.
+    s.click_button("Run scripts")
+    s.wait_for(lambda: s.execute("return window.__held;") == [1], 10, "the page's script after Run scripts")
+    assert frame()["sandbox"] == "allow-scripts", frame()
+    assert "its scripts are off" not in s.execute("return document.querySelector('aside[aria-label=\"Workbench\"]').innerText;")
+    # The next version is another page: it is held again.
+    Fake.queue.append({"tool_calls": [{"name": "update_artifact", "arguments": {"id": hid, "content": after % 2}}]})
+    Fake.queue.append({"content": "Changed."})
+    s.click(s.find("textarea"))
+    send(s, "change it")
+    wait_idle(s)
+    assert "Not checked: this page was written after" in tool_texts()[-1], tool_texts()[-1]
+    s.wait_for(lambda: (frame() or {}).get("key") == f"{hid}:2", 10, "version 2 is shown")
+    time.sleep(1.0)
+    assert frame()["sandbox"] == "" and s.execute("return window.__held;") == [1], (frame(), s.execute("return window.__held;"))
+    # A picture made in the same chat is drawn all the same: by the app's scripts, not its own.
+    Fake.queue.append({"tool_calls": [{"name": "create_artifact", "arguments": {
+        "title": "Dot", "kind": "svg",
+        "content": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"40\" onload=\"parent.postMessage({source: 'held-probe', n: 3}, '*')\"><circle cx=\"20\" cy=\"20\" r=\"10\"/></svg>"}}]})
+    Fake.queue.append({"content": "Drew it."})
+    s.click(s.find("textarea"))
+    send(s, "draw a dot")
+    wait_idle(s)
+    dot = tool_texts()[-1]
+    notes.append("picture with a handler: " + dot.replace("\n", " | "))
+    # The picture is drawn and checked; its handler is refused, and the model is told so.
+    assert "The preview reported 1 problem:" in dot and "script-src" in dot, dot
+    s.wait_for(lambda: (frame() or {}).get("sandbox") == "allow-scripts", 10, "the picture's frame")
+    assert in_frame("return document.querySelectorAll('svg circle').length;") == 1, "the picture was not drawn"
+    time.sleep(0.8)
+    assert s.execute("return window.__held;") == [1], "a handler inside a picture ran"
+
+
+@probe("search")
+def p_search(c, notes):
+    """Web search with sources that can be checked (0.0.4). The search goes to the service
+    the user chose: here a stand-in for a SearXNG instance on this computer. The pages it
+    names are on this computer or on a private network, so the app refuses to read them
+    without connecting, says so, and gives the model the service's summaries. An answer's
+    [n] is a chip that opens the source in the panel; a number with no source is marked.
+    Nothing a search returns is drawn as markup."""
+    from urllib.parse import parse_qs, urlsplit
+    s = c.s
+
+    class Searx(BaseHTTPRequestHandler):
+        seen = []
+        results = []
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            Searx.seen.append(self.path)
+            url = urlsplit(self.path)
+            query = parse_qs(url.query)
+            if url.path == "/search" and query.get("format") == ["json"]:
+                body = json.dumps({"query": query.get("q", [""])[0], "number_of_results": len(Searx.results),
+                                   "results": Searx.results}).encode()
+                kind = "application/json"
+            else:
+                body = b"<html><body><p>A page on this computer. The app must never read it.</p></body></html>"
+                kind = "text/html; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    Searx.results = [
+        {"title": "Heron migration routes", "url": f"{base}/pages/routes", "engine": "stand-in",
+         "content": "Grey herons from the north fly south in autumn and return in early spring."},
+        {"title": "Ringing records", "url": f"http://localhost:{port}/pages/ringing", "engine": "stand-in",
+         "content": "Ringed birds were found up to 2,000 km from the nest."},
+        {"title": "Field notes <img src=x onerror=\"window.__searchPwned=1\">", "url": "http://10.0.0.7/wiki/herons",
+         "engine": "stand-in", "content": "Notes kept on <b>our</b> network."},
+        {"title": "Instance data", "url": "http://169.254.169.254/latest/meta-data/", "engine": "stand-in",
+         "content": "What a cloud machine can ask about itself."},
+    ]
+    server = ThreadingHTTPServer(("127.0.0.1", port), Searx)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    before = s.invoke("get_search_settings")
+    notes.append("settings before: " + json.dumps(before))
+    workbench = 'aside[aria-label="Workbench"]'
+
+    def tool_results(chat_id):
+        return [m["toolResult"]["text"] for m in messages(s, chat_id) if m["role"] == "tool"]
+
+    try:
+        # ---- The service is chosen through the settings command, as the Settings screen does.
+        saved = s.invoke("set_search_settings", {"settings": {"provider": "searxng", "searxngUrl": base, "pages": 4,
+                                                               "versionMatching": True}})
+        assert saved["provider"] == "searxng" and saved["searxngUrl"].rstrip("/") == base, saved
+        # A key is kept in the keychain: what comes back says only that one is set, and it
+        # is not written to the database.
+        secret = "BSA-e2e-0123456789-key"
+        with_key = s.invoke("set_search_key", {"provider": "brave", "key": secret})
+        assert with_key["braveKeySet"] is True and secret not in json.dumps(with_key), with_key
+        assert secret not in json.dumps(s.invoke("get_search_settings"))
+        for name in ("app.db", "app.db-wal"):
+            f = c.db.with_name(name)
+            assert not f.exists() or secret.encode() not in f.read_bytes(), f"the key is in {name}"
+        assert s.invoke("clear_search_key", {"provider": "brave"})["braveKeySet"] is False
+
+        # ---- The Settings screen shows the choice, says where requests go, and can try it.
+        s.click_button("Settings")
+        tab = s.wait_for(lambda: s.execute(
+            "return [...document.querySelectorAll('[role=tab]')].find(b => b.innerText.trim() === 'Search') || false;"),
+            10, "the Search tab in Settings")
+        s.click(next(iter(tab.values())))
+        s.wait_text("Search service", 10)
+        page = s.page_text()
+        assert "the search is sent to the service chosen here, and the pages it finds are then fetched from their own sites" in page, page[-800:]
+        chosen = s.execute("return [...document.querySelectorAll('[role=radio][aria-checked=true]')].map(b => b.innerText);")
+        assert len(chosen) == 1 and "SearXNG" in chosen[0], chosen
+        assert s.execute("return document.getElementById('searxng-address').value;").rstrip("/") == base
+        s.click_button("Test search")
+        s.wait_text("SearXNG answered with 4 results.", 20)
+        assert "Heron migration routes · 127.0.0.1" in s.page_text()
+        assert [urlsplit(p).path for p in Searx.seen] == ["/search"], Searx.seen
+        assert "Something went wrong" not in s.page_text()
+        s.screenshot(str(OUT / "search-settings.png"))
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.4)
+
+        # ---- A search by the model asks first and says where it goes.
+        chat = new_chat(c, tools=["web_search", "read_source"])
+        Searx.seen.clear()
+        Fake.requests.clear()
+        Fake.queue.append({"tool_calls": [{"name": "web_search", "arguments": {"query": "how do herons migrate"}}]})
+        Fake.queue.append({"content": 'Grey herons from the north "fly south in autumn and return in early spring" [1]. '
+                                      'Some "spend the whole winter far out on the open sea" [1], '
+                                      "and every one of them sleeps until May [9]."})
+        send(s, "how do herons migrate?")
+        s.wait_for(lambda: "Allow once" in s.page_text(), 30, "approval card")
+        card = s.page_text()
+        assert "how do herons migrate" in card and f"your SearXNG instance at 127.0.0.1:{port}" in card, card[-700:]
+        assert "Up to 4 of the pages it finds are then read from their sites." in card, card[-700:]
+        assert Searx.seen == [], "the search was sent before it was allowed"
+        time.sleep(0.9)
+        s.click_button("Allow once")
+        wait_idle(s)
+
+        # ---- The result: numbered hits with the service's summaries, and why no page was read.
+        result = tool_results(chat)[-1]
+        notes.append("web_search result: " + result.replace("\n", " | "))
+        lines = result.split("\n")
+        assert lines[0] == "Sources [1] [2] [3] [4] for: how do herons migrate", lines[0]
+        assert lines[1] == "None of the pages could be read, so only the search service's summaries are given.", lines[1]
+        assert (f"\n[1] Heron migration routes — 127.0.0.1\n{base}/pages/routes\n"
+                "(This page could not be read: 127.0.0.1 is a loopback (this computer) address (127.0.0.1), "
+                "and pages are never read from there. The search service's summary:)\n"
+                "Grey herons from the north fly south in autumn and return in early spring.\n") in result, result
+        assert "\n[2] Ringing records — localhost\n" in result, result
+        assert "localhost is this computer, and pages are never read from there" in result, result
+        assert "10.0.0.7 is a private network address (10.0.0.7), and pages are never read from there" in result, result
+        assert "169.254.169.254 is a link-local address (169.254.169.254), and pages are never read from there" in result, result
+        assert result.count("(This page could not be read: ") == 4, result
+        assert result.rstrip().endswith("Cite a source as [n] right after the sentence it supports. "
+                                        "Use only what the excerpts say; if they do not answer the question, say so."), result[-300:]
+        # The model was sent that text as tool output (data, inside the delimiter), and only
+        # the search itself reached the stand-in.
+        sent = [m["content"] for m in Fake.requests[-1]["messages"] if m["role"] == "tool"][-1]
+        sent = sent if isinstance(sent, str) else json.dumps(sent)
+        notes.append("as sent to the model: " + sent[:260].replace("\n", " | ") + " … " + sent[-190:].replace("\n", " | "))
+        assert sent.startswith("<tool_output ") and 'tool="web_search"' in sent.split("\n", 1)[0], sent[:300]
+        assert result in sent, sent
+        assert len(Searx.seen) == 1, f"a page on this computer was asked for: {Searx.seen}"
+        asked = urlsplit(Searx.seen[0])
+        assert asked.path == "/search" and parse_qs(asked.query) == {"q": ["how do herons migrate"], "format": ["json"]}, Searx.seen
+
+        # ---- Each hit is stored under its number, with what the model was given of it.
+        sources = s.invoke("list_sources", {"chatId": chat})
+        assert [x["n"] for x in sources] == [1, 2, 3, 4], sources
+        assert all(x["excerpt"] == "" and x["fetchedAt"] is None and x["contentSha256"] is None and x["snippet"] for x in sources), sources
+        assert sources[0]["url"] == f"{base}/pages/routes" and sources[0]["queries"] == ["how do herons migrate"], sources[0]
+        assert sources[0]["snippet"] == "Grey herons from the north fly south in autumn and return in early spring.", sources[0]
+
+        # ---- In the answer, [1] is a chip and [9] is marked as having no source.
+        s.wait_for(lambda: s.execute("return document.querySelectorAll('button[data-citation=\"1\"]').length;") == 2, 15,
+                   "the chips for [1]")
+        chip = s.execute("const b = document.querySelector('button[data-citation=\"1\"]');"
+                         "return {text: b.innerText.trim(), title: b.getAttribute('title')};")
+        assert chip == {"text": "1", "title": "Heron migration routes — 127.0.0.1"}, chip
+        missing = s.execute("const e = document.querySelector('[data-citation-missing=\"9\"]');"
+                            "return e ? {text: e.innerText, title: e.getAttribute('title'), tag: e.tagName} : null;")
+        assert missing == {"text": "[9]", "title": "No such source", "tag": "SPAN"}, missing
+        assert s.execute("return document.querySelector('button[data-citation=\"9\"]') === null;")
+        # The card of the search lists what it found.
+        hits = s.execute("return [...document.querySelectorAll('ul[aria-label=\"Sources found\"] button')]"
+                         ".map(b => b.innerText.replace(/\\s+/g, ' ').trim());")
+        assert len(hits) == 4 and hits[0].startswith("1 Heron migration routes") and "127.0.0.1" in hits[0], hits
+
+        # ---- The chip opens the Sources tab on that source, with the quote check.
+        s.click(s.find('button[data-citation="1"]'))
+        s.wait_for(lambda: s.execute("return !!document.querySelector(arguments[0] + ' article[data-source=\"1\"]');", workbench),
+                   10, "the Sources tab on source 1")
+        tab = s.execute("const t = document.querySelector(arguments[0] + ' [role=tab][aria-selected=true]');"
+                        "return t ? t.innerText.trim() : null;", workbench)
+        assert tab == "Sources", tab
+        shown = s.execute("return document.querySelector(arguments[0] + ' article[data-source=\"1\"]').innerText;", workbench)
+        assert f"{base}/pages/routes" in shown and "how do herons migrate" in shown, shown
+        assert "Grey herons from the north fly south in autumn and return in early spring." in shown, shown
+        assert "not read: the model was given only the search service's summary" in shown, shown
+        quotes = s.execute("return [...document.querySelectorAll(arguments[0] + ' article[data-source=\"1\"] [data-quote-found]')]"
+                           ".map(e => [e.getAttribute('data-quote-found'), e.innerText.replace(/\\s+/g, ' ').trim()]);", workbench)
+        notes.append("quote check: " + json.dumps(quotes))
+        assert len(quotes) == 2, quotes
+        assert quotes[0][0] == "true" and "fly south in autumn and return in early spring" in quotes[0][1] and quotes[0][1].endswith("quote found"), quotes
+        assert quotes[1][0] == "false" and quotes[1][1].endswith("quote not found in the retrieved text"), quotes
+        assert s.execute("return document.querySelectorAll(arguments[0] + ' article[data-source]').length;", workbench) == 4
+        # What a search returns is text: markup in a title is shown, not drawn.
+        third = s.execute("return document.querySelector(arguments[0] + ' article[data-source=\"3\"] h3').innerText;", workbench)
+        assert "<img src=x onerror=" in third, third
+        assert s.execute("return window.__searchPwned === undefined && document.querySelector('img[src=\"x\"]') === null;"), \
+            "markup from a search result was drawn"
+        s.screenshot(str(OUT / "search-sources.png"))
+
+        # ---- Reading a source again is refused the same way, without a request.
+        Searx.seen.clear()
+        Fake.queue.append({"tool_calls": [{"name": "read_source", "arguments": {"n": 1}}]})
+        Fake.queue.append({"content": "That page could not be read."})
+        send(s, "read the first one")
+        s.wait_for(lambda: "Allow once" in s.page_text(), 30, "approval card")
+        assert "Read more of source [1]" in s.page_text(), s.page_text()[-600:]
+        time.sleep(0.9)
+        s.click_button("Allow once")
+        wait_idle(s)
+        again = tool_results(chat)[-1]
+        notes.append("read_source result: " + again.replace("\n", " | "))
+        assert again.startswith("Source [1] could not be read: 127.0.0.1 is a loopback (this computer) address (127.0.0.1), "
+                                "and pages are never read from there."), again
+        assert Searx.seen == [], f"a page on this computer was asked for: {Searx.seen}"
+        audit = [(a["tool"], a["decision"]) for a in s.invoke("list_audit", {"filter": {"chatId": chat}})]
+        notes.append("audit: " + json.dumps(audit))
+        assert ("web_search", "allow_once") in audit and ("read_source", "allow_once") in audit, audit
+    finally:
+        s.invoke("set_search_settings", {"settings": {k: before[k] for k in ("provider", "searxngUrl", "pages", "versionMatching")}})
+        server.shutdown()
+
 
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
-          p_tool_selection, p_artifacts]
+          p_tool_selection, p_artifacts, p_search]
 
 
 def main() -> int:

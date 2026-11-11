@@ -347,10 +347,24 @@ impl Core {
             (self.notify)(changed(false));
             return ToolOutput::text(text);
         }
+        // A page written after outside content entered the chat is shown without its
+        // scripts until the user allows them: there is nothing to check yet. A version
+        // that cannot be read back counts as such a page.
+        let held = artifact.kind == ArtifactKind::Html
+            && self
+                .store
+                .artifact_version(chat, artifact.id, Some(version))
+                .await
+                .ok()
+                .flatten()
+                .is_none_or(|v| v.after_outside);
         let report = if matches!(self.shared.gate.status(), Isolation::Broken { .. }) {
             // Nothing in the preview runs on this system: there is nothing to wait for.
             (self.notify)(changed(false));
             Some(RenderReport::NotShown(NotShown::ScriptsOff))
+        } else if held {
+            (self.notify)(changed(false));
+            Some(RenderReport::NotShown(NotShown::Held))
         } else {
             let waiting = self.shared.renders.expect(id, version);
             (self.notify)(changed(true));
@@ -392,6 +406,7 @@ impl Core {
                 kind,
                 content: content.to_owned(),
                 author: ArtifactAuthor::Model,
+                after_outside: self.shared.outside.seen(chat.0),
             })
             .await;
         match created {
@@ -439,7 +454,18 @@ impl Core {
         };
         let saved = self
             .store
-            .add_artifact_version(chat, id, content, ArtifactAuthor::Model, None)
+            .add_artifact_version(
+                chat,
+                id,
+                content,
+                ArtifactAuthor::Model,
+                None,
+                // Made from the newest version, whose mark it keeps.
+                store::Provenance {
+                    after_outside: self.shared.outside.seen(chat.0),
+                    based_on: None,
+                },
+            )
             .await;
         match saved {
             Ok(artifact) => self.saved(chat, &artifact, extra, cancel).await,
@@ -908,6 +934,82 @@ mod tests {
         assert!(!f.seen.lock().unwrap()[0].wants_report);
     }
 
+    /// A page written after content from outside the conversation entered the chat is
+    /// saved with the mark and not waited for: it is shown without its scripts until the
+    /// user allows them. Nothing the tool is given decides this.
+    #[tokio::test]
+    async fn a_page_written_after_outside_content_is_marked_and_not_waited_for() {
+        let mut f = fixture().await;
+        let page = |title: &str| json!({"title": title, "kind": "html", "content": "<p>1</p>"});
+        let marked = |f: &Fixture, chat: i64, id: i64, version: u32| {
+            let store = f.core.store.clone();
+            async move {
+                store
+                    .artifact_version(ChatId(chat), ArtifactId(id), Some(version))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .after_outside
+            }
+        };
+        // Nothing from outside yet: the page is waited for like any other.
+        let clean = run(&f, f.chat, CREATE, page("Timer")).await;
+        assert!(text(&clean).ends_with("Not rendered yet: open it to check."));
+        assert!(f.seen.lock().unwrap()[0].wants_report);
+        assert!(!marked(&f, f.chat, 1, 1).await);
+
+        // A tool brought outside content into the chat (`artifacts::note_tool_run`).
+        f.core.shared.outside.note(f.chat);
+        f.core.wait = Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let out = run(&f, f.chat, CREATE, page("Report")).await;
+        assert!(started.elapsed() < Duration::from_secs(5), "it waited");
+        let t = text(&out);
+        assert!(
+            t.starts_with(
+                "Artifact #2 \"Report\" (html), version 1 saved.\nNot checked: this page was written after content from outside the conversation"
+            ),
+            "{t}"
+        );
+        assert!(!out.is_error);
+        assert!(!f.seen.lock().unwrap()[1].wants_report);
+        assert!(marked(&f, f.chat, 2, 1).await);
+
+        // A new version of the page that was clean is marked as well, whichever way it
+        // is written.
+        let whole = run(&f, f.chat, UPDATE, json!({"id": 1, "content": "<p>2</p>"})).await;
+        assert!(text(&whole).contains("Not checked: this page was written after"));
+        assert!(marked(&f, f.chat, 1, 2).await);
+        let piece = run(
+            &f,
+            f.chat,
+            UPDATE,
+            json!({"id": 1, "old_text": "2", "new_text": "3"}),
+        )
+        .await;
+        assert!(text(&piece).contains("Not checked: this page was written after"));
+        assert!(marked(&f, f.chat, 1, 3).await);
+        assert!(!marked(&f, f.chat, 1, 1).await, "the old version is as it was");
+
+        // A picture is drawn by the app's own scripts: marked, and checked as usual.
+        f.core.wait = Duration::from_millis(60);
+        let picture = run(
+            &f,
+            f.chat,
+            CREATE,
+            json!({"title": "Logo", "kind": "svg", "content": "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"}),
+        )
+        .await;
+        assert!(text(&picture).ends_with("Not rendered yet: open it to check."));
+        assert!(f.seen.lock().unwrap().last().unwrap().wants_report);
+        assert!(marked(&f, f.chat, 3, 1).await);
+
+        // Another chat is not touched by any of this.
+        let other = run(&f, f.other, CREATE, page("Other")).await;
+        assert!(text(&other).ends_with("Not rendered yet: open it to check."));
+        assert!(!marked(&f, f.other, 4, 1).await);
+    }
+
     /// The tools work for the chat of the turn that runs them, and for no other.
     #[tokio::test]
     async fn an_artifact_of_another_chat_cannot_be_read_listed_or_changed() {
@@ -1060,6 +1162,7 @@ mod tests {
                 "two".into(),
                 ArtifactAuthor::User,
                 Some("Restored from version 1".into()),
+                store::Provenance::default(),
             )
             .await
             .unwrap();

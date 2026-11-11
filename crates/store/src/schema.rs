@@ -277,6 +277,10 @@ CREATE TABLE artifact_versions (
     author       TEXT    NOT NULL CHECK (author IN ('model', 'user')),
     note         TEXT,
     created_at   INTEGER NOT NULL,
+    -- 1 when content from outside the conversation (files, web pages, tool results) had
+    -- entered the chat before this version was written, or when the version it was made
+    -- from has the mark. A page with the mark runs no script until the user allows it.
+    after_outside INTEGER NOT NULL DEFAULT 0 CHECK (after_outside IN (0, 1)),
     UNIQUE (artifact_id, version)
 );
 -- [/artifacts]

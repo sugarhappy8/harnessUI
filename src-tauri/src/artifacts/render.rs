@@ -64,6 +64,9 @@ pub enum NotShown {
     ScriptsOff,
     /// The preview page said it cannot draw this kind here.
     CannotDraw,
+    /// The page was written after content from outside the conversation entered the chat:
+    /// its scripts stay off until the user allows them (`protocol::running`).
+    Held,
 }
 
 fn position(value: Option<u64>) -> Option<u32> {
@@ -133,6 +136,9 @@ pub fn report_text(report: Option<&RenderReport>) -> String {
         None => "Not rendered yet: open it to check.".to_owned(),
         Some(RenderReport::NotShown(NotShown::ScriptsOff)) => {
             "Not checked: scripts are switched off in previews on this system, so the preview shows the page without running it.".to_owned()
+        }
+        Some(RenderReport::NotShown(NotShown::Held)) => {
+            "Not checked: this page was written after content from outside the conversation (a file, a web page or a tool result) entered this chat, so the preview shows it without running its scripts until the user allows them with \"Run scripts\" in the Artifacts panel.".to_owned()
         }
         Some(RenderReport::NotShown(NotShown::CannotDraw)) => {
             "Not checked: the preview could not draw this on this system.".to_owned()
@@ -239,6 +245,10 @@ mod tests {
         assert!(
             report_text(Some(&RenderReport::NotShown(NotShown::CannotDraw)))
                 .starts_with("Not checked: the preview could not draw")
+        );
+        assert!(
+            report_text(Some(&RenderReport::NotShown(NotShown::Held)))
+                .starts_with("Not checked: this page was written after content from outside")
         );
     }
 

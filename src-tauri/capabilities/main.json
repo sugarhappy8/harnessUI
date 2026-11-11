@@ -147,6 +147,8 @@
     "allow-set-git-identity",
     "allow-list-artifacts",
     "allow-get-artifact",
+    "allow-artifact-frame",
+    "allow-allow-artifact-scripts",
     "allow-save-artifact-version",
     "allow-rename-artifact",
     "allow-delete-artifact",

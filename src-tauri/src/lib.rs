@@ -215,6 +215,8 @@ pub fn run() {
             git_cmd::set_git_identity,
             artifacts::list_artifacts,
             artifacts::get_artifact,
+            artifacts::artifact_frame,
+            artifacts::allow_artifact_scripts,
             artifacts::save_artifact_version,
             artifacts::rename_artifact,
             artifacts::delete_artifact,

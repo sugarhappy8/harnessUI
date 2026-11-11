@@ -32,6 +32,10 @@
     preview.problem("svg", "The content is not an SVG picture: its outermost element must be an svg element.");
     notice("This is not an SVG picture.");
   } else {
+    /* A link element of the HTML kind inside the picture (in a foreignObject) could hint
+       a connection to a server. Nothing else in a picture can reach one, so it goes. */
+    var links = root.getElementsByTagNameNS("http://www.w3.org/1999/xhtml", "link");
+    while (links.length) { links[0].parentNode.removeChild(links[0]); }
     document.body.appendChild(document.importNode(root, true));
   }
   preview.ready();

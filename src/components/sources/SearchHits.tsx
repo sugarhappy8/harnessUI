@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { BookOpen } from "lucide-react";
 import { useApp } from "../../store/app";
 import type { ToolCallView } from "../ToolCallCard";
@@ -28,6 +28,9 @@ export function readNumber(resultText: string): number | null {
 function SearchHits(props: { numbers: number[] }) {
   const chatId = useApp((s) => s.activeChatId);
   const sources = useSources((s) => (chatId === null ? undefined : s.byChat[chatId]));
+  useEffect(() => {
+    if (chatId !== null) useSources.getState().ensure(chatId);
+  }, [chatId]);
   return (
     <ul className="space-y-0.5" aria-label="Sources found">
       {props.numbers.map((n) => {

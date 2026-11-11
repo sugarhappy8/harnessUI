@@ -28,6 +28,12 @@
   try {
     library.initialize({ startOnLoad: false, securityLevel: "strict", theme: "default", suppressErrorRendering: true });
     library.render("artifact-diagram", String(preview.source)).then(function (drawn) {
+      /* The library keeps link elements out of what it draws. If one is there all the
+         same, the drawing is not shown: a link could hint a connection to a server. */
+      if (/<link[\s\/>]/i.test(String(drawn.svg))) {
+        failed(new Error("The diagram holds markup that a preview does not show."));
+        return;
+      }
       target.innerHTML = drawn.svg;
       preview.ready();
     }, failed);

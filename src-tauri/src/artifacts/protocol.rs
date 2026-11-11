@@ -21,10 +21,21 @@
 //!   scripts, see [`slice`]).
 //! - **Scripts only when proven.** Until the check in `isolation.rs` has passed on this
 //!   system, pages are served with scripts switched off altogether.
+//! - **Only the model's page runs the model's scripts.** A picture or a diagram is drawn
+//!   by a page of the app's own, served with a policy under which only the app's scripts
+//!   run ([`Scripts::AppOnly`]). An HTML page runs its own scripts ([`Scripts::On`]),
+//!   unless it was written after content from outside the conversation entered the chat:
+//!   then it is shown without them until the user allows them ([`running`]).
+//! - **Only into a frame the app just made.** A page is served once, for a ticket the app
+//!   issued a moment before it created the frame ([`Tickets`]). An address that was
+//!   written down anywhere (in a chat, by a page about itself) opens nothing, so a preview
+//!   can never become the page of the whole window, where it would be handed the app's own
+//!   script interface.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use store::ArtifactKind;
 use tauri::http::header::{self, HeaderName, HeaderValue};
@@ -62,9 +73,14 @@ pub fn frame_origin(windows_form: bool, https: bool) -> String {
     }
 }
 
-/// The address of one version's preview.
-pub fn frame_url(origin: &str, id: i64, version: u32) -> String {
-    format!("{origin}/{id}/{version}")
+/// The address of one version's preview, for the frame that holds `ticket`.
+pub fn frame_url(origin: &str, id: i64, version: u32, ticket: &str) -> String {
+    format!("{origin}/{id}/{version}?t={ticket}")
+}
+
+/// The ticket in a query such as `t=0123…`: exactly that form, nothing else.
+pub fn ticket_of_query(query: Option<&str>) -> Option<&str> {
+    query?.strip_prefix("t=").filter(|t| is_token(t))
 }
 
 // ---- Routes ------------------------------------------------------------------------
@@ -144,29 +160,53 @@ pub fn route(uri: &Uri) -> Option<Route> {
     route_of_path(uri.path())
 }
 
-/// Whether a webview may be allowed to navigate a frame to `url`: only to a page of this
-/// scheme, never to one of its scripts.
-///
-/// The webview asks about frames on Linux and macOS. On Windows it asks about the main
-/// frame only, and the main frame must never show a preview: there a preview would be
-/// the page of the window, with the window's rights. So nothing is allowed on Windows.
-pub fn is_frame_navigation(url: &url::Url) -> bool {
-    frame_navigation_allowed(url, cfg!(windows))
+/// What a webview asks to navigate to, when it is a page of this scheme.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameNavigation {
+    /// One version's page, with the ticket the address carries.
+    Document {
+        id: i64,
+        version: u32,
+        ticket: String,
+        /// The address has a fragment: a move inside a page (a link to `#part`), which
+        /// loads nothing when the page is the one already shown.
+        within_page: bool,
+    },
+    /// The page of a sandbox check.
+    Probe { nonce: String },
 }
 
-fn frame_navigation_allowed(url: &url::Url, asks_main_frame_only: bool) -> bool {
-    if asks_main_frame_only {
-        return false;
+/// The page of this scheme a navigation to `url` asks for: a version's page with a
+/// ticket, or a check's page. `None` for anything else, also for this scheme's scripts and
+/// for a page's address without a ticket.
+///
+/// The webview asks about navigations of frames on Linux and macOS, and cannot say there
+/// whether it is a frame or the window itself that navigates. So the caller
+/// (`artifacts::is_frame_navigation`) lets a navigation through only while the ticket is
+/// unused or the check is running: an address the app itself made a moment ago for a
+/// frame it is creating. On Windows the webview asks about the window only, and nothing
+/// of this scheme is allowed there.
+pub fn frame_navigation(url: &url::Url) -> Option<FrameNavigation> {
+    if url.scheme() != SCHEME
+        || url.host_str() != Some(HOST)
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
     }
-    url.scheme() == SCHEME
-        && url.host_str() == Some(HOST)
-        && url.port().is_none()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && matches!(
-            route_of_path(url.path()),
-            Some(Route::Document { .. } | Route::Probe { .. })
-        )
+    match route_of_path(url.path())? {
+        Route::Document { id, version } => Some(FrameNavigation::Document {
+            id,
+            version,
+            ticket: ticket_of_query(url.query())?.to_owned(),
+            within_page: url.fragment().is_some(),
+        }),
+        Route::Probe { nonce } if url.query().is_none() && url.fragment().is_none() => {
+            Some(FrameNavigation::Probe { nonce })
+        }
+        _ => None,
+    }
 }
 
 /// True when the webview says the request is for the page of a whole window rather than
@@ -181,17 +221,21 @@ pub fn is_for_a_whole_window(headers: &HeaderMap) -> bool {
 
 // ---- Headers -----------------------------------------------------------------------
 
-/// Whether pages are served with their scripts.
+/// Which scripts a page is served with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scripts {
-    /// The sandbox has been checked on this system.
+pub enum Scripts<'a> {
+    /// The page's own scripts run: an HTML artifact (see [`running`] for when).
     On,
-    /// It has not, or the check failed: nothing in a preview runs.
+    /// Only the app's own scripts run: the ones this file writes into the page, which
+    /// carry `nonce`, and the diagram library. A script or a handler in what the model
+    /// wrote does not run under this policy. For pictures and diagrams.
+    AppOnly { nonce: &'a str },
+    /// Nothing runs.
     Off,
 }
 
 /// The policy every response of this scheme carries.
-pub fn content_security_policy(scripts: Scripts, origin: &str) -> String {
+pub fn content_security_policy(scripts: Scripts<'_>, origin: &str) -> String {
     const REST: &str = "style-src 'unsafe-inline'; img-src data: blob:; font-src data:; \
                         media-src data: blob:; connect-src 'none'; form-action 'none'; \
                         frame-src 'none'; base-uri 'none'";
@@ -200,7 +244,51 @@ pub fn content_security_policy(scripts: Scripts, origin: &str) -> String {
             "sandbox allow-scripts; default-src 'none'; \
              script-src 'unsafe-inline' {origin}/__lib/ {origin}/__s/; {REST}"
         ),
+        Scripts::AppOnly { nonce } => format!(
+            "sandbox allow-scripts; default-src 'none'; \
+             script-src 'nonce-{nonce}' {origin}/__lib/; {REST}"
+        ),
         Scripts::Off => format!("sandbox; default-src 'none'; {REST}"),
+    }
+}
+
+/// What runs in the preview of one version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Running {
+    /// The page's own scripts: an HTML page.
+    Page,
+    /// Only the app's scripts, which draw a picture or a diagram.
+    AppOnly,
+    /// Nothing: the sandbox has not been checked on this system, or the check failed.
+    NotProven,
+    /// Nothing: the page was written after content from outside the conversation entered
+    /// the chat, and the user has not allowed its scripts.
+    Held,
+}
+
+/// What runs in the preview of a version of this kind.
+///
+/// A page the model writes is what the model was told to write, and after it has read a
+/// file, a web page or a tool result, that may be what a stranger told it. Such a page can
+/// make no request, but a script in it can still open a connection whose host name
+/// carries data (see [`without_connection_hints`]). So a page written after outside
+/// content (`after_outside`) is shown without its scripts until the user says otherwise
+/// (`allowed`). Pictures and diagrams are drawn by the app's own scripts and are shown
+/// either way.
+pub fn running(kind: ArtifactKind, after_outside: bool, allowed: bool, proven: bool) -> Running {
+    if !proven {
+        return Running::NotProven;
+    }
+    match kind {
+        ArtifactKind::Svg | ArtifactKind::Mermaid => Running::AppOnly,
+        ArtifactKind::Html | ArtifactKind::Markdown => {
+            if after_outside && !allowed {
+                Running::Held
+            } else {
+                Running::Page
+            }
+        }
     }
 }
 
@@ -220,7 +308,7 @@ pub enum Sharing {
 pub fn response_headers(
     content_type: &'static str,
     sharing: Sharing,
-    scripts: Scripts,
+    scripts: Scripts<'_>,
     origin: &str,
 ) -> Vec<(HeaderName, String)> {
     let mut headers = vec![
@@ -257,7 +345,7 @@ pub fn response(
     status: StatusCode,
     content_type: &'static str,
     sharing: Sharing,
-    scripts: Scripts,
+    scripts: Scripts<'_>,
     origin: &str,
     body: Vec<u8>,
 ) -> Response<Vec<u8>> {
@@ -284,7 +372,7 @@ pub fn refusal(status: StatusCode, origin: &str, text: &str) -> Response<Vec<u8>
 }
 
 /// The diagram library.
-pub fn library(scripts: Scripts, origin: &str) -> Response<Vec<u8>> {
+pub fn library(scripts: Scripts<'_>, origin: &str) -> Response<Vec<u8>> {
     response(
         StatusCode::OK,
         JAVASCRIPT,
@@ -296,7 +384,7 @@ pub fn library(scripts: Scripts, origin: &str) -> Response<Vec<u8>> {
 }
 
 /// A page.
-pub fn page(scripts: Scripts, origin: &str, html: String) -> Response<Vec<u8>> {
+pub fn page(scripts: Scripts<'_>, origin: &str, html: String) -> Response<Vec<u8>> {
     response(
         StatusCode::OK,
         HTML,
@@ -308,7 +396,7 @@ pub fn page(scripts: Scripts, origin: &str, html: String) -> Response<Vec<u8>> {
 }
 
 /// A script.
-pub fn script(scripts: Scripts, origin: &str, text: String) -> Response<Vec<u8>> {
+pub fn script(scripts: Scripts<'_>, origin: &str, text: String) -> Response<Vec<u8>> {
     response(
         StatusCode::OK,
         JAVASCRIPT,
@@ -345,6 +433,11 @@ const CONNECTION_HINTS: [&str; 2] = ["preconnect", "dns-prefetch"];
 /// This reads tags as they are usually written. It is a courtesy to ordinary pages, not
 /// a barrier: a page that wants such a connection can still make one from a script (see
 /// the notes on what a preview can do in ARCHITECTURE.md).
+///
+/// TODO(0.0.5): close this for scripts too. No rule a page is served with covers a
+/// connection hint (measured on WebKitGTK: one TCP connection per hint, no request), so
+/// it needs the webview itself to have no route to the network, where windows are set
+/// up (`lib.rs`).
 pub fn without_connection_hints(text: &str) -> Cow<'_, str> {
     let bytes = text.as_bytes();
     let len = bytes.len();
@@ -424,6 +517,46 @@ pub fn without_connection_hints(text: &str) -> Cow<'_, str> {
     }
     out.push_str(&text[copied..]);
     Cow::Owned(out)
+}
+
+/// The text with every `<link>` tag renamed to `<link-off>`, for pages that are shown
+/// without scripts.
+///
+/// Inside a preview a `<link>` can do nothing useful: its rules allow no style sheet, no
+/// icon and no preload from anywhere. The one thing it can still do is hint a connection
+/// (see [`without_connection_hints`]), and that hint can be spelled in more ways than a
+/// reader of the text can list (`rel="pre&#99;onnect"`). A page shown without scripts has
+/// no other way to reach a server, so with the tag itself gone it has none.
+///
+/// In HTML a tag name is the letters after `<` up to white space, `/` or `>`, written as
+/// they are: no escapes. So the tag is found by its letters.
+pub fn without_links(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let lower = text.to_ascii_lowercase();
+    let mut out: Option<String> = None;
+    let mut copied = 0;
+    let mut from = 0;
+    while let Some(found) = lower[from..].find("<link") {
+        let end = from + found + "<link".len();
+        from = end;
+        let ends_the_name = match bytes.get(end) {
+            None => true,
+            Some(b) => b.is_ascii_whitespace() || matches!(b, b'/' | b'>'),
+        };
+        if ends_the_name {
+            let out = out.get_or_insert_with(|| String::with_capacity(text.len() + 16));
+            out.push_str(&text[copied..end]);
+            out.push_str("-off");
+            copied = end;
+        }
+    }
+    match out {
+        Some(mut out) => {
+            out.push_str(&text[copied..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(text),
+    }
 }
 
 /// An artifact's text as it is served: line breaks as `\n`, and for pages and pictures
@@ -516,12 +649,20 @@ pub fn html_page(about: &About<'_>, content: &str) -> String {
     )
 }
 
+/// How a page of the app's own starts: like [`DOCUMENT_START`], with the mark that lets
+/// the script run under [`Scripts::AppOnly`].
+fn own_script(nonce: &str) -> String {
+    format!("<script nonce=\"{nonce}\">")
+}
+
 /// An SVG artifact: a page of the app's own that reads the picture as XML, reports what
-/// does not parse and shows the rest.
-pub fn svg_page(about: &About<'_>, content: &str) -> String {
+/// does not parse and shows the rest. Served with [`Scripts::AppOnly`] for `nonce`: a
+/// script or a handler inside the picture does not run.
+pub fn svg_page(about: &About<'_>, content: &str, nonce: &str) -> String {
     let content = prepared(ArtifactKind::Svg, content);
+    let script = own_script(nonce);
     format!(
-        "{DOCUMENT_START}{}{SCRIPT_END}<meta charset=\"utf-8\">{PAGE_STYLE}<body><script>{}{SCRIPT_END}",
+        "<!doctype html>{script}{}{SCRIPT_END}<meta charset=\"utf-8\">{PAGE_STYLE}<body>{script}{}{SCRIPT_END}",
         bootstrap(about, ArtifactKind::Svg, &content),
         one_line(SVG_PAGE_JS)
     )
@@ -529,11 +670,21 @@ pub fn svg_page(about: &About<'_>, content: &str) -> String {
 
 /// A Mermaid artifact: a page of the app's own that loads the bundled library and draws
 /// the diagram with the library's strict setting.
-pub fn mermaid_page(about: &About<'_>, content: &str) -> String {
+///
+/// The library does not load where `Object.prototype` is frozen. Tauri's `freezePrototype`
+/// would freeze it in every frame on WebView2, so that setting is off and the app's own
+/// pages freeze it themselves (`src/lib/freeze.ts`). If the library cannot start all the
+/// same, the page says the diagram could not be drawn and the tool result says it was not
+/// checked.
+///
+/// Served with [`Scripts::AppOnly`] for `nonce`: only the app's scripts and the library
+/// run, whatever the diagram's text makes the library write into the page.
+pub fn mermaid_page(about: &About<'_>, content: &str, nonce: &str) -> String {
     let content = prepared(ArtifactKind::Mermaid, content);
+    let script = own_script(nonce);
     format!(
-        "{DOCUMENT_START}{}{SCRIPT_END}<meta charset=\"utf-8\">{PAGE_STYLE}<body><div id=\"diagram\"></div>\
-         <script src=\"{}/__lib/mermaid.min.js\">{SCRIPT_END}<script>{}{SCRIPT_END}",
+        "<!doctype html>{script}{}{SCRIPT_END}<meta charset=\"utf-8\">{PAGE_STYLE}<body><div id=\"diagram\"></div>\
+         <script nonce=\"{nonce}\" src=\"{}/__lib/mermaid.min.js\">{SCRIPT_END}{script}{}{SCRIPT_END}",
         bootstrap(about, ArtifactKind::Mermaid, &content),
         about.origin,
         one_line(MERMAID_PAGE_JS)
@@ -547,9 +698,11 @@ fn escape_text(text: &str) -> String {
 }
 
 /// A page for when scripts are off: the model's HTML as it is (nothing in it runs), the
-/// SVG as markup, and for a diagram its source, since drawing it needs a script.
+/// SVG as markup, and for a diagram its source, since drawing it needs a script. No
+/// `<link>` is left in it ([`without_links`]), so it has no way at all to reach a server.
 pub fn static_page(kind: ArtifactKind, content: &str) -> String {
     let content = prepared(kind, content);
+    let content = without_links(&content);
     match kind {
         ArtifactKind::Html => format!("<!doctype html>{content}"),
         ArtifactKind::Svg => {
@@ -616,6 +769,109 @@ pub fn slice(content: &str, from: usize, to: usize) -> Option<String> {
     Some(out)
 }
 
+/// Which frames may load a page.
+///
+/// A version's page is served for a ticket, once. The app issues a ticket when it is about
+/// to create a frame for that version (`artifact_frame`), and the frame's address carries
+/// it. Everything that could ask for a page without the app having decided to show it has
+/// no unused ticket: an address the model wrote into a chat, an address a page read from
+/// its own location, a second load of the same address. That matters most on Linux and
+/// macOS, where the webview cannot tell the app whether a request comes from a frame or
+/// from the window itself, and a preview loaded as the window's own page would be given
+/// the app's script interface.
+#[derive(Default)]
+pub struct Tickets(Mutex<Kept>);
+
+#[derive(Default)]
+struct Kept {
+    /// Issued and not used yet.
+    unused: VecDeque<Ticket>,
+    /// Used: the pages that were loaded, newest last. A link inside such a page to a part
+    /// of itself is a navigation to the page's own address, which the webview asks about.
+    used: VecDeque<(String, i64, u32)>,
+}
+
+struct Ticket {
+    token: String,
+    id: i64,
+    version: u32,
+    issued: Instant,
+}
+
+/// A frame loads its page right after it is created.
+const TICKET_LIFETIME: Duration = Duration::from_secs(30);
+/// Unused tickets remembered. The panel shows one preview and renders a few out of sight.
+const TICKETS_KEPT: usize = 64;
+
+impl Tickets {
+    /// A ticket for one load of one version's page.
+    pub fn issue(&self, id: i64, version: u32) -> String {
+        self.issue_at(id, version, Instant::now())
+    }
+
+    /// Whether the ticket could still be used for this page. Uses nothing up.
+    pub fn is_live(&self, token: &str, id: i64, version: u32) -> bool {
+        self.find(token, id, version, Instant::now(), false)
+    }
+
+    /// Uses the ticket up: `true` once, for the page it was issued for, while it is fresh.
+    pub fn take(&self, token: &str, id: i64, version: u32) -> bool {
+        self.find(token, id, version, Instant::now(), true)
+    }
+
+    /// Whether this page was loaded with this ticket (and is among the pages remembered).
+    /// Says nothing about loading it again: a used ticket loads nothing.
+    pub fn was_used(&self, token: &str, id: i64, version: u32) -> bool {
+        self.0.lock().is_ok_and(|kept| {
+            kept.used
+                .iter()
+                .any(|(t, i, v)| t == token && *i == id && *v == version)
+        })
+    }
+
+    fn issue_at(&self, id: i64, version: u32, now: Instant) -> String {
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        if let Ok(mut kept) = self.0.lock() {
+            kept.unused
+                .retain(|t| now.saturating_duration_since(t.issued) < TICKET_LIFETIME);
+            if kept.unused.len() >= TICKETS_KEPT {
+                kept.unused.pop_front();
+            }
+            kept.unused.push_back(Ticket {
+                token: token.clone(),
+                id,
+                version,
+                issued: now,
+            });
+        }
+        token
+    }
+
+    fn find(&self, token: &str, id: i64, version: u32, now: Instant, take: bool) -> bool {
+        let Ok(mut kept) = self.0.lock() else {
+            return false;
+        };
+        let Some(at) = kept.unused.iter().position(|t| t.token == token) else {
+            return false;
+        };
+        let ticket = &kept.unused[at];
+        let good = ticket.id == id
+            && ticket.version == version
+            && now.saturating_duration_since(ticket.issued) < TICKET_LIFETIME;
+        if take || !good {
+            // Used, or presented for another page or too late: gone either way.
+            kept.unused.remove(at);
+        }
+        if take && good {
+            if kept.used.len() >= TICKETS_KEPT {
+                kept.used.pop_front();
+            }
+            kept.used.push_back((token.to_owned(), id, version));
+        }
+        good
+    }
+}
+
 /// Which page a slice may be cut from. A page is given a random token when it is served,
 /// and only that token opens its text: a preview cannot ask for the text of another
 /// artifact, which may belong to another chat.
@@ -663,11 +919,29 @@ mod tests {
             frame_origin(true, true),
             "https://artifact.sandbox.localhost"
         );
-        assert_eq!(frame_url(LINUX, 12, 3), "artifact://sandbox.localhost/12/3");
+        let ticket = "0123456789abcdef0123456789abcdef";
         assert_eq!(
-            frame_url(WINDOWS, 12, 3),
-            "http://artifact.sandbox.localhost/12/3"
+            frame_url(LINUX, 12, 3, ticket),
+            format!("artifact://sandbox.localhost/12/3?t={ticket}")
         );
+        assert_eq!(
+            frame_url(WINDOWS, 12, 3, ticket),
+            format!("http://artifact.sandbox.localhost/12/3?t={ticket}")
+        );
+        // What the app writes is what it reads back.
+        let url = url::Url::parse(&frame_url(LINUX, 12, 3, ticket)).unwrap();
+        assert_eq!(ticket_of_query(url.query()), Some(ticket));
+        for query in [
+            None,
+            Some(""),
+            Some("t="),
+            Some("t=short"),
+            Some("x=0123456789abcdef0123456789abcdef"),
+            Some("t=0123456789abcdef0123456789abcdef&u=1"),
+            Some("t=0123456789abcdef0123456789abcdeg"),
+        ] {
+            assert_eq!(ticket_of_query(query), None, "{query:?}");
+        }
     }
 
     /// The Windows address must not be the one Tauri takes for the app's own
@@ -675,7 +949,7 @@ mod tests {
     /// that its address is somebody else's.
     #[test]
     fn the_windows_address_is_not_the_one_tauri_treats_as_the_apps_own() {
-        let url = url::Url::parse(&frame_url(WINDOWS, 1, 1)).unwrap();
+        let url = url::Url::parse(&frame_url(WINDOWS, 1, 1, &"ab".repeat(16))).unwrap();
         let domain = url.domain().unwrap();
         // Tauri 2.12 (`Webview::is_local_url`): local when the domain minus ".localhost"
         // is the name of a registered scheme.
@@ -775,35 +1049,138 @@ mod tests {
 
     #[test]
     fn a_frame_may_only_be_sent_to_a_page_of_this_scheme() {
-        let allowed = |s: &str, windows: bool| {
-            frame_navigation_allowed(&url::Url::parse(s).unwrap(), windows)
-        };
+        let asked = |s: &str| frame_navigation(&url::Url::parse(s).unwrap());
         let token = "0123456789abcdef0123456789abcdef";
-        assert!(allowed("artifact://sandbox.localhost/1/2", false));
-        assert!(allowed(
-            &format!("artifact://sandbox.localhost/__probe/{token}"),
-            false
-        ));
+        assert_eq!(
+            asked(&format!("artifact://sandbox.localhost/1/2?t={token}")),
+            Some(FrameNavigation::Document {
+                id: 1,
+                version: 2,
+                ticket: token.into(),
+                within_page: false
+            })
+        );
+        // A link to a part of the page itself.
+        assert_eq!(
+            asked(&format!("artifact://sandbox.localhost/1/2?t={token}#part")),
+            Some(FrameNavigation::Document {
+                id: 1,
+                version: 2,
+                ticket: token.into(),
+                within_page: true
+            })
+        );
+        assert_eq!(
+            asked(&format!("artifact://sandbox.localhost/__probe/{token}")),
+            Some(FrameNavigation::Probe {
+                nonce: token.into()
+            })
+        );
         for url in [
-            "artifact://localhost/1/2",
+            // A page's address without a ticket is nothing: not from a chat, not from a
+            // page that read its own address after its ticket was used.
+            "artifact://sandbox.localhost/1/2",
+            "artifact://sandbox.localhost/1/2?t=",
+            "artifact://sandbox.localhost/1/2?t=short",
+            "artifact://sandbox.localhost/1/2#part",
+            &format!("artifact://sandbox.localhost/__probe/{token}#part"),
+            &format!("artifact://sandbox.localhost/1/2?t={token}&again=1"),
+            &format!("artifact://sandbox.localhost/__probe/{token}?t={token}"),
+            &format!("artifact://localhost/1/2?t={token}"),
             "artifact://sandbox.localhost/__lib/mermaid.min.js",
             &format!("artifact://sandbox.localhost/__s/{token}/1-2.js"),
             &format!("artifact://sandbox.localhost/__probe/{token}/hit/nav"),
-            "artifact://user@sandbox.localhost/1/2",
-            "artifact://sandbox.localhost:1/1/2",
-            "http://artifact.sandbox.localhost/1/2",
-            "http://artifact.localhost/1/2",
+            &format!("artifact://user@sandbox.localhost/1/2?t={token}"),
+            &format!("artifact://sandbox.localhost:1/1/2?t={token}"),
+            &format!("http://artifact.sandbox.localhost/1/2?t={token}"),
+            &format!("http://artifact.localhost/1/2?t={token}"),
             "https://example.com/1/2",
             "http://127.0.0.1:9000/leak",
             "data:text/html,hi",
             "javascript:alert(1)",
             "file:///etc/passwd",
         ] {
-            assert!(!allowed(url, false), "{url} must be refused");
+            assert_eq!(asked(url), None, "{url} must be refused");
         }
-        // Windows asks about the main frame only, which never shows a preview.
-        assert!(!allowed("artifact://sandbox.localhost/1/2", true));
-        assert!(!allowed("http://artifact.sandbox.localhost/1/2", true));
+    }
+
+    #[test]
+    fn a_ticket_opens_one_page_once_and_not_for_long() {
+        let tickets = Tickets::default();
+        let start = Instant::now();
+        let ticket = tickets.issue_at(7, 2, start);
+        assert!(is_token(&ticket));
+        // Looking uses nothing up; the frame's navigation is asked about before its page
+        // is requested.
+        assert!(tickets.find(&ticket, 7, 2, start, false));
+        assert!(tickets.find(&ticket, 7, 2, start, false));
+        assert!(!tickets.was_used(&ticket, 7, 2), "not loaded yet");
+        assert!(tickets.find(&ticket, 7, 2, start, true), "the frame's load");
+        assert!(
+            !tickets.find(&ticket, 7, 2, start, true),
+            "the same address a second time"
+        );
+        assert!(!tickets.find(&ticket, 7, 2, start, false));
+        // The loaded page is remembered for links to its own parts, and only it.
+        assert!(tickets.was_used(&ticket, 7, 2));
+        assert!(!tickets.was_used(&ticket, 7, 3) && !tickets.was_used(&"0".repeat(32), 7, 2));
+
+        // Not for another page, and a ticket shown for the wrong page is spent.
+        let other = tickets.issue_at(7, 2, start);
+        assert!(!tickets.find(&other, 7, 3, start, true));
+        assert!(!tickets.find(&other, 8, 2, start, true));
+        assert!(!tickets.find(&other, 7, 2, start, true));
+
+        // Not after the moment a frame needs to load.
+        let late = tickets.issue_at(7, 2, start);
+        let later = start + TICKET_LIFETIME;
+        assert!(!tickets.find(&late, 7, 2, later, false));
+        let fresh = tickets.issue_at(7, 2, start);
+        assert!(tickets.find(&fresh, 7, 2, later - Duration::from_millis(1), true));
+
+        // A ticket nobody issued, and a limited number of unused ones.
+        assert!(!tickets.take(&"0".repeat(32), 7, 2));
+        let first = tickets.issue_at(1, 1, start);
+        for _ in 0..TICKETS_KEPT {
+            tickets.issue_at(1, 1, start);
+        }
+        assert!(!tickets.find(&first, 1, 1, start, true));
+        assert_eq!(tickets.0.lock().unwrap().unused.len(), TICKETS_KEPT);
+        // Old ones are dropped when a new one is issued.
+        tickets.issue_at(1, 1, later);
+        assert_eq!(tickets.0.lock().unwrap().unused.len(), 1);
+        // The pages remembered as loaded are limited too.
+        for _ in 0..TICKETS_KEPT + 3 {
+            let t = tickets.issue_at(2, 1, later);
+            assert!(tickets.find(&t, 2, 1, later, true));
+        }
+        assert_eq!(tickets.0.lock().unwrap().used.len(), TICKETS_KEPT);
+        assert!(!tickets.was_used(&ticket, 7, 2), "the oldest was forgotten");
+    }
+
+    #[test]
+    fn what_runs_in_a_preview() {
+        use ArtifactKind::{Html, Mermaid, Svg};
+        // Nothing until the sandbox is proven, whatever else holds.
+        for kind in [Html, Svg, Mermaid] {
+            for (after_outside, allowed) in [(false, false), (true, false), (true, true)] {
+                assert_eq!(
+                    running(kind, after_outside, allowed, false),
+                    Running::NotProven
+                );
+            }
+        }
+        // A page the model wrote before anything from outside entered the chat runs.
+        assert_eq!(running(Html, false, false, true), Running::Page);
+        // After outside content it is held until the user allows it.
+        assert_eq!(running(Html, true, false, true), Running::Held);
+        assert_eq!(running(Html, true, true, true), Running::Page);
+        // Pictures and diagrams are drawn by the app's scripts, never by the model's.
+        for kind in [Svg, Mermaid] {
+            for after_outside in [false, true] {
+                assert_eq!(running(kind, after_outside, false, true), Running::AppOnly);
+            }
+        }
     }
 
     #[test]
@@ -843,11 +1220,36 @@ mod tests {
              font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; \
              frame-src 'none'; base-uri 'none'"
         );
+        // A picture or a diagram: the app's scripts by their nonce, the library by its
+        // folder, and no inline script or handler of anyone else's.
+        assert_eq!(
+            content_security_policy(Scripts::AppOnly { nonce: "N0NCE" }, WINDOWS),
+            "sandbox allow-scripts; default-src 'none'; \
+             script-src 'nonce-N0NCE' http://artifact.sandbox.localhost/__lib/; \
+             style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; \
+             connect-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"
+        );
+    }
+
+    #[test]
+    fn under_the_app_only_policy_nothing_inline_runs_without_the_nonce() {
+        for origin in [LINUX, WINDOWS] {
+            let policy = content_security_policy(Scripts::AppOnly { nonce: "abc" }, origin);
+            let script_src = policy
+                .split(';')
+                .map(str::trim)
+                .find(|d| d.starts_with("script-src "))
+                .expect("a script-src directive");
+            assert_eq!(script_src, format!("script-src 'nonce-abc' {origin}/__lib/"));
+            for word in ["unsafe-inline", "unsafe-hashes", "unsafe-eval", "strict-dynamic", "/__s/"] {
+                assert!(!script_src.contains(word), "{word} in {script_src}");
+            }
+        }
     }
 
     #[test]
     fn the_sandbox_never_grants_more_than_scripts() {
-        for scripts in [Scripts::On, Scripts::Off] {
+        for scripts in [Scripts::On, Scripts::AppOnly { nonce: "abc" }, Scripts::Off] {
             for origin in [LINUX, WINDOWS] {
                 let policy = content_security_policy(scripts, origin);
                 let sandbox = policy.split(';').next().unwrap().trim();
@@ -1044,6 +1446,33 @@ mod tests {
     }
 
     #[test]
+    fn every_link_tag_is_renamed_and_nothing_else() {
+        for (text, expected) in [
+            ("<link rel=stylesheet href=a.css>", "<link-off rel=stylesheet href=a.css>"),
+            ("<link>", "<link-off>"),
+            ("<link/>", "<link-off/>"),
+            ("<LiNk\nrel=x>", "<LiNk-off\nrel=x>"),
+            ("a<link", "a<link-off"),
+            ("<link rel=a><link rel=b>", "<link-off rel=a><link-off rel=b>"),
+        ] {
+            assert_eq!(without_links(text), expected, "{text}");
+        }
+        // Other tags and plain text stay as they are, borrowed.
+        for text in [
+            "<links>",
+            "<linkx rel=preconnect>",
+            "<link-item>",
+            "a < link",
+            "</link>",
+            "<a href=\"#link\">link</a>",
+            "<p>ünïcödé <b>ok</b></p>",
+            "",
+        ] {
+            assert!(matches!(without_links(text), Cow::Borrowed(t) if t == text), "{text}");
+        }
+    }
+
+    #[test]
     fn json_inside_a_script_cannot_end_the_script() {
         let value =
             serde_json::json!({ "s": "</script><!-- <script> & \u{2028}\u{2029} \"q\" \\ \n" });
@@ -1152,15 +1581,24 @@ mod tests {
             token: &token,
         };
         let hostile = "</script><script>window.pwned = 1</script><img src=x onerror=1>";
-        for page in [svg_page(&about, hostile), mermaid_page(&about, hostile)] {
+        let nonce = "cd".repeat(16);
+        for page in [
+            svg_page(&about, hostile, &nonce),
+            mermaid_page(&about, hostile, &nonce),
+        ] {
             assert!(!page.contains("window.pwned = 1</script>"));
             assert!(!page.contains("<img src=x"));
             assert!(page.contains("\\u003c/script\\u003e\\u003cscript\\u003ewindow.pwned"));
+            // Every script element in the page is the app's own and carries the nonce,
+            // which is what lets it run under the app-only policy.
+            let scripts = page.matches("<script").count();
+            let marked = page.matches(&format!("<script nonce=\"{nonce}\"")).count();
+            assert!(scripts >= 2 && scripts == marked, "{scripts} scripts, {marked} marked");
         }
-        let mermaid = mermaid_page(&about, "graph TD");
-        assert!(mermaid.contains(
-            "<script src=\"http://artifact.sandbox.localhost/__lib/mermaid.min.js\"></script>"
-        ));
+        let mermaid = mermaid_page(&about, "graph TD", &nonce);
+        assert!(mermaid.contains(&format!(
+            "<script nonce=\"{nonce}\" src=\"http://artifact.sandbox.localhost/__lib/mermaid.min.js\"></script>"
+        )));
         assert!(mermaid.contains("securityLevel"));
     }
 
@@ -1168,6 +1606,20 @@ mod tests {
     fn with_scripts_off_pages_carry_no_script_of_the_apps() {
         let html = static_page(ArtifactKind::Html, "<p>hi</p>\r\n<script>x()</script>");
         assert_eq!(html, "<!doctype html><p>hi</p>\n<script>x()</script>");
+        // No link element is left, however its hint is spelled.
+        let hinted = static_page(
+            ArtifactKind::Html,
+            "<LINK rel=\"pre&#99;onnect\" href=\"https://a.example\"><p>x</p><link\trel=dns-prefetch href=//b.example>",
+        );
+        assert_eq!(
+            hinted,
+            "<!doctype html><LINK-off rel=\"pre&#99;onnect\" href=\"https://a.example\"><p>x</p><link-off\tdata-rel=dns-prefetch href=//b.example>"
+        );
+        let picture = static_page(
+            ArtifactKind::Svg,
+            "<svg><foreignObject><link rel=preconnect href=//c.example /></foreignObject></svg>",
+        );
+        assert!(picture.contains("<link-off data-rel=preconnect") && !picture.contains("<link "));
         let svg = static_page(ArtifactKind::Svg, "<svg></svg>");
         assert!(svg.ends_with("<body><svg></svg>") && !svg.contains("<script"));
         let diagram = static_page(ArtifactKind::Mermaid, "graph TD\n  A --> B<script>");
