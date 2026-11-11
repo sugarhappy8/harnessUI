@@ -425,6 +425,38 @@ async fn navigate_snapshot_click_and_type() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_navigation_waits_until_the_tab_is_under_the_request_checks() {
+    // Found through CI (a pop-up test that hung, twice): a tab counted as usable as soon
+    // as it was attached, while its requests were put under the checks by a task that
+    // might not have run yet. A navigation sent in that moment was not checked at all:
+    // not its redirects, and the tab got no granted site. The hook holds that moment
+    // open; the redirect to a loopback address must still be blocked.
+    if !have_browser() {
+        return;
+    }
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_port = closed.local_addr().unwrap().port();
+    let handler: Handler = Arc::new(move |_, path, _| match path {
+        "/to-loopback" => redirect(&format!("http://127.0.0.1:{closed_port}/llama")),
+        _ => html("<title>Start</title>"),
+    });
+    let site = start_site(handler).await;
+    let h = harness_with(&[site.port], Answer::Allow, ConnectionMode::Pipe, |c| {
+        c.test_setup_delay = Duration::from_millis(1500);
+    });
+    let (_, out) = h
+        .run("browser_navigate", json!({"url": site.url("/to-loopback")}))
+        .await;
+    assert!(out.is_error, "{}", out.joined_text());
+    assert!(
+        out.joined_text().contains("loopback"),
+        "{}",
+        out.joined_text()
+    );
+    h.server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn redirects_to_private_and_loopback_addresses_are_blocked_at_the_request() {
     if !have_browser() {
         return;

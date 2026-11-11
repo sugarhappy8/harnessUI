@@ -1088,6 +1088,10 @@ impl BuiltinServer for BrowserServer {
                 Err(e) => return ToolOutput::error(e),
             },
         };
+        // Attached is not enough: the tab's requests must be paused and checked first.
+        if let Err(e) = browser.wait_enforced(&tab).await {
+            return ToolOutput::error(e);
+        }
         let intent: Option<SubmitIntent> = p
             .get("intent")
             .cloned()

@@ -61,6 +61,10 @@ pub struct BrowserConfig {
     /// addresses (pair with `--host-resolver-rules` in `test_extra_args`).
     #[cfg(feature = "test-hooks")]
     pub test_dns_overrides: Vec<(String, std::net::IpAddr)>,
+    /// Tests only (feature `test-hooks`): a wait before a new tab or frame is put under
+    /// the request checks, to hold open the moment between "attached" and "checked".
+    #[cfg(feature = "test-hooks")]
+    pub test_setup_delay: Duration,
 }
 
 impl BrowserConfig {
@@ -85,6 +89,8 @@ impl BrowserConfig {
             test_extra_args: Vec::new(),
             #[cfg(feature = "test-hooks")]
             test_dns_overrides: Vec::new(),
+            #[cfg(feature = "test-hooks")]
+            test_setup_delay: Duration::ZERO,
         }
     }
 

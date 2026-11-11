@@ -51,6 +51,9 @@ pub(crate) struct SessionInfo {
     pub kind: TargetKind,
     /// The tab (page target id) the session belongs to.
     pub tab: String,
+    /// The session's requests are paused and checked (`Fetch.enable` was answered). A
+    /// tab is attached before that; nothing may be sent to it in between.
+    pub enforced: bool,
 }
 
 /// Where a reference points.
@@ -450,6 +453,28 @@ impl Browser {
             .ok_or_else(|| "no browser tab is open".into())
     }
 
+    /// Waits until `tab`'s requests are under the checks. A tab is usable for a call only
+    /// then: a navigation sent earlier would not be paused, so neither its redirects nor
+    /// the site it lands on would be checked. A tab that is gone passes; the call then
+    /// fails on the missing tab.
+    pub async fn wait_enforced(&self, tab: &str) -> Result<(), String> {
+        let ready = self
+            .wait_for(
+                |s| {
+                    s.tab(tab)
+                        .is_none_or(|t| s.sessions.get(&t.session).is_some_and(|i| i.enforced))
+                },
+                Instant::now() + CMD,
+                &CancellationToken::new(),
+            )
+            .await;
+        if ready == Wait::Done {
+            Ok(())
+        } else {
+            Err("The browser tab is not ready: the app could not put its requests under its checks. Try again; if it keeps happening, restart the browser from Settings → Browser.".into())
+        }
+    }
+
     /// Waits until `cond` holds, the deadline passes, `cancel` fires or the browser goes.
     pub async fn wait_for(
         &self,
@@ -767,6 +792,7 @@ impl Browser {
                     SessionInfo {
                         kind: TargetKind::Page,
                         tab: target_id.clone(),
+                        enforced: false,
                     },
                 );
                 s.tabs.push(Tab {
@@ -821,6 +847,7 @@ impl Browser {
                     SessionInfo {
                         kind: TargetKind::Frame,
                         tab,
+                        enforced: false,
                     },
                 );
                 if let Some(f) = s.frames.get_mut(&target_id) {
@@ -877,6 +904,8 @@ impl Browser {
     }
 
     async fn setup_session(self: Arc<Self>, session: String, kind: TargetKind) {
+        #[cfg(feature = "test-hooks")]
+        tokio::time::sleep(self.config.test_setup_delay).await;
         let s = Some(session.as_str());
         let fetch = self
             .cdp
@@ -915,6 +944,10 @@ impl Browser {
             }
             return;
         }
+        if let Some(info) = self.lock().sessions.get_mut(&session) {
+            info.enforced = true;
+        }
+        self.bump();
         // A target waiting for the debugger answers some of these only once it runs, so
         // they are all sent in order, with the resume last, and awaited together. Fetch is
         // already on, so the target's first request is checked whatever happens here.
