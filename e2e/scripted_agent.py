@@ -531,7 +531,8 @@ def p_terminal_git(c, notes):
     # A call that does not run says why on its card.
     Fake.queue.append({"tool_calls": [{"name": "git_push", "arguments": {"path": str(repo)}}]})
     Fake.queue.append({"content": "hm"})
-    send(s, "bad call")
+    # The message names git: only tools that fit the task are shown to the model (0.0.4).
+    send(s, "git push, with a bad argument")
     wait_idle(s)
     bad = [m for m in messages(s, chat) if m["role"] == "tool"][-1]["toolResult"]
     assert bad["status"] == "error" and "Invalid arguments" in bad["text"], bad
