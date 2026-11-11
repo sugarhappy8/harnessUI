@@ -16,7 +16,11 @@ Added at the owner's request after the first test builds: models could not brows
 ### Changed
 - **Browser tools are on in new chats** when a browser is available and the model's context is at least 8,192 tokens (D10 was "files only"). A chat's own choice and the saved last choice are untouched.
 - **Computer use needs no per-model setup.** The way a model writes screen positions is picked from its name (pixels for the Qwen2.5-VL family such as UI-TARS-1.5, Fara and Holo1.5; a 0–1000 grid for Qwen3-VL, Qwen3.5 and newer Holo; y-first boxes for Gemma; a 0–1000 grid as the guess for unknown models). *Settings → Computer use* shows "Automatic" and lets the user choose another. The confirmation tick box is gone. Computer use is still off in every chat until switched on, and every safeguard is unchanged.
+- **Computer use and Subagents are switched on for one chat at a time.** The "last choice becomes the default for new chats" rule no longer carries them over. Tool defaults saved before this version are reset once, so the new Browser default takes effect.
 - **Intel Macs run models on the CPU by default** (llama.cpp's Metal backend is unreliable on Intel graphics); Metal can be chosen by hand. First run says so.
+
+### Reviewed
+An independent read of the new code found no way around the approval rules and eight defects, fixed here: Qwen2-VL was given Qwen2.5-VL's pixel convention (it answers on a 0–1000 grid, so clicks would have landed in the wrong place silently); a convention saved but never switched on in an older version overrode the automatic one; the model could write a line starting with "[App note]" into a helper's task; the Tools panel and a turn could disagree about a remote model's context; Cancel was ignored while a download waited to retry; and a link in a downloaded archive could have been created through an earlier link.
 
 ### Known issues
 - None of this has run on a real Windows PC or Mac yet; see docs/MILESTONES.md (M9).

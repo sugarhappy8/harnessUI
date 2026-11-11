@@ -317,7 +317,7 @@ Not in the original plan: added at the owner's request after the first test buil
 **Works:**
 - **Browsing without setup.** See M6: Browser on in new chats when it fits, Brave and Vivaldi found, a downloadable browser for Macs without one.
 - **Computer use without setup.** See M7: the convention is picked from the model's name.
-- **Subagents.** *Tools → Subagents* in a chat lets the model hand a task to a helper with its own fresh context, the same tools and the same approvals (cards start with "Subagent:"). One helper at a time; a helper cannot start another; Stop ends it at once; nothing of the helper is stored in the chat except its answer.
+- **Subagents.** *Tools → Subagents* in a chat (each chat separately, like Computer) lets the model hand a task to a helper with its own fresh context, the same tools and the same approvals (cards start with "Subagent:"). One helper at a time; a helper cannot start another; Stop ends it at once; nothing of the helper is stored in the chat except its answer.
 - **One Mac download for Intel and Apple Silicon** (macOS 13.3 or later). Intel Macs run models on the processor by default; Metal can be chosen in Settings → Local models.
 
 Automated: `e2e/scripted_agent.py` check `subagent` (fresh context, the helper's approval card, audit rows, nested call refused, Stop in 0.3 s); unit tests for the browser download's unpacking and checksum, the default-tools rule, the model-name table and the Intel Mac backend choice; a real download of the pinned Mac browser on Linux; CI builds the universal app and runs its Intel half on an Intel Mac runner.

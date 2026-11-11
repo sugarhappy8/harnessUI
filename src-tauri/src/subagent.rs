@@ -497,12 +497,49 @@ pub struct Helper {
 /// model wrote them (cleaned of chat-template control tokens, like any model-made text
 /// that goes back into a prompt).
 fn handover_message(task: &str, context: &str, sanitizer: &Sanitizer) -> String {
-    let mut text = format!("{HANDOVER}\n\nTask:\n{}", sanitizer.clean(task));
+    let clean = |text: &str| defang_app_notes(&sanitizer.clean(text));
+    let mut text = format!("{HANDOVER}\n\nTask:\n{}", clean(task));
     if !context.is_empty() {
         text.push_str("\n\nContext:\n");
-        text.push_str(&sanitizer.clean(context));
+        text.push_str(&clean(context));
     }
     text
+}
+
+/// Breaks every `[App note]` marker in model-written text (any letter case, any spacing
+/// inside the brackets) by turning its brackets into parentheses. The system prompt tells
+/// the model that lines starting with `[App note]` come from the app, and the task is not
+/// inside a delimited block, so without this the main model, steered by something it read,
+/// could pass an instruction to the helper as the app's own.
+fn defang_app_notes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let marker = after.find(']').filter(|&close| {
+            let inner: String = after[..close]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .to_lowercase();
+            inner == "appnote"
+        });
+        match marker {
+            Some(close) => {
+                out.push('(');
+                out.push_str(&after[..close]);
+                out.push(')');
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Runs one helper to its end and returns its final answer as the tool result. Failures

@@ -303,7 +303,8 @@ const FAMILIES: &[Family] = &[
         convention: Convention::Pixels,
         lineage: Lineage::Qwen2,
     },
-    // Built on Qwen3.5, but its card says it answers in pixels.
+    // Built on Qwen3.5; assumed to answer in pixels like Fara-7B (its convention is not
+    // documented, so this row is an inference).
     Family {
         name: "Fara1.5",
         needles: &[Needle::Word("fara15")],
@@ -329,10 +330,18 @@ const FAMILIES: &[Family] = &[
         convention: Convention::Grid1000,
         lineage: Lineage::Qwen3,
     },
+    // Absolute pixels arrived with Qwen2.5-VL.
+    Family {
+        name: "Qwen2.5-VL",
+        needles: &[Needle::Anywhere("qwen25vl")],
+        convention: Convention::Pixels,
+        lineage: Lineage::Qwen2,
+    },
+    // Qwen2-VL answers on a 0–1000 grid (the same projector and resize as 2.5).
     Family {
         name: "Qwen2-VL",
-        needles: &[Needle::Anywhere("qwen2vl"), Needle::Anywhere("qwen25vl")],
-        convention: Convention::Pixels,
+        needles: &[Needle::Anywhere("qwen2vl")],
+        convention: Convention::Grid1000,
         lineage: Lineage::Qwen2,
     },
     // Qwen3-VL, Qwen3.5 and later.
@@ -720,11 +729,13 @@ mod tests {
                 "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
                 Pixels,
                 q2(),
-                "Qwen2-VL",
+                "Qwen2.5-VL",
             ),
-            ("QWEN2.5VL-3B", Pixels, q2(), "Qwen2-VL"),
-            ("qwen2_5_vl_7b", Pixels, q2(), "Qwen2-VL"),
-            ("Qwen2-VL-2B-Instruct-Q8_0.gguf", Pixels, q2(), "Qwen2-VL"),
+            ("QWEN2.5VL-3B", Pixels, q2(), "Qwen2.5-VL"),
+            ("qwen2_5_vl_7b", Pixels, q2(), "Qwen2.5-VL"),
+            // Qwen2-VL (not 2.5) answers on a 0-1000 grid; pixels came with 2.5.
+            ("Qwen2-VL-2B-Instruct-Q8_0.gguf", Grid1000, q2(), "Qwen2-VL"),
+            ("qwen2-vl-7b-instruct", Grid1000, q2(), "Qwen2-VL"),
             ("Fara-7B-Q4_K_M.gguf", Pixels, q2(), "Fara"),
             ("Holo1.5-7B.Q4_K_M.gguf", Pixels, q2(), "Holo1"),
             ("holo-1.5-3b", Pixels, q2(), "Holo1"),

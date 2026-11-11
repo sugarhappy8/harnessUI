@@ -559,7 +559,7 @@ The host keeps one connection object per server. Built-in servers connect over a
 | `computer` | `computer_screenshot`, `computer_click`, `computer_move`, `computer_drag`, `computer_scroll`, `computer_type`, `computer_key` | no (spec), and only offered for vision models |
 | `skills` | `load_skill`, `read_skill_file` | yes, when any skill is enabled |
 
-Every group and every tool can be toggled per chat, and the user's last choice becomes their default for new chats.
+Every group and every tool can be toggled per chat, and the user's last choice becomes their default for new chats, except Computer use and Subagents, which are switched on for one chat at a time.
 
 **Files.**
 

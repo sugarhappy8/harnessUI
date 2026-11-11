@@ -208,6 +208,15 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// Downloads one archive with resume; returns once it is complete and verified.
+/// The wait before retry number `attempt + 1` (2 to 32 seconds). Cancel ends it at once, so
+/// a download that is retrying while offline stops as soon as the user says so.
+async fn pause(attempt: u32, cancel: &CancellationToken) -> Result<(), PackError> {
+    tokio::select! {
+        () = cancel.cancelled() => Err(PackError::Cancelled),
+        () = tokio::time::sleep(Duration::from_secs(2u64.pow(attempt + 1))) => Ok(()),
+    }
+}
+
 async fn fetch(
     client: &reqwest::Client,
     f: &PackFile,
@@ -252,7 +261,7 @@ async fn fetch(
             Ok(r) => r,
             Err(e) if attempt < 5 => {
                 tracing::warn!(file = %f.name, "backend download interrupted: {}", e.without_url());
-                tokio::time::sleep(Duration::from_secs(2u64.pow(attempt + 1))).await;
+                pause(attempt, cancel).await?;
                 continue;
             }
             Err(e) => return Err(net(e)),
@@ -331,7 +340,7 @@ async fn fetch(
                 message: "the connection kept dropping".into(),
             });
         }
-        tokio::time::sleep(Duration::from_secs(2u64.pow(attempt + 1))).await;
+        pause(attempt, cancel).await?;
     }
     // Verify size and hash.
     let got = tokio::fs::metadata(dest).await?.len();
@@ -567,6 +576,24 @@ pub async fn remove(pack: &PackSpec, packs_dir: &Path) -> Result<(), PackError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_ends_the_wait_before_a_retry() {
+        let cancel = CancellationToken::new();
+        // Not cancelled: the wait runs its course (2 s for the first retry).
+        let started = tokio::time::Instant::now();
+        pause(0, &cancel).await.expect("waited");
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        // Cancelled during the longest wait: it ends at once.
+        let waiting = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { pause(4, &cancel).await }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        cancel.cancel();
+        assert!(matches!(waiting.await.unwrap(), Err(PackError::Cancelled)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn hosts() {

@@ -33,11 +33,16 @@ fn profile_key(model_ref: &str) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct StoredProfile {
     pub profile: computer::ModelProfile,
-    /// Older versions kept computer use off for a model until this was ticked. Nothing
-    /// reads it now: saving a choice is the user's decision, ticked or not. It is still
-    /// written (as `true`) so an older version reading these settings keeps working.
-    #[serde(default)]
+    /// Older versions kept computer use off for a model until this was ticked, so a
+    /// profile stored with `false` was never in use (often the form's untouched default)
+    /// and does not count as a choice. Every save now writes `true`; a missing field is a
+    /// choice too.
+    #[serde(default = "yes")]
     pub confirmed: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// The profile computer use runs with for a model, and where it came from.
@@ -53,7 +58,7 @@ pub struct ChosenProfile {
 /// The user's saved choice when there is one, else the automatic profile.
 fn choose(stored: Option<StoredProfile>, model_ref: &str) -> ChosenProfile {
     let auto = computer::auto_profile(model_ref);
-    match stored {
+    match stored.filter(|s| s.confirmed) {
         Some(s) => ChosenProfile {
             profile: s.profile,
             by_user: true,
@@ -447,28 +452,36 @@ mod tests {
     /// Profiles saved by older versions are still read, and one counts whether or not its
     /// confirmation box was ticked: saving it was the user's choice.
     #[test]
-    fn a_saved_profile_wins_whether_or_not_it_was_confirmed() {
-        for confirmed in ["true", "false"] {
-            let old = format!(
+    fn a_profile_saved_by_an_older_version_counts_only_if_it_was_in_use() {
+        let old = |confirmed: &str| -> StoredProfile {
+            serde_json::from_str(&format!(
                 r#"{{"profile":{{"convention":"box1000","resize":{{"type":"smart","align":28,"minPixels":6272,"maxPixels":3211264,"longestEdge":0,"roundHalfEven":true}}}},"confirmed":{confirmed}}}"#
-            );
-            let stored: StoredProfile = serde_json::from_str(&old).unwrap();
-            let chosen = choose(Some(stored), TARS);
-            assert!(chosen.by_user, "confirmed {confirmed}");
-            assert_eq!(chosen.profile.convention, Convention::Box1000);
-            assert_eq!(
-                chosen.profile.resize,
-                computer::ResizeRule::Smart(computer::SmartResize::qwen2_vl(8, 4096))
-            );
-            // What Automatic would pick is still reported next to it.
-            assert_eq!(chosen.auto.profile.convention, Convention::Pixels);
-        }
-        // The field may be missing altogether.
+            ))
+            .unwrap()
+        };
+        // Ticked in the old version: the user's choice, used as stored.
+        let chosen = choose(Some(old("true")), TARS);
+        assert!(chosen.by_user);
+        assert_eq!(chosen.profile.convention, Convention::Box1000);
+        assert_eq!(
+            chosen.profile.resize,
+            computer::ResizeRule::Smart(computer::SmartResize::qwen2_vl(8, 4096))
+        );
+        // What Automatic would pick is still reported next to it.
+        assert_eq!(chosen.auto.profile.convention, Convention::Pixels);
+        // Never ticked: it was not in use (often the form's untouched default), so the
+        // automatic profile applies.
+        let chosen = choose(Some(old("false")), TARS);
+        assert!(!chosen.by_user);
+        assert_eq!(chosen.profile.convention, Convention::Pixels);
+        // The field may be missing altogether: that is a choice.
         let bare: StoredProfile = serde_json::from_str(
             r#"{"profile":{"convention":"grid1000","resize":{"type":"original"}}}"#,
         )
         .unwrap();
-        assert_eq!(bare.profile.convention, Convention::Grid1000);
+        let chosen = choose(Some(bare), TARS);
+        assert!(chosen.by_user);
+        assert_eq!(chosen.profile.convention, Convention::Grid1000);
     }
 
     #[test]

@@ -428,8 +428,22 @@ pub fn unpack_tree(
     // Links last: until here the tree holds only real files and folders.
     for (parts, text) in &links {
         let mut at = out.to_path_buf();
-        for p in parts {
+        // A link's own path must not run through a link made earlier in this loop: its
+        // folders and the link itself would be created wherever that link leads.
+        for p in &parts[..parts.len().saturating_sub(1)] {
             at.push(p);
+            if at
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
+                return Err(bad(format!(
+                    "the link {:?} would be created through another link",
+                    parts.join("/")
+                )));
+            }
+        }
+        if let Some(last) = parts.last() {
+            at.push(last);
         }
         if let Some(parent) = at.parent() {
             std::fs::create_dir_all(parent)?;
@@ -866,6 +880,29 @@ mod tests {
                 E::Link("leak", "a/b/c/d/../../.."),
             ],
             "points outside",
+        );
+    }
+
+    /// A link whose own path runs through an earlier link would be created wherever that
+    /// link leads, which can be above the unpack folder. Nothing may be created there, not
+    /// even for the moment before the final check.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_never_created_through_another_link() {
+        let dir = refused(
+            &[
+                E::File("a/b/c/file", b"x", 0o644),
+                E::Link("a/b/c/d", "../.."),
+                // By name this stays inside; really it is the folder above the root.
+                E::Link("leak", "a/b/c/d/../../.."),
+                // Would be created at <above the root>/x/y.
+                E::Link("leak/x/y", "z"),
+            ],
+            "through another link",
+        );
+        assert!(
+            !dir.path().join("x").exists(),
+            "a folder was created outside the unpack folder"
         );
     }
 

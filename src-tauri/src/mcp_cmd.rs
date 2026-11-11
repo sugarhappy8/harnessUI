@@ -25,7 +25,16 @@ use crate::state::AppState;
 use crate::toolset::mcp_secret_key;
 
 /// Setting: the tools of the last chat whose tools the user changed (new chats start so).
-const DEFAULT_TOOLS: &str = "defaultChatTools";
+/// The name carries a version: the defaults changed on 2026-11-11 (Browser on when it
+/// fits), and a last choice saved before that would keep every new chat on the old set
+/// without the user ever having decided against the browser. Old saved choices under
+/// "defaultChatTools" are simply no longer read.
+const DEFAULT_TOOLS: &str = "defaultChatTools2";
+
+/// Groups that are switched on for one chat only: the saved last choice never turns them
+/// on in a new chat. Both let the model act widely (the whole screen; helpers that work on
+/// their own), so each chat gets its own decision.
+const PER_CHAT_ONLY: &[&str] = &[computer::SERVER_NAME, crate::subagent::SERVER_NAME];
 
 /// Built-in servers whose tools are on in every new chat (D10).
 const DEFAULT_ON_BUILTIN: &[&str] = &["files", "skills"];
@@ -115,7 +124,10 @@ impl<'a> Selection<'a> {
     fn on(&self, exposed: &str, server: &str, builtin: bool) -> bool {
         match self {
             Self::NoChat => false,
-            Self::Chat(list) | Self::LastChoice(list) => list.iter().any(|e| e == exposed),
+            Self::Chat(list) => list.iter().any(|e| e == exposed),
+            Self::LastChoice(list) => {
+                !PER_CHAT_ONLY.contains(&server) && list.iter().any(|e| e == exposed)
+            }
             Self::Defaults {
                 browser_available,
                 context,
@@ -145,7 +157,9 @@ fn seen_context(model_ref: &str) -> Option<SeenContext> {
     REMOTE_CONTEXT.lock().ok()?.get(model_ref).copied()
 }
 
-fn remember_context(model_ref: &str, tokens: Option<u32>) {
+/// Also called by a turn with what the endpoint just reported, so the Tools panel decides
+/// on the same number the turn used.
+pub(crate) fn remember_context(model_ref: &str, tokens: Option<u32>) {
     if let Ok(mut map) = REMOTE_CONTEXT.lock() {
         // A handful of models at most; never let it grow without bound.
         if map.len() > 256 {
@@ -1116,9 +1130,15 @@ mod tests {
             assert!(!new_chat.on(tool, server, true));
             assert!(new_chat.on("read_file", "files", true));
         }
-        // The last choice in another chat included it: a new chat starts with it.
-        let last = names(&["read_file", tool]);
-        assert!(Selection::for_chat(None, Some(&last), true, Some(8192)).on(tool, server, true));
+        // Switched on in another chat: that is a choice for that chat only. The last
+        // choice carries the other groups over to a new chat, never subagents or
+        // computer use.
+        let last = names(&["read_file", tool, "computer_click", "git_status"]);
+        let new_chat = Selection::for_chat(None, Some(&last), true, Some(8192));
+        assert!(!new_chat.on(tool, server, true));
+        assert!(!new_chat.on("computer_click", computer::SERVER_NAME, true));
+        assert!(new_chat.on("read_file", "files", true));
+        assert!(new_chat.on("git_status", "git", true));
         // This chat's own choice without it wins over that.
         let own = names(&["read_file"]);
         let chat = Selection::for_chat(Some(&own), Some(&last), true, Some(8192));

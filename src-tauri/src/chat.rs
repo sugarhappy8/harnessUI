@@ -471,7 +471,9 @@ async fn resolve_target(state: &AppState, model_ref: Option<&str>) -> AppResult<
             crate::providers::client_for(state, store::ProviderId(id)).await?;
         // A model that reports no context (or a failed check) gets the user's setting,
         // 4,096 by default (8.4).
-        let n_ctx = match client.context_length(model).await.ok().flatten() {
+        let reported = client.context_length(model).await.ok().flatten();
+        crate::mcp_cmd::remember_context(model_ref, reported);
+        let n_ctx = match reported {
             Some(n) => n,
             None => {
                 let stored: Option<serde_json::Value> = state
