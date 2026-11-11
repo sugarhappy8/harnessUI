@@ -18,14 +18,13 @@ import {
   Trash2,
   Workflow,
 } from "lucide-react";
-import { isTauri } from "../../lib/ipc";
 import { toErrorInfo, useApp } from "../../store/app";
 import { Markdown } from "../Markdown";
 import * as api from "../artifacts/api";
 import { ArtifactFrame, type Settled } from "../artifacts/ArtifactFrame";
 import { ProblemList } from "../artifacts/ProblemList";
 import { SourceEditor } from "../artifacts/SourceEditor";
-import { runIsolationCheck } from "../artifacts/startup";
+import { inApp, runIsolationCheck } from "../artifacts/startup";
 import { reportKey, useArtifacts } from "../artifacts/state";
 import {
   EXTENSION,
@@ -476,7 +475,7 @@ export function ArtifactsTab(props: { chatId: number }) {
                     className="flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
                     onSelect={() =>
                       void act(async () => {
-                        if (isTauri()) await writeText(sourceText);
+                        if (inApp()) await writeText(sourceText);
                         else await navigator.clipboard.writeText(sourceText);
                         setCopied(true);
                         setTimeout(() => setCopied(false), 1500);

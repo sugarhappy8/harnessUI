@@ -659,6 +659,42 @@ fn matching_again_adds_nothing() {
 
 // ---- settings -----------------------------------------------------------------------------
 
+/// With "choose tools for each task" off, every tool that is on is shown, as before
+/// 0.0.4: nothing is kept back, whatever the chat remembers.
+#[test]
+fn with_the_selection_off_every_tool_that_is_on_is_shown() {
+    let tools = on(&[
+        "files",
+        "terminal",
+        "git",
+        "browser",
+        "artifacts",
+        "search",
+        "outputs",
+        "task",
+    ]);
+    let everything: BTreeSet<String> = tools.iter().map(|t| t.name.clone()).collect();
+    let prefs = crate::turns::ChatTools {
+        shown: names(&["read_file"]),
+        found: names(&["git_commit"]),
+        ..Default::default()
+    };
+    let off = ToolSelection {
+        auto: false,
+        max: DEFAULT_MAX,
+    };
+    assert_eq!(
+        shown_before_a_message(&tools, &prefs, &[], false, off),
+        everything
+    );
+    // On: the companions, the core, and what waits to be shown; the rest on request.
+    let chosen = shown_before_a_message(&tools, &prefs, &[], false, ToolSelection::default());
+    assert!(chosen.len() < everything.len());
+    assert!(chosen.contains("read_file") && chosen.contains("git_commit"));
+    assert!(chosen.contains("read_output") && chosen.contains("update_task"));
+    assert!(!chosen.contains("git_push") && !chosen.contains("browser_navigate"));
+}
+
 #[test]
 fn the_setting_is_on_with_14_unless_it_says_otherwise() {
     assert_eq!(

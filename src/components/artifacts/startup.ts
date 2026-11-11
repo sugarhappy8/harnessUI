@@ -1,4 +1,3 @@
-import { isTauri } from "../../lib/ipc";
 import { useApp } from "../../store/app";
 import * as api from "./api";
 import { useArtifacts } from "./state";
@@ -6,6 +5,11 @@ import type { ArtifactChanged, Isolation } from "./types";
 
 // What runs once when the app's window starts: listening for artifacts the model makes,
 // and checking the preview sandbox on this system.
+
+/** True inside the app's window; false in a plain browser and in tests. */
+export function inApp(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
 
 /** How long the check's page has to report. */
 const CHECK_TIMEOUT_MS = 6000;
@@ -94,7 +98,7 @@ let started = false;
 
 /** Starts listening and checking. Runs once, when the app's window loads. */
 export function startArtifacts(): void {
-  if (started || !isTauri()) return;
+  if (started || !inApp()) return;
   started = true;
   void api.onArtifactChanged(onArtifactChanged);
   void api.onArtifactIsolation((i) => useArtifacts.getState().setIsolation(i));
