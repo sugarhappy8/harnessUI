@@ -1011,7 +1011,7 @@ pub async fn refresh_catalog(app: AppHandle, state: State<'_, AppState>) -> AppR
             String::new(),
         ));
     };
-    let base = "https://github.com/sugarhappy8/harnissUI/releases/latest/download";
+    let base = "https://github.com/sugarhappy8/harnessUI/releases/latest/download";
     let client = reqwest::Client::builder()
         .user_agent(format!(
             "{}/{}",
