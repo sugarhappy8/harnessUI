@@ -1088,8 +1088,9 @@ impl BuiltinServer for BrowserServer {
                 Err(e) => return ToolOutput::error(e),
             },
         };
-        // Attached is not enough: the tab's requests must be paused and checked first.
-        if let Err(e) = browser.wait_enforced(&tab).await {
+        // Attached is not enough: the tab must be set up (requests checked, page events
+        // reported) first.
+        if let Err(e) = browser.wait_ready(&tab).await {
             return ToolOutput::error(e);
         }
         let intent: Option<SubmitIntent> = p

@@ -51,9 +51,10 @@ pub(crate) struct SessionInfo {
     pub kind: TargetKind,
     /// The tab (page target id) the session belongs to.
     pub tab: String,
-    /// The session's requests are paused and checked (`Fetch.enable` was answered). A
-    /// tab is attached before that; nothing may be sent to it in between.
-    pub enforced: bool,
+    /// Set-up is complete: the session's requests are paused and checked (`Fetch.enable`
+    /// was answered), it reports its page events, and its frame tree is recorded. A tab
+    /// is attached before that; no tool call may use it in between.
+    pub ready: bool,
 }
 
 /// Where a reference points.
@@ -453,18 +454,20 @@ impl Browser {
             .ok_or_else(|| "no browser tab is open".into())
     }
 
-    /// Waits until `tab`'s requests are under the checks. A tab is usable for a call only
-    /// then: a navigation sent earlier would not be paused, so neither its redirects nor
-    /// the site it lands on would be checked. A tab that is gone passes; the call then
-    /// fails on the missing tab.
-    pub async fn wait_enforced(&self, tab: &str) -> Result<(), String> {
+    /// Waits until `tab` is set up. A tab is usable for a call only then: a navigation
+    /// sent before its requests are checked would not be paused (neither its redirects
+    /// nor the site it lands on would be checked), and one sent before it reports its
+    /// page events could load unseen. A tab that is gone passes; the call then fails on
+    /// the missing tab.
+    pub async fn wait_ready(&self, tab: &str) -> Result<(), String> {
         let ready = self
             .wait_for(
                 |s| {
                     s.tab(tab)
-                        .is_none_or(|t| s.sessions.get(&t.session).is_some_and(|i| i.enforced))
+                        .is_none_or(|t| s.sessions.get(&t.session).is_some_and(|i| i.ready))
                 },
-                Instant::now() + CMD,
+                // Set-up waits at most CMD for each of its answers.
+                Instant::now() + CMD + CMD + Duration::from_secs(5),
                 &CancellationToken::new(),
             )
             .await;
@@ -792,7 +795,7 @@ impl Browser {
                     SessionInfo {
                         kind: TargetKind::Page,
                         tab: target_id.clone(),
-                        enforced: false,
+                        ready: false,
                     },
                 );
                 s.tabs.push(Tab {
@@ -847,7 +850,7 @@ impl Browser {
                     SessionInfo {
                         kind: TargetKind::Frame,
                         tab,
-                        enforced: false,
+                        ready: false,
                     },
                 );
                 if let Some(f) = s.frames.get_mut(&target_id) {
@@ -944,10 +947,8 @@ impl Browser {
             }
             return;
         }
-        if let Some(info) = self.lock().sessions.get_mut(&session) {
-            info.enforced = true;
-        }
-        self.bump();
+        #[cfg(feature = "test-hooks")]
+        tokio::time::sleep(self.config.test_setup_delay).await;
         // A target waiting for the debugger answers some of these only once it runs, so
         // they are all sent in order, with the resume last, and awaited together. Fetch is
         // already on, so the target's first request is checked whatever happens here.
@@ -970,6 +971,8 @@ impl Browser {
             .iter()
             .map(|(method, params)| self.cdp.call(method, params.clone(), s, CMD));
         let results = futures_util::future::join_all(calls).await;
+        #[cfg(feature = "test-hooks")]
+        tokio::time::sleep(self.config.test_setup_delay).await;
         for ((method, _), result) in steps.iter().zip(&results) {
             match result {
                 Ok(tree) if *method == "Page.getFrameTree" => {
@@ -980,6 +983,11 @@ impl Browser {
                 Ok(_) => {}
                 Err(e) => tracing::debug!(%method, error = %e, ?kind, "session setup step failed"),
             }
+        }
+        // Only now may a tool call use the tab. The checks are on (or the target was
+        // closed above); a step that failed here only costs detail in what is reported.
+        if let Some(info) = self.lock().sessions.get_mut(&session) {
+            info.ready = true;
         }
         self.bump();
     }

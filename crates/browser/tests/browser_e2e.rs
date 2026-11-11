@@ -457,6 +457,37 @@ async fn the_first_navigation_waits_until_the_tab_is_under_the_request_checks() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_call_waits_until_the_tab_reports_its_pages() {
+    // The first version of the fix above let a call go as soon as the requests were
+    // checked, before the tab was asked to report its page events. A page could then
+    // load unseen, and the first snapshot said `Page "" at about:blank` with frames it
+    // knew nothing about (a CI failure). The hook holds that second moment open as well.
+    if !have_browser() {
+        return;
+    }
+    // The frame answers after a second, so the page finishes loading between the two
+    // held moments: after the tab reports page events, before its frame tree is recorded.
+    let handler: Handler = Arc::new(|_, path, _| match path {
+        "/inner" => {
+            std::thread::sleep(Duration::from_millis(1000));
+            html("<p>Inner frame text</p>")
+        }
+        _ => html("<title>Ready</title><h1>Heading here</h1><iframe src=\"/inner\"></iframe>"),
+    });
+    let site = start_site(handler).await;
+    let h = harness_with(&[site.port], Answer::Deny, ConnectionMode::Pipe, |c| {
+        c.test_setup_delay = Duration::from_millis(700);
+    });
+    let snap = h
+        .ok("browser_navigate", json!({"url": site.url("/")}))
+        .await;
+    assert!(snap.contains("Page \"Ready\""), "{snap}");
+    assert!(snap.contains("Heading here"), "{snap}");
+    assert!(snap.contains("Inner frame text"), "{snap}");
+    h.server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn redirects_to_private_and_loopback_addresses_are_blocked_at_the_request() {
     if !have_browser() {
         return;
