@@ -99,7 +99,7 @@ class Fake(BaseHTTPRequestHandler):
                         "index": i, "id": f"call_{len(Fake.requests)}_{i}", "type": "function",
                         "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}]}}]})
                 emit({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-                      "usage": {"prompt_tokens": 50, "completion_tokens": 10}})
+                      "usage": {"prompt_tokens": item.get("prompt_tokens", 50), "completion_tokens": 10}})
             else:
                 rtext = item.get("reasoning", "")
                 for i in range(0, len(rtext), 12):
@@ -117,7 +117,7 @@ class Fake(BaseHTTPRequestHandler):
                     self.wfile.write(b"0\r\n\r\n")
                     return
                 emit({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                      "usage": {"prompt_tokens": 50, "completion_tokens": 10}})
+                      "usage": {"prompt_tokens": item.get("prompt_tokens", 50), "completion_tokens": 10}})
             raw(b"data: [DONE]\n\n")
             self.wfile.write(b"0\r\n\r\n")
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -817,8 +817,167 @@ def p_text_call(c, notes):
     notes.append("audit: " + json.dumps(audit))
 
 
+@probe("subagent")
+def p_subagent(c, notes):
+    s = c.s
+    assert "run_subagent" in c.all_tools, "the tool is not registered"
+    assert "run_subagent" not in c.default_tools, "Subagents are on in a new chat"
+    chat = new_chat(c)
+    path = str(c.work / "notes.txt")
+    # Something earlier in the chat that the helper must never be sent.
+    Fake.queue.append({"content": "PARENT-EARLIER-ANSWER"})
+    send(s, "PARENT-EARLIER-QUESTION")
+    wait_idle(s)
+    # Switch the group on in the Tools panel.
+    s.click_button("Tools")
+    s.wait_text("Subagents", 10)
+    panel = s.page_text()
+    assert "hand a task to a helper that works in its own context" in panel, panel[-600:]
+    on = s.execute(
+        """
+        const label = [...document.querySelectorAll('section > label')].find(l => l.innerText.trim().startsWith('Subagents'));
+        const box = label.querySelector('input');
+        const before = box.checked;
+        box.click();
+        label.scrollIntoView();
+        return before;
+        """
+    )
+    assert on is False, "the Subagents group was already on"
+    time.sleep(0.6)
+    s.screenshot(str(OUT / "tools-panel-subagents.png"))
+    tools = {t["exposed"]: t for t in s.invoke("list_chat_tools", {"chatId": chat})}
+    assert tools["run_subagent"]["enabledInChat"] and tools["run_subagent"]["server"] == "subagents", tools["run_subagent"]
+    s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+    time.sleep(0.3)
+
+    # 1. The turn hands a task over; the helper reads a file (a card), answers; the turn answers.
+    task = "Read the notes file and report the secret word. HELPER-TASK-771"
+    Fake.requests.clear()
+    Fake.queue.append({"tool_calls": [{"name": "run_subagent", "arguments": {"task": task, "context": f"The file is {path}"}}]})
+    # The helper's requests report a prompt of 7,777 tokens: that must never become the chat's.
+    Fake.queue.append({"tool_calls": [{"name": "read_file", "arguments": {"path": path}}], "prompt_tokens": 7777})
+    Fake.queue.append({"content": "the secret word is heron", "prompt_tokens": 7777})
+    Fake.queue.append({"content": "PARENT-FINAL: the helper found the word."})
+    send(s, "use a helper")
+    s.wait_for(lambda: "Allow once" in s.page_text(), 30, "the helper's approval card")
+    card = s.page_text()
+    s.screenshot(str(OUT / "subagent-card.png"))
+    assert "Subagent: " in card, "the card does not say it comes from a subagent: " + card[-500:]
+    assert "Waiting for you" in card, "the run_subagent tool card does not show it is waiting"
+    assert not any(n in card for n in ("7,777", "7,787")), "the helper's token count is shown as the chat's"
+    assert f"read_file {path}"[:60] in card, "the tool card does not show what the helper is doing"
+    time.sleep(0.9)
+    s.click_button("Allow once")
+    wait_idle(s)
+    reqs = list(Fake.requests)
+    assert len(reqs) == 4, len(reqs)
+    names = lambda r: [t["function"]["name"] for t in r.get("tools", [])]  # noqa: E731
+    roles = lambda r: [m["role"] for m in r["messages"]]  # noqa: E731
+    assert "run_subagent" in names(reqs[0]) and names(reqs[0])[-1] == "run_subagent", names(reqs[0])
+    # The helper's first request: a fresh history, the same system message, no run_subagent.
+    first = reqs[1]
+    assert roles(first) == ["system", "user"], roles(first)
+    assert first["messages"][0]["content"] == reqs[0]["messages"][0]["content"], "the helper has another system message"
+    user = json.dumps(first["messages"][1]["content"])
+    assert task in user and path in user and "[App note]" in user, user[:400]
+    assert "PARENT-EARLIER" not in json.dumps(first) and "use a helper" not in json.dumps(first), "the helper was sent the chat"
+    assert "run_subagent" not in names(first) and "read_file" in names(first), names(first)
+    assert names(first) == names(reqs[0])[:-1], "the helper's tools are not the chat's minus run_subagent"
+    assert first["model"] == reqs[0]["model"]
+    # Its second request carries the file; the turn's next request only the answer.
+    assert "heron" in json.dumps(reqs[2]["messages"][-1]) and roles(reqs[2])[:2] == ["system", "user"]
+    last = reqs[3]["messages"][-1]
+    assert last["role"] == "tool" and "the secret word is heron" in json.dumps(last), last
+    assert task in json.dumps(reqs[3]["messages"]) and "PARENT-EARLIER-QUESTION" in json.dumps(reqs[3]["messages"])
+    assert roles(reqs[3]).count("tool") == 1, "a helper message reached the chat's history"
+    # The chat stores the turn's own messages only.
+    msgs = messages(s, chat)
+    turn = msgs[2:]
+    notes.append("stored: " + json.dumps([(m["role"], [tc["name"] for tc in m.get("toolCalls") or []]) for m in turn]))
+    assert [m["role"] for m in turn] == ["user", "assistant", "tool", "assistant"], [m["role"] for m in turn]
+    assert [tc["name"] for m in turn for tc in (m.get("toolCalls") or [])] == ["run_subagent"]
+    result = turn[2]["toolResult"]
+    assert result["status"] == "ok" and result["text"] == "the secret word is heron", result
+    assert "PARENT-FINAL" in turn[3]["text"]
+    # The context numbers of the chat are the turn's own, not the helper's.
+    assert "7777" not in json.dumps(msgs), "the helper's token count was stored on a chat message"
+    header = s.execute("return document.querySelector('header')?.innerText || document.body.innerText.slice(0, 400);")
+    notes.append("header: " + header.replace("\n", " | ")[:160])
+    page = s.page_text()
+    assert not any(n in page for n in ("7,777", "7777", "7,787", "7787")), "the helper's token count is shown as the chat's: " + header
+    # The card shows the answer.
+    s.execute("[...document.querySelectorAll('button[aria-expanded]')].filter(b => b.innerText.includes('run_subagent')).pop().click();")
+    time.sleep(0.4)
+    page = s.page_text()
+    s.screenshot(str(OUT / "subagent-done.png"))
+    assert "Result | the secret word is heron" in page.replace("\n", " | "), page[-500:]
+    # Both calls are in the audit log; the helper's is marked and points at the turn's.
+    audit = s.invoke("list_audit", {"filter": {"chatId": chat}})
+    notes.append("audit: " + json.dumps([(a["tool"], a["decision"], a["result_status"], a["preview"][:40], a.get("parent_audit_id")) for a in audit]))
+    run_row = [a for a in audit if a["tool"] == "run_subagent"]
+    read_row = [a for a in audit if a["tool"] == "read_file"]
+    assert len(run_row) == 1 and len(read_row) == 1, [a["tool"] for a in audit]
+    assert run_row[0]["decision"] == "allowed_without_prompt" and run_row[0]["result_status"] == "ok", run_row[0]
+    assert run_row[0]["server"] == "subagents" and "heron" in (run_row[0]["result_summary"] or ""), run_row[0]
+    assert read_row[0]["decision"] == "allow_once" and read_row[0]["preview"].startswith("Subagent: "), read_row[0]
+    assert read_row[0]["parent_audit_id"] == run_row[0]["id"], (read_row[0], run_row[0]["id"])
+
+    # 2. A helper that tries to start a helper is refused.
+    Fake.requests.clear()
+    Fake.queue.append({"tool_calls": [{"name": "run_subagent", "arguments": {"task": "Delegate once more."}}]})
+    Fake.queue.append({"tool_calls": [{"name": "run_subagent", "arguments": {"task": "NESTED-TASK-552"}}]})
+    Fake.queue.append({"content": "I could not delegate, so I did it myself."})
+    Fake.queue.append({"content": "PARENT-SECOND-ANSWER"})
+    send(s, "let the helper try to delegate")
+    wait_idle(s)
+    reqs = list(Fake.requests)
+    assert len(reqs) == 4, len(reqs)
+    refusal = reqs[2]["messages"][-1]
+    assert refusal["role"] == "tool" and "No such tool: run_subagent" in json.dumps(refusal), refusal
+    assert all("NESTED-TASK-552" not in json.dumps(r["messages"][1]) for r in reqs[1:3]), "a nested helper was started"
+    assert "I could not delegate" in json.dumps(reqs[3]["messages"][-1])
+    audit = s.invoke("list_audit", {"filter": {"chatId": chat}})
+    nested = [a for a in audit if a["tool"] == "run_subagent" and a["preview"].startswith("Subagent: ")]
+    assert len(nested) == 1 and nested[0]["decision"] == "refused_by_policy", [(a["tool"], a["decision"], a["preview"][:30]) for a in audit]
+    assert len([a for a in audit if a["tool"] == "run_subagent"]) == 3, "a nested helper has its own audit row"
+
+    # 3. Stop while the helper streams ends the whole turn.
+    Fake.requests.clear()
+    Fake.queue.append({"tool_calls": [{"name": "run_subagent", "arguments": {"task": "Talk for a long time."}}]})
+    Fake.queue.append({"content": "helperword " * 400, "chunk": 11, "delay": 0.05})
+    send(s, "a slow helper")
+    s.wait_for(lambda: "helperword" in s.page_text(), 30, "the helper's text on the tool card")
+    time.sleep(0.5)
+    started = time.time()
+    s.click_button("Stop")
+    s.wait_for(lambda: idle(s), 10, "the turn to stop")
+    took = time.time() - started
+    notes.append(f"stop took {took:.2f}s")
+    assert took < 3.0, f"Stop took {took:.1f}s"
+    time.sleep(0.6)
+    msgs = messages(s, chat)
+    assert msgs[-1]["role"] == "assistant" and msgs[-1].get("status") == "stopped", msgs[-1]
+    stopped = [m for m in msgs if m["role"] == "tool"][-1]["toolResult"]
+    assert stopped["status"] == "cancelled" and "The helper was stopped" in stopped["text"], stopped
+    assert "helperword" in stopped["text"], "what the helper had so far was lost"
+    before = len(Fake.requests)
+    time.sleep(1.0)
+    assert len(Fake.requests) == before == 2, f"requests after Stop: {len(Fake.requests)}"
+    audit = s.invoke("list_audit", {"filter": {"chatId": chat}})
+    newest = [a for a in audit if a["tool"] == "run_subagent"][0]
+    assert newest["result_status"] == "cancelled", newest
+    # The chat still works.
+    Fake.queue.clear()
+    Fake.queue.append({"content": "fine after the stopped helper"})
+    send(s, "still there?")
+    wait_idle(s)
+    assert "fine after the stopped helper" in s.page_text()
+    assert "PARENT-EARLIER-QUESTION" in json.dumps(Fake.requests[-1]["messages"])
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
-          p_regen_error, p_switch, p_delete, p_reasoning, p_text_call]
+          p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent]
 
 
 def main() -> int:

@@ -33,7 +33,7 @@ pub use platform::{
     Capture, CaptureError, Captured, Injector, InputError, MainThread, MouseButton, PlatformError,
     SelfProcess,
 };
-pub use profile::{Convention, ModelProfile, ResizeRule, SmartResize};
+pub use profile::{AutoProfile, Convention, ModelProfile, ResizeRule, SmartResize, auto_profile};
 pub use server::{
     ComputerConfig, ComputerServer, MAX_HOLD_MS, MAX_TYPE_CHARS, ReadyCheck, SERVER_NAME,
     TOOL_CLICK, TOOL_DRAG, TOOL_KEY, TOOL_MOVE, TOOL_SCREENSHOT, TOOL_SCROLL, TOOL_TYPE,

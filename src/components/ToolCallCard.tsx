@@ -19,7 +19,9 @@ export interface ToolCallView {
 }
 
 function argSummary(args: Record<string, unknown>): string {
-  const first = ["path", "command", "query", "url", "name", "folder", "repo"].find((k) => typeof args[k] === "string");
+  const first = ["path", "command", "query", "url", "name", "folder", "repo", "task"].find(
+    (k) => typeof args[k] === "string",
+  );
   if (first) return String(args[first]);
   const s = JSON.stringify(args);
   return s.length > 80 ? `${s.slice(0, 80)}…` : s;
@@ -52,9 +54,22 @@ const STATUS_TEXT: Record<string, string> = {
   refused: "Not allowed",
 };
 
+/** The tool that hands a task to a helper (src-tauri/src/subagent.rs). */
+const SUBAGENT_TOOL = "run_subagent";
+
+/** The last line of a helper's progress that says something. */
+function lastLine(progress: string): string {
+  const lines = progress.split("\n").filter((l) => l.trim() !== "");
+  return lines[lines.length - 1] ?? "";
+}
+
 /**
  * One tool call with its result. Arguments and results come from the model and from
  * tools, so they are shown as plain text only.
+ *
+ * A helper's card shows what the helper is doing right now under its header while it
+ * works, without being opened: its tool calls, one line each, and its answer as it is
+ * written. Opened, it shows all of that; when the helper is done, its answer.
  */
 export function ToolCallCard(props: { call: ToolCallView }) {
   const c = props.call;
@@ -62,6 +77,8 @@ export function ToolCallCard(props: { call: ToolCallView }) {
   const [all, setAll] = useState(false);
   const result = c.text || c.progress || "";
   const shown = all ? result : result.slice(0, RESULT_PREVIEW_CHARS);
+  const helperNow =
+    c.name === SUBAGENT_TOOL && (c.status === "running" || c.status === "waiting") ? lastLine(c.progress ?? "") : "";
   return (
     <div className="rounded-md border border-border bg-bg-subtle text-sm">
       <button
@@ -77,6 +94,11 @@ export function ToolCallCard(props: { call: ToolCallView }) {
         <StatusIcon status={c.status} />
         <span className="text-xs text-fg-muted">{STATUS_TEXT[c.status] ?? c.status}</span>
       </button>
+      {helperNow && !open && (
+        <p className="truncate px-3 pb-1.5 pl-9 font-mono text-xs text-fg-muted" aria-live="off">
+          {helperNow}
+        </p>
+      )}
       {open && (
         <div className="space-y-2 border-t border-border px-3 py-2">
           {c.recovered && (

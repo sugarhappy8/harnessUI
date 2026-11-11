@@ -2,9 +2,13 @@
 //! server on Windows and macOS, the indicator while it acts, per-model coordinate
 //! profiles, the macOS permission checks, and Stop.
 //!
-//! The tools are offered only for models that can see images, and only once the model's
-//! coordinate convention is known: verified by the catalog or set by the user after the
-//! calibration test (9.3, "Model conventions").
+//! The tools are offered for every model that can see images, with nothing to set up: how
+//! the model writes screen positions is worked out from its name
+//! ([`computer::auto_profile`]), and the user can choose another convention per model in
+//! Settings → Computer use (9.3, "Model conventions"). What keeps computer use safe is
+//! unchanged and is not here: the tools are off in a chat until the user switches them on,
+//! every kind of input asks per application, and the indicator and the stop hotkey must
+//! be working before any input is sent.
 
 use std::sync::Arc;
 
@@ -23,23 +27,75 @@ fn profile_key(model_ref: &str) -> String {
     format!("computerProfile:{model_ref}")
 }
 
-/// A model's computer-use profile and whether the user confirmed it.
+/// The convention the user chose for a model in Settings → Computer use. A model without
+/// one runs with the automatic profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredProfile {
     pub profile: computer::ModelProfile,
-    /// Set by the user after the calibration test (or for a catalog-verified model).
+    /// Older versions kept computer use off for a model until this was ticked. Nothing
+    /// reads it now: saving a choice is the user's decision, ticked or not. It is still
+    /// written (as `true`) so an older version reading these settings keeps working.
+    #[serde(default)]
     pub confirmed: bool,
 }
 
-/// The profile for a model, if computer use is enabled for it.
-pub async fn profile_for(state: &AppState, model_ref: &str) -> Option<StoredProfile> {
-    state
+/// The profile computer use runs with for a model, and where it came from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChosenProfile {
+    pub profile: computer::ModelProfile,
+    /// The user chose it in Settings; otherwise it is the automatic one.
+    pub by_user: bool,
+    /// What the model's name says, whether or not it is in use.
+    pub auto: computer::AutoProfile,
+}
+
+/// The user's saved choice when there is one, else the automatic profile.
+fn choose(stored: Option<StoredProfile>, model_ref: &str) -> ChosenProfile {
+    let auto = computer::auto_profile(model_ref);
+    match stored {
+        Some(s) => ChosenProfile {
+            profile: s.profile,
+            by_user: true,
+            auto,
+        },
+        None => ChosenProfile {
+            profile: auto.profile,
+            by_user: false,
+            auto,
+        },
+    }
+}
+
+/// The profile for a model: every model has one.
+pub async fn profile_for(state: &AppState, model_ref: &str) -> ChosenProfile {
+    // A setting that cannot be read is treated as no choice.
+    let stored = state
         .store
         .get_setting(&profile_key(model_ref))
         .await
         .ok()
-        .flatten()
+        .flatten();
+    choose(stored, model_ref)
+}
+
+/// Shown on the Computer group in the Tools panel for a model without vision.
+pub const NO_VISION: &str =
+    "This model cannot see images, which computer use needs. Pick a vision model.";
+
+/// Why the computer tools cannot be offered for a chat's model, if they cannot.
+///
+/// One reason is left: the model cannot see the screenshots. That is known for the local
+/// model that is loaded (`loaded_path`, `loaded_vision`); a local model that is not loaded
+/// yet and a remote model may well be able to see, so they are not refused here. On an
+/// OS without computer use the server is never registered, so there are no tools to mark.
+pub fn unavailable_reason(
+    model_ref: &str,
+    loaded_path: Option<&str>,
+    loaded_vision: bool,
+) -> Option<&'static str> {
+    let path = model_ref.strip_prefix("local:")?;
+    (loaded_path == Some(path) && !loaded_vision).then_some(NO_VISION)
 }
 
 /// Runs closures on the app's main thread (enigo and AppKit need it).
@@ -166,6 +222,13 @@ fn overlay_on_active_space(app: &AppHandle) -> Option<bool> {
         .flatten()
 }
 
+/// For a chat no turn has prepared ([`prepare_turn`] sets the real one): the profile of an
+/// unknown model.
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+fn unprepared_profile() -> computer::ModelProfile {
+    computer::auto_profile("").profile
+}
+
 /// Builds the native server (Windows and macOS); `None` elsewhere or when the platform
 /// layer cannot start.
 pub fn build(app: &AppHandle) -> Option<Arc<computer::ComputerServer>> {
@@ -182,7 +245,7 @@ pub fn build(app: &AppHandle) -> Option<Arc<computer::ComputerServer>> {
         }
         let ready_app = app.clone();
         let config = computer::ComputerConfig {
-            default_profile: computer::ModelProfile::default(),
+            default_profile: unprepared_profile(),
             ready_check: Some(Arc::new(move || ready(&ready_app))),
         };
         match computer::ComputerServer::native(Arc::new(TauriMainThread(app.clone())), me, config) {
@@ -220,15 +283,20 @@ fn ready(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Called when a turn starts: sets the chat's profile, or keeps the tools from running.
+/// Called when a turn starts: tells the server how the chat's model writes positions.
 pub async fn prepare_turn(app: &AppHandle, chat_id: i64, model_ref: &str) {
     let Some(server) = app.state::<ComputerHandle>().0.clone() else {
         return;
     };
     let state = app.state::<AppState>();
-    if let Some(p) = profile_for(&state, model_ref).await {
-        server.set_profile(chat_id, p.profile);
-    }
+    let chosen = profile_for(&state, model_ref).await;
+    tracing::debug!(
+        convention = ?chosen.profile.convention,
+        by_user = chosen.by_user,
+        family = ?chosen.auto.family,
+        "computer use profile for this turn"
+    );
+    server.set_profile(chat_id, chosen.profile);
 }
 
 /// Called when a turn ends: hides the indicator and releases anything still held.
@@ -258,8 +326,33 @@ pub struct ComputerStatus {
     pub accessibility: bool,
     pub screen_recording_url: &'static str,
     pub accessibility_url: &'static str,
-    /// The current model's profile, if computer use is set up for it.
-    pub profile: Option<StoredProfile>,
+    /// How the asked-about model writes positions (`None` when no model was named).
+    pub profile: Option<ProfileStatus>,
+}
+
+/// A model's coordinate convention, for Settings → Computer use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileStatus {
+    /// What computer use runs with for this model.
+    pub convention: computer::Convention,
+    /// It is the automatic pick; false when the user chose one.
+    pub automatic: bool,
+    /// What Automatic picks for this model.
+    pub auto_convention: computer::Convention,
+    /// The model's name was not recognised, so the automatic pick is a best guess.
+    pub auto_guess: bool,
+}
+
+impl From<ChosenProfile> for ProfileStatus {
+    fn from(c: ChosenProfile) -> Self {
+        Self {
+            convention: c.profile.convention,
+            automatic: !c.by_user,
+            auto_convention: c.auto.profile.convention,
+            auto_guess: c.auto.is_guess(),
+        }
+    }
 }
 
 #[tauri::command]
@@ -276,8 +369,8 @@ pub async fn computer_status(
     #[cfg(not(target_os = "macos"))]
     let (screen_recording, accessibility) = (true, true);
     let profile = match model_ref {
-        Some(m) => profile_for(&state, &m).await,
-        None => None,
+        Some(m) if !m.trim().is_empty() => Some(profile_for(&state, &m).await.into()),
+        _ => None,
     };
     Ok(ComputerStatus {
         available: app.state::<ComputerHandle>().0.is_some(),
@@ -289,29 +382,171 @@ pub async fn computer_status(
     })
 }
 
-/// Saves a model's coordinate convention. `confirmed` is set once the user has seen the
-/// calibration test land on its targets.
+/// Saves the convention the user chose for a model, or with no convention goes back to
+/// Automatic (the choice is forgotten).
 #[tauri::command]
 pub async fn set_computer_profile(
     state: State<'_, AppState>,
     model_ref: String,
-    convention: computer::Convention,
-    confirmed: bool,
+    convention: Option<computer::Convention>,
 ) -> AppResult<()> {
     if model_ref.trim().is_empty() {
         return Err(AppError::bad_request("No model is selected."));
     }
-    let mut stored = profile_for(&state, &model_ref)
-        .await
-        .unwrap_or(StoredProfile {
-            profile: computer::ModelProfile::default(),
-            confirmed: false,
-        });
-    stored.profile.convention = convention;
-    stored.confirmed = confirmed;
-    state
-        .store
-        .set_setting(&profile_key(&model_ref), &stored)
-        .await?;
+    let key = profile_key(&model_ref);
+    match convention {
+        Some(c) => {
+            state
+                .store
+                .set_setting(&key, &chosen_by_user(&model_ref, c))
+                .await?;
+        }
+        None => {
+            state.store.delete_setting(&key).await?;
+        }
+    }
     Ok(())
+}
+
+/// What is saved when the user picks a convention for a model.
+fn chosen_by_user(model_ref: &str, convention: computer::Convention) -> StoredProfile {
+    StoredProfile {
+        profile: computer::auto_profile(model_ref).with_convention(convention),
+        confirmed: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use computer::Convention;
+
+    const TARS: &str =
+        "local:/home/u/models/Mungert/UI-TARS-1.5-7B-GGUF/UI-TARS-1.5-7B-q4_k_m.gguf";
+    const UNKNOWN: &str = "local:/home/u/models/someone/new-vision-model.gguf";
+
+    /// The owner's decision of 2026-11-11: computer use needs no per-model setup. A model
+    /// nobody set anything up for has a profile, picked from its name.
+    #[test]
+    fn every_model_has_a_profile_without_any_setup() {
+        let known = choose(None, TARS);
+        assert!(!known.by_user);
+        assert_eq!(known.profile.convention, Convention::Pixels);
+        assert_eq!(known.profile, computer::auto_profile(TARS).profile);
+        assert!(!known.auto.is_guess());
+
+        let guess = choose(None, UNKNOWN);
+        assert!(!guess.by_user);
+        assert_eq!(guess.profile.convention, Convention::Grid1000);
+        assert!(guess.auto.is_guess());
+
+        let remote = choose(None, "remote:3:qwen2.5-vl-7b");
+        assert_eq!(remote.profile.convention, Convention::Pixels);
+    }
+
+    /// Profiles saved by older versions are still read, and one counts whether or not its
+    /// confirmation box was ticked: saving it was the user's choice.
+    #[test]
+    fn a_saved_profile_wins_whether_or_not_it_was_confirmed() {
+        for confirmed in ["true", "false"] {
+            let old = format!(
+                r#"{{"profile":{{"convention":"box1000","resize":{{"type":"smart","align":28,"minPixels":6272,"maxPixels":3211264,"longestEdge":0,"roundHalfEven":true}}}},"confirmed":{confirmed}}}"#
+            );
+            let stored: StoredProfile = serde_json::from_str(&old).unwrap();
+            let chosen = choose(Some(stored), TARS);
+            assert!(chosen.by_user, "confirmed {confirmed}");
+            assert_eq!(chosen.profile.convention, Convention::Box1000);
+            assert_eq!(
+                chosen.profile.resize,
+                computer::ResizeRule::Smart(computer::SmartResize::qwen2_vl(8, 4096))
+            );
+            // What Automatic would pick is still reported next to it.
+            assert_eq!(chosen.auto.profile.convention, Convention::Pixels);
+        }
+        // The field may be missing altogether.
+        let bare: StoredProfile = serde_json::from_str(
+            r#"{"profile":{"convention":"grid1000","resize":{"type":"original"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.profile.convention, Convention::Grid1000);
+    }
+
+    #[test]
+    fn what_settings_shows_for_a_model() {
+        assert_eq!(
+            ProfileStatus::from(choose(None, TARS)),
+            ProfileStatus {
+                convention: Convention::Pixels,
+                automatic: true,
+                auto_convention: Convention::Pixels,
+                auto_guess: false,
+            }
+        );
+        assert_eq!(
+            ProfileStatus::from(choose(None, UNKNOWN)),
+            ProfileStatus {
+                convention: Convention::Grid1000,
+                automatic: true,
+                auto_convention: Convention::Grid1000,
+                auto_guess: true,
+            }
+        );
+        // The user's choice, as `set_computer_profile` saves it and a later read finds it.
+        let saved = serde_json::to_string(&chosen_by_user(UNKNOWN, Convention::Pixels)).unwrap();
+        let read: StoredProfile = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            read.profile,
+            computer::auto_profile(UNKNOWN).with_convention(Convention::Pixels)
+        );
+        assert_eq!(
+            ProfileStatus::from(choose(Some(read), UNKNOWN)),
+            ProfileStatus {
+                convention: Convention::Pixels,
+                automatic: false,
+                auto_convention: Convention::Grid1000,
+                auto_guess: true,
+            }
+        );
+        // An older version reading the saved choice still finds it confirmed.
+        assert!(saved.contains(r#""confirmed":true"#), "{saved}");
+        // The frontend's field names.
+        let json = serde_json::to_value(ProfileStatus::from(choose(None, UNKNOWN))).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "convention": "grid1000",
+                "automatic": true,
+                "autoConvention": "grid1000",
+                "autoGuess": true,
+            })
+        );
+    }
+
+    /// The one reason left for the Computer group to be unavailable: the loaded local
+    /// model cannot see. There is no "set it up first" any more.
+    #[test]
+    fn the_tools_are_unavailable_only_for_a_model_that_cannot_see() {
+        let path = "/home/u/models/someone/text-only.gguf";
+        let local = format!("local:{path}");
+        // Loaded, without vision.
+        assert_eq!(
+            unavailable_reason(&local, Some(path), false),
+            Some(NO_VISION)
+        );
+        // Loaded with vision: available, with no profile saved by anyone.
+        assert_eq!(unavailable_reason(&local, Some(path), true), None);
+        // Not loaded yet, or another model is loaded: it may be able to see.
+        assert_eq!(unavailable_reason(&local, None, false), None);
+        assert_eq!(unavailable_reason(&local, Some("/other.gguf"), false), None);
+        // Remote models are not refused here.
+        assert_eq!(
+            unavailable_reason("remote:3:some-model", Some(path), false),
+            None
+        );
+        assert_eq!(unavailable_reason("remote:3:some-model", None, false), None);
+        assert_eq!(
+            NO_VISION,
+            "This model cannot see images, which computer use needs. Pick a vision model."
+        );
+    }
 }

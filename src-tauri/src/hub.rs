@@ -113,6 +113,9 @@ pub struct HardwareDto {
     pub ram_available_bytes: Option<u64>,
     pub usable_bytes: u64,
     pub backend: Option<String>,
+    /// A Mac with an Intel processor: models run on the CPU there (see `detect`), which
+    /// the first-run screen says in those words instead of "no supported GPU found".
+    pub intel_mac: bool,
 }
 
 async fn detect(state: &AppState) -> (Target, HardwareDto) {
@@ -174,10 +177,25 @@ async fn detect(state: &AppState) -> (Target, HardwareDto) {
                 ram_available_bytes: ram.map(|m| m.available_bytes),
                 usable_bytes: usable,
                 backend: Some(b.kind.as_str().to_string()),
+                intel_mac: false,
             },
         );
     }
-    let usable = ram_free.saturating_sub(models::fit::RAM_RESERVE_BYTES);
+    cpu_hardware(
+        ram.map(|m| m.total_bytes),
+        ram.map(|m| m.available_bytes),
+        crate::runtime_manager::auto_prefers_cpu(),
+    )
+}
+
+/// What is reported when models run on the CPU: no usable GPU, or a Mac with an Intel
+/// processor (`intel_mac`), where the CPU is used even though there is one.
+fn cpu_hardware(
+    ram_total: Option<u64>,
+    ram_available: Option<u64>,
+    intel_mac: bool,
+) -> (Target, HardwareDto) {
+    let ram_free = ram_available.unwrap_or(0);
     (
         Target::Cpu {
             ram_free_bytes: ram_free,
@@ -186,10 +204,11 @@ async fn detect(state: &AppState) -> (Target, HardwareDto) {
             target: "cpu".into(),
             gpu_name: None,
             gpu_free_bytes: None,
-            ram_total_bytes: ram.map(|m| m.total_bytes),
-            ram_available_bytes: ram.map(|m| m.available_bytes),
-            usable_bytes: usable,
+            ram_total_bytes: ram_total,
+            ram_available_bytes: ram_available,
+            usable_bytes: ram_free.saturating_sub(models::fit::RAM_RESERVE_BYTES),
             backend: Some("cpu".into()),
+            intel_mac,
         },
     )
 }
@@ -1043,4 +1062,33 @@ pub async fn refresh_catalog(app: AppHandle, state: State<'_, AppState>) -> AppR
     };
     state.store.set_setting(SETTING_CATALOG, &json).await?;
     Ok(catalog.sequence)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first-run screen reads `intelMac` to say "Intel Mac: models run on the
+    /// processor" instead of "No supported GPU found".
+    #[test]
+    fn cpu_hardware_says_when_it_is_an_intel_mac() {
+        let gb = 1_000_000_000u64;
+        let (target, dto) = cpu_hardware(Some(16 * gb), Some(12 * gb), true);
+        assert!(matches!(target, Target::Cpu { ram_free_bytes } if ram_free_bytes == 12 * gb));
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["target"], "cpu");
+        assert_eq!(json["intelMac"], true);
+        assert_eq!(json["backend"], "cpu");
+        assert_eq!(json["ramAvailableBytes"], 12 * gb);
+        assert_eq!(
+            dto.usable_bytes,
+            12 * gb - models::fit::RAM_RESERVE_BYTES.min(12 * gb)
+        );
+
+        // Any other computer without a usable GPU, and one whose memory could not be read.
+        let (_, other) = cpu_hardware(None, None, false);
+        assert!(!other.intel_mac);
+        assert_eq!(other.usable_bytes, 0);
+        assert_eq!(serde_json::to_value(&other).unwrap()["intelMac"], false);
+    }
 }

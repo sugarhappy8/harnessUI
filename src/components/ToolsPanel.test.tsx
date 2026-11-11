@@ -24,6 +24,7 @@ const ipcMock = vi.hoisted(() => ({
   setChatWorkingFolder: vi.fn<(chatId: number, path: string | null) => Promise<void>>(async () => undefined),
   unloadSkill: vi.fn<(chatId: number, name: string) => Promise<void>>(async () => undefined),
   clearChatGrants: vi.fn(async () => undefined),
+  setChatTools: vi.fn<(chatId: number, enabled: string[]) => Promise<void>>(async () => undefined),
   getChat: vi.fn(async () => {
     throw new Error("not used");
   }),
@@ -188,7 +189,7 @@ describe("ToolsPanel: the Browser group", () => {
   });
 
   it("keeps another group's per-tool reason on the tool", async () => {
-    const why = "set up computer use for this model first (Settings → Computer use)";
+    const why = "This model cannot see images, which computer use needs. Pick a vision model.";
     ipcMock.listChatTools.mockImplementation(async () => [
       tool("computer", "computer_screenshot", { available: false, schemaError: why }),
       tool("computer", "computer_click", { available: false, schemaError: why }),
@@ -208,5 +209,42 @@ describe("ToolsPanel: the Browser group", () => {
       view.rerender(<ToolsPanel chatId={CHAT} nCtx={8192} />);
     });
     expect(ipcMock.listChatTools.mock.calls.length).toBe(before + 1);
+  });
+});
+
+describe("ToolsPanel: the Subagents group", () => {
+  const NOTE =
+    "Lets the model hand a task to a helper that works in its own context with the same tools and the same approvals.";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listApprovedFolders.mockImplementation(async () => []);
+    ipcMock.loadedSkills.mockImplementation(async () => []);
+  });
+  afterEach(cleanup);
+
+  it("is named, explained in one line, listed last and off until it is switched on", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file", { enabledInChat: true }),
+      tool("subagents", "run_subagent"),
+      tool("browser", "browser_navigate"),
+    ]);
+    await openPanel();
+    expect(screen.getAllByText(NOTE)).toHaveLength(1);
+    const titles = [...document.querySelectorAll("section > label")].map((l) => l.textContent?.trim());
+    expect(titles).toEqual(["Files", "Browser", "Subagents"]);
+    const group = screen.getByText("Subagents").closest("label")!.querySelector("input")!;
+    expect(group.checked).toBe(false);
+    expect(screen.getByTitle("Tools for this chat").textContent).toContain("Tools (1)");
+    await act(async () => {
+      fireEvent.click(group);
+    });
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT, ["read_file", "run_subagent"]);
+  });
+
+  it("does not add its note to other groups", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [tool("files", "read_file", { enabledInChat: true })]);
+    await openPanel();
+    expect(screen.queryByText(NOTE)).toBeNull();
   });
 });

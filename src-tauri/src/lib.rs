@@ -28,6 +28,7 @@ mod runtime_manager;
 mod settings;
 mod skills_cmd;
 mod state;
+mod subagent;
 mod toolset;
 mod turns;
 mod updates;

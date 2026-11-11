@@ -43,6 +43,7 @@ function base(pick: string | null, suggestions: CatalogSuggestion[]): FirstRunIn
       ramAvailableBytes: 12e9,
       usableBytes: 12e9,
       backend: null,
+      intelMac: false,
     },
     pick,
     suggestions,
@@ -70,5 +71,35 @@ describe("FirstRun preselection", () => {
     const radios = screen.getAllByRole("radio") as HTMLInputElement[];
     expect(radios.map((r) => r.checked)).toEqual([false, true]);
     expect(screen.getByRole("button", { name: "Download tested-one" })).toBeTruthy();
+  });
+});
+
+describe("FirstRun hardware line", () => {
+  afterEach(cleanup);
+
+  it("says an Intel Mac runs models on the processor", async () => {
+    info = base(null, [suggestion("small", false)]);
+    info.hardware = { ...info.hardware, backend: "cpu", intelMac: true };
+    await show();
+    expect(screen.getByText("Intel Mac: models run on the processor, with 12.0 GB of free memory.")).toBeTruthy();
+    expect(screen.queryByText(/No supported GPU/)).toBeNull();
+  });
+
+  it("keeps the other lines as they were", async () => {
+    info = base(null, [suggestion("small", false)]);
+    await show();
+    expect(
+      screen.getByText("No supported GPU found; models will run on the CPU with 12.0 GB of free memory."),
+    ).toBeTruthy();
+    cleanup();
+
+    info.hardware = { ...info.hardware, target: "apple", gpuName: "Apple M2", usableBytes: 10e9, backend: "metal" };
+    await show();
+    expect(screen.getByText("Apple silicon; the GPU can use about 10.0 GB.")).toBeTruthy();
+    cleanup();
+
+    info.hardware = { ...info.hardware, target: "gpu", gpuName: "Radeon RX", gpuFreeBytes: 15e9, backend: "vulkan" };
+    await show();
+    expect(screen.getByText("Radeon RX with 15.0 GB free (vulkan).")).toBeTruthy();
   });
 });

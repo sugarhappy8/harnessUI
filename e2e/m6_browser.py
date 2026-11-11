@@ -62,7 +62,7 @@ def main() -> int:
         names = sorted(n for n in tools if n.startswith("browser_"))
         print("    tools:", names)
         assert len(names) == 10, names
-        assert not any(tools[n]["enabledInChat"] for n in names), "browser starts off (D10)"
+        assert not any(tools[n]["enabledInChat"] for n in names), "browser starts off in a chat with no model (its context is not known)"
         servers = {x["name"]: x for x in s.invoke("list_mcp_servers")}
         assert servers["browser"]["builtin"], servers["browser"]
 

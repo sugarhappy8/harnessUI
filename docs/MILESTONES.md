@@ -212,8 +212,9 @@ How to write a skill: [skills-guide.md](skills-guide.md).
 ## M6 — Browser tool
 
 **Works:** the `browser` tools (navigate, snapshot, find, read text, click, type, fill a
-form, press a key, screenshot, back) drive the agent's own Chrome or Edge window with a
-separate profile in the app's data folder, over a pipe (no listening port) or, as a
+form, press a key, screenshot, back) drive a browser window of the agent's own (Chrome,
+Edge, Brave, Vivaldi or Chromium; on a Mac with none, one downloaded from Settings →
+Browser) with a separate profile in the app's data folder, over a pipe (no listening port) or, as a
 setting, a loopback port. Every document request on every tab and frame is checked in
 the browser itself: `http`/`https` only, and this computer's own addresses (including the
 local model server) and, unless allowed, private networks are blocked, including after
@@ -226,10 +227,11 @@ submissions released or failed, pop-ups, Stop releasing held requests); `e2e/m6_
 checks the integration in the app.
 
 **Manual test — both machines** (a vision model is not required):
-1. Tools panel → switch on Browser. Ask: "Open https://example.com and tell me the page's heading." A navigate card shows the host; allow it. A Chrome window opens (not your own profile: no bookmarks, not signed in); the model reads the heading.
+1. In a new chat the Tools button should already count the ten Browser tools (context of 8,192 or more and a browser installed; otherwise switch on Browser in the Tools panel). Ask: "Open https://example.com and tell me the page's heading." A navigate card shows the host; allow it. A Chrome window opens (not your own profile: no bookmarks, not signed in); the model reads the heading.
 2. Ask it to search something on a site with a search box: typing asks per site; pressing Enter in the search field shows a submission card (D8). Deny: the page does not change.
 3. Ask it to open `http://127.0.0.1:8080` or your router's address: refused without a card (private networks are off by default).
 4. Press Stop while a card is open: the card closes and the held request is cancelled.
+5. Mac without Chrome or Edge (or with them moved away for the test): the Tools panel's Browser group says no browser was found and shows *Set up the browser*. In Settings → Browser, *Download a browser for the agent*: progress, then "Installed (version 157.0.8103.50)". Repeat step 1: a "Google Chrome for Testing" window opens. *Remove* deletes it again. (Not yet run on a real Mac.)
 
 **Known issues:** see CHANGELOG (M6).
 
@@ -249,12 +251,12 @@ re-checks the target app before every event, refuses elevated windows on Windows
 releases every held key and button on Stop, a panic or exit. Grants are per kind of input
 and per application (D7); terminals, system settings and password managers always ask.
 While it acts, a red border and an "AI is controlling this computer" bar with a Stop
-button stay on screen. Settings → Computer use shows the macOS permissions and sets each
-model's coordinate convention.
+button stay on screen. There is no per-model setup: the way a model writes screen
+positions is picked from its name, and Settings → Computer use can override it.
 
 **Manual test — Windows PC** (needs a vision model with known coordinates, e.g. a
 Qwen2.5-VL-based model such as UI-TARS-1.5-7B):
-1. Settings → Computer use → pick the model, choose "Pixels of the image the model saw", tick the confirmation, Save. Tools panel → switch on Computer.
+1. Load the model. Tools panel → switch on Computer (nothing to set up; Settings → Computer use shows "Automatic: pixels of the image the model saw" for a UI-TARS-1.5 model).
 2. Open Notepad. Ask: "Take a screenshot, then click in the Notepad window and type hello." Approve the screenshot card, then the pointer card (it names notepad.exe) and the keyboard card.
 3. While it works the red border and the Stop bar are visible; press Ctrl+Alt+Backspace: everything stops, no key stays pressed.
 4. Ask it to click on harnissUI's own window: refused ("covered by this app's window").
@@ -266,9 +268,10 @@ Qwen2.5-VL-based model such as UI-TARS-1.5-7B):
 3. Put TextEdit in full screen: the border and Stop bar still show on that Space.
 
 **Known issues:** unsigned macOS builds lose the two permissions on every new build (a
-Developer ID fixes that). The automated calibration test of 9.3 is replaced by a
-confirmed per-model convention for now: the app's windows are excluded from screenshots, so
-the model cannot see calibration targets the app draws.
+Developer ID fixes that). The convention is picked from the model's name; for a model the
+app does not know it is a guess (a 0–1000 grid), so if clicks land in the wrong place,
+choose another one in Settings → Computer use. Whether clicks land correctly with real
+models on real hardware has not been tested yet.
 
 **Dependencies:** `image` 0.25 (bicubic resize identical to llama.cpp's, PNG; already in
 the lock through Tauri); `xcap` 0.9 (Windows monitor capture, named in 9.3); `enigo` 0.6
@@ -304,3 +307,33 @@ clients; each crate makes its own HTTP client.
 
 **Dependencies:** `tauri-plugin-updater` (listed in section 18; registered only in builds
 that carry the updater key).
+
+---
+
+## M9 — Works out of the box on more machines (2026-11-11)
+
+Not in the original plan: added at the owner's request after the first test builds.
+
+**Works:**
+- **Browsing without setup.** See M6: Browser on in new chats when it fits, Brave and Vivaldi found, a downloadable browser for Macs without one.
+- **Computer use without setup.** See M7: the convention is picked from the model's name.
+- **Subagents.** *Tools → Subagents* in a chat lets the model hand a task to a helper with its own fresh context, the same tools and the same approvals (cards start with "Subagent:"). One helper at a time; a helper cannot start another; Stop ends it at once; nothing of the helper is stored in the chat except its answer.
+- **One Mac download for Intel and Apple Silicon** (macOS 13.3 or later). Intel Macs run models on the processor by default; Metal can be chosen in Settings → Local models.
+
+Automated: `e2e/scripted_agent.py` check `subagent` (fresh context, the helper's approval card, audit rows, nested call refused, Stop in 0.3 s); unit tests for the browser download's unpacking and checksum, the default-tools rule, the model-name table and the Intel Mac backend choice; a real download of the pinned Mac browser on Linux; CI builds the universal app and runs its Intel half on an Intel Mac runner.
+
+**Manual test — both machines:**
+1. New chat, a tool-capable model. *Tools* → switch on *Subagents*. Ask: "Use a helper to read notes.txt in my folder and tell me only its first line." A `run_subagent` card appears and shows the helper's steps; the read asks with a card that starts with "Subagent:"; the answer comes back into the main chat. *Settings → Audit log* shows both calls.
+2. While a helper is working, press Stop: everything ends at once.
+3. Browser and computer use: the M6 and M7 steps, with nothing set up beforehand.
+
+**Manual test — Intel Mac:** install the same .dmg. *Settings → Diagnostics → Run backend check* lists the CPU first; a model loads and answers (slowly). First run says "Intel Mac: models run on the processor".
+
+**Known issues:**
+- Nothing in this milestone has run on a real Windows PC or Mac: computer use with real models, the browser download through the Mac UI, the Intel build's window, and Brave or Vivaldi being driven are all untested.
+- The downloaded browser does not update itself; a newer one comes with a newer app version (remove and download again). Installing Chrome or Edge avoids this.
+- A helper uses the same model, one request at a time; on the local server its requests replace the cached prompt, so the main chat's next request is slower.
+- An Intel Mac patched to run macOS 13 without AVX2 cannot run the bundled llama.cpp.
+
+**Dependencies:** none new (`zip`, already used for skills, is now also used by the browser crate).
+

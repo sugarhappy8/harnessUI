@@ -2,6 +2,25 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## M9 — Works out of the box on more machines (2026-11-11)
+
+Added at the owner's request after the first test builds: models could not browse or use the computer without setup, and only Apple Silicon Macs could run the app.
+
+### Added
+- **Subagents.** A built-in group "Subagents" (one tool, `run_subagent`), off in new chats and switched on per chat in the Tools panel. The model can hand a self-contained task to a helper that works in a fresh context with the same model and the chat's tools, and returns only its answer. The helper's actions go through the same policy, grants, approval cards (marked "Subagent:") and audit log; it inherits the turn's untrusted-content and recovered-call state; it cannot start another helper; Stop ends it at once; nothing of it is stored in the chat except the result, and its token counts do not reach the chat's context numbers.
+- **A browser of the agent's own on Macs.** With no Chrome, Edge, Brave, Vivaldi or Chromium installed, *Settings → Browser* downloads Google's Chrome for Testing (157.0.8103.50; pinned by size and SHA-256 in `browser.lock.json`, from storage.googleapis.com only) into the app's data folder. Links in the archive are checked to stay inside the folder. An installed Chrome or Edge is preferred.
+- **One Mac download for Intel and Apple Silicon.** CI and releases build a universal app; llama.cpp is built from the pinned commit for both processors and joined; a CI job runs the Intel half on an Intel Mac runner.
+- Brave and Vivaldi are detected on Windows, macOS and Linux.
+- The Tools panel shows why the Browser group cannot work when no browser is found, with *Set up the browser*.
+
+### Changed
+- **Browser tools are on in new chats** when a browser is available and the model's context is at least 8,192 tokens (D10 was "files only"). A chat's own choice and the saved last choice are untouched.
+- **Computer use needs no per-model setup.** The way a model writes screen positions is picked from its name (pixels for the Qwen2.5-VL family such as UI-TARS-1.5, Fara and Holo1.5; a 0–1000 grid for Qwen3-VL, Qwen3.5 and newer Holo; y-first boxes for Gemma; a 0–1000 grid as the guess for unknown models). *Settings → Computer use* shows "Automatic" and lets the user choose another. The confirmation tick box is gone. Computer use is still off in every chat until switched on, and every safeguard is unchanged.
+- **Intel Macs run models on the CPU by default** (llama.cpp's Metal backend is unreliable on Intel graphics); Metal can be chosen by hand. First run says so.
+
+### Known issues
+- None of this has run on a real Windows PC or Mac yet; see docs/MILESTONES.md (M9).
+
 ## Debugging pass (2026-11-11)
 
 The app was driven end to end against a fake model server with scripted replies (text, thinking, tool calls, HTTP errors, dropped streams), which makes the agent loop testable without a model. The script is now `e2e/scripted_agent.py` (16 checks).

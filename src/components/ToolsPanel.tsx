@@ -12,7 +12,17 @@ const SERVER_LABEL: Record<string, string> = {
   skills: "Skills",
   browser: "Browser",
   computer: "Computer",
+  subagents: "Subagents",
 };
+
+/** One line under a group's name, for groups that need a word of explanation. */
+const SERVER_NOTE: Record<string, string> = {
+  subagents:
+    "Lets the model hand a task to a helper that works in its own context with the same tools and the same approvals.",
+};
+
+/** Groups shown after every other group. */
+const LAST_GROUPS = ["subagents"];
 
 /**
  * The tools switched on for this chat (9.3). Only switched-on tools are offered to the
@@ -74,7 +84,8 @@ export function ToolsPanel(props: {
   const groups = useMemo(() => {
     const m = new Map<string, ToolDto[]>();
     for (const t of tools) m.set(t.server, [...(m.get(t.server) ?? []), t]);
-    return [...m.entries()];
+    const all = [...m.entries()];
+    return [...all.filter(([s]) => !LAST_GROUPS.includes(s)), ...all.filter(([s]) => LAST_GROUPS.includes(s))];
   }, [tools]);
 
   async function save(next: string[]) {
@@ -207,6 +218,7 @@ export function ToolsPanel(props: {
                     </span>
                   )}
                 </label>
+                {SERVER_NOTE[server] && <p className="mt-0.5 pl-6 text-xs text-fg-muted">{SERVER_NOTE[server]}</p>}
                 {noBrowser && (
                   <div className="mt-1 pl-6 text-xs">
                     <p className="flex items-start gap-1 text-warning">

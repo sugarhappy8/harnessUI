@@ -289,8 +289,9 @@ export function onAgentBrowserProgress(handler: (p: AgentBrowserProgress) => voi
 
 // Computer use
 export const computerStatus = (modelRef: string | null) => invoke<ComputerStatus>("computer_status", { modelRef });
-export const setComputerProfile = (modelRef: string, convention: Convention, confirmed: boolean) =>
-  invoke<void>("set_computer_profile", { modelRef, convention, confirmed });
+/** Saves the convention chosen for a model; `null` goes back to Automatic. */
+export const setComputerProfile = (modelRef: string, convention: Convention | null) =>
+  invoke<void>("set_computer_profile", { modelRef, convention });
 
 // Git
 export const gitInfo = () => invoke<GitInfo>("git_info");

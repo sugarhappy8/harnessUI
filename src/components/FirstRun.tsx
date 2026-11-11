@@ -16,6 +16,11 @@ function hardwareLine(info: FirstRunInfo): string {
   if (h.target === "apple") {
     return `Apple silicon; the GPU can use about ${formatBytes(h.usableBytes)}.`;
   }
+  // A Mac with an Intel processor: its graphics are unreliable for this, so the processor is
+  // used. Not a missing GPU, so the line does not say one was not found.
+  if (h.intelMac) {
+    return `Intel Mac: models run on the processor, with ${formatBytes(h.ramAvailableBytes)} of free memory.`;
+  }
   return `No supported GPU found; models will run on the CPU with ${formatBytes(h.ramAvailableBytes)} of free memory.`;
 }
 

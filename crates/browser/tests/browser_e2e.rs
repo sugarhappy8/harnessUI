@@ -715,7 +715,9 @@ async fn a_pop_up_is_adopted_and_back_closes_it() {
 }
 
 async fn eventually_async(h: &Harness, f: impl Fn(&str) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Generous: with every test's browser starting at once on a busy machine, a tab can
+    // take well over ten seconds to appear.
+    let deadline = Instant::now() + Duration::from_secs(40);
     loop {
         if let Some(url) = h.server.active_url().await
             && f(&url)

@@ -6,9 +6,13 @@
 //! - An approval is resolved by a random id created in Rust and sent only to the main
 //!   window.
 //! - Every tool call gets one audit row.
+//! - `run_subagent` runs here, not in a tool server: [`AppTools`] starts a helper turn
+//!   (`subagent.rs`) with this chat's tools minus that one, behind a policy gate, an
+//!   approver and an audit trail built for the same chat, so a helper's calls are decided,
+//!   shown and logged exactly like the turn's own.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent::history::{CallRecord, CallStatus, HistoryMessage, Part, ResultRecord};
@@ -366,6 +370,9 @@ struct AppApprover {
     app: AppHandle,
     chat_id: i64,
     cancel: CancellationToken,
+    /// Set for a helper's approver: the id of the `run_subagent` call the helper works
+    /// for. Its cards say they come from a subagent and belong to that call's tool card.
+    helper_of: Option<String>,
 }
 
 /// An always-ask card raised while a call is running (ARCHITECTURE.md 13.3, "Approvals
@@ -392,6 +399,9 @@ pub async fn ask_during_call(
         summary,
         preview,
     } = held;
+    // A navigation held while a helper works in this chat came from the helper: the card
+    // and the audit row say so.
+    let helper = crate::subagent::running_in(chat_id);
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
     if let Ok(mut m) = app.state::<PendingApprovals>().0.lock() {
@@ -409,7 +419,10 @@ pub async fn ask_during_call(
         call_id: String::new(),
         server: server.clone(),
         tool: tool.clone(),
-        summary: summary.clone(),
+        summary: match helper {
+            Some(_) => crate::subagent::card_summary(&summary),
+            None => summary.clone(),
+        },
         preview: preview.clone(),
         card: policy::CardKind::OnceOnly,
         reason: policy::AskReason::AlwaysAsk,
@@ -434,23 +447,24 @@ pub async fn ask_during_call(
         Approval::Cancelled => (store::AuditDecision::Cancelled, "stop", None),
     };
     let state = app.state::<AppState>();
-    let _ = state
-        .store
-        .append_audit(store::AuditEntry {
-            ts: None,
-            chat_id: Some(store::ChatId(chat_id)),
-            server,
-            tool,
-            arguments: json!({ "held": summary }),
-            preview: preview.chars().take(20_000).collect(),
-            risk: "alwaysAsk".into(),
-            decision,
-            decided_by: decided_by.into(),
-            note,
-            parent_audit_id: None,
-            result: None,
-        })
-        .await;
+    let mut entry = store::AuditEntry {
+        ts: None,
+        chat_id: Some(store::ChatId(chat_id)),
+        server,
+        tool,
+        arguments: json!({ "held": summary }),
+        preview: preview.chars().take(20_000).collect(),
+        risk: "alwaysAsk".into(),
+        decision,
+        decided_by: decided_by.into(),
+        note,
+        parent_audit_id: None,
+        result: None,
+    };
+    if let Some(row) = helper {
+        crate::subagent::mark_audit(&mut entry, row);
+    }
+    let _ = state.store.append_audit(entry).await;
     allowed
 }
 
@@ -468,13 +482,20 @@ impl Approver for AppApprover {
                 },
             );
         }
+        let (call_id, summary) = match &self.helper_of {
+            Some(parent_call) => (
+                parent_call.clone(),
+                crate::subagent::card_summary(&req.action.summary),
+            ),
+            None => (req.call_id.clone(), req.action.summary.clone()),
+        };
         let dto = ApprovalDto {
             id: id.clone(),
             chat_id: self.chat_id,
-            call_id: req.call_id.clone(),
+            call_id,
             server: req.action.server.clone(),
             tool: req.tool.clone(),
-            summary: req.action.summary.clone(),
+            summary,
             preview: req.action.preview.clone(),
             card: req.card,
             reason: req.reason,
@@ -516,6 +537,8 @@ struct AppPolicy {
     grants: Arc<Grants>,
     chat_id: i64,
     ready: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    /// What the turn's other pieces need to know about its calls (see [`TurnShared`]).
+    shared: Arc<TurnShared>,
 }
 
 impl AppPolicy {
@@ -528,6 +551,56 @@ impl AppPolicy {
             grants,
             chat_id,
             ready,
+            shared: Arc::default(),
+        }
+    }
+
+    fn sharing(mut self, shared: Arc<TurnShared>) -> Self {
+        self.shared = shared;
+        self
+    }
+}
+
+/// What the pieces of one turn (policy gate, tool host, sink) tell each other. Calls run
+/// one at a time, so "the current call" is well defined.
+#[derive(Default)]
+struct TurnShared {
+    /// Untrusted content has entered the turn (D9), as the loop last told the policy gate.
+    untrusted: AtomicBool,
+    /// The `run_subagent` call being decided was recovered from text (8.3).
+    subagent_recovered: AtomicBool,
+    /// The id of the call being processed.
+    current_call: Mutex<String>,
+    /// The audit row already written for the running `run_subagent` call, by call id. Its
+    /// result is filled in when the call finishes (instead of a second row).
+    open_audit: Mutex<Option<(String, store::AuditId)>>,
+}
+
+impl TurnShared {
+    fn current_call(&self) -> String {
+        self.current_call
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default()
+    }
+
+    /// What a helper started now inherits from the turn.
+    fn inherited(&self) -> crate::subagent::Inherited {
+        crate::subagent::Inherited {
+            untrusted: self.untrusted.load(Ordering::Relaxed),
+            recovered: self.subagent_recovered.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The audit row opened for `call_id`, if any. Taken once.
+    fn take_open_audit(&self, call_id: &str) -> Option<store::AuditId> {
+        let mut open = self.open_audit.lock().ok()?;
+        match open.take() {
+            Some((id, row)) if id == call_id => Some(row),
+            other => {
+                *open = other;
+                None
+            }
         }
     }
 }
@@ -540,6 +613,17 @@ impl PolicyGate for AppPolicy {
         recovered: bool,
         untrusted_in_turn: bool,
     ) -> policy::Decision {
+        // A helper started by this turn starts where the turn is: with untrusted content
+        // already read, and from a call written as text, its actions ask as the turn's
+        // own would (D9, 8.3).
+        if untrusted_in_turn {
+            self.shared.untrusted.store(true, Ordering::Relaxed);
+        }
+        if crate::subagent::is_action(action) {
+            self.shared
+                .subagent_recovered
+                .store(recovered, Ordering::Relaxed);
+        }
         let turn = policy::TurnContext {
             // Only enabled tools are offered; a call to anything else never gets here.
             tool_enabled: true,
@@ -561,6 +645,139 @@ struct AppTools {
     result_cap: Arc<AtomicUsize>,
     prefs: HashMap<String, mcp_host::ToolPrefs>,
     progress: Option<mcp_host::ProgressFn>,
+    /// What `run_subagent` needs to start a helper. `None` in a helper's own tool host: a
+    /// helper cannot start another.
+    helper: Option<HelperSetup>,
+}
+
+/// What a helper takes over from the turn that starts it (see `subagent.rs`).
+struct HelperSetup {
+    app: AppHandle,
+    client: agent::OpenAiClient,
+    sanitizer: agent::Sanitizer,
+    /// The turn's input without its history: system prompt, preamble, skills, model
+    /// capabilities and request template.
+    input: agent::turn::TurnInput,
+    channel: Channel<TurnStreamEvent>,
+    persist: tokio::sync::mpsc::UnboundedSender<Persist>,
+    grants: Arc<Grants>,
+    shared: Arc<TurnShared>,
+}
+
+impl AppTools {
+    /// Runs one `run_subagent` call: a helper turn in the same chat, with the chat's
+    /// tools minus this one, behind the same policy gate, grants, approval cards and
+    /// audit log. `cancel` is the call's token, so Stop ends the helper and whatever it
+    /// is running.
+    async fn run_subagent(
+        &self,
+        setup: &HelperSetup,
+        args: &Map<String, Value>,
+        action: &policy::Action,
+        cancel: CancellationToken,
+    ) -> ToolOutput {
+        let state = setup.app.state::<AppState>();
+        let chat_id = self.chat.chat_id;
+        let call_id = setup.shared.current_call();
+        // The call's audit row is written before the helper starts, so the rows of the
+        // helper's own calls can point at it; its result is filled in when it finishes.
+        let row = state
+            .store
+            .append_audit(store::AuditEntry {
+                ts: None,
+                chat_id: Some(store::ChatId(chat_id)),
+                server: action.server.clone(),
+                tool: action.tool.clone(),
+                arguments: Value::Object(args.clone()),
+                preview: action.preview.chars().take(20_000).collect(),
+                risk: format!("{:?}", action.risk).to_lowercase(),
+                decision: store::AuditDecision::AllowedWithoutPrompt,
+                decided_by: "policy".into(),
+                note: None,
+                parent_audit_id: None,
+                result: None,
+            })
+            .await;
+        let row = match row {
+            Ok(row) => {
+                if let Ok(mut open) = setup.shared.open_audit.lock() {
+                    *open = Some((call_id.clone(), row));
+                }
+                Some(row)
+            }
+            Err(e) => {
+                tracing::error!("could not write the audit log: {e}");
+                None
+            }
+        };
+        let _running = crate::subagent::enter(chat_id, row);
+
+        // The helper's own budget sets its per-result cap; the turn's stays as it is.
+        let result_cap = Arc::new(AtomicUsize::new(self.result_cap.load(Ordering::Relaxed)));
+        let tools = AppTools {
+            host: self.host.clone(),
+            enabled: self
+                .enabled
+                .iter()
+                .filter(|t| !crate::subagent::is_tool(t))
+                .cloned()
+                .collect(),
+            chat: self.chat.clone(),
+            result_cap: result_cap.clone(),
+            prefs: self.prefs.clone(),
+            // The card shows one short line per call of the helper, not each tool's output.
+            progress: None,
+            helper: None,
+        };
+        let ready_host = self.host.clone();
+        let policy = AppPolicy::for_chat(
+            setup.grants.clone(),
+            chat_id,
+            Arc::new(move |tool: &str| ready_host.tool_ready(tool)),
+        );
+        let approver = AppApprover {
+            app: setup.app.clone(),
+            chat_id,
+            cancel: cancel.clone(),
+            helper_of: Some(call_id.clone()),
+        };
+        let mut input = setup.input.clone();
+        // Skills loaded in the chat so far, also during this turn: `load_skill` answers
+        // "already loaded" for them, so their text must be in the helper's system message.
+        input.loaded_skills = state
+            .skills
+            .loaded_in(chat_id)
+            .into_iter()
+            .map(|s| agent::prompt::LoadedSkill {
+                name: s.name.clone(),
+                text: s.body.clone(),
+            })
+            .collect();
+        let channel = setup.channel.clone();
+        let persist = setup.persist.clone();
+        let helper = crate::subagent::Helper {
+            chat_id,
+            client: setup.client.clone(),
+            sanitizer: setup.sanitizer.clone(),
+            tools: Arc::new(tools),
+            policy: Arc::new(policy),
+            approver: Arc::new(approver),
+            input,
+            inherited: setup.shared.inherited(),
+            progress: Arc::new(move |text: String| {
+                let _ = channel.send(TurnStreamEvent::ToolProgress {
+                    call_id: call_id.clone(),
+                    text: text.chars().take(4000).collect(),
+                });
+            }),
+            audit: Arc::new(move |entry: store::AuditEntry| {
+                let _ = persist.send(Persist::Audit(Box::new(entry)));
+            }),
+            parent_audit: row,
+            result_cap,
+        };
+        crate::subagent::run(helper, args, cancel).await
+    }
 }
 
 #[async_trait]
@@ -597,6 +814,16 @@ impl ToolHost for AppTools {
         action: &policy::Action,
         cancel: CancellationToken,
     ) -> ToolOutput {
+        // Built-in names are fixed (an external tool can never hold one), so this is the
+        // app's own tool. It runs here, not in its server: a helper needs the turn's
+        // client, policy gate, approver and sink.
+        if name == crate::subagent::TOOL_NAME {
+            let on = self.enabled.iter().any(crate::subagent::is_tool);
+            return match &self.helper {
+                Some(setup) if on => self.run_subagent(setup, args, action, cancel).await,
+                _ => ToolOutput::error(crate::subagent::NESTED_REFUSAL),
+            };
+        }
         let mut chat = self.chat.clone();
         chat.result_cap_tokens = self.result_cap.load(Ordering::Relaxed);
         self.host
@@ -700,6 +927,8 @@ enum Persist {
     /// The turn was stopped after its last message was stored: mark that message stopped.
     MarkStopped,
     Audit(Box<store::AuditEntry>),
+    /// Fills in the result of an audit row written when its call started.
+    CompleteAudit(store::AuditId, store::AuditResult),
     Summary(String, Vec<i64>),
 }
 
@@ -718,6 +947,7 @@ struct AppSink {
     /// known (see [`ending`]).
     filler: Mutex<Option<(HistoryMessage, MessageUsage)>>,
     deltas: Mutex<DeltaBuffer>,
+    shared: Arc<TurnShared>,
 }
 
 /// True for the "(stopped)" placeholder the agent loop appends when a turn ends without an
@@ -779,6 +1009,62 @@ fn decision_name(d: &CallDecision) -> (&'static str, store::AuditDecision, Optio
         ),
         CallDecision::NotEvaluated => ("not run", store::AuditDecision::RefusedByPolicy, None),
     }
+}
+
+/// The audit row for one finished call (13.7), and the decision as its tool card words it.
+/// Shared by the turn's sink and a helper's (`subagent.rs`), so both write the same rows.
+pub(crate) fn audit_entry(
+    chat_id: i64,
+    arguments: Value,
+    result: &ResultRecord,
+    decision: &CallDecision,
+    action: Option<&policy::Action>,
+    duration_ms: u64,
+) -> (&'static str, store::AuditEntry) {
+    let (mut label, mut audit_decision, note) = decision_name(decision);
+    // Skills and `run_subagent` never prompt (D11): record them as such, not as a grant.
+    if audit_decision == store::AuditDecision::AllowedByGrant
+        && action.is_some_and(|a| a.scope == policy::Scope::Skill)
+    {
+        audit_decision = store::AuditDecision::AllowedWithoutPrompt;
+        label = "no approval needed";
+    }
+    let (server, preview, risk) = match action {
+        Some(a) => (
+            a.server.clone(),
+            a.preview.clone(),
+            format!("{:?}", a.risk).to_lowercase(),
+        ),
+        None => (String::new(), String::new(), "unknown".into()),
+    };
+    let entry = store::AuditEntry {
+        ts: None,
+        chat_id: Some(store::ChatId(chat_id)),
+        server,
+        tool: result.name.clone(),
+        arguments,
+        preview: preview.chars().take(20_000).collect(),
+        risk,
+        decision: audit_decision,
+        decided_by: match decision {
+            CallDecision::AllowedByGrant
+            | CallDecision::Refused { .. }
+            | CallDecision::NotEvaluated => "policy".into(),
+            CallDecision::Cancelled => "stop".into(),
+            _ => "user".into(),
+        },
+        note: note.or_else(|| match &result.status {
+            CallStatus::Denied { note } => note.clone(),
+            _ => None,
+        }),
+        parent_audit_id: None,
+        result: Some(store::AuditResult {
+            status: result.status.label().to_string(),
+            summary: Some(result.text.chars().take(500).collect()),
+            duration_ms: Some(duration_ms),
+        }),
+    };
+    (label, entry)
 }
 
 /// Streamed text not yet sent to the webview.
@@ -913,6 +1199,9 @@ impl TurnSink for AppSink {
                 let _ = self.persist.send(Persist::Message(message, usage));
             }
             TurnEvent::ToolCallStarted { call } => {
+                if let Ok(mut current) = self.shared.current_call.lock() {
+                    current.clone_from(&call.id);
+                }
                 send(TurnStreamEvent::ToolStarted {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
@@ -932,16 +1221,22 @@ impl TurnSink for AppSink {
                 ui,
                 duration_ms,
             } => {
-                let (mut label, mut audit_decision, note) = decision_name(&decision);
-                // Skills never prompt (D11): record them as such, not as a grant.
-                if audit_decision == store::AuditDecision::AllowedByGrant
-                    && action
-                        .as_ref()
-                        .is_some_and(|a| a.scope == policy::Scope::Skill)
-                {
-                    audit_decision = store::AuditDecision::AllowedWithoutPrompt;
-                    label = "no approval needed";
-                }
+                let call = self
+                    .started
+                    .lock()
+                    .ok()
+                    .and_then(|mut s| s.remove(&result.call_id));
+                let arguments = call
+                    .map(|c| Value::Object(c.arguments))
+                    .unwrap_or(Value::Null);
+                let (label, entry) = audit_entry(
+                    self.chat_id,
+                    arguments,
+                    &result,
+                    &decision,
+                    action.as_ref(),
+                    duration_ms,
+                );
                 send(TurnStreamEvent::ToolFinished {
                     call_id: result.call_id.clone(),
                     name: result.name.clone(),
@@ -953,50 +1248,13 @@ impl TurnSink for AppSink {
                     duration_ms,
                     ui,
                 });
-                let call = self
-                    .started
-                    .lock()
-                    .ok()
-                    .and_then(|mut s| s.remove(&result.call_id));
-                let arguments = call
-                    .map(|c| Value::Object(c.arguments))
-                    .unwrap_or(Value::Null);
-                let (server, preview, risk) = match &action {
-                    Some(a) => (
-                        a.server.clone(),
-                        a.preview.clone(),
-                        format!("{:?}", a.risk).to_lowercase(),
-                    ),
-                    None => (String::new(), String::new(), "unknown".into()),
-                };
-                let entry = store::AuditEntry {
-                    ts: None,
-                    chat_id: Some(store::ChatId(self.chat_id)),
-                    server,
-                    tool: result.name.clone(),
-                    arguments,
-                    preview: preview.chars().take(20_000).collect(),
-                    risk,
-                    decision: audit_decision,
-                    decided_by: match decision {
-                        CallDecision::AllowedByGrant
-                        | CallDecision::Refused { .. }
-                        | CallDecision::NotEvaluated => "policy".into(),
-                        CallDecision::Cancelled => "stop".into(),
-                        _ => "user".into(),
-                    },
-                    note: note.or_else(|| match &result.status {
-                        CallStatus::Denied { note } => note.clone(),
-                        _ => None,
-                    }),
-                    parent_audit_id: None,
-                    result: Some(store::AuditResult {
-                        status: result.status.label().to_string(),
-                        summary: Some(result.text.chars().take(500).collect()),
-                        duration_ms: Some(duration_ms),
-                    }),
-                };
-                let _ = self.persist.send(Persist::Audit(Box::new(entry)));
+                // A `run_subagent` call that ran wrote its row when it started: only its
+                // result is filled in now.
+                let opened = self.shared.take_open_audit(&result.call_id);
+                let _ = self.persist.send(match (opened, entry.result.clone()) {
+                    (Some(row), Some(outcome)) => Persist::CompleteAudit(row, outcome),
+                    _ => Persist::Audit(Box::new(entry)),
+                });
             }
             TurnEvent::AppNote { text } => send(TurnStreamEvent::Note { text }),
             TurnEvent::Usage { usage, timings } => {
@@ -1143,6 +1401,15 @@ async fn persist_loop(
                     tracing::error!("could not write the audit log: {e}");
                 }
             }
+            Persist::CompleteAudit(row, outcome) => {
+                if let Err(e) = state
+                    .store
+                    .complete_audit(row, outcome.status, outcome.summary, outcome.duration_ms)
+                    .await
+                {
+                    tracing::error!("could not write the audit log: {e}");
+                }
+            }
             Persist::Summary(text, covered) => {
                 let last = covered.iter().max().copied().unwrap_or(parent.0);
                 let _ = state
@@ -1195,7 +1462,11 @@ pub async fn run(
     // Tools enabled for this chat.
     let host = state.host.clone();
     crate::computer_cmd::prepare_turn(app, chat_id.0, &req.model_ref).await;
-    let enabled = crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
+    let mut enabled =
+        crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
+    // `run_subagent` goes last, so a helper's tool list (the same without it) is a prefix
+    // of the turn's and the model server can reuse more of its cached prompt (8.5).
+    enabled.sort_by_key(crate::subagent::is_tool);
     let mut tool_prefs = HashMap::new();
     for t in &enabled {
         tool_prefs.insert(
@@ -1247,7 +1518,8 @@ pub async fn run(
     };
     let result_cap = Arc::new(AtomicUsize::new(2000));
     let progress_channel = channel.clone();
-    let tools = AppTools {
+    let subagents_on = enabled.iter().any(crate::subagent::is_tool);
+    let mut tools = AppTools {
         host: host.clone(),
         enabled,
         chat: chat_ctx,
@@ -1259,17 +1531,22 @@ pub async fn run(
                 text: text.chars().take(4000).collect(),
             });
         })),
+        // Set below, once the turn's input exists.
+        helper: None,
     };
+    let shared = Arc::new(TurnShared::default());
     let ready_host = host.clone();
     let policy = AppPolicy::for_chat(
         state.grants.clone(),
         chat_id.0,
         Arc::new(move |tool: &str| ready_host.tool_ready(tool)),
-    );
+    )
+    .sharing(shared.clone());
     let approver = AppApprover {
         app: app.clone(),
         chat_id: chat_id.0,
         cancel: cancel.clone(),
+        helper_of: None,
     };
     let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
     let sink = AppSink {
@@ -1283,6 +1560,7 @@ pub async fn run(
         answered: std::sync::atomic::AtomicBool::new(false),
         filler: Mutex::new(None),
         deltas: Mutex::new(DeltaBuffer::default()),
+        shared: shared.clone(),
     };
     let persister = tokio::spawn(persist_loop(
         app.clone(),
@@ -1336,8 +1614,25 @@ pub async fn run(
             text: s.body.clone(),
         })
         .collect();
-    input.summary = latest_summary(&state, chat_id, &path).await;
     let sanitizer = agent::prompt::Sanitizer::for_endpoint(&req.client).await;
+    if subagents_on {
+        // A helper gets the same system prompt, preamble and skills, the same model and
+        // request settings, and none of the chat: no history and no summary.
+        let history = std::mem::take(&mut input.history);
+        let helper_input = input.clone();
+        input.history = history;
+        tools.helper = Some(HelperSetup {
+            app: app.clone(),
+            client: req.client.clone(),
+            sanitizer: sanitizer.clone(),
+            input: helper_input,
+            channel: channel.clone(),
+            persist: sink.persist.clone(),
+            grants: state.grants.clone(),
+            shared: shared.clone(),
+        });
+    }
+    input.summary = latest_summary(&state, chat_id, &path).await;
     let _ = channel.send(TurnStreamEvent::Started {
         user_message_id: req.user_message_id.map(|m| m.0),
     });
@@ -1392,6 +1687,8 @@ pub async fn run(
     }
     sink.flush_deltas();
     crate::computer_cmd::end_turn(app);
+    // The persister ends when every sender is gone: the sink's and the one kept for helpers.
+    drop(tools);
     drop(sink);
     let _ = persister.await;
     let (status, message) = match &outcome.status {
@@ -1707,6 +2004,110 @@ mod tests {
         // Nothing to add leaves no empty entry behind.
         grants.add(9, Vec::new());
         assert!(grants.0.lock().unwrap().get(&9).is_none());
+    }
+
+    fn subagent_action() -> policy::Action {
+        policy::Action {
+            server: crate::subagent::SERVER_NAME.into(),
+            tool: crate::subagent::TOOL_NAME.into(),
+            scope: policy::Scope::Skill,
+            ..action_with(policy::Scope::Skill)
+        }
+    }
+
+    /// The gate tells the rest of the turn what a helper started now must inherit: that
+    /// untrusted content is in the turn (it stays so), and whether the `run_subagent`
+    /// call being decided was recovered from text.
+    #[test]
+    fn the_gate_records_what_a_helper_inherits() {
+        let shared = Arc::new(TurnShared::default());
+        let gate = AppPolicy::for_chat(Arc::new(Grants::default()), 7, Arc::new(|_: &str| true))
+            .sharing(shared.clone());
+        let read = action_with(policy::Scope::FileRead {
+            folder: "/work".into(),
+        });
+        let none = crate::subagent::Inherited::default();
+        assert_eq!(shared.inherited(), none);
+
+        // `run_subagent` itself never asks, recovered or not, untrusted or not.
+        assert_eq!(
+            gate.decide("run_subagent", &subagent_action(), false, false),
+            policy::Decision::AllowedByGrant
+        );
+        assert_eq!(shared.inherited(), none);
+        assert_eq!(
+            gate.decide("run_subagent", &subagent_action(), true, false),
+            policy::Decision::AllowedByGrant
+        );
+        assert!(shared.inherited().recovered);
+        // The next, native, call to it clears that; another tool's call does not set it.
+        gate.decide("read_file", &read, true, false);
+        assert!(shared.inherited().recovered);
+        gate.decide("run_subagent", &subagent_action(), false, false);
+        assert_eq!(shared.inherited(), none);
+        gate.decide("read_file", &read, true, false);
+        assert_eq!(shared.inherited(), none);
+
+        // Untrusted content stays in the turn once the loop has said so.
+        gate.decide("read_file", &read, false, true);
+        gate.decide("read_file", &read, false, false);
+        assert_eq!(
+            shared.inherited(),
+            crate::subagent::Inherited {
+                untrusted: true,
+                recovered: false
+            }
+        );
+    }
+
+    /// `run_subagent` is audited like a skill call: allowed without a prompt, not as a
+    /// grant. Its row is written when the helper starts and matched to the call by id.
+    #[test]
+    fn a_subagent_call_is_audited_as_needing_no_approval() {
+        let call = CallRecord {
+            id: "c9".into(),
+            name: "run_subagent".into(),
+            arguments: serde_json::from_value(json!({"task": "Read it."})).unwrap(),
+            recovered: false,
+        };
+        let mut result = ResultRecord::synthetic(&call, CallStatus::Ok, Vec::new());
+        result.text = "the secret word is heron".into();
+        let (label, entry) = audit_entry(
+            7,
+            Value::Object(call.arguments.clone()),
+            &result,
+            &CallDecision::AllowedByGrant,
+            Some(&subagent_action()),
+            1200,
+        );
+        assert_eq!(label, "no approval needed");
+        assert_eq!(entry.decision, store::AuditDecision::AllowedWithoutPrompt);
+        assert_eq!(entry.server, "subagents");
+        assert_eq!(entry.tool, "run_subagent");
+        assert_eq!(entry.decided_by, "policy");
+        assert_eq!(entry.arguments, json!({"task": "Read it."}));
+        let outcome = entry.result.expect("a result");
+        assert_eq!(outcome.status, "ok");
+        assert_eq!(outcome.summary.as_deref(), Some("the secret word is heron"));
+        // An ordinary grant is still a grant.
+        let (label, entry) = audit_entry(
+            7,
+            Value::Null,
+            &result,
+            &CallDecision::AllowedByGrant,
+            Some(&action_with(policy::Scope::Screenshots)),
+            1,
+        );
+        assert_eq!(label, "allowed by an earlier grant");
+        assert_eq!(entry.decision, store::AuditDecision::AllowedByGrant);
+
+        // The row opened for a call is taken once, and only by that call.
+        let shared = TurnShared::default();
+        assert_eq!(shared.take_open_audit("c9"), None);
+        *shared.open_audit.lock().unwrap() = Some(("c9".into(), store::AuditId(3)));
+        assert_eq!(shared.take_open_audit("other"), None);
+        assert_eq!(shared.take_open_audit("c9"), Some(store::AuditId(3)));
+        assert_eq!(shared.take_open_audit("c9"), None);
     }
 
     /// ARCHITECTURE.md 9.3: the chosen working folder is used only while it is still

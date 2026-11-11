@@ -80,6 +80,45 @@ describe("streamed turn events", () => {
     expect(t.decision).toBe("allowed once");
   });
 
+  it("puts a helper's progress on its own card, and keeps it out of the chat's text and numbers", () => {
+    const finished = { type: "toolFinished", durationMs: 5, ui: null } as const;
+    emit({
+      type: "usage",
+      promptTokens: 900,
+      completionTokens: 20,
+      tokensPerSecond: null,
+      contextUsed: 900,
+      nCtx: 8192,
+    });
+    emit({ type: "toolStarted", callId: "c1", name: "read_file", arguments: { path: "a.txt" }, recovered: false });
+    emit({ ...finished, callId: "c1", name: "read_file", status: "ok", text: "a", decision: "allowed once" });
+    emit({ type: "toolStarted", callId: "c2", name: "run_subagent", arguments: { task: "Read." }, recovered: false });
+    // The helper's lines name the call they belong to.
+    emit({ type: "toolProgress", callId: "c2", text: "read_file notes.txt" });
+    emit({ type: "toolProgress", callId: "c2", text: " — done\n" });
+    emit({ type: "toolProgress", callId: "c2", text: "the secret word is heron\n" });
+    let g = useApp.getState().generation!;
+    expect(g.tools.map((t) => t.name)).toEqual(["read_file", "run_subagent"]);
+    expect(g.tools[0]!.progress).toBe("");
+    expect(g.tools[1]!.progress).toBe("read_file notes.txt — done\nthe secret word is heron\n");
+    expect(g.tools[1]!.status).toBe("running");
+    // Nothing of the helper is the chat's answer text or its context numbers.
+    expect(g.text).toBe("");
+    expect(g.contextUsed).toBe(900);
+    expect(g.promptTokens).toBe(900);
+    emit({
+      ...finished,
+      callId: "c2",
+      name: "run_subagent",
+      status: "ok",
+      text: "the secret word is heron",
+      decision: "no approval needed",
+    });
+    g = useApp.getState().generation!;
+    expect(g.tools[1]!.text).toBe("the secret word is heron");
+    expect(g.tools[1]!.decision).toBe("no approval needed");
+  });
+
   it("drops a discarded attempt's text", () => {
     emit({ type: "content", text: "<tool_call>{" });
     emit({ type: "discarded" });

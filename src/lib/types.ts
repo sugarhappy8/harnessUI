@@ -317,6 +317,8 @@ export interface HardwareInfo {
   /** Memory the fit check compares against. */
   usableBytes: number;
   backend: string | null;
+  /** A Mac with an Intel processor, where models run on the CPU. */
+  intelMac: boolean;
 }
 
 export interface CatalogSuggestion {
@@ -566,7 +568,19 @@ export interface ComputerStatus {
   accessibility: boolean;
   screenRecordingUrl: string;
   accessibilityUrl: string;
-  profile: { profile: { convention: Convention }; confirmed: boolean } | null;
+  /** How the asked-about model writes positions (null when no model was named). */
+  profile: ComputerProfileStatus | null;
+}
+
+export interface ComputerProfileStatus {
+  /** What computer use runs with for this model. */
+  convention: Convention;
+  /** It is the automatic pick; false when the user chose one in Settings. */
+  automatic: boolean;
+  /** What Automatic picks for this model. */
+  autoConvention: Convention;
+  /** The model's name was not recognised, so the automatic pick is a best guess. */
+  autoGuess: boolean;
 }
 
 // ---- Git (M4) ----------------------------------------------------------------------

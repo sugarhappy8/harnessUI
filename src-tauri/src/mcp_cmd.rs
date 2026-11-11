@@ -7,7 +7,8 @@
 //!   again and loses its grants (9.2).
 //! - A new chat starts with the file and skill tools, and with the browser tools when a
 //!   browser is available and the model's context is at least 8,192 tokens (D10 as the
-//!   owner changed it on 2026-11-11). [`Selection`] is the one place that decides this,
+//!   owner changed it on 2026-11-11). Every other built-in group starts off, the Subagents
+//!   group (`run_subagent`) included. [`Selection`] is the one place that decides this,
 //!   for the Tools panel and for the turn.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -759,7 +760,7 @@ async fn chat_tool_list(
         context,
     );
     let mut list = tool_list(state, &selection).await;
-    // Computer use: only for a model that can see, with a confirmed coordinate convention.
+    // Computer use: only for a model that can see images.
     let no_computer = computer_unavailable(state, chat).await;
     for (_, dto) in &mut list {
         let why_not = match dto.server.as_str() {
@@ -837,20 +838,14 @@ async fn remote_context(state: &AppState, model_ref: &str) -> Option<u32> {
     tokens
 }
 
-/// Why the computer tools cannot be offered in this chat, if they cannot.
+/// Why the computer tools cannot be offered in this chat, if they cannot: only a model
+/// that cannot see images. There is nothing to set up per model; the rule and its tests
+/// are in `computer_cmd::unavailable_reason`.
 async fn computer_unavailable(state: &AppState, chat: &store::Chat) -> Option<String> {
     let model = chat.model_ref.as_deref()?;
-    if let Some(path) = model.strip_prefix("local:") {
-        let status = state.runtime.status();
-        let same = status.model_path.as_deref() == Some(path);
-        if same && !status.vision {
-            return Some("this model cannot see images, which computer use needs".into());
-        }
-    }
-    match crate::computer_cmd::profile_for(state, model).await {
-        Some(p) if p.confirmed => None,
-        _ => Some("set up computer use for this model first (Settings → Computer use)".into()),
-    }
+    let status = state.runtime.status();
+    crate::computer_cmd::unavailable_reason(model, status.model_path.as_deref(), status.vision)
+        .map(str::to_string)
 }
 
 async fn tool_list(
@@ -1103,6 +1098,33 @@ mod tests {
                 assert!(!default_on(off, available, context), "{off}");
             }
         }
+    }
+
+    /// The Subagents group is never on by itself, whatever the model and whatever else is
+    /// on by default. Once the user switched it on, that choice is kept like any other.
+    #[test]
+    fn subagents_stay_off_until_the_user_switches_them_on() {
+        let (server, tool) = (crate::subagent::SERVER_NAME, crate::subagent::TOOL_NAME);
+        for (available, context) in [
+            (true, Some(131_072)),
+            (true, Some(8192)),
+            (true, None),
+            (false, Some(32768)),
+        ] {
+            assert!(!default_on(server, available, context));
+            let new_chat = Selection::for_chat(None, None, available, context);
+            assert!(!new_chat.on(tool, server, true));
+            assert!(new_chat.on("read_file", "files", true));
+        }
+        // The last choice in another chat included it: a new chat starts with it.
+        let last = names(&["read_file", tool]);
+        assert!(Selection::for_chat(None, Some(&last), true, Some(8192)).on(tool, server, true));
+        // This chat's own choice without it wins over that.
+        let own = names(&["read_file"]);
+        let chat = Selection::for_chat(Some(&own), Some(&last), true, Some(8192));
+        assert!(!chat.on(tool, server, true));
+        let own = names(&[tool]);
+        assert!(Selection::for_chat(Some(&own), None, true, None).on(tool, server, true));
     }
 
     #[test]

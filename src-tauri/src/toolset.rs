@@ -1,5 +1,5 @@
 //! The tool servers the app runs (ARCHITECTURE.md 9): the MCP host with the built-in
-//! servers (files, terminal, git, skills) and the user's external servers.
+//! servers (files, terminal, git, skills, subagents) and the user's external servers.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,6 +59,8 @@ pub async fn build_host(
     record_backend(&git);
     host.add_builtin(Arc::new(git));
     host.add_builtin(skills);
+    // Lists `run_subagent` (the "Subagents" group, off in a new chat); the turn runs it.
+    host.add_builtin(Arc::new(crate::subagent::SubagentsServer));
     host
 }
 
