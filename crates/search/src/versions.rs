@@ -77,8 +77,20 @@ impl Library {
 
     /// The name people use for it: the last part of a Go module path, else the name.
     pub fn short_name(&self) -> &str {
-        let _ = self;
-        unimplemented!()
+        if self.ecosystem != Ecosystem::Go {
+            return &self.name;
+        }
+        self.name
+            .split('/')
+            .rev()
+            // A trailing "/v5" is the module's major version, not its name.
+            .find(|part| !is_major_suffix(part) && !part.is_empty())
+            .unwrap_or(&self.name)
+    }
+
+    /// The language itself (`node`, `rust`, `python`, `go`), not a package.
+    pub fn is_runtime(&self) -> bool {
+        RUNTIMES.contains(&(self.ecosystem, self.name.as_str()))
     }
 }
 
@@ -99,41 +111,474 @@ pub const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 /// Libraries listed at most.
 pub const MAX_LIBRARIES: usize = 3000;
 
+/// The languages, as they are listed next to the packages.
+const RUNTIMES: &[(Ecosystem, &str)] = &[
+    (Ecosystem::Npm, "node"),
+    (Ecosystem::Cargo, "rust"),
+    (Ecosystem::Pypi, "python"),
+    (Ecosystem::Go, "go"),
+];
+
+/// `v2`, `v15`: the major-version part at the end of a Go module path.
+fn is_major_suffix(part: &str) -> bool {
+    part.strip_prefix('v')
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// A run of at most six digits at the start of `text`, and what follows it. Longer runs
+/// are not version numbers.
+fn digits(text: &str) -> Option<(u64, &str)> {
+    let end = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    if end == 0 || end > 6 {
+        return None;
+    }
+    Some((text[..end].parse().ok()?, &text[end..]))
+}
+
 /// The first version number in `text`: `1.38.2` in `^1.38.2`, `4.2` in `>=4.2,<5`, `18` in
 /// `18.x`, `1.9.1` in `v1.9.1`. `None` when there is none (`*`, `latest`).
 pub fn parse_version(text: &str) -> Option<Version> {
-    let _ = text;
-    unimplemented!()
+    let start = text.find(|c: char| c.is_ascii_digit())?;
+    let (major, rest) = digits(&text[start..])?;
+    let mut version = Version {
+        major,
+        minor: None,
+        patch: None,
+    };
+    let Some((minor, rest)) = rest.strip_prefix('.').and_then(digits) else {
+        return Some(version);
+    };
+    version.minor = Some(minor);
+    if let Some((patch, _)) = rest.strip_prefix('.').and_then(digits) {
+        version.patch = Some(patch);
+    }
+    Some(version)
+}
+
+/// The version of a requirement as text: `18.3.1` for `^18.3.1`. Empty when it has none.
+fn requirement_version(requirement: &str) -> String {
+    match parse_version(requirement) {
+        Some(Version {
+            major,
+            minor: Some(minor),
+            patch: Some(patch),
+        }) => format!("{major}.{minor}.{patch}"),
+        Some(version) => version.label(),
+        None => String::new(),
+    }
+}
+
+/// A library name as it is compared: lower case, `-` for `_` and `.`.
+fn normal(name: &str) -> String {
+    name.trim().to_lowercase().replace(['_', '.'], "-")
+}
+
+fn library(name: &str, version: String, ecosystem: Ecosystem) -> Library {
+    Library {
+        name: name.to_string(),
+        version,
+        ecosystem,
+    }
+}
+
+/// The exact version of each package the lock holds at the top of `node_modules`.
+fn npm_lock_versions(lock: &str) -> std::collections::HashMap<String, String> {
+    let mut versions = std::collections::HashMap::new();
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(lock)
+    else {
+        return versions;
+    };
+    // Lock versions 2 and 3: "packages" keyed by path.
+    if let Some(serde_json::Value::Object(packages)) = root.get("packages") {
+        for (path, entry) in packages {
+            let Some(name) = path.strip_prefix("node_modules/") else {
+                continue;
+            };
+            // Only the project's own level, not a package nested inside another.
+            if name.contains("node_modules/") {
+                continue;
+            }
+            if let Some(version) = entry.get("version").and_then(serde_json::Value::as_str) {
+                versions.insert(name.to_string(), version.to_string());
+            }
+        }
+    }
+    // Lock version 1: "dependencies" keyed by name.
+    if let Some(serde_json::Value::Object(dependencies)) = root.get("dependencies") {
+        for (name, entry) in dependencies {
+            if let Some(version) = entry.get("version").and_then(serde_json::Value::as_str) {
+                versions
+                    .entry(name.clone())
+                    .or_insert_with(|| version.to_string());
+            }
+        }
+    }
+    versions
 }
 
 /// `package.json`, with the text of `package-lock.json` when there is one.
 pub fn parse_package_json(manifest: &str, lock: Option<&str>) -> Vec<Library> {
-    let _ = (manifest, lock);
-    unimplemented!()
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(manifest)
+    else {
+        return Vec::new();
+    };
+    let locked = lock.map(npm_lock_versions).unwrap_or_default();
+    let mut libraries = Vec::new();
+    for table in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        let Some(serde_json::Value::Object(dependencies)) = root.get(table) else {
+            continue;
+        };
+        for (name, requirement) in dependencies {
+            let requirement = requirement.as_str().unwrap_or("");
+            // "npm:real-name@^1.2": installed under another name.
+            let (real, requirement) = match requirement.strip_prefix("npm:") {
+                Some(alias) => match alias.rfind('@').filter(|at| *at > 0) {
+                    Some(at) => (&alias[..at], &alias[at + 1..]),
+                    None => (alias, ""),
+                },
+                None => (name.as_str(), requirement),
+            };
+            // A folder, an archive or a git address has no version to read.
+            let elsewhere = [
+                "file:",
+                "link:",
+                "workspace:",
+                "portal:",
+                "git",
+                "http:",
+                "https:",
+            ]
+            .iter()
+            .any(|prefix| requirement.starts_with(prefix))
+                || requirement.contains('/');
+            let version = match locked.get(name) {
+                Some(exact) => exact.clone(),
+                None if elsewhere => continue,
+                None => requirement_version(requirement),
+            };
+            libraries.push(library(real, version, Ecosystem::Npm));
+        }
+    }
+    if let Some(node) = root
+        .get("engines")
+        .and_then(|e| e.get("node"))
+        .and_then(serde_json::Value::as_str)
+    {
+        let version = requirement_version(node);
+        if !version.is_empty() {
+            libraries.push(library("node", version, Ecosystem::Npm));
+        }
+    }
+    libraries
+}
+
+/// Every version of every package in a `Cargo.lock`.
+fn cargo_lock_versions(lock: &str) -> std::collections::HashMap<String, Vec<String>> {
+    let mut versions: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let Ok(root) = lock.parse::<toml::Table>() else {
+        return versions;
+    };
+    let Some(toml::Value::Array(packages)) = root.get("package") else {
+        return versions;
+    };
+    for package in packages {
+        if let (Some(name), Some(version)) = (
+            package.get("name").and_then(toml::Value::as_str),
+            package.get("version").and_then(toml::Value::as_str),
+        ) {
+            versions
+                .entry(normal(name))
+                .or_default()
+                .push(version.to_string());
+        }
+    }
+    versions
+}
+
+/// Of the locked versions of one crate, the one a requirement asks for: the highest that
+/// starts like the requirement (the same major, and for `0.x` the same minor), else the
+/// highest there is.
+fn pick_locked(locked: &[String], requirement: &str) -> Option<String> {
+    let key = |v: &String| {
+        parse_version(v).map(|p| (p.major, p.minor.unwrap_or(0), p.patch.unwrap_or(0)))
+    };
+    let wanted = parse_version(requirement);
+    let fits = |v: &&String| match (wanted, parse_version(v)) {
+        (Some(want), Some(have)) => {
+            want.major == have.major
+                && (want.major > 0 || want.minor.is_none() || want.minor == have.minor)
+        }
+        _ => false,
+    };
+    locked
+        .iter()
+        .filter(fits)
+        .max_by_key(|v| key(v))
+        .or_else(|| locked.iter().max_by_key(|v| key(v)))
+        .cloned()
 }
 
 /// `Cargo.toml`, with the text of `Cargo.lock` when there is one.
 pub fn parse_cargo(manifest: &str, lock: Option<&str>) -> Vec<Library> {
-    let _ = (manifest, lock);
-    unimplemented!()
+    let Ok(root) = manifest.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let locked = lock.map(cargo_lock_versions).unwrap_or_default();
+    let workspace = root.get("workspace").and_then(toml::Value::as_table);
+    let workspace_dependencies = workspace
+        .and_then(|w| w.get("dependencies"))
+        .and_then(toml::Value::as_table);
+    // (name in the registry, requirement) for one entry of a dependency table.
+    let entry = |name: &str, value: &toml::Value| -> Option<(String, String)> {
+        match value {
+            toml::Value::String(requirement) => Some((name.to_string(), requirement.clone())),
+            toml::Value::Table(table) => {
+                let real = table
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(name)
+                    .to_string();
+                if let Some(requirement) = table.get("version").and_then(toml::Value::as_str) {
+                    return Some((real, requirement.to_string()));
+                }
+                if table.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+                    // The requirement is the workspace's; that table is read as well.
+                    return Some((real, String::new()));
+                }
+                // A path or git dependency: listed only when the lock knows a version.
+                Some((real, String::new()))
+            }
+            _ => None,
+        }
+    };
+    let mut tables: Vec<&toml::Table> = Vec::new();
+    for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(table) = root.get(key).and_then(toml::Value::as_table) {
+            tables.push(table);
+        }
+    }
+    if let Some(targets) = root.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values() {
+            for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                if let Some(table) = target.get(key).and_then(toml::Value::as_table) {
+                    tables.push(table);
+                }
+            }
+        }
+    }
+    // The workspace's own table first, so its requirements are known to the others.
+    let mut requirements: Vec<(String, String)> = Vec::new();
+    for table in workspace_dependencies.into_iter().chain(tables) {
+        for (name, value) in table {
+            let Some((real, requirement)) = entry(name, value) else {
+                continue;
+            };
+            match requirements
+                .iter_mut()
+                .find(|(n, _)| normal(n) == normal(&real))
+            {
+                Some((_, known)) if known.is_empty() => *known = requirement,
+                Some(_) => {}
+                None => requirements.push((real, requirement)),
+            }
+        }
+    }
+    let mut libraries = Vec::new();
+    for (name, requirement) in requirements {
+        let exact = locked
+            .get(&normal(&name))
+            .and_then(|versions| pick_locked(versions, &requirement));
+        let version = match exact {
+            Some(exact) => exact,
+            None if requirement.is_empty() => continue,
+            None => requirement_version(&requirement),
+        };
+        libraries.push(library(&name, version, Ecosystem::Cargo));
+    }
+    let rust_version = root
+        .get("package")
+        .and_then(|p| p.get("rust-version"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            workspace
+                .and_then(|w| w.get("package"))
+                .and_then(|p| p.get("rust-version"))
+                .and_then(toml::Value::as_str)
+        });
+    if let Some(rust) = rust_version
+        .map(requirement_version)
+        .filter(|v| !v.is_empty())
+    {
+        libraries.push(library("rust", rust, Ecosystem::Cargo));
+    }
+    libraries
+}
+
+/// One requirement in the form Python tools write: `Django>=4.2,<5`,
+/// `requests[socks]==2.31.0`, `uvicorn ; python_version < '3.12'`, `pkg @ https://…`.
+fn python_requirement(line: &str) -> Option<Library> {
+    // What follows ";" says when the requirement applies, not which version.
+    let spec = line.split(';').next().unwrap_or("").trim();
+    let end = spec
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        .unwrap_or(spec.len());
+    let name = normal(&spec[..end]);
+    if name.is_empty() || !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let mut rest = spec[end..].trim_start();
+    if let Some(after) = rest.strip_prefix('[') {
+        rest = after.split_once(']').map_or("", |(_, r)| r).trim_start();
+    }
+    // "name @ address": installed from that address, version unknown.
+    let version = if rest.starts_with('@') {
+        String::new()
+    } else {
+        requirement_version(rest)
+    };
+    Some(library(&name, version, Ecosystem::Pypi))
 }
 
 /// `pyproject.toml`: the standard `[project]` tables and Poetry's.
 pub fn parse_pyproject(manifest: &str) -> Vec<Library> {
-    let _ = manifest;
-    unimplemented!()
+    let Ok(root) = manifest.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let mut libraries = Vec::new();
+    let mut python: Option<String> = None;
+    let strings = |value: Option<&toml::Value>, out: &mut Vec<Library>| {
+        if let Some(toml::Value::Array(items)) = value {
+            out.extend(
+                items
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .filter_map(python_requirement),
+            );
+        }
+    };
+    if let Some(project) = root.get("project").and_then(toml::Value::as_table) {
+        strings(project.get("dependencies"), &mut libraries);
+        if let Some(groups) = project
+            .get("optional-dependencies")
+            .and_then(toml::Value::as_table)
+        {
+            for group in groups.values() {
+                strings(Some(group), &mut libraries);
+            }
+        }
+        python = project
+            .get("requires-python")
+            .and_then(toml::Value::as_str)
+            .map(requirement_version);
+    }
+    if let Some(groups) = root
+        .get("dependency-groups")
+        .and_then(toml::Value::as_table)
+    {
+        for group in groups.values() {
+            strings(Some(group), &mut libraries);
+        }
+    }
+    let poetry = root
+        .get("tool")
+        .and_then(|t| t.get("poetry"))
+        .and_then(toml::Value::as_table);
+    let mut poetry_tables: Vec<&toml::Table> = Vec::new();
+    if let Some(poetry) = poetry {
+        for key in ["dependencies", "dev-dependencies"] {
+            if let Some(table) = poetry.get(key).and_then(toml::Value::as_table) {
+                poetry_tables.push(table);
+            }
+        }
+        if let Some(groups) = poetry.get("group").and_then(toml::Value::as_table) {
+            for group in groups.values() {
+                if let Some(table) = group.get("dependencies").and_then(toml::Value::as_table) {
+                    poetry_tables.push(table);
+                }
+            }
+        }
+    }
+    for table in poetry_tables {
+        for (name, value) in table {
+            let requirement = match value {
+                toml::Value::String(requirement) => requirement.as_str(),
+                toml::Value::Table(t) => {
+                    t.get("version").and_then(toml::Value::as_str).unwrap_or("")
+                }
+                _ => "",
+            };
+            if normal(name) == "python" {
+                python.get_or_insert_with(|| requirement_version(requirement));
+            } else {
+                libraries.push(library(
+                    &normal(name),
+                    requirement_version(requirement),
+                    Ecosystem::Pypi,
+                ));
+            }
+        }
+    }
+    if let Some(python) = python.filter(|v| !v.is_empty()) {
+        libraries.push(library("python", python, Ecosystem::Pypi));
+    }
+    libraries
 }
 
 /// `requirements.txt`.
 pub fn parse_requirements(text: &str) -> Vec<Library> {
-    let _ = text;
-    unimplemented!()
+    text.lines()
+        .map(|line| line.split(" #").next().unwrap_or("").trim())
+        // Options (-r, -e, --index-url) and comments name no library.
+        .filter(|line| !line.is_empty() && !line.starts_with(['#', '-']))
+        // "--hash=…" after a requirement is not part of it.
+        .map(|line| line.split(" --").next().unwrap_or(""))
+        .filter_map(python_requirement)
+        .collect()
 }
 
 /// `go.mod`: the modules it requires directly.
 pub fn parse_go_mod(text: &str) -> Vec<Library> {
-    let _ = text;
-    unimplemented!()
+    let mut libraries = Vec::new();
+    let mut in_block = false;
+    let require = |line: &str, out: &mut Vec<Library>| {
+        if line.contains("// indirect") {
+            return;
+        }
+        let mut parts = line.split_whitespace();
+        if let (Some(module), Some(version)) = (parts.next(), parts.next()) {
+            let version = requirement_version(version);
+            if !version.is_empty() && module.contains('.') {
+                out.push(library(module, version, Ecosystem::Go));
+            }
+        }
+    };
+    for line in text.lines().map(str::trim) {
+        if in_block {
+            if line.starts_with(')') {
+                in_block = false;
+            } else {
+                require(line, &mut libraries);
+            }
+        } else if line == "require (" || line == "require(" {
+            in_block = true;
+        } else if let Some(one) = line.strip_prefix("require ") {
+            require(one, &mut libraries);
+        } else if let Some(go) = line.strip_prefix("go ") {
+            let version = requirement_version(go);
+            if !version.is_empty() {
+                libraries.push(library("go", version, Ecosystem::Go));
+            }
+        }
+    }
+    libraries
 }
 
 /// The project's libraries, from whatever manifests `read` can give. `read` gets a file
@@ -141,8 +586,37 @@ pub fn parse_go_mod(text: &str) -> Vec<Library> {
 /// may not be read. A manifest that does not parse is skipped. The result is sorted and
 /// has each library once.
 pub fn from_manifests(read: &dyn Fn(&str) -> Option<String>) -> Vec<Library> {
-    let _ = read;
-    unimplemented!()
+    let mut libraries = Vec::new();
+    if let Some(manifest) = read("package.json") {
+        let lock = read("package-lock.json");
+        libraries.extend(parse_package_json(&manifest, lock.as_deref()));
+    }
+    if let Some(manifest) = read("Cargo.toml") {
+        let lock = read("Cargo.lock");
+        libraries.extend(parse_cargo(&manifest, lock.as_deref()));
+    }
+    if let Some(manifest) = read("pyproject.toml") {
+        libraries.extend(parse_pyproject(&manifest));
+    }
+    if let Some(text) = read("requirements.txt") {
+        libraries.extend(parse_requirements(&text));
+    }
+    if let Some(text) = read("go.mod") {
+        libraries.extend(parse_go_mod(&text));
+    }
+    // Sorted by ecosystem and name; of two entries for one library, the one that knows a
+    // version stays.
+    libraries.sort_by(|a, b| {
+        (a.ecosystem, &a.name, b.version.is_empty()).cmp(&(
+            b.ecosystem,
+            &b.name,
+            a.version.is_empty(),
+        ))
+    });
+    libraries
+        .dedup_by(|later, first| later.ecosystem == first.ecosystem && later.name == first.name);
+    libraries.truncate(MAX_LIBRARIES);
+    libraries
 }
 
 /// [`from_manifests`] over the files directly in `dir`.
@@ -157,19 +631,141 @@ pub fn read_folder(dir: &Path) -> Vec<Library> {
     })
 }
 
+/// Library names that are also everyday words. A question that uses one of them is not
+/// taken to be about the library; the model can still name it.
+const EVERYDAY_WORDS: &[&str] = &[
+    "all",
+    "any",
+    "async",
+    "base",
+    "build",
+    "bytes",
+    "cache",
+    "can",
+    "chalk",
+    "click",
+    "clock",
+    "color",
+    "colors",
+    "commander",
+    "config",
+    "core",
+    "data",
+    "date",
+    "debug",
+    "error",
+    "fast",
+    "file",
+    "files",
+    "form",
+    "future",
+    "futures",
+    "get",
+    "glob",
+    "go",
+    "http",
+    "image",
+    "is",
+    "it",
+    "json",
+    "list",
+    "log",
+    "make",
+    "map",
+    "mock",
+    "moment",
+    "ms",
+    "new",
+    "next",
+    "node",
+    "nose",
+    "one",
+    "open",
+    "path",
+    "pillow",
+    "process",
+    "queue",
+    "rand",
+    "random",
+    "regex",
+    "request",
+    "requests",
+    "rich",
+    "run",
+    "set",
+    "six",
+    "string",
+    "test",
+    "that",
+    "this",
+    "time",
+    "tools",
+    "two",
+    "type",
+    "types",
+    "url",
+    "use",
+    "util",
+    "utils",
+    "uuid",
+    "web",
+    "when",
+    "which",
+    "zip",
+];
+
+/// The words of a name or a question as they are compared: lower-case runs of letters and
+/// digits.
+fn name_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
 /// The library called `name`, however it is written: letter case, `-` and `_` do not
 /// matter, and the last part of a Go module path is enough.
 pub fn find_library<'a>(libraries: &'a [Library], name: &str) -> Option<&'a Library> {
-    let _ = (libraries, name);
-    unimplemented!()
+    let wanted = normal(name);
+    if wanted.is_empty() {
+        return None;
+    }
+    libraries
+        .iter()
+        .find(|l| normal(&l.name) == wanted)
+        .or_else(|| libraries.iter().find(|l| normal(l.short_name()) == wanted))
 }
 
 /// The library a question is about, when it names one of the project's as whole words.
 /// Names that are also everyday words ("time", "open", "next") never count: the model has
 /// to pass those as the library. Of several, the longest name wins.
 pub fn mentioned<'a>(libraries: &'a [Library], query: &str) -> Option<&'a Library> {
-    let _ = (libraries, query);
-    unimplemented!()
+    let query = name_words(query);
+    let mut best: Option<(usize, &Library)> = None;
+    for library in libraries {
+        let name = name_words(library.short_name());
+        if name.is_empty() || name.len() > query.len() {
+            continue;
+        }
+        if name.len() == 1 && EVERYDAY_WORDS.contains(&name[0].as_str()) && !library.is_runtime() {
+            continue;
+        }
+        // A language named by an everyday word ("go") is not guessed either.
+        if library.is_runtime() && matches!(library.name.as_str(), "go" | "node") {
+            continue;
+        }
+        if !query
+            .windows(name.len())
+            .any(|window| window == name.as_slice())
+        {
+            continue;
+        }
+        let length: usize = name.iter().map(String::len).sum();
+        if best.is_none_or(|(longest, _)| length > longest) {
+            best = Some((length, library));
+        }
+    }
+    best.map(|(_, library)| library)
 }
 
 #[cfg(test)]
@@ -196,11 +792,13 @@ mod tests {
 
     #[test]
     fn versions_are_read_from_requirement_strings() {
-        let v = |major, minor, patch| Some(Version {
-            major,
-            minor,
-            patch,
-        });
+        let v = |major, minor, patch| {
+            Some(Version {
+                major,
+                minor,
+                patch,
+            })
+        };
         assert_eq!(parse_version("1.38.2"), v(1, Some(38), Some(2)));
         assert_eq!(parse_version("^18.3.1"), v(18, Some(3), Some(1)));
         assert_eq!(parse_version("~2.12"), v(2, Some(12), None));
@@ -215,7 +813,10 @@ mod tests {
         assert_eq!(parse_version(""), None);
         // A number too long to be a version is not one.
         assert_eq!(parse_version("99999999999999999999999"), None);
-        assert_eq!(lib("tokio", "1.38.2", Ecosystem::Cargo).version_label(), "1.38");
+        assert_eq!(
+            lib("tokio", "1.38.2", Ecosystem::Cargo).version_label(),
+            "1.38"
+        );
         assert_eq!(lib("react", "18", Ecosystem::Npm).version_label(), "18");
         assert_eq!(lib("numpy", "", Ecosystem::Pypi).version_label(), "");
     }
@@ -435,7 +1036,10 @@ black = "24.3.0"
         let text = "module example.com/demo\n\ngo 1.22.3\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.9.1\n\tgolang.org/x/sync v0.7.0 // indirect\n\tgopkg.in/yaml.v3 v3.0.1\n)\n\nrequire github.com/spf13/cobra v1.8.0\n\nreplace example.com/x => ../x\n";
         let libs = parse_go_mod(text);
         assert_eq!(get(&libs, "github.com/gin-gonic/gin").version, "1.9.1");
-        assert_eq!(get(&libs, "github.com/gin-gonic/gin").ecosystem, Ecosystem::Go);
+        assert_eq!(
+            get(&libs, "github.com/gin-gonic/gin").ecosystem,
+            Ecosystem::Go
+        );
         assert_eq!(get(&libs, "gopkg.in/yaml.v3").version, "3.0.1");
         assert_eq!(get(&libs, "github.com/spf13/cobra").version, "1.8.0");
         assert_eq!(get(&libs, "go").version, "1.22.3");
@@ -525,7 +1129,10 @@ black = "24.3.0"
         assert_eq!(found("SERDE_JSON"), Some("serde_json"));
         assert_eq!(found("@tauri-apps/api"), Some("@tauri-apps/api"));
         assert_eq!(found("gin"), Some("github.com/gin-gonic/gin"));
-        assert_eq!(found("github.com/gin-gonic/gin"), Some("github.com/gin-gonic/gin"));
+        assert_eq!(
+            found("github.com/gin-gonic/gin"),
+            Some("github.com/gin-gonic/gin")
+        );
         // Named by the model, everyday words count too.
         assert_eq!(found("time"), Some("time"));
         assert_eq!(found("next"), Some("next"));
@@ -544,7 +1151,10 @@ black = "24.3.0"
         assert_eq!(found("react-router loader example"), Some("react-router"));
         assert_eq!(found("serde_json from_str error"), Some("serde_json"));
         assert_eq!(found("serde json pretty print"), Some("serde_json"));
-        assert_eq!(found("gin middleware order"), Some("github.com/gin-gonic/gin"));
+        assert_eq!(
+            found("gin middleware order"),
+            Some("github.com/gin-gonic/gin")
+        );
         assert_eq!(found("python asyncio gather"), Some("python"));
         // Part of another word is not a mention.
         assert_eq!(found("reactive programming"), None);

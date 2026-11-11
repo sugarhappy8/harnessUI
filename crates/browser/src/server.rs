@@ -33,6 +33,9 @@ use crate::snapshot::budget_chars;
 
 /// Told to the model when a tool needs a page and the browser is not open.
 const NOT_OPEN: &str = "The browser is not open yet. Use browser_navigate to open a page first.";
+/// Told to the model when a control's label became one that always asks (pay, delete,
+/// send…) after the action was described: what runs must be what was shown.
+const LABEL_CHANGED: &str = "Refused: that control now says something that always asks the user (it changed since this was described). Describe the action again.";
 /// Told to the model when a reference is unknown.
 const UNKNOWN_REF: &str = "Unknown element reference. References come from the latest browser_snapshot or browser_find of the current page; take a new snapshot.";
 
@@ -97,6 +100,30 @@ fn target_from(p: &Value) -> Option<RefTarget> {
     })
 }
 
+/// What Allow all needs to know about a browser action (0.0.4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Mode {
+    /// The action still asks in Allow all: a control whose label spends money, destroys
+    /// or publishes, or a key sent where nothing can be looked at.
+    keep_asking: Option<policy::KeepAsking>,
+    /// The action can send data to a site: a navigation to another site, typing, a
+    /// submission. It asks once untrusted content has entered the turn.
+    network: bool,
+}
+
+impl Mode {
+    /// An action that stays on the page and sends nothing: reading, an ordinary click.
+    const LOCAL: Mode = Mode {
+        keep_asking: None,
+        network: false,
+    };
+    /// An action that can send data to a site.
+    const SENDS: Mode = Mode {
+        keep_asking: None,
+        network: true,
+    };
+}
+
 #[allow(clippy::too_many_arguments)]
 fn action(
     tool: &str,
@@ -106,6 +133,7 @@ fn action(
     risk: Risk,
     read_only: bool,
     outbound: bool,
+    mode: Mode,
     payload: Value,
 ) -> Described {
     // A frame with no site of its own (a sandboxed or srcdoc frame has the opaque origin
@@ -131,8 +159,8 @@ fn action(
         risk,
         read_only,
         outbound,
-        keep_asking: None,
-        network: false,
+        keep_asking: mode.keep_asking,
+        network: mode.network,
         hard_limit: None,
         payload,
     })
@@ -458,6 +486,9 @@ impl BrowserServer {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        // Allow all: a navigation within the site the tab is on sends nothing anywhere
+        // new; one to another site (or with no page open) can carry data there.
+        let mut same_site = false;
         if let Some(b) = self.running().await {
             let current = {
                 let st = b.lock();
@@ -466,6 +497,7 @@ impl BrowserServer {
                     .and_then(|t| st.main_frame(t))
                     .map(|f| f.origin.clone())
             };
+            same_site = current.as_deref() == Some(origin.as_str()) && origin != "null";
             if let Some(current) = current.filter(|c| c != "null" && *c != origin) {
                 preview.push_str(&format!("\nLeaves the current site {current}."));
             }
@@ -478,6 +510,10 @@ impl BrowserServer {
             Risk::Normal,
             false,
             true,
+            Mode {
+                keep_asking: None,
+                network: !same_site,
+            },
             json!({"url": url.as_str(), "origin": origin}),
         )
     }
@@ -531,6 +567,7 @@ impl BrowserServer {
             Risk::Normal,
             true,
             false,
+            Mode::LOCAL,
             json!({
                 "epoch": b.epoch, "tab": tab, "origin": frame_origin,
                 "session": session, "frame": frame,
@@ -611,7 +648,15 @@ impl BrowserServer {
         payload["origin"] = json!(origin);
         payload["intent"] = json!(intent);
         payload["point"] = json!(point.map(|(x, y)| [x, y]));
-        action(tool, summary, preview, &origin, risk, false, true, payload)
+        // Allow all: a click that may submit sends data; an ordinary click does not. A
+        // control labelled pay, buy, delete, send… asks whatever the mode.
+        let mode = Mode {
+            keep_asking: intent::click_keeps_asking(&info),
+            network: intent.is_some(),
+        };
+        action(
+            tool, summary, preview, &origin, risk, false, true, mode, payload,
+        )
     }
 
     async fn describe_type(&self, tool: &str, args: &Map<String, Value>) -> Described {
@@ -679,7 +724,17 @@ impl BrowserServer {
         payload["text"] = json!(text);
         payload["clear"] = json!(clear);
         payload["intent"] = json!(intent);
-        action(tool, summary, preview, &origin, risk, false, true, payload)
+        // Allow all: typing shows the text to the page. Pressing Enter in a form whose
+        // submit button says pay, order, delete… asks whatever the mode.
+        let mode = Mode {
+            keep_asking: intent
+                .as_ref()
+                .and_then(|_| intent::submit_keeps_asking(&info)),
+            network: true,
+        };
+        action(
+            tool, summary, preview, &origin, risk, false, true, mode, payload,
+        )
     }
 
     async fn describe_fill(&self, tool: &str, args: &Map<String, Value>) -> Described {
@@ -754,6 +809,7 @@ impl BrowserServer {
             Risk::Normal,
             false,
             true,
+            Mode::SENDS,
             json!({"epoch": b.epoch, "tab": tab, "origin": origin, "fields": out_fields}),
         )
     }
@@ -826,6 +882,13 @@ impl BrowserServer {
             }
             None => (Risk::Normal, format!("Press {shown_key} on {host}")),
         };
+        // Allow all: a key that may submit, or that types a character into a field,
+        // sends data.
+        let mode = Mode {
+            keep_asking: intent::key_keeps_asking(key, info),
+            network: intent.is_some()
+                || (press.text.is_some() && info.is_some_and(|i| i.is_editable || i.opaque_frame)),
+        };
         action(
             tool,
             summary,
@@ -834,6 +897,7 @@ impl BrowserServer {
             risk,
             false,
             true,
+            mode,
             json!({
                 "epoch": b.epoch, "tab": tab, "origin": origin, "key": key, "intent": intent,
                 "session": session, "frame": frame,
@@ -870,6 +934,9 @@ impl BrowserServer {
                 }
                 let origin = netpolicy::origin_of(&url).unwrap_or_else(|| "null".into());
                 let host = host_of(&origin);
+                // Allow all: going back within the site sends nothing anywhere new.
+                let current = b.lock().main_frame(&tab).map(|f| f.origin.clone());
+                let same_site = current.as_deref() == Some(origin.as_str()) && origin != "null";
                 action(
                     tool,
                     format!("Go back to {host}"),
@@ -878,6 +945,10 @@ impl BrowserServer {
                     Risk::Normal,
                     false,
                     true,
+                    Mode {
+                        keep_asking: None,
+                        network: !same_site,
+                    },
                     json!({"epoch": b.epoch, "tab": tab, "origin": origin, "entry": entry, "url": url_str}),
                 )
             }
@@ -906,6 +977,7 @@ impl BrowserServer {
                         Risk::Normal,
                         false,
                         false,
+                        Mode::LOCAL,
                         json!({"epoch": b.epoch, "tab": tab, "origin": origin, "close": true, "opener": opener}),
                     ),
                     None => Described::Invalid("There is no earlier page to go back to.".into()),
@@ -1269,6 +1341,9 @@ impl BrowserServer {
                     check_origin(target.session.clone(), target.frame_id.clone()).await?;
                     let (info, _) = b.element_info(&target).await?;
                     self.recheck_intent(b, tool, &info, tab, action)?;
+                    if action.keep_asking.is_none() && intent::click_keeps_asking(&info).is_some() {
+                        return Err(LABEL_CHANGED.into());
+                    }
                     let (x, y) = match p.get("point").and_then(Value::as_array) {
                         Some(pt) if pt.len() == 2 => {
                             let (x, y) = (pt[0].as_f64().unwrap_or(0.0), pt[1].as_f64().unwrap_or(0.0));
@@ -1298,6 +1373,12 @@ impl BrowserServer {
                     let (info, _) = b.element_info(&target).await?;
                     if !info.is_editable {
                         return Err("Refused: that element is no longer a text field. Take a new snapshot.".into());
+                    }
+                    if p.get("intent").is_some_and(|v| !v.is_null())
+                        && action.keep_asking.is_none()
+                        && intent::submit_keeps_asking(&info).is_some()
+                    {
+                        return Err(LABEL_CHANGED.into());
                     }
                     b.type_into(tab, &target, text, clear).await?;
                     mark_typed(b, tab);
@@ -1380,6 +1461,9 @@ impl BrowserServer {
                         || info.is_some_and(|i| i.opaque_frame);
                     if action.risk == Risk::Normal && may_submit {
                         return Err("Refused: the focus moved to something that may submit a form since this was approved. Describe the key press again.".into());
+                    }
+                    if action.keep_asking.is_none() && intent::key_keeps_asking(key, info).is_some() {
+                        return Err(LABEL_CHANGED.into());
                     }
                     let (nav, stop) = seqs(b, tab);
                     b.press(tab, &press).await?;
@@ -1597,6 +1681,7 @@ mod tests {
                 Risk::Normal,
                 read_only,
                 !read_only,
+                Mode::LOCAL,
                 Value::Null,
             ) else {
                 panic!("expected an action");
@@ -1693,6 +1778,7 @@ mod tests {
             Risk::Normal,
             false,
             true,
+            Mode::LOCAL,
             Value::Null,
         ) else {
             panic!("expected an action");

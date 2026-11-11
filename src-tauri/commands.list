@@ -23,6 +23,12 @@ list_providers
 save_provider
 delete_provider
 test_provider
+get_search_settings
+set_search_settings
+set_search_key
+clear_search_key
+test_search
+list_sources
 get_setting
 set_setting
 hardware_info
@@ -78,6 +84,9 @@ set_mcp_tool_pref
 clear_chat_grants
 mcp_server_log
 list_server_tools
+get_tool_selection
+set_tool_selection
+tool_catalog_problems
 list_skills
 import_skill
 set_skill_enabled
@@ -110,3 +119,14 @@ set_git_token
 remove_git_token
 set_git_identity
 minimize_main_window
+list_artifacts
+get_artifact
+save_artifact_version
+rename_artifact
+delete_artifact
+export_artifact
+report_artifact_render
+artifact_isolation
+begin_artifact_check
+finish_artifact_check
+artifact_canary

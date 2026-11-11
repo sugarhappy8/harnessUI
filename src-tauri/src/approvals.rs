@@ -23,10 +23,10 @@
 //!   outside the approved folders or a blocked address stays a denial.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use serde_json::json;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -115,12 +115,79 @@ pub fn modes() -> &'static ApprovalModes {
     &MODES
 }
 
+/// The app, for telling the main window that a mode changed (set once at start).
+static APP: OnceLock<AppHandle> = OnceLock::new();
+
+/// Event to the main window: a chat's mode changed (`Some(chat)`) or every chat's may
+/// have (`None`). The window reads the mode again; the event carries no mode itself.
+const MODE_CHANGED: &str = "approval-mode-changed";
+
+fn tell_window(chat_id: Option<i64>) {
+    if let Some(app) = APP.get() {
+        let _ = app.emit_to(crate::MAIN_WINDOW, MODE_CHANGED, chat_id);
+    }
+}
+
+/// Puts a chat back to asking first. For "Forget everything I allowed in this chat": what
+/// the user allowed there includes Allow all.
+pub fn ask_first(chat_id: i64) {
+    modes().set_chat(chat_id, false);
+    tell_window(Some(chat_id));
+}
+
 /// For the policy gate, on every decision: notes whether untrusted content is in the turn
 /// and says whether the chat is in Allow all right now.
 pub fn for_decision(chat_id: i64, untrusted_in_turn: bool) -> bool {
     let modes = modes();
     modes.note_decision(chat_id, untrusted_in_turn);
     modes.allow_all(chat_id)
+}
+
+/// Whether a navigation the browser holds is let through without a card (13.3, "Approvals
+/// raised during a call"). Only in Allow all, and only what
+/// [`browser::HeldNavigation::released_in_allow_all`] says: a page moving its tab to
+/// another site during a call, while no untrusted content had entered the turn. A held
+/// submission, a background send and anything held outside a call keep their card.
+fn releases(modes: &ApprovalModes, chat_id: i64, held: &browser::HeldNavigation) -> bool {
+    modes.allow_all(chat_id)
+        && held.released_in_allow_all(modes.untrusted_at_last_decision(chat_id))
+}
+
+/// For the browser's approver: `true` when the held navigation is let through by Allow
+/// all. The decision gets its own audit row, like the answers to such cards do.
+pub async fn release_held_navigation(
+    app: &AppHandle,
+    chat_id: i64,
+    held: &browser::HeldNavigation,
+) -> bool {
+    if !releases(modes(), chat_id, held) {
+        return false;
+    }
+    let mut entry = store::AuditEntry {
+        ts: None,
+        chat_id: Some(store::ChatId(chat_id)),
+        server: "browser".into(),
+        tool: held
+            .during_tool
+            .clone()
+            .unwrap_or_else(|| "browser_navigate".into()),
+        arguments: json!({ "held": held.summary }),
+        preview: held.preview.chars().take(20_000).collect(),
+        risk: "alwaysAsk".into(),
+        decision: store::AuditDecision::AllowedByMode,
+        decided_by: "policy".into(),
+        note: None,
+        parent_audit_id: None,
+        result: None,
+    };
+    // A navigation held while a helper works in this chat came from the helper.
+    if let Some(row) = crate::subagent::running_in(chat_id) {
+        crate::subagent::mark_audit(&mut entry, row);
+    }
+    if let Err(e) = app.state::<AppState>().store.append_audit(entry).await {
+        tracing::error!("could not write the audit log: {e}");
+    }
+    true
 }
 
 /// Reads the saved "Allow all in every chat" setting into `modes` (at start).
@@ -138,6 +205,7 @@ async fn load_default_into(store: &store::Store, modes: &ApprovalModes) {
 
 /// Loads the saved default when the app starts.
 pub fn load_default(app: &AppHandle) {
+    let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
     tauri::async_runtime::block_on(load_default_into(&state.store, modes()));
     if modes().default_on() {
@@ -190,6 +258,7 @@ pub async fn set_approval_mode(
     }
     modes().set_chat(chat_id, allow_all);
     tracing::info!(chat_id, allow_all, "approval mode changed by the user");
+    tell_window(Some(chat_id));
     Ok(modes().allow_all(chat_id))
 }
 
@@ -209,6 +278,7 @@ pub async fn set_allow_all_default(
     only_main_window(window.label())?;
     save_default(&state.store, modes(), on).await?;
     tracing::info!(on, "\"Allow all in every chat\" changed by the user");
+    tell_window(None);
     Ok(())
 }
 
@@ -292,6 +362,77 @@ mod tests {
             fresh.allow_all(5),
             "loading an off default switches nothing"
         );
+    }
+
+    /// A navigation the browser holds: let through only in Allow all, only when a page
+    /// moves its tab to another site during a call, and only before untrusted content
+    /// entered the turn. A held submission always keeps its card.
+    #[test]
+    fn allow_all_releases_only_a_move_to_another_site_before_untrusted_content() {
+        let url = url::Url::parse("https://other.example/").unwrap();
+        let held = |kind, tool: Option<&str>| {
+            browser::HeldNavigation::new(kind, "GET", &url, None, true, tool)
+        };
+        let leaves = held(browser::HoldKind::LeavesSite, Some("browser_navigate"));
+        let submits = held(browser::HoldKind::Submission, Some("browser_click"));
+        let modes = ApprovalModes::default();
+
+        // Ask mode: every held navigation gets its card.
+        modes.note_decision(1, false);
+        assert!(!releases(&modes, 1, &leaves));
+
+        modes.set_chat(1, true);
+        assert!(releases(&modes, 1, &leaves));
+        assert!(!releases(&modes, 1, &submits), "a held submission asks");
+        assert!(
+            !releases(&modes, 1, &held(browser::HoldKind::LeavesSite, None)),
+            "outside a call the page acted alone"
+        );
+        // Untrusted content entered the turn before the call in progress was decided.
+        modes.note_decision(1, true);
+        assert!(!releases(&modes, 1, &leaves));
+        // A chat nothing is known about counts as untrusted; another chat's mode is its own.
+        modes.set_chat(2, true);
+        assert!(!releases(&modes, 2, &leaves));
+        modes.note_decision(3, false);
+        assert!(!releases(&modes, 3, &leaves), "chat 3 is in Ask");
+    }
+
+    /// The generic `set_setting` command takes a fixed list of plain preferences. The
+    /// default mode must never be on it: it has its own command, which only the user's
+    /// click in the main window reaches.
+    #[test]
+    fn the_generic_settings_command_cannot_switch_the_default() {
+        let source = include_str!("models_cmd.rs");
+        let start = source
+            .find("const ALLOWED: &[&str] = &[")
+            .expect("the allow-list of set_setting");
+        let list = &source[start..start + source[start..].find("];").expect("its end")];
+        assert!(list.contains("\"theme\""), "this is the list: {list}");
+        assert!(!list.contains(ALLOW_ALL_DEFAULT), "{list}");
+        assert!(!list.to_lowercase().contains("allow_all"), "{list}");
+        assert!(!list.contains("approvals::"), "{list}");
+    }
+
+    /// "Forget everything I allowed in this chat" ends Allow all in that chat, also when
+    /// every chat starts in it.
+    #[test]
+    fn forgetting_what_was_allowed_puts_the_chat_back_to_asking() {
+        // Chat ids of this test alone: `ask_first` works on the app's own modes.
+        const CHAT: i64 = 904_201;
+        const OTHER: i64 = 904_202;
+        modes().set_chat(CHAT, true);
+        modes().set_chat(OTHER, true);
+        ask_first(CHAT);
+        assert!(!modes().allow_all(CHAT));
+        assert!(modes().allow_all(OTHER), "another chat is not touched");
+        modes().set_chat(OTHER, false);
+
+        // With "Allow all in every chat" on, the chat still goes back to asking.
+        let all = ApprovalModes::default();
+        all.set_default(true);
+        all.set_chat(1, false);
+        assert!(!all.allow_all(1) && all.allow_all(2));
     }
 
     #[test]

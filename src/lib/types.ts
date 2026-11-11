@@ -386,8 +386,20 @@ export interface ApprovalRequest {
   summary: string;
   preview: string;
   card: "onceOnly" | "grantable";
-  reason: "normal" | "alwaysAsk" | "recoveredFromText" | "untrustedContentThenOutbound";
+  reason: "normal" | "alwaysAsk" | "recoveredFromText" | "untrustedContentThenOutbound" | "stillAsksInAllowAll";
+  /** Why the action asks whatever the chat's approval mode; null when Allow all would let it through. */
+  keepAsking?: KeepAsking | null;
 }
+
+/** The kinds of action that still ask while a chat is in Allow all. */
+export type KeepAsking =
+  | "delete"
+  | "destroy"
+  | "sensitive"
+  | "publish"
+  | "protectedApp"
+  | "markedDestructive"
+  | "hidden";
 
 export interface ApprovedFolder {
   id: number;
@@ -445,6 +457,16 @@ export interface ToolDto {
   ready: boolean;
   schemaError: string | null;
   tokenEstimate: number;
+  /** Comes along with any other tool (find_tools, call_tool, read_output, update_task): not a switch. */
+  companion: boolean;
+  /** On, and in the list the model gets whatever the next message says. On but not shown: "on request". */
+  shown: boolean;
+}
+
+/** The `toolSelection` setting: choose the tools for each task, and how many a turn shows at most. */
+export interface ToolSelection {
+  auto: boolean;
+  max: number;
 }
 
 export type ServerState =

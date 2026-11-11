@@ -1034,8 +1034,380 @@ def p_step_limit(c, notes):
         s.invoke("set_setting", {"key": "stepsPerTurn", "value": 50})
 
 
+@probe("allow-all")
+def p_allow_all(c, notes):
+    """Owner's request for 0.0.4: "an allow all button so it doesn't ask for approval all the
+    time (deleting any type of file or files still needs approval no matter what, but not
+    code changes or file editing)"."""
+    s = c.s
+    files = ["read_file", "list_dir", "search_files", "write_file", "edit_file", "delete_file"]
+    chat = new_chat(c, tools=[t for t in files if t in c.all_tools])
+    folder = c.work / "allow-all"
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir()
+    a, b, kept = folder / "a.txt", folder / "b.txt", folder / "kept.txt"
+    kept.write_text("keep me\n")
+
+    def call(name, arguments):
+        # A tool that is on but not shown this turn is run through call_tool (tool selection).
+        offered = [t.get("function", {}).get("name") for t in (Fake.requests[-1].get("tools") or [])] if Fake.requests else []
+        if name in offered or "call_tool" not in offered:
+            return {"tool_calls": [{"name": name, "arguments": arguments}]}
+        return {"tool_calls": [{"name": "call_tool", "arguments": {"name": name, "arguments": arguments}}]}
+
+    def card_or_done():
+        s.wait_for(lambda: "Allow once" in s.page_text() or idle(s), 30, "card or done")
+        return "Allow once" in s.page_text()
+
+    def no_card_until_done():
+        time.sleep(0.4)
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            assert "Allow once" not in s.page_text(), "a card was shown in Allow all"
+            if idle(s):
+                return
+            time.sleep(0.2)
+        raise AssertionError("the turn did not finish")
+
+    def click_in_confirmation(label):
+        # The confirmation is the open dialog; a card behind it can carry the same label.
+        time.sleep(0.9)
+        done = s.execute(
+            """
+            const d = document.querySelector('[role=alertdialog][data-state=open]');
+            const b = d && [...d.querySelectorAll('button')].find(x => x.innerText.trim() === arguments[0]);
+            if (b) b.click();
+            return !!b;
+            """,
+            label,
+        )
+        assert done, f"no {label!r} in the confirmation"
+        time.sleep(0.4)
+
+    def mode():
+        return s.invoke("get_approval_mode", {"chatId": chat})
+
+    def audit():
+        return [(r["tool"], r["decision"]) for r in s.invoke("list_audit", {"filter": {"chatId": chat}})]
+
+    try:
+        assert s.invoke("get_allow_all_default") is False, "Allow all in every chat is on in a fresh install"
+        assert mode() is False, "a new chat is not in Ask mode"
+        Fake.queue.append({"content": "ready"})
+        send(s, "hello")
+        wait_idle(s)
+
+        # 1. Ask first (the default): a write shows a card.
+        s.wait_for(lambda: s.execute("return !!document.querySelector('button[aria-label=\"Ask first\"]');"), 10, "the Ask first button")
+        Fake.queue.append(call("write_file", {"path": str(a), "content": "one\n"}))
+        Fake.queue.append({"content": "not written"})
+        send(s, "go on")
+        assert card_or_done(), "a write ran without asking in Ask mode"
+        card = s.page_text()
+        assert "Allow for this chat" in card and "Allow all in this chat" in card, card[-400:]
+        time.sleep(0.9)
+        s.click_button("Deny")
+        wait_idle(s)
+        assert not a.exists(), "a denied write created the file"
+
+        # Only the user's own command switches the mode: the generic settings command cannot.
+        for key in ("allowAllDefault", "approvalMode", "allowAll"):
+            try:
+                s.invoke("set_setting", {"key": key, "value": True})
+                raise AssertionError(f"set_setting accepted {key}")
+            except WebDriverError as e:
+                assert "cannot be changed this way" in str(e), e
+        assert s.invoke("get_allow_all_default") is False and mode() is False
+
+        # 2. The header button asks first, listing what still asks.
+        s.click_button("Ask first")
+        s.wait_text("Allow all in this chat?", 10)
+        dialog = s.execute(
+            "const d = document.querySelector('[role=alertdialog][data-state=open]'); return d ? d.innerText : null;")
+        (OUT / "allow-all-dialog.txt").write_text(dialog or "")
+        s.screenshot(str(OUT / "allow-all-dialog.png"))
+        for needle in ("It still asks before:", "Deleting files or folders", "git push", "Cancel"):
+            assert needle in dialog, (needle, dialog)
+        assert mode() is False, "opening the confirmation switched the mode"
+        click_in_confirmation("Cancel")
+        assert mode() is False, "Cancel switched the mode"
+        s.click_button("Ask first")
+        s.wait_text("Allow all in this chat?", 10)
+        click_in_confirmation("Allow all in this chat")
+        s.wait_for(mode, 10, "the chat in Allow all")
+        s.wait_for(lambda: s.execute("return !!document.querySelector('button[aria-label=\"Allow all\"]');"), 10, "the Allow all button")
+        s.screenshot(str(OUT / "allow-all-on.png"))
+
+        # 3. A write and an edit run with no card, and are audited as allowed by the mode.
+        Fake.queue.append(call("write_file", {"path": str(a), "content": "one\n"}))
+        Fake.queue.append(call("edit_file", {"path": str(a), "old_text": "one", "new_text": "two"}))
+        Fake.queue.append({"content": "written and edited"})
+        send(s, "go on")
+        no_card_until_done()
+        assert a.read_text() == "two\n", a.read_text() if a.exists() else "a.txt was not written"
+        rows = audit()
+        notes.append("audit: " + json.dumps(rows[:4]))
+        assert ("write_file", "allowed_by_mode") in rows and ("edit_file", "allowed_by_mode") in rows, rows
+
+        # 4. A delete still shows a card, with Allow once and Deny only.
+        Fake.queue.append(call("delete_file", {"path": str(kept)}))
+        Fake.queue.append({"content": "kept"})
+        send(s, "go on")
+        assert card_or_done(), "a delete ran without asking in Allow all"
+        card = s.page_text()
+        assert "this still asks" in card and "deletes files" in card, card[-500:]
+        assert "Allow for this chat" not in card and "Allow all in this chat" not in card, card[-500:]
+        s.screenshot(str(OUT / "allow-all-delete-card.png"))
+        time.sleep(0.9)
+        s.click_button("Deny")
+        wait_idle(s)
+        assert kept.read_text() == "keep me\n", "a denied delete removed the file"
+        assert ("delete_file", "denied") in audit(), audit()
+
+        # The audit log in Settings words it for people.
+        s.click_button("Settings")
+        s.click_button("Audit log")
+        s.wait_text("allowed by Allow all", 10)
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.4)
+
+        # 5. Switching back takes one click, and a write asks again.
+        s.click_button("Allow all")
+        s.wait_for(lambda: mode() is False, 10, "the chat back in Ask mode")
+        assert "Allow all in this chat?" not in s.page_text(), "switching back asked for confirmation"
+        Fake.queue.append(call("write_file", {"path": str(b), "content": "three\n"}))
+        Fake.queue.append({"content": "written"})
+        send(s, "go on")
+        assert card_or_done(), "a write ran without asking after switching back"
+
+        # The card's third choice: confirm, and this card is approved and the chat switched.
+        time.sleep(0.9)
+        s.click_button("Allow all in this chat")
+        s.wait_text("Allow all in this chat?", 10)
+        assert not b.exists() and mode() is False, "the card's button acted before the confirmation"
+        click_in_confirmation("Allow all in this chat")
+        wait_idle(s)
+        assert b.read_text() == "three\n"
+        assert mode() is True
+        assert ("write_file", "allow_once") in audit(), audit()
+
+        # "Forget everything I allowed in this chat" ends Allow all in the chat too.
+        s.click_button("Tools")
+        s.wait_text("Forget everything I allowed in this chat", 10)
+        s.click_button("Forget everything I allowed in this chat")
+        s.wait_for(lambda: mode() is False, 10, "the chat back in Ask mode after Forget")
+        s.wait_for(lambda: s.execute("return !!document.querySelector('button[aria-label=\"Ask first\"]');"), 10,
+                   "the Ask first button after Forget")
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.3)
+
+        # "Allow all in every chat" in Settings: asks first, and is a saved setting.
+        s.invoke("set_approval_mode", {"chatId": chat, "allowAll": False})
+        s.click_button("Settings")
+        s.click_button("Permissions")
+        s.wait_text("Allow all in every chat", 10)
+        s.execute("document.querySelector('input[role=switch]').click();")
+        s.wait_text("Allow all in every chat?", 10)
+        assert s.invoke("get_allow_all_default") is False
+        click_in_confirmation("Allow all in every chat")
+        s.wait_for(lambda: s.invoke("get_allow_all_default") is True, 10, "the default switched on")
+        assert mode() is True, "an open chat did not follow the default"
+        assert s.invoke("get_setting", {"key": "allowAllDefault"}) is True
+        s.execute("document.querySelector('input[role=switch]').click();")
+        s.wait_for(lambda: s.invoke("get_allow_all_default") is False, 10, "the default switched off")
+        assert mode() is False, "switching the default off left a chat in Allow all"
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+    finally:
+        s.invoke("set_allow_all_default", {"on": False})
+        s.invoke("set_approval_mode", {"chatId": chat, "allowAll": False})
+
+
+@probe("tool-selection")
+def p_tool_selection(c, notes):
+    """Adaptive tool selection: a turn shows the model a small set of the tools that are on,
+    `find_tools` finds the others and `call_tool` runs them exactly like a direct call (the
+    card and the audit row are the real tool's), a tool that is off stays out of reach, and
+    the list only grows from turn to turn."""
+    s = c.s
+    names = lambda r: [t["function"]["name"] for t in r.get("tools", [])]  # noqa: E731
+    estimate = lambda r: round(len(json.dumps(r.get("tools", []))) / 3.5)  # noqa: E731
+
+    def listing(chat_id):
+        return {t["exposed"]: t for t in s.invoke("list_chat_tools", {"chatId": chat_id})}
+
+    def tool_results(chat_id):
+        return [m["toolResult"] for m in messages(s, chat_id) if m["role"] == "tool"]
+
+    def in_order(earlier, later):
+        rest = iter(later)
+        return all(any(x == y for y in rest) for x in earlier)
+
+    # The catalog covers every built-in tool this app has registered, with examples the
+    # tools' own schemas accept (the unit tests can only build some of the servers).
+    problems = s.invoke("tool_catalog_problems")
+    assert problems == [], "tool catalog: " + json.dumps(problems)
+    assert s.invoke("get_tool_selection") == {"auto": True, "max": 14}
+
+    repo = c.work / "selection-repo"
+    if not repo.exists():
+        repo.mkdir()
+        env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_AUTHOR_NAME="p", GIT_AUTHOR_EMAIL="p@p",
+                   GIT_COMMITTER_NAME="p", GIT_COMMITTER_EMAIL="p@p")
+        for cmd in [["git", "init", "-q", "-b", "main"], ["git", "commit", "-q", "--allow-empty", "-m", "init"]]:
+            subprocess.run(cmd, cwd=repo, check=True, env=env)
+
+    try:
+        # Files, terminal and git on; everything else off.
+        chat = new_chat(c, tools=[])
+        registered = listing(chat)
+        wanted = [n for n, t in registered.items() if t["server"] in ("files", "terminal", "git")]
+        assert len(wanted) == 14, wanted
+        s.invoke("set_chat_tools", {"chatId": chat, "enabled": wanted + ["find_tools", "call_tool"]})
+        tools = listing(chat)
+        companions = [n for n, t in tools.items() if t["companion"]]
+        assert "find_tools" in companions and "call_tool" in companions, companions
+        assert all(tools[n]["enabledInChat"] for n in companions), "a companion is off although tools are on"
+        on = sorted(n for n, t in tools.items() if t["enabledInChat"] and not t["companion"])
+        assert on == sorted(wanted), on
+        assert tools["read_file"]["shown"] and not tools["git_status"]["shown"], (tools["read_file"], tools["git_status"])
+        core = ["list_dir", "read_file", "search_files", "write_file", "edit_file"]
+
+        # 1. A request about a file: the core and the companions, no git tool.
+        Fake.requests.clear()
+        Fake.queue.append({"tool_calls": [{"name": "find_tools", "arguments": {"query": "commit"}}]})
+        Fake.queue.append({"tool_calls": [{"name": "call_tool", "arguments": {"name": "git_status", "arguments": {"repo": str(repo)}}}]})
+        Fake.queue.append({"content": "SELECTION-FIRST-ANSWER"})
+        send(s, "Please read the notes file and tell me what it says")
+        s.wait_for(lambda: "Allow once" in s.page_text() or idle(s), 30, "the approval card of git_status")
+        card = s.page_text()
+        s.screenshot(str(OUT / "tool-selection-card.png"))
+        first = names(Fake.requests[0])
+        notes.append("first request: " + json.dumps(first))
+        for name in core + companions:
+            assert name in first, f"{name} is not in the first request: {first}"
+        assert not any(n.startswith("git_") for n in first), f"a git tool was shown: {first}"
+        assert "run_command" not in first and "delete_file" not in first, first
+        assert len(first) <= 14, first
+        # `find_tools` ran without a card and told the model how to reach git_commit.
+        found = json.dumps(Fake.requests[1]["messages"][-1])
+        assert Fake.requests[1]["messages"][-1]["role"] == "tool" and "git_commit" in found and "call_tool" in found, found[:600]
+        # 2. The card is git_status's own: its name, its server, its summary.
+        assert "Allow once" in card, "call_tool ran git_status without a card: " + card[-400:]
+        assert "git_status · git" in card, "the card does not name the real tool: " + card[-500:]
+        assert "call_tool ·" not in card and "toolfinder" not in card, "the card names call_tool: " + card[-500:]
+        assert "selection-repo" in card, card[-500:]
+        time.sleep(0.9)
+        s.click_button("Allow once")
+        wait_idle(s)
+        reqs = list(Fake.requests)
+        assert len(reqs) == 3, len(reqs)
+        assert all(names(r) == first for r in reqs), "the tool list changed within the turn"
+        results = tool_results(chat)
+        find_text = results[0]["text"]
+        notes.append("find_tools commit: " + find_text.replace("\n", " | "))
+        (OUT / "find_tools-commit.txt").write_text(find_text)
+        assert "git_commit [Git]: " in find_text, find_text
+        assert 'Example arguments: {"message": "Fix the date parser"}' in find_text, find_text
+        assert 'Run it with call_tool: name "git_commit"' in find_text, find_text
+        assert results[1]["status"] == "ok" and "main" in results[1]["text"], results[1]
+        audit = s.invoke("list_audit", {"filter": {"chatId": chat}})
+        rows = [(a["tool"], a["server"], a["decision"]) for a in audit]
+        notes.append("audit: " + json.dumps(rows))
+        assert ("git_status", "git", "allow_once") in rows, rows
+        assert ("find_tools", "toolfinder", "allowed_without_prompt") in rows, rows
+        assert not any(tool == "call_tool" for tool, _, _ in rows), "a call_tool row hides the real tool: " + json.dumps(rows)
+        status_row = [a for a in audit if a["tool"] == "git_status"][0]
+        assert json.loads(json.dumps(status_row["arguments"])) in ({"repo": str(repo)}, json.dumps({"repo": str(repo)})), status_row
+        # Nothing was switched on by finding or calling.
+        after = listing(chat)
+        assert sorted(n for n, t in after.items() if t["enabledInChat"] and not t["companion"]) == sorted(wanted)
+
+        # 3. The next turn shows what was found and used, added to the same list.
+        Fake.requests.clear()
+        Fake.queue.append({"content": "SELECTION-SECOND-ANSWER"})
+        send(s, "thanks")
+        wait_idle(s)
+        second = names(Fake.requests[-1])
+        notes.append("second request: " + json.dumps(second))
+        assert "git_commit" in second and "git_status" in second, f"what was found is not shown: {second}"
+        assert set(first) <= set(second) and in_order(first, second), f"the list did not only grow: {first} then {second}"
+        assert len(second) <= 14, second
+        assert listing(chat)["git_commit"]["shown"], "the Tools panel does not mark a found tool as shown"
+
+        # 4. A tool that is off cannot be reached, and call_tool cannot call itself.
+        target = c.work / "selection-nested.txt"
+        Fake.queue.append({"tool_calls": [{"name": "call_tool", "arguments": {"name": "browser_navigate", "arguments": {"url": "https://example.com"}}}]})
+        Fake.queue.append({"tool_calls": [{"name": "call_tool", "arguments": {"name": "call_tool", "arguments": {
+            "name": "write_file", "arguments": {"path": str(target), "content": "x"}}}}]})
+        Fake.queue.append({"content": "SELECTION-THIRD-ANSWER"})
+        send(s, "try the page anyway")
+        deadline = time.time() + 60
+        while time.time() < deadline and not idle(s):
+            assert "Allow once" not in s.page_text(), "a card was shown for a tool that is off, or for a nested call"
+            time.sleep(0.3)
+        wait_idle(s)
+        refused = tool_results(chat)[-2:]
+        notes.append("refusals: " + json.dumps([r["text"][:160] for r in refused]))
+        assert refused[0]["status"] == "error" and "switched off" in refused[0]["text"], refused[0]
+        assert refused[1]["status"] == "error" and "cannot run call_tool" in refused[1]["text"], refused[1]
+        assert not target.exists(), "a nested call_tool wrote a file"
+        assert not listing(chat)["browser_navigate"]["enabledInChat"], "a call switched the browser on"
+        newest = s.invoke("list_audit", {"filter": {"chatId": chat}})[:2]
+        assert all(a["tool"] == "call_tool" and a["decision"] == "refused_by_policy" for a in newest), newest
+
+        # 5. The Tools panel: marks, the companions in one line, the count of tools that are on.
+        s.click_button("Tools")
+        s.wait_text("Choose tools for each task automatically", 10)
+        time.sleep(0.4)
+        panel = s.page_text()
+        s.screenshot(str(OUT / "tools-panel-selection.png"))
+        assert "on request" in panel and "shown" in panel, panel[-900:]
+        assert "Always included with the tools above" in panel and "find_tools" in panel, panel[-900:]
+        assert "Tools (14)" in panel, "the header does not count the tools that are on"
+        # 6. The switch: off shows every tool that is on, and the finder tools are gone.
+        s.execute("document.querySelector('input[role=switch]').click();")
+        s.wait_for(lambda: s.invoke("get_tool_selection")["auto"] is False, 10, "the setting to be saved")
+        time.sleep(0.4)
+        assert "on request" not in s.page_text(), "a tool is still marked on request with the selection off"
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.3)
+        off = listing(chat)
+        assert not off["find_tools"]["enabledInChat"] and not off["call_tool"]["enabledInChat"], "the finder tools are offered with nothing hidden"
+        Fake.requests.clear()
+        Fake.queue.append({"content": "SELECTION-ALL-ANSWER"})
+        send(s, "hello again")
+        wait_idle(s)
+        everything = names(Fake.requests[-1])
+        notes.append("selection off: " + json.dumps(everything))
+        for name in wanted:
+            assert name in everything, f"{name} is on but was not sent with the selection off"
+        assert "find_tools" not in everything and "call_tool" not in everything, everything
+        notes.append(f"files+terminal+git: {len(everything)} tools, about {estimate(Fake.requests[-1])} tokens, with the selection off; "
+                     f"{len(first)} tools, about {estimate(reqs[0])} tokens, on the first turn with it on")
+
+        # 7. What the default tools of a new chat cost with and without the selection (for the notes).
+        defaults = [n for n, t in registered.items()
+                    if t["server"] in ("files", "skills", "artifacts", "search", "browser") and t["available"]]
+        measured = {}
+        for auto in (False, True):
+            s.invoke("set_tool_selection", {"auto": auto})
+            fresh = new_chat(c, tools=defaults)
+            Fake.requests.clear()
+            Fake.queue.append({"content": "ok"})
+            send(s, "hello")
+            wait_idle(s)
+            measured[auto] = (len(names(Fake.requests[-1])), estimate(Fake.requests[-1]), len(json.dumps(Fake.requests[-1].get("tools", []))))
+            del fresh
+        notes.append(f"default tools of a new chat ({len(defaults)} switches): all sent: {measured[False][0]} tools, {measured[False][2]} characters, "
+                     f"about {measured[False][1]} tokens; chosen: {measured[True][0]} tools, {measured[True][2]} characters, about {measured[True][1]} tokens")
+        assert measured[True][0] < measured[False][0] or measured[False][0] <= 14, measured
+    finally:
+        s.invoke("set_tool_selection", {"auto": True})
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
-          p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit]
+          p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
+          p_tool_selection]
 
 
 def main() -> int:

@@ -220,11 +220,21 @@ export function onStopRequested(handler: () => void): Promise<UnlistenFn> {
 // Agent turns: approvals
 export const resolveApproval = (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) =>
   invoke<void>("resolve_approval", { id, decision, note });
+// Approval modes: Ask first, or Allow all (only these commands change them)
+export const getApprovalMode = (chatId: number) => invoke<boolean>("get_approval_mode", { chatId });
+export const setApprovalMode = (chatId: number, allowAll: boolean) =>
+  invoke<boolean>("set_approval_mode", { chatId, allowAll });
+export const getAllowAllDefault = () => invoke<boolean>("get_allow_all_default");
+export const setAllowAllDefault = (on: boolean) => invoke<void>("set_allow_all_default", { on });
 
 // Tools and MCP servers
 export const listChatTools = (chatId: number) => invoke<ToolDto[]>("list_chat_tools", { chatId });
 export const setChatTools = (chatId: number, enabled: string[]) =>
   invoke<void>("set_chat_tools", { chatId, enabled });
+// Adaptive tool selection: which of the tools that are on a turn shows the model.
+export const getToolSelection = () => invoke<import("./types").ToolSelection>("get_tool_selection");
+export const setToolSelection = (auto: boolean) =>
+  invoke<import("./types").ToolSelection>("set_tool_selection", { auto });
 export const clearChatGrants = (chatId: number) => invoke<void>("clear_chat_grants", { chatId });
 export const listMcpServers = () => invoke<McpServerDto[]>("list_mcp_servers");
 export const previewMcpConfig = (json: string) => invoke<McpImportPreview[]>("preview_mcp_config", { json });
@@ -249,6 +259,11 @@ export function onApprovalRequest(handler: (r: ApprovalRequest) => void): Promis
 
 export function onApprovalClosed(handler: (id: string) => void): Promise<UnlistenFn> {
   return listen<string>("approval-closed", (e) => handler(e.payload));
+}
+
+/** A chat's approval mode changed in the app (null: every chat's may have). */
+export function onApprovalModeChanged(handler: (chatId: number | null) => void): Promise<UnlistenFn> {
+  return listen<number | null>("approval-mode-changed", (e) => handler(e.payload));
 }
 
 export function onMcpChanged(handler: () => void): Promise<UnlistenFn> {

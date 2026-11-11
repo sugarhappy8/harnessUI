@@ -7,6 +7,15 @@ fn main() {
     println!("cargo:rerun-if-changed=commands.list");
     println!("cargo:rerun-if-changed=windows-app-manifest.xml");
 
+    // The diagram library for artifact previews is built into the app from the npm
+    // package (src/artifacts/protocol.rs), so that diagrams are drawn without a network.
+    const MERMAID: &str = "../node_modules/mermaid/dist/mermaid.min.js";
+    println!("cargo:rerun-if-changed={MERMAID}");
+    assert!(
+        std::path::Path::new(MERMAID).is_file(),
+        "{MERMAID} is missing: run npm ci first (the diagram library for artifact previews is built into the app from node_modules)"
+    );
+
     let list = std::fs::read_to_string("commands.list").expect("read commands.list");
     let commands: Vec<&'static str> = list
         .lines()

@@ -299,6 +299,8 @@ CREATE TABLE sources (
     created_at      INTEGER NOT NULL,
     UNIQUE (chat_id, n)
 );
+-- An address is one source in a chat: found again, it keeps its number.
+CREATE UNIQUE INDEX sources_chat_url ON sources(chat_id, url);
 -- [/sources]
 
 -- [task] One task record per chat: goal, constraints, steps, changed files, checks, next action.
@@ -578,5 +580,220 @@ mod tests {
             })
             .expect("row kept");
         assert_eq!(decision, "denied");
+    }
+
+    /// [allow all] Version 2 rebuilds the audit log so it accepts 'allowed_by_mode'. A
+    /// database written by version 1 keeps every row with its id, its result and its
+    /// link to a parent row; the log stays append-only; unknown decisions are still
+    /// refused.
+    #[test]
+    fn the_audit_log_of_a_version_1_database_survives_the_rebuild() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("pragma");
+        conn.pragma_update(None, "recursive_triggers", "ON")
+            .expect("pragma");
+        // A database as version 1 left it, with an audit trail.
+        Migrations(&[Migration { sql: V1 }])
+            .to_latest(&mut conn)
+            .expect("version 1");
+        let insert = "INSERT INTO audit_log (id, ts, chat_id, server, tool, arguments, preview, \
+                      risk, decision, decided_by, note, result_status, result_summary, \
+                      duration_ms, parent_audit_id) VALUES ";
+        for row in [
+            "(1, 100, 7, 'files', 'write_file', '{\"path\":\"a\"}', 'p1', 'normal', 'allow_once', \
+             'user', NULL, 'ok', 'Wrote a', 12, NULL)",
+            "(2, 200, 7, 'browser', 'browser_click', '{}', 'p2', 'alwaysask', 'denied', 'user', \
+             'not this one', 'denied', NULL, NULL, 1)",
+            "(5, 300, NULL, 'files', 'read_file', '{}', 'p5', 'normal', 'allowed_by_grant', \
+             'policy', NULL, NULL, NULL, NULL, NULL)",
+        ] {
+            conn.execute(&format!("{insert}{row}"), [])
+                .expect("a version 1 row");
+        }
+        // Version 1 does not know the new decision.
+        assert!(
+            conn.execute(
+                &format!(
+                    "{insert}(9, 1, 7, 's', 't', '{{}}', 'p', 'normal', 'allowed_by_mode', \
+                     'policy', NULL, NULL, NULL, NULL, NULL)"
+                ),
+                [],
+            )
+            .is_err()
+        );
+
+        MIGRATIONS.to_latest(&mut conn).expect("version 2");
+
+        // id, ts, chat, decision, preview, result status, parent.
+        type Kept = (
+            i64,
+            i64,
+            Option<i64>,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+        );
+        let rows: Vec<Kept> = conn
+            .prepare(
+                "SELECT id, ts, chat_id, decision, preview, result_status, parent_audit_id \
+                 FROM audit_log ORDER BY id",
+            )
+            .expect("prepare")
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    1,
+                    100,
+                    Some(7),
+                    "allow_once".into(),
+                    "p1".into(),
+                    Some("ok".into()),
+                    None
+                ),
+                (
+                    2,
+                    200,
+                    Some(7),
+                    "denied".into(),
+                    "p2".into(),
+                    Some("denied".into()),
+                    Some(1)
+                ),
+                (
+                    5,
+                    300,
+                    None,
+                    "allowed_by_grant".into(),
+                    "p5".into(),
+                    None,
+                    None
+                ),
+            ]
+        );
+        let (note, summary, duration): (Option<String>, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT (SELECT note FROM audit_log WHERE id = 2), result_summary, duration_ms \
+                 FROM audit_log WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("columns");
+        assert_eq!(
+            (note.as_deref(), summary.as_deref(), duration),
+            (Some("not this one"), Some("Wrote a"), Some(12))
+        );
+
+        // The new decision is accepted, with the next free id; an unknown one is not.
+        conn.execute(
+            "INSERT INTO audit_log (ts, chat_id, server, tool, arguments, preview, risk, \
+             decision, decided_by, parent_audit_id) VALUES (400, 7, 'files', 'write_file', '{}', \
+             'p', 'normal', 'allowed_by_mode', 'policy', 5)",
+            [],
+        )
+        .expect("the new decision");
+        assert_eq!(conn.last_insert_rowid(), 6);
+        assert!(
+            conn.execute(
+                "INSERT INTO audit_log (ts, server, tool, arguments, preview, risk, decision, \
+                 decided_by) VALUES (0, 's', 't', '{}', 'p', 'normal', 'allowed_anyway', 'x')",
+                [],
+            )
+            .is_err(),
+            "an unknown decision was stored"
+        );
+
+        // Still append-only: no delete, no rewrite, no replace; a result is filled in once.
+        assert!(
+            conn.execute("DELETE FROM audit_log WHERE id = 1", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE audit_log SET decision = 'allowed_by_mode' WHERE id = 2",
+                []
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "INSERT OR REPLACE INTO audit_log (id, ts, server, tool, arguments, preview, risk, \
+                 decision, decided_by) VALUES (1, 0, 's', 't', '{}', 'p', 'r', 'denied', 'user')",
+                [],
+            )
+            .is_err()
+        );
+        conn.execute("UPDATE audit_log SET result_status = 'ok' WHERE id = 5", [])
+            .expect("the one permitted update");
+        assert!(
+            conn.execute(
+                "UPDATE audit_log SET result_status = 'error' WHERE id = 5",
+                []
+            )
+            .is_err()
+        );
+
+        // The parent link points at the rebuilt table, and is enforced.
+        assert!(
+            conn.execute(
+                "INSERT INTO audit_log (ts, server, tool, arguments, preview, risk, decision, \
+                 decided_by, parent_audit_id) VALUES (0, 's', 't', '{}', 'p', 'r', 'denied', \
+                 'user', 4242)",
+                [],
+            )
+            .is_err(),
+            "a row may not point at a parent that does not exist"
+        );
+        let broken: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .expect("check");
+        assert_eq!(broken, 0);
+        // Nothing of the rebuild is left behind, and the indexes and triggers are back.
+        let names: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE tbl_name LIKE 'audit_log%' ORDER BY name",
+            )
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("names");
+        assert_eq!(
+            names,
+            vec![
+                "audit_log",
+                "audit_log_chat",
+                "audit_log_no_delete",
+                "audit_log_no_rewrite",
+                "audit_log_parent",
+                "audit_log_ts",
+            ]
+        );
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'audit_log'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("sql");
+        assert!(!sql.contains("audit_log_v2"), "{sql}");
     }
 }

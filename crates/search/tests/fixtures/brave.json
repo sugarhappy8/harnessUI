@@ -1,0 +1,67 @@
+{
+  "query": {
+    "original": "tokio spawn_blocking",
+    "show_strict_warning": false,
+    "is_navigational": false,
+    "is_news_breaking": false,
+    "spellcheck_off": true,
+    "country": "us",
+    "bad_results": false,
+    "should_fallback": false,
+    "postal_code": "",
+    "city": "",
+    "header_country": "",
+    "more_results_available": true,
+    "state": ""
+  },
+  "mixed": {
+    "type": "mixed",
+    "main": [
+      { "type": "web", "index": 0, "all": false },
+      { "type": "web", "index": 1, "all": false },
+      { "type": "web", "index": 2, "all": false }
+    ],
+    "top": [],
+    "side": []
+  },
+  "type": "search",
+  "web": {
+    "type": "search",
+    "results": [
+      {
+        "title": "spawn_blocking in tokio::task - Rust",
+        "url": "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html",
+        "is_source_local": false,
+        "is_source_both": false,
+        "description": "Runs the provided closure on a thread where <strong>blocking</strong> is acceptable. In general, issuing a <strong>blocking</strong> call &amp; waiting on it is problematic.",
+        "profile": { "name": "Docs.rs", "url": "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html", "long_name": "docs.rs", "img": "https://imgs.search.brave.com/x/docs.rs" },
+        "language": "en",
+        "family_friendly": true,
+        "type": "search_result",
+        "subtype": "generic",
+        "meta_url": { "scheme": "https", "netloc": "docs.rs", "hostname": "docs.rs", "favicon": "https://imgs.search.brave.com/x", "path": "› tokio  › latest  › tokio  › task  › fn.spawn_blocking.html" }
+      },
+      {
+        "title": "Spawning | <strong>Tokio</strong> - An asynchronous Rust runtime",
+        "url": "https://tokio.rs/tokio/tutorial/spawning",
+        "is_source_local": false,
+        "is_source_both": false,
+        "description": "A <strong>Tokio</strong> task is an asynchronous green thread.",
+        "language": "en",
+        "family_friendly": true,
+        "type": "search_result",
+        "subtype": "generic"
+      },
+      {
+        "title": "No address here",
+        "description": "A result without an address is skipped."
+      },
+      {
+        "title": "Not a web address",
+        "url": "ftp://files.example.com/tokio.tar.gz",
+        "description": "Skipped as well."
+      }
+    ],
+    "family_friendly": true
+  }
+}

@@ -968,6 +968,84 @@ mod tests {
         assert!(!classify(Shell::Posix, "find . -name x -delete").read_only);
     }
 
+    /// The lenient parse is only for the Allow-all classification: it accepts a PowerShell
+    /// double-quoted string that holds nothing to expand, and nothing else that `parse`
+    /// refuses. `classify` still reports what `parse` says.
+    #[test]
+    fn the_lenient_parse_only_adds_plain_double_quoted_strings() {
+        let lenient = |line: &str| match parse_lenient(Shell::PowerShell, line) {
+            Parsed::Plain(c) => Some(c),
+            Parsed::Complex { .. } => None,
+        };
+        let c = lenient("git commit -m \"Fix the build\"").expect("a plain literal");
+        assert_eq!(c[0].args, vec!["commit", "-m", "Fix the build"]);
+        assert!(is_complex(
+            Shell::PowerShell,
+            "git commit -m \"Fix the build\""
+        ));
+        let v = classify(Shell::PowerShell, "git commit -m \"Fix the build\"");
+        assert!(matches!(v.parsed, Parsed::Complex { .. }) && v.always_ask.is_some());
+        assert_eq!((v.keep_asking, v.network), (None, false));
+
+        for line in [
+            "Write-Output \"$x\"",
+            "Write-Output \"a $env:PATH b\"",
+            "Write-Output \"$(Get-Date)\"",
+            "Write-Output \"a`nb\"",
+            "echo $env:PATH",
+            "& notepad x",
+            "Get-Content x > y",
+            "Get-ChildItem | ForEach-Object { $_ }",
+            "Invoke-Expression (Get-Content x)",
+            "Get-ChildItem *.txt",
+            "$a = 1",
+            "Get-Item @args",
+            "\"notepad\" x",
+        ] {
+            assert!(lenient(line).is_none(), "{line:?} must stay complex");
+        }
+        // The bash grammar is not affected.
+        for line in ["echo \"$HOME\"", "ls > out.txt", "ls *.rs"] {
+            assert!(matches!(
+                parse_lenient(Shell::Posix, line),
+                Parsed::Complex { .. }
+            ));
+        }
+        // Single-quoted strings read as before.
+        assert_eq!(
+            plain(Shell::PowerShell, "Select-String 'it''s'")[0].args,
+            vec!["it's"]
+        );
+    }
+
+    /// `classify` carries the Allow-all facts next to the Ask-mode verdict, which they do
+    /// not change.
+    #[test]
+    fn the_verdict_carries_the_allow_all_facts() {
+        let v = classify(Shell::Posix, "rm -rf build");
+        assert!(v.always_ask.is_some());
+        assert_eq!(
+            v.keep_asking.map(|(kind, _)| kind),
+            Some(KeepAsking::Delete)
+        );
+        // A wrapper always asks in Ask mode; in Allow all it asks only for what it wraps.
+        let v = classify(Shell::Posix, "env CI=1 cargo test");
+        assert!(v.always_ask.is_some());
+        assert_eq!((v.keep_asking, v.network), (None, true));
+        // Grantable in Ask mode, and still a delete handed to another program.
+        let v = classify(Shell::Posix, "npx rimraf dist");
+        assert!(v.always_ask.is_none());
+        assert_eq!(
+            v.keep_asking.map(|(kind, _)| kind),
+            Some(KeepAsking::Delete)
+        );
+        let v = classify(Shell::Posix, "cargo test");
+        assert!(v.always_ask.is_none() && !v.read_only);
+        assert_eq!((v.keep_asking, v.network), (None, false));
+        let v = classify(Shell::Posix, "curl https://example.com");
+        assert_eq!((v.keep_asking, v.network), (None, true));
+    }
+
     #[test]
     fn program_names() {
         assert_eq!(program_name("C:\\Windows\\System32\\cmd.exe"), "cmd");

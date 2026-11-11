@@ -1,0 +1,809 @@
+//! The selection as a pure function: which groups a request is about, and which tools a
+//! turn shows.
+
+use std::collections::BTreeSet;
+
+use agent::history::{CallRecord, HistoryMessage, Part};
+use serde_json::json;
+
+use super::*;
+use crate::tool_catalog;
+
+/// Built-in tools as the selection sees them, in the order the app registers their
+/// servers: the given groups' tools, from the catalog.
+fn on(groups: &[&str]) -> Vec<Candidate> {
+    tool_catalog::ENTRIES
+        .iter()
+        .filter(|e| groups.contains(&e.group))
+        .map(|e| Candidate {
+            name: e.name.to_string(),
+            server: e.group.to_string(),
+            description: e.purpose.to_string(),
+            builtin: true,
+        })
+        .collect()
+}
+
+/// What a new chat has on: files, the browser, artifacts, search, and the companions.
+fn default_set() -> Vec<Candidate> {
+    on(&[
+        "files",
+        "browser",
+        "artifacts",
+        "search",
+        "toolfinder",
+        "outputs",
+        "task",
+    ])
+}
+
+fn external(server: &str, tool: &str, description: &str) -> Candidate {
+    Candidate {
+        name: format!("{server}__{tool}"),
+        server: server.to_string(),
+        description: description.to_string(),
+        builtin: false,
+    }
+}
+
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+fn texts(list: &[&str]) -> Vec<String> {
+    names(list)
+}
+
+fn pick(
+    tools: &[Candidate],
+    messages: &[&str],
+    shown: &[String],
+    wanted: &[String],
+) -> Vec<String> {
+    let messages = texts(messages);
+    select(&Selecting {
+        tools,
+        messages: &messages,
+        shown,
+        wanted,
+        skills: &[],
+        skill_loaded: false,
+        max: DEFAULT_MAX,
+    })
+}
+
+const BASE: &[&str] = &[
+    "list_dir",
+    "read_file",
+    "search_files",
+    "write_file",
+    "edit_file",
+    "find_tools",
+    "call_tool",
+    "read_output",
+    "update_task",
+];
+
+/// `earlier` in order, possibly with other names in between, inside `later`.
+fn is_subsequence(earlier: &[String], later: &[String]) -> bool {
+    let mut rest = later.iter();
+    earlier.iter().all(|name| rest.any(|l| l == name))
+}
+
+// ---- words --------------------------------------------------------------------------------
+
+#[test]
+fn a_keyword_matches_its_plural_and_its_ing_and_ed_forms() {
+    for (text, keyword) in [
+        ("two commits", "commit"),
+        ("committing now", "commit"),
+        ("it was committed", "commit"),
+        ("list the branches", "branch"),
+        ("both repositories", "repository"),
+        ("installing it", "install"),
+        ("is it running", "run"),
+        ("they merged it", "merge"),
+        ("it compiled", "compile"),
+        ("three pages", "page"),
+        ("the tests", "test"),
+        ("keep searching", "search"),
+        ("a drawing", "draw"),
+        ("two websites", "website"),
+        ("Commit THIS", "commit"),
+        ("git_commit", "commit"),
+        ("see https://example.com/x", "https"),
+        ("please look up the docs", "look up"),
+        ("click on OK", "click on"),
+    ] {
+        assert!(
+            Wording::of(text).has(keyword),
+            "\"{text}\" should match {keyword}"
+        );
+    }
+    for (text, keyword) in [
+        ("a commitment", "commit"),
+        ("too pushy", "push"),
+        ("the testament", "test"),
+        ("gitter chat", "git"),
+        ("the outlook upgrade", "look up"),
+        ("nothing here", "commit"),
+        ("", "commit"),
+    ] {
+        assert!(
+            !Wording::of(text).has(keyword),
+            "\"{text}\" should not match {keyword}"
+        );
+    }
+}
+
+// ---- groups -------------------------------------------------------------------------------
+
+/// The groups a request is about: a table of messages and what they must match. Every
+/// built-in tool that is not always shown takes part, so a message that should match
+/// nothing proves that no group's words are too loose.
+#[test]
+fn requests_match_the_groups_they_are_about() {
+    let all: Vec<Candidate> = on(&[
+        "files",
+        "terminal",
+        "git",
+        "skills",
+        "browser",
+        "computer",
+        "artifacts",
+        "search",
+    ])
+    .into_iter()
+    .filter(|t| !is_always_shown(t) && !is_core(t))
+    .collect();
+    let skills = vec![(
+        "pdf-forms".to_string(),
+        "Fill in PDF forms. Use when a PDF has fields to complete.".to_string(),
+    )];
+    let table: &[(&[&str], &[&str])] = &[
+        (&["Please read notes.txt and tell me what it says"], &[]),
+        (&["thanks, that looks good"], &[]),
+        (&["what does this function do?"], &[]),
+        (&["open the file notes.txt"], &[]),
+        (
+            &["explain the second paragraph on this page of the pdf"],
+            &[],
+        ),
+        (&["rename the variable in main.py"], &[]),
+        (&["run the tests and fix what fails"], &["terminal"]),
+        (&["install the dependencies with npm"], &["terminal"]),
+        (&["does it compile?"], &["terminal"]),
+        (&["commit these changes with a good message"], &["git"]),
+        (&["what changed on this branch? show me the diff"], &["git"]),
+        (&["build the project and push it"], &["terminal", "git"]),
+        (
+            &["open https://example.com and tell me what the page says"],
+            &["browser"],
+        ),
+        (
+            &["log in to the website and fill in the form"],
+            &["browser"],
+        ),
+        (
+            &["go to the pricing page and click the first button"],
+            &["browser"],
+        ),
+        (
+            &["look up the latest documentation for tokio timeouts"],
+            &["search"],
+        ),
+        (&["search the web for news about the release"], &["search"]),
+        (&["find out who maintains this library"], &["search"]),
+        (&["draw a diagram of the sign-up flow"], &["artifacts"]),
+        (&["make a small calculator as an html page"], &["artifacts"]),
+        (&["write a report about the meeting"], &["artifacts"]),
+        (&["run the tests and report the results"], &["terminal"]),
+        (
+            &["click on the Start button on my screen"],
+            &["browser", "computer"],
+        ),
+        (
+            &["move the mouse to the corner of the desktop"],
+            &["computer"],
+        ),
+        (&["take a screenshot of the page"], &["browser", "computer"]),
+        (&["use the pdf-forms skill for this"], &["skills"]),
+        (&["fill in the pdf form I attached"], &["skills"]),
+        (&["delete the old draft"], &["files"]),
+        (&["test the login page"], &["terminal", "browser"]),
+        // The two messages before the latest one count too.
+        (
+            &["search the web for the release date", "ok", "now try again"],
+            &["search"],
+        ),
+        (&["look at the website", "thanks", "open it"], &["browser"]),
+    ];
+    for (messages, expected) in table {
+        let wording = Wording::of(&messages.join("\n"));
+        let got: BTreeSet<String> = matching_groups(&all, &wording, &skills)
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect();
+        let want: BTreeSet<String> = expected.iter().map(|g| g.to_string()).collect();
+        assert_eq!(got, want, "{messages:?}");
+    }
+}
+
+/// An external server has no catalog entry: its name, its tools' names and their
+/// descriptions are what a request is matched against.
+#[test]
+fn an_external_server_matches_by_its_names_and_descriptions() {
+    let tools = vec![
+        external(
+            "weather",
+            "get_forecast",
+            "Get the weather forecast for a city.",
+        ),
+        external(
+            "tracker",
+            "create_issue",
+            "Create an issue in the project tracker with a title and a body.",
+        ),
+    ];
+    let groups = |text: &str| -> Vec<String> {
+        matching_groups(&tools, &Wording::of(text), &[])
+            .into_iter()
+            .map(|(g, _)| g)
+            .collect()
+    };
+    assert_eq!(
+        groups("what is the weather in Paris tomorrow?"),
+        names(&["weather"])
+    );
+    assert_eq!(groups("give me the forecast"), names(&["weather"]));
+    assert_eq!(groups("create an issue for this bug"), names(&["tracker"]));
+    assert_eq!(groups("put it in the tracker"), names(&["tracker"]));
+    assert!(groups("read the file").is_empty());
+    assert!(
+        groups("create a file with a title").is_empty(),
+        "one everyday word is not a match"
+    );
+}
+
+/// The best match comes first; a tie keeps the order the tools are in.
+#[test]
+fn matching_groups_are_ordered_by_score() {
+    let all: Vec<Candidate> = on(&["terminal", "git", "browser"]);
+    let wording = Wording::of("commit and push the branch, then run the build");
+    let got: Vec<String> = matching_groups(&all, &wording, &[])
+        .into_iter()
+        .map(|(g, _)| g)
+        .collect();
+    assert_eq!(got, names(&["git", "terminal"]));
+    let scores = matching_groups(&all, &wording, &[]);
+    assert!(scores[0].1 > scores[1].1, "{scores:?}");
+}
+
+// ---- the shown set ------------------------------------------------------------------------
+
+#[test]
+fn a_plain_request_shows_the_companions_and_the_core_file_tools() {
+    let tools = default_set();
+    assert_eq!(tools.len(), 26);
+    let shown = pick(
+        &tools,
+        &["Please read notes.txt and tell me what it says"],
+        &[],
+        &[],
+    );
+    assert_eq!(shown, names(BASE));
+    // No message at all (the Tools panel before the first turn): the same.
+    assert_eq!(pick(&tools, &[], &[], &[]), names(BASE));
+}
+
+#[test]
+fn a_matching_group_is_shown_whole_when_it_fits() {
+    let tools = default_set();
+    let shown = pick(&tools, &["draw a diagram of the sign-up flow"], &[], &[]);
+    let mut want = names(BASE);
+    // In the order the tools are registered: artifacts come before the task tool.
+    want.splice(
+        8..8,
+        names(&[
+            "create_artifact",
+            "update_artifact",
+            "read_artifact",
+            "list_artifacts",
+        ]),
+    );
+    assert_eq!(shown, want);
+    assert_eq!(shown.len(), 13);
+}
+
+/// 14 by default. Companions and the core are kept, then what the chat used or found, then
+/// the best matches of the matching group.
+#[test]
+fn the_cap_keeps_companions_then_used_and_found_then_the_best_matches() {
+    let tools = default_set();
+    let wanted = names(&["browser_back", "browser_fill_form"]);
+    let shown = pick(
+        &tools,
+        &["open the website and click the sign-in button"],
+        &[],
+        &wanted,
+    );
+    assert_eq!(shown.len(), DEFAULT_MAX);
+    for name in BASE {
+        assert!(
+            shown.contains(&name.to_string()),
+            "{name} was dropped: {shown:?}"
+        );
+    }
+    let browser: Vec<&str> = shown
+        .iter()
+        .map(String::as_str)
+        .filter(|n| n.starts_with("browser_"))
+        .collect();
+    // Used and found first (two of the five places), then the three tools the request
+    // points at most: "click" and "button" (click), "open" and "website" (navigate),
+    // "button" (find). The others of the group stay behind `find_tools`.
+    assert_eq!(
+        browser,
+        [
+            "browser_navigate",
+            "browser_find",
+            "browser_click",
+            "browser_fill_form",
+            "browser_back"
+        ]
+    );
+    // Without the cap in the way the whole group is shown.
+    let messages = texts(&["open the website and click the sign-in button"]);
+    let roomy = select(&Selecting {
+        tools: &tools,
+        messages: &messages,
+        shown: &[],
+        wanted: &[],
+        skills: &[],
+        skill_loaded: false,
+        max: 30,
+    });
+    assert_eq!(
+        roomy.iter().filter(|n| n.starts_with("browser_")).count(),
+        10
+    );
+}
+
+/// Two groups match and not everything fits: they take turns, so the smaller group is not
+/// starved by the larger one.
+#[test]
+fn matching_groups_share_the_places_that_are_left() {
+    let tools = default_set();
+    let shown = pick(
+        &tools,
+        &["search the web, then open the website it finds"],
+        &[],
+        &[],
+    );
+    assert_eq!(shown.len(), DEFAULT_MAX);
+    let extra: Vec<&str> = shown
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !BASE.contains(n))
+        .collect();
+    assert!(
+        extra.contains(&"web_search") && extra.contains(&"read_source"),
+        "{extra:?}"
+    );
+    assert!(extra.contains(&"browser_navigate"), "{extra:?}");
+    assert_eq!(
+        extra.iter().filter(|n| n.starts_with("browser_")).count(),
+        3,
+        "{extra:?}"
+    );
+}
+
+/// The cap is about choosing among many tools. A chat whose tools all fit under it gets
+/// them all: nothing is held back for no gain.
+#[test]
+fn everything_is_shown_when_it_fits_under_the_cap() {
+    let tools = on(&["files", "terminal", "toolfinder", "outputs", "task"]);
+    assert_eq!(tools.len(), 11);
+    let shown = pick(&tools, &["hello"], &[], &[]);
+    assert_eq!(
+        shown,
+        tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+    );
+}
+
+/// The invariant behind the prompt cache: across the turns of a chat the list only grows,
+/// and it is always in the one fixed order (the order of the chat's tools), so an earlier
+/// turn's list is the later one's with nothing moved and nothing taken out.
+#[test]
+fn across_turns_the_list_only_grows_and_keeps_its_order() {
+    let tools = on(&[
+        "files",
+        "terminal",
+        "git",
+        "browser",
+        "artifacts",
+        "search",
+        "toolfinder",
+        "outputs",
+        "task",
+    ]);
+    let order: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+    let turns: &[(&str, &[&str])] = &[
+        ("read the notes file", &[]),
+        ("thanks", &[]),
+        ("run the tests", &[]),
+        ("commit the fix", &["git_status"]),
+        ("something else entirely", &[]),
+        ("draw a diagram of it", &["create_artifact"]),
+        ("look it up on the web", &[]),
+        ("open the website", &["browser_navigate", "browser_click"]),
+        ("read the notes file", &[]),
+    ];
+    let mut stored: Vec<String> = Vec::new();
+    let mut previous: Vec<String> = Vec::new();
+    let mut said: Vec<String> = Vec::new();
+    for (i, (message, found)) in turns.iter().enumerate() {
+        said.push(message.to_string());
+        let recent: Vec<String> = said.iter().rev().take(3).cloned().collect();
+        let wanted = names(found);
+        let input = Selecting {
+            tools: &tools,
+            messages: &recent,
+            shown: &stored,
+            wanted: &wanted,
+            skills: &[],
+            skill_loaded: false,
+            max: DEFAULT_MAX,
+        };
+        let shown = select(&input);
+        // The same question gives the same answer.
+        assert_eq!(select(&input), shown, "turn {i}");
+        // One fixed order: the list is the chat's tools with some left out.
+        let filtered: Vec<String> = order
+            .iter()
+            .filter(|n| shown.contains(n))
+            .cloned()
+            .collect();
+        assert_eq!(
+            shown, filtered,
+            "turn {i}: not in the order of the chat's tools"
+        );
+        // Only grows: everything shown before is still there, in the same order.
+        assert!(
+            is_subsequence(&previous, &shown),
+            "turn {i}: {previous:?} then {shown:?}"
+        );
+        assert!(shown.len() >= previous.len(), "turn {i}");
+        assert!(
+            shown.len() <= DEFAULT_MAX,
+            "turn {i}: {} tools",
+            shown.len()
+        );
+        stored = remembered(&stored, &shown);
+        previous = shown;
+    }
+    // By the end the chat has grown to the cap, and what it used early is still there.
+    assert_eq!(previous.len(), DEFAULT_MAX);
+    for name in [
+        "run_command",
+        "git_status",
+        "git_commit",
+        "find_tools",
+        "call_tool",
+        "read_file",
+    ] {
+        assert!(previous.contains(&name.to_string()), "{name}: {previous:?}");
+    }
+    // What was remembered names every tool ever shown, once.
+    let unique: BTreeSet<&String> = stored.iter().collect();
+    assert_eq!(unique.len(), stored.len());
+    assert!(previous.iter().all(|n| stored.contains(n)));
+}
+
+/// A tool that is not on in the chat is never shown, whatever was remembered, used or found.
+#[test]
+fn only_tools_that_are_on_are_ever_shown() {
+    let tools = on(&[
+        "files",
+        "terminal",
+        "browser",
+        "artifacts",
+        "toolfinder",
+        "outputs",
+        "task",
+    ]);
+    let stored = names(&["git_push", "computer_click", "weather__forecast"]);
+    let wanted = names(&["git_commit", "run_subagent", "browser_back"]);
+    let shown = pick(
+        &tools,
+        &["commit and push with git, then click on my screen"],
+        &stored,
+        &wanted,
+    );
+    let on_names: BTreeSet<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(
+        shown.iter().all(|n| on_names.contains(n.as_str())),
+        "{shown:?}"
+    );
+    assert!(shown.contains(&"browser_back".to_string()));
+    // The names of tools that are off are still remembered, for when they are on again.
+    let kept = remembered(&stored, &shown);
+    assert!(kept.starts_with(&stored));
+}
+
+/// `run_subagent` cannot be reached through `call_tool`, and the system message tells the
+/// model to use `load_skill` by name: both are always in the list when they are on.
+#[test]
+fn run_subagent_and_load_skill_are_always_shown_when_on() {
+    let tools = on(&[
+        "files",
+        "git",
+        "skills",
+        "subagents",
+        "browser",
+        "toolfinder",
+        "outputs",
+        "task",
+    ]);
+    let shown = pick(&tools, &["hello"], &[], &[]);
+    assert!(shown.contains(&"run_subagent".to_string()));
+    assert!(shown.contains(&"load_skill".to_string()));
+    assert!(!shown.contains(&"read_skill_file".to_string()));
+    assert_eq!(shown.len(), BASE.len() + 2);
+}
+
+/// A skill that is loaded in the chat refers to its files and its scripts: the tool that
+/// reads them and the terminal are shown from the next turn on.
+#[test]
+fn a_loaded_skill_brings_its_file_tool_and_the_terminal() {
+    let tools = on(&[
+        "files",
+        "terminal",
+        "git",
+        "skills",
+        "browser",
+        "toolfinder",
+        "outputs",
+        "task",
+    ]);
+    let messages = texts(&["carry on"]);
+    let input = |skill_loaded| Selecting {
+        tools: &tools,
+        messages: &messages,
+        shown: &[],
+        wanted: &[],
+        skills: &[],
+        skill_loaded,
+        max: DEFAULT_MAX,
+    };
+    let without = select(&input(false));
+    assert!(
+        !without.contains(&"read_skill_file".to_string())
+            && !without.contains(&"run_command".to_string())
+    );
+    let with = select(&input(true));
+    assert!(
+        with.contains(&"read_skill_file".to_string()) && with.contains(&"run_command".to_string()),
+        "{with:?}"
+    );
+}
+
+/// What was shown stays shown even when the cap is lowered below it, and the companions
+/// are shown whatever the cap is.
+#[test]
+fn the_cap_never_takes_away_what_was_shown() {
+    let tools = default_set();
+    let before = pick(&tools, &["draw a diagram"], &[], &[]);
+    assert_eq!(before.len(), 13);
+    let messages = texts(&["open the website"]);
+    let after = select(&Selecting {
+        tools: &tools,
+        messages: &messages,
+        shown: &before,
+        wanted: &[],
+        skills: &[],
+        skill_loaded: false,
+        max: MIN_MAX,
+    });
+    assert_eq!(after, before, "a lower cap removed tools, or added some");
+}
+
+/// A chat that used many tools (a long history, or one from before 0.0.4) still gets the
+/// core file tools: what it used takes the places that are left after them, newest first.
+#[test]
+fn what_a_chat_used_never_pushes_out_the_core_file_tools() {
+    let tools = on(&[
+        "files",
+        "terminal",
+        "git",
+        "browser",
+        "toolfinder",
+        "outputs",
+        "task",
+    ]);
+    let used = names(&[
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_click",
+        "browser_type",
+        "browser_read_text",
+        "git_status",
+        "git_diff",
+        "git_commit",
+        "git_push",
+        "run_command",
+        "browser_back",
+    ]);
+    let shown = pick(&tools, &["carry on"], &[], &used);
+    assert_eq!(shown.len(), DEFAULT_MAX);
+    for name in BASE {
+        assert!(
+            shown.contains(&name.to_string()),
+            "{name} was pushed out: {shown:?}"
+        );
+    }
+    for name in &used[..5] {
+        assert!(shown.contains(name), "{name} was used last: {shown:?}");
+    }
+    assert!(!shown.contains(&used[5]), "{shown:?}");
+}
+
+/// A request that matches a group whose tools are already shown changes nothing.
+#[test]
+fn matching_again_adds_nothing() {
+    let tools = default_set();
+    let first = pick(&tools, &["draw a diagram"], &[], &[]);
+    let second = pick(&tools, &["now draw a chart"], &first, &[]);
+    assert_eq!(first, second);
+}
+
+// ---- settings -----------------------------------------------------------------------------
+
+#[test]
+fn the_setting_is_on_with_14_unless_it_says_otherwise() {
+    assert_eq!(
+        ToolSelection::from_stored(None),
+        ToolSelection {
+            auto: true,
+            max: 14
+        }
+    );
+    assert_eq!(
+        ToolSelection::from_stored(Some(&json!({"auto": false}))),
+        ToolSelection {
+            auto: false,
+            max: 14
+        }
+    );
+    assert_eq!(
+        ToolSelection::from_stored(Some(&json!({"auto": true, "max": 20}))),
+        ToolSelection {
+            auto: true,
+            max: 20
+        }
+    );
+    // A cap that makes no sense is brought into range; anything unreadable is the default.
+    assert_eq!(
+        ToolSelection::from_stored(Some(&json!({"max": 1}))).max,
+        MIN_MAX
+    );
+    assert_eq!(
+        ToolSelection::from_stored(Some(&json!({"max": 5000}))).max,
+        MAX_MAX
+    );
+    for bad in [
+        json!(null),
+        json!("on"),
+        json!({"auto": "yes"}),
+        json!({"max": -3}),
+        json!([1]),
+    ] {
+        assert_eq!(
+            ToolSelection::from_stored(Some(&bad)),
+            ToolSelection::default(),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(ToolSelection::default()).unwrap(),
+        json!({"auto": true, "max": 14})
+    );
+}
+
+// ---- what the chat said and used --------------------------------------------------------------
+
+fn call(name: &str, arguments: serde_json::Value) -> CallRecord {
+    CallRecord {
+        id: format!("c-{name}"),
+        name: name.into(),
+        arguments: arguments.as_object().cloned().unwrap(),
+        recovered: false,
+    }
+}
+
+#[test]
+fn the_three_latest_user_messages_are_what_a_request_is_matched_on() {
+    let mut with_attachment = HistoryMessage::user("third: look at this");
+    with_attachment.parts.push(Part::Attachment {
+        name: "notes.txt".into(),
+        text: "commit push browser website".into(),
+    });
+    let history = vec![
+        HistoryMessage::user("first"),
+        HistoryMessage::assistant("commit push"),
+        HistoryMessage::user("second"),
+        HistoryMessage::assistant_calls("", vec![call("read_file", json!({"path": "a"}))]),
+        with_attachment,
+        HistoryMessage::assistant("an answer about git"),
+        HistoryMessage::user("fourth"),
+    ];
+    assert_eq!(
+        recent_user_messages(&history),
+        texts(&["fourth", "third: look at this", "second"])
+    );
+    assert!(recent_user_messages(&[]).is_empty());
+    // Long messages are cut, on a character boundary.
+    let long = "é".repeat(MESSAGE_CHARS + 50);
+    let cut = recent_user_messages(&[HistoryMessage::user(long)]);
+    assert_eq!(cut[0].chars().count(), MESSAGE_CHARS);
+}
+
+#[test]
+fn the_tools_a_chat_used_come_from_its_history_newest_first() {
+    let history = vec![
+        HistoryMessage::user("go"),
+        HistoryMessage::assistant_calls("", vec![call("read_file", json!({"path": "a"}))]),
+        HistoryMessage::assistant_calls(
+            "",
+            vec![
+                call("call_tool", json!({"name": "git_status", "arguments": {}})),
+                call("find_tools", json!({"query": "commit"})),
+            ],
+        ),
+        HistoryMessage::assistant_calls("", vec![call("read_file", json!({"path": "b"}))]),
+        HistoryMessage::assistant_calls("", vec![call("call_tool", json!({"name": 7}))]),
+    ];
+    assert_eq!(used_tools(&history), names(&["read_file", "git_status"]));
+    assert!(used_tools(&[]).is_empty());
+}
+
+#[test]
+fn the_tools_are_split_in_their_order() {
+    let host = tool_catalog::tests::builtin_host();
+    let all = host.tools();
+    let shown = names(&["read_file", "git_status", "nothing_like_this"]);
+    let (yes, no) = split(all.clone(), &shown);
+    assert_eq!(
+        yes.iter().map(|t| t.exposed.as_str()).collect::<Vec<_>>(),
+        ["read_file", "git_status"]
+    );
+    assert_eq!(yes.len() + no.len(), all.len());
+    let merged: BTreeSet<&str> = yes.iter().chain(&no).map(|t| t.exposed.as_str()).collect();
+    assert_eq!(merged.len(), all.len());
+    // The rest keep their order too.
+    let rest: Vec<&str> = all
+        .iter()
+        .map(|t| t.exposed.as_str())
+        .filter(|n| !shown.iter().any(|s| s == n))
+        .collect();
+    assert_eq!(
+        no.iter().map(|t| t.exposed.as_str()).collect::<Vec<_>>(),
+        rest
+    );
+}
+
+/// What is remembered for a chat stays bounded, and names that are shown now are kept
+/// before names that are only remembered.
+#[test]
+fn what_is_remembered_is_bounded() {
+    let old: Vec<String> = (0..REMEMBERED_NAMES + 40)
+        .map(|i| format!("old_{i}"))
+        .collect();
+    let shown = names(&["read_file", "old_3"]);
+    let kept = remembered(&old, &shown);
+    assert_eq!(kept.len(), REMEMBERED_NAMES);
+    assert!(kept.contains(&"read_file".to_string()) && kept.contains(&"old_3".to_string()));
+    // Nothing new: nothing changes, so nothing needs to be written.
+    let same = remembered(&shown, &shown);
+    assert_eq!(same, shown);
+}

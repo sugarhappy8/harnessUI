@@ -102,6 +102,12 @@ impl browser::NavigationApprover for AppNavigationApprover {
         request: browser::HeldNavigation,
         cancel: CancellationToken,
     ) -> bool {
+        // [0.0.4 allow all] In Allow all a page moving its tab to another site during a
+        // call is let through while nothing untrusted has entered the turn. Every other
+        // held request, a submission above all, still gets its card (`approvals.rs`).
+        if crate::approvals::release_held_navigation(&self.app, chat_id, &request).await {
+            return true;
+        }
         let tool = request
             .during_tool
             .clone()

@@ -30,6 +30,7 @@ mod packs_cmd;
 mod permissions;
 mod providers;
 mod runtime_manager;
+mod search_cmd;
 mod settings;
 mod skills_cmd;
 mod state;
@@ -117,6 +118,12 @@ pub fn run() {
             providers::save_provider,
             providers::delete_provider,
             providers::test_provider,
+            search_cmd::get_search_settings,
+            search_cmd::set_search_settings,
+            search_cmd::set_search_key,
+            search_cmd::clear_search_key,
+            search_cmd::test_search,
+            search_cmd::list_sources,
             models_cmd::get_setting,
             models_cmd::set_setting,
             hub::hardware_info,
@@ -172,6 +179,9 @@ pub fn run() {
             mcp_cmd::set_mcp_tool_pref,
             mcp_cmd::clear_chat_grants,
             mcp_cmd::mcp_server_log,
+            tool_select::get_tool_selection,
+            tool_select::set_tool_selection,
+            tool_select::tool_catalog_problems,
             skills_cmd::list_skills,
             skills_cmd::import_skill,
             skills_cmd::set_skill_enabled,
@@ -203,6 +213,17 @@ pub fn run() {
             git_cmd::set_git_token,
             git_cmd::remove_git_token,
             git_cmd::set_git_identity,
+            artifacts::list_artifacts,
+            artifacts::get_artifact,
+            artifacts::save_artifact_version,
+            artifacts::rename_artifact,
+            artifacts::delete_artifact,
+            artifacts::export_artifact,
+            artifacts::report_artifact_render,
+            artifacts::artifact_isolation,
+            artifacts::begin_artifact_check,
+            artifacts::finish_artifact_check,
+            artifacts::artifact_canary,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -376,7 +397,8 @@ fn create_windows(app: &mut tauri::App) -> tauri::Result<()> {
         let previews = config.label == MAIN_WINDOW;
         let mut builder = WebviewWindowBuilder::from_config(app.handle(), config)?
             .on_navigation(move |url| {
-                navigation::is_allowed(url, dev) || (previews && artifacts::is_frame_navigation(url))
+                navigation::is_allowed(url, dev)
+                    || (previews && artifacts::is_frame_navigation(url))
             })
             .on_new_window(|_url, _features| NewWindowResponse::Deny);
         if config.label == MAIN_WINDOW {

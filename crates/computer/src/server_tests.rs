@@ -1265,3 +1265,201 @@ async fn screenshots_never_overlap() {
     // overlapping capture would see them reappear halfway.
     assert_eq!(d.state().max_captures_in_flight, 1);
 }
+
+// ---- Allow all (0.0.4) -------------------------------------------------------------
+
+fn allow_all(untrusted: bool) -> TurnContext {
+    TurnContext {
+        allow_all: true,
+        untrusted_in_turn: untrusted,
+        ..ready()
+    }
+}
+
+const STILL_ASKS: Decision = Decision::Ask {
+    card: CardKind::OnceOnly,
+    reason: AskReason::StillAsksInAllowAll,
+};
+
+/// Ordinary input to an ordinary application runs without a card in Allow all, also
+/// after untrusted content (a screenshot is one). Screenshots too. Input to this app
+/// stays a hard limit.
+#[tokio::test]
+async fn allow_all_lets_ordinary_input_to_ordinary_applications_through() {
+    let d = desktop();
+    let s = server(&d);
+    let shot = describe(&s, TOOL_SCREENSHOT, json!({})).await.unwrap();
+    let none = BTreeSet::new();
+    assert_eq!(
+        evaluate(&shot, &allow_all(true), &none),
+        Decision::AllowedByMode
+    );
+    screenshot(&s).await;
+    for (tool, a) in [
+        (TOOL_CLICK, json!({"coordinate": [100, 100]})),
+        (TOOL_MOVE, json!({"coordinate": [100, 100]})),
+        (
+            TOOL_SCROLL,
+            json!({"coordinate": [100, 100], "direction": "down"}),
+        ),
+        (TOOL_DRAG, json!({"from": [100, 100], "to": [200, 200]})),
+        (TOOL_TYPE, json!({"text": "hello"})),
+        (TOOL_KEY, json!({"keys": "ctrl+s"})),
+    ] {
+        let action = describe(&s, tool, a).await.unwrap();
+        assert_eq!(action.risk, Risk::Normal, "{tool}");
+        assert_eq!(action.keep_asking, None, "{tool}");
+        assert!(!action.network, "{tool}");
+        for untrusted in [false, true] {
+            assert_eq!(
+                evaluate(&action, &allow_all(untrusted), &none),
+                Decision::AllowedByMode,
+                "{tool}"
+            );
+        }
+    }
+    // This app's own window: denied, never a card, never allowed by the mode.
+    let own = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    assert!(matches!(
+        evaluate(&own, &allow_all(false), &none),
+        Decision::Denied { .. }
+    ));
+}
+
+/// D7's never-covered list keeps asking in Allow all: terminals and shell hosts, system
+/// settings, password managers, the Windows shell's command entry, the system's own
+/// shortcuts, and a drag into another application.
+#[tokio::test]
+async fn allow_all_still_asks_for_protected_applications() {
+    let none = BTreeSet::new();
+    let check = |action: &Action, what: &str| {
+        assert_eq!(action.risk, Risk::AlwaysAsk, "{what}");
+        assert_eq!(
+            action.keep_asking,
+            Some(policy::KeepAsking::ProtectedApp),
+            "{what}"
+        );
+        for untrusted in [false, true] {
+            assert_eq!(
+                evaluate(action, &allow_all(untrusted), &none),
+                STILL_ASKS,
+                "{what}"
+            );
+        }
+    };
+    for exe in [
+        "cmd",
+        "powershell",
+        "WindowsTerminal",
+        "SystemSettings",
+        "KeePassXC",
+    ] {
+        let d = desktop();
+        let mut w = FakeWindow::new(9, Rect::new(0.0, 0.0, 500.0, 500.0), 70, app(exe));
+        w.colour = [5, 5, 5];
+        d.push_front(w);
+        let s = server(&d);
+        screenshot(&s).await;
+        let click = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+            .await
+            .unwrap();
+        check(&click, exe);
+        let typing = describe(&s, TOOL_TYPE, json!({"text": "del x"}))
+            .await
+            .unwrap();
+        check(&typing, exe);
+        let key = describe(&s, TOOL_KEY, json!({"keys": "Enter"}))
+            .await
+            .unwrap();
+        check(&key, exe);
+    }
+
+    // A console window, whatever program runs in it.
+    let d = desktop();
+    d.push_front(python_window(20, Rect::new(0.0, 0.0, 500.0, 500.0), true));
+    let s = server(&d);
+    screenshot(&s).await;
+    let click = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+        .await
+        .unwrap();
+    check(&click, "a console window");
+
+    // Typing into the Windows shell (the Run box, the address bar).
+    let d = desktop();
+    let mut explorer = FakeWindow::new(
+        30,
+        Rect::new(0.0, 0.0, 500.0, 500.0),
+        95,
+        AppInfo::from_windows_path(r"C:\Windows\explorer.exe"),
+    );
+    explorer.colour = [3, 3, 3];
+    d.push_front(explorer);
+    let s = server(&d);
+    screenshot(&s).await;
+    let typing = describe(&s, TOOL_TYPE, json!({"text": "cmd /c calc"}))
+        .await
+        .unwrap();
+    check(&typing, "typing into the Windows shell");
+
+    // The system's own shortcuts, and the Windows key held during a click.
+    let d = desktop();
+    let s = server(&d);
+    screenshot(&s).await;
+    let run_box = describe(&s, TOOL_KEY, json!({"keys": "win+r"}))
+        .await
+        .unwrap();
+    check(&run_box, "Win+R");
+    let win_click = describe(
+        &s,
+        TOOL_CLICK,
+        json!({"coordinate": [100, 100], "modifiers": ["cmd"]}),
+    )
+    .await
+    .unwrap();
+    check(&win_click, "a click holding the Windows key");
+
+    // A drag from one application into another.
+    let d = desktop();
+    let mut mail = FakeWindow::new(8, Rect::new(0.0, 500.0, 300.0, 300.0), 61, app("mail"));
+    mail.colour = [9, 9, 9];
+    d.state().windows.insert(0, mail);
+    let s = server(&d);
+    screenshot(&s).await;
+    let drag = describe(&s, TOOL_DRAG, json!({"from": [100, 100], "to": [100, 600]}))
+        .await
+        .unwrap();
+    check(&drag, "a drag into another application");
+}
+
+/// The guard lets input reach a target that always asks only for an action the user
+/// approved on its own card. An always-ask action that does not keep asking could have
+/// been let through by Allow all, so it does not count as approved.
+#[tokio::test]
+async fn an_input_that_allow_all_could_let_through_never_reaches_a_protected_target() {
+    let d = desktop();
+    d.push_front(python_window(20, Rect::new(0.0, 0.0, 500.0, 500.0), true));
+    let s = server(&d);
+    screenshot(&s).await;
+    let approved = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+        .await
+        .unwrap();
+    assert_eq!(approved.keep_asking, Some(policy::KeepAsking::ProtectedApp));
+    // Without the mark that keeps it asking, the same action is refused at the console.
+    let mut unmarked = approved.clone();
+    unmarked.keep_asking = None;
+    assert_eq!(
+        evaluate(&unmarked, &allow_all(false), &BTreeSet::new()),
+        Decision::AllowedByMode
+    );
+    d.clear_events();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &unmarked, ctx()).await;
+    assert!(out.is_error, "{}", out.joined_text());
+    assert!(buttons(&d).is_empty());
+    // Approved on its card, it goes through, as before.
+    d.clear_events();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &approved, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(buttons(&d).len(), 2);
+}

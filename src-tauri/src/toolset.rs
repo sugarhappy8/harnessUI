@@ -61,6 +61,14 @@ pub async fn build_host(
     host.add_builtin(skills);
     // Lists `run_subagent` (the "Subagents" group, off in a new chat); the turn runs it.
     host.add_builtin(Arc::new(crate::subagent::SubagentsServer));
+    // The "Artifacts" group (0.0.4): documents, pages and diagrams shown beside the chat.
+    host.add_builtin(Arc::new(crate::artifacts::ArtifactsServer::new(
+        app.clone(),
+    )));
+    // The "Search" group (0.0.4): web search with numbered sources an answer can cite.
+    host.add_builtin(Arc::new(crate::search_cmd::SearchServer::new(app.clone())));
+    // Lists `find_tools` and `call_tool` (0.0.4, adaptive tool selection); the turn runs them.
+    host.add_builtin(Arc::new(crate::tool_select::ToolFinderServer));
     host
 }
 

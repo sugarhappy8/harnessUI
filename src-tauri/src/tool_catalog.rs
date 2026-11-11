@@ -48,8 +48,13 @@ pub struct Group {
     pub weak: &'static [&'static str],
 }
 
+/// The skill named in the examples of the skill tools. `find_tools` puts the name of an
+/// enabled skill in its place.
+pub const EXAMPLE_SKILL: &str = "pdf-forms";
+
 /// The built-in groups. A phrase (more than one word) must appear as written; a single
-/// word also matches its plural and its -ing and -ed forms.
+/// word is written in its plain form and also matches its plural and its -ing and -ed
+/// forms in a request.
 pub const GROUPS: &[Group] = &[
     Group {
         server: "files",
@@ -87,7 +92,14 @@ pub const GROUPS: &[Group] = &[
             "docker",
             "command line",
         ],
-        weak: &["start", "launch", "package", "dependency", "server", "program"],
+        weak: &[
+            "start",
+            "launch",
+            "package",
+            "dependency",
+            "server",
+            "program",
+        ],
     },
     Group {
         server: "git",
@@ -109,7 +121,7 @@ pub const GROUPS: &[Group] = &[
             "staged",
             "pull request",
         ],
-        weak: &["history", "revert", "stage", "remote", "upstream", "changes"],
+        weak: &["history", "revert", "stage", "remote", "upstream", "change"],
     },
     Group {
         server: "skills",
@@ -121,24 +133,12 @@ pub const GROUPS: &[Group] = &[
         server: "browser",
         label: "Browser",
         strong: &[
-            "website",
-            "url",
-            "http",
-            "https",
-            "www",
-            "browser",
-            "browse",
-            "click",
-            "log in",
-            "sign in",
-            "login",
-            "navigate",
-            "visit",
-            "webpage",
-            "web page",
-            "site",
+            "website", "url", "http", "https", "www", "browser", "browse", "click", "log in",
+            "sign in", "login", "navigate", "visit", "webpage", "web page", "site",
         ],
-        weak: &["page", "open", "form", "fill", "submit", "web", "online", "link", "tab"],
+        weak: &[
+            "page", "open", "form", "submit", "web", "online", "link", "tab",
+        ],
     },
     Group {
         server: "computer",
@@ -255,7 +255,7 @@ pub const ENTRIES: &[Entry] = &[
         name: "read_file",
         group: "files",
         purpose: "Read a text file, or a range of lines from a long one.",
-        keywords: &["open", "view", "show", "contents", "cat"],
+        keywords: &["open", "view", "show", "content", "cat"],
         rank: 1,
         examples: &[
             r#"{"path": "notes.txt"}"#,
@@ -266,7 +266,7 @@ pub const ENTRIES: &[Entry] = &[
         name: "search_files",
         group: "files",
         purpose: "Find text in the files under a folder and get the matching lines.",
-        keywords: &["grep", "find", "where", "occurrences"],
+        keywords: &["grep", "find", "where", "occurrence"],
         rank: 1,
         examples: &[
             r#"{"path": ".", "query": "TODO"}"#,
@@ -279,9 +279,7 @@ pub const ENTRIES: &[Entry] = &[
         purpose: "Create a file, or replace everything in an existing one.",
         keywords: &["create", "save", "new"],
         rank: 1,
-        examples: &[
-            r##"{"path": "notes/todo.md", "content": "# To do\n\n- Write the report\n"}"##,
-        ],
+        examples: &[r##"{"path": "notes/todo.md", "content": "# To do\n\n- Write the report\n"}"##],
     },
     Entry {
         name: "edit_file",
@@ -330,7 +328,7 @@ pub const ENTRIES: &[Entry] = &[
         name: "git_diff",
         group: "git",
         purpose: "Show what changed in the files, or what is staged for the next commit.",
-        keywords: &["changes", "staged", "compare"],
+        keywords: &["change", "staged", "compare"],
         rank: 1,
         examples: &[r#"{"staged": true}"#, r#"{"path": "src/main.rs"}"#],
     },
@@ -338,7 +336,7 @@ pub const ENTRIES: &[Entry] = &[
         name: "git_log",
         group: "git",
         purpose: "List recent commits.",
-        keywords: &["history", "commits", "recent"],
+        keywords: &["history", "commit", "recent"],
         rank: 2,
         examples: &[r#"{"limit": 10}"#, r#"{"path": "README.md", "limit": 5}"#],
     },
@@ -437,7 +435,7 @@ pub const ENTRIES: &[Entry] = &[
         name: "browser_snapshot",
         group: "browser",
         purpose: "List what is visible on the current page, with a reference for each element.",
-        keywords: &["look", "see", "elements", "page"],
+        keywords: &["look", "see", "element", "page"],
         rank: 1,
         examples: &[r#"{}"#, r#"{"full": true}"#],
     },
@@ -480,7 +478,7 @@ pub const ENTRIES: &[Entry] = &[
         name: "browser_fill_form",
         group: "browser",
         purpose: "Fill in several form fields at once, without submitting.",
-        keywords: &["fields", "checkbox", "dropdown"],
+        keywords: &["field", "checkbox", "dropdown"],
         rank: 2,
         examples: &[
             r#"{"fields": [{"ref": "e3", "value": "Ada"}, {"ref": "e4", "value": "ada@example.com"}]}"#,
@@ -578,7 +576,7 @@ pub const ENTRIES: &[Entry] = &[
         name: "read_output",
         group: "outputs",
         purpose: "Read more of a tool result that was shortened: a range of lines, or the lines that contain some text.",
-        keywords: &["output", "full", "shortened", "truncated", "lines", "rest"],
+        keywords: &["output", "full", "shortened", "truncated", "line", "rest"],
         rank: 1,
         examples: &[
             r#"{"id": 3, "lines": "1-80"}"#,
@@ -623,7 +621,7 @@ pub const ENTRIES: &[Entry] = &[
         name: "list_artifacts",
         group: "artifacts",
         purpose: "List this chat's artifacts with their ids.",
-        keywords: &["all", "ids", "which"],
+        keywords: &["all", "id", "which"],
         rank: 2,
         examples: &[r#"{}"#],
     },
@@ -633,7 +631,14 @@ pub const ENTRIES: &[Entry] = &[
         group: "search",
         purpose: "Search the web and get numbered sources with excerpts to cite.",
         keywords: &[
-            "internet", "online", "google", "look up", "latest", "news", "documentation", "docs",
+            "internet",
+            "online",
+            "google",
+            "look up",
+            "latest",
+            "news",
+            "documentation",
+            "docs",
         ],
         rank: 1,
         examples: &[
@@ -654,7 +659,7 @@ pub const ENTRIES: &[Entry] = &[
         name: "update_task",
         group: "task",
         purpose: "Record the goal, the steps and the next action of the task this chat is working on.",
-        keywords: &["goal", "plan", "steps", "progress", "todo", "next"],
+        keywords: &["goal", "plan", "step", "progress", "todo", "next"],
         rank: 1,
         examples: &[
             r#"{"goal": "Fix the failing date tests", "steps": [{"text": "Run the tests", "status": "doing"}, {"text": "Fix the parser", "status": "todo"}], "next_action": "Run the tests"}"#,
@@ -699,22 +704,24 @@ pub fn entry_for(tool: &RegisteredTool, builtin: bool) -> Option<&'static Entry>
     entry(&tool.exposed).filter(|e| e.group == tool.server)
 }
 
-/// An entry's examples that are valid for the tool as it is registered, as (JSON text,
-/// value). An example that no longer fits the schema is left out rather than shown.
-pub fn valid_examples(
+/// Checks one tool's arguments by the tool's name: `Ok`, or one message per problem.
+pub type Validate<'a> = dyn Fn(&str, &Value) -> Result<(), Vec<String>> + 'a;
+
+/// An entry's examples as JSON text, as far as they are argument objects that `fits`
+/// accepts (the tool's schema as it is registered now). `rewrite` may change an example
+/// first (a skill's real name in place of the one in the catalog). An example that does
+/// not fit is left out rather than shown.
+pub fn fitting_examples(
     entry: &Entry,
-    validate: &dyn Fn(&Value) -> Result<(), Vec<String>>,
-) -> Vec<(String, Map<String, Value>)> {
+    rewrite: &dyn Fn(&str) -> String,
+    fits: &dyn Fn(&Value) -> bool,
+) -> Vec<String> {
     entry
         .examples
         .iter()
-        .filter_map(|text| {
-            let value: Value = serde_json::from_str(text).ok()?;
-            validate(&value).ok()?;
-            match value {
-                Value::Object(map) => Some(((*text).to_string(), map)),
-                _ => None,
-            }
+        .map(|text| rewrite(text))
+        .filter(|text| {
+            serde_json::from_str::<Value>(text).is_ok_and(|value| value.is_object() && fits(&value))
         })
         .collect()
 }
@@ -900,13 +907,10 @@ fn type_words(schema: &Value) -> Option<String> {
 pub fn problems(
     tools: &[RegisteredTool],
     builtin_servers: &BTreeSet<String>,
-    validate: &dyn Fn(&str, &Value) -> Result<(), Vec<String>>,
+    validate: &Validate<'_>,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    for tool in tools
-        .iter()
-        .filter(|t| builtin_servers.contains(&t.server))
-    {
+    for tool in tools.iter().filter(|t| builtin_servers.contains(&t.server)) {
         let name = &tool.exposed;
         let Some(entry) = entry(name) else {
             out.push(format!(
@@ -1094,7 +1098,9 @@ pub(crate) mod tests {
             let entry =
                 entry_for(tool, true).unwrap_or_else(|| panic!("no entry: {}", tool.exposed));
             assert_eq!(entry.group, tool.server, "{}", tool.exposed);
-            let valid = valid_examples(entry, &|args| host.validate(&tool.exposed, args));
+            let valid = fitting_examples(entry, &|text| text.to_string(), &|args| {
+                host.validate(&tool.exposed, args).is_ok()
+            });
             assert_eq!(valid.len(), entry.examples.len(), "{}", tool.exposed);
         }
     }
@@ -1151,7 +1157,9 @@ pub(crate) mod tests {
             assert_eq!(entry.group, *server, "{name}");
             let compiled =
                 CompiledSchema::compile(schema).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let valid = valid_examples(entry, &|args| compiled.validate(args));
+            let valid = fitting_examples(entry, &|text| text.to_string(), &|args| {
+                compiled.validate(args).is_ok()
+            });
             assert_eq!(
                 valid.len(),
                 entry.examples.len(),

@@ -78,6 +78,11 @@ pub enum Scope {
     /// output, the chat's tool list. Never prompts (0.0.4): nothing outside the app is
     /// read or changed.
     AppData,
+    /// Web search for this chat (0.0.4): `web_search` and `read_source`. One grant covers
+    /// both: a search sends the question to the search service the user chose, and reading
+    /// a source fetches a page that a search of this chat listed. Unlike [`Scope::AppData`]
+    /// it prompts like any other scope.
+    WebSearch,
 }
 
 /// Why an action still asks while its chat is in Allow all (0.0.4). The describer sets it;
@@ -216,7 +221,11 @@ impl Grants for std::collections::BTreeSet<Scope> {
     }
 }
 
-/// The evaluation order of ARCHITECTURE.md 13.3.
+/// The evaluation order of ARCHITECTURE.md 13.3. Steps 1 and 2 hold in every mode. In
+/// Allow all ([`TurnContext::allow_all`]) steps 3 to 7 are replaced: an action that keeps
+/// asking ([`Action::keep_asking`]) asks with Allow once / Deny, an action that can send
+/// data out ([`Action::network`]) asks once untrusted content is in the turn, and
+/// everything else is allowed by the mode.
 pub fn evaluate(action: &Action, turn: &TurnContext, grants: &dyn Grants) -> Decision {
     // 1. Not enabled / server not ready.
     if !turn.tool_enabled {
@@ -239,6 +248,24 @@ pub fn evaluate(action: &Action, turn: &TurnContext, grants: &dyn Grants) -> Dec
     // The app's own data for the chat never prompts either (0.0.4).
     if matches!(action.scope, Scope::Skill | Scope::AppData) && action.risk == Risk::Normal {
         return Decision::AllowedByGrant;
+    }
+    // Allow all (0.0.4): the engine answers the card itself, unless the action is one that
+    // keeps asking, or can send data out after untrusted content entered the turn (D9).
+    // A call recovered from text is treated like a native one, and grants are not read.
+    if turn.allow_all {
+        if action.keep_asking.is_some() {
+            return Decision::Ask {
+                card: CardKind::OnceOnly,
+                reason: AskReason::StillAsksInAllowAll,
+            };
+        }
+        if turn.untrusted_in_turn && action.network {
+            return Decision::Ask {
+                card: CardKind::Grantable,
+                reason: AskReason::UntrustedContentThenOutbound,
+            };
+        }
+        return Decision::AllowedByMode;
     }
     // 3. Always ask.
     if action.risk == Risk::AlwaysAsk {
@@ -596,6 +623,209 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Allow all (0.0.4), in the order of `evaluate`: what keeps asking asks with Allow
+    /// once / Deny only; what can send data out asks once untrusted content is in the
+    /// turn; everything else is allowed by the mode, grant or no grant, native call or
+    /// recovered from text. The rows of what keeps asking are in `allow_all::tests`.
+    #[test]
+    fn allow_all_replaces_steps_3_to_7() {
+        let allow_all = |untrusted: bool, recovered: bool| TurnContext {
+            allow_all: true,
+            untrusted_in_turn: untrusted,
+            recovered_from_text: recovered,
+            ..ready()
+        };
+        let none = BTreeSet::new();
+        let granted: BTreeSet<Scope> = [write_scope()].into();
+        let still_asks = Decision::Ask {
+            card: CardKind::OnceOnly,
+            reason: AskReason::StillAsksInAllowAll,
+        };
+
+        // A plain write: no card, also for a call recovered from text and after untrusted
+        // content (it sends nothing out).
+        let write = action(write_scope(), Risk::Normal, false, false);
+        for (untrusted, recovered) in [(false, false), (true, false), (false, true), (true, true)] {
+            for grants in [&none, &granted] {
+                assert_eq!(
+                    evaluate(&write, &allow_all(untrusted, recovered), grants),
+                    Decision::AllowedByMode
+                );
+            }
+        }
+        // In Ask mode the same call asks, or runs under its grant.
+        assert_eq!(
+            evaluate(&write, &ready(), &none),
+            Decision::Ask {
+                card: CardKind::Grantable,
+                reason: AskReason::Normal
+            }
+        );
+        assert_eq!(
+            evaluate(&write, &ready(), &granted),
+            Decision::AllowedByGrant
+        );
+
+        // Every kind of "keeps asking" asks, whatever was granted.
+        for kind in [
+            KeepAsking::Delete,
+            KeepAsking::Destroy,
+            KeepAsking::Sensitive,
+            KeepAsking::Publish,
+            KeepAsking::ProtectedApp,
+            KeepAsking::MarkedDestructive,
+            KeepAsking::Hidden,
+        ] {
+            for risk in [Risk::Normal, Risk::AlwaysAsk] {
+                let mut a = action(write_scope(), risk, false, false);
+                a.keep_asking = Some(kind);
+                for (untrusted, recovered) in [(false, false), (true, true)] {
+                    assert_eq!(
+                        evaluate(&a, &allow_all(untrusted, recovered), &granted),
+                        still_asks,
+                        "{kind:?}"
+                    );
+                }
+            }
+        }
+
+        // An action that can send data out: allowed until untrusted content is in the
+        // turn, then it asks as D9 does, grant or not.
+        let mut fetch = action(write_scope(), Risk::Normal, false, true);
+        fetch.network = true;
+        assert_eq!(
+            evaluate(&fetch, &allow_all(false, false), &none),
+            Decision::AllowedByMode
+        );
+        assert_eq!(
+            evaluate(&fetch, &allow_all(true, false), &granted),
+            Decision::Ask {
+                card: CardKind::Grantable,
+                reason: AskReason::UntrustedContentThenOutbound
+            }
+        );
+        // Outbound alone (a terminal command that stays on this machine) is not enough.
+        let local = action(write_scope(), Risk::Normal, false, true);
+        assert_eq!(
+            evaluate(&local, &allow_all(true, false), &none),
+            Decision::AllowedByMode
+        );
+
+        // Steps 1 and 2 come first.
+        let mut off = allow_all(false, false);
+        off.tool_enabled = false;
+        assert!(matches!(
+            evaluate(&write, &off, &granted),
+            Decision::Refused { .. }
+        ));
+        let mut limited = write.clone();
+        limited.hard_limit = Some("outside approved folders".into());
+        assert!(matches!(
+            evaluate(&limited, &allow_all(false, false), &granted),
+            Decision::Denied { .. }
+        ));
+        // The app's own data and skills are recorded as before, not as allowed by the mode.
+        for scope in [Scope::AppData, Scope::Skill] {
+            assert_eq!(
+                evaluate(
+                    &action(scope, Risk::Normal, false, false),
+                    &allow_all(true, true),
+                    &none
+                ),
+                Decision::AllowedByGrant
+            );
+        }
+    }
+
+    /// The new facts have serde defaults: an action stored or sent without them reads as
+    /// "nothing keeps asking, nothing leaves the machine".
+    #[test]
+    fn the_allow_all_facts_default_to_nothing() {
+        let old = serde_json::json!({
+            "server": "files", "tool": "read_file", "summary": "", "preview": "",
+            "scope": {"type": "appData"}, "risk": "normal", "readOnly": true,
+            "outbound": false, "hardLimit": null
+        });
+        let a: Action = serde_json::from_value(old).unwrap();
+        assert_eq!((a.keep_asking, a.network), (None, false));
+        let mut b = a.clone();
+        b.keep_asking = Some(KeepAsking::MarkedDestructive);
+        let json = serde_json::to_value(&b).unwrap();
+        assert_eq!(json["keepAsking"], "markedDestructive");
+        assert_eq!(json["network"], false);
+        assert_eq!(
+            serde_json::to_value(AskReason::StillAsksInAllowAll).unwrap(),
+            "stillAsksInAllowAll"
+        );
+        assert!(!TurnContext::default().allow_all, "Ask is the default mode");
+    }
+
+    /// Web search (0.0.4) is an ordinary grantable scope: it asks first, "Allow for this
+    /// chat" covers later searches of that chat, and because a search sends the question
+    /// out, it asks again once untrusted content is in the turn (D9), grant or not.
+    #[test]
+    fn web_search_is_grantable_and_asks_again_after_untrusted_content() {
+        let search = Action {
+            server: "search".into(),
+            tool: "web_search".into(),
+            network: true,
+            ..action(Scope::WebSearch, Risk::Normal, true, true)
+        };
+        let none: BTreeSet<Scope> = BTreeSet::new();
+        let granted: BTreeSet<Scope> = [Scope::WebSearch].into();
+        // The first search in a chat: a card that offers "Allow for this chat".
+        assert_eq!(
+            evaluate(&search, &ready(), &none),
+            Decision::Ask {
+                card: CardKind::Grantable,
+                reason: AskReason::Normal
+            }
+        );
+        assert_eq!(
+            evaluate(&search, &ready(), &granted),
+            Decision::AllowedByGrant
+        );
+        // Never without a card or a grant, unlike the app's own data.
+        assert!(!none.covers(&Scope::WebSearch));
+        assert!(!BTreeSet::from([Scope::AppData, Scope::Skill]).covers(&Scope::WebSearch));
+        // After a tool result or an attachment entered the turn, it asks whatever was granted.
+        let mut untrusted = ready();
+        untrusted.untrusted_in_turn = true;
+        assert_eq!(
+            evaluate(&search, &untrusted, &granted),
+            Decision::Ask {
+                card: CardKind::Grantable,
+                reason: AskReason::UntrustedContentThenOutbound
+            }
+        );
+        // The same in Allow all: allowed by the mode, except after untrusted content.
+        let mut allow_all = ready();
+        allow_all.allow_all = true;
+        assert_eq!(
+            evaluate(&search, &allow_all, &none),
+            Decision::AllowedByMode
+        );
+        allow_all.untrusted_in_turn = true;
+        assert!(matches!(
+            evaluate(&search, &allow_all, &granted),
+            Decision::Ask {
+                reason: AskReason::UntrustedContentThenOutbound,
+                ..
+            }
+        ));
+        // Switched off in the chat, it is refused like any tool.
+        let mut off = ready();
+        off.tool_enabled = false;
+        assert!(matches!(
+            evaluate(&search, &off, &granted),
+            Decision::Refused { .. }
+        ));
+        assert_eq!(
+            serde_json::to_value(Scope::WebSearch).unwrap(),
+            serde_json::json!({"type": "webSearch"})
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, FileText, Paperclip, Square, X } from "lucide-react";
 import type { DocumentInput, ImageInput } from "../lib/types";
+import { ApprovalHint } from "./AllowAllButton";
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -228,7 +229,7 @@ export function Composer(props: {
         )}
       </div>
       <p className="mx-auto mt-1.5 max-w-3xl px-2 text-center text-[11px] text-fg-muted">
-        Enter to send · Shift+Enter for a new line · the model asks before it changes anything
+        Enter to send · Shift+Enter for a new line · <ApprovalHint />
       </p>
     </div>
   );

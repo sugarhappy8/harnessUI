@@ -230,6 +230,8 @@ type Grants = Arc<Mutex<BTreeSet<Scope>>>;
 struct FakePolicy {
     grants: Grants,
     calls: Mutex<Vec<(String, bool, bool)>>,
+    /// The chat is in Allow all (off unless a test switches it on).
+    allow_all: std::sync::atomic::AtomicBool,
 }
 
 impl PolicyGate for FakePolicy {
@@ -243,7 +245,7 @@ impl PolicyGate for FakePolicy {
             server_ready: true,
             recovered_from_text: recovered,
             untrusted_in_turn: untrusted,
-            allow_all: false,
+            allow_all: self.allow_all.load(std::sync::atomic::Ordering::Relaxed),
         };
         let grants = self.grants.lock().unwrap();
         policy::evaluate(action, &turn, &*grants)
@@ -345,6 +347,7 @@ impl Harness {
             policy: FakePolicy {
                 grants: Arc::clone(&grants),
                 calls: Mutex::new(Vec::new()),
+                allow_all: std::sync::atomic::AtomicBool::new(false),
             },
             approver: FakeApprover {
                 answers: Mutex::new(VecDeque::new()),
@@ -629,6 +632,42 @@ async fn allow_for_chat_covers_later_calls() {
     assert_eq!(
         decisions,
         vec![CallDecision::AllowedForChat, CallDecision::AllowedByGrant]
+    );
+}
+
+/// Allow all (0.0.4): a call the policy gate allows by the chat's mode runs without a
+/// card and is reported as such, so the app can audit it as "allowed by Allow all".
+#[tokio::test]
+async fn a_call_allowed_by_the_mode_runs_without_a_card() {
+    let h = Harness::new(vec![
+        reply_text(sse::tool_calls(&[
+            (
+                "c1",
+                "write_file",
+                json!({"path": "/p/x.txt", "content": "data"}),
+            ),
+            ("c2", "read_file", json!({"path": "/p/x.txt"})),
+        ])),
+        reply_text(sse::text("Written and read back.")),
+    ])
+    .await;
+    h.policy
+        .allow_all
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let outcome = h.run(input("Write x.txt")).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert!(h.asked().is_empty(), "no card in Allow all");
+    assert_eq!(h.tools.executed().len(), 2);
+    let decisions: Vec<CallDecision> = h.sink.finished_calls().into_iter().map(|c| c.1).collect();
+    assert_eq!(
+        decisions,
+        vec![CallDecision::AllowedByMode, CallDecision::AllowedByMode]
+    );
+    assert!(
+        !h.sink
+            .events()
+            .iter()
+            .any(|e| matches!(e, TurnEvent::ApprovalPending { .. }))
     );
 }
 

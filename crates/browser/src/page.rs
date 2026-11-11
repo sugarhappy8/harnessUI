@@ -47,8 +47,24 @@ pub(crate) const ELEMENT_INFO_JS: &str = r#"function() {
   }
   const text = (s) => (s || '').replace(/\s+/g, ' ').trim().slice(0, 160);
   const label = text(attr(el, 'aria-label')) || (isInput ? text(el.value) || text(el.placeholder) : '') || text(el.innerText) || text(attr(el, 'title')) || text(attr(el, 'alt')) || text(el.textContent);
+  // The form's default button (its first submit control, in tree order): Enter in one of
+  // the form's fields presses it.
+  let submitLabel = '';
+  if (form) {
+    const controls = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'elements').get.call(form);
+    for (let i = 0; i < controls.length && i < 2000; i++) {
+      const b = controls[i];
+      const bTag = b.tagName.toLowerCase();
+      const bType = String(b.type || '').toLowerCase();
+      const isSubmit = (bTag === 'button' && (bType === '' || bType === 'submit')) || (bTag === 'input' && (bType === 'submit' || bType === 'image'));
+      if (isSubmit && !b.disabled) {
+        submitLabel = text(attr(b, 'aria-label')) || (bTag === 'input' ? text(b.value) : '') || text(b.innerText) || text(attr(b, 'title')) || text(attr(b, 'alt')) || text(b.textContent);
+        break;
+      }
+    }
+  }
   return {
-    tag, inputType: type, role, label,
+    tag, inputType: type, role, label, formSubmitLabel: submitLabel,
     isSubmitControl: submit, inForm: !!form, formMethod: method, formAction: action,
     isButtonLike: buttonLike, isEditable: editable,
     isLink: tag === 'a' && el.hasAttribute('href'), href: tag === 'a' ? el.href : null,

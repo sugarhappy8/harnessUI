@@ -126,6 +126,16 @@ mod tests {
         assert!(csp.contains("script-src 'self';"));
         assert!(!csp.contains("unsafe-eval"));
         assert!(!csp.contains("127.0.0.1"));
+        // The whole policy, word for word, so that loosening it is a deliberate change
+        // here. `frame-src` names the one origin artifact previews load from, as the two
+        // kinds of webview spell it (artifacts/protocol.rs), and nothing else.
+        assert_eq!(
+            csp,
+            "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; \
+             img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; \
+             object-src 'none'; frame-src artifact://sandbox.localhost http://artifact.sandbox.localhost; \
+             form-action 'none'; base-uri 'self'; require-trusted-types-for 'script'"
+        );
         assert_eq!(conf["app"]["withGlobalTauri"], serde_json::json!(false));
     }
 }

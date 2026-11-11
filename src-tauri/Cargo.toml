@@ -39,6 +39,7 @@ models = { workspace = true }
 policy = { workspace = true }
 tools = { workspace = true }
 browser = { workspace = true }
+search = { workspace = true }
 computer = { workspace = true }
 mcp-host = { workspace = true }
 # Signed, opt-in updates (registered only when the build carries the updater key).

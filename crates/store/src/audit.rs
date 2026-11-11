@@ -669,6 +669,47 @@ mod tests {
         assert_eq!(first["preview"], json!("multi\nline"));
     }
 
+    /// A call that a chat's Allow all mode let through is stored, filtered and exported
+    /// under its own decision.
+    #[tokio::test]
+    async fn calls_allowed_by_the_mode_have_their_own_decision() {
+        let store = Store::open_in_memory().expect("open");
+        let mut by_mode = entry("write_file", AuditDecision::AllowedByMode);
+        by_mode.decided_by = "policy".into();
+        store.append_audit(by_mode).await.expect("append");
+        store
+            .append_audit(entry("write_file", AuditDecision::AllowedByGrant))
+            .await
+            .expect("append");
+        let rows = store
+            .list_audit(AuditQuery {
+                decision: Some(AuditDecision::AllowedByMode),
+                ..AuditQuery::default()
+            })
+            .await
+            .expect("filter");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].decision, AuditDecision::AllowedByMode);
+        assert_eq!(rows[0].decided_by, "policy");
+        assert_eq!(
+            "allowed_by_mode".parse::<AuditDecision>().expect("parse"),
+            AuditDecision::AllowedByMode
+        );
+        let jsonl = store
+            .export_audit_jsonl(AuditQuery::default())
+            .await
+            .expect("jsonl");
+        assert!(
+            jsonl.contains("\"decision\":\"allowed_by_mode\""),
+            "{jsonl}"
+        );
+        let csv = store
+            .export_audit_csv(AuditQuery::default())
+            .await
+            .expect("csv");
+        assert!(csv.contains(",allowed_by_mode,policy,"), "{csv}");
+    }
+
     /// Minimal RFC 4180 parser for the round-trip test.
     fn parse_csv(input: &str) -> Vec<Vec<String>> {
         let mut records = Vec::new();

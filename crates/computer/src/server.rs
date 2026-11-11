@@ -501,6 +501,14 @@ impl ComputerServer {
         } else {
             Risk::Normal
         };
+        // Allow all: whatever always asks here keeps asking. Each reason is input that
+        // reaches outside the application a grant could cover (D7): a terminal or console
+        // window, system settings, a password manager, the system's own shortcuts, a drag
+        // into another application. So an always-ask input that runs was approved by the
+        // user on its own card in every mode, which is what the guard relies on.
+        a.keep_asking = always_ask
+            .is_some()
+            .then_some(policy::KeepAsking::ProtectedApp);
         a.read_only = false;
         a.outbound = outbound;
         a.payload = serde_json::to_value(plan).unwrap_or(Value::Null);
@@ -1031,8 +1039,10 @@ impl ComputerServer {
         let guard = self.guard.clone();
         let cancel = ctx.cancel.clone();
         // Only an action the user approved on an always-ask card may reach a target that
-        // always asks; anything else (possibly allowed by a grant) is refused there.
-        let always_ask_approved = action.risk == Risk::AlwaysAsk;
+        // always asks; anything else (possibly allowed by a grant, or by Allow all) is
+        // refused there. An always-ask input always keeps asking (see `input_action`), so
+        // it cannot have been let through by the mode.
+        let always_ask_approved = action.risk == Risk::AlwaysAsk && action.keep_asking.is_some();
         let task = tokio::task::spawn_blocking(move || {
             let _lock = lock;
             run_plan(&guard, &plan, cancel, always_ask_approved)
