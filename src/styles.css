@@ -1,69 +1,105 @@
 @import "tailwindcss";
 
 /* Theme tokens. Light is the default; dark applies with the OS setting unless the
-   user picked light, and always when the user picked dark. */
+   user picked light, and always when the user picked dark.
+
+   Surfaces are layered: --bg is the page, --bg-subtle the sidebar and quiet panels,
+   --bg-muted hover and chips, --surface what floats above the page (composer, menus,
+   dialogs, cards). --accent to --accent-2 is the one gradient the app uses, for the
+   brand mark and the main action. */
 :root {
-  --bg: #ffffff;
-  --bg-subtle: #f6f6f7;
-  --bg-muted: #ededf0;
-  --fg: #18181b;
-  --fg-muted: #5c5c66;
-  --border: #e2e2e6;
-  --accent: #2f5bd8;
+  --bg: #fbfbfd;
+  --bg-subtle: #f3f3f7;
+  --bg-muted: #e9e9f0;
+  --surface: #ffffff;
+  --fg: #17181c;
+  --fg-muted: #5d5f6b;
+  --border: #e3e3ea;
+  --border-strong: #cdced8;
+  --accent: #4f56d9;
+  --accent-2: #9a4fe0;
   --accent-fg: #ffffff;
   --danger: #c0262d;
   --warning: #a15c00;
   --success: #1c7c3c;
-  --focus: #2f5bd8;
+  --focus: #4f56d9;
+  --shadow-color: 230 25% 20%;
+  --glow: 0.06;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #131316;
-    --bg-subtle: #1b1b1f;
-    --bg-muted: #26262b;
-    --fg: #ececf0;
-    --fg-muted: #a0a0ab;
-    --border: #2f2f36;
-    --accent: #7b9cff;
-    --accent-fg: #0d1430;
+    --bg: #0e0f13;
+    --bg-subtle: #14151a;
+    --bg-muted: #20222a;
+    --surface: #191b21;
+    --fg: #ecedf2;
+    --fg-muted: #9a9cab;
+    --border: #272932;
+    --border-strong: #383b49;
+    --accent: #8b93ff;
+    --accent-2: #c084fc;
+    --accent-fg: #0b0d1f;
     --danger: #ff6b70;
     --warning: #f0b45a;
     --success: #5fd38a;
-    --focus: #7b9cff;
+    --focus: #8b93ff;
+    --shadow-color: 230 40% 2%;
+    --glow: 0.1;
     color-scheme: dark;
   }
 }
 
 :root[data-theme="dark"] {
-  --bg: #131316;
-  --bg-subtle: #1b1b1f;
-  --bg-muted: #26262b;
-  --fg: #ececf0;
-  --fg-muted: #a0a0ab;
-  --border: #2f2f36;
-  --accent: #7b9cff;
-  --accent-fg: #0d1430;
+  --bg: #0e0f13;
+  --bg-subtle: #14151a;
+  --bg-muted: #20222a;
+  --surface: #191b21;
+  --fg: #ecedf2;
+  --fg-muted: #9a9cab;
+  --border: #272932;
+  --border-strong: #383b49;
+  --accent: #8b93ff;
+  --accent-2: #c084fc;
+  --accent-fg: #0b0d1f;
   --danger: #ff6b70;
   --warning: #f0b45a;
   --success: #5fd38a;
-  --focus: #7b9cff;
+  --focus: #8b93ff;
+  --shadow-color: 230 40% 2%;
+  --glow: 0.1;
   color-scheme: dark;
+}
+
+:root {
+  --shadow-sm: 0 1px 2px hsl(var(--shadow-color) / 0.12), 0 1px 1px hsl(var(--shadow-color) / 0.06);
+  --shadow-md: 0 4px 12px hsl(var(--shadow-color) / 0.14), 0 1px 3px hsl(var(--shadow-color) / 0.1);
+  --shadow-lg: 0 18px 48px hsl(var(--shadow-color) / 0.3), 0 4px 12px hsl(var(--shadow-color) / 0.16);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
 }
 
 @theme inline {
   --color-bg: var(--bg);
   --color-bg-subtle: var(--bg-subtle);
   --color-bg-muted: var(--bg-muted);
+  --color-surface: var(--surface);
   --color-fg: var(--fg);
   --color-fg-muted: var(--fg-muted);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
   --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
   --color-accent-fg: var(--accent-fg);
   --color-danger: var(--danger);
   --color-warning: var(--warning);
   --color-success: var(--success);
+  --shadow-soft: var(--shadow-sm);
+  --shadow-float: var(--shadow-md);
+  --shadow-pop: var(--shadow-lg);
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
 html,
@@ -76,16 +112,15 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    Roboto,
-    "Helvetica Neue",
-    sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 :focus-visible {
@@ -93,12 +128,318 @@ body {
   outline-offset: 2px;
 }
 
+/* Thin scrollbars in the theme's colours, instead of the system's wide grey ones. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* ---- Motion ---------------------------------------------------------------------
+   Everything that reacts to the pointer eases; everything that appears eases in.
+   Short (120 to 220 ms) so the app feels quick, and switched off just below for
+   people who asked their system for less motion. */
+button,
+a,
+input,
+textarea,
+select,
+summary,
+[role="menuitem"],
+[role="tab"],
+[role="radio"],
+[role="switch"] {
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 160ms ease,
+    opacity 140ms ease,
+    transform 120ms var(--ease-out);
+}
+
+button:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-4px);
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    scale: 0.96;
+  }
+}
+
+@keyframes dialog-out {
+  to {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+
+@keyframes dot-bounce {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+
+@keyframes glow-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Dialogs and menus (Radix marks them with data-state). The dialogs are centred with the
+   `translate` property, so `scale` and `opacity` can animate without moving them. */
+[role="dialog"][data-state="open"],
+[role="alertdialog"][data-state="open"] {
+  animation: dialog-in 200ms var(--ease-out);
+}
+
+[role="dialog"][data-state="closed"],
+[role="alertdialog"][data-state="closed"] {
+  animation: dialog-out 130ms ease-in forwards;
+}
+
+.dialog-overlay {
+  background: hsl(var(--shadow-color) / 0.5);
+  backdrop-filter: blur(3px);
+}
+
+.dialog-overlay[data-state="open"] {
+  animation: fade-in 180ms ease-out;
+}
+
+.dialog-overlay[data-state="closed"] {
+  animation: fade-out 130ms ease-in forwards;
+}
+
+/* Menus animate in only. While a closing animation runs the menu still holds the
+   keyboard focus and hands it back to its button when it ends, so anything typed right
+   after choosing an item went to that button (and Space opened the menu again). Found by
+   an end-to-end test that types straight after picking a model. */
+[role="menu"][data-state="open"] {
+  animation: pop-in 150ms var(--ease-out);
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin, top left);
+}
+
+/* Something new in the conversation: a message, a tool card, a notice. */
+.enter {
+  animation: rise-in 220ms var(--ease-out) both;
+}
+
+.enter-fade {
+  animation: fade-in 200ms ease-out both;
+}
+
+/* The model is working and has not written anything yet. */
+.typing-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  height: 1.25rem;
+}
+
+.typing-dots > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--fg-muted);
+  animation: dot-bounce 1.2s ease-in-out infinite;
+}
+
+.typing-dots > span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dots > span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* A bar that keeps moving while the amount of progress is not known. */
+.progress-indeterminate {
+  position: relative;
+  overflow: hidden;
+}
+
+.progress-indeterminate::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  animation: progress-slide 1.1s ease-in-out infinite;
+}
+
+.pulse {
+  animation: glow-pulse 1.6s ease-in-out infinite;
+}
+
+/* ---- Brand and surfaces ------------------------------------------------------------ */
+.brand-gradient {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+
+.brand-text {
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* The main action: gradient, a soft glow, and a lift on hover. */
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: var(--accent-fg);
+  box-shadow:
+    0 1px 2px hsl(var(--shadow-color) / 0.2),
+    0 6px 18px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.btn-primary:not(:disabled):hover {
+  filter: brightness(1.07);
+  box-shadow:
+    0 1px 2px hsl(var(--shadow-color) / 0.2),
+    0 8px 24px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.btn-primary:disabled {
+  background: var(--bg-muted);
+  color: var(--fg-muted);
+  box-shadow: none;
+}
+
+/* The page behind a chat: a very faint glow of the accent at the top, so the main area
+   is not one flat colour. */
+.app-backdrop {
+  background:
+    radial-gradient(60rem 28rem at 50% -12rem, color-mix(in srgb, var(--accent) calc(var(--glow) * 100%), transparent), transparent 70%),
+    var(--bg);
+}
+
+.glass {
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: blur(12px) saturate(140%);
+}
+
+/* A card that can be clicked: lifts a little and shows the accent on its border. */
+.card-interactive {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition:
+    transform 180ms var(--ease-out),
+    box-shadow 180ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+.card-interactive:not(:disabled):hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: var(--shadow-md);
+}
+
+.card-interactive:not(:disabled):active {
+  transform: translateY(0) scale(0.99);
+}
+
+/* The composer: floats above the page and glows in the accent while typing. */
+.composer {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  transition:
+    border-color 160ms ease,
+    box-shadow 200ms ease;
+}
+
+.composer:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* Text of the conversation: a little larger and airier than the interface around it. */
+.chat-text {
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+/* Code inside a block has the block's background, not the inline chip's. */
+pre code {
+  background: transparent !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+}
+
+/* Long chats: the browser skips laying out messages that are off screen. */
+.message-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+  /* The containment above clips at the row's edge: leave room for focus rings and the
+     cards' shadows. */
+  padding: 3px 6px;
+  margin-inline: -6px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  button:not(:disabled):active {
+    transform: none;
   }
 }
 

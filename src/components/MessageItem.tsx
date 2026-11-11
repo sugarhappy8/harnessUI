@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { MessageDto } from "../lib/types";
@@ -62,7 +62,8 @@ function BranchSwitcher(props: { message: MessageDto; onSwitch: (id: number) => 
   );
 }
 
-export function MessageItem(props: Props) {
+/** Memoised: while a reply streams in, the messages above it do not render again. */
+export const MessageItem = memo(function MessageItem(props: Props) {
   const m = props.message;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(m.text);
@@ -81,7 +82,7 @@ export function MessageItem(props: Props) {
 
   if (m.role === "user") {
     return (
-      <div className="group flex flex-col items-end">
+      <div className="group enter flex flex-col items-end">
         {editing ? (
           <form
             className="w-full max-w-[85%]"
@@ -126,7 +127,11 @@ export function MessageItem(props: Props) {
                 ))}
               </div>
             )}
-            {m.text && <div className="rounded-lg bg-bg-muted px-3 py-2 whitespace-pre-wrap">{m.text}</div>}
+            {m.text && (
+              <div className="chat-text rounded-2xl rounded-br-md border border-accent/20 bg-accent/10 px-3.5 py-2 whitespace-pre-wrap">
+                {m.text}
+              </div>
+            )}
           </div>
         )}
         <div className="mt-1 flex items-center gap-2 opacity-70 group-hover:opacity-100">
@@ -154,14 +159,14 @@ export function MessageItem(props: Props) {
   if (m.role !== "assistant") return null;
 
   return (
-    <div className="group">
+    <div className="group enter">
       {m.reasoning && (
-        <details className="mb-2 rounded-md border border-border bg-bg-subtle px-3 py-1.5 text-sm">
+        <details className="mb-2 rounded-lg border border-border bg-bg-subtle px-3 py-2 text-sm">
           <summary className="cursor-pointer text-fg-muted select-none">Thinking</summary>
           <div className="mt-1 whitespace-pre-wrap text-fg-muted">{m.reasoning}</div>
         </details>
       )}
-      <div className="leading-relaxed">
+      <div className="chat-text">
         {m.text ? (
           <Markdown text={m.text} />
         ) : m.status === "streaming" ? (
@@ -199,4 +204,4 @@ export function MessageItem(props: Props) {
       </div>
     </div>
   );
-}
+});

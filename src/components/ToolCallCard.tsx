@@ -80,15 +80,17 @@ export function ToolCallCard(props: { call: ToolCallView }) {
   const helperNow =
     c.name === SUBAGENT_TOOL && (c.status === "running" || c.status === "waiting") ? lastLine(c.progress ?? "") : "";
   return (
-    <div className="rounded-md border border-border bg-bg-subtle text-sm">
+    <div className="enter overflow-hidden rounded-xl border border-border bg-surface text-sm shadow-soft">
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-bg-muted/60"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
         {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-        <Wrench size={14} className="text-fg-muted" aria-hidden />
+        <span className="rounded-md bg-bg-muted p-1 text-accent">
+          <Wrench size={13} aria-hidden />
+        </span>
         <span className="font-medium">{c.name}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg-muted">{argSummary(c.arguments)}</span>
         <StatusIcon status={c.status} />
@@ -100,7 +102,7 @@ export function ToolCallCard(props: { call: ToolCallView }) {
         </p>
       )}
       {open && (
-        <div className="space-y-2 border-t border-border px-3 py-2">
+        <div className="enter-fade space-y-2 border-t border-border px-3 py-2">
           {c.recovered && (
             <p className="text-xs text-warning">This call was recovered from the model&apos;s text.</p>
           )}

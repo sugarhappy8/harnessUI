@@ -2,9 +2,21 @@
 
 All notable changes, by milestone. Dates are UTC.
 
-## Unreleased
+## 0.0.3 (2026-11-11)
+
+Three things reported from a real Windows PC on 0.0.2: a model that seemed not to load, a task that stopped at the step limit, and "the app looks too plain and is not smooth".
 
 ### Changed
+- **A new look.** The colours have layers now (page, sidebar, floating surfaces) with one accent gradient, soft shadows and rounder corners, in dark and in light. What changed on screen:
+  - *With no chat open* there is a welcome screen instead of one line of grey text: the loaded model (or the recent ones, one click to load), and four things to try that write a request into the message box.
+  - *Sidebar:* the app's mark, a prominent New chat button, chats under Today, Yesterday, This week and Earlier, and at the bottom what is loaded and on which backend (it opens the model manager).
+  - *Header:* nothing wraps onto a second line any more at narrow widths (labels give way to icons), and context use is a small meter (`40.9k / 65.5k tokens (62%)`) that turns amber, then red, as it fills.
+  - *Messages:* your messages are tinted bubbles; code blocks have a header with the language and a Copy button; tables, tool cards, approval cards, banners and dialogs share the same surfaces.
+  - *Message box:* floats above the page and shows focus as a glow.
+- **Motion.** Buttons, menus and fields ease between states; dialogs and menus open and close with a short scale and fade; messages, tool cards and notices rise in; a moving bar shows while a model loads without a known percentage; three dots show while the model works. All of it is switched off when the system asks for reduced motion.
+- **Smoother while a reply streams.** Messages above the one being written are no longer rendered again for every chunk of text; a long reply with code is rendered as fast as the machine can without holding up typing or scrolling; off-screen messages are skipped by the layout engine; and the chat only follows new text while you are at the bottom. Scroll up to read and it stays put, with a button to jump back to the latest message.
+- With no chat open and a model loaded, typing a message starts a chat with that model, and New chat uses the loaded model.
+- **No white flash at start on a dark system.** The main window was created white and stayed so until the page had painted. It is now created hidden, given the page's background for the system theme, and then shown. Checked on Linux that the window still appears; the flash itself could only be seen on Windows or macOS, so this part is not verified.
 - **The step limit is a setting, and reaching it is no longer a dead end.** Reported on 0.0.2: a task (installing Rust) stopped at "The step limit for one turn was reached", shown as a red error. A turn could make 25 model calls and that number could not be changed. The default is now 50, *Settings → General → Steps per turn* offers 25, 50, 100 and 200, and when a turn stops at the limit the chat shows a notice with a **Continue** button instead of an error.
 
 ### Fixed

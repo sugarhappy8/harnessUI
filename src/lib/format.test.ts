@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatCount, formatEta, formatParams } from "./format";
+import { dayGroup, formatBytes, formatCount, formatEta, formatParams } from "./format";
 
 describe("format", () => {
   it("formats sizes in decimal units", () => {
@@ -18,5 +18,20 @@ describe("format", () => {
     expect(formatEta(600e6, 10e6)).toBe("1 min left");
     expect(formatEta(30e6, 1e6)).toBe("30 s left");
     expect(formatEta(1, 0)).toBeNull();
+  });
+});
+
+describe("dayGroup", () => {
+  const now = new Date(2026, 10, 11, 15, 30).getTime();
+  const at = (y: number, m: number, d: number, h = 12) => new Date(y, m, d, h).getTime();
+  it("puts a chat under the day it was last used", () => {
+    expect(dayGroup(at(2026, 10, 11, 0), now)).toBe("Today");
+    expect(dayGroup(now, now)).toBe("Today");
+    expect(dayGroup(at(2026, 10, 10, 23), now)).toBe("Yesterday");
+    expect(dayGroup(at(2026, 10, 10, 0), now)).toBe("Yesterday");
+    expect(dayGroup(at(2026, 10, 9, 23), now)).toBe("This week");
+    expect(dayGroup(at(2026, 10, 5, 1), now)).toBe("This week");
+    expect(dayGroup(at(2026, 10, 4, 23), now)).toBe("Earlier");
+    expect(dayGroup(0, now)).toBe("Earlier");
   });
 });

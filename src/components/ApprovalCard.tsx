@@ -47,7 +47,7 @@ export function ApprovalCard(props: {
       role="alertdialog"
       aria-labelledby={`approval-${request.id}-title`}
       aria-describedby={`approval-${request.id}-preview`}
-      className="my-2 rounded-lg border border-warning/60 bg-bg-subtle p-3 text-sm"
+      className="enter my-2 rounded-xl border border-warning/60 bg-surface p-3.5 text-sm shadow-float"
       onKeyDown={(e) => {
         // Enter must never approve.
         if (e.key === "Enter" && (e.target as HTMLElement).tagName !== "TEXTAREA") e.preventDefault();

@@ -31,7 +31,7 @@ export function ErrorBanner(props: {
     <div
       role={notice ? "status" : "alert"}
       className={
-        "flex items-start gap-3 rounded-md border px-3 py-2 text-sm " +
+        "enter flex items-start gap-3 rounded-xl border px-3.5 py-2.5 text-sm shadow-soft " +
         (notice ? "border-warning/40 bg-warning/10" : "border-danger/40 bg-danger/10")
       }
     >
@@ -42,7 +42,7 @@ export function ErrorBanner(props: {
       {props.action && (
         <button
           type="button"
-          className="rounded-md bg-accent px-3 py-1 text-sm text-accent-fg"
+          className="btn-primary rounded-lg px-3 py-1 text-sm font-medium"
           onClick={props.action.onClick}
         >
           {props.action.label}

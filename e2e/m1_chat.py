@@ -175,7 +175,7 @@ def main() -> int:
         assert s.invoke("list_chats", {"query": None}) == []
         assert s.execute(header) == "Choose a model", s.execute(header)
         s.click_button("Model for this chat")
-        s.click_button(os.path.basename(MODEL))
+        s.click_menu_item(os.path.basename(MODEL))
         shown_loading = False
         deadline = time.time() + 120
         while time.time() < deadline:

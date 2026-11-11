@@ -338,6 +338,16 @@ pub fn run() {
 /// Builds the windows declared in `tauri.conf.json` (they have `"create": false`)
 /// so navigation and pop-up handlers can be attached. Navigation away from the app's
 /// own origin is blocked, and so is `window.open` (ARCHITECTURE.md 13.2).
+/// The page background (`--bg` in src/styles.css) for the system theme, as the colour of
+/// the main window before its page has painted.
+fn startup_background(dark: bool) -> (u8, u8, u8) {
+    if dark {
+        (0x0e, 0x0f, 0x13)
+    } else {
+        (0xfb, 0xfb, 0xfd)
+    }
+}
+
 fn create_windows(app: &mut tauri::App) -> tauri::Result<()> {
     let product_name = app
         .config()
@@ -352,13 +362,23 @@ fn create_windows(app: &mut tauri::App) -> tauri::Result<()> {
             .on_navigation(move |url| navigation::is_allowed(url, dev))
             .on_new_window(|_url, _features| NewWindowResponse::Deny);
         if config.label == MAIN_WINDOW {
-            builder = builder.title(&product_name);
+            // Created hidden and shown below with the theme's background: a window is
+            // white until its page has painted, which is a flash on a dark system.
+            builder = builder.title(&product_name).visible(false);
         }
         #[cfg(windows)]
         {
             builder = builder.additional_browser_args(WEBVIEW2_ARGS);
         }
         let window = builder.build()?;
+        if config.label == MAIN_WINDOW {
+            let dark = matches!(window.theme(), Ok(tauri::Theme::Dark));
+            let (r, g, b) = startup_background(dark);
+            let _ = window.set_background_color(Some(tauri::window::Color(r, g, b, 255)));
+            // Shown whatever the calls above returned: a window that stays hidden is
+            // worse than a flash.
+            window.show()?;
+        }
         // Click-through has no config key; it is a runtime call. On Linux (development
         // only) GTK has no native window until the overlay is first shown, so the call is
         // made when M7 shows it.
@@ -370,4 +390,21 @@ fn create_windows(app: &mut tauri::App) -> tauri::Result<()> {
         let _ = &window;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_background;
+
+    /// The window's first colour must be the page's, or the start still flashes.
+    #[test]
+    fn the_startup_background_is_the_page_background() {
+        let css = include_str!("../../src/styles.css");
+        let hex = |(r, g, b): (u8, u8, u8)| format!("--bg: #{r:02x}{g:02x}{b:02x};");
+        let light = hex(startup_background(false));
+        let dark = hex(startup_background(true));
+        // Light is declared once (:root); dark twice (system setting, and chosen).
+        assert_eq!(css.matches(&light).count(), 1, "{light}");
+        assert_eq!(css.matches(&dark).count(), 2, "{dark}");
+    }
 }

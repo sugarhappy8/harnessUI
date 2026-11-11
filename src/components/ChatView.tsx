@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Brain, FileText } from "lucide-react";
+import { useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, Brain, FileText } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { useApp, toErrorInfo } from "../store/app";
 import { MessageItem } from "./MessageItem";
@@ -12,7 +12,45 @@ import { ToolCallCard, type ToolCallView } from "./ToolCallCard";
 import { ToolsPanel } from "./ToolsPanel";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
+import { EmptyChat, Welcome } from "./Welcome";
+import { formatCount } from "../lib/format";
 import type { MessageDto, ToolResultDto } from "../lib/types";
+
+/** The reply being written. Text arrives many times a second; when rendering it cannot
+ *  keep up (a long answer with code), React shows the latest it has finished instead of
+ *  holding up typing and scrolling. */
+function LiveReply(props: { text: string }) {
+  const text = useDeferredValue(props.text);
+  return (
+    <div className="chat-text">
+      <Markdown text={text} />
+    </div>
+  );
+}
+
+/** How much of the context window the last request filled. */
+function ContextMeter(props: { used: number; nCtx: number | null }) {
+  if (!props.nCtx) {
+    return (
+      <span className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums" title="Context used by the last request">
+        {props.used.toLocaleString()} tokens
+      </span>
+    );
+  }
+  const pct = Math.min(100, Math.round((props.used / props.nCtx) * 100));
+  const tone = pct >= 90 ? "bg-danger" : pct >= 75 ? "bg-warning" : "bg-accent";
+  return (
+    <span
+      className="flex shrink-0 items-center gap-2 text-xs whitespace-nowrap text-fg-muted tabular-nums"
+      title={`Context used by the last request: ${props.used.toLocaleString()} of ${props.nCtx.toLocaleString()} tokens`}
+    >
+      <span className="h-1.5 w-12 overflow-hidden rounded-full bg-bg-muted" aria-hidden>
+        <span className={"block h-full rounded-full transition-[width] duration-500 " + tone} style={{ width: `${pct}%` }} />
+      </span>
+      {formatCount(props.used)} / {formatCount(props.nCtx)} tokens ({pct}%)
+    </span>
+  );
+}
 
 /** Messages rendered at first in a long chat. */
 const RECENT_MESSAGES = 80;
@@ -37,7 +75,10 @@ export function ChatView() {
   const [promptOpen, setPromptOpen] = useState(false);
   // Long chats render their latest messages; earlier ones on request.
   const [earlier, setEarlier] = useState<{ chatId: number | null; count: number }>({ chatId: null, count: 0 });
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  // Follow new text only while the reader is at the bottom; scrolling up to read stops it.
+  const pinnedRef = useRef(true);
+  const [pinned, setPinned] = useState(true);
   const busy = generation !== null;
   const messages = useMemo(
     () => (detail?.messages ?? []).filter((m) => m.role === "user" || m.role === "assistant"),
@@ -59,13 +100,33 @@ export function ChatView() {
   const scrollKey =
     messages.length + (live ? live.text.length + live.tools.length * 1000 + live.reasoning.length : 0) + chatApprovals.length;
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
+  const onScroll = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    pinnedRef.current = atBottom;
+    setPinned(atBottom);
+  }, []);
+  const toBottom = useCallback((smooth: boolean) => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    pinnedRef.current = true;
+    setPinned(true);
+  }, []);
+  // Opening a chat starts at its end.
+  useLayoutEffect(() => {
+    toBottom(false);
+  }, [chatKey, toBottom]);
+  useLayoutEffect(() => {
+    if (pinnedRef.current) scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
   }, [scrollKey]);
 
   const modelRef = detail?.chat.modelRef ?? null;
   let disabledReason: string | null = null;
-  if (!modelRef) disabledReason = "Choose a model above to start chatting";
+  // With no chat open, sending starts one with the loaded model.
+  if (!detail) disabledReason = runtime?.state === "ready" ? null : "Choose a model to start chatting";
+  else if (!modelRef) disabledReason = "Choose a model above to start chatting";
   else if (modelRef.startsWith("local:") && runtime?.state === "starting")
     disabledReason = "The model is still loading…";
   else if (modelRef.startsWith("local:") && runtime?.state !== "ready")
@@ -83,30 +144,28 @@ export function ChatView() {
           : null;
   const nCtx = live?.nCtx ?? (modelRef?.startsWith("local:") ? (runtime?.nCtx ?? null) : null);
 
-  function editResend(m: MessageDto, text: string) {
-    void send(text, m.parentId);
-  }
+  // Stable callbacks, so the memoised messages are not rendered again for every token.
+  const editResend = useCallback((m: MessageDto, text: string) => void send(text, m.parentId), [send]);
+  const onRegenerate = useCallback((id: number) => void regenerate(id), [regenerate]);
+  const onSwitchBranch = useCallback((id: number) => void switchBranch(id), [switchBranch]);
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
-      <header className="flex items-center gap-3 border-b border-border px-4 py-2">
+      <header className="glass @container z-10 flex items-center gap-1.5 border-b border-border px-3 py-2">
         <ModelPicker />
         <RuntimeIndicator />
         <div className="flex-1" />
-        {used !== null && (
-          <span className="text-xs text-fg-muted" title="Context used by the last request">
-            {nCtx
-              ? `${used.toLocaleString()} / ${nCtx.toLocaleString()} tokens (${Math.round((used / nCtx) * 100)}%)`
-              : `${used.toLocaleString()} tokens`}
-          </span>
-        )}
+        {used !== null && <ContextMeter used={used} nCtx={nCtx} />}
         {live?.tokensPerSecond != null && (
-          <span className="text-xs text-fg-muted">{live.tokensPerSecond.toFixed(1)} tokens/s</span>
+          <span className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums">
+            {live.tokensPerSecond.toFixed(1)} tokens/s
+          </span>
         )}
         {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
           <button
             type="button"
             aria-pressed={detail.chat.thinking}
+            aria-label={`Thinking ${detail.chat.thinking ? "on" : "off"}`}
             title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
             onClick={() =>
               void ipc
@@ -114,9 +173,10 @@ export function ChatView() {
                 .then(() => openChat(detail.chat.id))
                 .catch((e) => showError(toErrorInfo(e)))
             }
-            className={`flex items-center gap-1 rounded-md px-2 py-1 text-sm hover:bg-bg-muted ${detail.chat.thinking ? "text-fg" : "text-fg-muted"}`}
+            className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted ${detail.chat.thinking ? "text-accent" : "text-fg-muted"}`}
           >
-            <Brain size={14} aria-hidden /> Thinking {detail.chat.thinking ? "on" : "off"}
+            <Brain size={15} aria-hidden />
+            <span className="hidden @3xl:inline">Thinking {detail.chat.thinking ? "on" : "off"}</span>
           </button>
         )}
         {detail && (
@@ -131,21 +191,27 @@ export function ChatView() {
           <button
             type="button"
             onClick={() => setPromptOpen(true)}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-fg-muted hover:bg-bg-muted hover:text-fg"
+            className="flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap text-fg-muted hover:bg-bg-muted hover:text-fg"
             title="System prompt"
+            aria-label="System prompt"
           >
-            <FileText size={14} aria-hidden /> System prompt
+            <FileText size={15} aria-hidden />
+            <span className="hidden @3xl:inline">System prompt</span>
           </button>
         )}
       </header>
 
-      <div className="flex-1 overflow-y-auto" aria-live="polite" aria-busy={busy}>
-        <div className="mx-auto max-w-3xl space-y-6 px-4 py-6">
-          {messages.length === 0 && (
-            <div className="py-16 text-center text-fg-muted">
-              {detail ? "Send a message to start." : "Start a new chat or pick one from the list."}
-            </div>
-          )}
+      <div className="relative min-h-0 flex-1">
+      <div
+        ref={scrollerRef}
+        onScroll={onScroll}
+        className="app-backdrop h-full overflow-y-auto"
+        aria-live="polite"
+        aria-busy={busy}
+      >
+        {!detail && <Welcome />}
+        {detail && messages.length === 0 && !live && <EmptyChat />}
+        <div className={"mx-auto max-w-3xl space-y-6 px-4 py-6" + (detail ? "" : " hidden")}>
           {hidden > 0 && (
             <div className="text-center">
               <button
@@ -158,7 +224,7 @@ export function ChatView() {
             </div>
           )}
           {shown.map((m) => (
-            <div key={m.id} className="space-y-2">
+            <div key={m.id} className="message-row space-y-2">
               {(m.text ||
                 m.reasoning ||
                 m.role === "user" ||
@@ -169,9 +235,9 @@ export function ChatView() {
                   message={m}
                   isLastAssistant={m.id === lastAssistantId}
                   busy={busy}
-                  onRegenerate={(id) => void regenerate(id)}
+                  onRegenerate={onRegenerate}
                   onEditResend={editResend}
-                  onSwitchBranch={(id) => void switchBranch(id)}
+                  onSwitchBranch={onSwitchBranch}
                 />
               )}
               {m.toolCalls.map((c) => {
@@ -192,7 +258,7 @@ export function ChatView() {
             </div>
           ))}
           {live && (
-            <div className="space-y-2" aria-live="polite">
+            <div className="enter-fade space-y-2" aria-live="polite">
               {live.tools
                 .filter((t) => !messages.some((m) => m.toolCalls.some((c) => c.id === t.callId)))
                 .map((t) => (
@@ -206,18 +272,22 @@ export function ChatView() {
                   />
                 ))}
               {live.reasoning && (
-                <details className="rounded-md border border-border bg-bg-subtle px-3 py-1.5 text-sm" open>
+                <details className="rounded-lg border border-border bg-bg-subtle px-3 py-2 text-sm" open>
                   <summary className="cursor-pointer text-fg-muted select-none">Thinking…</summary>
                   <div className="mt-1 whitespace-pre-wrap text-fg-muted">{live.reasoning}</div>
                 </details>
               )}
               {live.text ? (
-                <div className="leading-relaxed">
-                  <Markdown text={live.text} />
-                </div>
+                <LiveReply text={live.text} />
               ) : (
                 live.tools.every((t) => t.status !== "running") &&
-                chatApprovals.length === 0 && <div className="text-fg-muted">…</div>
+                chatApprovals.length === 0 && (
+                  <div className="typing-dots enter-fade" role="status" aria-label="The model is working">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                )
               )}
               {live.notes.map((n, i) => (
                 <p key={i} className="text-xs text-fg-muted">
@@ -238,8 +308,19 @@ export function ChatView() {
           {chatApprovals.map((a) => (
             <ApprovalCard key={a.id} request={a} onDecide={(d, note) => void decideApproval(a.id, d, note)} />
           ))}
-          <div ref={bottomRef} />
         </div>
+      </div>
+        {!pinned && detail && (
+          <button
+            type="button"
+            onClick={() => toBottom(true)}
+            aria-label="Jump to the latest message"
+            title="Jump to the latest message"
+            className="enter absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-border bg-surface p-2 text-fg-muted shadow-float hover:text-fg"
+          >
+            <ArrowDown size={16} aria-hidden />
+          </button>
+        )}
       </div>
 
       {error && (

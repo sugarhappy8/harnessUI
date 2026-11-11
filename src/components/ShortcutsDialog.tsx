@@ -31,8 +31,8 @@ export function ShortcutsDialog(props: { open: boolean; onOpenChange: (open: boo
   return (
     <Dialog.Root open={props.open} onOpenChange={props.onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/40" />
-        <Dialog.Content className="fixed top-1/2 left-1/2 w-[28rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-bg p-5 shadow-xl">
+        <Dialog.Overlay className="dialog-overlay fixed inset-0" />
+        <Dialog.Content className="fixed top-1/2 left-1/2 w-[28rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 shadow-pop">
           <div className="mb-3 flex items-center justify-between">
             <Dialog.Title className="font-semibold">Keyboard shortcuts</Dialog.Title>
             <Dialog.Close aria-label="Close" className="text-fg-muted hover:text-fg">

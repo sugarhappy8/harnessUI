@@ -1,3 +1,4 @@
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
 import type {
@@ -87,6 +88,10 @@ interface AppState {
   setRuntime: (s: RuntimeStatus) => void;
   refreshModelOptions: () => Promise<void>;
   setChatModel: (modelRef: string | null) => Promise<void>;
+  /** Makes a model the open chat's (or a new chat's) and loads it when it is local. */
+  pickModel: (modelRef: string) => Promise<void>;
+  /** Asks for a .gguf file and picks it. */
+  openModelFile: () => Promise<void>;
   setSystemPrompt: (prompt: string | null) => Promise<void>;
   showError: (e: ErrorInfo | null) => void;
   addApproval: (r: ApprovalRequest) => void;
@@ -283,7 +288,11 @@ export const useApp = create<AppState>((set, get) => {
 
     newChat: async () => {
       const options = get().modelOptions;
-      const lastUsed = get().detail?.chat.modelRef ?? options[0]?.ref ?? null;
+      // The open chat's model, else the one that is loaded, else the most recent.
+      const rt = get().runtime;
+      const loaded =
+        rt && rt.modelPath && (rt.state === "ready" || rt.state === "starting") ? `local:${rt.modelPath}` : null;
+      const lastUsed = get().detail?.chat.modelRef ?? loaded ?? options[0]?.ref ?? null;
       const chat = await ipc.createChat(lastUsed);
       await get().refreshChats();
       await get().openChat(chat.id);
@@ -361,6 +370,32 @@ export const useApp = create<AppState>((set, get) => {
       }
       await ipc.setChatModel(chatId, modelRef);
       await get().openChat(chatId);
+    },
+
+    pickModel: async (modelRef) => {
+      try {
+        await get().setChatModel(modelRef);
+        if (modelRef.startsWith("local:")) {
+          const settings = await ipc.getLocalModelSettings();
+          await ipc.loadLocalModel(modelRef.slice(6), settings);
+          await get().refreshModelOptions();
+        }
+      } catch (err) {
+        set({ error: toErrorInfo(err) });
+      }
+    },
+
+    openModelFile: async () => {
+      try {
+        const picked = await openFileDialog({
+          multiple: false,
+          directory: false,
+          filters: [{ name: "GGUF model", extensions: ["gguf"] }],
+        });
+        if (typeof picked === "string") await get().pickModel(`local:${picked}`);
+      } catch (err) {
+        set({ error: toErrorInfo(err) });
+      }
     },
 
     setSystemPrompt: async (prompt) => {

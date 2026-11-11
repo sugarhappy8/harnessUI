@@ -1,8 +1,6 @@
 import { DropdownMenu } from "radix-ui";
 import { Boxes, ChevronDown, FolderOpen, HardDrive, Globe } from "lucide-react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { useApp, toErrorInfo } from "../store/app";
-import * as ipc from "../lib/ipc";
+import { useApp } from "../store/app";
 
 function labelFor(ref: string | null, options: { ref: string; label: string }[]): string {
   if (!ref) return "Choose a model";
@@ -13,38 +11,10 @@ function labelFor(ref: string | null, options: { ref: string; label: string }[])
 }
 
 export function ModelPicker() {
-  const { detail, modelOptions, setChatModel, refreshModelOptions, showError } = useApp();
+  const { detail, modelOptions, refreshModelOptions, pickModel, openModelFile } = useApp();
   const current = detail?.chat.modelRef ?? null;
-
-  async function openFile() {
-    try {
-      const picked = await open({
-        multiple: false,
-        directory: false,
-        filters: [{ name: "GGUF model", extensions: ["gguf"] }],
-      });
-      if (typeof picked !== "string") return;
-      const ref = `local:${picked}`;
-      const settings = await ipc.getLocalModelSettings();
-      await setChatModel(ref);
-      await ipc.loadLocalModel(picked, settings);
-      await refreshModelOptions();
-    } catch (err) {
-      showError(toErrorInfo(err));
-    }
-  }
-
-  async function choose(ref: string) {
-    try {
-      await setChatModel(ref);
-      if (ref.startsWith("local:")) {
-        const settings = await ipc.getLocalModelSettings();
-        await ipc.loadLocalModel(ref.slice(6), settings);
-      }
-    } catch (err) {
-      showError(toErrorInfo(err));
-    }
-  }
+  const openFile = openModelFile;
+  const choose = pickModel;
 
   const local = modelOptions.filter((o) => o.source === "local");
   const remote = modelOptions.filter((o) => o.source === "provider");
@@ -54,18 +24,21 @@ export function ModelPicker() {
       <DropdownMenu.Trigger asChild>
         <button
           type="button"
-          className="flex max-w-xs items-center gap-1 rounded-md px-2 py-1 text-sm hover:bg-bg-muted"
+          className={
+            "flex max-w-xs min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm font-medium hover:bg-bg-muted " +
+            (current ? "border-transparent" : "border-border bg-surface shadow-soft")
+          }
           aria-label="Model for this chat"
         >
           <span className="truncate">{labelFor(current, modelOptions)}</span>
-          <ChevronDown size={14} aria-hidden />
+          <ChevronDown size={14} className="shrink-0 text-fg-muted" aria-hidden />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
           align="start"
           sideOffset={4}
-          className="z-50 min-w-64 rounded-md border border-border bg-bg p-1 shadow-lg"
+          className="z-50 min-w-64 rounded-xl border border-border bg-surface p-1.5 shadow-pop"
         >
           {local.length > 0 && (
             <DropdownMenu.Label className="px-2 py-1 text-xs text-fg-muted">On this computer</DropdownMenu.Label>
@@ -74,7 +47,7 @@ export function ModelPicker() {
             <DropdownMenu.Item
               key={o.ref}
               onSelect={() => void choose(o.ref)}
-              className="flex cursor-default items-center gap-2 rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
+              className="flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
             >
               <HardDrive size={14} aria-hidden /> <span className="truncate">{o.label}</span>
             </DropdownMenu.Item>
@@ -86,7 +59,7 @@ export function ModelPicker() {
             <DropdownMenu.Item
               key={o.ref}
               onSelect={() => void choose(o.ref)}
-              className="flex cursor-default items-center gap-2 rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
+              className="flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
             >
               <Globe size={14} aria-hidden /> <span className="truncate">{o.label}</span>
             </DropdownMenu.Item>
@@ -94,13 +67,13 @@ export function ModelPicker() {
           <DropdownMenu.Separator className="my-1 h-px bg-border" />
           <DropdownMenu.Item
             onSelect={() => void openFile()}
-            className="flex cursor-default items-center gap-2 rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
+            className="flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
           >
             <FolderOpen size={14} aria-hidden /> Open a GGUF file…
           </DropdownMenu.Item>
           <DropdownMenu.Item
             onSelect={() => window.dispatchEvent(new Event("app:open-models"))}
-            className="flex cursor-default items-center gap-2 rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
+            className="flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
           >
             <Boxes size={14} aria-hidden /> Find and manage models…
           </DropdownMenu.Item>

@@ -159,17 +159,17 @@ export function ToolsPanel(props: {
       <Popover.Trigger asChild>
         <button
           type="button"
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-fg-muted hover:bg-bg-muted hover:text-fg"
+          className="flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap text-fg-muted hover:bg-bg-muted hover:text-fg"
           title="Tools for this chat"
         >
-          <Wrench size={14} aria-hidden /> {props.unsupported ? "Tools (unavailable)" : `Tools (${enabled.length})`}
+          <Wrench size={15} aria-hidden /> {props.unsupported ? "Tools (unavailable)" : `Tools (${enabled.length})`}
         </button>
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
           align="end"
           sideOffset={6}
-          className="z-50 max-h-[70vh] w-96 overflow-y-auto rounded-lg border border-border bg-bg p-3 text-sm shadow-lg"
+          className="enter z-50 max-h-[70vh] w-96 overflow-y-auto rounded-xl border border-border bg-surface p-3 text-sm shadow-pop"
         >
           <div className="mb-2 flex items-baseline justify-between">
             <h2 className="font-medium">Tools for this chat</h2>

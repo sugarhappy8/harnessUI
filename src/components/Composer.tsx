@@ -82,8 +82,24 @@ export function Composer(props: {
     function onFocus() {
       ref.current?.focus();
     }
+    // A suggestion was chosen on the welcome screen: write it into the box, send nothing.
+    function onCompose(event: Event) {
+      const detail: unknown = (event as CustomEvent<unknown>).detail;
+      if (typeof detail !== "string") return;
+      setText(detail);
+      requestAnimationFrame(() => {
+        const box = ref.current;
+        if (!box) return;
+        box.focus();
+        box.setSelectionRange(detail.length, detail.length);
+      });
+    }
     window.addEventListener("app:focus-input", onFocus);
-    return () => window.removeEventListener("app:focus-input", onFocus);
+    window.addEventListener("app:compose", onCompose);
+    return () => {
+      window.removeEventListener("app:focus-input", onFocus);
+      window.removeEventListener("app:compose", onCompose);
+    };
   }, []);
 
   function submit() {
@@ -97,7 +113,7 @@ export function Composer(props: {
 
   return (
     <div
-      className="border-t border-border p-3"
+      className="px-4 pt-1 pb-3"
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("Files")) e.preventDefault();
       }}
@@ -142,15 +158,15 @@ export function Composer(props: {
           {imageError && <span className="text-xs text-danger">{imageError}</span>}
         </div>
       )}
-      <div className="mx-auto flex max-w-3xl items-end gap-2 rounded-lg border border-border bg-bg px-3 py-2 focus-within:border-accent">
+      <div className="composer mx-auto flex max-w-3xl items-end gap-2 rounded-2xl px-2.5 py-2">
         <button
           type="button"
           aria-label="Attach files"
           title="Attach images, PDFs or text files"
           onClick={() => fileInput.current?.click()}
-          className="rounded-md p-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
+          className="rounded-xl p-2 text-fg-muted hover:bg-bg-muted hover:text-fg"
         >
-          <Paperclip size={16} aria-hidden />
+          <Paperclip size={17} aria-hidden />
         </button>
         <input
           ref={fileInput}
@@ -185,31 +201,35 @@ export function Composer(props: {
             }
           }}
           rows={Math.min(8, Math.max(1, text.split("\n").length))}
-          placeholder={props.disabledReason ?? "Message (Enter to send, Shift+Enter for a new line)"}
-          className="max-h-48 flex-1 resize-none bg-transparent outline-none"
+          placeholder={props.disabledReason ?? "Ask anything, or describe a task"}
+          className="chat-text max-h-48 flex-1 resize-none self-center bg-transparent py-1 outline-none placeholder:text-fg-muted focus-visible:outline-none"
         />
         {props.busy ? (
           <button
             type="button"
             onClick={props.onStop}
-            className="rounded-md bg-danger p-2 text-white"
+            className="enter-fade rounded-xl bg-danger p-2.5 text-white shadow-soft hover:brightness-110"
             aria-label="Stop"
             title="Stop"
           >
-            <Square size={14} aria-hidden />
+            <Square size={14} fill="currentColor" aria-hidden />
           </button>
         ) : (
           <button
             type="button"
             onClick={submit}
             disabled={(!text.trim() && images.length === 0 && documents.length === 0) || props.disabledReason !== null}
-            className="rounded-md bg-accent p-2 text-accent-fg disabled:opacity-40"
+            className="btn-primary rounded-xl p-2.5"
             aria-label="Send"
+            title="Send (Enter)"
           >
-            <ArrowUp size={14} aria-hidden />
+            <ArrowUp size={15} strokeWidth={2.5} aria-hidden />
           </button>
         )}
       </div>
+      <p className="mx-auto mt-1.5 max-w-3xl px-2 text-center text-[11px] text-fg-muted">
+        Enter to send · Shift+Enter for a new line · the model asks before it changes anything
+      </p>
     </div>
   );
 }

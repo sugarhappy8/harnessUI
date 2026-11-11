@@ -47,6 +47,10 @@ Environment variables: `APP_BIN` (default `target/debug/app`), `TEST_GGUF`,
 `APP_DEV_LLAMA_DIR` (default `.cache/llama-linux`), `E2E_OUT` (screenshots and logs).
 Each run uses a fresh temporary home folder, so it never touches your own app data.
 
+Writing scenarios: `click_button(label)` clicks the first visible button whose text contains
+the label. A model's name is on the menu's own button and on the welcome screen as well as
+in the menu, so pick a model with `click_menu_item(name)`.
+
 ## Scenarios
 
 | Script | Covers |

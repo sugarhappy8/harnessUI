@@ -95,7 +95,7 @@ def main() -> int:
         s.click_button("New chat")
         time.sleep(0.5)
         s.click_button("Model for this chat")
-        s.click_button(os.path.basename(MODEL))
+        s.click_menu_item(os.path.basename(MODEL))
         s.wait_for(lambda: "still loading" not in s.page_text(), 60, "composer enabled")
         chat_id = s.invoke("list_chats", {"query": None})[0]["id"]
         tools = s.invoke("list_chat_tools", {"chatId": chat_id})
