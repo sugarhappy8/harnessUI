@@ -74,6 +74,10 @@ pub enum Scope {
     },
     /// Skills never prompt (D11).
     Skill,
+    /// The app's own data for the current chat: artifacts, the task record, stored tool
+    /// output, the chat's tool list. Never prompts (0.0.4): nothing outside the app is
+    /// read or changed.
+    AppData,
 }
 
 /// A tool call, described for policy and for the approval card.
@@ -188,7 +192,8 @@ pub fn evaluate(action: &Action, turn: &TurnContext, grants: &dyn Grants) -> Dec
         };
     }
     // Skills never prompt (D11), but only after the checks above.
-    if action.scope == Scope::Skill && action.risk == Risk::Normal {
+    // The app's own data for the chat never prompts either (0.0.4).
+    if matches!(action.scope, Scope::Skill | Scope::AppData) && action.risk == Risk::Normal {
         return Decision::AllowedByGrant;
     }
     // 3. Always ask.
@@ -506,6 +511,45 @@ mod tests {
         assert_eq!(external_risk(None, false), Risk::Normal);
         assert_eq!(external_risk(Some(false), false), Risk::Normal);
         assert_eq!(external_risk(Some(false), true), Risk::AlwaysAsk);
+    }
+
+    /// The app's own per-chat data (artifacts, task, stored output, tool list) behaves like
+    /// skills: no card, but a tool that is off or a hard limit still stops the call, and a
+    /// describer can still raise one of these to always-ask.
+    #[test]
+    fn app_data_does_not_prompt_but_respects_steps_1_to_3() {
+        let a = action(Scope::AppData, Risk::Normal, false, false);
+        assert_eq!(
+            evaluate(&a, &ready(), &BTreeSet::new()),
+            Decision::AllowedByGrant
+        );
+        let mut untrusted = ready();
+        untrusted.untrusted_in_turn = true;
+        untrusted.recovered_from_text = true;
+        assert_eq!(
+            evaluate(&a, &untrusted, &BTreeSet::new()),
+            Decision::AllowedByGrant
+        );
+        let mut off = ready();
+        off.tool_enabled = false;
+        assert!(matches!(
+            evaluate(&a, &off, &BTreeSet::new()),
+            Decision::Refused { .. }
+        ));
+        let mut limited = a.clone();
+        limited.hard_limit = Some("too large".into());
+        assert!(matches!(
+            evaluate(&limited, &ready(), &BTreeSet::new()),
+            Decision::Denied { .. }
+        ));
+        let always = action(Scope::AppData, Risk::AlwaysAsk, false, false);
+        assert!(matches!(
+            evaluate(&always, &ready(), &BTreeSet::new()),
+            Decision::Ask {
+                card: CardKind::OnceOnly,
+                ..
+            }
+        ));
     }
 
     #[test]
