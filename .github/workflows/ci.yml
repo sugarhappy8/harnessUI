@@ -24,10 +24,20 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The package download has hung on the runner (37 minutes with no output, in two
+      # runs at once). Each attempt gets a time limit, and a hung or failed one is retried.
       - name: System libraries for Tauri
+        timeout-minutes: 35
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+          apt_get() { sudo timeout --kill-after=10 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 "$@"; }
+          for attempt in 1 2 3; do
+            if apt_get update && apt_get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev; then
+              exit 0
+            fi
+            echo "apt-get attempt $attempt failed or timed out"
+            sleep 15
+          done
+          exit 1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
