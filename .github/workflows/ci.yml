@@ -24,19 +24,27 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The package download has hung on the runner (37 minutes with no output, in two
-      # runs at once). Each attempt gets a time limit, and a hung or failed one is retried.
+      # The runner's default Ubuntu mirror (azure.archive.ubuntu.com) stopped answering on
+      # 2026-11-11 and this step hung for 37 minutes. Each apt-get call has a time limit;
+      # when the default mirror fails, Ubuntu's own archive is used, then the kernel.org
+      # mirror. apt checks every package against Ubuntu's signing keys whatever the mirror.
       - name: System libraries for Tauri
-        timeout-minutes: 35
+        timeout-minutes: 30
         run: |
-          apt_get() { sudo timeout --kill-after=10 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 "$@"; }
-          for attempt in 1 2 3; do
-            if apt_get update && apt_get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev; then
-              exit 0
-            fi
-            echo "apt-get attempt $attempt failed or timed out"
-            sleep 15
-          done
+          apt_get() { sudo timeout --kill-after=10 "$1" apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=120 -o APT::Update::Error-Mode=any "${@:2}"; }
+          install() { apt_get 150 update && apt_get 400 install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev; }
+          use_mirror() {
+            echo "The package install failed or timed out; switching apt to $1"
+            printf '%s\tpriority:1\n' "$1" | sudo tee /etc/apt/apt-mirrors.txt
+            for list in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+              if [ -f "$list" ]; then sudo sed -i -E "s#https?://azure\.archive\.ubuntu\.com/ubuntu/?#$1#g" "$list"; fi
+            done
+          }
+          install && exit 0
+          use_mirror https://archive.ubuntu.com/ubuntu/
+          install && exit 0
+          use_mirror https://mirrors.edge.kernel.org/ubuntu/
+          install && exit 0
           exit 1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
