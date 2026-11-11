@@ -202,7 +202,7 @@ export function Composer(props: {
           }}
           rows={Math.min(8, Math.max(1, text.split("\n").length))}
           placeholder={props.disabledReason ?? "Ask anything, or describe a task"}
-          className="chat-text max-h-48 flex-1 resize-none self-center bg-transparent py-1 outline-none placeholder:text-fg-muted focus-visible:outline-none"
+          className="chat-text max-h-48 flex-1 resize-none self-center bg-transparent py-1 outline-none placeholder:text-fg-muted"
         />
         {props.busy ? (
           <button

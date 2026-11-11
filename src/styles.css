@@ -419,6 +419,11 @@ pre code {
   border-radius: 0 !important;
 }
 
+/* The box shows focus as its glow; a second ring around the field inside it is noise. */
+.composer textarea:focus-visible {
+  outline: none;
+}
+
 /* Long chats: the browser skips laying out messages that are off screen. */
 .message-row {
   content-visibility: auto;
