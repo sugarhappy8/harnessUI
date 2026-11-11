@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check } f
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { MessageDto } from "../lib/types";
 import { Markdown } from "./Markdown";
+import { useCitations } from "./sources/useCitations";
 import { ErrorBanner } from "./ErrorBanner";
 import { getAttachment, isTauri } from "../lib/ipc";
 
@@ -65,6 +66,8 @@ function BranchSwitcher(props: { message: MessageDto; onSwitch: (id: number) => 
 /** Memoised: while a reply streams in, the messages above it do not render again. */
 export const MessageItem = memo(function MessageItem(props: Props) {
   const m = props.message;
+  // [0.0.4 search] An answer's `[n]` are checked against the chat's stored sources.
+  const citations = useCitations(m.role === "assistant");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(m.text);
   const [copied, setCopied] = useState(false);
@@ -168,7 +171,7 @@ export const MessageItem = memo(function MessageItem(props: Props) {
       )}
       <div className="chat-text">
         {m.text ? (
-          <Markdown text={m.text} />
+          <Markdown text={m.text} citations={citations} />
         ) : m.status === "streaming" ? (
           <span className="text-fg-muted" aria-live="polite">
             …

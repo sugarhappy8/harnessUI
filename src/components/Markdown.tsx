@@ -1,4 +1,4 @@
-import { isValidElement, memo, useRef, useState, type ReactNode } from "react";
+import { createContext, isValidElement, memo, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -7,10 +7,11 @@ import rehypeHighlight from "rehype-highlight";
 import { AlertDialog } from "radix-ui";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isTauri } from "../lib/ipc";
+import { CITATION_ELEMENT, remarkCitations } from "./sources/citations";
 
 /** Shows a link's real destination and opens it in the system browser only after
  *  the user confirms (ARCHITECTURE.md 13.2). Model output never navigates the app. */
-function SafeLink(props: { href?: string; children?: React.ReactNode }) {
+export function SafeLink(props: { href?: string; children?: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   let host = "";
   let display = props.href ?? "";
@@ -107,8 +108,49 @@ function CodeBlock(props: { children?: ReactNode }) {
   );
 }
 
+/** What an answer's citations are checked against: the sources a web search stored for
+ *  the chat (their numbers, with title and site for the tooltip), and what a click does. */
+export interface Citations {
+  sources: ReadonlyMap<number, { title: string; site: string }>;
+  onOpen: (n: number) => void;
+}
+
+const CitationContext = createContext<Citations | null>(null);
+
+/** One `[n]` of an answer. With a source of that number: a small chip that opens it.
+ *  Without one: the text as it was written, marked as pointing nowhere. */
+function Citation(props: { n: number; children?: ReactNode }) {
+  const citations = useContext(CitationContext);
+  const source = citations?.sources.get(props.n);
+  if (!citations || !source) {
+    return (
+      <span className="underline decoration-dotted decoration-fg-muted underline-offset-2" title="No such source" data-citation-missing={props.n}>
+        {props.children}
+      </span>
+    );
+  }
+  const label = source.title ? `${source.title} — ${source.site}` : source.site;
+  return (
+    <button
+      type="button"
+      data-citation={props.n}
+      title={label}
+      aria-label={`Source ${props.n}: ${label}`}
+      onClick={() => citations.onOpen(props.n)}
+      className="mx-0.5 inline-flex h-[1.35em] min-w-[1.35em] items-center justify-center rounded-md border border-border bg-bg-muted px-1 align-baseline text-[0.72em] leading-none font-medium text-accent tabular-nums hover:border-accent"
+    >
+      {props.n}
+    </button>
+  );
+}
+
 const components: Components = {
   a: ({ href, children }) => <SafeLink href={href}>{children}</SafeLink>,
+  // Only the citation plugin makes this element (raw HTML in an answer stays text).
+  [CITATION_ELEMENT]: (props: { children?: ReactNode; "data-cite"?: string }) => {
+    const n = Number(props["data-cite"]);
+    return Number.isInteger(n) && n > 0 ? <Citation n={n}>{props.children}</Citation> : <>{props.children}</>;
+  },
   img: ({ src, alt }) => <SafeImage src={src} alt={alt} />,
   pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
   code: ({ children, className }) => (
@@ -155,16 +197,28 @@ function safeHighlight(): ReturnType<typeof rehypeHighlight> {
 }
 
 /** Markdown rendered to React elements. Raw HTML in the source is shown as text,
- *  never parsed (react-markdown's default; no rehype-raw). */
-export const Markdown = memo(function Markdown(props: { text: string }) {
+ *  never parsed (react-markdown's default; no rehype-raw).
+ *
+ *  With `citations` (an answer in a chat whose sources are known), `[n]` in running text
+ *  becomes a chip for source n, or is marked when the chat has no such source. Without
+ *  it, `[n]` is the plain text it is. */
+export const Markdown = memo(function Markdown(props: { text: string; citations?: Citations }) {
+  const citations = props.citations;
+  const remarkPlugins = useMemo(() => {
+    if (!citations) return [remarkGfm];
+    const known = (n: number) => citations.sources.has(n);
+    return [remarkGfm, [remarkCitations, { known }] as [typeof remarkCitations, { known: (n: number) => boolean }]];
+  }, [citations]);
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[safeHighlight]}
-      components={components}
-      skipHtml={false}
-    >
-      {props.text}
-    </ReactMarkdown>
+    <CitationContext.Provider value={citations ?? null}>
+      <ReactMarkdown
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={[safeHighlight]}
+        components={components}
+        skipHtml={false}
+      >
+        {props.text}
+      </ReactMarkdown>
+    </CitationContext.Provider>
   );
 });
