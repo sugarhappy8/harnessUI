@@ -380,18 +380,18 @@ mod tests {
     #[test]
     fn the_log_folder_is_forbidden() {
         let home = Path::new("/Users/me");
-        let logs = home.join("Library/Logs/app.harniss");
+        let logs = home.join("Library/Logs/app.harness");
         let forbidden = AppDirs {
-            local_data: Some(home.join("Library/Application Support/app.harniss")),
-            data: Some(home.join("Library/Application Support/app.harniss")),
+            local_data: Some(home.join("Library/Application Support/app.harness")),
+            data: Some(home.join("Library/Application Support/app.harness")),
             logs: Some(logs.clone()),
-            install: Some(PathBuf::from("/Applications/harnissUI.app/Contents/MacOS")),
+            install: Some(PathBuf::from("/Applications/harnessUI.app/Contents/MacOS")),
         }
         .forbidden();
         assert!(forbidden.contains(&logs));
         let refused = |p: &Path| forbidden.iter().any(|f| overlaps(p, f));
         assert!(refused(&home.join("Library/Logs")));
-        assert!(refused(&logs.join("harniss.2026-11-10.log")));
+        assert!(refused(&logs.join("harness.2026-11-10.log")));
         assert!(refused(&home.join("Library")));
         assert!(!refused(&home.join("Library/Logs/OtherApp")));
         assert!(!refused(&home.join("Documents")));

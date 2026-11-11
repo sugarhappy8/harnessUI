@@ -133,7 +133,7 @@ open, audit rows).
 5. Ask for a write, and while the card is up press the global stop hotkey (Windows Ctrl+Alt+Backspace, Mac Ctrl+Option+Delete) with another app in front: the card closes, the call shows Cancelled.
 6. *Tools* panel: switch on Terminal; ask "what is in this folder? use run_command". Windows runs PowerShell 5.1, Mac runs zsh. `dir`/`ls` can be granted; `rm`/`Remove-Item` always asks.
 7. MCP: *Settings → MCP servers → Add servers*, paste e.g. `{"mcpServers":{"everything":{"command":"npx","args":["-y","@modelcontextprotocol/server-everything"]}}}` (needs Node.js). Confirm the warning. The server goes Running; open it, switch on `echo`; in a chat ask the model to echo something: card shows server, tool and arguments.
-8. Paste a config with `"env": {"API_KEY": "abc"}`: the preview reads *Saved in the system keychain: API_KEY*. After adding, the server row does not show the value. Windows Credential Manager (*Windows Credentials → Generic Credentials*) has `mcp-secret:<server name>.env.API_KEY.io.github.sugarhappy8.harnissui`; macOS Keychain Access has an item for `io.github.sugarhappy8.harnissui` with account `mcp-secret:<server name>.env.API_KEY`. Either holds `abc`. (The app's database keeps only `${secret:<server name>.env.API_KEY}`.)
+8. Paste a config with `"env": {"API_KEY": "abc"}`: the preview reads *Saved in the system keychain: API_KEY*. After adding, the server row does not show the value. Windows Credential Manager (*Windows Credentials → Generic Credentials*) has `mcp-secret:<server name>.env.API_KEY.io.github.sugarhappy8.harnessui`; macOS Keychain Access has an item for `io.github.sugarhappy8.harnessui` with account `mcp-secret:<server name>.env.API_KEY`. Either holds `abc`. (The app's database keeps only `${secret:<server name>.env.API_KEY}`.)
 
 Also: a per-chat *Thinking on/off* switch in the header for local thinking models.
 
@@ -259,11 +259,11 @@ Qwen2.5-VL-based model such as UI-TARS-1.5-7B):
 1. Load the model. Tools panel → switch on Computer (nothing to set up; Settings → Computer use shows "Automatic: pixels of the image the model saw" for a UI-TARS-1.5 model).
 2. Open Notepad. Ask: "Take a screenshot, then click in the Notepad window and type hello." Approve the screenshot card, then the pointer card (it names notepad.exe) and the keyboard card.
 3. While it works the red border and the Stop bar are visible; press Ctrl+Alt+Backspace: everything stops, no key stays pressed.
-4. Ask it to click on harnissUI's own window: refused ("covered by this app's window").
+4. Ask it to click on harnessUI's own window: refused ("covered by this app's window").
 5. Run an admin Command Prompt and ask it to type there: refused ("running as administrator").
 
 **Manual test — Mac:**
-1. Settings → Computer use: Screen Recording and Accessibility show "not allowed"; *Open System Settings*, allow harnissUI, come back, *Check again* (restart the app if macOS asks).
+1. Settings → Computer use: Screen Recording and Accessibility show "not allowed"; *Open System Settings*, allow harnessUI, come back, *Check again* (restart the app if macOS asks).
 2. Steps 1–4 as above with TextEdit; the stop hotkey is Ctrl+Option+Delete.
 3. Put TextEdit in full screen: the border and Stop bar still show on that Space.
 
@@ -296,7 +296,7 @@ installer, a platform in `latest.json` or the catalog. The Windows installer sto
 1. *Settings → General → Updates* says this build cannot update itself (no key yet). After you set up the key (README, "Signing") and tag a release, a release build offers *Check now*.
 2. Press Ctrl+/ (Cmd+/): the shortcut list opens, including your stop hotkey. Ctrl+B hides and shows the chat list.
 3. Offline: turn off Wi-Fi / unplug the network, start the app, load a downloaded model and chat; everything works and nothing reports a network error except Hugging Face search.
-4. Windows: quit the app, start `llama-server.exe -m <any .gguf>` from the install folder's `llama\main` (by default `%LOCALAPPDATA%\harnissUI\llama\main`) in a terminal, then run the installer again: it stops that server and installs without an "Error opening file for writing" prompt.
+4. Windows: quit the app, start `llama-server.exe -m <any .gguf>` from the install folder's `llama\main` (by default `%LOCALAPPDATA%\harnessUI\llama\main`) in a terminal, then run the installer again: it stops that server and installs without an "Error opening file for writing" prompt.
 
 **Known issues:** the offline gate sees proxied traffic only (not direct DNS lookups); long
 chats show their latest 80 messages with a "Show earlier" button rather than a

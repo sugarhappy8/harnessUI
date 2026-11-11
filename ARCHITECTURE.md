@@ -87,7 +87,7 @@ The scope of every grant, tool by tool, is the table in section 13.3. Please rea
 |---|---|---|---|
 | D15 | Minimum macOS version | **13.3**, not 13.0 | llama.cpp's macOS builds target 13.3. |
 | D16 | Sign-in (OAuth) for remote MCP servers | Not in v1. Remote servers work with a URL plus static headers kept in the keychain. A server that demands sign-in gets a clear message. | Many hosted MCP servers use OAuth. The SDK supports it, so it can be added; it is extra scope. |
-| D17 | Bundle identifier | `io.github.sugarhappy8.harnissui` | It names the data folder and keychain entries and should not change after the first release. It is separate from the display name. |
+| D17 | Bundle identifier | `io.github.sugarhappy8.harnessui` | It names the data folder and keychain entries and should not change after the first release. It is separate from the display name. |
 
 ### 1.4 Limits to know before approving
 

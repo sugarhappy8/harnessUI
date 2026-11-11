@@ -1,7 +1,7 @@
 # Writing skills
 
 A skill is a folder with a `SKILL.md` file: instructions the model reads when a task needs
-them, plus any scripts and reference files they mention. harnissUI reads the same format
+them, plus any scripts and reference files they mention. harnessUI reads the same format
 other agent apps use, so most skills work as they are.
 
 ## Folder layout

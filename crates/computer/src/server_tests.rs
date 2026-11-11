@@ -56,7 +56,7 @@ fn desktop() -> FakeDesktop {
         2,
         Rect::new(600.0, 0.0, 400.0, 800.0),
         WEBVIEW,
-        app("harniss"),
+        app("harness"),
     );
     mine.root_pid = Some(ME);
     mine.colour = [255, 0, 255];

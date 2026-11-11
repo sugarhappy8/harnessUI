@@ -126,7 +126,7 @@ def main() -> int:
     ap.add_argument("--server", help="path to llama-server from the app or scripts/fetch_llama.py")
     ap.add_argument("--device", default=None, help="for example Vulkan0, ROCm0, MTL0; default CPU")
     ap.add_argument("--ctx", type=int, default=8192)
-    ap.add_argument("--models-dir", default=str(pathlib.Path.home() / "harnissUI-catalog-test"))
+    ap.add_argument("--models-dir", default=str(pathlib.Path.home() / "harnessUI-catalog-test"))
     a = ap.parse_args()
     if a.list or not a.entry:
         for tier, t in sorted(CATALOG["tiers"].items(), key=lambda kv: int(kv[0])):

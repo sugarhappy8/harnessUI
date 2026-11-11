@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -139,7 +139,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "agent",
  "async-trait",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "browser"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "computer"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-host"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "models"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -4383,7 +4383,7 @@ dependencies = [
 
 [[package]]
 name = "policy"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "dunce",
  "libc",
@@ -4921,7 +4921,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "futures-util",
  "libc",
@@ -5678,7 +5678,7 @@ checksum = "ff7589a1859b09232522bb9edf076ca7fcf14ded96685d3fa629db73023ffbb7"
 
 [[package]]
 name = "store"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "apple-native-keyring-store",
  "chrono",
@@ -6670,7 +6670,7 @@ checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 
 [[package]]
 name = "tools"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

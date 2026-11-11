@@ -2,6 +2,14 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.0.1 (2026-11-11)
+
+The first release: everything below, M0 to M9, under the app's corrected name, **harnessUI** (test builds before this were called "harnissUI"). An early test build. The installers are not code-signed (see the README for opening them), there are no in-app updates yet, and nothing has been tested on a real Windows PC or Mac; computer use is the least proven part.
+
+### Changed in 0.0.1
+- The app is named harnessUI. Its identifier is `io.github.sugarhappy8.harnessui`, so it keeps its data, settings and keychain entries in new places: chats, settings and saved keys from an earlier "harnissUI" test build are not carried over (that build can be uninstalled). The GitHub repository is still called `harnissUI`; the app's download links point there.
+- A release is published automatically once the release workflow has checked that both installers are attached.
+
 ## M9 — Works out of the box on more machines (2026-11-11)
 
 Added at the owner's request after the first test builds: models could not browse or use the computer without setup, and only Apple Silicon Macs could run the app.
@@ -71,7 +79,7 @@ A read-only audit of the whole app against ARCHITECTURE.md, the security rules a
 - *Settings → Diagnostics → Open logs folder*.
 - A warning bar in the main window while the stop hotkey is not registered.
 - Syntax highlighting in fenced code blocks that name a language (`rehype-highlight`: it produces React elements, no HTML strings, so the strict CSP is unaffected).
-- docs/skills-guide.md: how to write a skill for harnissUI.
+- docs/skills-guide.md: how to write a skill for harnessUI.
 
 ## M8 — Polish (2026-11-10; macOS signing and in-app updates wait for your keys; Windows signing is not set up yet)
 
@@ -99,7 +107,7 @@ A read-only audit of the whole app against ARCHITECTURE.md, the security rules a
 
 ### Added
 - `crates/computer`: screenshots of one monitor (xcap on Windows; ScreenCaptureKit on macOS 14+, the older call on 13) with this app's windows left out and a cursor marker drawn in, resized exactly as llama.cpp resizes images for the model (a port of its size calculation, checked bit for bit against the C++); clicks, moves, drags, scrolls, typing and key combinations (SendInput for the mouse on Windows, enigo on the main thread for the keyboard) through one injector that refuses input to this app and its WebView processes, re-checks the target application before every event, refuses elevated windows on Windows, refuses the indicator's Stop button, and releases every held key and button on Stop, panic or exit. Grants per kind of input and per application (D7); terminals, system settings, password managers and OS-level shortcuts always ask. Coordinate conventions per model: pixels of the resized image, a 0–1000 grid, 0–1000 boxes (and Gemma's y-x boxes). 69 tests with fake capture and input.
-- App: the computer server on Windows and macOS; the indicator (red border, "AI is controlling this computer" bar with a Stop button whose window may call nothing but stop) shown while it acts and hidden when the turn ends; input refused when the indicator or the stop hotkey is missing, or (macOS) the indicator is not on the active Space; the stop hotkey and the Stop button release held input. Settings → Computer use: macOS Screen Recording and Accessibility checks with links to System Settings, and each model's convention. When a click is refused because harnissUI's own window covers the point, the tool card offers to minimise the window. The tools are offered only for models that can see images and whose convention the user confirmed.
+- App: the computer server on Windows and macOS; the indicator (red border, "AI is controlling this computer" bar with a Stop button whose window may call nothing but stop) shown while it acts and hidden when the turn ends; input refused when the indicator or the stop hotkey is missing, or (macOS) the indicator is not on the active Space; the stop hotkey and the Stop button release held input. Settings → Computer use: macOS Screen Recording and Accessibility checks with links to System Settings, and each model's convention. When a click is refused because harnessUI's own window covers the point, the tool card offers to minimise the window. The tools are offered only for models that can see images and whose convention the user confirmed.
 
 ### Known issues
 - The one-click calibration test of 9.3 is replaced by a convention the user confirms per model (the app's windows are excluded from screenshots, so the model cannot see targets the app draws). See docs/MILESTONES.md.

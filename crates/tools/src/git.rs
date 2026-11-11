@@ -1826,7 +1826,7 @@ mod fallback_tests {
     use super::*;
     use std::ffi::OsString;
 
-    const TEST_WORKER_ENV: &str = "HARNISS_TOOLS_GIT_WORKER_TEST";
+    const TEST_WORKER_ENV: &str = "HARNESS_TOOLS_GIT_WORKER_TEST";
 
     /// A checked-out file's text with CRLF read as LF: Git for Windows sets
     /// `core.autocrlf=true` in its system config, and libgit2 honours it on checkout as git
@@ -2900,10 +2900,10 @@ mod fallback_tests {
     #[cfg(unix)]
     const ASKS_FOR_A_TOKEN: &str = r#"read job
 printf '%s\n' 'stray output is ignored'
-printf '%s\n' '@@harniss-git-worker@@ {"kind":"need_token","host":"github.com"}'
+printf '%s\n' '@@harness-git-worker@@ {"kind":"need_token","host":"github.com"}'
 read reply
 case "$reply" in *s3cret*) r=got;; *'"token":null'*) r=none;; *) r=other;; esac
-printf '@@harniss-git-worker@@ {"kind":"done","text":"%s"}\n' "$r""#;
+printf '@@harness-git-worker@@ {"kind":"done","text":"%s"}\n' "$r""#;
 
     #[cfg(unix)]
     #[tokio::test]
@@ -3003,7 +3003,7 @@ printf '@@harniss-git-worker@@ {"kind":"done","text":"%s"}\n' "$r""#;
         let moved = elsewhere.join("moved.git");
         let mut s = server();
         s.worker = Some(sh(&format!(
-            "read job; mv .git '{m}'; printf 'gitdir: %s\\n' '{m}' > .git; printf '%s\\n' '@@harniss-git-worker@@ {{\"kind\":\"done\",\"text\":\"fetched\"}}'",
+            "read job; mv .git '{m}'; printf 'gitdir: %s\\n' '{m}' > .git; printf '%s\\n' '@@harness-git-worker@@ {{\"kind\":\"done\",\"text\":\"fetched\"}}'",
             m = moved.display()
         )));
         let (_, out) = go(

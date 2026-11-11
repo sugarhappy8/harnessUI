@@ -30,7 +30,7 @@ APP = os.environ.get("APP_BIN", str(ROOT / "target" / "debug" / "app"))
 MODEL = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
 LLAMA_DIR = os.environ.get("APP_DEV_LLAMA_DIR", str(ROOT / ".cache" / "llama-linux"))
 OUT = pathlib.Path(os.environ.get("E2E_OUT", tempfile.mkdtemp(prefix="e2e-m3-")))
-IDENTIFIER = "io.github.sugarhappy8.harnissui"
+IDENTIFIER = "io.github.sugarhappy8.harnessui"
 
 
 def free_port() -> int:

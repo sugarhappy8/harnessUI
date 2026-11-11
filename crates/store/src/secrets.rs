@@ -774,7 +774,7 @@ mod tests {
     fn keychain_store_over_keyring_mock() {
         let mock = keyring_core::mock::Store::new().expect("mock");
         let keychain =
-            KeychainSecretStore::with_credential_store("io.github.sugarhappy8.harnissui", mock);
+            KeychainSecretStore::with_credential_store("io.github.sugarhappy8.harnessui", mock);
         assert!(keychain.is_available());
         assert_eq!(keychain.get("hf_token").expect("get"), None);
         keychain
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn platform_default_works_here() {
-        let store = platform_default("io.github.sugarhappy8.harnissui.test");
+        let store = platform_default("io.github.sugarhappy8.harnessui.test");
         if cfg!(not(any(windows, target_os = "macos"))) {
             store.set("k", "v").expect("set");
             assert_eq!(store.get("k").expect("get").as_deref(), Some("v"));

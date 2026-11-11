@@ -1,10 +1,10 @@
 //! End-to-end tests of the browser server against a real Chromium in headless mode and
 //! local HTTP servers started by each test.
 //!
-//! They need a browser: `HARNISS_BROWSER_PATH`, an installed Chrome/Edge/Chromium, or
+//! They need a browser: `HARNESS_BROWSER_PATH`, an installed Chrome/Edge/Chromium, or
 //! Playwright's Chromium under `/opt/pw-browsers`. Without one, each test prints a note
 //! and passes, so CI machines without a browser still pass. On Windows and macOS they run
-//! only with `HARNISS_BROWSER_E2E=1`.
+//! only with `HARNESS_BROWSER_E2E=1`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -197,9 +197,9 @@ impl NavigationApprover for Approver {
 fn have_browser() -> bool {
     // On Windows and macOS CI runners Chrome is usually installed; these tests run there
     // only when asked to, so a CI job opts in deliberately.
-    if !cfg!(target_os = "linux") && std::env::var_os("HARNISS_BROWSER_E2E").is_none() {
+    if !cfg!(target_os = "linux") && std::env::var_os("HARNESS_BROWSER_E2E").is_none() {
         eprintln!(
-            "skipping browser end-to-end test: set HARNISS_BROWSER_E2E=1 to run it against this computer's browser"
+            "skipping browser end-to-end test: set HARNESS_BROWSER_E2E=1 to run it against this computer's browser"
         );
         return false;
     }

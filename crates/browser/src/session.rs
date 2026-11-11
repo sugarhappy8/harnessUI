@@ -1568,7 +1568,7 @@ pub(crate) async fn isolated_world(
     let r = cdp
         .call(
             "Page.createIsolatedWorld",
-            json!({"frameId": frame_id, "worldName": "harniss-agent", "grantUniveralAccess": false}),
+            json!({"frameId": frame_id, "worldName": "harness-agent", "grantUniveralAccess": false}),
             Some(session),
             CMD,
         )
