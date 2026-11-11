@@ -72,6 +72,10 @@ interface AppState {
    * that arrives as a turn ends would otherwise vanish before it can be read. */
   turnNotes: { chatId: number; notes: string[] } | null;
   error: ErrorInfo | null;
+  /** The panel beside the chat (artifacts, task, sources, context). */
+  workbench: { open: boolean; tab: WorkbenchTab };
+  openWorkbench: (tab?: WorkbenchTab) => void;
+  closeWorkbench: () => void;
   /** Approval cards waiting for an answer (any chat). */
   approvals: ApprovalRequest[];
 
@@ -117,6 +121,9 @@ function lastMessageId(detail: ChatDetail | null): number | null {
   const last = detail?.messages[detail.messages.length - 1];
   return last ? last.id : null;
 }
+
+/** The tabs of the panel beside the chat. */
+export type WorkbenchTab = "artifacts" | "task" | "sources" | "context";
 
 export const useApp = create<AppState>((set, get) => {
   /** Re-reads a chat after a stream event. Never rejects: the chat may have been deleted
@@ -264,6 +271,9 @@ export const useApp = create<AppState>((set, get) => {
     generation: null,
     turnNotes: null,
     error: null,
+    workbench: { open: false, tab: "artifacts" },
+    openWorkbench: (tab) => set({ workbench: { open: true, tab: tab ?? get().workbench.tab } }),
+    closeWorkbench: () => set({ workbench: { ...get().workbench, open: false } }),
     approvals: [],
 
     setSearch: (q) => {

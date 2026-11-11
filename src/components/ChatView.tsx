@@ -1,5 +1,5 @@
 import { useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Brain, FileText } from "lucide-react";
+import { ArrowDown, Brain, FileText, PanelRight } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { useApp, toErrorInfo } from "../store/app";
 import { MessageItem } from "./MessageItem";
@@ -71,6 +71,9 @@ export function ChatView() {
     approvals,
     decideApproval,
     openChat,
+    workbench,
+    openWorkbench,
+    closeWorkbench,
   } = useApp();
   const [promptOpen, setPromptOpen] = useState(false);
   // Long chats render their latest messages; earlier ones on request.
@@ -197,6 +200,18 @@ export function ChatView() {
           >
             <FileText size={15} aria-hidden />
             <span className="hidden @3xl:inline">System prompt</span>
+          </button>
+        )}
+        {detail && (
+          <button
+            type="button"
+            onClick={() => (workbench.open ? closeWorkbench() : openWorkbench())}
+            aria-pressed={workbench.open}
+            aria-label="Panel"
+            title="Artifacts, task, sources and context beside the chat"
+            className={`flex shrink-0 items-center rounded-lg p-1.5 hover:bg-bg-muted ${workbench.open ? "text-accent" : "text-fg-muted hover:text-fg"}`}
+          >
+            <PanelRight size={16} aria-hidden />
           </button>
         )}
       </header>

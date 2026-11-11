@@ -254,6 +254,88 @@ CREATE TABLE settings (
 );
 "#;
 
+/// Version 2 (app 0.0.4): artifacts, sources, task state, pinned instructions and stored
+/// tool output. Not shipped until 0.0.4 is released; until then each block may still be
+/// changed by the feature that owns it (the name in brackets), and only by that feature.
+const V2: &str = r#"
+-- [artifacts] Documents, pages, diagrams and small tools the model made, shown beside the chat.
+CREATE TABLE artifacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    title       TEXT    NOT NULL,
+    kind        TEXT    NOT NULL CHECK (kind IN ('markdown', 'html', 'svg', 'mermaid')),
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+CREATE INDEX artifacts_chat ON artifacts(chat_id, updated_at DESC, id DESC);
+
+CREATE TABLE artifact_versions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id  INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    version      INTEGER NOT NULL CHECK (version >= 1),
+    content      TEXT    NOT NULL,
+    author       TEXT    NOT NULL CHECK (author IN ('model', 'user')),
+    note         TEXT,
+    created_at   INTEGER NOT NULL,
+    UNIQUE (artifact_id, version)
+);
+-- [/artifacts]
+
+-- [sources] What a web search retrieved, numbered per chat so an answer can cite [n].
+CREATE TABLE sources (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id         INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    n               INTEGER NOT NULL CHECK (n >= 1),
+    url             TEXT    NOT NULL,
+    title           TEXT    NOT NULL,
+    site            TEXT    NOT NULL,
+    snippet         TEXT    NOT NULL DEFAULT '',
+    excerpt         TEXT    NOT NULL DEFAULT '',
+    content_sha256  TEXT,
+    official        INTEGER NOT NULL DEFAULT 0 CHECK (official IN (0, 1)),
+    version_note    TEXT,
+    query           TEXT    NOT NULL DEFAULT '',
+    fetched_at      INTEGER,
+    created_at      INTEGER NOT NULL,
+    UNIQUE (chat_id, n)
+);
+-- [/sources]
+
+-- [task] One task record per chat: goal, constraints, steps, changed files, checks, next action.
+CREATE TABLE tasks (
+    chat_id     INTEGER PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    state       TEXT    NOT NULL CHECK (json_valid(state)),
+    status      TEXT    NOT NULL CHECK (status IN ('active', 'paused', 'done')),
+    updated_at  INTEGER NOT NULL
+);
+-- [/task]
+
+-- [pinned] Instructions the user pinned. chat_id NULL: every chat.
+CREATE TABLE pinned_instructions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER REFERENCES chats(id) ON DELETE CASCADE,
+    text        TEXT    NOT NULL,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX pinned_instructions_chat ON pinned_instructions(chat_id, position, id);
+-- [/pinned]
+
+-- [outputs] The full text of tool results the model saw shortened, for read_output.
+CREATE TABLE tool_outputs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    call_id     TEXT    NOT NULL,
+    tool        TEXT    NOT NULL,
+    content     TEXT    NOT NULL,
+    bytes       INTEGER NOT NULL CHECK (bytes >= 0),
+    lines       INTEGER NOT NULL CHECK (lines >= 0),
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX tool_outputs_chat ON tool_outputs(chat_id, id);
+-- [/outputs]
+"#;
+
 /// One schema step: the SQL that takes `user_version` from its index to index + 1.
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -265,7 +347,7 @@ pub struct Migration {
 pub struct Migrations(&'static [Migration]);
 
 /// All schema migrations.
-pub const MIGRATIONS: Migrations = Migrations(&[Migration { sql: V1 }]);
+pub const MIGRATIONS: Migrations = Migrations(&[Migration { sql: V1 }, Migration { sql: V2 }]);
 
 /// Why bringing the schema up to date failed.
 #[derive(Debug, thiserror::Error)]

@@ -624,6 +624,7 @@ impl PolicyGate for AppPolicy {
                 .subagent_recovered
                 .store(recovered, Ordering::Relaxed);
         }
+        // [0.0.4 allow all] the chat's approval mode goes into the turn context here.
         let turn = policy::TurnContext {
             // Only enabled tools are offered; a call to anything else never gets here.
             tool_enabled: true,
@@ -648,6 +649,13 @@ struct AppTools {
     /// What `run_subagent` needs to start a helper. `None` in a helper's own tool host: a
     /// helper cannot start another.
     helper: Option<HelperSetup>,
+    /// The app, for the hooks that store or track what a call did.
+    app: AppHandle,
+    /// Tools that are on in the chat but not shown to the model this turn (adaptive tool
+    /// selection, `tool_select.rs`): `find_tools` lists them and `call_tool` runs them.
+    hidden: Vec<mcp_host::RegisteredTool>,
+    /// Shared with the policy gate and the sink: the id of the call in progress.
+    shared: Arc<TurnShared>,
 }
 
 /// What a helper takes over from the turn that starts it (see `subagent.rs`).
@@ -728,6 +736,14 @@ impl AppTools {
             // The card shows one short line per call of the helper, not each tool's output.
             progress: None,
             helper: None,
+            app: setup.app.clone(),
+            hidden: self
+                .hidden
+                .iter()
+                .filter(|t| !crate::subagent::is_tool(t))
+                .cloned()
+                .collect(),
+            shared: Arc::default(),
         };
         let ready_host = self.host.clone();
         let policy = AppPolicy::for_chat(
@@ -824,9 +840,13 @@ impl ToolHost for AppTools {
                 _ => ToolOutput::error(crate::subagent::NESTED_REFUSAL),
             };
         }
+        // [0.0.4 tool selection] `find_tools` and `call_tool` are the app's own tools too and
+        // are run from here (see `tool_select.rs`).
         let mut chat = self.chat.clone();
         chat.result_cap_tokens = self.result_cap.load(Ordering::Relaxed);
-        self.host
+        let chat_id = chat.chat_id;
+        let mut out = self
+            .host
             .call(
                 name,
                 args,
@@ -837,7 +857,14 @@ impl ToolHost for AppTools {
                     progress: self.progress.clone(),
                 },
             )
-            .await
+            .await;
+        // ---- After a call. One line per feature, each a call into that feature's module. ----
+        let call_id = self.shared.current_call();
+        // [0.0.4 outputs] keeps the full text of a shortened result and says how to read it.
+        crate::outputs::after_call(&self.app, chat_id, &call_id, name, &mut out).await;
+        // [0.0.4 task] notes changed files and completed checks in the chat's task.
+        crate::task::after_call(&self.app, chat_id, name, args, action, &out).await;
+        out
     }
 }
 
@@ -1462,8 +1489,11 @@ pub async fn run(
     // Tools enabled for this chat.
     let host = state.host.clone();
     crate::computer_cmd::prepare_turn(app, chat_id.0, &req.model_ref).await;
-    let mut enabled =
-        crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
+    let enabled = crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
+    // [0.0.4 tool selection] Of the tools that are on in the chat, the ones shown to the
+    // model this turn. The rest stay reachable through `find_tools` and `call_tool`.
+    let (mut enabled, hidden) =
+        crate::tool_select::for_turn(&state, &req.chat, &history, enabled).await;
     // `run_subagent` goes last, so a helper's tool list (the same without it) is a prefix
     // of the turn's and the model server can reuse more of its cached prompt (8.5).
     enabled.sort_by_key(crate::subagent::is_tool);
@@ -1517,6 +1547,7 @@ pub async fn run(
         result_cap_tokens: 2000,
     };
     let result_cap = Arc::new(AtomicUsize::new(2000));
+    let shared = Arc::new(TurnShared::default());
     let progress_channel = channel.clone();
     let subagents_on = enabled.iter().any(crate::subagent::is_tool);
     let mut tools = AppTools {
@@ -1533,8 +1564,10 @@ pub async fn run(
         })),
         // Set below, once the turn's input exists.
         helper: None,
+        app: app.clone(),
+        hidden,
+        shared: shared.clone(),
     };
-    let shared = Arc::new(TurnShared::default());
     let ready_host = host.clone();
     let policy = AppPolicy::for_chat(
         state.grants.clone(),

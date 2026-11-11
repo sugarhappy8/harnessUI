@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { minimizeMainWindow } from "../lib/ipc";
+import { TOOL_CARD_EXTRAS } from "./toolcards";
 import { Ban, CheckCircle2, ChevronDown, ChevronRight, Hand, Loader2, Wrench, XCircle } from "lucide-react";
 
 /** How much of a result is shown before "Show all". */
@@ -77,6 +78,7 @@ export function ToolCallCard(props: { call: ToolCallView }) {
   const [all, setAll] = useState(false);
   const result = c.text || c.progress || "";
   const shown = all ? result : result.slice(0, RESULT_PREVIEW_CHARS);
+  const extra = TOOL_CARD_EXTRAS[c.name]?.(c) ?? null;
   const helperNow =
     c.name === SUBAGENT_TOOL && (c.status === "running" || c.status === "waiting") ? lastLine(c.progress ?? "") : "";
   return (
@@ -101,6 +103,7 @@ export function ToolCallCard(props: { call: ToolCallView }) {
           {helperNow}
         </p>
       )}
+      {extra && <div className="border-t border-border px-3 py-2">{extra}</div>}
       {open && (
         <div className="enter-fade space-y-2 border-t border-border px-3 py-2">
           {c.recovered && (
