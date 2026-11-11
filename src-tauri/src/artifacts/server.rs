@@ -989,7 +989,10 @@ mod tests {
         .await;
         assert!(text(&piece).contains("Not checked: this page was written after"));
         assert!(marked(&f, f.chat, 1, 3).await);
-        assert!(!marked(&f, f.chat, 1, 1).await, "the old version is as it was");
+        assert!(
+            !marked(&f, f.chat, 1, 1).await,
+            "the old version is as it was"
+        );
 
         // A picture is drawn by the app's own scripts: marked, and checked as usual.
         f.core.wait = Duration::from_millis(60);

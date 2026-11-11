@@ -195,8 +195,13 @@ async fn the_terminal_carries_the_classifiers_allow_all_facts() {
         (&sh, "sudo make install", Some(KeepAsking::Destroy), false),
         (&sh, "git push", Some(KeepAsking::Publish), true),
         (&sh, "curl https://example.com", None, true),
-        (&sh, "npm test > log.txt", None, true),
-        (&sh, "echo $HOME", None, true),
+        // A redirection to a file and a variable as an argument hide nothing: every
+        // program still stands in the line by name.
+        (&sh, "npm test > log.txt", None, false),
+        (&sh, "echo $HOME", None, false),
+        // A substitution can hide what runs; an empty redirection leaves a file empty.
+        (&sh, "echo $(date) > log.txt", None, true),
+        (&sh, ": > log.txt", Some(KeepAsking::Delete), false),
         (&ps, "npm run build", None, false),
         (&ps, "git commit -m \"Fix the build\"", None, false),
         (

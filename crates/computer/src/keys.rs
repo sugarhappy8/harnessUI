@@ -102,7 +102,7 @@ impl KeyCombo {
             .join("+")
     }
 
-    fn has(&self, k: Key) -> bool {
+    pub(crate) fn has(&self, k: Key) -> bool {
         self.modifiers.contains(&k)
     }
 }

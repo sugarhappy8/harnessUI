@@ -1328,6 +1328,98 @@ async fn allow_all_lets_ordinary_input_to_ordinary_applications_through() {
     ));
 }
 
+/// Deleting files by key in a file manager asks in every mode. Other keyboard input to
+/// the same window is ordinary input. Typing into a web browser is typing into a page: it
+/// asks once untrusted content is in the turn, as the browser tool's typing does.
+#[tokio::test]
+async fn allow_all_still_asks_before_deleting_files_by_key_and_typing_into_a_browser() {
+    let none = BTreeSet::new();
+    let d = desktop();
+    let mut w = FakeWindow::new(9, Rect::new(0.0, 0.0, 500.0, 500.0), 70, app("nautilus"));
+    w.colour = [5, 5, 5];
+    d.push_front(w);
+    let s = server(&d);
+    screenshot(&s).await;
+
+    let delete = describe(&s, TOOL_KEY, json!({"keys": "Delete"}))
+        .await
+        .unwrap();
+    assert_eq!(delete.risk, Risk::AlwaysAsk);
+    assert!(delete.preview.contains("deletes the selected files"));
+    for untrusted in [false, true] {
+        assert_eq!(evaluate(&delete, &allow_all(untrusted), &none), STILL_ASKS);
+    }
+
+    let enter = describe(&s, TOOL_KEY, json!({"keys": "Enter"}))
+        .await
+        .unwrap();
+    let typing = describe(&s, TOOL_TYPE, json!({"text": "notes"}))
+        .await
+        .unwrap();
+    for action in [&enter, &typing] {
+        assert_eq!(action.keep_asking, None);
+        assert!(!action.network);
+        for untrusted in [false, true] {
+            assert_eq!(
+                evaluate(action, &allow_all(untrusted), &none),
+                Decision::AllowedByMode
+            );
+        }
+    }
+
+    // A web browser in front: what is typed can go to any site.
+    for exe in ["chrome", "msedge", "firefox"] {
+        let d = desktop();
+        let mut w = FakeWindow::new(9, Rect::new(0.0, 0.0, 500.0, 500.0), 70, app(exe));
+        w.colour = [5, 5, 5];
+        d.push_front(w);
+        let s = server(&d);
+        screenshot(&s).await;
+        for (tool, a) in [
+            (TOOL_TYPE, json!({"text": "notes"})),
+            (TOOL_KEY, json!({"keys": "Enter"})),
+        ] {
+            let action = describe(&s, tool, a).await.unwrap();
+            assert_eq!(action.keep_asking, None, "{exe} {tool}");
+            assert!(action.network, "{exe} {tool}");
+            assert_eq!(
+                evaluate(&action, &allow_all(false), &none),
+                Decision::AllowedByMode,
+                "{exe} {tool}"
+            );
+            assert!(
+                matches!(
+                    evaluate(&action, &allow_all(true), &none),
+                    Decision::Ask { .. }
+                ),
+                "{exe} {tool}"
+            );
+        }
+        // A click sends no text.
+        let click = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+            .await
+            .unwrap();
+        assert!(!click.network);
+        assert_eq!(
+            evaluate(&click, &allow_all(true), &none),
+            Decision::AllowedByMode
+        );
+    }
+
+    // The Delete key in an application that is not a file manager is ordinary input.
+    let d = desktop();
+    let mut w = FakeWindow::new(9, Rect::new(0.0, 0.0, 500.0, 500.0), 70, app("notepad"));
+    w.colour = [5, 5, 5];
+    d.push_front(w);
+    let s = server(&d);
+    screenshot(&s).await;
+    let in_editor = describe(&s, TOOL_KEY, json!({"keys": "Delete"}))
+        .await
+        .unwrap();
+    assert_eq!(in_editor.risk, Risk::Normal);
+    assert_eq!(in_editor.keep_asking, None);
+}
+
 /// D7's never-covered list keeps asking in Allow all: terminals and shell hosts, system
 /// settings, password managers, the Windows shell's command entry, the system's own
 /// shortcuts, and a drag into another application.

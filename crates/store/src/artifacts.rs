@@ -355,7 +355,15 @@ fn add_version(
     tx.execute(
         "INSERT INTO artifact_versions (artifact_id, version, content, author, note, created_at, \
          after_outside) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![id, next, content, author, checked_note(note), now, after_outside],
+        params![
+            id,
+            next,
+            content,
+            author,
+            checked_note(note),
+            now,
+            after_outside
+        ],
     )?;
     tx.execute(
         "DELETE FROM artifact_versions WHERE artifact_id = ?1 AND version <= ?2",
@@ -588,7 +596,14 @@ mod tests {
             .await
             .expect("create");
         let a2 = store
-            .add_artifact_version(c, a.id, "two".into(), ArtifactAuthor::User, None, Provenance::default())
+            .add_artifact_version(
+                c,
+                a.id,
+                "two".into(),
+                ArtifactAuthor::User,
+                None,
+                Provenance::default(),
+            )
             .await
             .expect("second");
         assert_eq!((a2.latest_version, a2.versions), (2, 2));
@@ -682,7 +697,14 @@ mod tests {
         assert!(store.list_artifacts(mine).await.expect("list").is_empty());
         assert!(matches!(
             store
-                .add_artifact_version(mine, theirs.id, "x".into(), ArtifactAuthor::Model, None, Provenance::default())
+                .add_artifact_version(
+                    mine,
+                    theirs.id,
+                    "x".into(),
+                    ArtifactAuthor::Model,
+                    None,
+                    Provenance::default()
+                )
                 .await,
             Err(StoreError::NotFound { .. })
         ));
@@ -737,7 +759,14 @@ mod tests {
         );
         tokio::time::sleep(std::time::Duration::from_millis(3)).await;
         store
-            .add_artifact_version(c, a.id, "<svg></svg>".into(), ArtifactAuthor::Model, None, Provenance::default())
+            .add_artifact_version(
+                c,
+                a.id,
+                "<svg></svg>".into(),
+                ArtifactAuthor::Model,
+                None,
+                Provenance::default(),
+            )
             .await
             .expect("update a");
         assert_eq!(
@@ -799,7 +828,14 @@ mod tests {
         assert!(
             invalid(
                 store
-                    .add_artifact_version(c, a.id, big, ArtifactAuthor::User, None, Provenance::default())
+                    .add_artifact_version(
+                        c,
+                        a.id,
+                        big,
+                        ArtifactAuthor::User,
+                        None,
+                        Provenance::default()
+                    )
                     .await
             )
             .contains("1048576")
@@ -856,7 +892,14 @@ mod tests {
         let mut last = a.clone();
         for n in 2..=MAX_ARTIFACT_VERSIONS + 5 {
             last = store
-                .add_artifact_version(c, a.id, format!("v{n}"), ArtifactAuthor::Model, None, Provenance::default())
+                .add_artifact_version(
+                    c,
+                    a.id,
+                    format!("v{n}"),
+                    ArtifactAuthor::Model,
+                    None,
+                    Provenance::default(),
+                )
                 .await
                 .expect("add");
         }
@@ -914,7 +957,14 @@ mod tests {
         );
         assert!(matches!(
             store
-                .add_artifact_version(c, a.id, "x".into(), ArtifactAuthor::User, None, Provenance::default())
+                .add_artifact_version(
+                    c,
+                    a.id,
+                    "x".into(),
+                    ArtifactAuthor::User,
+                    None,
+                    Provenance::default()
+                )
                 .await,
             Err(StoreError::NotFound { .. })
         ));
@@ -958,7 +1008,14 @@ mod tests {
             .await
             .expect("create");
         store
-            .add_artifact_version(c, a.id, "<b>2</b>".into(), ArtifactAuthor::Model, None, Provenance::default())
+            .add_artifact_version(
+                c,
+                a.id,
+                "<b>2</b>".into(),
+                ArtifactAuthor::Model,
+                None,
+                Provenance::default(),
+            )
             .await
             .expect("add");
         let (artifact, version) = store

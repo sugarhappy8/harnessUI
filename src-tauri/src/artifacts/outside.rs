@@ -50,19 +50,25 @@ impl Outside {
     /// Whether outside content has entered the chat. A state that cannot be read counts
     /// as yes.
     pub fn seen(&self, chat: i64) -> bool {
-        self.0.lock().map(|chats| chats.contains(&chat)).unwrap_or(true)
+        self.0
+            .lock()
+            .map(|chats| chats.contains(&chat))
+            .unwrap_or(true)
     }
 }
 
 /// Whether a chat's history holds the result of a tool that brought in outside content.
 /// A call that did not run has no result text and counts for nothing.
 pub fn in_history(history: &[HistoryMessage]) -> bool {
-    history.iter().flat_map(|m| &m.parts).any(|part| match part {
-        Part::ToolResult(r) => {
-            !is_own_data_tool(&r.name) && (!r.text.is_empty() || !r.images.is_empty())
-        }
-        _ => false,
-    })
+    history
+        .iter()
+        .flat_map(|m| &m.parts)
+        .any(|part| match part {
+            Part::ToolResult(r) => {
+                !is_own_data_tool(&r.name) && (!r.text.is_empty() || !r.images.is_empty())
+            }
+            _ => false,
+        })
 }
 
 /// The versions whose scripts the user allowed although they were written after outside
@@ -173,7 +179,10 @@ mod tests {
         assert!(!allowed.is_allowed(3, 2));
         allowed.allow(3, 2);
         assert!(allowed.is_allowed(3, 2));
-        assert!(!allowed.is_allowed(3, 3), "the next version is a different page");
+        assert!(
+            !allowed.is_allowed(3, 3),
+            "the next version is a different page"
+        );
         assert!(!allowed.is_allowed(4, 2));
     }
 }

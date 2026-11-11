@@ -1240,8 +1240,17 @@ mod tests {
                 .map(str::trim)
                 .find(|d| d.starts_with("script-src "))
                 .expect("a script-src directive");
-            assert_eq!(script_src, format!("script-src 'nonce-abc' {origin}/__lib/"));
-            for word in ["unsafe-inline", "unsafe-hashes", "unsafe-eval", "strict-dynamic", "/__s/"] {
+            assert_eq!(
+                script_src,
+                format!("script-src 'nonce-abc' {origin}/__lib/")
+            );
+            for word in [
+                "unsafe-inline",
+                "unsafe-hashes",
+                "unsafe-eval",
+                "strict-dynamic",
+                "/__s/",
+            ] {
                 assert!(!script_src.contains(word), "{word} in {script_src}");
             }
         }
@@ -1448,12 +1457,18 @@ mod tests {
     #[test]
     fn every_link_tag_is_renamed_and_nothing_else() {
         for (text, expected) in [
-            ("<link rel=stylesheet href=a.css>", "<link-off rel=stylesheet href=a.css>"),
+            (
+                "<link rel=stylesheet href=a.css>",
+                "<link-off rel=stylesheet href=a.css>",
+            ),
             ("<link>", "<link-off>"),
             ("<link/>", "<link-off/>"),
             ("<LiNk\nrel=x>", "<LiNk-off\nrel=x>"),
             ("a<link", "a<link-off"),
-            ("<link rel=a><link rel=b>", "<link-off rel=a><link-off rel=b>"),
+            (
+                "<link rel=a><link rel=b>",
+                "<link-off rel=a><link-off rel=b>",
+            ),
         ] {
             assert_eq!(without_links(text), expected, "{text}");
         }
@@ -1468,7 +1483,10 @@ mod tests {
             "<p>ünïcödé <b>ok</b></p>",
             "",
         ] {
-            assert!(matches!(without_links(text), Cow::Borrowed(t) if t == text), "{text}");
+            assert!(
+                matches!(without_links(text), Cow::Borrowed(t) if t == text),
+                "{text}"
+            );
         }
     }
 
@@ -1593,7 +1611,10 @@ mod tests {
             // which is what lets it run under the app-only policy.
             let scripts = page.matches("<script").count();
             let marked = page.matches(&format!("<script nonce=\"{nonce}\"")).count();
-            assert!(scripts >= 2 && scripts == marked, "{scripts} scripts, {marked} marked");
+            assert!(
+                scripts >= 2 && scripts == marked,
+                "{scripts} scripts, {marked} marked"
+            );
         }
         let mermaid = mermaid_page(&about, "graph TD", &nonce);
         assert!(mermaid.contains(&format!(

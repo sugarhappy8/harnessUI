@@ -11,7 +11,8 @@
 //!
 //! 1. Deleting: a delete program whatever its flags (`rm`, `unlink`, `rmdir`, `shred`,
 //!    `del`, `erase`, `rd`, `Remove-Item` and its aliases, `git rm`, `git clean`,
-//!    `find -delete`), and leaving a file empty.
+//!    `find -delete`), and leaving a file empty (`> file`, `'' > file`, `Set-Content file
+//!    ''`, `New-Item -Force`, the null device copied over a file; see [`empties_a_file`]).
 //! 2. Discarding or destroying work or the system: `git reset --hard`, a forced push,
 //!    disk and system programs, registry edits, elevation.
 //! 3. A command that cannot be fully broken down (redirections, variables, command
@@ -21,8 +22,10 @@
 //! 4. Sensitive places: a `.git` folder, shell start-up files, git and ssh
 //!    configuration, autostart locations.
 //! 5. Publishing: `git push` and commands that publish or deploy.
-//! 8. After untrusted content entered the turn: a command that names a network program
-//!    or cannot be fully broken down.
+//! 8. After untrusted content entered the turn: a command that names a network program,
+//!    or that cannot be fully broken down and can hide what it runs
+//!    ([`may_hide_or_reach`]). A line that only has a glob, a redirection to a file or a
+//!    variable as an argument still shows every program it runs, and is judged by them.
 //!
 //! Like the terminal classifier it builds on, this is a guard against accidents and
 //! obvious abuse, not a security boundary. It reads the command line. What a script file
@@ -65,7 +68,7 @@ const MORE_DELETES: &[&str] = &[
 ];
 
 /// Programs that change how the system works, beyond [`SYSTEM`].
-const MORE_SYSTEM: &[&str] = &["netsh", "set-mppreference", "set-executionpolicy"];
+const MORE_SYSTEM: &[&str] = &["netsh", "set-mppreference", "set-executionpolicy", "fsutil"];
 
 /// Programs that run another program, beyond [`WRAPPERS`]. Package runners such as `npx`
 /// are not here: `npx vitest run` is a plain test run, and what they are handed is read
@@ -97,6 +100,7 @@ const DELETE_VERBS: &[&str] = &[
     "uninstall",
     "destroy",
     "rmtree",
+    "drop",
 ];
 
 /// Delete verbs that count as the name of a flag: `--delete`, `-delete`, `/purge`,
@@ -182,6 +186,9 @@ const REMOVAL_CALLS: &[&str] = &[
     "remove_dir",
     "emptydir",
     "send2trash",
+    "truncate(",
+    "truncatesync",
+    "ftruncate",
 ];
 
 /// Calls that turn encoded text back into something to run.
@@ -274,18 +281,35 @@ pub fn command_facts(shell: Shell, line: &str, strict: &Parsed) -> CommandFacts 
     };
     let mut found = Found::default();
     let mut only_reads = false;
+    // Whether the line may hide a program or reach another machine (rule 8).
+    let hides;
     match parsed {
         Parsed::Plain(commands) => {
             for command in commands {
                 simple(command, &mut found);
             }
+            if let [only] = commands.as_slice()
+                && program_name(&only.program) == "out-file"
+            {
+                found.note(KeepAsking::Delete, || {
+                    "Out-File with nothing piped into it leaves the file empty".into()
+                });
+            }
             only_reads = commands.iter().all(is_read_only);
+            // A wrapper, inline code, `find -exec`: what runs is not on the line.
+            hides = found.opaque;
         }
-        Parsed::Complex { .. } => found.opaque = true,
+        Parsed::Complex { reason } => {
+            found.opaque = true;
+            hides = could_not_be_read(reason) || may_hide_or_reach(shell, line);
+        }
     }
     if found.opaque {
-        // Rule 3: the text is all there is to go by. Rule 8: it may reach the network.
+        // Rule 3: the text is all there is to go by.
         scan(line, &mut found);
+    }
+    if hides {
+        // Rule 8: it may reach the network.
         found.network = true;
     }
     if !only_reads && !found.any() {
@@ -379,6 +403,42 @@ fn simple(command: &SimpleCommand, found: &mut Found) {
             "robocopy with /MIR or /PURGE deletes files in the destination".into()
         });
     }
+    // Rule 1: commands that leave a file empty or delete what they packed.
+    if matches!(name, "new-item" | "ni") {
+        let forced = args
+            .iter()
+            .any(|a| a.len() >= 2 && "-force".starts_with(a.as_str()));
+        let not_a_file = args.iter().any(|a| {
+            matches!(
+                a.as_str(),
+                "directory" | "container" | "junction" | "symboliclink" | "hardlink"
+            )
+        });
+        if forced && !not_a_file {
+            found.note(KeepAsking::Delete, || {
+                "New-Item -Force replaces an existing file with an empty one".into()
+            });
+        }
+    }
+    if name == "set-content" && command.args.iter().any(String::is_empty) {
+        found.note(KeepAsking::Delete, || {
+            "Set-Content with an empty value leaves the file empty".into()
+        });
+    }
+    if name == "zip"
+        && command.args.iter().any(|a| {
+            a == "--move" || (a.starts_with('-') && !a.starts_with("--") && a.contains('m'))
+        })
+    {
+        found.note(KeepAsking::Delete, || {
+            "zip -m deletes the files it packs".into()
+        });
+    }
+    if matches!(name, "7z" | "7za" | "7zr") && has("-sdel") {
+        found.note(KeepAsking::Delete, || {
+            "7z -sdel deletes the files it packs".into()
+        });
+    }
     if is_read_only(command) {
         return;
     }
@@ -424,7 +484,11 @@ fn simple(command: &SimpleCommand, found: &mut Found) {
                 format!("{program} {arg} publishes in your name")
             });
             found.network = true;
-        } else if NETWORK_PROGRAMS.contains(&base.as_str()) || word.contains("://") {
+        } else if NETWORK_PROGRAMS.contains(&base.as_str())
+            || word.contains("://")
+            // A Windows share on another machine.
+            || word.starts_with("\\\\")
+        {
             found.network = true;
         }
     }
@@ -549,10 +613,39 @@ fn git(command: &SimpleCommand, args: &[String], found: &mut Found) {
         "reset" if has("--hard") => found.note(KeepAsking::Destroy, || {
             "git reset --hard discards changes".into()
         }),
-        "checkout" if has("--force") || has("-f") || has("--") || has(".") => {
+        "checkout"
+            if has("--force")
+                || has("-f")
+                || has("--")
+                || has(".")
+                || checks_out_files(rest_exact) =>
+        {
             found.note(KeepAsking::Destroy, || {
                 "git checkout of files discards changes that are not committed".into()
             });
+        }
+        "gc" if rest.iter().any(|a| a.starts_with("--prune")) => {
+            found.note(KeepAsking::Destroy, || {
+                "git gc --prune removes work that could still be recovered".into()
+            });
+        }
+        "reflog" if matches!(rest.first().map(String::as_str), Some("expire" | "delete")) => {
+            found.note(KeepAsking::Destroy, || {
+                "git reflog expire and delete remove the record that work can be recovered from"
+                    .into()
+            });
+        }
+        "update-ref" if rest_exact.iter().any(|a| a == "-d" || a == "--delete") => {
+            found.note(KeepAsking::Destroy, || {
+                "git update-ref -d deletes a branch or another reference".into()
+            });
+        }
+        "filter-branch" | "filter-repo" => {
+            found.note(KeepAsking::Destroy, || {
+                "rewriting history discards the commits it replaces".into()
+            });
+            // Its filters are commands of their own.
+            found.opaque = true;
         }
         "restore" if !staged_only(rest_exact) => found.note(KeepAsking::Destroy, || {
             "git restore discards changes that are not committed".into()
@@ -585,6 +678,18 @@ fn git(command: &SimpleCommand, args: &[String], found: &mut Found) {
         other if !GIT_KNOWN.contains(&other) => found.opaque = true,
         _ => {}
     }
+}
+
+/// `git checkout <commit> <path>...`: more than one name and no option that makes a
+/// branch. It overwrites the files with the commit's version.
+fn checks_out_files(rest: &[String]) -> bool {
+    let makes_a_branch = rest.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-b" | "-B" | "--orphan" | "-t" | "--track" | "--detach" | "-d"
+        )
+    });
+    !makes_a_branch && rest.iter().filter(|a| !a.starts_with('-')).count() >= 2
 }
 
 /// `git restore` that touches the index only (`--staged` or `-S` without `--worktree`).
@@ -655,6 +760,292 @@ fn scan(line: &str, found: &mut Found) {
         .filter(|c| !matches!(c, '\'' | '"' | '\\' | '`' | '^'))
         .collect();
     scan_text(&unquoted, found);
+    if let Some(why) = empties_a_file(line) {
+        found.note(KeepAsking::Delete, || why.into());
+    }
+}
+
+/// What a command line starts with when it puts out nothing. Longest first.
+const NOTHING: &[&str] = &[
+    "write-output $null",
+    "write-output ''",
+    "write-output \"\"",
+    "echo -n ''",
+    "echo -n \"\"",
+    "echo $null",
+    "echo -n",
+    "echo ''",
+    "echo \"\"",
+    "printf ''",
+    "printf \"\"",
+    "$null",
+    "true",
+    "''",
+    "\"\"",
+    ":",
+    "",
+];
+
+/// Programs that write what is piped into them to a file.
+const PIPED_WRITERS: &[&str] = &["set-content", "out-file", "tee"];
+
+/// The part of a line before the next `;`, line break, `(`, `{`, `&&` or `||`, for every
+/// such part.
+fn segments(lower: &str) -> impl Iterator<Item = &str> {
+    lower
+        .split([';', '\n', '(', '{'])
+        .flat_map(|part| part.split("&&"))
+        .flat_map(|part| part.split("||"))
+}
+
+/// Rule 1 for a command that is read as text: the ways of leaving a file empty.
+///
+/// - A redirection with nothing in front of it, or with a command that puts out nothing:
+///   `> f`, `: > f`, `true > f`, `echo -n > f`, `'' > f`, `$null > f`.
+/// - Nothing piped into a program that writes a file: `'' | Set-Content f`.
+/// - `Set-Content` or `Out-File` given `$null`.
+/// - The null device used as what is copied: `cat /dev/null > f`.
+/// - Code that writes an empty string to a file.
+///
+/// A redirection *to* the null device, an append (`>>`) and a command that puts out
+/// something are not such ways.
+fn empties_a_file(line: &str) -> Option<&'static str> {
+    let lower = line.to_lowercase();
+    for segment in segments(&lower) {
+        let segment = segment.trim_start();
+        for nothing in NOTHING {
+            let Some(rest) = segment.strip_prefix(nothing) else {
+                continue;
+            };
+            // `true` and `echo` are whole words: `truecolor` is something else.
+            let ends = rest
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphanumeric());
+            if !ends {
+                continue;
+            }
+            let rest = rest.trim_start();
+            let redirects =
+                rest.starts_with('>') && !rest.starts_with(">>") && !rest.starts_with(">&");
+            if redirects && !goes_nowhere(&rest[1..]) {
+                return Some("a redirection with nothing to write leaves the file empty");
+            }
+            if !nothing.is_empty()
+                && let Some(after) = rest.strip_prefix('|')
+                && PIPED_WRITERS
+                    .iter()
+                    .any(|writer| after.trim_start().starts_with(writer))
+            {
+                return Some("writing nothing to a file leaves it empty");
+            }
+        }
+        // `Set-Content f $null`, `Out-File f -InputObject $null`.
+        for writer in ["set-content", "out-file"] {
+            if let Some(at) = segment.find(writer)
+                && used_as_a_value(&segment[at..], "$null")
+            {
+                return Some("writing $null to a file leaves it empty");
+            }
+        }
+    }
+    if used_as_a_value(&lower, "/dev/null") {
+        return Some("the null device copied over a file leaves the file empty");
+    }
+    // Inline code: `open(p, 'w').write('')`, `writeFileSync(p, '')`, `WriteAllText(p, '')`.
+    let squeezed: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    if squeezed.contains("write")
+        && [",'')", ",\"\")", "('')", "(\"\")"]
+            .iter()
+            .any(|empty| squeezed.contains(empty))
+    {
+        return Some("writing an empty text to a file leaves it empty");
+    }
+    None
+}
+
+/// Whether what follows a `>` is the null device: output thrown away, not a file.
+fn goes_nowhere(target: &str) -> bool {
+    let target = target.trim_start();
+    ["/dev/null", "$null", "nul"].iter().any(|null| {
+        target.strip_prefix(null).is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphanumeric())
+        })
+    })
+}
+
+/// Whether `null` stands in `text` as a value: not right after a `>` or a `<`, where it is
+/// only where output goes to or input comes from.
+fn used_as_a_value(text: &str, null: &str) -> bool {
+    let mut from = 0;
+    while let Some(found) = text[from..].find(null) {
+        let at = from + found;
+        from = at + null.len();
+        let before = text[..at].trim_end().chars().next_back();
+        if !matches!(before, Some('>' | '<')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The strict parser's words for a line it could not read at all (as opposed to one it
+/// read and found something in that it does not break down). Such a line is not judged
+/// by its words.
+fn could_not_be_read(reason: &str) -> bool {
+    reason.starts_with("the command could not be")
+        || reason.starts_with("the command is ")
+        || reason.starts_with("the shell grammar")
+}
+
+/// Programs and words that run something that is not named on the line, beyond the
+/// wrappers: definitions and jobs.
+const HIDERS: &[&str] = &[
+    "function",
+    "start-job",
+    "set-alias",
+    "new-alias",
+    "sal",
+    "nal",
+    "new-object",
+    "add-type",
+    "trap",
+];
+
+/// Pieces of text that can hide a program or name another machine.
+const HIDING_TEXT: &[&str] = &[
+    "$(", // command substitution, in both shells
+    "`",  // command substitution in sh; the escape character in PowerShell
+    "<(", // process substitution
+    ">(",
+    "/dev/tcp", // bash opens a connection for a redirection to these
+    "/dev/udp",
+    "://",
+    "]::", // a .NET call from PowerShell
+    ".invoke(",
+    "()", // a function definition in sh; a method call in PowerShell
+    "-computername",
+    "-encodedcommand",
+];
+
+/// Rule 8, for a line that is read as text: whether it can hide what it runs or reach
+/// another machine.
+///
+/// A glob, a redirection to a file, a variable as an argument, a pipe between programs
+/// and a loop all keep a line from being broken down into plain commands, but every
+/// program still stands in the line by name. This looks for what does hide one: command
+/// and process substitution, a variable or a quoted word where a program's name belongs,
+/// the call operator, a wrapper or a shell where a program's name belongs, an
+/// interpreter that is handed code, .NET calls. And for what reaches another machine by
+/// name: the network programs, git's network commands, publishing, an address, a Windows
+/// share. Names are looked for as written and with quotes and escapes taken away, as
+/// [`scan`] does (`c\url`, `cu''rl`).
+///
+/// When in doubt it says yes: the price is one more question after untrusted content.
+fn may_hide_or_reach(shell: Shell, line: &str) -> bool {
+    let lower = line.to_lowercase();
+    if HIDING_TEXT.iter().any(|piece| lower.contains(piece)) {
+        return true;
+    }
+    // A share on another machine.
+    if shell == Shell::PowerShell && lower.contains("\\\\") {
+        return true;
+    }
+    let unquoted: String = lower
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\' | '^'))
+        .collect();
+    hides_by_position(shell, &lower)
+        || hides_by_position(shell, &unquoted)
+        || reaches_by_name(shell, &lower)
+        || (shell == Shell::Posix && reaches_by_name(shell, &unquoted))
+}
+
+/// What stands where a program's name belongs, in every command of the line.
+fn hides_by_position(shell: Shell, lower: &str) -> bool {
+    for segment in segments(lower).flat_map(|s| s.split('|')) {
+        let mut start = segment.trim_start();
+        for keyword in [
+            "then ", "do ", "else ", "elif ", "if ", "while ", "until ", "! ",
+        ] {
+            start = start.strip_prefix(keyword).unwrap_or(start).trim_start();
+        }
+        // `FOO=1 BAR=2 program`: the settings in front of a program are not its name.
+        if shell == Shell::Posix {
+            while let Some((first, rest)) = start.split_once(char::is_whitespace) {
+                let is_setting = first.split_once('=').is_some_and(|(name, _)| {
+                    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                });
+                if !is_setting {
+                    break;
+                }
+                start = rest.trim_start();
+            }
+        }
+        let hidden = match shell {
+            // `$TOOL x`, `"$TOOL" x`, `'cu''rl' x`: not a plain name.
+            Shell::Posix => start.starts_with(['$', '"', '\'']),
+            // `& $tool`, `. .\script.ps1`, and a member call on a variable.
+            Shell::PowerShell => {
+                start.starts_with('&')
+                    || start.starts_with(". ")
+                    || (start.starts_with('$') && start.contains('('))
+            }
+        };
+        if hidden {
+            return true;
+        }
+        // A wrapper, a definition or another shell as the program.
+        let word = start.split_whitespace().next().unwrap_or("");
+        let name = program_name(word);
+        let name = name.as_str();
+        if WRAPPERS.contains(&name)
+            || MORE_WRAPPERS.contains(&name)
+            || HIDERS.contains(&name)
+            || matches!(name, "powershell" | "pwsh")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Names that reach another machine, anywhere in the line, and interpreters handed code.
+fn reaches_by_name(shell: Shell, lower: &str) -> bool {
+    // `$env:NAME` is a variable in PowerShell, not the program `env`.
+    let text = if shell == Shell::PowerShell {
+        lower.replace("$env:", "$")
+    } else {
+        lower.to_owned()
+    };
+    let words: Vec<&str> = text
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .filter(|w| !w.is_empty())
+        .map(strip_extension)
+        .collect();
+    let has = |word: &str| words.contains(&word);
+    if words
+        .iter()
+        .any(|w| NETWORK_PROGRAMS.contains(w) || PUBLISH_VERBS.contains(w) || HIDERS.contains(w))
+    {
+        return true;
+    }
+    if has("git") && GIT_NETWORK.iter().any(|sub| has(sub)) {
+        return true;
+    }
+    // A shell or an interpreter that is handed its code: through a pipe, from standard
+    // input, or on the command line.
+    let interpreter = words.iter().any(|w| code_flags(w).is_some());
+    let handed_code = text.contains('|')
+        || text.contains('<')
+        || words.iter().any(|w| {
+            w.strip_prefix('-')
+                .is_some_and(|flag| !flag.starts_with('-') && flag.contains(['c', 'e', 'p', 'r']))
+                || matches!(*w, "--eval" | "--print")
+        });
+    interpreter && handed_code
 }
 
 fn scan_text(lower: &str, found: &mut Found) {
