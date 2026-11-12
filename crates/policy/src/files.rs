@@ -1,7 +1,7 @@
 //! Which file writes always ask, whatever was granted (ARCHITECTURE.md 13.3):
 //! deletes; replacing a file with an empty one; anything under a `.git` folder; shell
 //! start-up files; git and ssh configuration; autostart locations; the settings of the
-//! coding apps Claude Code and Codex (0.0.5: `.claude/`, `.codex/`, `.mcp.json`,
+//! coding apps Claude Code and Codex (0.0.6: `.claude/`, `.codex/`, `.mcp.json`,
 //! `.claude.json`).
 
 use crate::engine::KeepAsking;
@@ -41,7 +41,7 @@ const CONFIG_FILES: &[&str] = &[
 /// Folder names whose contents are always sensitive.
 const SENSITIVE_DIRS: &[&str] = &[".git", ".ssh", ".gnupg", "launchagents", "launchdaemons"];
 
-/// The settings folders of the coding apps the app can hand tasks to (0.0.5): a project's
+/// The settings folders of the coding apps the app can hand tasks to (0.0.6): a project's
 /// and the user's `.claude` and `.codex`. Hooks and MCP servers configured there run
 /// programs, and their permission settings decide what the app may do on its own.
 pub(crate) const CODING_APP_DIRS: &[&str] = &[".claude", ".codex"];
@@ -278,7 +278,7 @@ mod tests {
         }
     }
 
-    /// 0.0.5: the settings of the coding apps the app can hand tasks to (Claude Code,
+    /// 0.0.6: the settings of the coding apps the app can hand tasks to (Claude Code,
     /// Codex) keep asking like `.git`: a project's `.claude/` folder and `.mcp.json`, the
     /// user's `~/.claude/`, `~/.claude.json` and `~/.codex/`. A file there could start a
     /// program the next time the app runs, or turn off its permission checks.

@@ -26,9 +26,10 @@
 //!    or that cannot be fully broken down and can hide what it runs
 //!    ([`may_hide_or_reach`]). A line that only has a glob, a redirection to a file or a
 //!    variable as an argument still shows every program it runs, and is judged by them.
-//! 9. (0.0.5) A coding assistant (Claude Code, Codex and the like) or a token that turns
-//!    off one's permission checks ([`crate::command::coding_apps`]): it asks in every mode
-//!    and counts as reaching the network. Sensitive places (rule 4) include their settings.
+//! 9. (0.0.6) A coding assistant (Claude Code, Codex and the like) or a token that turns
+//!    off one's permission checks ([`crate::command::coding_apps`]): it asks in Ask first
+//!    and Allow all, runs in Full access (D11 as amended for 0.0.6), and counts as reaching
+//!    the network. Sensitive places (rule 4) include their settings.
 //!
 //! Like the terminal classifier it builds on, this is a guard against accidents and
 //! obvious abuse, not a security boundary. It reads the command line. What a script file
@@ -52,9 +53,10 @@ pub struct CommandFacts {
     pub network: bool,
     /// The command could not be fully broken down (its text was scanned for words).
     pub opaque: bool,
-    /// 0.0.5: why the command starts a coding assistant or turns off one's permission
-    /// checks ([`crate::command::coding_apps`]). Such a command keeps asking in every mode
-    /// and counts as reaching the network.
+    /// 0.0.6: why the command starts a coding assistant or turns off one's permission
+    /// checks ([`crate::command::coding_apps`]). Such a command asks in Ask first and Allow
+    /// all, runs in Full access (D11 as amended for 0.0.6), and counts as reaching the
+    /// network.
     pub coding_app: Option<String>,
 }
 
@@ -353,7 +355,7 @@ pub fn command_facts(shell: Shell, line: &str, strict: &Parsed) -> CommandFacts 
         // Rule 8: it may reach the network.
         found.network = true;
     }
-    // Rule 9 (0.0.5): a coding assistant, or a token that turns off its permission checks.
+    // Rule 9 (0.0.6): a coding assistant, or a token that turns off its permission checks.
     // It works online with the user's account and can change files on its own, so it asks
     // and counts as reaching the network.
     if let Some(why) = crate::command::coding_apps::find(line, parsed) {

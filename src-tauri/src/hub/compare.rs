@@ -720,7 +720,7 @@ fn local_header(rec: &Installed) -> Option<Arc<ModelSummary>> {
     Some(summary)
 }
 
-/// The projector beside an installed model, when its file is there: (size, it exists).
+/// The size of the projector beside an installed model; 0 when there is none.
 fn installed_projector_bytes(rec: &Installed) -> u64 {
     rec.stored
         .projector
@@ -810,6 +810,10 @@ async fn catalog_item(
     f.catalog = Some(catalog_facts(id, e));
     f.results = known.results_for(&first.path, first.size);
     if let Some(rec) = known.installed_for_entry(id, e) {
+        if f.results.is_empty() {
+            // The same bytes under another name.
+            f.results = known.results_for(&rec.file_name, rec.first_file_size());
+        }
         fill_from_installed(&mut f, rec, known, ctx);
         if f.hub.is_none() {
             // Downloads and dates are extras for an installed model: a failure is not

@@ -10,23 +10,33 @@
 //! - **One session first.** Each app has a way that lasts one window or is used only when
 //!   asked (variables for one window; a separate Codex profile), then the settings-file
 //!   way, with the file's full path on each system.
-//! - **Names from the official documentation** (checked for 0.0.5, see `map-details.md`
-//!   item 3):
-//!   - Claude Code: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (sent as
-//!     `Authorization: Bearer`), `ANTHROPIC_MODEL`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (the
-//!     window it assumes for a model id that does not start with `claude-`),
-//!     `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (its default for an unknown model, 32,000, would
-//!     leave almost no room in a small context), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`;
-//!     the settings file `~/.claude/settings.json` (`%USERPROFILE%\.claude\settings.json`
-//!     on Windows) with an `env` block.
-//!   - Codex: `model_provider`, `model`, `model_context_window`,
-//!     `model_auto_compact_token_limit`, `[model_providers.<id>]` with `name`, `base_url`,
-//!     `env_key` and `wire_api = "responses"` (the only value); profiles are separate files
-//!     next to `config.toml`, `~/.codex/<name>.config.toml`, used with `--profile <name>`
-//!     (since Codex 0.134.0; the home is `%USERPROFILE%\.codex` on Windows).
-//!   - The Claude app: Help → Troubleshooting → Enable Developer Mode, then Developer →
-//!     Configure Third-Party Inference, Inference provider Gateway, Gateway base URL,
-//!     Gateway API key, Gateway auth scheme Bearer. Not tried yet (it may want https).
+//! - **Names from the official documentation**, checked again for 0.0.6 on 2026-11-12
+//!   (see `map-details.md` item 3 for the first check):
+//!   - Claude Code (code.claude.com/docs, env-vars and model-config): `ANTHROPIC_BASE_URL`,
+//!     `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`), `ANTHROPIC_MODEL`,
+//!     `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (applies on its own to a model id that does not start
+//!     with `claude-` and has no `[1m]`, such as the alias), `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
+//!     (its default for an unknown model, 32,000, would leave almost no room in a small
+//!     context), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`; the settings file
+//!     `~/.claude/settings.json` (`%USERPROFILE%\.claude\settings.json` on Windows) with an
+//!     `env` block.
+//!   - Codex (developers.openai.com/codex, which now redirects to learn.chatgpt.com/docs:
+//!     config-advanced, config-reference, developer-commands): `model_provider`, `model`,
+//!     `model_context_window`, `model_auto_compact_token_limit`, `[model_providers.<id>]` with
+//!     `name`, `base_url`, `env_key` and `wire_api = "responses"` (the only value). Profiles
+//!     are separate files next to `config.toml`, `$CODEX_HOME/<name>.config.toml` with
+//!     top-level keys, layered on top of `config.toml` by the global flag `--profile <name>`
+//!     (also `-p`), which applies to the interactive `codex` command too; since Codex 0.134.0
+//!     `--profile` no longer reads `[profiles.<name>]` from `config.toml`. `CODEX_HOME` is
+//!     `~/.codex`, `%USERPROFILE%\.codex` on Windows. Not run here: Codex is not installed.
+//!   - The Claude app (claude.com/docs/third-party/claude-desktop, gateway, in-app
+//!     configuration, installation): Help → Troubleshooting → Enable Developer Mode (on
+//!     Windows the Help menu is under the menu button at the top left), then Developer →
+//!     Configure Third-Party Inference; Connection: Inference provider Gateway, Gateway base
+//!     URL, Gateway API key, Credential kind Static API key, Gateway auth scheme Bearer; Apply
+//!     Changes, then Save & Restart; the sign-in screen then offers to start with that setup,
+//!     and choosing the Anthropic sign-in there goes back. Not tried yet (the documentation's
+//!     examples use https).
 
 use serde::Serialize;
 
@@ -261,7 +271,7 @@ fn codex(input: &SetupInput) -> Vec<SetupWay> {
         system,
         steps: vec![
             step(
-                "Open this file in a text editor, or create it if it is not there. Paste these lines at the very top and save. If the file already has model, model_provider or model_context_window, change those lines instead of adding them again.",
+                "Open this file in a text editor, or create it if it is not there. Paste these lines at the very top and save. If the file already has model, model_provider, model_context_window or model_auto_compact_token_limit, change those lines instead of adding them again.",
                 Some(toml.clone()),
                 Some(&format!("{folder}{sep}config.toml")),
             ),
@@ -319,7 +329,7 @@ fn claude_app(input: &SetupInput) -> Vec<SetupWay> {
         system: SetupSystem::Any,
         steps: vec![
             step(
-                "Open Help, then Troubleshooting, then Enable Developer Mode. The app restarts with a Developer menu.",
+                "Open Help, then Troubleshooting, then Enable Developer Mode. On Windows, Help is in the menu at the top left. A Developer menu appears.",
                 None,
                 None,
             ),
@@ -335,12 +345,17 @@ fn claude_app(input: &SetupInput) -> Vec<SetupWay> {
             ),
             step("Set Gateway API key to:", Some(clean(&input.key)), None),
             step(
-                "Set Credential kind to Static API key and Gateway auth scheme to Bearer, then save.",
+                "Set Credential kind to Static API key and Gateway auth scheme to Bearer. Then choose Apply Changes, then Save & Restart.",
                 None,
                 None,
             ),
             step(
-                "To go back, open the same window and set Inference provider back to what it was.",
+                "When the app opens again, choose to start with this setup on the sign-in screen.",
+                None,
+                None,
+            ),
+            step(
+                "To go back, choose the Anthropic sign-in on the sign-in screen instead.",
                 None,
                 None,
             ),
@@ -700,6 +715,31 @@ mod tests {
             codes,
             vec!["http://127.0.0.1:51234".to_owned(), KEY.to_owned()]
         );
+        // The labels of the app's own documentation, in its order.
+        let text: Vec<&str> = setup.ways[0]
+            .steps
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        let all = text.join("\n");
+        let mut at = 0;
+        for label in [
+            "Enable Developer Mode",
+            "Configure Third-Party Inference",
+            "Inference provider to Gateway",
+            "Gateway base URL",
+            "Gateway API key",
+            "Credential kind to Static API key",
+            "Gateway auth scheme to Bearer",
+            "Apply Changes, then Save & Restart",
+            "sign-in screen",
+            "To go back",
+        ] {
+            let found = all[at..]
+                .find(label)
+                .unwrap_or_else(|| panic!("{label}: {all}"));
+            at += found + label.len();
+        }
     }
 
     #[test]

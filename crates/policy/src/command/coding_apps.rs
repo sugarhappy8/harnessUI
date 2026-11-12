@@ -11,24 +11,29 @@
 //! everything there. [`find`] says why a line is such a line, if it is:
 //!
 //! - (a) the program, also after a wrapper (`env`, `timeout`, `sudo`, `cmd /c`,
-//!   `Start-Process`, a shell given a command, …), is a coding assistant ([`ASSISTANTS`],
-//!   with `.exe`, `.cmd` and the like);
+//!   `Start-Process`, `taskset`, `tmux`, `firejail`, a shell given a command, …), after
+//!   `find -exec` or `fd -x`, inside code handed to an interpreter (`python3 -c
+//!   "os.system('claude …')"`), or as a locator finds it (`$(which claude)`), is a coding
+//!   assistant ([`ASSISTANTS`], with `.exe`, `.cmd` and the like);
 //! - (b) such a name is the package handed to a package runner (`npx`, `npm exec`,
 //!   `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`), as `claude`, `@openai/codex`,
-//!   `@google/gemini-cli`, `aider-chat` and the like;
+//!   `@google/gemini-cli`, `aider-chat` and the like, or the program a package manager is
+//!   handed by name (`yarn claude`, `pnpm codex`, `bun run claude`);
 //! - (c) `node`, `bun` or `deno` is handed a script inside one of the assistants' npm
 //!   packages ([`PACKAGES`]);
 //! - (d) a token that turns off an assistant's permission checks ([`BYPASS_TOKENS`])
 //!   appears anywhere on the line, quoted or not.
 //!
 //! A line that cannot be broken down into plain commands is read as text: the first word
-//! of every command in it is checked the same way.
+//! of every command in it is checked the same way, as written, with its quotes taken away,
+//! and with its escapes taken away too (the POSIX shell runs `cod\ex` as `codex`).
 //!
 //! Known limit: this reads names. A copy of one of these programs under another name, or
 //! a link to it (`ln -s "$(which claude)" helper; ./helper -p …`), is not seen, nor is code
-//! in another language that builds the name from pieces.
+//! in a script file or code that builds the name from pieces (`"cl" + "aude"`,
+//! `$'\x63laude'`).
 
-use crate::command::{ELEVATION, Parsed, WRAPPERS, program_name};
+use crate::command::{ELEVATION, INLINE, Parsed, WRAPPERS, program_name};
 
 /// The program names of coding assistants (D8 as amended for 0.0.6 allows them here).
 pub const ASSISTANTS: &[&str] = &[
@@ -74,6 +79,72 @@ const RUNNER_SUBCOMMANDS: &[(&str, &[&str])] = &[
     ("bun", &["x"]),
     ("pipx", &["run"]),
     ("uv", &["tool"]),
+];
+
+/// Programs that change how another program runs (processor, priority, limits, terminal,
+/// sandbox, namespace, tracing, clock) and then run it, beyond the classifier's wrapper
+/// lists. Only this rule follows them.
+const PROGRAM_RUNNERS: &[&str] = &[
+    "taskset",
+    "numactl",
+    "chrt",
+    "prlimit",
+    "unbuffer",
+    "rlwrap",
+    "tmux",
+    "screen",
+    "firejail",
+    "bwrap",
+    "systemd-run",
+    "arch",
+    "dbus-run-session",
+    "xvfb-run",
+    "unshare",
+    "nsenter",
+    "runuser",
+    "sg",
+    "strace",
+    "ltrace",
+    "faketime",
+    "corepack",
+];
+
+/// Programs that hand each file they find to a program named after a flag
+/// (`find . -exec claude …`, `fd -x claude …`).
+const PROGRAM_FLAGS: &[(&str, &[&str])] = &[
+    ("find", &["-exec", "-execdir", "-ok", "-okdir"]),
+    ("gfind", &["-exec", "-execdir", "-ok", "-okdir"]),
+    ("fd", &["-x", "--exec", "-X", "--exec-batch"]),
+    ("fdfind", &["-x", "--exec", "-X", "--exec-batch"]),
+];
+
+/// Package managers that run a program of the project's packages handed by name
+/// (`yarn claude`, `pnpm codex`, `bun run claude`).
+const BIN_RUNNERS: &[&str] = &["yarn", "pnpm", "bun"];
+
+/// Their options that take the next word as a value.
+const BIN_RUNNER_VALUE_FLAGS: &[&str] = &[
+    "--cwd",
+    "--dir",
+    "-C",
+    "--filter",
+    "-F",
+    "--workspace",
+    "-w",
+    "--prefix",
+    "--registry",
+    "--config",
+];
+
+/// Programs that print where a program is (`$(which claude) -p …`).
+const LOCATORS: &[&str] = &[
+    "which",
+    "where",
+    "whence",
+    "type",
+    "command",
+    "get-command",
+    "gcm",
 ];
 
 /// Programs that run a JavaScript file they are handed.
@@ -198,6 +269,7 @@ fn is_wrapper(name: &str) -> bool {
     WRAPPERS.contains(&name)
         || crate::allow_all::MORE_WRAPPERS.contains(&name)
         || ELEVATION.contains(&name)
+        || PROGRAM_RUNNERS.contains(&name)
 }
 
 /// How many programs inside programs are followed (`sudo env timeout 9 npx claude`).
@@ -229,6 +301,29 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
         return Some(format!(
             "{program} runs {found}, a coding assistant that works online with your account"
         ));
+    }
+    // (b) A package manager handed an assistant's program by name.
+    if let Some(found) = bin_runner_program(name, args).filter(|p| is_assistant(p)) {
+        return Some(format!(
+            "{program} runs {found}, a coding assistant that works online with your account"
+        ));
+    }
+    // (a) The program `find -exec` or `fd -x` hands each file to.
+    if let Some((_, flags)) = PROGRAM_FLAGS.iter().find(|(n, _)| *n == name) {
+        for at in (0..args.len()).filter(|&i| flags.contains(&args[i].as_str())) {
+            if let Some(next) = args.get(at + 1)
+                && let Some(why) = command(next, &args[at + 2..], depth + 1)
+            {
+                return Some(why);
+            }
+        }
+    }
+    // (a) Code handed to an interpreter that runs a command line given as a string.
+    if !SHELLS.contains(&name)
+        && let Some(code) = inline_code(name, args)
+        && let Some(why) = in_code(code, depth + 1)
+    {
+        return Some(why);
     }
     // (a) After a wrapper, or inside a command handed to a shell.
     let wraps = is_wrapper(name);
@@ -281,14 +376,150 @@ fn runner_args<'a>(name: &str, args: &'a [String]) -> Option<&'a [String]> {
     let (_, subs) = RUNNER_SUBCOMMANDS
         .iter()
         .find(|(manager, _)| *manager == name)?;
-    let at = args.iter().position(|a| !a.starts_with('-'))?;
-    subs.contains(&args[at].to_lowercase().as_str())
-        .then(|| &args[at + 1..])
+    // The subcommand is the first of its words on the line: an option before it can take a
+    // value of its own (`npm --prefix /x exec …`, `pnpm --dir x dlx …`).
+    let at = args
+        .iter()
+        .position(|a| subs.contains(&a.to_lowercase().as_str()))?;
+    Some(&args[at + 1..])
+}
+
+/// The program a package manager is handed by name (`yarn claude`, `pnpm --dir x codex`,
+/// `bun run claude`), if `name` is one that runs such a program.
+fn bin_runner_program<'a>(name: &str, args: &'a [String]) -> Option<&'a str> {
+    if !BIN_RUNNERS.contains(&name) {
+        return None;
+    }
+    let mut i = 0;
+    let mut run_seen = false;
+    while let Some(arg) = args.get(i) {
+        if BIN_RUNNER_VALUE_FLAGS.contains(&arg.as_str()) {
+            i += 2;
+        } else if arg.starts_with('-') {
+            i += 1;
+        } else if !run_seen && arg.eq_ignore_ascii_case("run") {
+            run_seen = true;
+            i += 1;
+        } else {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+/// The code handed to an interpreter on its command line (`python3 -c "…"`, `node -e
+/// "…"`, `perl -e '…'`, `osascript -e '…'`), if there is some.
+fn inline_code<'a>(name: &str, args: &'a [String]) -> Option<&'a str> {
+    let (_, flags) = INLINE.iter().find(|(interp, _)| {
+        name == *interp
+            || name
+                .strip_prefix(interp)
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    })?;
+    args.iter().enumerate().find_map(|(i, arg)| {
+        let lower = arg.to_lowercase();
+        flags.iter().find_map(|flag| {
+            if lower == *flag {
+                args.get(i + 1).map(String::as_str)
+            } else {
+                lower
+                    .strip_prefix(flag)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .map(|_| &arg[flag.len() + 1..])
+            }
+        })
+    })
+}
+
+/// Why code handed to an interpreter starts a coding assistant, if it does: a string in it
+/// that is a command line starting one (`os.system('claude -p x')`,
+/// `execSync('codex exec x')`, `["claude", "-p", "x"]`), or a script of one.
+fn in_code(code: &str, depth: usize) -> Option<String> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    if names_package_path(code) {
+        return Some("the command runs a script of a coding assistant".into());
+    }
+    quoted_strings(code)
+        .iter()
+        .find_map(|text| in_text(text, depth + 1))
+}
+
+/// The text of every string written in quotes (`'…'`, `"…"`, `` `…` ``) in a piece of code,
+/// with a backslash taking the next character as it is.
+fn quoted_strings(code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = code.chars();
+    while let Some(c) = chars.next() {
+        if !matches!(c, '\'' | '"' | '`') {
+            continue;
+        }
+        let mut text = String::new();
+        let mut escaped = false;
+        for d in chars.by_ref() {
+            if escaped {
+                text.push(d);
+                escaped = false;
+            } else if d == '\\' {
+                escaped = true;
+            } else if d == c {
+                break;
+            } else {
+                text.push(d);
+            }
+        }
+        out.push(text);
+    }
+    out
+}
+
+/// A command substitution that only finds a coding assistant (`$(which claude)`,
+/// `` `command -v codex` ``, `(Get-Command claude)`) replaced by the name it finds, so the
+/// name stands where the program is run: `$(which claude) -p x` reads as `claude -p x`.
+fn resolve_locators(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find(['(', '`']) {
+        let paren = rest[open..].starts_with('(');
+        let close = if paren { ')' } else { '`' };
+        let after = &rest[open + 1..];
+        let Some(end) = after.find(close) else {
+            break;
+        };
+        // PowerShell's `( … )` gives a value; only `&` or `.` in front of it runs it.
+        let runs =
+            !paren || rest[..open].ends_with('$') || rest[..open].trim_end().ends_with(['&', '.']);
+        let words = shell_words(&after[..end]);
+        let found = match words.split_first() {
+            Some((first, more)) if runs && LOCATORS.contains(&program_name(first).as_str()) => {
+                more.iter().find(|w| !w.starts_with('-') && is_assistant(w))
+            }
+            _ => None,
+        };
+        match found {
+            Some(name) => {
+                let head = &rest[..open];
+                out.push_str(head.strip_suffix('$').unwrap_or(head));
+                out.push(' ');
+                out.push_str(name);
+                out.push(' ');
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[..=open]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// For a line that cannot be broken down: the first word of every command in it, read as
-/// a program (also as written with quotes and escapes taken away), and a script inside an
-/// assistant's package anywhere in it.
+/// a program (as written with a locator's finding in its place, with quotes taken away,
+/// and with quotes and escapes taken away), and a script inside an assistant's package
+/// anywhere in it.
 fn in_text(line: &str, depth: usize) -> Option<String> {
     if depth > MAX_DEPTH {
         return None;
@@ -296,12 +527,48 @@ fn in_text(line: &str, depth: usize) -> Option<String> {
     if names_package_path(line) {
         return Some("the command runs a script of a coding assistant".into());
     }
-    let lower = line.to_lowercase();
+    // `find`'s `{}` and `\;` (or `';'`) are words, not braces or the end of a command:
+    // `find . -exec echo {} \; -exec claude -p {} \;` stays one command.
+    let lower = line
+        .to_lowercase()
+        .replace("\\;", " _ ")
+        .replace("';'", " _ ")
+        .replace("\";\"", " _ ")
+        .replace("{}", " _ ");
     let unquoted: String = lower
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '`' | '^'))
         .collect();
-    for text in [lower.as_str(), unquoted.as_str()] {
+    // As the POSIX shell reads a word: escapes and quotes taken away (`cod\ex`, `$'claude'`).
+    let mut unescaped = String::with_capacity(lower.len());
+    let mut chars = lower.chars().peekable();
+    while let Some(c) = chars.next() {
+        let quote_follows = matches!(chars.peek(), Some('\'' | '"'));
+        if !(matches!(c, '\'' | '"' | '`' | '^' | '\\') || (c == '$' && quote_follows)) {
+            unescaped.push(c);
+        }
+    }
+    let mut readings = vec![resolve_locators(&lower)];
+    for text in [unquoted, unescaped] {
+        if !readings.contains(&text) {
+            readings.push(text);
+        }
+    }
+    for text in &readings {
+        // .NET's `[Diagnostics.Process]::Start('claude', '-p x')`: the first argument is a
+        // program.
+        for (at, _) in text.match_indices("::start(") {
+            let first = text[at + "::start(".len()..]
+                .split([',', ')'])
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if is_assistant(first) {
+                return Some(format!(
+                    "{first} is a coding assistant: it works online with your account and can change files"
+                ));
+            }
+        }
         for segment in text.split([';', '\n', '(', ')', '{', '}', '|', '&', '`']) {
             let mut words = shell_words(segment);
             // Keywords and settings in front of a program are not its name.

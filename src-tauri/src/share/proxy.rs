@@ -1,4 +1,4 @@
-//! The sharing proxy (0.0.5 item 3, direction A; D10): a small HTTP/1 server that the app
+//! The sharing proxy (0.0.6 item 3, direction A; D10): a small HTTP/1 server that the app
 //! owns, on `127.0.0.1:<kept port>`, in front of llama-server, which stays on its random
 //! port with its private key.
 //!
@@ -8,10 +8,10 @@
 //! - **Checks before anything is read or revealed.** In this order and before the body is
 //!   read: the request target is a plain path (no scheme or host in it), `Host` is exactly
 //!   `127.0.0.1:<port>` or `localhost:<port>` (DNS rebinding), there is no `Origin` header
-//!   (web pages), and the sharing key (`x-api-key` or `Authorization: Bearer`) matches,
-//!   compared in constant time. Refused requests are counted in memory only, never
-//!   audited, and over [`REFUSALS_PER_SECOND`] they are answered with a bare 429 and the
-//!   connection is closed.
+//!   (web pages), and the sharing key (`x-api-key` or `Authorization: Bearer`, each at most
+//!   once) is in one of them, compared in constant time. Refused requests are counted in
+//!   memory only, never audited, and over [`REFUSALS_PER_SECOND`] they are answered with a
+//!   bare 429 and the connection is closed.
 //! - **Exact paths only**: `POST /v1/messages`, `POST /v1/messages/count_tokens`,
 //!   `POST /v1/responses`, `POST /v1/chat/completions`, and `GET /v1/models`, which the
 //!   proxy answers itself with [`MODEL_ALIAS`]. The path is compared byte for byte, so
@@ -29,13 +29,17 @@
 //! - **Answers are cleaned**: `timings`, `system_fingerprint` and cached-token counters are
 //!   removed from JSON and from every SSE event (they would show how much of a prompt
 //!   matches what the in-app chat sent last), the model name is the alias, and the model
-//!   file's path never appears. Errors come back in each API's own shape.
+//!   file's path never appears. Errors come back in each API's own shape. The audit row's
+//!   token counts come from the usage object, or else from the removed `timings`.
 //! - **One audit row per authenticated generation request** (server `other-apps`, the
 //!   path, what the caller says it is, token counts and the result; never the request
 //!   text), `count_tokens` at most once a minute. The decision is the existing
 //!   `allowed_without_prompt` (D9).
 //! - **The busy counter** ([`BusyKind::OtherApp`]) is held while a request runs (D3); the
-//!   in-app chat is never blocked by it.
+//!   in-app chat is never blocked by it. A caller that leaves a streamed answer unread for
+//!   [`CALLER_STALL`] is cut off, so an app that hangs cannot hold it for ever.
+//! - **The approval mode changes nothing here** (D12): the proxy is not a tool action, reads
+//!   no mode, and its switch is changed only by the user.
 
 use std::convert::Infallible;
 use std::io;
@@ -74,6 +78,13 @@ const MAX_CONNECTIONS: usize = 32;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a client may take to send its body.
 const BODY_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a caller may leave a streamed answer unread before it is cut off. Without it, an
+/// app that hangs with its connection open would hold the busy counter for ever, and "Restart
+/// when it ends" (D3) would never come. Short in tests, which wait for it.
+#[cfg(not(test))]
+pub const CALLER_STALL: Duration = Duration::from_secs(60);
+#[cfg(test)]
+pub const CALLER_STALL: Duration = Duration::from_secs(2);
 /// How long the proxy waits for llama-server to accept a connection.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// `count_tokens` writes at most one audit row per this long.
@@ -297,9 +308,12 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(diff) == 0
 }
 
-/// The sharing key check: `x-api-key: <key>` or `Authorization: Bearer <key>`. At least
-/// one must be sent, each header at most once, and every one sent must match. An empty
-/// expected key (none made yet) matches nothing.
+/// The sharing key check: `x-api-key: <key>` or `Authorization: Bearer <key>`, each header
+/// at most once, and one of them must hold the key. The other may hold something else:
+/// Claude Code sends both when the user also has `ANTHROPIC_API_KEY` set (that key goes in
+/// `x-api-key`, the sharing key from `ANTHROPIC_AUTH_TOKEN` in `Authorization`; seen with
+/// 2.1.322). That other value is never used, logged, audited or forwarded. An empty expected
+/// key (none made yet) matches nothing.
 pub fn key_matches(headers: &HeaderMap, expected: &str) -> bool {
     if expected.is_empty() {
         return false;
@@ -315,10 +329,10 @@ pub fn key_matches(headers: &HeaderMap, expected: &str) -> bool {
             (Some(value), None) => {
                 let bytes = value.as_bytes();
                 if name == header::AUTHORIZATION {
-                    let Some(token) = bearer_token(bytes) else {
-                        return false;
-                    };
-                    sent.push(token);
+                    // Another scheme never holds the sharing key.
+                    if let Some(token) = bearer_token(bytes) {
+                        sent.push(token);
+                    }
                 } else {
                     sent.push(bytes);
                 }
@@ -326,12 +340,9 @@ pub fn key_matches(headers: &HeaderMap, expected: &str) -> bool {
             (Some(_), Some(_)) => return false,
         }
     }
-    if sent.is_empty() {
-        return false;
-    }
-    // Every comparison runs, so the time does not tell which header was wrong.
-    sent.iter().fold(true, |ok, key| {
-        constant_time_eq(key, expected.as_bytes()) & ok
+    // Every comparison runs, so the time does not tell which header held the key.
+    sent.iter().fold(false, |ok, key| {
+        constant_time_eq(key, expected.as_bytes()) | ok
     })
 }
 
@@ -515,6 +526,14 @@ impl Usage {
         self.output = other.output.or(self.output);
     }
 
+    /// These counts, and `other`'s where these have none.
+    fn or(self, other: Usage) -> Usage {
+        Usage {
+            input: self.input.or(other.input),
+            output: self.output.or(other.output),
+        }
+    }
+
     /// "1,234 tokens in, 56 out", or nothing when no count was seen.
     pub fn summary(self) -> Option<String> {
         match (self.input, self.output) {
@@ -547,29 +566,60 @@ pub fn thousands(n: u64) -> String {
 /// Only known places are touched: the top level and the `message` (Anthropic
 /// `message_start`) and `response` (OpenAI Responses events) objects.
 pub fn clean_answer(value: &mut Value) -> Usage {
-    let mut usage = Usage::default();
-    let Some(obj) = value.as_object_mut() else {
-        return usage;
-    };
-    clean_object(obj, &mut usage);
-    for key in ["message", "response"] {
-        if let Some(Value::Object(inner)) = obj.get_mut(key) {
-            clean_object(inner, &mut usage);
-        }
-    }
-    usage
+    let counts = clean_counted(value);
+    counts.usage.or(counts.timed)
 }
 
-fn clean_object(obj: &mut Map<String, Value>, usage: &mut Usage) {
-    obj.remove("timings");
+/// The counts one answer or event carried, kept apart until the end of a stream: a usage
+/// object always wins over `timings`, also when they come in different events.
+#[derive(Debug, Clone, Copy, Default)]
+struct Counts {
+    /// From usage objects.
+    usage: Usage,
+    /// From llama-server's `timings` (removed from the answer).
+    timed: Usage,
+}
+
+fn clean_counted(value: &mut Value) -> Counts {
+    let mut counts = Counts::default();
+    let Some(obj) = value.as_object_mut() else {
+        return counts;
+    };
+    clean_object(obj, &mut counts);
+    for key in ["message", "response"] {
+        if let Some(Value::Object(inner)) = obj.get_mut(key) {
+            clean_object(inner, &mut counts);
+        }
+    }
+    counts
+}
+
+fn clean_object(obj: &mut Map<String, Value>, counts: &mut Counts) {
+    if let Some(Value::Object(timings)) = obj.remove("timings") {
+        counts.timed.merge(timings_usage(&timings));
+    }
     obj.remove("system_fingerprint");
     if let Some(model) = obj.get_mut("model")
         && model.is_string()
     {
         *model = json!(MODEL_ALIAS);
     }
-    if let Some(Value::Object(counts)) = obj.get_mut("usage") {
-        usage.merge(clean_usage(counts));
+    if let Some(Value::Object(usage)) = obj.get_mut("usage") {
+        counts.usage.merge(clean_usage(usage));
+    }
+}
+
+/// The counts in llama-server's `timings`, for the audit row only (the object itself never
+/// goes back): the prompt is the cached part plus the rest, the answer is what was predicted.
+fn timings_usage(timings: &Map<String, Value>) -> Usage {
+    let number = |key: &str| timings.get(key).and_then(Value::as_u64);
+    let input = match (number("cache_n"), number("prompt_n")) {
+        (None, None) => None,
+        (cached, rest) => Some(cached.unwrap_or(0) + rest.unwrap_or(0)),
+    };
+    Usage {
+        input,
+        output: number("predicted_n"),
     }
 }
 
@@ -652,7 +702,7 @@ impl Scrub {
 pub struct SseFilter {
     buf: Vec<u8>,
     scrub: Scrub,
-    usage: Usage,
+    counts: Counts,
 }
 
 impl SseFilter {
@@ -660,13 +710,13 @@ impl SseFilter {
         Self {
             buf: Vec::new(),
             scrub,
-            usage: Usage::default(),
+            counts: Counts::default(),
         }
     }
 
-    /// The counts seen so far.
+    /// The counts seen so far (from usage objects, else from the timings).
     pub fn usage(&self) -> Usage {
-        self.usage
+        self.counts.usage.or(self.counts.timed)
     }
 
     /// Takes the next chunk and returns the cleaned complete lines in it. Fails when a
@@ -706,8 +756,9 @@ impl SseFilter {
             if data == "[DONE]" {
                 out.push_str("data: [DONE]\n");
             } else if let Ok(mut value) = serde_json::from_str::<Value>(data) {
-                let usage = clean_answer(&mut value);
-                self.usage.merge(usage);
+                let counts = clean_counted(&mut value);
+                self.counts.usage.merge(counts.usage);
+                self.counts.timed.merge(counts.timed);
                 out.push_str("data: ");
                 out.push_str(&self.scrub.apply(value.to_string()));
                 out.push('\n');
@@ -1231,8 +1282,20 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
                     Ok(Some(chunk)) => match filter.push(&chunk) {
                         Ok(out) if out.is_empty() => {}
                         Ok(out) => {
-                            if sender.send_data(Bytes::from(out)).await.is_err() {
-                                break "cancelled";
+                            let sent = tokio::time::timeout(
+                                CALLER_STALL,
+                                sender.send_data(Bytes::from(out)),
+                            )
+                            .await;
+                            match sent {
+                                Ok(Ok(())) => {}
+                                // The caller went away.
+                                Ok(Err(_)) => break "cancelled",
+                                // The caller stopped reading: end its answer, free the model.
+                                Err(_) => {
+                                    sender.abort(io::Error::other("the caller stopped reading"));
+                                    break "cancelled";
+                                }
                             }
                         }
                         Err(()) => {
@@ -1243,7 +1306,11 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
                     Ok(None) => {
                         let rest = filter.finish();
                         if !rest.is_empty() {
-                            let _ = sender.send_data(Bytes::from(rest)).await;
+                            let _ = tokio::time::timeout(
+                                CALLER_STALL,
+                                sender.send_data(Bytes::from(rest)),
+                            )
+                            .await;
                         }
                         break "ok";
                     }
@@ -1574,6 +1641,26 @@ mod tests {
             ]),
             KEY
         ));
+        // The key in one, something else in the other: Claude Code with the user's own
+        // ANTHROPIC_API_KEY set sends that key in x-api-key next to the sharing key.
+        assert!(key_matches(
+            &headers(&[
+                ("x-api-key", "sk-ant-api03-the-users-own-key"),
+                ("authorization", &format!("Bearer {KEY}"))
+            ]),
+            KEY
+        ));
+        assert!(key_matches(
+            &headers(&[("x-api-key", KEY), ("authorization", "Bearer nope")]),
+            KEY
+        ));
+        assert!(key_matches(
+            &headers(&[
+                ("x-api-key", KEY),
+                ("authorization", "Basic aGFybmVzc3VpOg==")
+            ]),
+            KEY
+        ));
     }
 
     #[test]
@@ -1591,17 +1678,24 @@ mod tests {
                 "authorization",
                 "Bearer  harnessui-share-0123456789abcdef0123456789abcdef",
             )],
-            // One right, one wrong.
-            vec![("x-api-key", KEY), ("authorization", "Bearer nope")],
+            // Both wrong, or the key only in a scheme that is not Bearer.
+            vec![("x-api-key", wrong), ("authorization", "Bearer nope")],
             vec![
-                ("x-api-key", wrong),
-                (
-                    "authorization",
-                    "Bearer harnessui-share-0123456789abcdef0123456789abcdef",
-                ),
+                ("x-api-key", "sk-ant-api03-the-users-own-key"),
+                ("authorization", &format!("Basic {KEY}")),
             ],
-            // Repeated.
+            // Repeated, even when one of the copies is right.
             vec![("x-api-key", KEY), ("x-api-key", KEY)],
+            vec![("x-api-key", wrong), ("x-api-key", KEY)],
+            vec![
+                ("authorization", &format!("Bearer {KEY}")),
+                ("authorization", &format!("Bearer {KEY}")),
+            ],
+            vec![
+                ("x-api-key", KEY),
+                ("authorization", &format!("Bearer {KEY}")),
+                ("authorization", "Bearer nope"),
+            ],
         ] {
             assert!(!key_matches(&headers(&set), KEY), "{set:?}");
         }
@@ -2027,6 +2121,52 @@ mod tests {
             Usage {
                 input: Some(10),
                 output: Some(4)
+            }
+        );
+    }
+
+    /// A streamed Chat Completions answer reports no usage unless the caller asked for it,
+    /// but llama-server's `timings` still carry the counts: the audit row takes them from
+    /// there before they are removed.
+    #[test]
+    fn counts_come_from_the_timings_when_there_is_no_usage() {
+        let mut filter = SseFilter::new(Scrub::default());
+        let mut out = filter
+            .push(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+            .unwrap();
+        out.push_str(&filter.push(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"timings\":{\"cache_n\":9,\"prompt_n\":3,\"prompt_ms\":1.5,\"predicted_n\":4,\"predicted_ms\":2.0}}\n\ndata: [DONE]\n\n").unwrap());
+        assert!(
+            !out.contains("timings") && !out.contains("cache_n"),
+            "{out}"
+        );
+        assert_eq!(
+            filter.usage(),
+            Usage {
+                input: Some(12),
+                output: Some(4)
+            }
+        );
+        // A usage object, when there is one, wins over the timings.
+        let mut both = json!({"usage": {"prompt_tokens": 20, "completion_tokens": 5},
+            "timings": {"cache_n": 1, "prompt_n": 1, "predicted_n": 1}});
+        assert_eq!(
+            clean_answer(&mut both),
+            Usage {
+                input: Some(20),
+                output: Some(5)
+            }
+        );
+        assert_eq!(both.get("timings"), None);
+        // Timings that are not an object, or lack the counts, give nothing.
+        let mut odd = json!({"timings": "x"});
+        assert_eq!(clean_answer(&mut odd), Usage::default());
+        assert_eq!(odd, json!({}));
+        let mut partial = json!({"timings": {"predicted_n": 2}});
+        assert_eq!(
+            clean_answer(&mut partial),
+            Usage {
+                input: None,
+                output: Some(2)
             }
         );
     }

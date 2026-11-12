@@ -1,4 +1,4 @@
-//! Contract tests for what the 0.0.5 sharing proxy (`src-tauri/src/share/proxy.rs`) relies
+//! Contract tests for what the 0.0.6 sharing proxy (`src-tauri/src/share/proxy.rs`) relies
 //! on in the pinned llama-server: the Anthropic Messages API (`/v1/messages`,
 //! `/v1/messages/count_tokens`), the OpenAI Responses API (`/v1/responses`) and Chat
 //! Completions, the fixed model alias as the model id, a comma-separated list of keys in
@@ -311,8 +311,21 @@ async fn chat_completions_contract() {
     assert_eq!(status, 200, "{text}");
     let answer = json_of(&text);
     assert_eq!(answer["model"], json!(MODEL_ALIAS));
-    // The fields the proxy removes or zeroes.
-    assert!(answer.get("timings").is_some(), "{answer}");
+    // The fields the proxy removes or zeroes. Before removing `timings` it reads the counts
+    // for the audit row from them (a streamed answer without `include_usage` has no usage).
+    let timings = &answer["timings"];
+    for counter in ["cache_n", "prompt_n", "predicted_n"] {
+        assert!(timings[counter].is_u64(), "{counter}: {answer}");
+    }
+    assert_eq!(
+        timings["cache_n"].as_u64().unwrap() + timings["prompt_n"].as_u64().unwrap(),
+        answer["usage"]["prompt_tokens"].as_u64().unwrap(),
+        "{answer}"
+    );
+    assert_eq!(
+        timings["predicted_n"], answer["usage"]["completion_tokens"],
+        "{answer}"
+    );
     assert!(answer.get("system_fingerprint").is_some(), "{answer}");
     assert!(
         answer["usage"]["prompt_tokens_details"]
@@ -332,7 +345,7 @@ async fn chat_completions_contract() {
     assert!(text.trim_end().ends_with("data: [DONE]"));
     let (_, data) = events(&text);
     assert!(data.iter().all(|d| d["model"] == json!(MODEL_ALIAS)));
-    assert!(data.iter().any(|d| d.get("timings").is_some()));
+    assert!(data.iter().any(|d| d["timings"]["predicted_n"].is_u64()));
     assert!(data.iter().any(|d| d["usage"]["prompt_tokens"].is_u64()));
     server.stop().await;
 }

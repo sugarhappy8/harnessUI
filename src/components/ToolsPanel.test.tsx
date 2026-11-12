@@ -401,7 +401,7 @@ describe("ToolsPanel: tools chosen for each task", () => {
 
 describe("ToolsPanel: the Coding apps group (0.0.6)", () => {
   const NOTE =
-    "Lets the model hand a task to Claude Code or Codex on this computer. They work online with your own account, and every request asks you first.";
+    "Lets the model hand a task to Claude Code or Codex on this computer. They work online with your own account. Every request asks you first, except in Full access.";
   const NOT_INSTALLED = "Claude Code and Codex are not installed on this computer.";
   const FOUND: CodingAppsStatus = {
     checked: true,

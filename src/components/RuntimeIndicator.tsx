@@ -195,9 +195,10 @@ function Status() {
     const top = notes[0] ?? null;
     const run = (action: NoteAction) =>
       action === "reload" ? reload(true) : action === "apply" ? reload(false) : settings();
-    // "Remembers about N words" stays whole in a narrow header; only the reason shortens.
-    const line = runtime.nCtx ? readyLine(runtime.nCtx, null) : "Ready";
-    const reason = runtime.nCtx && runtime.ctxSource ? readyLine(runtime.nCtx, runtime.ctxSource).slice(line.length) : "";
+    // One sentence that shortens from its end in a crowded header: the reason gives way
+    // first, then the end of "Remembers about N words"; nothing runs under what follows.
+    // The whole line, reason included, is always in the menu and the tooltip.
+    const full = runtime.nCtx ? readyLine(runtime.nCtx, runtime.ctxSource) : "Ready";
     return (
       <div className="enter-fade flex min-w-0 flex-col justify-center gap-0.5 text-xs leading-tight">
         <div className="flex min-w-0 items-center gap-1.5 whitespace-nowrap text-fg-muted">
@@ -207,11 +208,10 @@ function Status() {
               <button
                 type="button"
                 aria-label="Model menu"
-                title={runtime.modelPath ?? undefined}
-                className="flex min-w-0 items-center gap-1 rounded hover:text-fg"
+                title={runtime.modelPath ? `${full}\n${runtime.modelPath}` : full}
+                className="flex min-w-0 items-center gap-1 overflow-hidden rounded hover:text-fg"
               >
-                <span className="shrink-0">{line}</span>
-                {reason && <span className="min-w-0 truncate">{reason}</span>}
+                <span className="min-w-0 truncate">{full}</span>
                 <ChevronDown size={12} className="shrink-0" aria-hidden />
               </button>
             </DropdownMenu.Trigger>
@@ -223,6 +223,7 @@ function Status() {
               >
                 <DropdownMenu.Label className="px-2.5 py-1 text-xs text-fg-muted">
                   {runtime.modelName ?? "Local model"} · runs on {backendWords(runtime.backend)}
+                  <span className="block">{full}</span>
                 </DropdownMenu.Label>
                 {notes.map((n) => (
                   <p key={n.text} className="px-2.5 py-1 text-xs text-warning">
@@ -245,14 +246,19 @@ function Status() {
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
           </DropdownMenu.Root>
-          <span aria-hidden>·</span>
-          <button type="button" onClick={settings} className="underline hover:text-fg">
-            Change
-          </button>
-          {share?.inUse && <span className="text-accent">· Used by another app</span>}
+          {/* In a narrower header only the menu's Model settings… is left, so the number stays. */}
+          <span className="hidden shrink-0 items-center gap-1.5 @5xl:flex">
+            <span aria-hidden>·</span>
+            <button type="button" onClick={settings} className="underline hover:text-fg">
+              Change
+            </button>
+          </span>
+          {share?.inUse && <span className="min-w-0 shrink-[100] truncate text-accent">· Used by another app</span>}
         </div>
+        {/* In a narrower header the second line takes the first line's width, not more,
+            so the model picker beside it keeps room for the model's name. */}
         {waitingLine ? (
-          <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-warning" role="status">
+          <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-warning @max-5xl:w-0 @max-5xl:min-w-full" role="status">
             <span className="truncate">{waitingWords(waiting ?? "reload", busy)}</span>
             <span aria-hidden>·</span>
             <button
@@ -265,7 +271,10 @@ function Status() {
           </div>
         ) : (
           top && (
-            <div className="flex max-w-[34rem] min-w-0 items-start gap-1.5 text-[11px] text-warning" role="status">
+            <div
+              className="flex max-w-[34rem] min-w-0 items-start gap-1.5 text-[11px] text-warning @max-5xl:w-0 @max-5xl:min-w-full"
+              role="status"
+            >
               <span className="line-clamp-2" title={top.text}>
                 {top.text}
               </span>

@@ -39,6 +39,26 @@ const ipcMock = vi.hoisted(() => ({
 vi.mock("../../lib/ipc", () => ipcMock);
 const clipboard = vi.hoisted(() => ({ writeText: vi.fn<(text: string) => Promise<void>>(async () => undefined) }));
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => clipboard);
+// The model's own panel (WP2), as a stand-in: what matters here is where it opens and what
+// the page does with what it saves.
+const panel = vi.hoisted(() => ({
+  saved: null as ModelLoadInfo | null,
+  opened: vi.fn<(path: string) => void>(),
+}));
+vi.mock("../ModelSettings", () => ({
+  openModelSettings: panel.opened,
+  ModelSettings: (props: { path: string; onClose: () => void; onSaved?: (info: ModelLoadInfo) => void }) => (
+    <div role="dialog" aria-label="Settings for this model">
+      <p>{props.path}</p>
+      <button type="button" onClick={() => panel.saved && props.onSaved?.(panel.saved)}>
+        Save
+      </button>
+      <button type="button" onClick={props.onClose}>
+        Close
+      </button>
+    </div>
+  ),
+}));
 
 const { OtherApps, POLL_MS, COPIED_KEY } = await import("./OtherApps");
 const { useApp } = await import("../../store/app");
@@ -263,6 +283,7 @@ beforeEach(() => {
   ipcMock.modelBusy.mockResolvedValue(IDLE);
   useApp.setState({ runtime: null });
   useQuestion.setState({ question: null, hosts: 0 });
+  panel.saved = null;
 });
 
 afterEach(() => {
@@ -337,6 +358,27 @@ describe("OtherApps: the switch", () => {
     await poll();
     expect(screen.getByText("Another app is using the model now.")).toBeTruthy();
     expect(screen.getByText("Requests refused since sharing was switched on: 1")).toBeTruthy();
+  });
+
+  it("changes nothing by itself: while open it only reads, whatever the backend says", async () => {
+    vi.useFakeTimers();
+    useApp.setState({ runtime: runtime() });
+    statusNow = share({ port: 51234 });
+    await show();
+    await poll();
+    // Switched on elsewhere, with a short model and another app at work: still only reads.
+    statusNow = ON({ modelCtx: 8192, inUse: true, refused: 4 });
+    await poll();
+    await poll();
+    expect(screen.getByText(WARNING)).toBeTruthy();
+    expect(ipcMock.setShareEnabled).not.toHaveBeenCalled();
+    expect(ipcMock.setSharePort).not.toHaveBeenCalled();
+    expect(ipcMock.newShareKey).not.toHaveBeenCalled();
+    expect(ipcMock.revealShareKey).not.toHaveBeenCalled();
+    expect(ipcMock.shareSetup).not.toHaveBeenCalled();
+    expect(ipcMock.setModelLoadSettings).not.toHaveBeenCalled();
+    expect(ipcMock.reloadLocalModel).not.toHaveBeenCalled();
+    expect(ipcMock.shareStatus.mock.calls.length).toBeGreaterThanOrEqual(4);
   });
 
   it("does not let a poll that started before a click undo what the click did", async () => {
@@ -503,6 +545,37 @@ describe("OtherApps: the context warning", () => {
     expect(screen.getByRole("button", { name: "Model settings…" })).toBeTruthy();
   });
 
+  it("opens the loaded model's settings over this page, and shows what was saved there", async () => {
+    useApp.setState({ runtime: runtime() });
+    ipcMock.modelLoadInfo.mockResolvedValue(
+      info({
+        contextOptions: [
+          { choice: "auto", tokens: 8192, fit: "green" },
+          { choice: { fixed: 32_768 }, tokens: 32_768, fit: "red" },
+        ],
+      }),
+    );
+    statusNow = ON({ modelCtx: 8192 });
+    await show();
+    expect(screen.getByText(TOO_MUCH)).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Model settings…" }));
+    // Inside the page (so the settings window stays open under it), not the chat's panel.
+    const opened = screen.getByRole("dialog", { name: "Settings for this model" });
+    expect(within(opened).getByText("/models/a.gguf")).toBeTruthy();
+    expect(panel.opened).not.toHaveBeenCalled();
+    // Save memory turned on there: 32,768 tokens fit now, and the page says so at once.
+    panel.saved = info({
+      overrides: { ...OVERRIDES, saveMemory: "on" },
+      contextOptions: [{ choice: { fixed: 32_768 }, tokens: 32_768, fit: "green" }],
+    });
+    await click(within(opened).getByRole("button", { name: "Save" }));
+    expect(screen.queryByText(TOO_MUCH)).toBeNull();
+    expect(screen.getByRole("button", { name: "Use 32,768 tokens and restart · Fits" })).toBeTruthy();
+    await click(within(opened).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog", { name: "Settings for this model" })).toBeNull();
+    expect(screen.getByText(WARNING)).toBeTruthy();
+  });
+
   it("says when the model itself cannot remember that much", async () => {
     useApp.setState({ runtime: runtime() });
     ipcMock.modelLoadInfo.mockResolvedValue(
@@ -631,6 +704,31 @@ describe("OtherApps: setup cards", () => {
     expect(screen.getByText(OLD_KEY)).toBeTruthy();
     await click(firstCopy());
     expect(screen.queryByText(OLD_KEY)).toBeNull();
+  });
+
+  it("forgets a card (and the key in it) when its app is closed or sharing is switched off", async () => {
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    expect(screen.getByRole("region", { name: "Set up Claude Code" })).toBeTruthy();
+    // Closed: the next look fetches it again instead of showing a kept copy.
+    let next: (s: ShareSetup) => void = () => undefined;
+    ipcMock.shareSetup.mockImplementationOnce(() => new Promise((resolve) => (next = resolve)));
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    expect(screen.queryByRole("region", { name: "Set up Claude Code" })).toBeNull();
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    expect(ipcMock.shareSetup).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("region", { name: "Set up Claude Code" })).toBeNull();
+    expect(screen.getByText("Getting the setup…")).toBeTruthy();
+    expect(screen.queryByText(/harnessui-share-/)).toBeNull();
+    await act(async () => next(setup("claudeCode")));
+    expect(screen.getByRole("region", { name: "Set up Claude Code" })).toBeTruthy();
+    // Off and on again: no card and no key until asked for.
+    await click(theSwitch());
+    await click(theSwitch());
+    expect(screen.queryByRole("region", { name: "Set up Claude Code" })).toBeNull();
+    expect(screen.queryByText(/harnessui-share-/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Show key" })).toBeTruthy();
   });
 
   it("shows why a card could not be made", async () => {

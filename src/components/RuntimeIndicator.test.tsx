@@ -159,8 +159,13 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
 
   it("has a menu with Reload, Model settings… and Unload to free memory", async () => {
     await show(status());
+    // The whole line, reason included, even when a narrow header shortens it.
+    expect(screen.getByRole("button", { name: "Model menu" }).title).toBe(
+      "Remembers about 24,000 words (Automatic)\n/models/a.gguf",
+    );
     await openMenu();
     expect(text()).toContain("runs on Graphics card (Vulkan)");
+    expect(screen.getByRole("menu").textContent).toContain("Remembers about 24,000 words (Automatic)");
     expect(screen.getByRole("menuitem", { name: /Reload/ })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /Model settings/ })).toBeTruthy();
     await click(screen.getByRole("menuitem", { name: /Reload/ }));

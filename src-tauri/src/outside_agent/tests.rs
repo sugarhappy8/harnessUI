@@ -187,6 +187,7 @@ fn arguments_are_exact_per_template_and_mode() {
             "--restricted",
             "--safe-mode",
             "--strict-mcp-config",
+            "--disable-slash-commands",
             "--permission-mode",
             "default",
             "--tools",
@@ -205,6 +206,7 @@ fn arguments_are_exact_per_template_and_mode() {
             "--restricted",
             "--safe-mode",
             "--strict-mcp-config",
+            "--disable-slash-commands",
             "--permission-mode",
             "acceptEdits",
             "--tools",
@@ -277,6 +279,9 @@ fn no_bypass_token_and_every_required_flag() {
             assert!(differ <= 2 && words.len() == other.len(), "{app:?}");
         }
     }
+    // The task cannot run Claude Code's own commands (`/config`, `/mcp`, …), which change
+    // its settings without a model call (review of 0.0.6, round 1).
+    assert!(required_flags(CodingApp::ClaudeCode).contains(&"--disable-slash-commands"));
     // The same check guards the tools at run time.
     assert!(CodingApp::ALL.into_iter().all(template_ok));
     // Claude Code's mode words are documented values, never bypassPermissions.
@@ -396,6 +401,16 @@ fn versions_and_the_documented_first_versions() {
     // Every flag or setting with a documented first version is in its template, in both
     // modes: a flag as a word, a setting inside the settings given with `--settings`.
     assert!(FLAG_SINCE.iter().any(|(_, f, _)| *f == "--restricted"));
+    // `--disable-slash-commands` came in 2.0.60 (Claude Code's changelog), before the others.
+    assert!(FLAG_SINCE.contains(&(
+        CodingApp::ClaudeCode,
+        "--disable-slash-commands",
+        (2, 0, 60)
+    )));
+    assert_eq!(
+        missing_flag(CodingApp::ClaudeCode, Some("2.0.59")),
+        Some((setting, (2, 1, 257)))
+    );
     for (app, flag, _) in FLAG_SINCE {
         for may_edit in [false, true] {
             let words = arguments(*app, may_edit);
@@ -549,7 +564,7 @@ async fn a_program_inside_an_approved_folder_is_refused() {
         &[project.display().to_string()],
     );
     assert!(
-        matches!(&found.problem, Some(Problem::InsideApprovedFolder { folder }) if *folder == project.display().to_string()),
+        matches!(&found.problem, Some(Problem::InsideApprovedFolder { folder, .. }) if *folder == project.display().to_string()),
         "{found:?}"
     );
     assert!(!found.usable());
@@ -592,6 +607,162 @@ async fn a_program_inside_an_approved_folder_is_refused() {
         action.hard_limit
     );
     assert!(!bin.join("args.txt").exists(), "it ran");
+}
+
+/// A link on `PATH` inside an approved folder is refused wherever it leads: where it
+/// stands counts, not only the file it leads to (a link `codex` -> `/bin/sh` would run the
+/// file `exec` of the working folder). In Ask first and in Full access (review of 0.0.6,
+/// round 1).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_inside_an_approved_folder_is_refused_wherever_it_leads() {
+    let project = temp("link-project");
+    let outside = temp("link-outside");
+    let target = fake(&outside, "real-codex", CODEX_OK);
+    let bin = project.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&target, bin.join("codex")).unwrap();
+    let approved = vec![project.display().to_string()];
+    let found = find_app(CodingApp::Codex, Some(bin.as_os_str()), None, &approved);
+    assert!(
+        matches!(&found.problem, Some(Problem::InsideApprovedFolder { folder, .. }) if *folder == project.display().to_string()),
+        "{found:?}"
+    );
+    assert!(!found.usable());
+    // A link elsewhere that leads through a link inside the folder counts too: the project
+    // controls that step.
+    let elsewhere = temp("link-elsewhere");
+    std::os::unix::fs::symlink(bin.join("codex"), elsewhere.join("codex")).unwrap();
+    let through = find_app(
+        CodingApp::Codex,
+        Some(elsewhere.as_os_str()),
+        None,
+        &approved,
+    );
+    assert!(
+        matches!(&through.problem, Some(Problem::InsideApprovedFolder { folder, .. }) if *folder == project.display().to_string()),
+        "{through:?}"
+    );
+    // Found while the folder was not approved; the chat approves it later.
+    let s = server_for(&bin, base_env());
+    assert_eq!(s.tools().len(), 1);
+    let refused = |action: &policy::Action| {
+        action
+            .hard_limit
+            .clone()
+            .filter(|w| w.contains("inside a folder you approved"))
+            .unwrap_or_else(|| panic!("not refused: {:?}", action.hard_limit))
+    };
+    let action = describe(&s, CODEX_TOOL, json!({"task": "hello"}), &chat(&project)).await;
+    let why = refused(&action);
+    assert_eq!(
+        policy::evaluate(
+            &action,
+            &turn_in(false, false, false, false),
+            &BTreeSet::new()
+        ),
+        policy::Decision::Denied { reason: why }
+    );
+    // Full access: the stored folders count, and the link is still refused.
+    let home = temp("link-home");
+    let s = server_for(&bin, base_env())
+        .with_approved(approved_store(approved.clone(), Some(approved.clone())));
+    let action = describe(
+        &s,
+        CODEX_TOOL,
+        json!({"task": "hello"}),
+        &in_full_access(chat(&project), &home),
+    )
+    .await;
+    let why = refused(&action);
+    for allow_all in [false, true] {
+        assert_eq!(
+            policy::evaluate(
+                &action,
+                &turn_in(allow_all, true, false, false),
+                &BTreeSet::new()
+            ),
+            policy::Decision::Denied {
+                reason: why.clone()
+            }
+        );
+    }
+    assert!(!outside.join("args.txt").exists(), "it ran");
+    assert!(!bin.join("args.txt").exists(), "it ran");
+}
+
+/// When the approved folder holds the home folder, installing the app "in its usual place"
+/// cannot help (its usual places are in the home folder): the message says to approve a
+/// narrower folder instead.
+#[cfg(unix)]
+#[test]
+fn inside_the_home_folder_the_message_says_to_approve_a_narrower_folder() {
+    let home = temp("approved-home");
+    let bin = home.join(".local").join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script(&bin, "claude", "#!/bin/sh\nexit 0\n");
+    let empty = temp("approved-home-path");
+    let found = find_app(
+        CodingApp::ClaudeCode,
+        Some(empty.as_os_str()),
+        Some(&home),
+        &[home.display().to_string()],
+    );
+    let problem = found.problem.expect("refused");
+    assert!(
+        matches!(
+            &problem,
+            Problem::InsideApprovedFolder {
+                holds_home: true,
+                ..
+            }
+        ),
+        "{problem:?}"
+    );
+    let words = problem.words(CodingApp::ClaudeCode);
+    assert!(
+        words.contains("Approve a narrower folder, such as a project folder,")
+            && !words.contains("usual place"),
+        "{words}"
+    );
+    // A project folder that does not hold the home folder keeps the old advice.
+    let project = temp("approved-project");
+    let pbin = project.join("bin");
+    std::fs::create_dir_all(&pbin).unwrap();
+    script(&pbin, "claude", "#!/bin/sh\nexit 0\n");
+    let found = find_app(
+        CodingApp::ClaudeCode,
+        Some(pbin.as_os_str()),
+        Some(&home),
+        &[project.display().to_string()],
+    );
+    let problem = found.problem.expect("refused");
+    assert!(
+        matches!(
+            &problem,
+            Problem::InsideApprovedFolder {
+                holds_home: false,
+                ..
+            }
+        ),
+        "{problem:?}"
+    );
+    assert!(
+        problem
+            .words(CodingApp::ClaudeCode)
+            .contains("Install Claude Code in its usual place"),
+        "{problem:?}"
+    );
+    // A setup saved before 0.0.6's round-1 fix (no holds_home) still reads.
+    let old: Problem =
+        serde_json::from_str(r#"{"kind":"insideApprovedFolder","folder":"/p"}"#).unwrap();
+    assert_eq!(
+        old,
+        Problem::InsideApprovedFolder {
+            folder: "/p".into(),
+            holds_home: false
+        }
+    );
 }
 
 /// The file must be the one found: a replaced file, a changed one and a link that now

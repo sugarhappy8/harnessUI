@@ -3485,10 +3485,19 @@ def p_model_settings(c, notes):
         s.click(next(iter(el.values())))
 
     def click_in(container, label):
-        el = s.wait_for(lambda: s.execute(
-            "return [...document.querySelectorAll(arguments[0] + ' button')].find(b => b.innerText.trim() === arguments[1]) || false;",
-            container, label), 15, f"{label!r} in {container}")
-        s.click(next(iter(el.values())))
+        # A question that opens as the menu closes takes a moment to take clicks.
+        deadline = time.time() + 5
+        while True:
+            el = s.wait_for(lambda: s.execute(
+                "return [...document.querySelectorAll(arguments[0] + ' button')].find(b => b.innerText.trim() === arguments[1]) || false;",
+                container, label), 15, f"{label!r} in {container}")
+            try:
+                s.click(next(iter(el.values())))
+                return
+            except WebDriverError as e:
+                if "not interactable" not in str(e) or time.time() > deadline:
+                    raise
+                time.sleep(0.3)
 
     def header():
         return s.execute("const h = document.querySelector('main header'); return h ? h.innerText : '';")
@@ -3542,6 +3551,40 @@ def p_model_settings(c, notes):
     notes.append("header: " + line.replace("\n", " | ")[:200])
     assert "vulkan" not in line and " context" not in line and "Vulkan0" not in line, line
 
+    def ready_line_geometry():
+        """The ready line never runs under what follows it (its button clips what does not
+        fit), "Remembers about N words" is shown whole in this window, and the whole text,
+        reason included, is in the tooltip."""
+        geo = s.execute(
+            """
+            const b = document.querySelector('main header button[aria-label="Model menu"]');
+            if (!b) return null;
+            const span = b.querySelector('span');
+            const text = span.textContent;
+            const end = text.indexOf(' words') + ' words'.length;
+            // Where "Remembers about N words" ends, against where the span is cut (an
+            // ellipsis, about one character wide, covers the end of a cut span).
+            const range = document.createRange();
+            range.setStart(span.firstChild, 0);
+            range.setEnd(span.firstChild, end);
+            const cut = span.scrollWidth > span.clientWidth;
+            const whole = range.getBoundingClientRect().right <= span.getBoundingClientRect().right - (cut ? 12 : 0) + 0.5;
+            const next = b.nextElementSibling;
+            const r = next && next.getBoundingClientRect();
+            const after = r && r.width > 0 ? r.left : b.parentElement.getBoundingClientRect().right;
+            return [b.getBoundingClientRect().right, after, getComputedStyle(b).overflowX, b.title,
+                    whole, text.slice(0, end), !!(r && r.width > 0), cut];
+            """)
+        assert geo and geo[0] <= geo[1] + 0.5 and geo[2] == "hidden", geo
+        assert geo[4], f"the ready line is cut short: {geo!r}"
+        notes.append(f"shown whole: {geo[5]!r}; reason cut: {geo[7]}; '· Change' shown: {geo[6]}")
+        return geo[3].split("\n")[0]
+
+    full = ready_line_geometry()
+    notes.append(f"ready line in full: {full!r}")
+    assert full.startswith("Remembers about ") and full.endswith(")"), full
+    s.screenshot(str(OUT / "model-settings-ready.png"))
+
     # The panel from the picker's gear: help lines, Same as default, change, Save.
     s.click_button("Model for this chat")
     click_css('[role=menuitem][aria-label^="Settings for this model"]', "the picker's gear")
@@ -3591,7 +3634,15 @@ def p_model_settings(c, notes):
 
     # Apply and restart with the saved size (needs WP1b's resolver and reload).
     if real:
-        click_in_header("Change")
+        # "· Change" when the header has room for it, else the menu's Model settings….
+        change = s.execute(
+            "const b = [...document.querySelectorAll('main header button')].find(x => x.innerText.trim() === 'Change');"
+            " return !!b && b.getBoundingClientRect().width > 0;")
+        if change:
+            click_in_header("Change")
+        else:
+            s.click_button("Model menu")
+            s.click_menu_item("Model settings…")
         s.wait_text("How much of the chat the model can see at once.", 60)
         s.wait_text("Settings changed. Restart the model to use them.", 10)
         click_in("[role=dialog]", "Apply and restart")
@@ -3599,6 +3650,10 @@ def p_model_settings(c, notes):
         time.sleep(1.0)
         notes.append(f"after Apply and restart: ctxSource {state()['ctxSource']}; header: "
                      + header().replace("\n", " | ")[:160])
+        full = ready_line_geometry()
+        words = int(size[6:]) * 3 // 4
+        words = words // 1000 * 1000 if words >= 1000 else words // 100 * 100
+        assert full == f"Remembers about {words:,} words (set for this model)", full
     else:
         notes.append("integration: Apply and restart loads the saved size (WP1b)")
 
@@ -3714,11 +3769,13 @@ def p_model_settings(c, notes):
 
 CODING_TASK = "-p --dangerously-skip-permissions \"quoted\" 'single' 100% $HOME `id`\nsecond line"
 CLAUDE_TEMPLATE = {
-    False: ["-p", "--restricted", "--safe-mode", "--strict-mcp-config", "--permission-mode", "default",
+    False: ["-p", "--restricted", "--safe-mode", "--strict-mcp-config", "--disable-slash-commands",
+            "--permission-mode", "default",
             "--tools", "Read,Grep,Glob", "--settings",
             '{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}',
             "--output-format", "stream-json", "--verbose"],
-    True: ["-p", "--restricted", "--safe-mode", "--strict-mcp-config", "--permission-mode", "acceptEdits",
+    True: ["-p", "--restricted", "--safe-mode", "--strict-mcp-config", "--disable-slash-commands",
+           "--permission-mode", "acceptEdits",
            "--tools", "Read,Grep,Glob,Edit,Write", "--settings",
            '{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}',
            "--output-format", "stream-json", "--verbose"],
@@ -3743,7 +3800,7 @@ FAKE_OUTPUT = {
 
 @probe("coding-apps")
 def p_coding_apps(c, notes):
-    """0.0.5 WP6 (item 3, direction B): the local model hands a task to Claude Code or Codex.
+    """0.0.6 WP6 (item 3, direction B): the local model hands a task to Claude Code or Codex.
     Fake `claude` and `codex` programs (scripts that record their arguments, standard input
     and working folder, then print what the real ones print) sit in a folder that the test
     puts first on PATH, outside every approved folder. The group is off in a new chat;
@@ -3780,7 +3837,7 @@ def p_coding_apps(c, notes):
     s.click_button("Tools")
     s.wait_text("Coding apps (experimental)", 10)
     panel = s.page_text()
-    assert "They work online with your own account, and every request asks you first." in panel, panel[-600:]
+    assert "They work online with your own account. Every request asks you first, except in Full access." in panel, panel[-600:]
     before = s.execute(
         """
         const box = [...document.querySelectorAll('input[role="switch"]')].find(i => i.closest('label').innerText.includes('Coding apps'));
@@ -4010,8 +4067,11 @@ def p_share_proxy(c, notes):
         answer = json.loads(body)
         assert answer["model"] == alias and answer["type"] == "message" and answer["usage"]["input_tokens"] > 0, body
         clean(body)
+        # Streamed, with the user's own key next to the sharing key (Claude Code sends both when
+        # ANTHROPIC_API_KEY is also set): accepted, the other key never used.
         status, body = share_call(port, "POST", "/v1/messages",
-                                  {"model": "x", "max_tokens": 8, "stream": True, "messages": ask}, key=key, bearer=True)
+                                  {"model": "x", "max_tokens": 8, "stream": True, "messages": ask}, key=key, bearer=True,
+                                  headers={"x-api-key": "sk-ant-api03-e2e-own-key"})
         assert status == 200 and "event: message_start" in body and "event: message_stop" in body, (status, body[:600])
         clean(body)
         # Chat Completions and Responses.
@@ -4120,6 +4180,7 @@ def p_share_proxy(c, notes):
         assert k not in settings, "a sharing key is in the settings"
         assert k not in log, "a sharing key is in the log"
         assert k[-32:] not in log
+    assert "e2e-own-key" not in settings and "e2e-own-key" not in log, "the other app's own key was kept"
 
 
 @probe("other-apps")
@@ -4132,7 +4193,11 @@ def p_other_apps(c, notes):
     and its audit row (also on the Audit log page), the Claude Code setup card (Windows tab
     first off a Mac, the port, key and size in its text, Copy), "Use 32,768 tokens and
     restart", "Copy the setup again", a new key made on the page (the old one refused); and
-    the page's switch turning sharing off (the port closed, no key in settings or log)."""
+    the page's switch turning sharing off (the port closed, no key in settings or log).
+    0.0.6: in Ask first, Allow all and Full access the page and switch are the same (D12);
+    Model settings… opens over the settings window; the restart asks first while another
+    app's request runs (D3): Restart when it ends waits for it (then cancelled), Stop and
+    restart ends it and restarts at once."""
     import re
     s = c.s
     model = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
@@ -4191,8 +4256,8 @@ def p_other_apps(c, notes):
             f"return [...{panel}.querySelectorAll('button')].some(b => b.getAttribute('aria-label') === arguments[0] "
             "&& b.innerText.trim() === 'Copied');", copy_step)
 
-    def messages_call(key, extra=None):
-        return share_call(port, "POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": ask}, key=key,
+    def messages_call(key, extra=None, body=None):
+        return share_call(port, "POST", "/v1/messages", body or {"model": "x", "max_tokens": 8, "messages": ask}, key=key,
                           headers={**ua, **(extra or {})})
 
     def with_model(key):
@@ -4222,6 +4287,11 @@ def p_other_apps(c, notes):
         # "Model settings…" opens this model's panel over the settings window; Escape closes only the panel.
         press("Model settings…")
         s.wait_for(lambda: "Settings for this model" in s.page_text(), 10, "the model's settings panel")
+        assert warning in page(), "the settings window closed when the panel opened"
+        s.screenshot(str(OUT / "other-apps-model-panel.png"))
+        # A moment for the panel to become the top layer (nobody presses Escape within
+        # milliseconds of it appearing; sent at once, the window under it would get it).
+        time.sleep(0.5)
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
         s.wait_for(lambda: "Settings for this model" not in s.page_text(), 5, "the panel closed")
         assert warning in page(), "the settings window closed with the panel"
@@ -4261,9 +4331,53 @@ def p_other_apps(c, notes):
         assert json.loads(copied) == {"ctx": 8192, "port": port}, copied
         s.screenshot(str(OUT / "other-apps-setup.png"))
 
-        # 32,768 tokens for this model, then a restart (nothing uses the model: no question).
+        # 32,768 tokens for this model, then a restart. Another app's request is running, so
+        # it asks first (D3): Restart when it ends waits for that request (cancelled here),
+        # Stop and restart ends it and restarts at once.
         if fit:
-            press(f"Use 32,768 tokens and restart · {fit.group(1)}")
+            question = "Another app is using the model. Stop its request and restart the model?"
+            answer = {}
+
+            def long_request():
+                try:
+                    answer["r"] = messages_call(key, body={
+                        "model": "x", "max_tokens": 4000, "stream": True,
+                        "messages": [{"role": "user", "content": "Write the numbers from 1 to 3000, one per line, and nothing else."}]})
+                except Exception as e:  # noqa: BLE001 - cut off by the restart
+                    answer["r"] = (None, repr(e))
+
+            def answer_question(label):
+                s.wait_for(lambda: question in s.page_text(), 15, "the question before the restart")
+                asked = s.execute("const q = document.querySelector('[role=alertdialog]'); return q ? q.innerText : '';")
+                assert all(b in asked for b in ("Cancel", "Restart when it ends", "Stop and restart")), asked
+                assert warning in page(), "the settings window closed when the question opened"
+                time.sleep(0.5)
+                real_click(s.wait_for(lambda: s.execute(
+                    "return [...document.querySelectorAll('[role=alertdialog] button')]"
+                    ".find(b => b.innerText.trim() === arguments[0]) || false;", label), 5, label))
+                s.wait_for(lambda: question not in s.page_text(), 10, "the question answered")
+
+            worker = threading.Thread(target=long_request, daemon=True)
+            worker.start()
+            s.wait_for(lambda: s.invoke("share_status")["inUse"], 30, "another app using the model")
+            s.wait_for(lambda: "Another app is using the model now." in page(), 10, "the page saying so")
+            use = f"Use 32,768 tokens and restart · {fit.group(1)}"
+            press(use)
+            s.screenshot(str(OUT / "other-apps-question.png"))
+            answer_question("Restart when it ends")
+            s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"], 10, "the restart waiting")
+            s.wait_for(lambda: "Restarting the model…" in page(), 5, "the page saying it restarts")
+            time.sleep(2)
+            assert s.invoke("share_status")["modelCtx"] == 8192 and worker.is_alive(), "it restarted while the request ran"
+            s.invoke("cancel_pending_reload")
+            s.wait_for(lambda: not s.invoke("runtime_status")["reloadWaiting"] and "Restarting the model…" not in page(),
+                       10, "the wait cancelled")
+            assert s.invoke("share_status")["modelCtx"] == 8192 and worker.is_alive(), "Cancel restarted or stopped the request"
+            press(use)
+            answer_question("Stop and restart")
+            worker.join(90)
+            assert not worker.is_alive(), "the other app's request went on after Stop and restart"
+            notes.append(f"the other app's request after Stop and restart: {answer['r'][0]} {answer['r'][1][-120:]!r}")
             s.wait_for(lambda: s.invoke("share_status")["modelCtx"] == 32768, 240, "the restart at 32,768 tokens")
             s.wait_for(lambda: size_changed in page() and warning not in page(), 15, "Copy the setup again")
             overrides = s.invoke("model_load_info", {"path": model})["overrides"]
@@ -4299,7 +4413,26 @@ def p_other_apps(c, notes):
     text = page()
     assert "Experimental" in text and not switched_on(), text
     assert find_button("Show key") is False and "Set up an app" not in text, text
+    assert not s.execute(f"return {panel}.querySelectorAll('[role=alert]').length;"), text
     s.screenshot(str(OUT / "other-apps-off.png"))
+
+    # The approval mode changes nothing here (D12): in Ask first, Allow all and Full access
+    # sharing stays off until the switch is clicked, and the generic settings command cannot
+    # turn it on.
+    try:
+        for mode in ("ask", "allowAll", "fullAccess"):
+            s.invoke("set_default_approval_mode", {"mode": mode})
+            assert s.invoke("get_default_approval_mode") == mode
+            try:
+                s.invoke("set_setting", {"key": "shareWithApps", "value": {"enabled": True, "port": 50123}})
+                raise AssertionError(f"set_setting turned sharing on in {mode}")
+            except WebDriverError as e:
+                assert "cannot be changed this way" in str(e), e
+            time.sleep(2.5)  # longer than one poll of the page
+            assert not switched_on() and not s.invoke("share_status")["enabled"], mode
+            assert find_button("Show key") is False, mode
+    finally:
+        s.invoke("set_default_approval_mode", {"mode": "ask"})
 
     # On, by the page's switch only.
     toggle()
@@ -4401,6 +4534,34 @@ def p_folder_chip(c, notes):
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
         time.sleep(0.3)
 
+    def shown():
+        """What the chip shows on screen (its innerText, without the parts hidden at this width)."""
+        return s.execute("const b = document.querySelector('[data-folder-chip]'); "
+                         "return b ? b.innerText.replace(/\\s+/g, ' ').trim() : null;")
+
+    def at_width(width, read):
+        """Reads the header at a window this wide, then puts the window back."""
+        rect = s._req("GET", s._s("/window/rect"))
+        try:
+            s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
+            time.sleep(0.8)
+            return s.execute("return window.innerWidth;"), read()
+        finally:
+            s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
+            time.sleep(0.5)
+
+    def check_shown(wide, narrow):
+        """The chip's visible words: the spec's at 1,200 pixels, the short form at 720 (the
+        window's narrowest). The breakpoint is a header of 42rem, a window of about 950 pixels."""
+        w, text = at_width(1200, shown)
+        notes.append(f"chip shows at {w}px: {text!r}")
+        if w >= 1100:
+            assert text == wide, (w, text, wide)
+        w, text = at_width(720, shown)
+        notes.append(f"chip shows at {w}px: {text!r}")
+        if w <= 760:
+            assert text == narrow, (w, text, narrow)
+
     try:
         # Only the folder approved for every chat: its last name, and the message box names it.
         s.wait_for(lambda: folder_chip(s) == label + c.work.name, 10, "the chip with one folder")
@@ -4413,6 +4574,8 @@ def p_folder_chip(c, notes):
         con.close()
         s.wait_for(lambda: folder_chip(s) == label + f"{c.work.name} + 2 more", 10, "the chip with three folders")
         s.screenshot(str(OUT / "folder-chip.png"))
+        check_shown(f"{c.work.name} + 2 more", f"{c.work.name} + 2")
+        assert "the file tools can use" in s.execute("return document.querySelector('[data-folder-chip]').title;")
         # The narrowest window (720 pixels): the chip and the approval mode stay in the header.
         rect = s._req("GET", s._s("/window/rect"))
         try:
@@ -4454,6 +4617,9 @@ def p_folder_chip(c, notes):
         s.wait_for(lambda: s.execute(
             "const r = [...document.querySelectorAll('input[type=radio]')].find(r => r.checked); return r ? r.closest('label').title : null;")
             == other, 10, "the same working folder selected in the Tools panel")
+        # TODO(0.0.6): the Tools panel's folder list (ToolsPanel.tsx, not WP7's) shows paths as they
+        # are; once it escapes them like the chip (visiblePath), make this note an assertion.
+        notes.append("Tools panel shows a hidden character as it is: " + str("‮" in s.page_text()))
         close()
         # Remove, for this chat's own folders: the hidden-character one, then the working one.
         s.click_button(label + f"{c.other.name} + 2 more")
@@ -4470,18 +4636,44 @@ def p_folder_chip(c, notes):
         # Full access: the whole computer, said plainly, with the working folder.
         s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "fullAccess"})
         s.wait_for(lambda: folder_chip(s) == label + "Whole computer", 10, "the chip in Full access")
+        # Below the breakpoint only the chip's red icon shows; the mode button beside it still reads Full access.
+        check_shown("Whole computer", "")
+        w, mode_shown = at_width(720, lambda: s.execute(
+            "const b = document.querySelector('button[aria-label=\"Full access\"]'); return b ? b.innerText.trim() : null;"))
+        if w <= 760:
+            assert mode_shown == "Full access", mode_shown
         s.click_button(label + "Whole computer")
         menu = menu_text()
         s.screenshot(str(OUT / "folder-chip-full-access.png"))
         line = ("Full access is on, so the file and terminal tools can reach every folder on this computer except "
                 f"harnessUI's own. Working folder: {work}.")
         assert line in menu.replace("\n", " "), menu
+        limit = "A program the terminal starts has your full rights, so it could still reach harnessUI's own folders."
+        assert limit in menu.replace("\n", " "), menu
         close()
         s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "allowAll"})
         s.wait_for(lambda: folder_chip(s) == label + c.work.name, 10, "the chip in Allow all")
+        # Allow all: the folders hold the file tools, not the terminal, and the menu says so.
+        title = s.execute("return document.querySelector('[data-folder-chip]').title;")
+        assert title.endswith("the file tools can use. In Allow all, terminal commands are not held to these folders."), title
+        s.click_button(label + c.work.name)
+        menu = menu_text()
+        assert "In Allow all, terminal commands are not held to these folders." in menu, menu
+        close()
+        s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
+        # No folder at all (the one for every chat taken away for a moment): the chip says so.
+        for f in s.invoke("list_approved_folders", {"chatId": chat}):
+            s.invoke("remove_approved_folder", {"id": f["id"]})
+        s.wait_for(lambda: folder_chip(s) == label + "No folder · Choose", 10, "the chip with no folder")
+        check_shown("No folder · Choose", "No folder")
     finally:
         s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
         shutil.rmtree(odd, ignore_errors=True)
+        if not any(f["path"] == work for f in s.invoke("list_approved_folders", {"chatId": None})):
+            con = sqlite3.connect(c.db)
+            con.execute("INSERT INTO approved_folders(path, chat_id, created_at) VALUES (?, NULL, ?)", (work, int(time.time() * 1000)))
+            con.commit()
+            con.close()
 
 
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
@@ -4505,7 +4697,7 @@ def main() -> int:
         d.mkdir()
     (c.work / "notes.txt").write_text("the secret word is heron\n")
     (c.other / "only-in-other.txt").write_text("x\n")
-    # 0.0.5 coding-apps: a folder for fake `claude` and `codex` programs, first on PATH and
+    # 0.0.6 coding-apps: a folder for fake `claude` and `codex` programs, first on PATH and
     # outside every approved folder, so the real programs are never the ones found.
     c.fakebin = OUT / "fakebin"
     shutil.rmtree(c.fakebin, ignore_errors=True)

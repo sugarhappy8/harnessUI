@@ -11,8 +11,8 @@
 //!   `turns::AppTools::run_subagent`). Its cards and audit rows say they come from a
 //!   subagent, and its audit rows point at the `run_subagent` call's row.
 //! - A helper cannot start a helper: the tool is not offered to it, and a call to it is
-//!   refused ([`NoNesting`]). Nor can it hand a task to a coding app (0.0.5): those tools
-//!   are left out and refused the same way.
+//!   refused ([`NoNesting`]). Nor can it hand a task to a coding app (0.0.6), in any
+//!   approval mode: those tools are left out and refused the same way.
 //! - The helper starts where the turn is: if untrusted content already entered the turn,
 //!   or the `run_subagent` call itself was recovered from text, the helper's calls are
 //!   decided as such from its first one ([`InheritedGate`], D9 and 8.3).
@@ -68,7 +68,7 @@ pub fn is_action(action: &policy::Action) -> bool {
 }
 
 /// Whether a tool of the chat is offered to a helper: every one but `run_subagent` and
-/// the coding apps (0.0.5: a helper never hands a task to Claude Code or Codex).
+/// the coding apps (0.0.6: a helper never hands a task to Claude Code or Codex).
 pub fn offered_to_helper(tool: &mcp_host::RegisteredTool) -> bool {
     !is_tool(tool) && !crate::outside_agent::is_tool(tool)
 }
@@ -226,7 +226,7 @@ pub fn running_in(chat: i64) -> Option<Option<store::AuditId>> {
 
 // ---- The helper's view of the chat's tools and policy ---------------------------------
 
-/// The chat's tools without `run_subagent` and the coding apps (0.0.5): they are not
+/// The chat's tools without `run_subagent` and the coding apps (0.0.6): they are not
 /// offered to a helper, and a call to one is refused whatever the wrapped host would do.
 struct NoNesting(Arc<dyn ToolHost>);
 

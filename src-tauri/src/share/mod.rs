@@ -1,4 +1,4 @@
-//! Other apps on this computer use the loaded model (0.0.5 item 3, direction A).
+//! Other apps on this computer use the loaded model (0.0.6 item 3, direction A).
 //! Experimental and off by default (D5).
 //!
 //! - **The switch never turns itself on.** Only `set_share_enabled`, a main-window command,
@@ -13,6 +13,8 @@
 //!   working at once). It is never written to settings, files or logs.
 //! - **The proxy** (`proxy.rs`) listens on `127.0.0.1` only; the setup text
 //!   (`setup_text.rs`) is built with real JSON and TOML serialisers.
+//! - **No approval mode changes any of this** (D12): sharing is not a tool action, and no
+//!   tool reaches the switch, the port or the key in Ask first, Allow all or Full access.
 
 mod proxy;
 pub mod setup_text;

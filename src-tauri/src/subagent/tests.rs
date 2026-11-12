@@ -1197,7 +1197,7 @@ fn a_helper_is_in_its_chats_approval_mode() {
     assert!(asks(fresh.decide("write_file", &write, false, false)));
 }
 
-// ---- coding apps (0.0.5) -------------------------------------------------------------------
+// ---- coding apps (0.0.6) -------------------------------------------------------------------
 
 /// A chat with the Coding apps group on: its two tools are among the chat's.
 struct WithCodingApps(Arc<Tools>);

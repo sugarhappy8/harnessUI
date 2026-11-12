@@ -748,7 +748,8 @@ pub fn classify(shell: Shell, line: &str) -> Verdict {
     let mode = crate::allow_all::command_facts(shell, line, &parsed);
     match &parsed {
         Parsed::Plain(cmds) => {
-            // A coding assistant (0.0.5) always asks, whatever else the line does.
+            // A coding assistant (0.0.6) always asks, whatever else the line does (in Full
+            // access nothing asks, D11 as amended for 0.0.6).
             let always_ask = mode
                 .coding_app
                 .clone()

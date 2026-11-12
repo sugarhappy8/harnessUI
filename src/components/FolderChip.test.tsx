@@ -46,8 +46,10 @@ vi.mock("../lib/ipc", () => ipcMock);
 
 const {
   ALL_CHATS_NOTE,
+  ALLOW_ALL_TERMINAL,
   FOLDERS_POLL_MS,
   FULL_ACCESS_LEAD,
+  FULL_ACCESS_LIMIT,
   FolderChip,
   NO_FOLDER,
   NO_FOLDER_LINE,
@@ -151,6 +153,18 @@ describe("folder names and visible paths", () => {
     expect(visiblePath("/x/\u{E0041}tag\uFEFF")).toBe("/x/\\u{E0041}tag\\u{FEFF}");
     // Letters of right-to-left scripts are ordinary text and stay as they are.
     expect(visiblePath("/home/u/\u05E9\u05DC\u05D5\u05DD")).toBe("/home/u/\u05E9\u05DC\u05D5\u05DD");
+  });
+
+  it("also shows the combining grapheme joiner, shorthand format controls and the whole tag plane as codes", () => {
+    // "/home/u/pro\u034Fj" would look exactly like "/home/u/proj" in the menu.
+    expect(visiblePath("/home/u/pro\u034Fj")).toBe("/home/u/pro\\u{034F}j");
+    expect(visiblePath("/x/a\u{1BCA0}b\u{1BCA1}c\u{1BCA2}d\u{1BCA3}")).toBe(
+      "/x/a\\u{1BCA0}b\\u{1BCA1}c\\u{1BCA2}d\\u{1BCA3}",
+    );
+    // Not assigned yet, but invisible wherever a font has nothing for them.
+    expect(visiblePath("/x/\u{E0080}\u{E01F0}\u{E0FFF}")).toBe("/x/\\u{E0080}\\u{E01F0}\\u{E0FFF}");
+    // Ordinary marks that do show stay as they are.
+    expect(visiblePath("/x/caf\u00E9 e\u0301")).toBe("/x/caf\u00E9 e\u0301");
   });
 
   it("finds the working folder the way the backend does", () => {
@@ -297,6 +311,87 @@ describe("FolderChip", () => {
     const menu = await openMenu();
     expect((menu.querySelector("[data-full-access-line]") as HTMLElement).textContent).toBe(fullAccessLine(null));
     expect(menu.textContent).not.toContain(NO_FOLDER_LINE);
+  });
+
+  it("never says the folders hold the whole chat: they are the file tools', and in Allow all the terminal is not held to them", async () => {
+    folders = [global(1, HARNESS), own(2, "/tmp/scratch")];
+    const tools = `Working folder: ${HARNESS}. Click to see or change the folders the file tools can use.`;
+    expect(ALLOW_ALL_TERMINAL).toBe("In Allow all, terminal commands are not held to these folders.");
+
+    // Ask first: a command shows its card before it runs.
+    await show();
+    expect(chip().getAttribute("title")).toBe(tools);
+    let menu = await openMenu();
+    expect(menu.querySelector("[data-allow-all-line]")).toBeNull();
+    expect(menu.textContent).not.toContain(ALLOW_ALL_TERMINAL);
+    cleanup();
+
+    // Allow all: a command runs without a card and its arguments are not held to the folders.
+    setMode("allowAll");
+    await show();
+    expect(chip().getAttribute("title")).toBe(`${tools} ${ALLOW_ALL_TERMINAL}`);
+    menu = await openMenu();
+    expect((menu.querySelector("[data-allow-all-line]") as HTMLElement).textContent).toBe(ALLOW_ALL_TERMINAL);
+    cleanup();
+
+    // Full access says what it reaches instead.
+    setMode("fullAccess");
+    await show();
+    expect(chip().getAttribute("title")).not.toContain("can use");
+    menu = await openMenu();
+    expect(menu.querySelector("[data-allow-all-line]")).toBeNull();
+    cleanup();
+
+    // Allow all with no folder: there is nothing to hold commands to (they cannot start anywhere).
+    setMode("allowAll");
+    folders = [];
+    await show();
+    menu = await openMenu();
+    expect(menu.querySelector("[data-allow-all-line]")).toBeNull();
+    expect(menu.textContent).toContain(NO_FOLDER_LINE);
+  });
+
+  it("in Full access also says that a program the terminal starts is not held back", async () => {
+    setMode("fullAccess");
+    folders = [global(1, "/srv/shared"), own(2, HARNESS)];
+    stored = HARNESS;
+    await show();
+    expect(FULL_ACCESS_LIMIT).toBe(
+      "A program the terminal starts has your full rights, so it could still reach harnessUI's own folders.",
+    );
+    expect(chip().getAttribute("title")).toBe(`${fullAccessLine(HARNESS)} ${FULL_ACCESS_LIMIT}`);
+    const menu = await openMenu();
+    // The spec's sentence stays exactly as it is, and the limit follows it.
+    expect((menu.querySelector("[data-full-access-line]") as HTMLElement).textContent).toBe(fullAccessLine(HARNESS));
+    expect((menu.querySelector("[data-full-access-limit]") as HTMLElement).textContent).toBe(FULL_ACCESS_LIMIT);
+  });
+
+  it("shows the spec's words from one width on (@2xl: a window about 950 pixels wide) and short forms below it", async () => {
+    // What a narrow header shows: the parts hidden below the breakpoint left out. jsdom does not
+    // apply container queries, so the real widths are checked in the e2e scenario folder-chip.
+    const narrow = () => {
+      const copy = chip().cloneNode(true) as HTMLElement;
+      for (const el of copy.querySelectorAll(".hidden")) el.remove();
+      return copy.textContent;
+    };
+    const cases: [ApprovalModeName, ApprovedFolder[], string, string][] = [
+      ["ask", [], "No folder · Choose", "No folder"],
+      ["ask", [global(1, HARNESS)], "harnessUI", "harnessUI"],
+      ["ask", [global(1, HARNESS), own(2, "/a"), own(3, "/b")], "harnessUI + 2 more", "harnessUI + 2"],
+      ["allowAll", [global(1, HARNESS), own(2, "/a")], "harnessUI + 1 more", "harnessUI + 1"],
+      ["fullAccess", [global(1, HARNESS)], "Whole computer", ""],
+    ];
+    for (const [mode, list, wide, short] of cases) {
+      cleanup();
+      setMode(mode);
+      folders = list;
+      await show();
+      expect(chip().textContent).toBe(wide);
+      expect(narrow()).toBe(short);
+      // One breakpoint for every hidden part, so "more", "Choose" and "Whole computer" come
+      // back together.
+      for (const el of chip().querySelectorAll(".hidden")) expect(el.className).toBe("hidden @2xl:inline");
+    }
   });
 
   it("follows the mode when it changes", async () => {

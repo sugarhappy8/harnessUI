@@ -440,11 +440,11 @@ pub const ENTRIES: &[Entry] = &[
             r#"{"task": "Read every file in docs and list the ones that mention the old API.", "context": "The project is in the working folder."}"#,
         ],
     },
-    // ---- coding apps (0.0.5) ----
+    // ---- coding apps (0.0.6) ----
     Entry {
         name: "ask_claude_code",
         group: "coding_apps",
-        purpose: "Ask Claude Code on this computer to do a task in the working folder; it works online and the user approves each time.",
+        purpose: "Ask Claude Code on this computer to do a task in the working folder; it works online and the user approves each time, except in Full access.",
         keywords: &["claude code", "claude", "coding app", "second opinion"],
         rank: 1,
         examples: &[
@@ -455,7 +455,7 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "ask_codex",
         group: "coding_apps",
-        purpose: "Ask Codex on this computer to do a task in the working folder; it works online and the user approves each time.",
+        purpose: "Ask Codex on this computer to do a task in the working folder; it works online and the user approves each time, except in Full access.",
         keywords: &["codex", "coding app", "second opinion"],
         rank: 1,
         examples: &[

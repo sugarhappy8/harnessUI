@@ -414,6 +414,15 @@ fn a_saved_catalog_id_with_another_sha_is_not_a_match() {
         StoredSummary::default(),
     );
     assert!(!installed_is_entry(&near, "sample-7b-q4km", e));
+    // The same on Windows, whose paths use backslashes.
+    let windows = installed(
+        "C:\\Users\\owner\\harnessUI\\models\\example-quants\\Sample-7B-GGUF\\Sample-7B-Q4_K_M.gguf",
+        Some("example-quants/Sample-7B-GGUF"),
+        1,
+        None,
+        StoredSummary::default(),
+    );
+    assert!(installed_is_entry(&windows, "sample-7b-q4km", e));
     let imported = installed(
         "/m/Sample-7B-Q4_K_M.gguf",
         None,

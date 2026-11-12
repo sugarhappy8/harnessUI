@@ -45,7 +45,7 @@ const EARLIER_DEFAULT_TOOLS: &[&str] = &["defaultChatTools", "defaultChatTools2"
 
 /// Groups that are switched on for one chat only: the saved last choice never turns them
 /// on in a new chat. They let the model act widely (the whole screen; helpers that work on
-/// their own; coding apps that work online, 0.0.5), so each chat gets its own decision.
+/// their own; coding apps that work online, 0.0.6), so each chat gets its own decision.
 const PER_CHAT_ONLY: &[&str] = &[
     computer::SERVER_NAME,
     crate::subagent::SERVER_NAME,
@@ -1345,7 +1345,7 @@ mod tests {
         assert!(Selection::for_chat(Some(&own), None, true, None).on(tool, server, true));
     }
 
-    /// The Coding apps group (0.0.5) is off in a new chat, and switching it on in one chat
+    /// The Coding apps group (0.0.6) is off in a new chat, and switching it on in one chat
     /// never carries over to the next through the last choice.
     #[test]
     fn coding_apps_stay_off_until_the_user_switches_them_on() {

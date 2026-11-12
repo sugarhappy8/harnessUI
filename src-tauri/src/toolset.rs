@@ -61,7 +61,7 @@ pub async fn build_host(
     host.add_builtin(skills);
     // Lists `run_subagent` (the "Subagents" group, off in a new chat); the turn runs it.
     host.add_builtin(Arc::new(crate::subagent::SubagentsServer));
-    // The "Coding apps" group (0.0.5): lists nothing until the user turns it on and the
+    // The "Coding apps" group (0.0.6): lists nothing until the user turns it on and the
     // programs are found (`outside_agent::find_coding_apps`, and at start the saved ones).
     host.add_builtin(Arc::new(crate::outside_agent::CodingAppsServer::unchecked()));
     // The "Artifacts" group (0.0.4): documents, pages and diagrams shown beside the chat.

@@ -83,10 +83,11 @@ pub enum Scope {
     /// a source fetches a page that a search of this chat listed. Unlike [`Scope::AppData`]
     /// it prompts like any other scope.
     WebSearch,
-    /// A task handed to a coding app installed on this computer (0.0.5, `ask_claude_code`
+    /// A task handed to a coding app installed on this computer (0.0.6, `ask_claude_code`
     /// and `ask_codex`): the app (`claudeCode`, `codex`) and the working folder it runs
     /// in. It sends the task, and what the app reads, to an online service under the
-    /// user's own account, so it asks every time (D11): no grant covers it, in any mode.
+    /// user's own account, so it asks every time in Ask first and Allow all, and no grant
+    /// covers it; in Full access it runs without a card (D11 as amended for 0.0.6).
     CodingApp {
         app: String,
         folder: String,

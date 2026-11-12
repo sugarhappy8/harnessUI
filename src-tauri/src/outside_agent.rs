@@ -44,11 +44,19 @@
 //! the build machine (`claude --help`, and the strings of its binary, without starting a
 //! session):
 //!
-//! - Claude Code: `claude -p --restricted --safe-mode --strict-mcp-config --permission-mode
-//!   default --tools Read,Grep,Glob --settings {"disableAllHooks":true,"permissions":
-//!   {"blockReadsOutsideWorkingDirectories":true}} --output-format stream-json --verbose`;
-//!   with `may_edit`, `Edit,Write` are added to `--tools` and the permission mode is
-//!   `acceptEdits`. `--verbose` is not in the specification's template: 2.1.322 refuses
+//! - Claude Code: `claude -p --restricted --safe-mode --strict-mcp-config
+//!   --disable-slash-commands --permission-mode default --tools Read,Grep,Glob --settings
+//!   {"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}
+//!   --output-format stream-json --verbose`; with `may_edit`, `Edit,Write` are added to
+//!   `--tools` and the permission mode is `acceptEdits`.
+//!   `--disable-slash-commands` ("Disable all skills and commands", in the CLI reference and
+//!   `--help`; added in 2.0.60 by the changelog) is not in the specification's template:
+//!   without it a task such as `/config permissionMode=acceptEdits` or `/config language=…`
+//!   is run by Claude Code itself, with no model call, and rewrites the user's
+//!   `~/.claude/settings.json` for every later session (seen with 2.1.322, offline, in an
+//!   empty home folder: `/config theme=light` wrote `{"theme":"light"}`; with the flag the
+//!   answer is "/config isn't available in this environment." and nothing is written).
+//!   `--verbose` is not in the specification's template either: 2.1.322 refuses
 //!   `--output-format stream-json` with `-p` without it (its binary holds the check
 //!   `outputFormat==="stream-json"&&!verbose` and the message "When using --print,
 //!   --output-format=stream-json requires --verbose"), and every stream-json example in the
@@ -65,7 +73,10 @@
 //!   mode and hooks): `exec`, `--json` ("Print newline-delimited JSON events"), `--sandbox`
 //!   with `read-only` and `workspace-write`, `-c key=value`, the feature key `hooks`
 //!   (`[features] hooks = false`; `--enable` is documented as `-c features.<name>=true`) and
-//!   `-` ("Use `-` to pipe the prompt from stdin"). None was run.
+//!   `-` ("Use `-` to pipe the prompt from stdin"). None was run. Codex's source
+//!   (github.com/openai/codex, `codex-rs/exec/src/lib.rs` and `codex-rs/features/src/lib.rs`)
+//!   hands the task from standard input to the model as text, with no commands of its own
+//!   (`/…`) read in `exec`, and lists the feature key `hooks`.
 
 mod identity;
 mod output;
@@ -106,7 +117,7 @@ pub const SETTINGS_KEY: &str = "codingApps";
 /// What the panel says when neither program is found.
 pub const NOT_INSTALLED: &str = "Claude Code and Codex are not installed on this computer.";
 /// What a helper is told when it tries one of these tools.
-pub const HELPER_REFUSAL: &str = "Helpers cannot ask Claude Code or Codex. Only the main chat can, and the user approves each request.";
+pub const HELPER_REFUSAL: &str = "Helpers cannot ask Claude Code or Codex. Only the main chat can.";
 
 /// The longest task, in characters.
 pub const MAX_TASK_CHARS: usize = 60_000;
@@ -214,6 +225,7 @@ pub fn arguments(app: CodingApp, may_edit: bool) -> Vec<String> {
             "--restricted",
             "--safe-mode",
             "--strict-mcp-config",
+            "--disable-slash-commands",
             "--permission-mode",
             if may_edit { "acceptEdits" } else { "default" },
             "--tools",
@@ -253,6 +265,7 @@ pub fn required_flags(app: CodingApp) -> &'static [&'static str] {
             "--restricted",
             "--safe-mode",
             "--strict-mcp-config",
+            "--disable-slash-commands",
             "--permission-mode",
             "--tools",
             "--settings",
@@ -279,12 +292,17 @@ pub fn template_ok(app: CodingApp) -> bool {
 /// A version as `major.minor.patch`.
 pub type Version = (u32, u32, u32);
 
-/// The oldest version whose documentation lists each flag or setting of the template,
-/// where the documentation says. A version without the setting would drop it from
+/// The oldest version whose documentation (or changelog) lists each flag or setting of the
+/// template, where it says. A version without the setting would drop it from
 /// `--settings` without a word, so it counts like a missing flag. Flags not listed here
 /// carry no version in the documentation and are present in Claude Code 2.1.322; Codex's
 /// documentation gives no versions.
 pub const FLAG_SINCE: &[(CodingApp, &str, Version)] = &[
+    (
+        CodingApp::ClaudeCode,
+        "--disable-slash-commands",
+        (2, 0, 60),
+    ),
     (CodingApp::ClaudeCode, "--restricted", (2, 1, 248)),
     (
         CodingApp::ClaudeCode,
@@ -375,6 +393,9 @@ pub enum Problem {
     /// It is inside a folder approved for the app's file tools.
     InsideApprovedFolder {
         folder: String,
+        /// That folder holds the home folder, where the app's usual places are.
+        #[serde(default)]
+        holds_home: bool,
     },
     /// It could not be looked at.
     Unreadable {
@@ -395,7 +416,13 @@ impl Problem {
             } => format!(
                 "{label} {version} is too old for this. Update {label} to {minimum} or later, then turn Coding apps off and on again."
             ),
-            Problem::InsideApprovedFolder { folder } => format!(
+            Problem::InsideApprovedFolder {
+                folder,
+                holds_home: true,
+            } => format!(
+                "{label} was found inside a folder you approved for this app ({folder}), so it is not used. A program there could have been put there by a project. Approve a narrower folder, such as a project folder, instead of {folder}, then turn Coding apps off and on again in the Tools panel."
+            ),
+            Problem::InsideApprovedFolder { folder, .. } => format!(
                 "{label} was found inside a folder you approved for this app ({folder}), so it is not used. A program there could have been put there by a project. Install {label} in its usual place."
             ),
             Problem::Unreadable { reason } => {
@@ -525,6 +552,52 @@ fn inside_any(path: &str, folders: &[String]) -> Option<String> {
         .map(|r| r.canonical.to_string())
 }
 
+/// The folders a found program stands in before it reaches the file that runs: the folder
+/// of the found path and of every link it leads through, each with the links in its own
+/// path followed. A link counts where it stands, not only where it leads: a project could
+/// otherwise put a link `codex` -> `/bin/sh` on `PATH`.
+fn standing_folders(found: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut current = found.to_path_buf();
+    for _ in 0..40 {
+        let (Some(parent), Some(name)) = (current.parent(), current.file_name()) else {
+            break;
+        };
+        let Ok(dir) = dunce::canonicalize(parent) else {
+            break;
+        };
+        let here = dir.join(name);
+        out.push(dir.clone());
+        match std::fs::read_link(&here) {
+            Ok(target) if target.is_absolute() => current = target,
+            Ok(target) => current = dir.join(target),
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// The approved folder a found program stands in or leads into, if there is one: where
+/// the found path and every link on the way stand, and the file that runs.
+fn inside_approved(found: &Path, program: &Path, folders: &[String]) -> Option<String> {
+    standing_folders(found)
+        .iter()
+        .chain(std::iter::once(&program.to_path_buf()))
+        .find_map(|p| inside_any(&p.display().to_string(), folders))
+}
+
+/// [`Problem::InsideApprovedFolder`] for `folder`, which says whether it holds the home
+/// folder (where installing the app "in its usual place" cannot help).
+fn inside_problem(folder: &str, shown: String, home: Option<&Path>) -> Problem {
+    let holds_home = home
+        .and_then(|h| dunce::canonicalize(h).ok())
+        .is_some_and(|h| h.starts_with(folder));
+    Problem::InsideApprovedFolder {
+        folder: shown,
+        holds_home,
+    }
+}
+
 /// Looks for one app and describes what was found. `approved` is every approved folder.
 pub fn find_app(
     app: CodingApp,
@@ -565,11 +638,9 @@ pub fn find_app(
         }
     }
     saved.version = version_near(app, &program);
-    for candidate in [&found, &program] {
-        if let Some(folder) = inside_any(&candidate.display().to_string(), approved) {
-            saved.problem = Some(Problem::InsideApprovedFolder { folder });
-            return saved;
-        }
+    if let Some(folder) = inside_approved(&found, &program, approved) {
+        saved.problem = Some(inside_problem(&folder, folder.clone(), home));
+        return saved;
     }
     if let Some((flag, since)) = missing_flag(app, saved.version.as_deref()) {
         saved.problem = Some(Problem::TooOld {
@@ -830,7 +901,7 @@ fn tool_def(app: CodingApp) -> ToolDef {
     ToolDef {
         name: app.tool().into(),
         description: format!(
-            "Ask {label}, a coding assistant installed on this computer, to do a task in the chat's working folder. It works online with the user's own account, and the user approves every request. It sees nothing of this chat: put everything it needs into task. Set may_edit to let it change files there. Its answer comes back as the result."
+            "Ask {label}, a coding assistant installed on this computer, to do a task in the chat's working folder. It works online with the user's own account, and the user approves each request, except in Full access. It sees nothing of this chat: put everything it needs into task. Set may_edit to let it change files there. Its answer comes back as the result."
         ),
         input_schema: json!({
             "type": "object",
@@ -914,16 +985,10 @@ impl CodingAppsServer {
         let mut folders = own.to_vec();
         folders.extend(chat.skill_folders.iter().cloned());
         folders.extend(approved.all.iter().cloned());
-        for candidate in [
-            saved.path.as_deref().unwrap_or_default(),
-            &program.display().to_string(),
-        ] {
-            if let Some(folder) = inside_any(candidate, &folders) {
-                return Err(Problem::InsideApprovedFolder {
-                    folder: policy::sanitize::visible(&folder),
-                }
-                .words(app));
-            }
+        let found = Path::new(saved.path.as_deref().unwrap_or_default());
+        if let Some(folder) = inside_approved(found, &program, &folders) {
+            let shown = policy::sanitize::visible(&folder);
+            return Err(inside_problem(&folder, shown, self.home.as_deref()).words(app));
         }
         Ok(program)
     }

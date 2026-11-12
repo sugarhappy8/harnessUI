@@ -22,6 +22,8 @@ use crate::state::{BusyCounter, BusyKind};
 const PRIVATE: &str = "private-llama-key-1234567890";
 const MODEL_PATH: &str = "/home/someone/Private Models/Secret-Model-Q4.gguf";
 const SHARE_KEY: &str = "harnessui-share-0123456789abcdef0123456789abcdef";
+/// What Claude Code also sends (in `x-api-key`) when the user has ANTHROPIC_API_KEY set.
+const USERS_OWN_KEY: &str = "sk-ant-api03-the-users-own-key";
 
 // ---- A fake llama-server -----------------------------------------------------------
 
@@ -321,6 +323,8 @@ async fn forwards_a_rebuilt_request_with_a_fixed_header_list() {
         .client
         .post(h.url("/v1/messages?beta=true"))
         .header("authorization", format!("Bearer {SHARE_KEY}"))
+        // Claude Code adds the user's own key when ANTHROPIC_API_KEY is also set.
+        .header("x-api-key", USERS_OWN_KEY)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .header("anthropic-beta", "something")
@@ -415,6 +419,8 @@ async fn forwards_a_rebuilt_request_with_a_fixed_header_list() {
     );
     let all = serde_json::to_string(row).unwrap();
     assert!(!all.contains("secret prompt") && !all.contains(SHARE_KEY) && !all.contains(PRIVATE));
+    assert!(!all.contains(USERS_OWN_KEY));
+    assert!(up.headers.iter().all(|(_, v)| !v.contains(USERS_OWN_KEY)));
 }
 
 #[tokio::test]
@@ -902,6 +908,49 @@ async fn a_caller_that_goes_away_ends_the_request() {
     assert!(!h.busy.is_busy());
 }
 
+/// A caller that keeps its connection open but stops reading a streamed answer is cut off
+/// after [`proxy::CALLER_STALL`], so the busy counter goes back to zero and "Restart when
+/// it ends" (D3) is not kept waiting by an app that hangs.
+#[tokio::test]
+async fn a_caller_that_stops_reading_is_cut_off() {
+    let h = Harness::new().await;
+    // About 32 MB of events: more than the socket buffers between the caller and the
+    // proxy hold, so the proxy has to wait for the caller.
+    let text = "x".repeat(4000);
+    let lines: Vec<String> = (0..8000)
+        .map(|_| format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n"))
+        .collect();
+    h.llama.reply(Reply::Sse(lines, Duration::ZERO));
+    let body = json!({"messages": [], "stream": true}).to_string();
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nx-api-key: {SHARE_KEY}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        h.port,
+        body.len()
+    );
+    let mut stream = TcpStream::connect(("127.0.0.1", h.port)).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    // The request starts...
+    let started = Instant::now();
+    while !h.busy.is_busy() && started.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(h.busy.is_busy(), "the request never started");
+    // ...and ends by itself although the caller neither reads nor closes.
+    let wait = proxy::CALLER_STALL + Duration::from_secs(20);
+    while h.busy.is_busy() && started.elapsed() < wait {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !h.busy.is_busy(),
+        "still busy after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(h.counters.active(), 0);
+    let rows = h.audit_done(1).await;
+    assert_eq!(rows[0].result_status.as_deref(), Some("cancelled"));
+    drop(stream);
+}
+
 #[tokio::test]
 async fn token_counting_is_audited_at_most_once_a_minute() {
     let h = Harness::new().await;
@@ -1037,6 +1086,15 @@ fn the_keys_never_reach_the_log() {
                 .body("{}")
                 .send()
                 .await;
+            h.llama.reply(Reply::Json(200, anthropic_answer()));
+            let _ = h
+                .client
+                .post(h.url("/v1/messages"))
+                .bearer_auth(key)
+                .header("x-api-key", USERS_OWN_KEY)
+                .body("{}")
+                .send()
+                .await;
         }
         let closed = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1064,6 +1122,7 @@ fn the_keys_never_reach_the_log() {
             second.as_str(),
             "Secret-Model",
             "ffffffffffffffff",
+            USERS_OWN_KEY,
         ] {
             assert!(!log.contains(secret), "{secret} is in the log:\n{log}");
         }
@@ -1320,6 +1379,67 @@ async fn the_status_shows_the_loaded_models_context_and_use() {
     sharing.shutdown().await;
 }
 
+/// Switching sharing off while another app's answer streams closes the port at once and
+/// ends that request; the busy counter goes back to zero (no "Restart when it ends" is kept
+/// waiting by a request the user has cut off).
+#[tokio::test]
+async fn switching_off_ends_a_running_request() {
+    use futures_util::StreamExt;
+    let llama = FakeLlama::default();
+    let addr = llama.start().await;
+    let env = env_with(FakeModel::ready(addr, 8192));
+    let sharing = Sharing::default();
+    let port = sharing.set_enabled(&env, true).await.unwrap().port.unwrap();
+    let key = sharing.reveal_key(&env).await.unwrap();
+    // About 20 seconds of events.
+    let lines: Vec<String> = (0..100)
+        .map(|i| format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{i}\"}}}}]}}\n\n"))
+        .collect();
+    llama.reply(Reply::Sse(lines, Duration::from_millis(200)));
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth(&key)
+        .body("{\"messages\":[],\"stream\":true}")
+        .send()
+        .await
+        .unwrap();
+    let mut stream = response.bytes_stream();
+    stream.next().await.unwrap().unwrap();
+    assert!(env.busy.is_busy());
+
+    let started = Instant::now();
+    let off = sharing.set_enabled(&env, false).await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!off.enabled && !off.listening, "{off:?}");
+    assert!(!port_open(port).await);
+    // The caller's answer is cut off instead of running on.
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = stream.next().await {
+            if chunk.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(
+        ended.is_ok(),
+        "the request ran on after sharing was switched off"
+    );
+    for _ in 0..150 {
+        if !env.busy.is_busy() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!env.busy.is_busy());
+    sharing.shutdown().await;
+}
+
 #[tokio::test]
 async fn the_setup_needs_sharing_on_and_holds_the_port_key_and_context() {
     let llama = FakeLlama::default();
@@ -1406,6 +1526,110 @@ async fn at_start_it_listens_only_if_left_on() {
     assert!(status.enabled && status.listening, "{status:?}");
     assert!(port_open(port).await);
     sharing.shutdown().await;
+}
+
+/// D12: sharing is not a tool action, and no approval mode changes it. Whatever mode every
+/// chat starts in (Ask first, Allow all, or a saved Full access), the switch stays as the
+/// user left it at start, and the proxy asks for the key, refuses web pages and writes the
+/// same audit row (never the Full access decision or note).
+#[tokio::test]
+async fn no_approval_mode_changes_sharing() {
+    for mode in ["ask", "allowAll", "fullAccess"] {
+        let llama = FakeLlama::default();
+        let addr = llama.start().await;
+        let env = env_with(FakeModel::ready(addr, 8192));
+        env.store
+            .set_setting(crate::approvals::APPROVAL_MODE_DEFAULT, &json!(mode))
+            .await
+            .unwrap();
+        env.store
+            .set_setting(crate::approvals::ALLOW_ALL_DEFAULT, &json!(mode != "ask"))
+            .await
+            .unwrap();
+        let sharing = Sharing::default();
+        sharing.start_saved(&env).await;
+        let status = sharing.status(&env).await;
+        assert!(!status.enabled && !status.listening, "{mode}: {status:?}");
+        assert!(env.secrets.get(KEY_SECRET).unwrap().is_none(), "{mode}");
+
+        let port = sharing.set_enabled(&env, true).await.unwrap().port.unwrap();
+        let key = sharing.reveal_key(&env).await.unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://127.0.0.1:{port}/v1/messages");
+        let without = client.post(&url).body("{}").send().await.unwrap();
+        assert_eq!(without.status(), 401, "{mode}");
+        let page = client
+            .post(&url)
+            .header("x-api-key", &key)
+            .header("origin", "http://127.0.0.1")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.status(), 403, "{mode}");
+        llama.reply(Reply::Json(200, anthropic_answer()));
+        let with = client
+            .post(&url)
+            .header("x-api-key", &key)
+            .body("{\"messages\":[]}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(with.status(), 200, "{mode}");
+        let mut rows = Vec::new();
+        for _ in 0..100 {
+            rows = env
+                .store
+                .list_audit(store::AuditQuery {
+                    server: Some(proxy::AUDIT_SERVER.into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            if rows.iter().all(|r| r.result_status.is_some()) && !rows.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(rows.len(), 1, "{mode}");
+        assert_eq!(
+            rows[0].decision,
+            store::AuditDecision::AllowedWithoutPrompt,
+            "{mode}"
+        );
+        assert_eq!(rows[0].note, None, "{mode}");
+        sharing.set_enabled(&env, false).await.unwrap();
+        assert!(!port_open(port).await, "{mode}");
+        sharing.shutdown().await;
+    }
+}
+
+/// D12: the switch, the port and the key stay out of reach of every tool in every mode.
+/// The generic `set_setting` command (the only settings write a page could reach without
+/// its own command) never lists the sharing key, and nothing here reads an approval mode.
+#[test]
+fn the_sharing_switch_is_out_of_reach_of_tools() {
+    let source = include_str!("../models_cmd.rs");
+    let start = source
+        .find("const ALLOWED: &[&str] = &[")
+        .expect("the allow-list of set_setting");
+    let list = &source[start..start + source[start..].find("];").expect("its end")];
+    assert!(list.contains("\"theme\""), "this is the list: {list}");
+    for word in [SETTINGS_KEY, "share", "Share"] {
+        assert!(!list.contains(word), "{word} in {list}");
+    }
+    for (name, module) in [
+        ("mod.rs", include_str!("mod.rs")),
+        ("proxy.rs", include_str!("proxy.rs")),
+        ("setup_text.rs", include_str!("setup_text.rs")),
+    ] {
+        for word in ["approvals::", "ApprovalMode", "full_access(", "allow_all("] {
+            assert!(
+                !module.contains(word),
+                "{name} reads the approval mode ({word})"
+            );
+        }
+    }
 }
 
 #[test]

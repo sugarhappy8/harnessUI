@@ -33,7 +33,7 @@ const LAST_GROUPS = ["subagents"];
  */
 const CODING_APPS = "coding_apps";
 const CODING_NOTE =
-  "Lets the model hand a task to Claude Code or Codex on this computer. They work online with your own account, and every request asks you first.";
+  "Lets the model hand a task to Claude Code or Codex on this computer. They work online with your own account. Every request asks you first, except in Full access.";
 
 /** The chat's switched-on tools after turning `names` on or off. */
 function switched(list: ToolDto[], names: string[], on: boolean): string[] {

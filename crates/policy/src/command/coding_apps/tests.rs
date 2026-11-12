@@ -206,6 +206,144 @@ fn a_after_a_wrapper_or_inside_a_shell() {
     }
 }
 
+/// (a) After a program that changes how another program runs (processor, priority,
+/// limits, terminal, sandbox, namespace, tracing, clock) and then runs it, and after
+/// `find -exec` / `fd -x`, which hand each file to a program (review of 0.0.6, round 1).
+#[test]
+fn a_after_programs_that_run_another_program() {
+    for line in [
+        "taskset -c 0 claude -p hi --allowedTools Bash",
+        "numactl --cpunodebind=0 claude -p x",
+        "chrt -f 10 codex exec x",
+        "prlimit --nofile=100 claude -p x",
+        "unbuffer claude -p x",
+        "rlwrap claude",
+        "tmux new-session -d 'claude -p x'",
+        "tmux new -d codex exec x",
+        "screen -dmS x claude -p x",
+        "firejail claude -p x",
+        "bwrap --bind / / claude -p x",
+        "systemd-run --user --pty claude -p x",
+        "arch -arm64 claude -p x",
+        "dbus-run-session claude -p x",
+        "xvfb-run claude -p x",
+        "unshare -r claude -p x",
+        "nsenter -t 1 -m claude -p x",
+        "runuser -u me -- claude -p x",
+        "sg staff 'claude -p x'",
+        "strace -f claude -p x",
+        "ltrace claude -p x",
+        "faketime '2020-01-01' claude -p x",
+        "corepack pnpm dlx @anthropic-ai/claude-code -p x",
+        "corepack yarn claude",
+        "find . -name x -exec claude -p {} +",
+        "find . -execdir codex exec x +",
+        "find . -exec claude -p x ;",
+        "find . -exec claude -p x \\;",
+        "find . -type f -exec echo {} \\; -exec claude -p {} \\;",
+        "find . -type f -exec echo {} ';' -exec claude -p {} ';'",
+        "find . -ok codex exec x ;",
+        "fd -x claude -p",
+        "fd . -X codex exec",
+        "fd --exec claude -p",
+        "fdfind -x claude -p",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "taskset -c 0 cargo test",
+        "tmux new-session -d 'cargo test'",
+        "strace -o claude.log ls",
+        "find . -name '*.rs' -exec wc -l {} +",
+        "find . -name claude",
+        "fd -x wc -l",
+        "fd claude",
+        "corepack enable",
+    ] {
+        assert_not_seen(SH, line);
+    }
+}
+
+/// (a) A name the POSIX shell runs as written once its escapes and quotes are taken away
+/// (`cod\ex` is `codex`, `$'claude'` is `claude`): every reading of a line that cannot be
+/// broken down is checked (review of 0.0.6, round 1).
+#[test]
+fn a_a_name_with_escapes_or_quotes_inside() {
+    for line in [
+        "cod\\ex exec hi",
+        "c\\laude -p hi --allowedTools Bash",
+        "co\\dex exec x",
+        "\\claude -p x",
+        "cl''aude -p x",
+        "\"claude\" -p x",
+        "$'claude' -p x",
+        "$\"codex\" exec x",
+        "echo task | cl\\aude -p",
+    ] {
+        assert_asks(SH, line);
+    }
+    // A Windows path keeps its backslashes and is still read as one.
+    assert_asks(PS, "& 'C:\\Users\\me\\.local\\bin\\claude.exe' -p x");
+    assert_not_seen(SH, "echo c\\laude");
+    assert_not_seen(SH, "cat no\\tes.txt > out.txt");
+}
+
+/// (a) Code handed to an interpreter (`python3 -c`, `node -e`, `perl -e`, …) that runs a
+/// command line given as a string, and the program a locator finds used as a program
+/// (`$(which claude)`, `& (Get-Command claude)`, .NET's `Process.Start`) (review of 0.0.6,
+/// round 1).
+#[test]
+fn a_inline_code_and_located_programs() {
+    for line in [
+        "python3 -c \"import os; os.system('claude -p x')\"",
+        "python -c 'import subprocess; subprocess.run([\"codex\", \"exec\", \"x\"])'",
+        "python3.12 -c \"__import__('os').system('claude -p x')\"",
+        "node -e \"require('child_process').execSync('codex exec x')\"",
+        "node --eval \"require('child_process').spawnSync('claude', ['-p', 'x'])\"",
+        "perl -e 'system(\"claude -p x\")'",
+        "ruby -e 'system(\"codex\", \"exec\", \"x\")'",
+        "osascript -e 'do shell script \"claude -p x\"'",
+        "$(which claude) -p x",
+        "`which codex` exec x",
+        "$(command -v claude) -p x",
+        "$(type -p codex) exec x",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "& (Get-Command claude) -p x",
+        "&(Get-Command claude) -p x",
+        "& (gcm codex) exec x",
+        "& (Get-Command claude).Source -p x",
+        "[Diagnostics.Process]::Start('claude','-p x')",
+        "[System.Diagnostics.Process]::Start(\"codex\", \"exec x\")",
+        "python -c \"import os; os.system('claude -p x')\"",
+    ] {
+        assert_asks(PS, line);
+    }
+    for line in [
+        "python3 -c 'print(1)'",
+        "python3 -c \"print('hello world')\"",
+        "node -e \"console.log('done')\"",
+        "perl -e 'print \"ok\\n\"'",
+        "echo $(which claude)",
+        "ls -l $(which claude)",
+        "if which claude > /dev/null; then echo found; fi",
+        "$(which cargo) test",
+        "cargo test 2>&1 | grep -E 'a,q'",
+        "sed -n '1,q' notes.txt > out.txt",
+    ] {
+        assert_not_seen(SH, line);
+    }
+    for line in [
+        "Get-Command claude",
+        "(Get-Command claude).Source",
+        "[Diagnostics.Process]::Start('notepad', 'claude.txt')",
+    ] {
+        assert_not_seen(PS, line);
+    }
+}
+
 /// (b) A package runner handed an assistant's package, in every form a runner takes it.
 #[test]
 fn b_a_package_runner_handed_an_assistant() {
@@ -235,8 +373,35 @@ fn b_a_package_runner_handed_an_assistant() {
         "npx @sourcegraph/amp",
         "npx @charmland/crush",
         "npx @github/copilot -p x",
+        // An option with a value before the subcommand (review of 0.0.6, round 1).
+        "npm --prefix /x exec -- claude -p x",
+        "npm -w pkg exec codex",
+        "npm --registry https://r exec claude",
+        "pnpm --dir x dlx @openai/codex",
+        "yarn --cwd x dlx @openai/codex",
+        // A package manager handed the program of a package by name.
+        "yarn claude",
+        "pnpm claude -p x",
+        "bun codex exec x",
+        "yarn run claude",
+        "bun run codex exec x",
+        "yarn --cwd x claude -p x",
+        "pnpm -C x codex exec x",
     ] {
         assert_asks(SH, line);
+    }
+    for line in [
+        "yarn test",
+        "yarn add claude-notes",
+        "pnpm install",
+        "pnpm --dir x build",
+        "bun run build",
+        "bun test",
+        "bun claude.ts",
+        "npm --prefix /x run test",
+        "npm --prefix /x exec -- vitest",
+    ] {
+        assert_not_seen(SH, line);
     }
     for line in [
         "npx.cmd claude",
@@ -406,6 +571,11 @@ fn deep_nesting_stays_bounded() {
     let _ = command_facts(SH, &line, &parse(SH, &line));
     let nested = format!("{}claude -p x", "env ".repeat(4));
     assert_asks(SH, &nested);
+    // Nested shells, escapes, inline code and substitutions, each read several ways.
+    let piece = "sh -c \"python3 -c 'x(\\\"a,b\\\")' $(which x) `y` c\\d; ";
+    let line = piece.repeat(2000);
+    let _ = command_facts(SH, &line, &parse(SH, &line));
+    let _ = command_facts(PS, &line, &parse(PS, &line));
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),
         "{:?}",

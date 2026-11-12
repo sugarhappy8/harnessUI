@@ -26,6 +26,15 @@ export const NO_FOLDER_LINE = "No folder yet, so the file tools have nowhere to 
 /** The first sentence of the menu in Full access (what `approvals::widen` lets the tools reach). */
 export const FULL_ACCESS_LEAD =
   "Full access is on, so the file and terminal tools can reach every folder on this computer except harnessUI's own.";
+/** Under it: the app's folders are kept from its tools only by reading their paths and the
+ *  command text (`terminal::names_app_folder`, `reaches_app_folder`), so a program a command
+ *  starts can still reach them (ARCHITECTURE.md 13.3, Full access limits). */
+export const FULL_ACCESS_LIMIT =
+  "A program the terminal starts has your full rights, so it could still reach harnessUI's own folders.";
+/** In Allow all, under the chat's folders: a command runs without a card and its arguments are
+ *  not held to the approved folders (ARCHITECTURE.md 13.3, Allow all limits); only the file
+ *  tools are. */
+export const ALLOW_ALL_TERMINAL = "In Allow all, terminal commands are not held to these folders.";
 /** In Full access a chat with no folder works in the home folder (`approvals::widen`). */
 export const HOME_FOLDER = "your home folder";
 /** Under the list when a folder is approved for every chat: the chip does not remove those. */
@@ -44,10 +53,12 @@ export const FOLDERS_POLL_MS = 2000;
 // (new lines and tabs too, a path is one line), bidirectional embeddings, overrides and
 // isolates, zero-width characters, line and paragraph separators, variation selectors and
 // tag characters. The same set as the approval cards' sanitiser (crates/policy/src/sanitize.rs)
-// plus U+00AD, U+2028 and U+2029.
+// plus U+00AD, U+2028 and U+2029, the combining grapheme joiner (U+034F), the shorthand format
+// controls (U+1BCA0 to U+1BCA3) and the rest of the tag plane (U+E0000 to U+E0FFF, which also
+// holds the variation selectors U+E0100 to U+E01EF).
 const INVISIBLE =
   // eslint-disable-next-line no-control-regex, no-misleading-character-class
-  /[\u{0}-\u{1F}\u{7F}-\u{9F}\u{AD}\u{61C}\u{115F}\u{1160}\u{17B4}\u{17B5}\u{180B}-\u{180F}\u{200B}-\u{200F}\u{2028}-\u{202E}\u{2060}-\u{206F}\u{3164}\u{FE00}-\u{FE0F}\u{FEFF}\u{FFA0}\u{FFF9}-\u{FFFB}\u{1D173}-\u{1D17A}\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+  /[\u{0}-\u{1F}\u{7F}-\u{9F}\u{AD}\u{34F}\u{61C}\u{115F}\u{1160}\u{17B4}\u{17B5}\u{180B}-\u{180F}\u{200B}-\u{200F}\u{2028}-\u{202E}\u{2060}-\u{206F}\u{3164}\u{FE00}-\u{FE0F}\u{FEFF}\u{FFA0}\u{FFF9}-\u{FFFB}\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/gu;
 
 /** A path as it is shown: every invisible or direction-changing character as `\u{XXXX}`,
  *  the way approval cards show them. */
@@ -205,10 +216,14 @@ export function FolderChip(props: { chatId: number; workingFolder: string | null
   const text = chipText(mode, folders, workingFolder);
   const name = working ? visiblePath(folderName(working.path)) : "";
   const workingShown = working ? visiblePath(working.path) : null;
+  // The approved folders hold the file tools; a terminal command is held to them only by its
+  // card in Ask first, and not at all in Allow all, so the chip never says "this chat".
+  const allowAll = mode === "allowAll" && list.length > 0;
   const title = full
-    ? fullAccessLine(workingShown)
+    ? `${fullAccessLine(workingShown)} ${FULL_ACCESS_LIMIT}`
     : working
-      ? `Working folder: ${workingShown}. Click to see or change the folders this chat can use.`
+      ? `Working folder: ${workingShown}. Click to see or change the folders the file tools can use.` +
+        (allowAll ? ` ${ALLOW_ALL_TERMINAL}` : "")
       : folders
         ? `${NO_FOLDER_LINE} Click to choose one.`
         : "Folders for this chat";
@@ -233,6 +248,10 @@ export function FolderChip(props: { chatId: number; workingFolder: string | null
           }
         >
           <Icon size={15} className="shrink-0" aria-hidden />
+          {/* Below @2xl (a header under 42rem: a window under about 950 pixels with the sidebar
+              open) the chip keeps the folder's name and the count, and in Full access its red
+              icon while the mode button beside it still reads "Full access"; the spec's words
+              come back above it. The accessible name and the title always hold all of them. */}
           {full ? (
             <span className="hidden @2xl:inline">{WHOLE_COMPUTER}</span>
           ) : working ? (
@@ -245,7 +264,7 @@ export function FolderChip(props: { chatId: number; workingFolder: string | null
                   {" "}
                   <span>
                     {`+ ${list.length - 1}`}
-                    <span className="hidden @3xl:inline"> more</span>
+                    <span className="hidden @2xl:inline"> more</span>
                   </span>
                 </>
               )}
@@ -254,7 +273,7 @@ export function FolderChip(props: { chatId: number; workingFolder: string | null
             folders && (
               <span>
                 No folder
-                <span className="hidden @3xl:inline">
+                <span className="hidden @2xl:inline">
                   {" · "}
                   <span className="text-accent">Choose</span>
                 </span>
@@ -276,16 +295,26 @@ export function FolderChip(props: { chatId: number; workingFolder: string | null
           className="z-50 max-h-[70vh] w-96 max-w-[92vw] overflow-y-auto rounded-xl border border-border bg-surface p-1.5 text-sm shadow-pop"
         >
           {full && (
-            <p className="mx-1 mb-1.5 rounded-lg bg-danger/10 px-2.5 py-2 text-danger" data-full-access-line>
-              {FULL_ACCESS_LEAD} Working folder:{" "}
-              {workingShown ? (
-                <bdi dir="ltr" className="font-mono text-xs break-all">
-                  {workingShown}
-                </bdi>
-              ) : (
-                HOME_FOLDER
-              )}
-              .
+            <div className="mx-1 mb-1.5 rounded-lg bg-danger/10 px-2.5 py-2 text-danger">
+              <p data-full-access-line>
+                {FULL_ACCESS_LEAD} Working folder:{" "}
+                {workingShown ? (
+                  <bdi dir="ltr" className="font-mono text-xs break-all">
+                    {workingShown}
+                  </bdi>
+                ) : (
+                  HOME_FOLDER
+                )}
+                .
+              </p>
+              <p className="mt-1 text-xs" data-full-access-limit>
+                {FULL_ACCESS_LIMIT}
+              </p>
+            </div>
+          )}
+          {allowAll && (
+            <p className="mx-1 mb-1.5 rounded-lg bg-warning/10 px-2.5 py-1.5 text-xs text-warning" data-allow-all-line>
+              {ALLOW_ALL_TERMINAL}
             </p>
           )}
           {!full && folders && list.length === 0 && (

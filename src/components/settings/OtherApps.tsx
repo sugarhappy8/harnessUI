@@ -6,7 +6,7 @@ import { FIT_WORDS, isAppleComputer, tokensWithWords } from "../../lib/words";
 import { toErrorInfo, useApp } from "../../store/app";
 import { reloadModel } from "../../store/modelChange";
 import { ErrorBanner } from "../ErrorBanner";
-import { openModelSettings } from "../ModelSettings";
+import { ModelSettings } from "../ModelSettings";
 
 // Settings → Other apps (0.0.5 item 3, direction A, experimental, off by default): Claude
 // Code, Codex or the Claude app on this computer may use the model loaded here, through the
@@ -15,7 +15,8 @@ import { openModelSettings } from "../ModelSettings";
 //
 // - The switch changes only on the user's click (`set_share_enabled`).
 // - The key is read only when asked for (Show key, Copy) and is never kept outside React
-//   state. The setup cards contain it too, so a card is fetched only when its app is chosen.
+//   state. The setup cards contain it too, so a card is fetched only when its app is chosen
+//   and forgotten when it is closed or sharing is switched off.
 // - The page asks `share_status` again every POLL_MS while it is open and visible (there is
 //   no push event); a late answer never overwrites a newer one.
 // - What a copied setup assumed (the model's context and the port, never the key) is kept in
@@ -138,6 +139,9 @@ export function OtherApps() {
   const [copied, setCopied] = useState<Copied | null>(readCopied);
   // The loaded model's settings, for the context warning's fit mark.
   const [loadInfo, setLoadInfo] = useState<{ path: string; info: ModelLoadInfo } | null>(null);
+  // The loaded model's own settings panel, opened over this page (inside the settings window,
+  // so the window stays open under it and Escape closes only the panel).
+  const [panelFor, setPanelFor] = useState<string | null>(null);
   const runtime = useApp((s) => s.runtime);
   const modelPath = runtime?.state === "ready" ? runtime.modelPath : null;
 
@@ -199,6 +203,13 @@ export function OtherApps() {
     };
   }, [short, modelPath, modelCtx]);
 
+  /** Opens one app's card, or closes it. A closed card is forgotten: it contains the key. */
+  function chooseApp(next: ShareApp | null) {
+    setApp(next);
+    setCard(null);
+    setCardError(null);
+  }
+
   function fail(place: ErrorPlace, e: unknown) {
     setError({ place, error: toErrorInfo(e) });
   }
@@ -216,7 +227,7 @@ export function OtherApps() {
         setKey(null);
         setChoosing(false);
         setConfirmNewKey(false);
-        setApp(null);
+        chooseApp(null);
       }
     } catch (e) {
       fail("switch", e);
@@ -423,7 +434,7 @@ export function OtherApps() {
               {modelPath && (
                 <button
                   type="button"
-                  onClick={() => openModelSettings(modelPath)}
+                  onClick={() => setPanelFor(modelPath)}
                   className="text-xs text-fg-muted underline hover:text-fg"
                 >
                   Model settings…
@@ -513,7 +524,7 @@ export function OtherApps() {
                   key={a.app}
                   type="button"
                   aria-pressed={app === a.app}
-                  onClick={() => setApp(app === a.app ? null : a.app)}
+                  onClick={() => chooseApp(app === a.app ? null : a.app)}
                   className={
                     "rounded-md border px-3 py-1 " +
                     (app === a.app ? "border-accent bg-accent text-accent-fg" : "border-border hover:bg-bg-muted")
@@ -528,6 +539,14 @@ export function OtherApps() {
             {shownCard && <SetupCard key={shownCard.app} setup={shownCard.setup} onCopied={setupCopied} />}
           </section>
         </>
+      )}
+      {panelFor !== null && (
+        <ModelSettings
+          key={panelFor}
+          path={panelFor}
+          onClose={() => setPanelFor(null)}
+          onSaved={(saved) => setLoadInfo({ path: panelFor, info: saved })}
+        />
       )}
     </div>
   );
