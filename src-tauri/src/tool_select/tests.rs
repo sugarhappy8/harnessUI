@@ -20,6 +20,7 @@ fn on(groups: &[&str]) -> Vec<Candidate> {
             server: e.group.to_string(),
             description: e.purpose.to_string(),
             builtin: true,
+            cost: 100,
         })
         .collect()
 }
@@ -43,6 +44,7 @@ fn external(server: &str, tool: &str, description: &str) -> Candidate {
         server: server.to_string(),
         description: description.to_string(),
         builtin: false,
+        cost: 100,
     }
 }
 
@@ -69,6 +71,7 @@ fn pick(
         skills: &[],
         skill_loaded: false,
         max: DEFAULT_MAX,
+        allowance: None,
     })
 }
 
@@ -362,6 +365,7 @@ fn the_cap_keeps_companions_then_used_and_found_then_the_best_matches() {
         skills: &[],
         skill_loaded: false,
         max: 30,
+        allowance: None,
     });
     assert_eq!(
         roomy.iter().filter(|n| n.starts_with("browser_")).count(),
@@ -454,6 +458,7 @@ fn across_turns_the_list_only_grows_and_keeps_its_order() {
             skills: &[],
             skill_loaded: false,
             max: DEFAULT_MAX,
+            allowance: None,
         };
         let shown = select(&input);
         // The same question gives the same answer.
@@ -575,6 +580,7 @@ fn a_loaded_skill_brings_its_file_tool_and_the_terminal() {
         skills: &[],
         skill_loaded,
         max: DEFAULT_MAX,
+        allowance: None,
     };
     let without = select(&input(false));
     assert!(
@@ -604,6 +610,7 @@ fn the_cap_never_takes_away_what_was_shown() {
         skills: &[],
         skill_loaded: false,
         max: MIN_MAX,
+        allowance: None,
     });
     assert_eq!(after, before, "a lower cap removed tools, or added some");
 }
@@ -684,11 +691,11 @@ fn with_the_selection_off_every_tool_that_is_on_is_shown() {
         max: DEFAULT_MAX,
     };
     assert_eq!(
-        shown_before_a_message(&tools, &prefs, &[], false, off),
+        shown_before_a_message(&tools, &prefs, &[], false, off, None),
         everything
     );
     // On: the companions, the core, and what waits to be shown; the rest on request.
-    let chosen = shown_before_a_message(&tools, &prefs, &[], false, ToolSelection::default());
+    let chosen = shown_before_a_message(&tools, &prefs, &[], false, ToolSelection::default(), None);
     assert!(chosen.len() < everything.len());
     assert!(chosen.contains("read_file") && chosen.contains("git_commit"));
     assert!(chosen.contains("read_output") && chosen.contains("update_task"));
@@ -842,4 +849,137 @@ fn what_is_remembered_is_bounded() {
     // Nothing new: nothing changes, so nothing needs to be written.
     let same = remembered(&shown, &shown);
     assert_eq!(same, shown);
+}
+
+// ---- A size allowance: small context windows (0.0.4) ---------------------------------
+
+fn pick_within(tools: &[Candidate], shown: &[String], allowance: Option<u32>) -> Vec<String> {
+    select(&Selecting {
+        tools,
+        messages: &[],
+        shown,
+        wanted: &[],
+        skills: &[],
+        skill_loaded: false,
+        max: DEFAULT_MAX,
+        allowance,
+    })
+}
+
+fn cost_of(tools: &[Candidate], shown: &[String]) -> u32 {
+    tools
+        .iter()
+        .filter(|t| shown.contains(&t.name))
+        .map(|t| t.cost)
+        .sum()
+}
+
+/// The core file tools, in the order the files server offers them.
+const CORE: &[&str] = &[
+    "list_dir",
+    "read_file",
+    "search_files",
+    "write_file",
+    "edit_file",
+];
+
+/// What a new chat has on when no browser is found: the set that did not fit a model
+/// loaded with 4,096 tokens of context, so that no message could be sent.
+fn small_default_set() -> Vec<Candidate> {
+    on(&["files", "skills", "artifacts", "search", "toolfinder"])
+}
+
+#[test]
+fn a_small_window_gets_the_core_file_tools_and_then_only_what_fits() {
+    let tools = small_default_set();
+    assert_eq!(tools.len(), 16);
+    let core = names(CORE);
+    // Room enough: the list is the one chosen by count, as without an allowance.
+    let by_count = pick_within(&tools, &[], None);
+    assert_eq!(
+        by_count,
+        names(&[
+            "list_dir",
+            "read_file",
+            "search_files",
+            "write_file",
+            "edit_file",
+            "load_skill",
+            "find_tools",
+            "call_tool"
+        ])
+    );
+    assert_eq!(pick_within(&tools, &[], Some(1_600)), by_count);
+    assert_eq!(pick_within(&tools, &[], Some(800)), by_count);
+
+    // Room for five tools: the core file tools, and not the two finder tools.
+    let five = pick_within(&tools, &[], Some(500));
+    assert_eq!(five, core);
+    // Room for six: one more tool comes along, but not half of the finder pair.
+    let six = pick_within(&tools, &[], Some(650));
+    assert!(
+        six.len() == 6 && core.iter().all(|c| six.contains(c)),
+        "{six:?}"
+    );
+    assert!(!six.contains(&"find_tools".to_string()) && !six.contains(&"call_tool".to_string()));
+    // Room for seven: the finder pair comes before anything else that is optional.
+    let seven = pick_within(&tools, &[], Some(700));
+    assert_eq!(seven.len(), 7);
+    assert!(seven.contains(&"find_tools".to_string()) && seven.contains(&"call_tool".to_string()));
+
+    // Never more than the allowance, whatever it is.
+    for allowance in [0, 99, 100, 250, 499, 500, 701, 999, 1_234, 1_599] {
+        let shown = pick_within(&tools, &[], Some(allowance));
+        assert!(
+            cost_of(&tools, &shown) <= allowance,
+            "{allowance}: {shown:?}"
+        );
+    }
+    // No room at all: no tools, and the turn is an ordinary chat turn.
+    assert!(pick_within(&tools, &[], Some(99)).is_empty());
+}
+
+#[test]
+fn what_a_chat_was_shown_before_is_kept_while_it_fits() {
+    let tools = small_default_set();
+    let before = names(&["list_dir", "read_file", "web_search", "read_source"]);
+    // It fits: all of it is shown again, and the core tools join it.
+    let roomy = pick_within(&tools, &before, Some(800));
+    for name in &before {
+        assert!(roomy.contains(name), "{name} was dropped: {roomy:?}");
+    }
+    assert!(names(CORE).iter().all(|c| roomy.contains(c)));
+    // The window got smaller: the core file tools first, then what still fits of the rest.
+    let tight = pick_within(&tools, &before, Some(600));
+    assert!(names(CORE).iter().all(|c| tight.contains(c)), "{tight:?}");
+    assert_eq!(tight.len(), 6);
+    assert!(tight.contains(&"web_search".to_string()));
+}
+
+#[test]
+fn a_tool_costs_about_what_its_definition_takes_in_a_request() {
+    let small = definition_cost("t", "Short.", &json!({"type": "object"}));
+    let large = definition_cost(
+        "t",
+        &"A long description of what the tool does. ".repeat(10),
+        &json!({"type": "object", "properties": {"path": {"type": "string", "description": "Where."}}}),
+    );
+    assert!((15..60).contains(&small), "{small}");
+    assert!(large > small + 100, "{large} vs {small}");
+}
+
+#[test]
+fn the_allowance_follows_the_loops_own_limit() {
+    // 4,096 tokens: the loop offers tools only while the fixed part is at most 40% of what
+    // a prompt may use (2,992), so about 1,196. The allowance stays a little under that
+    // and leaves room for the rest of the fixed part.
+    let budget = agent::context::ContextBudget::new(4_096, 0).budget;
+    assert_eq!(budget, 2_992);
+    let all = allowance(4_096, 0);
+    assert!(all < 1_196 && all > 1_100, "{all}");
+    assert_eq!(allowance(4_096, 200), all - 200);
+    assert_eq!(allowance(4_096, 5_000), 0);
+    // More context, more room.
+    assert!(allowance(8_192, 200) > 2 * allowance(4_096, 200));
+    assert!(allowance(32_768, 200) > 8_000);
 }

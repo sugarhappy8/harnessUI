@@ -327,7 +327,7 @@ fn refused(d: Described) -> String {
 }
 
 #[test]
-fn a_search_is_an_outbound_action_with_its_own_scope() {
+fn a_search_asks_first_under_its_own_scope_and_a_grant_covers_the_turn() {
     let settings = SearchSettings::default();
     let action = described(describe_search(
         &args(json!({"query": "  tokio\nspawn_blocking ", "library": "tokio", "max_results": 3})),
@@ -340,15 +340,14 @@ fn a_search_is_an_outbound_action_with_its_own_scope() {
     );
     assert_eq!(action.scope, policy::Scope::WebSearch);
     assert_eq!(action.risk, policy::Risk::Normal);
-    assert!(
-        action.outbound && action.network,
-        "a search sends the question out"
-    );
+    // Not outbound for the untrusted-content rule: the question goes only to the service
+    // the user chose, and pages are read only from addresses that service returned.
+    assert!(!action.outbound && !action.network);
     assert!(action.read_only && action.keep_asking.is_none() && action.hard_limit.is_none());
     assert_eq!(action.summary, "Search the web: tokio spawn_blocking");
     assert_eq!(
         action.preview,
-        "Search the web for:\ntokio spawn_blocking\n\nLibrary: tokio\n\nThe search is sent to DuckDuckGo. Up to 4 of the pages it finds are then read from their sites."
+        "Search the web for:\ntokio spawn_blocking\n\nLibrary: tokio\n\nThe search is sent to DuckDuckGo. If it names a library this project uses, the version in use is added to it. Up to 4 of the pages it finds are then read from their sites."
     );
     assert_eq!(action.payload["query"], "tokio spawn_blocking");
     assert_eq!(action.payload["provider"], "duckduckgo");
@@ -364,14 +363,14 @@ fn a_search_is_an_outbound_action_with_its_own_scope() {
     let action = described(describe_search(&args(json!({"query": "x"})), &own, false));
     assert!(
         action.preview.ends_with(
-            "The search is sent to your SearXNG instance at 127.0.0.1:8888. No page is read."
+            "The search is sent to your SearXNG instance at 127.0.0.1:8888. If it names a library this project uses, the version in use is added to it. No page is read."
         ),
         "{}",
         action.preview
     );
 
-    // The gate: asks first, a grant covers the next search, and after untrusted content
-    // entered the turn it asks again, grant or not.
+    // The gate: asks first, and a grant covers the next search, also after the first
+    // search's result (untrusted content) is in the turn. Without a grant it still asks.
     let turn = policy::TurnContext {
         tool_enabled: true,
         server_ready: true,
@@ -394,13 +393,34 @@ fn a_search_is_an_outbound_action_with_its_own_scope() {
         untrusted_in_turn: true,
         ..turn
     };
-    assert!(matches!(
+    assert_eq!(
         policy::evaluate(&action, &untrusted, &granted),
+        policy::Decision::AllowedByGrant
+    );
+    assert_eq!(
+        policy::evaluate(&action, &untrusted, &none),
         policy::Decision::Ask {
-            reason: policy::AskReason::UntrustedContentThenOutbound,
-            ..
+            card: policy::CardKind::Grantable,
+            reason: policy::AskReason::Normal
         }
-    ));
+    );
+    // In Allow all it runs, before and after untrusted content.
+    for untrusted_in_turn in [false, true] {
+        let allow_all = policy::TurnContext {
+            allow_all: true,
+            untrusted_in_turn,
+            ..turn
+        };
+        assert_eq!(
+            policy::evaluate(&action, &allow_all, &none),
+            policy::Decision::AllowedByMode
+        );
+    }
+    // The question is one line of limited length: no more than that leaves in a search.
+    let long = "word ".repeat(400);
+    let action = described(describe_search(&args(json!({"query": long})), &own, false));
+    let sent = action.payload["query"].as_str().unwrap();
+    assert!(sent.chars().count() <= search::provider::MAX_QUERY_CHARS && !sent.contains('\n'));
 }
 
 #[test]
@@ -468,7 +488,7 @@ async fn reading_a_source_shows_and_fetches_the_stored_address() {
         ("search", "read_source")
     );
     assert_eq!(action.scope, policy::Scope::WebSearch);
-    assert!(action.outbound && action.network && action.read_only);
+    assert!(!action.outbound && !action.network && action.read_only);
     assert_eq!(action.summary, "Read more of source [1]: tokio - Rust");
     assert_eq!(
         action.preview,

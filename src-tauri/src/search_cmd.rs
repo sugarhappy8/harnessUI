@@ -863,12 +863,20 @@ fn action(tool: &str, summary: String, preview: String, payload: Value) -> polic
         preview,
         scope: policy::Scope::WebSearch,
         risk: policy::Risk::Normal,
-        // It changes nothing anywhere, and it sends the question (or a request for a page)
-        // off this computer.
+        // It changes nothing anywhere.
         read_only: true,
-        outbound: true,
+        // A search sends the question off this computer, which is why it asks first and
+        // has a scope of its own. It is still not marked as outbound for the rule about
+        // untrusted content (D9), because that rule is about data reaching a place
+        // someone else chose, and neither tool can send anything there: the question
+        // (one line, at most `MAX_QUERY_CHARS`) goes only to the search service the user
+        // chose in Settings, and a page is read only from an address that service
+        // returned, never one the model wrote. With the mark, the second search of a
+        // turn would ask again whatever the user had allowed, since the first search's
+        // result is untrusted content.
+        outbound: false,
         keep_asking: None,
-        network: true,
+        network: false,
         hard_limit: None,
         payload,
     }
@@ -911,6 +919,12 @@ fn describe_search(
         preview.push_str(&format!("\nLibrary: {library}\n"));
     }
     preview.push_str(&format!("\nThe search is sent to {goes_to}."));
+    if settings.version_matching {
+        // What is sent is what the card says: the version is added when the search runs.
+        preview.push_str(
+            " If it names a library this project uses, the version in use is added to it.",
+        );
+    }
     preview.push_str(&match settings.pages {
         0 => " No page is read.".to_string(),
         1 => " The first page it finds is then read from its site.".to_string(),

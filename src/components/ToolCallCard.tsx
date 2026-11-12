@@ -78,7 +78,8 @@ export function ToolCallCard(props: { call: ToolCallView }) {
   const [all, setAll] = useState(false);
   const result = c.text || c.progress || "";
   const shown = all ? result : result.slice(0, RESULT_PREVIEW_CHARS);
-  const extra = TOOL_CARD_EXTRAS[c.name]?.(c) ?? null;
+  // The name is the model's: only a card of its own, never something every object has.
+  const extra = Object.hasOwn(TOOL_CARD_EXTRAS, c.name) ? (TOOL_CARD_EXTRAS[c.name]?.(c) ?? null) : null;
   const helperNow =
     c.name === SUBAGENT_TOOL && (c.status === "running" || c.status === "waiting") ? lastLine(c.progress ?? "") : "";
   return (

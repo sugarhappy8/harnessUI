@@ -52,6 +52,8 @@ export interface AppInfo {
   identifier: string;
   os: string;
   arch: string;
+  /** The start of the commit the build was made from; empty when the build could not tell. */
+  commit: string;
 }
 
 export function isTauri(): boolean {

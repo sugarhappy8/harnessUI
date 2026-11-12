@@ -1568,7 +1568,7 @@ pub async fn run(
     // [0.0.4 tool selection] Of the tools that are on in the chat, the ones shown to the
     // model this turn. The rest stay reachable through `find_tools` and `call_tool`.
     let (mut enabled, hidden) =
-        crate::tool_select::for_turn(&state, &req.chat, &history, enabled).await;
+        crate::tool_select::for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx).await;
     // `run_subagent` goes last, so a helper's tool list (the same without it) is a prefix
     // of the turn's and the model server can reuse more of its cached prompt (8.5).
     enabled.sort_by_key(crate::subagent::is_tool);

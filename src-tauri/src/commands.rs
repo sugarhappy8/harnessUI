@@ -14,6 +14,9 @@ pub struct AppInfo {
     pub identifier: String,
     pub os: &'static str,
     pub arch: &'static str,
+    /// The start of the commit this build was made from, so that two builds with the same
+    /// version number can be told apart. Empty when the build could not tell.
+    pub commit: &'static str,
 }
 
 #[tauri::command]
@@ -28,6 +31,7 @@ pub fn app_info(app: tauri::AppHandle) -> AppInfo {
         identifier: config.identifier.clone(),
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
+        commit: env!("APP_COMMIT"),
     }
 }
 

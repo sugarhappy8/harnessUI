@@ -15,10 +15,10 @@ This folder is what the next developer needs to continue.
 
 | Step | Owner items | Feature (spec section) | State |
 |---|---|---|---|
-| 1 | 3 | Allow all (A) | see "Step 1 status" below |
-| 1 | 1, 9 | Artifacts beside the chat, isolated previews, render feedback (C) | see below |
-| 1 | 2, 10 | Web search with verifiable sources, version-aware (D) | see below |
-| 1 | 4 | Adaptive tool selection (E) | see below |
+| 1 | 3 | Allow all (A) | done |
+| 1 | 1, 9 | Artifacts beside the chat, isolated previews, render feedback (C) | done |
+| 1 | 2, 10 | Web search with verifiable sources, version-aware (D) | done |
+| 1 | 4 | Adaptive tool selection (E) | done |
 | 2 | 7, 8 | Helpful tool errors, manageable tool output (B) | started: `handoff-B-tool-errors-output.md` |
 | 2 | 6 | Visible, resumable task state (G) | started: `handoff-G-task-state.md` |
 | 2 | 11 | File and symbol mentions (H) | started: `handoff-H-mentions.md` |
@@ -36,18 +36,24 @@ and `policy::Scope::AppData` (the app's own per-chat data: never prompts).
 
 ## Step 1 status
 
-**In progress (as of 2026-11-11, about 19:50 UTC).** Four developers are building the
-four step 1 features at once in this tree; none is integrated or reviewed yet, and the
-branch may not build at a given work-in-progress commit. Each writes its report to
-`report-<letter>-<name>.md` in this folder (what is done, tested, unverified and left).
-If those files exist, read them first: they are the most exact account of the state.
+**Done (2026-11-12): built, integrated, reviewed and tested on Linux.** The four features
+are in the tree with their tests, the whole workspace passes, and every end-to-end suite
+passes against the real app. Windows and macOS builds come from CI and nothing of step 1
+has been run on those systems yet.
+
+Read first, per feature: `report-A-allow-all.md`, `report-C-artifacts.md`,
+`report-D-search.md`, `report-E-tool-selection.md` (each developer's own account: what
+was built, the choices, what is not verified). `ARCHITECTURE.md` has the result: 8.4
+(tool selection), 9.3 (the new servers), 12 (tables), 13.2, 13.3 ("Approval modes"), 13.6
+(the guarded fetcher) and 13.8 (artifact previews). `CHANGELOG.md` says it for users.
 
 Where the code is:
-- A, Allow all: `crates/policy/src/engine.rs` and `command.rs` (the mode, what keeps
-  asking), `src-tauri/src/approvals.rs`, `src/components/AllowAllButton.tsx`,
+- A, Allow all: `crates/policy/src/engine.rs`, `allow_all.rs` and `command.rs` (the mode,
+  what keeps asking), `src-tauri/src/approvals.rs`, `src/components/AllowAllButton.tsx`,
   `ApprovalCard.tsx`, `PermissionsSettings.tsx`; e2e scenario `allow-all`.
-- C, Artifacts: `crates/store/src/artifacts.rs`, `src-tauri/src/artifacts.rs` (server,
-  commands, the `artifact:` protocol with its own CSP), `src/components/artifacts/`,
+- C, Artifacts: `crates/store/src/artifacts.rs`, `src-tauri/src/artifacts.rs` and
+  `src-tauri/src/artifacts/` (server, the `artifact` scheme with its sandbox, the start-up
+  check, tickets, what counts as outside content), `src/components/artifacts/`,
   `src/components/workbench/ArtifactsTab.tsx`; e2e scenario `artifacts`.
 - D, Web search: `crates/search/` (providers, guarded fetch, extraction, ranking,
   versions, official hosts), `crates/store/src/sources.rs`,
@@ -57,19 +63,64 @@ Where the code is:
   `find_tools`, `call_tool`), `src-tauri/src/tool_catalog.rs`, `mcp_cmd.rs`,
   `src/components/ToolsPanel.tsx`; e2e scenario `tool-selection`.
 
-What is left for step 1 after the four features are written (the lead's checklist):
-1. Make the whole workspace build and pass: the checks listed under "For steps 2 and 3".
-2. Re-run the tool catalog test with every server registered (E's report says what).
-3. Review the safety-critical code by reading it, not only by its tests: the Allow all
-   rules in the engine and every describer that sets them; the artifact protocol's
-   response headers, the frame's sandbox and the app CSP change; the search fetcher's
-   address checks on every redirect hop; `call_tool` producing the target's own action.
-4. Run the four new e2e scenarios and the existing suites (`scripted_agent.py` all,
-   `m0_close.py`, `m1_chat.py`, `m3_agent.py`).
-5. Show the build's commit in Settings → General so builds can be told apart.
-6. Update `ARCHITECTURE.md` (13.3 policy table and evaluation order, 13.2 CSP, 13.6
-   network use, 9.3 built-in servers, 12 storage), `CHANGELOG.md`, `README.md`.
-7. A commit without `[skip ci]`, CI green on all platforms, installer link to the owner.
+What the lead changed after the four reports (so the reports are out of date on these):
+1. **Previews, three safeguards.** A page is served only for a one-time ticket the app
+   issues for a frame it is creating (`protocol::Tickets`, command `artifact_frame`), so
+   a preview address from anywhere else opens nothing; this is the server-side answer to
+   "a preview loaded as the page of the whole window gets the app's script interface on
+   macOS and Linux". A page written after outside content entered the chat is served
+   without scripts and without `<link>` tags until the user presses Run scripts
+   (`artifacts/outside.rs`, column `artifact_versions.after_outside`, command
+   `allow_artifact_scripts`). Pictures and diagrams are served under a policy that runs
+   only the app's scripts (`Scripts::AppOnly`, a nonce per response).
+2. **Diagrams on Windows.** `freezePrototype` is off in `tauri.conf.json` and each page of
+   the app imports `src/lib/freeze.ts` first (report C, finding F5).
+3. **Allow all, after probing about 240 command lines.** Emptying a file from a terminal
+   asks; more git commands that discard work ask; a command line that hides nothing is no
+   longer treated as possibly reaching the network (`allow_all::may_hide_or_reach`);
+   computer use asks for the Delete key in a file manager and for typing into a web
+   browser after untrusted content.
+4. **Search is not marked outbound for D9** (`search_cmd.rs::action` says why), so a
+   grant or Allow all covers the second search of a turn.
+5. **Tool selection is held to the model's context** (`tool_select::allowance`,
+   `Candidate::cost`, `select_by_size`). Without it a new chat on a 4,096-token model
+   could not send a message. `e2e/m1_chat.py` is the test that caught it.
+6. Small things: the build's commit in Settings → General (`APP_COMMIT` from `build.rs`),
+   `Object.hasOwn` for tool card extras, the welcome text, `E2E_TRACE=1` for a line
+   number when a scripted scenario fails.
+
+For whoever builds steps 2 and 3, the places where step 1 expects you to do something:
+- `artifacts/outside.rs`, `OWN_DATA_TOOLS`: the tools whose results are the app's own data
+  and do not count as outside content. `update_task` is already there. `read_output` must
+  stay out (it returns another tool's result).
+- `tool_select`: `read_output` and `update_task` are companions and always shown. Each
+  costs room in a small context: run `e2e/m1_chat.py` (a 0.6B model at 4,096 tokens)
+  after adding them, and look at `select_by_size` if a turn is refused again.
+- `tool_catalog.rs` has entries for `read_output` and `update_task` checked against the
+  agreed shapes only; `tool_catalog_problems` (first assertion of the `tool-selection`
+  scenario) checks them against the real servers once those are registered.
+- The after-call hooks in `turns.rs` (`outputs::after_call`, `task::after_call`) are still
+  the no-op stubs.
+
+Checked at the end of step 1 (Linux): `cargo fmt --all --check`; `cargo +1.99 clippy
+--workspace --all-targets -- -D warnings`; `cargo +1.99 test --workspace` (about 1,400
+tests, 0 failed); `npm run lint`, `typecheck`, `test` (191), `build`; `scripts/notices.py
+--check`; `scripts/check-spawn.sh`; `e2e/scripted_agent.py` (22 scenarios),
+`m0_close.py`, `m1_chat.py`, `m3_agent.py`.
+
+Not verified, and not hidden:
+- Windows and macOS: nothing of step 1 has run there. The preview sandbox on those
+  systems rests on the framework's source as read (tauri 2.12.5, wry 0.57.2), on the
+  start-up check, and on the first real use.
+- A live search: DuckDuckGo turned the build machine away, so its results parser has only
+  seen a hand-written fixture. Brave and Tavily were never called with a key.
+- Two independent security reviews (Allow all bypasses; the search fetcher) were started
+  and cut off by a usage limit before they reported. The lead then did both checks in
+  a narrower form: the command probe above, and a read of `netguard.rs` and `fetch.rs`.
+  Not read line by line by a second pair of eyes: the browser tool's label rules for
+  Allow all (`crates/browser/src/intent.rs`), `call_tool`'s routing
+  (`tool_select/finder.rs`, covered by mutation-checked tests), and the search crate's
+  extraction and ranking under hostile pages (covered by its own limits and tests).
 
 ## For steps 2 and 3
 

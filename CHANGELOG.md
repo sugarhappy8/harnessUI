@@ -2,6 +2,41 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.0.4 (in progress)
+
+The owner asked for thirteen things in 0.0.4 and split the work into three steps. **Step 1 is done and is what this section describes**: an Allow all button, artifacts beside the chat, web search with sources, and a short tool list per task. Steps 2 and 3 (helpful tool errors and long output, task state, file and symbol mentions, pinned instructions and a context inspector, per-model checks and coding benchmarks) are not built yet; the plan and the handoff notes are in `docs/dev/0.0.4/`. The version number stays 0.0.3 until the release is complete; *Settings → General* now also shows which build it is.
+
+### Added
+- **Allow all.** A button in the chat header (next to Tools) switches a chat from *Ask first* to *Allow all*: the model then reads, writes and edits files in your approved folders, runs commands, commits with git, browses and uses its other tools without a card for each. A confirmation says exactly what still asks, and *Settings → Permissions → Approvals* has the same switch for every chat (off by default). **What still asks, whatever the mode:** deleting files or folders however it is done, and leaving a file empty; throwing away work (`git reset --hard`, checking files out over your changes, a forced push) and disk, system, registry and administrator commands; commands that hide what they run; writing to a `.git` folder, shell start-up files, git and ssh settings or autostart folders; paying, sending and publishing (web buttons that say so, and `git push`); typing or clicking in a terminal, in system settings or in a password manager; tools from added servers that are marked destructive. After the model has read a web page, a file or a tool result in the same turn, sending data out also asks: opening another site, typing into a page, tools from added servers, git pull and clone, and commands that use the network or can hide what they run. Folders you have not approved stay out of reach of the file tools. Calls that ran this way are listed in the audit log as "allowed by Allow all". What it cannot see is said in the confirmation too: the app checks the command it is about to run, not what a script or a program does once it is running.
+- **Artifacts beside the chat.** The model can make documents (Markdown), pages (HTML), pictures (SVG) and diagrams (Mermaid, bundled, no network). They open in a panel beside the chat with a preview and a source view. You can edit the source and save it as a new version, step through versions, restore one, export to a file, rename and delete. What goes wrong in a preview (script errors, blocked requests, a diagram that does not parse) is sent back to the model with line numbers so it can fix its own page, and "Ask the model to fix these" writes the problems into the message box.
+- **Web search with sources you can check.** The model can search the web and read the pages it finds; each asks first, and "Allow for this chat" covers the rest of the chat. Answers cite sources as numbered chips; a click opens the Sources tab with the page's address, when it was read, the exact text the model was given, and a check of whether a quoted sentence really is in that text. A number with no source behind it is marked. Official documentation is listed first, and when the question names a library your project uses, the version in use is added to the search. *Settings → Search* chooses the service: DuckDuckGo (no key), Brave or Tavily (your key, kept in the system keychain), or your own SearXNG address.
+- **A short tool list per task.** Instead of sending every tool description with every request, each turn shows the model the tools the task is about (file tools always; git when you talk about commits; the browser when you name a site), 14 at most. Two small tools let the model look up and run the others when it needs them. The Tools panel still decides which tools are on, and marks each as "shown" or "on request"; one switch there turns the choosing off. On a model with a small context this roughly halves what tools cost on every request.
+- *Settings → General* shows the build (the first characters of the commit) next to the version.
+
+### Changed
+- New chats start with Artifacts and Web search on, next to Files and Skills.
+- In Allow all, a command line that only has a glob, a redirection to a file or a variable as an argument is judged by the programs it names. It does not ask merely because it could not be fully broken down.
+- Repeated searches in one turn no longer ask again once you have allowed searching in the chat.
+- Computer use: the Delete key in a file manager always asks, and a grant for keyboard input to that file manager does not cover it.
+- The app's own pages now lock down JavaScript's base object themselves; the framework's switch for it is off, because on Windows it also applied inside preview frames, where the diagram library could not start.
+
+### Fixed
+- **A model loaded with a small context (4,096 tokens) could not send a message in a new chat.** With Artifacts and Web search on by default, the tool descriptions took more of such a context than a turn may start with, and every message was refused with "These 14 tools need about 2,165 tokens". The tool list is now also held to the model's context: when it would not fit, it is made again by size, the core file tools first. Found by the end-to-end test that loads a real 0.6B model.
+
+### Safety work behind the previews
+A preview is a page the model wrote, shown inside the window that also approves actions, so most of the work on it was isolation (ARCHITECTURE.md 13.8):
+- Previews load from an address of their own, in a sandbox with no storage, no access to the app's page and no way to make a request. The first design used an address that, on Windows, the framework would have treated as the app's own: a page the model wrote could have called the app's commands. That was caught by reading the framework's source before anything shipped, and the address changed.
+- When the app starts it checks its own sandbox with a page that tries to call the app, make requests and find storage. Scripts run in previews only after that check has passed; otherwise pages are shown without running.
+- A preview address works once, for a frame the app has just made. An address copied from anywhere opens nothing, so a preview cannot become the page of the whole window.
+- A page the model writes after it has read a file, a web page or a tool result in the chat is shown without its scripts until you press **Run scripts**. Pictures and diagrams never run scripts of their own.
+
+### Known limits of step 1
+- **Nothing here has run on Windows or macOS yet.** It was built and tested on Linux (about 1,400 unit and integration tests, 22 scripted end-to-end scenarios against the real app, and the chat and agent suites with a real small model). The Windows and macOS builds come from CI. On those systems the preview sandbox rests on the framework's source as read and on the start-up check; if the check fails there, previews show without scripts and say so.
+- **DuckDuckGo may turn the app away.** It refused automated searches from the machine this was built on, so a complete search through the default service has not been seen working. If a search says DuckDuckGo refused it, choose Brave, Tavily or SearXNG in *Settings → Search*. Brave and Tavily were tested only against their documented answers, without keys.
+- A script in a preview can still open a connection to a server (no request is sent, but the server's name leaves). This is why pages written after the model read outside content wait for "Run scripts".
+- Allow all reads the command line. It does not see what a script file or a program does once it runs.
+- A database made by an earlier 0.0.4 development build has to be deleted; one from 0.0.3 upgrades.
+
 ## 0.0.3 (2026-11-11)
 
 Three things reported from a real Windows PC on 0.0.2: a model that seemed not to load, a task that stopped at the step limit, and "the app looks too plain and is not smooth".

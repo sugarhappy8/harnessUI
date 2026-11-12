@@ -936,12 +936,25 @@ async fn chat_tool_list(
         .filter(|(_, dto)| dto.offered())
         .map(|(tool, dto)| crate::tool_select::Candidate::of(tool, dto.builtin))
         .collect();
+    // With the model's context known, the list is also held to what fits in it.
+    let known_context = match turn_context {
+        Some(n) => Some(n),
+        None => context_for_defaults(state, chat).await.tokens(),
+    };
+    let room = match known_context {
+        Some(n) => Some(crate::tool_select::allowance(
+            n,
+            crate::tool_select::other_fixed(state, chat).await,
+        )),
+        None => None,
+    };
     let shown = crate::tool_select::shown_before_a_message(
         &offered,
         &prefs,
         &crate::tool_select::skill_words(state),
         !state.skills.loaded_in(chat.id.0).is_empty(),
         setting,
+        room,
     );
     for (_, dto) in &mut list {
         dto.shown = dto.offered() && shown.contains(&dto.exposed);

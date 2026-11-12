@@ -762,9 +762,11 @@ mod tests {
         assert!(!TurnContext::default().allow_all, "Ask is the default mode");
     }
 
-    /// Web search (0.0.4) is an ordinary grantable scope: it asks first, "Allow for this
-    /// chat" covers later searches of that chat, and because a search sends the question
-    /// out, it asks again once untrusted content is in the turn (D9), grant or not.
+    /// Web search (0.0.4) is an ordinary grantable scope: it asks first and "Allow for
+    /// this chat" covers later searches of that chat. An action of this scope that is
+    /// marked outbound asks again once untrusted content is in the turn (D9), like any
+    /// other. (The search tools themselves are not marked outbound; `search_cmd.rs` says
+    /// why.)
     #[test]
     fn web_search_is_grantable_and_asks_again_after_untrusted_content() {
         let search = Action {

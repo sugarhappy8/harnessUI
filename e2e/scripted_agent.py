@@ -807,8 +807,8 @@ def p_text_call(c, notes):
     s.click_button("Tools")
     s.wait_text("Forget everything I allowed in this chat", 10)
     s.click_button("Forget everything I allowed in this chat")
-    time.sleep(0.5)
-    s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+    # The panel closes when the app has forgotten: only then is the next call sent.
+    s.wait_for(lambda: "Forget everything I allowed in this chat" not in s.page_text(), 10, "the panel closes after forgetting")
     time.sleep(0.3)
     Fake.queue.append({"tool_calls": [{"name": "read_file", "arguments": {"path": path}}]})
     Fake.queue.append({"content": "fourth read"})

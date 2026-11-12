@@ -301,6 +301,8 @@ pub struct Candidate {
     pub description: String,
     /// One of the app's own tools.
     pub builtin: bool,
+    /// About how many tokens its definition takes in a request ([`definition_cost`]).
+    pub cost: u32,
 }
 
 impl Candidate {
@@ -311,8 +313,69 @@ impl Candidate {
             server: tool.server.clone(),
             description: tool.def.description.clone(),
             builtin,
+            cost: definition_cost(&tool.exposed, &tool.def.description, &tool.def.input_schema),
         }
     }
+}
+
+/// About how many tokens a tool's definition takes in a request: its name, description and
+/// argument schema as JSON, and the wrapping around them, by the loop's own cautious
+/// estimate (three characters to a token). The loop measures the real size before a turn
+/// starts; this is for choosing a list that will pass that measurement.
+pub fn definition_cost(name: &str, description: &str, schema: &Value) -> u32 {
+    /// `{"type":"function","function":{"name":"","description":"","parameters":}}`.
+    const WRAPPING_CHARS: usize = 72;
+    let chars = name.chars().count()
+        + description.chars().count()
+        + schema.to_string().chars().count()
+        + WRAPPING_CHARS;
+    u32::try_from(chars.div_ceil(3)).unwrap_or(u32::MAX)
+}
+
+/// How many tokens the tool definitions of a turn may take in a context of `n_ctx` tokens,
+/// when the rest of the fixed part of every request (the system message with its
+/// additions) takes about `other_fixed`.
+///
+/// The loop refuses to start a turn whose fixed part is over
+/// `agent::context::TOOLS_FIT_PERCENT` of what a prompt may use (ARCHITECTURE.md 8.4).
+/// Before the selection knew about sizes, the tools that are on by default did not pass
+/// that check in a 4,096-token context, and no message could be sent. Sizes here are
+/// estimates, so the allowance stays a little under the loop's limit.
+pub fn allowance(n_ctx: u32, other_fixed: u32) -> u32 {
+    let budget = agent::context::ContextBudget::new(n_ctx, 0).budget;
+    let limit = u64::from(budget) * u64::from(agent::context::TOOLS_FIT_PERCENT) / 100;
+    let limit = limit * 97 / 100;
+    u32::try_from(limit)
+        .unwrap_or(u32::MAX)
+        .saturating_sub(other_fixed)
+}
+
+/// About how many tokens a turn in this chat sends besides tool definitions and messages:
+/// the system prompt, the list of skills, loaded skills, and the app's own lines around
+/// them.
+pub async fn other_fixed(state: &AppState, chat: &store::Chat) -> u32 {
+    /// The app's own part of the system message: folders, the system, how to call tools.
+    const APP_LINES_TOKENS: u32 = 220;
+    let prompt = match &chat.system_prompt {
+        Some(prompt) => prompt.clone(),
+        None => state
+            .store
+            .get_setting::<String>(crate::settings::DEFAULT_SYSTEM_PROMPT)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+    };
+    let mut text = prompt;
+    let skills = state.skills.enabled();
+    if !skills.is_empty() {
+        let refs: Vec<&tools::Skill> = skills.iter().collect();
+        text.push_str(&tools::skills::index_block(&refs));
+    }
+    for skill in state.skills.loaded_in(chat.id.0) {
+        text.push_str(&skill.body);
+    }
+    agent::estimate::estimate_tokens(&text).saturating_add(APP_LINES_TOKENS)
 }
 
 /// Everything [`select`] decides on.
@@ -332,6 +395,9 @@ pub struct Selecting<'a> {
     pub skill_loaded: bool,
     /// The most tools to show.
     pub max: usize,
+    /// The most tokens their definitions may take together ([`allowance`]); `None` when
+    /// the model's context is not known.
+    pub allowance: Option<u32>,
 }
 
 /// A tool that is in every turn's list when it is on: the companions, `run_subagent`
@@ -543,7 +609,91 @@ impl Picked {
 ///    this chat was shown before (the list never shrinks).
 /// 3. Then, while there is room: the core file tools, what the chat used or found, and
 ///    the tools of the groups the request is about, best first, the groups taking turns.
+///
+/// When that list would take more of the model's context than tool definitions may
+/// ([`Selecting::allowance`]), the list is made again by size ([`select_by_size`]).
 pub fn select(input: &Selecting<'_>) -> Vec<String> {
+    let chosen = select_by_count(input);
+    let Some(allowance) = input.allowance else {
+        return chosen;
+    };
+    let cost: u64 = input
+        .tools
+        .iter()
+        .filter(|t| chosen.contains(&t.name))
+        .map(|t| u64::from(t.cost))
+        .sum();
+    if cost <= u64::from(allowance) {
+        chosen
+    } else {
+        select_by_size(input, &chosen, allowance)
+    }
+}
+
+/// The list for a context too small for what [`select_by_count`] chose: tools are added
+/// in order of need while their definitions fit in `allowance` tokens.
+///
+/// 1. The core file tools.
+/// 2. What this chat was shown before, in that order, so the list changes as little as
+///    the smaller room allows.
+/// 3. `find_tools` and `call_tool`, both or neither: one is no use without the other.
+/// 4. The rest of what the list by count had, in the order of `tools`.
+///
+/// A tool that does not fit is left out and the smaller ones after it are still tried.
+/// Left-out tools stay on in the chat; without the finder pair the model cannot reach
+/// them in this turn, which is what a turn in so small a context was like before 0.0.4.
+fn select_by_size(input: &Selecting<'_>, by_count: &[String], allowance: u32) -> Vec<String> {
+    let tools = input.tools;
+    let mut chosen = vec![false; tools.len()];
+    let mut spent: u32 = 0;
+    let mut add = |indexes: &[usize], chosen: &mut Vec<bool>| {
+        let new: Vec<usize> = indexes.iter().copied().filter(|i| !chosen[*i]).collect();
+        let cost = new
+            .iter()
+            .fold(0u32, |sum, i| sum.saturating_add(tools[*i].cost));
+        if spent.saturating_add(cost) <= allowance {
+            spent = spent.saturating_add(cost);
+            for i in new {
+                chosen[i] = true;
+            }
+        }
+    };
+    for (index, tool) in tools.iter().enumerate() {
+        if is_core(tool) {
+            add(&[index], &mut chosen);
+        }
+    }
+    for name in input.shown {
+        if let Some(index) = tools.iter().position(|t| &t.name == name)
+            && !is_finder(&tools[index])
+        {
+            add(&[index], &mut chosen);
+        }
+    }
+    let finder: Vec<usize> = (0..tools.len()).filter(|i| is_finder(&tools[*i])).collect();
+    if finder.iter().all(|i| by_count.contains(&tools[*i].name)) {
+        add(&finder, &mut chosen);
+    }
+    for (index, tool) in tools.iter().enumerate() {
+        if by_count.contains(&tool.name) && !is_finder(tool) {
+            add(&[index], &mut chosen);
+        }
+    }
+    tools
+        .iter()
+        .zip(&chosen)
+        .filter(|(_, chosen)| **chosen)
+        .map(|(tool, _)| tool.name.clone())
+        .collect()
+}
+
+/// One of the two tools that reach the tools a turn does not show.
+fn is_finder(tool: &Candidate) -> bool {
+    tool.builtin && tool.server == finder::SERVER_NAME
+}
+
+/// The list by count: see [`select`].
+fn select_by_count(input: &Selecting<'_>) -> Vec<String> {
     let tools = input.tools;
     if tools.len() <= input.max {
         return tools.iter().map(|t| t.name.clone()).collect();
@@ -728,6 +878,7 @@ pub fn shown_before_a_message(
     skills: &[(String, String)],
     skill_loaded: bool,
     setting: ToolSelection,
+    allowance: Option<u32>,
 ) -> BTreeSet<String> {
     if !setting.auto {
         return offered.iter().map(|t| t.name.clone()).collect();
@@ -740,6 +891,7 @@ pub fn shown_before_a_message(
         skills,
         skill_loaded,
         max: setting.max,
+        allowance,
     })
     .into_iter()
     .collect()
@@ -788,11 +940,14 @@ pub async fn for_turn(
     chat: &store::Chat,
     history: &[HistoryMessage],
     enabled: Vec<RegisteredTool>,
+    n_ctx: u32,
 ) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
     let setting = settings(state).await;
     if !setting.auto || enabled.is_empty() {
         return (enabled, Vec::new());
     }
+    // What the definitions may take of this model's context.
+    let room = allowance(n_ctx, other_fixed(state, chat).await);
     let builtin = tool_catalog::builtin_servers(&state.host);
     let candidates: Vec<Candidate> = enabled
         .iter()
@@ -815,6 +970,7 @@ pub async fn for_turn(
         skills: &skill_words(state),
         skill_loaded: !state.skills.loaded_in(chat.id.0).is_empty(),
         max: setting.max,
+        allowance: Some(room),
     });
     let stored = crate::mcp_cmd::change_selection_memory(state, chat.id, |was_shown, found| {
         *was_shown = remembered(was_shown, &shown);

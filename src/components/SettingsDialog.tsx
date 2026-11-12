@@ -72,7 +72,9 @@ function General() {
       <section aria-label="About">
         <h3 className="mb-1 text-sm font-medium">About</h3>
         <p className="text-sm text-fg-muted">
-          {info ? `${info.name} ${info.version} · ${info.os} ${info.arch}` : APP_NAME}
+          {info
+            ? `${info.name} ${info.version}${info.commit ? ` (build ${info.commit})` : ""} · ${info.os} ${info.arch}`
+            : APP_NAME}
         </p>
         <p className="mt-1 text-xs text-fg-muted">
           Runs locally. No account, no telemetry. Licenses for bundled software are in

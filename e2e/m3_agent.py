@@ -7,11 +7,12 @@ with the denial reaching the model, Stop while a card is open, tool-call cards i
 the chat, and one audit row per call.
 
 The model (Qwen3 0.6B by default) decides whether to call a tool, so the scenario
-asks plainly and retries a prompt once if the model answers without calling.
+asks plainly and retries a prompt a few times if the model answers without calling.
 
     python3 -I e2e/m3_agent.py
 """
 
+import json
 import os
 import pathlib
 import shutil
@@ -101,6 +102,7 @@ def main() -> int:
         tools = s.invoke("list_chat_tools", {"chatId": chat_id})
         on = sorted(t["exposed"] for t in tools if t["enabledInChat"])
         print("    enabled:", on)
+        print("    shown before a message:", sorted(t["exposed"] for t in tools if t.get("shown")))
         assert "read_file" in on and "run_command" not in on, on
         servers = s.invoke("list_mcp_servers")
         assert {x["name"] for x in servers} >= {"files", "terminal", "git", "skills"}, servers
@@ -119,14 +121,16 @@ def main() -> int:
         def card_shown():
             return "Allow once" in s.page_text()
 
-        def ask_until_card(prompt, attempts=3):
+        def ask_until_card(prompt, attempts=5):
             for i in range(attempts):
                 before = len(messages())
                 send(prompt)
                 s.wait_for(lambda: card_shown() or (idle() and len(messages()) > before + 1), 240, "card or answer")
                 if card_shown():
                     return True
-                print(f"    attempt {i + 1}: the model answered without a tool call; asking again")
+                said = [m for m in messages() if m["role"] == "assistant"]
+                text = json.dumps(said[-1].get("content") if said else None)[:300]
+                print(f"    attempt {i + 1}: the model answered without a tool call; asking again. It said: {text}")
             return False
 
         step("read_file: approval card, Allow once")

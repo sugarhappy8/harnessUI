@@ -138,8 +138,8 @@ export function Welcome() {
           What should <span className="brand-text">{APP_NAME}</span> work on?
         </h1>
         <p className="max-w-md text-sm text-fg-muted">
-          Start a new chat or pick one from the list. The model runs on this computer and asks before it changes
-          anything.
+          Start a new chat or pick one from the list. The model runs on this computer. It asks before it changes
+          anything, unless you switch a chat to Allow all.
         </p>
       </div>
       <ModelCard onOpenModels={openModels} />
