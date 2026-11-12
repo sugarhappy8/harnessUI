@@ -63,6 +63,11 @@ one starts from this file and `README.md`.
   work in progress with [skip ci].
 - 18:10 UTC: 0.0.5 merged into `main` (4189a3a, released as v0.0.5); `main` merged into this
   branch (no file changes). From now on merge `main`, not the 0.0.5 branch.
+- 18:51 UTC check: WP1a developed (contract tests 11/11 and m10 pass with the real model),
+  waiting for its reviews; WP1b, WP2, WP3a, WP3b, WP4a in development; WP6 developed, in
+  review; WP7 developed (its developer returned early, so the fix stage must finish its
+  checks) and reviewed; WP4c developed, reviewed, in fixing; items 5 and 6 designed
+  (`item5-spec.md`, `item6-spec.md`) and critiqued, being revised.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

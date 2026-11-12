@@ -1129,10 +1129,8 @@ mod tests {
 
         // Crashing on the processor with Save memory on: the restarts, then the failure.
         let crash = Script::Run(Some(Duration::from_secs(1)));
-        let (sup, log, mut rx) = supervisor(
-            vec![crash; 4],
-            vec![candidate(BackendKind::Cpu, None)],
-        );
+        let (sup, log, mut rx) =
+            supervisor(vec![crash; 4], vec![candidate(BackendKind::Cpu, None)]);
         let exit = sup
             .run(
                 spec_with(BackendKind::Cpu, None, GpuUse::Off, true),

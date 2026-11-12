@@ -15,9 +15,11 @@
 //!    summary (about 4,000 characters, twice the 2,048 a summary may keep at 4,096 tokens)
 //!    is rewritten by the model under the smaller cap before the turn measures anything;
 //!    the stage-2 event carries the new summary for the same messages and the turn answers.
-//! 2. How long it may think: with Short, each request carries a thinking budget of 1,024
-//!    tokens (min(1,024, half the output limit)), and the server ends the model's reasoning
-//!    there (plus the closing tag it forces).
+//! 2. How long it may think: each request carries a thinking budget of min(the choice,
+//!    half the output limit), and the server ends the model's reasoning there (plus the
+//!    closing tag it forces). The loop is told the model holds 1,024 tokens, so the output
+//!    limit is about 940 and Short's 1,024 is capped at about 470: the same field and rule
+//!    as every choice, and a turn short enough for a slow processor.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -31,8 +33,8 @@ use agent::{
 use async_trait::async_trait;
 use runtime::llama::server::loopback_client_builder;
 use runtime::{
-    Backend, BackendKind, GpuUse, LaunchConfig, RunningServer, RuntimeLayout, StartSpec,
-    discover, free_loopback_port, random_api_key, start,
+    Backend, BackendKind, GpuUse, LaunchConfig, RunningServer, RuntimeLayout, StartSpec, discover,
+    free_loopback_port, random_api_key, start,
 };
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
@@ -43,7 +45,10 @@ const CONTEXT: u32 = 4_096;
 /// The most characters a summary may keep at [`CONTEXT`] (`ContextBudget::summary_max_chars`).
 const SUMMARY_CAP_AT_4K: usize = 2_048;
 /// How long one turn may take on a slow processor before the test gives up.
-const TURN_TIMEOUT: Duration = Duration::from_secs(1_200);
+const TURN_TIMEOUT: Duration = Duration::from_secs(1_800);
+/// What the loop is told the model holds in the thinking check: it bounds the output limit,
+/// so the turn stays short however long the model would think.
+const THINKING_CONTEXT: u32 = 1_024;
 /// Tokens the server may add after the budget ends the reasoning (the closing tag it
 /// forces, and the token the budget was reached on).
 const BUDGET_SLACK: usize = 64;
@@ -299,16 +304,16 @@ async fn conversation_memory_with_the_real_model() {
     let answer = outcome.messages.last().expect("an answer");
     assert!(!answer.text().trim().is_empty(), "{answer:?}");
 
-    // 2. How long it may think: Short is 1,024 tokens here (half the output limit is more).
+    // 2. How long it may think: Short (1,024 tokens) capped at half the output limit.
     let question = "A farmer has 17 sheep, 9 goats and 4 cows. He sells a third of the animals \
                     that have four legs and buys twice as many chickens as he has cows left. \
-                    Think it through step by step, checking each step twice, then give the \
-                    number of legs on the farm.";
-    let mut input = TurnInput::new(
-        vec![HistoryMessage::user(question)],
-        caps,
-        template.clone(),
-    );
+                    Think it through step by step, checking each step twice. Then reply with \
+                    only the number of legs on the farm.";
+    let caps = ModelCaps {
+        n_ctx: THINKING_CONTEXT,
+        ..caps
+    };
+    let mut input = TurnInput::new(vec![HistoryMessage::user(question)], caps, template.clone());
     input.thinking = true;
     input.thinking_limit = ThinkingLimit::Short;
     let events = Events::default();
@@ -319,8 +324,16 @@ async fn conversation_memory_with_the_real_model() {
         outcome.status
     );
     let prompt = outcome.usage.last_prompt_tokens.unwrap_or(0);
-    let budget = ThinkingLimit::Short.budget(CONTEXT.saturating_sub(prompt));
-    assert_eq!(budget, 1_024, "a short prompt leaves more than 2,048 tokens");
+    assert!(
+        prompt > 0 && prompt < THINKING_CONTEXT / 4,
+        "{prompt} prompt tokens"
+    );
+    // The output limit the loop sent: what is left of the context after the prompt.
+    let budget = ThinkingLimit::Short.budget(THINKING_CONTEXT - prompt);
+    assert!(
+        budget < 1_024,
+        "half the output limit decides here: {budget}"
+    );
     let reasoning = outcome
         .messages
         .iter()

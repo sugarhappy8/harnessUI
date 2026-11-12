@@ -237,7 +237,6 @@ where
     let Some(count) = count else {
         return out;
     };
-    if out.1.is_some() || out.1.is_none() { return out; } // TEMP: old behaviour
     let allowed = (cap / CHARS_PER_TOKEN).max(1);
     for _ in 0..MAX_COUNTS {
         let Some(tokens) = count(out.0.clone()).await else {
@@ -739,7 +738,13 @@ mod tests {
 
     fn table(rows: usize) -> String {
         (1..=rows)
-            .map(|i| format!("{i},{},{}\n", (i * 7_919) % 100_003, (i * 104_729) % 1_000_003))
+            .map(|i| {
+                format!(
+                    "{i},{},{}\n",
+                    (i * 7_919) % 100_003,
+                    (i * 104_729) % 1_000_003
+                )
+            })
             .collect()
     }
 
@@ -755,8 +760,8 @@ mod tests {
         let numbers = table(1_200);
 
         // An endpoint: the estimate alone (no count).
-        let none: Option<fn(String) -> std::future::Ready<Option<usize>>> = None;
-        let by_estimate = cut_to_share(&numbers, cap, false, none).await;
+        type Count = fn(String) -> std::future::Ready<Option<usize>>;
+        let by_estimate = cut_to_share(&numbers, cap, false, None::<Count>).await;
         assert_eq!(by_estimate, cut_document(&numbers, cap, false));
 
         // A local model whose tokenizer splits digits.
@@ -793,7 +798,11 @@ mod tests {
     async fn the_models_count_cuts_short_dense_text_and_never_below_the_floor() {
         let cap = document_cap_chars(8_192, 1);
         let dense = "1234567890\n".repeat(cap / 11);
-        assert_eq!(cut_document(&dense, cap, false).1, None, "fits by characters");
+        assert_eq!(
+            cut_document(&dense, cap, false).1,
+            None,
+            "fits by characters"
+        );
         let asked = std::sync::Mutex::new(Vec::new());
         let count = counter(1, &asked);
         let (out, cut) = cut_to_share(&dense, cap, false, Some(&count)).await;
@@ -813,7 +822,11 @@ mod tests {
         let count = counter(50, &asked);
         let (out, cut) = cut_to_share(&numbers, cap, false, Some(&count)).await;
         assert!(cut.is_some());
-        assert!(out.chars().count() <= MIN_DOCUMENT_CHARS, "{}", out.chars().count());
+        assert!(
+            out.chars().count() <= MIN_DOCUMENT_CHARS,
+            "{}",
+            out.chars().count()
+        );
         assert!(out.chars().count() > 0);
         assert!(asked.lock().unwrap().len() <= MAX_COUNTS);
     }

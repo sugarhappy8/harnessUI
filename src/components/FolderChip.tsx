@@ -228,29 +228,36 @@ export function FolderChip(props: { chatId: number; workingFolder: string | null
           title={title}
           data-folder-chip
           className={
-            "flex min-w-0 shrink items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap " +
+            "flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap " +
             (full ? MODE_LOOK.fullAccess.button : "text-fg-muted hover:bg-bg-muted hover:text-fg")
           }
         >
           <Icon size={15} className="shrink-0" aria-hidden />
           {full ? (
-            <span className="truncate">{WHOLE_COMPUTER}</span>
+            <span className="hidden @2xl:inline">{WHOLE_COMPUTER}</span>
           ) : working ? (
             <>
-              <bdi dir="ltr" className="max-w-[7rem] min-w-0 truncate @3xl:max-w-[14rem]">
+              <bdi dir="ltr" className="max-w-[5rem] truncate @3xl:max-w-[14rem]">
                 {name}
               </bdi>
               {list.length > 1 && (
                 <>
                   {" "}
-                  <span className="shrink-0">{`+ ${list.length - 1} more`}</span>
+                  <span>
+                    {`+ ${list.length - 1}`}
+                    <span className="hidden @3xl:inline"> more</span>
+                  </span>
                 </>
               )}
             </>
           ) : (
             folders && (
-              <span className="truncate">
-                No folder · <span className="text-accent">Choose</span>
+              <span>
+                No folder
+                <span className="hidden @3xl:inline">
+                  {" · "}
+                  <span className="text-accent">Choose</span>
+                </span>
               </span>
             )
           )}

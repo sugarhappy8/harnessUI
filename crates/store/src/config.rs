@@ -760,7 +760,10 @@ mod tests {
         ] {
             store.set_setting(k, &v).await.expect("set");
         }
-        let got = store.settings_with_prefix("modelProfile:").await.expect("list");
+        let got = store
+            .settings_with_prefix("modelProfile:")
+            .await
+            .expect("list");
         assert_eq!(
             got,
             vec![
@@ -773,7 +776,13 @@ mod tests {
         assert_eq!(got, vec![("a%b:1".to_string(), json!(6))]);
         let got = store.settings_with_prefix("model_").await.expect("list");
         assert_eq!(got, vec![("model_Profile:ee".to_string(), json!(5))]);
-        assert!(store.settings_with_prefix("nothing").await.expect("list").is_empty());
+        assert!(
+            store
+                .settings_with_prefix("nothing")
+                .await
+                .expect("list")
+                .is_empty()
+        );
         assert!(matches!(
             store.settings_with_prefix("").await,
             Err(StoreError::InvalidInput(_))

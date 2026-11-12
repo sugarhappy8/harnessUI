@@ -27,6 +27,13 @@ pub struct GroupMeta {
     pub model_files: Vec<String>,
     pub projector: Option<String>,
     pub catalog_id: Option<String>,
+    /// 0.0.6: what the uploader listed when the download started, saved with the model
+    /// for comparing it offline (absent in groups saved before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub: Option<crate::dto::HubFacts>,
+    /// 0.0.6: the parameter count Hugging Face gave for the repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<u64>,
 }
 
 fn meta_key(group: &str) -> String {
@@ -57,6 +64,17 @@ struct Live {
     last_emit: Option<Instant>,
     last_persist: Option<Instant>,
     window: Option<(Instant, u64)>,
+}
+
+/// What a finished download saves with the model besides its file (0.0.6 item 4): the
+/// catalog id, the file's path in its repository and what the uploader listed.
+fn saved_facts(meta: &GroupMeta) -> crate::hub::SavedFacts {
+    crate::hub::SavedFacts {
+        catalog_id: meta.catalog_id.clone(),
+        repo_file: meta.model_files.first().cloned(),
+        hub: meta.hub.clone(),
+        parameters: meta.parameters,
+    }
 }
 
 #[derive(Default)]
@@ -541,6 +559,7 @@ impl DownloadManager {
             sha,
             projector,
             ModelSource::Download,
+            saved_facts(meta),
         )
         .await?;
         tracing::info!(repo = %meta.repo, label = %meta.label, "download finished");
@@ -604,5 +623,60 @@ impl DownloadManager {
             self.emit(app, d.clone());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A group saved before 0.0.6 still reads, and a finished download saves its catalog
+    /// id, its file's path in the repository and the uploader's facts with the model.
+    #[test]
+    fn group_meta_old_and_new() {
+        let old: GroupMeta = serde_json::from_value(serde_json::json!({
+            "repo": "example-quants/Sample-7B-GGUF",
+            "commit": "4444444444444444444444444444444444444444",
+            "label": "Q4_K_M",
+            "modelFiles": ["Q4/Sample-7B-Q4_K_M-00001-of-00002.gguf", "Q4/Sample-7B-Q4_K_M-00002-of-00002.gguf"],
+            "projector": null,
+            "catalogId": "sample-7b-q4km"
+        }))
+        .unwrap();
+        assert!(old.hub.is_none() && old.parameters.is_none());
+        let saved = saved_facts(&old);
+        assert_eq!(saved.catalog_id.as_deref(), Some("sample-7b-q4km"));
+        assert_eq!(
+            saved.repo_file.as_deref(),
+            Some("Q4/Sample-7B-Q4_K_M-00001-of-00002.gguf")
+        );
+        assert!(saved.hub.is_none());
+        // Written again, the unknown facts stay out of the JSON.
+        let json = serde_json::to_value(&old).unwrap();
+        assert!(json.get("hub").is_none() && json.get("parameters").is_none());
+
+        let hub = crate::dto::HubFacts {
+            repo: "example-quants/Sample-7B-GGUF".into(),
+            author: Some("example-quants".into()),
+            pipeline_tag: Some("text-generation".into()),
+            base_model: Some("example-labs/Sample-7B".into()),
+            languages: vec!["en".into()],
+            license: None,
+            tags: vec!["code".into()],
+            downloads: Some(1),
+            likes: Some(2),
+            last_modified: None,
+            gated: false,
+            card_url: "https://huggingface.co/example-quants/Sample-7B-GGUF".into(),
+        };
+        let new = GroupMeta {
+            hub: Some(hub.clone()),
+            parameters: Some(7_000_000_000),
+            ..old
+        };
+        let back: GroupMeta = serde_json::from_value(serde_json::to_value(&new).unwrap()).unwrap();
+        let saved = saved_facts(&back);
+        assert_eq!(saved.hub, Some(hub));
+        assert_eq!(saved.parameters, Some(7_000_000_000));
     }
 }

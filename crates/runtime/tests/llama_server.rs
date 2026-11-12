@@ -608,7 +608,8 @@ async fn all_of_it_starts_with_fit_off() {
     };
     let args = build_args(&all);
     assert!(
-        args.windows(4).any(|w| w == ["-ngl", "all", "--fit", "off"]),
+        args.windows(4)
+            .any(|w| w == ["-ngl", "all", "--fit", "off"]),
         "{args:?}"
     );
     let server = start_cpu(&bin, all).await;
@@ -717,11 +718,16 @@ async fn the_alias_is_the_model_id_in_every_api() {
     assert_eq!(ready["id"], MODEL_ALIAS, "{ready}");
 }
 
-/// A context far too large for any computer fails to allocate: with Save memory on, the
-/// supervisor retries once without it on the same backend, says so with a typed stage, and
-/// then reports the failure (the processor has nothing to step down to).
+/// A context far too large for any computer fails to allocate, through real llama-server
+/// processes and the real supervisor: on a graphics backend with Save memory on, it retries
+/// once without it on the same backend, then steps down to the processor, each with a typed
+/// event, and reports the failure. On the processor nothing is retried without Save memory
+/// (it can always do it, so the failure is memory, and turning it off needs more).
 ///
-/// Linux only, and only while the kernel refuses impossible allocations
+/// The Linux build has no graphics backend, so the "graphics" backend is the same
+/// processor build labelled Vulkan with no device (`--device none`): the supervisor decides
+/// by the label, while the processes, their log and its classification are the pinned
+/// build's. Linux only, and only while the kernel refuses impossible allocations
 /// (`vm.overcommit_memory` is not 1): elsewhere the allocation of several terabytes might
 /// be granted lazily and then touched.
 #[cfg(target_os = "linux")]
@@ -740,48 +746,79 @@ async fn a_failure_save_memory_may_cause_is_retried_once_without_it() {
         return;
     }
     let cpu = backend(&bin, BackendKind::Cpu);
-    let (tx, mut rx) = unbounded_channel();
-    let mut supervisor = Supervisor::local(
-        vec![Candidate {
-            backend: cpu.clone(),
-            device: None,
-            hip_visible_devices: None,
-        }],
-        tx,
-    );
-    let spec = StartSpec {
-        backend: cpu,
+    let mut graphics = cpu.clone();
+    graphics.kind = BackendKind::Vulkan;
+    let candidate = |backend: &Backend| Candidate {
+        backend: backend.clone(),
+        device: None,
+        hip_visible_devices: None,
+    };
+    let too_large = |backend: Backend, gpu: GpuUse| StartSpec {
+        backend,
         launch: LaunchConfig {
             ctx: 50_000_128,
+            gpu,
             save_memory: true,
-            ..launch(gguf)
+            ..launch(gguf.clone())
         },
         load_timeout: LOAD_TIMEOUT,
     };
-    let error = supervisor.start(spec).await.expect_err("cannot allocate");
+    /// The stages and step-downs, in order.
+    fn changes(events: &[ServerEvent]) -> Vec<&ServerEvent> {
+        events
+            .iter()
+            .filter(|e| matches!(e, ServerEvent::Stage(_) | ServerEvent::SteppedDown { .. }))
+            .collect()
+    }
+    let starts = |events: &[ServerEvent]| {
+        events
+            .iter()
+            .filter(|e| **e == ServerEvent::State(ServerState::Starting))
+            .count()
+    };
+
+    // A graphics backend: Save memory off, then the processor.
+    let (tx, mut rx) = unbounded_channel();
+    let mut supervisor = Supervisor::local(vec![candidate(&graphics), candidate(&cpu)], tx);
+    let error = supervisor
+        .start(too_large(graphics.clone(), GpuUse::All))
+        .await
+        .expect_err("cannot allocate");
     assert_eq!(
         error.failure(),
         LoadFailure::ContextTooLarge,
         "{}",
         error.stderr_tail().join("\n")
     );
-    let events: Vec<ServerEvent> = drain(&mut rx)
-        .into_iter()
-        .filter(|e| !matches!(e, ServerEvent::Log(_)))
-        .collect();
-    let stages: Vec<&ServerEvent> = events
-        .iter()
-        .filter(|e| matches!(e, ServerEvent::Stage(_) | ServerEvent::SteppedDown { .. }))
-        .collect();
+    let events = drain(&mut rx);
     assert_eq!(
-        stages,
-        vec![&ServerEvent::Stage(LoadStage::RetryingWithoutSaveMemory {
-            backend: BackendKind::Cpu
-        })]
+        changes(&events),
+        vec![
+            &ServerEvent::Stage(LoadStage::RetryingWithoutSaveMemory {
+                backend: BackendKind::Vulkan
+            }),
+            &ServerEvent::SteppedDown {
+                from: BackendKind::Vulkan,
+                to: BackendKind::Cpu,
+                reason: LoadFailure::ContextTooLarge,
+            },
+        ]
     );
-    let starts = events
-        .iter()
-        .filter(|e| **e == ServerEvent::State(ServerState::Starting))
-        .count();
-    assert_eq!(starts, 2, "one start with Save memory, one without");
+    assert_eq!(
+        starts(&events),
+        3,
+        "with Save memory, without it, then on the processor"
+    );
+
+    // The processor alone: one start, no retry.
+    let (tx, mut rx) = unbounded_channel();
+    let mut supervisor = Supervisor::local(vec![candidate(&cpu)], tx);
+    let error = supervisor
+        .start(too_large(cpu, GpuUse::Off))
+        .await
+        .expect_err("cannot allocate");
+    assert_eq!(error.failure(), LoadFailure::ContextTooLarge);
+    let events = drain(&mut rx);
+    assert!(changes(&events).is_empty(), "{events:?}");
+    assert_eq!(starts(&events), 1);
 }

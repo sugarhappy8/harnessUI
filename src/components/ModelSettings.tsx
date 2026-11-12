@@ -139,6 +139,8 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
   // What the panel is doing while a command runs (they can take a while on a busy computer).
   const [working, setWorking] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // The facts for the unsaved choices (`draftKey`), so the fit marks follow them.
+  const [preview, setPreview] = useState<{ key: string; info: ModelLoadInfo } | null>(null);
   const runtime = useApp((s) => s.runtime);
   const apple = isAppleComputer();
 
@@ -160,6 +162,33 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
   const name = info?.fileName ?? path.split(/[\\/]/).pop() ?? path;
   const loaded = !!info && (info.loaded || (runtime?.state === "ready" && runtime.modelPath === path));
   const dirty = !!info && !!draft && !same(draft, info.overrides);
+  const draftKey = draft ? JSON.stringify(draft) : null;
+  const savedKey = info ? JSON.stringify(info.overrides) : null;
+
+  // Unsaved choices: ask for their fit (nothing is saved), a moment after the last change.
+  // An answer for choices changed since is dropped; without an answer the saved marks stay,
+  // and Save says what is wrong with the choices, if anything.
+  useEffect(() => {
+    if (draftKey === null || draftKey === savedKey) return;
+    const choices = JSON.parse(draftKey) as ModelLoadSettings;
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const next = await ipc.previewModelLoadSettings(path, choices);
+          if (alive) setPreview({ key: draftKey, info: next });
+        } catch {
+          // The saved marks stay.
+        }
+      })();
+    }, 150);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [path, draftKey, savedKey]);
+  // What the controls show: the facts for the choices on screen when known, else the saved ones.
+  const facts = info && dirty && preview && preview.key === draftKey ? preview.info : info;
 
   function change(patch: Partial<ModelLoadSettings>) {
     setSaved(false);
@@ -245,8 +274,15 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
             {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
             {!info && !error && <p className="text-sm text-fg-muted">Reading the model file…</p>}
-            {info && draft && (
-              <Controls info={info} draft={draft} apple={apple} disabled={working !== null} onChange={change} />
+            {facts && draft && (
+              <Controls
+                info={facts}
+                draft={draft}
+                dirty={dirty}
+                apple={apple}
+                disabled={working !== null}
+                onChange={change}
+              />
             )}
           </div>
           {info && draft && (
@@ -312,22 +348,22 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
 }
 
 /**
- * The panel's settings, in plain words, each "Same as default (…)" until changed.
- *
- * TODO(0.0.6): the fit marks are those of the saved settings (`model_load_info`); a change
- * to another setting in the draft (Save memory, the graphics card) updates them only after
- * Save. A preview command that checks the fit of unsaved choices would let them follow the
- * draft.
+ * The panel's settings, in plain words, each "Same as default (…)" until changed. `info`
+ * holds the facts for the choices on screen (`model_load_info` with the unsaved choices
+ * once it answered), so the fit marks, the too-large line and what Automatic would pick
+ * follow a change before it is saved.
  */
 function Controls(props: {
   info: ModelLoadInfo;
   draft: ModelLoadSettings;
+  /** The choices on screen are not saved yet. */
+  dirty: boolean;
   apple: boolean;
   /** While a command runs, nothing can be changed. */
   disabled: boolean;
   onChange: (patch: Partial<ModelLoadSettings>) => void;
 }) {
-  const { info, draft, apple, disabled, onChange } = props;
+  const { info, draft, dirty, apple, disabled, onChange } = props;
   const d = info.defaults;
 
   // How much it can remember.
@@ -350,7 +386,10 @@ function Controls(props: {
   if (!contextOptions.some((o) => o.value === "auto")) contextOptions.splice(1, 0, { value: "auto", label: "Automatic" });
   const usesAuto = draft.context === "auto" || (draft.context === "default" && autoDefault);
   const autoOption = info.contextOptions.find((o) => o.choice === "auto");
-  const autoTokens = info.loaded && info.autoCtx ? info.autoCtx : (autoOption?.tokens ?? 0);
+  // What Automatic chose for the loaded copy while it uses the settings on screen (D2b),
+  // else what it would choose with them now.
+  const autoTokens =
+    !dirty && info.loaded && !info.olderSettingsLoaded && info.autoCtx ? info.autoCtx : (autoOption?.tokens ?? 0);
 
   // Use the graphics card: only when there is one.
   const showGpu = info.devices.length > 0;

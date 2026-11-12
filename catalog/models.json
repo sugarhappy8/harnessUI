@@ -80,7 +80,6 @@
       "source": "https://huggingface.co/Qwen/Qwen3.5-4B",
       "goodAt": [
         "tools",
-        "images",
         "long-documents",
         "languages"
       ],
@@ -225,7 +224,6 @@
       "source": "https://huggingface.co/Qwen/Qwen3.5-9B",
       "goodAt": [
         "tools",
-        "images",
         "long-documents",
         "languages"
       ],
@@ -411,7 +409,7 @@
         "languages"
       ],
       "publisher": "Mistral AI",
-      "parameters": 13900000000,
+      "parameters": 13500000000,
       "languages": [
         "en",
         "fr",
@@ -460,13 +458,11 @@
       "source": "https://huggingface.co/Qwen/Qwen3.8-27B",
       "goodAt": [
         "coding",
-        "tools",
         "images",
         "long-documents"
       ],
       "publisher": "Qwen Team",
-      "parameters": 27000000000,
-      "released": "2026-08"
+      "parameters": 27000000000
     },
     "gemma-4-26b-a4b-qat": {
       "name": "Gemma 4 26B A4B (QAT)",
@@ -646,13 +642,11 @@
       "source": "https://huggingface.co/Qwen/Qwen3.8-27B",
       "goodAt": [
         "coding",
-        "tools",
         "images",
         "long-documents"
       ],
       "publisher": "Qwen Team",
-      "parameters": 27000000000,
-      "released": "2026-08"
+      "parameters": 27000000000
     },
     "gemma-4-31b-qat": {
       "name": "Gemma 4 31B (QAT)",

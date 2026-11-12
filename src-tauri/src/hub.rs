@@ -18,6 +18,9 @@ use crate::downloads::{DownloadGroupDto, DownloadManager, GroupMeta};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+mod compare;
+use compare::{Hub as _, LiveHub};
+
 const HF_TOKEN_KEY: &str = "hf-token";
 const SETTING_MODELS_DIR: &str = "modelsDir";
 const SETTING_HF_ENDPOINT: &str = "hfEndpoint";
@@ -279,6 +282,9 @@ pub async fn hub_repo(
 ) -> AppResult<RepoView> {
     let client = hf_client(&app).await?;
     let detail = client.repo(&repo_id, None).await.map_err(hf_error)?;
+    // 0.0.6: the comparison reuses this listing and header instead of asking again.
+    let live = LiveHub::new(Some(client.clone()));
+    live.remember_listing(None, Arc::new(detail.clone()));
     let classified = models::classify(&detail.files);
     let fit_context = ctx
         .unwrap_or(u64::from(
@@ -286,14 +292,14 @@ pub async fn hub_repo(
         ))
         .max(512);
 
-    // Read the header of the smallest variant to get the model's real parameters.
+    // Read the header of the smallest variant to get the model's real parameters (once
+    // per commit in a session: headers at a commit never change).
     let summary = match classified.variants.iter().min_by_key(|v| v.total_size) {
-        Some(v) => client
-            .fetch_head(&detail.id, &detail.commit, &v.first_file().path, HEAD_BYTES)
+        Some(v) => live
+            .head(&detail.id, &detail.commit, &v.first_file().path)
             .await
             .ok()
-            .and_then(|bytes| models::gguf::read_prefix(&bytes).ok())
-            .map(|h| ModelSummary::from_header(&h)),
+            .map(|s| (*s).clone()),
         None => None,
     };
     let card = client.model_card(&detail.id, &detail.commit).await.ok();
@@ -472,6 +478,7 @@ fn file_spec(repo: &str, commit: &str, f: &models::RepoFile) -> FileSpec {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_group(
     app: &AppHandle,
     repo: &str,
@@ -480,6 +487,7 @@ async fn start_group(
     model_files: &[models::RepoFile],
     projector: Option<&models::RepoFile>,
     catalog_id: Option<String>,
+    facts: Option<(crate::dto::HubFacts, Option<u64>)>,
 ) -> AppResult<String> {
     let dir = models_dir(app).await;
     std::fs::create_dir_all(&dir).map_err(|e| {
@@ -502,6 +510,8 @@ async fn start_group(
         model_files: model_files.iter().map(|f| f.path.clone()).collect(),
         projector: projector.map(|p| p.path.clone()),
         catalog_id,
+        parameters: facts.as_ref().and_then(|(_, p)| *p),
+        hub: facts.map(|(h, _)| h),
     };
     let manager = app.state::<Arc<DownloadManager>>().inner().clone();
     manager.start(app, meta, files).await
@@ -532,6 +542,16 @@ pub async fn download_start(
     } else {
         None
     };
+    // 0.0.6: what the uploader lists, saved with the model for comparing it offline.
+    let facts = (
+        compare::hub_facts(
+            &detail,
+            client
+                .page_url(&detail.id)
+                .unwrap_or_else(|| format!("{}/{}", models::hf::OFFICIAL_ENDPOINT, detail.id)),
+        ),
+        detail.gguf.as_ref().and_then(|g| g.parameters),
+    );
     start_group(
         &app,
         &detail.id,
@@ -540,6 +560,7 @@ pub async fn download_start(
         &variant.files,
         projector,
         None,
+        Some(facts),
     )
     .await
 }
@@ -551,6 +572,17 @@ pub async fn download_catalog_entry(app: AppHandle, entry_id: String) -> AppResu
         .models
         .get(&entry_id)
         .ok_or_else(|| AppError::not_found("catalog entry"))?;
+    // 0.0.6: the uploader's facts when the comparison already read them (nothing is
+    // fetched for this; the catalog id is saved either way).
+    let live = LiveHub::new(hf_client(&app).await.ok());
+    let facts = live
+        .cached_listing(&entry.repo, Some(&entry.revision))
+        .map(|d| {
+            (
+                compare::hub_facts(&d, live.page_url(&entry.repo)),
+                d.gguf.as_ref().and_then(|g| g.parameters),
+            )
+        });
     start_group(
         &app,
         &entry.repo,
@@ -559,6 +591,7 @@ pub async fn download_catalog_entry(app: AppHandle, entry_id: String) -> AppResu
         &entry.files,
         entry.mmproj.as_ref(),
         Some(entry_id),
+        facts,
     )
     .await
 }
@@ -611,9 +644,47 @@ struct StoredSummary {
     is_moe: bool,
     #[serde(default)]
     projector: Option<String>,
+    // ---- 0.0.6 item 4: for comparing installed models offline. Absent in rows saved
+    // before; each is left out of the JSON when unknown.
+    /// For a mixture of experts: how many experts it has and uses for each token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expert_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expert_used_count: Option<u64>,
+    /// The parameter count Hugging Face gave when it was downloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parameters: Option<u64>,
+    /// The catalog entry it was downloaded from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog_id: Option<String>,
+    /// The file's path in its Hugging Face repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repo_file: Option<String>,
+    /// What the uploader listed when it was downloaded (already made safe to show).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hub: Option<crate::dto::HubFacts>,
+}
+
+/// What a download knows about a model besides its file (0.0.6 item 4), saved with it.
+#[derive(Debug, Clone, Default)]
+pub struct SavedFacts {
+    pub catalog_id: Option<String>,
+    pub repo_file: Option<String>,
+    pub hub: Option<crate::dto::HubFacts>,
+    pub parameters: Option<u64>,
+}
+
+impl SavedFacts {
+    fn is_empty(&self) -> bool {
+        self.catalog_id.is_none()
+            && self.repo_file.is_none()
+            && self.hub.is_none()
+            && self.parameters.is_none()
+    }
 }
 
 /// Adds a model file to the installed list, reading its header for the badges.
+#[allow(clippy::too_many_arguments)]
 pub async fn register_installed(
     state: &AppState,
     path: &Path,
@@ -622,6 +693,34 @@ pub async fn register_installed(
     sha256: Option<String>,
     projector: Option<String>,
     source: ModelSource,
+    saved: SavedFacts,
+) -> AppResult<store::ModelId> {
+    register_installed_in(
+        &state.store,
+        path,
+        repo,
+        size,
+        sha256,
+        projector,
+        source,
+        saved,
+    )
+    .await
+}
+
+/// [`register_installed`] on a store. Registering a file again without saved facts (an
+/// import of a downloaded file) keeps the facts saved before, as long as the file still
+/// has the same size.
+#[allow(clippy::too_many_arguments)]
+async fn register_installed_in(
+    store: &store::Store,
+    path: &Path,
+    repo: Option<String>,
+    size: u64,
+    sha256: Option<String>,
+    projector: Option<String>,
+    source: ModelSource,
+    saved: SavedFacts,
 ) -> AppResult<store::ModelId> {
     let header = models::read_file(path).map_err(|e| {
         AppError::new(
@@ -638,6 +737,24 @@ pub async fn register_installed(
         ));
     }
     let projector = projector.or_else(|| find_projector(path));
+    let path_text = path.display().to_string();
+    let saved = if saved.is_empty() {
+        match store.model_by_path(&path_text).await? {
+            Some(old) if old.size_bytes == size => {
+                let before: StoredSummary =
+                    serde_json::from_value(old.gguf_summary).unwrap_or_default();
+                SavedFacts {
+                    catalog_id: before.catalog_id,
+                    repo_file: before.repo_file,
+                    hub: before.hub,
+                    parameters: before.parameters,
+                }
+            }
+            _ => saved,
+        }
+    } else {
+        saved
+    };
     let stored = StoredSummary {
         is_moe: s.is_moe(),
         architecture: Some(s.architecture),
@@ -647,11 +764,16 @@ pub async fn register_installed(
         template_tools: s.template_tools,
         template_thinking: s.template_thinking,
         projector,
+        expert_count: s.expert_count,
+        expert_used_count: s.expert_used_count,
+        parameters: saved.parameters,
+        catalog_id: saved.catalog_id,
+        repo_file: saved.repo_file,
+        hub: saved.hub,
     };
-    let id = state
-        .store
+    let id = store
         .upsert_model(ModelInput {
-            path: path.display().to_string(),
+            path: path_text,
             repo,
             file_name: path
                 .file_name()
@@ -768,7 +890,17 @@ pub async fn import_model(
             e.to_string(),
         )
     })?;
-    register_installed(&state, &p, None, size, None, None, ModelSource::Import).await?;
+    register_installed(
+        &state,
+        &p,
+        None,
+        size,
+        None,
+        None,
+        ModelSource::Import,
+        SavedFacts::default(),
+    )
+    .await?;
     crate::settings::remember_local_model(&state, &path).await;
     list_installed_models(state)
         .await?
@@ -1068,203 +1200,159 @@ pub async fn refresh_catalog(app: AppHandle, state: State<'_, AppState>) -> AppR
     Ok(catalog.sequence)
 }
 
-// ---- Comparison (0.0.5 item 4) ---------------------------------------------------
-// TODO(WP4a): `catalog_list` and `compare_facts` are WP0 stubs returning fixed sample
-// data (no network, no store reads). The sample names are made up on purpose: no model
-// name appears in code.
+// ---- Comparison (0.0.6 item 4, WP4a; the rules are in `compare`) ---------------------
 
-fn sample_fit(ctx: u32, verdict: models::Verdict) -> models::FitResult {
-    models::FitResult {
-        verdict,
-        needed_bytes: 4_400_000_000,
-        available_bytes: 15_200_000_000,
-        suggested_ctx: None,
-        partial_offload: false,
-        sentence: format!(
-            "Sample: needs about 4.4 GB at {ctx} tokens; your GPU has 15.2 GB free. Fits."
-        ),
+/// The size a comparison is checked at: the one asked for, or the defaults' size (as the
+/// repository page uses it).
+async fn compare_ctx(state: &AppState, ctx: Option<u32>) -> u32 {
+    match ctx {
+        Some(c) => compare::clamp_ctx(c),
+        None => compare::clamp_ctx(crate::load_settings::browse_fit_ctx(state).await),
     }
 }
 
-fn sample_catalog_facts(id: &str, name: &str) -> crate::dto::CatalogFacts {
-    crate::dto::CatalogFacts {
-        id: id.to_string(),
-        name: name.to_string(),
-        summary: Some("Sample summary quoted from a model card.".into()),
-        source: Some("https://huggingface.co/example/sample".into()),
-        good_at: vec!["chat".into(), "coding".into()],
-        publisher: Some("Example publisher".into()),
-        parameters: Some(4_000_000_000),
-        active_parameters: None,
-        languages: vec!["en".into()],
-        released: Some("2026-01".into()),
-        capabilities: vec!["tools".into(), "thinking".into()],
-        license: Some(crate::dto::LicenseFacts {
-            name: "apache-2.0".into(),
-            url: None,
-        }),
-    }
+/// What a comparison needs from this computer: the catalog, the installed models, the
+/// hardware and the user's results.
+async fn compare_known(app: &AppHandle, state: &AppState) -> AppResult<compare::Known> {
+    let catalog = current_catalog(app).await;
+    let installed = state
+        .store
+        .list_models()
+        .await?
+        .iter()
+        .map(compare::Installed::from_record)
+        .collect();
+    let (target, hardware) = detect(state).await;
+    let profiles = crate::evals::commands::list_profiles(&state.store).await;
+    let app2 = app.clone();
+    // Benchmark runs are files; each with the size its model file has now.
+    let bench = tokio::task::spawn_blocking(move || {
+        crate::evals::commands::saved_bench_runs(&app2)
+            .into_iter()
+            .map(|run| {
+                let size = run
+                    .model_ref
+                    .strip_prefix("local:")
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len());
+                (run, size)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    Ok(compare::Known {
+        catalog,
+        installed,
+        target,
+        usable_bytes: hardware.usable_bytes,
+        results: compare::local_results(&profiles, &bench),
+    })
 }
 
-/// The catalog's entries for Suggested models, each with one fit verdict at `ctx`
-/// (`None`: the defaults' context), installed state and the user's results.
+/// The catalog's entries for Suggested models, best for this computer first, each with
+/// one fit verdict at `ctx` (`None`: the defaults' size) when it is known without the
+/// network, its installed path and the user's results. Fetches nothing.
 #[tauri::command]
 pub async fn catalog_list(
     window: tauri::WebviewWindow,
-    _state: State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, AppState>,
     ctx: Option<u32>,
 ) -> AppResult<Vec<crate::dto::CatalogListEntry>> {
     crate::commands::only_main_window(window.label())?;
-    let ctx = ctx.unwrap_or(8192);
-    let entry = |id: &str, name: &str, verdict| crate::dto::CatalogListEntry {
-        catalog: sample_catalog_facts(id, name),
-        repo: format!("example/{id}-GGUF"),
-        file: format!("{id}-Q4_K_M.gguf"),
-        quant: "Q4_K_M".into(),
-        size_bytes: 2_700_000_000,
-        fit: Some(sample_fit(ctx, verdict)),
-        installed_path: None,
-        results: Vec::new(),
-    };
-    Ok(vec![
-        entry("sample-small", "Sample small model", models::Verdict::Green),
-        entry(
-            "sample-large",
-            "Sample large model",
-            models::Verdict::Yellow,
-        ),
-    ])
+    let ctx = compare_ctx(&state, ctx).await;
+    let known = compare_known(&app, &state).await?;
+    let hub = LiveHub::new(hf_client(&app).await.ok());
+    Ok(compare::catalog_list(&hub, &known, ctx))
 }
 
 /// Facts for each model to compare, in the order given, with one fit verdict per item at
-/// `ctx` (`None`: the defaults' context). Never fetches more than the one repository of a
-/// Hugging Face item.
+/// `ctx` (`None`: the defaults' size). At most four items; never fetches more than the one
+/// repository of each item. What cannot be found is named in each item's `problem`.
 #[tauri::command]
 pub async fn compare_facts(
     window: tauri::WebviewWindow,
-    _state: State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, AppState>,
     items: Vec<crate::dto::CompareItem>,
     ctx: Option<u32>,
 ) -> AppResult<Vec<crate::dto::CompareFacts>> {
     crate::commands::only_main_window(window.label())?;
-    let ctx = ctx.unwrap_or(8192);
-    Ok(items
-        .into_iter()
-        .map(|item| sample_facts(item, ctx))
-        .collect())
+    check_compare_items(&items)?;
+    let ctx = compare_ctx(&state, ctx).await;
+    let known = compare_known(&app, &state).await?;
+    let hub = LiveHub::new(hf_client(&app).await.ok());
+    let mut out = Vec::with_capacity(items.len());
+    // One at a time: gentler on Hugging Face's limits than all at once.
+    for item in items {
+        out.push(compare::facts_for(&hub, &known, item, ctx).await);
+    }
+    Ok(out)
 }
 
-fn sample_facts(item: crate::dto::CompareItem, ctx: u32) -> crate::dto::CompareFacts {
-    use crate::dto::{CompareFacts, CompareItem, FileFacts, HubFacts};
-    let file_facts = FileFacts {
-        architecture: Some("sample".into()),
-        parameters: Some(4_000_000_000),
-        context_length: Some(32_768),
-        tools: true,
-        thinking: true,
-        vision: false,
-        moe: false,
-        quantization: Some("Q4_K_M".into()),
-        expert_count: None,
-        expert_used_count: None,
-        active_parameters: None,
-    };
-    let base = CompareFacts {
-        item: item.clone(),
-        title: String::new(),
-        file: None,
-        quant: Some("Q4_K_M".into()),
-        size_bytes: Some(2_700_000_000),
-        installed_path: None,
-        ctx,
-        fit: Some(sample_fit(ctx, models::Verdict::Green)),
-        catalog: None,
-        base_catalog: None,
-        hub: None,
-        file_facts: Some(file_facts),
-        results: Vec::new(),
-        problem: None,
-    };
-    match item {
-        CompareItem::Catalog { catalog_id } => CompareFacts {
-            title: "Sample catalog model".into(),
-            file: Some(format!("{catalog_id}-Q4_K_M.gguf")),
-            catalog: Some(sample_catalog_facts(&catalog_id, "Sample catalog model")),
-            ..base
-        },
-        CompareItem::Repo { repo, file } => CompareFacts {
-            title: repo.clone(),
-            file: Some(file),
-            hub: Some(HubFacts {
-                card_url: format!("https://huggingface.co/{repo}"),
-                repo,
-                author: Some("example".into()),
-                pipeline_tag: Some("text-generation".into()),
-                base_model: None,
-                languages: vec!["en".into()],
-                license: None,
-                tags: vec!["gguf".into()],
-                downloads: Some(1234),
-                likes: Some(5),
-                last_modified: Some("2026-01-01T00:00:00Z".into()),
-                gated: false,
-            }),
-            ..base
-        },
-        CompareItem::Installed { installed_path } => CompareFacts {
-            title: std::path::Path::new(&installed_path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| installed_path.clone()),
-            file: None,
-            installed_path: Some(installed_path),
-            ..base
-        },
+/// A comparison holds at most [`compare::COMPARE_LIMIT`] models.
+fn check_compare_items(items: &[crate::dto::CompareItem]) -> AppResult<()> {
+    if items.len() > compare::COMPARE_LIMIT {
+        return Err(AppError::bad_request(
+            "You can compare up to 4 models. Remove one first.",
+        ));
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// More than four models is refused before anything is read.
     #[test]
-    fn compare_samples_echo_the_item_and_the_context() {
+    fn a_comparison_holds_at_most_four_models() {
         use crate::dto::CompareItem;
-        let items = [
-            CompareItem::Catalog {
-                catalog_id: "sample-small".into(),
-            },
-            CompareItem::Repo {
-                repo: "owner/name".into(),
-                file: "f.gguf".into(),
-            },
-            CompareItem::Installed {
-                installed_path: "/models/x.gguf".into(),
-            },
-        ];
-        for item in items {
-            let facts = sample_facts(item.clone(), 16_384);
-            assert_eq!(facts.item, item);
-            assert_eq!(facts.ctx, 16_384);
-            let v = serde_json::to_value(&facts).unwrap();
-            for key in [
-                "item",
-                "title",
-                "file",
-                "quant",
-                "sizeBytes",
-                "installedPath",
-                "ctx",
-                "fit",
-                "catalog",
-                "baseCatalog",
-                "hub",
-                "fileFacts",
-                "results",
-                "problem",
-            ] {
-                assert!(v.get(key).is_some(), "{key} missing: {v}");
-            }
+        let item = |n: usize| CompareItem::Catalog {
+            catalog_id: format!("id-{n}"),
+        };
+        let four: Vec<CompareItem> = (0..4).map(item).collect();
+        assert!(check_compare_items(&four).is_ok());
+        assert!(check_compare_items(&[]).is_ok());
+        let five: Vec<CompareItem> = (0..5).map(item).collect();
+        let err = check_compare_items(&five).unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        assert!(err.message.contains("up to 4"), "{}", err.message);
+    }
+
+    /// Both comparison commands check the calling window first.
+    #[test]
+    fn comparison_commands_check_the_window_first() {
+        let source = include_str!("hub.rs");
+        for name in ["catalog_list", "compare_facts"] {
+            let start = source
+                .find(&format!("pub async fn {name}("))
+                .unwrap_or_else(|| panic!("{name}"));
+            let body = &source[start..];
+            let body = &body[body.find(") -> ").unwrap()..];
+            let first = body[body.find('{').unwrap() + 1..].trim_start();
+            assert!(
+                first.starts_with("crate::commands::only_main_window(window.label())?;"),
+                "{name}"
+            );
+        }
+    }
+
+    /// Saved facts survive in `gguf_summary`; a row saved before 0.0.6 still reads.
+    #[test]
+    fn stored_summary_old_and_new() {
+        let old: StoredSummary = serde_json::from_value(serde_json::json!({
+            "architecture": "sample", "quantization": "Q4_K_M", "contextLength": 32768,
+            "templateTools": true, "isMoe": false, "projector": null
+        }))
+        .unwrap();
+        assert_eq!(old.architecture.as_deref(), Some("sample"));
+        assert!(old.hub.is_none() && old.catalog_id.is_none() && old.parameters.is_none());
+        // Unknown facts are left out of what is saved.
+        let json = serde_json::to_value(&old).unwrap();
+        for key in ["hub", "catalogId", "repoFile", "parameters", "expertCount"] {
+            assert!(json.get(key).is_none(), "{key}");
         }
     }
 

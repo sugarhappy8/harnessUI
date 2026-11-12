@@ -2693,8 +2693,11 @@ mod tests {
                     .is_empty()
             );
             assert!(
-                cut_document_notes(Some(&message(store::Role::Assistant, cut.clone())), full_access)
-                    .is_empty()
+                cut_document_notes(
+                    Some(&message(store::Role::Assistant, cut.clone())),
+                    full_access
+                )
+                .is_empty()
             );
             assert!(cut_document_notes(None, full_access).is_empty());
         }

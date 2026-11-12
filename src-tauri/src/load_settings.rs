@@ -15,6 +15,10 @@
 //! backend probe, cached since it last ran; the model that a load replaces is counted as
 //! free (its estimated size is added back when it was loaded while the probe ran, and its
 //! conversation memory is added back to system memory when it runs on the processor).
+//! Measured against the pinned llama-server on the processor
+//! (`the_memory_estimate_matches_llama_server`): the conversation memory per token is
+//! llama.cpp's own figure, in f16 and in q8_0; the compute allowance is several times
+//! what the processor backend reserves; what a graphics card reserves is not measured.
 //!
 //! Storage (no migration, D9): the defaults for all models stay in `localModel`
 //! ([`LocalModelSettings`]); one model's overrides are in

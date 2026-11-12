@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DropdownMenu } from "radix-ui";
 import { ChevronDown, RotateCcw, Settings2, PowerOff } from "lucide-react";
 import * as ipc from "../lib/ipc";
-import type { ModelBusy, RuntimeStatus, ShareStatus } from "../lib/types";
+import type { LoadStage, ModelBusy, RuntimeStatus, ShareStatus } from "../lib/types";
 import {
   adjustmentWords,
   backendWords,
@@ -40,16 +40,38 @@ export function runtimeNotes(rt: RuntimeStatus, opts: { restarted: boolean; hasM
     if (text && !notes.some((n) => n.text === text)) notes.push({ text, action });
   };
   if (rt.settingsChanged) add("Settings changed. Restart the model to use them.", "apply");
-  for (const a of rt.adjustments) {
+  const adjustments = currentAdjustments(rt.adjustments);
+  for (const a of adjustments) {
     add(adjustmentWords(a), a.kind === "steppingDown" ? "reload" : a.kind === "restarting" ? null : "settings");
   }
   const gpu = rt.backend !== null && rt.backend !== "cpu";
   const partial =
     gpu && rt.offloadedLayers !== null && rt.totalLayers !== null && rt.offloadedLayers < rt.totalLayers;
-  if (partial && !rt.adjustments.some((a) => a.kind === "retryingWithLessGpu")) add(SLOW_WORDS.partial, "settings");
+  if (partial && !adjustments.some((a) => a.kind === "retryingWithLessGpu")) add(SLOW_WORDS.partial, "settings");
   if (rt.slow && rt.speedTps !== null) add(slowSpeedWords(rt.speedTps), "settings");
   if (opts.restarted && opts.hasMessages) add(SLOW_WORDS.afterRestart, null);
   return notes;
+}
+
+/**
+ * The adjustments of this load that still describe the running model, the step-down first:
+ * after the whole chain (Save memory off, As much as fits, the processor) the header says
+ * "Running on the processor because…", not the first retry. Only the last step-down says
+ * where it runs now, and "part of the model runs on the processor" is dropped for a
+ * backend the model has left. Save memory stays off for the rest of the load, so that note
+ * stays.
+ */
+function currentAdjustments(adjustments: LoadStage[]): LoadStage[] {
+  let last = -1;
+  adjustments.forEach((a, i) => {
+    if (a.kind === "steppingDown") last = i;
+  });
+  if (last < 0) return adjustments;
+  const left = new Set(adjustments.flatMap((a) => (a.kind === "steppingDown" ? [a.from] : [])));
+  const rest = adjustments.filter(
+    (a, i) => i !== last && a.kind !== "steppingDown" && !(a.kind === "retryingWithLessGpu" && left.has(a.backend)),
+  );
+  return [adjustments[last] as LoadStage, ...rest];
 }
 
 /** Whether the page is shown (polling stops while the window is hidden). */

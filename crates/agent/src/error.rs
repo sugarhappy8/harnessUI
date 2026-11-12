@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn user_messages_are_plain() {
-        // 0.0.5: no "context window"; the model's size comes with words.
+        // 0.0.6: no "context window"; the model's size comes with words.
         assert_eq!(
             ProviderError::ContextOverflow {
                 n_prompt_tokens: Some(5009),

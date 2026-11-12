@@ -7,6 +7,7 @@ const IDLE: ModelBusy = { chatTurns: 0, modelChecks: 0, otherApps: 0 };
 const ipcMock = vi.hoisted(() => ({
   isTauri: () => false,
   modelLoadInfo: vi.fn<(path: string) => Promise<ModelLoadInfo>>(),
+  previewModelLoadSettings: vi.fn<(path: string, o: ModelLoadSettings) => Promise<ModelLoadInfo>>(),
   setModelLoadSettings: vi.fn<(path: string, o: ModelLoadSettings) => Promise<ModelLoadInfo>>(),
   resetModelLoadSettings: vi.fn<(path: string) => Promise<ModelLoadInfo>>(),
   reloadLocalModel: vi.fn<(force: boolean, whenIdle: boolean) => Promise<boolean>>(async () => true),
@@ -151,6 +152,7 @@ describe("ModelSettings: one model's load settings in plain words", () => {
     ipcMock.modelBusy.mockResolvedValue(IDLE);
     ipcMock.setModelLoadSettings.mockImplementation(async (path, overrides) => ({ ...sample(path), overrides }));
     ipcMock.resetModelLoadSettings.mockImplementation(async (path) => sample(path));
+    ipcMock.previewModelLoadSettings.mockImplementation(async (path, overrides) => ({ ...sample(path), overrides }));
     useApp.setState({ runtime: null, activeChatId: 3, detail: null, error: null });
     Object.defineProperty(navigator, "platform", { value: "Linux x86_64", configurable: true });
   });
@@ -343,6 +345,112 @@ describe("ModelSettings: one model's load settings in plain words", () => {
     expect(ipcMock.setChatModel).toHaveBeenCalledWith(3, "local:/models/other.gguf");
     expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/other.gguf", null, undefined);
     expect(onClose).toHaveBeenCalled();
+  });
+
+  /** Lets the panel ask for the fit of unsaved choices (it waits a moment after a change). */
+  async function settle() {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+  }
+
+  /** The facts with Save memory on: more fits, and Automatic picks more. */
+  function withSaveMemory(path: string, overrides: ModelLoadSettings): ModelLoadInfo {
+    const info = { ...sample(path), overrides, tooLarge: false, fit: "green" as const };
+    info.contextOptions = [
+      { choice: "auto", tokens: 32_768, fit: "green" },
+      { choice: { fixed: 4096 }, tokens: 4096, fit: "green" },
+      { choice: { fixed: 8192 }, tokens: 8192, fit: "green" },
+      { choice: { fixed: 16_384 }, tokens: 16_384, fit: "green" },
+      { choice: { fixed: 32_768 }, tokens: 32_768, fit: "green" },
+      { choice: { fixed: 40_960 }, tokens: 40_960, fit: "yellow" },
+    ];
+    info.gpuOptions = [
+      { gpu: "all", fit: "green" },
+      { gpu: "fit", fit: "green" },
+      { gpu: "off", fit: "green" },
+    ];
+    return info;
+  }
+
+  it("moves the fit marks with unsaved choices, saves nothing, and goes back when they are undone", async () => {
+    const saved = sample();
+    saved.tooLarge = true;
+    saved.fit = "red";
+    ipcMock.previewModelLoadSettings.mockImplementation(async (path, overrides) =>
+      overrides.saveMemory === "on" ? withSaveMemory(path, overrides) : { ...saved, overrides },
+    );
+    await openPanel(saved);
+    expect(screen.getByRole("alert").textContent).toContain("Too large for this computer");
+    expect(optionTexts("How much it can remember")[5]).toBe("32,768 tokens, about 24,000 words · Fits with limits");
+
+    await choose("Save memory", "on");
+    await settle();
+    expect(ipcMock.previewModelLoadSettings).toHaveBeenLastCalledWith("/models/model.gguf", { ...DEFAULTS, saveMemory: "on" });
+    expect(optionTexts("How much it can remember")).toEqual([
+      "Same as default (8,192 tokens, about 6,000 words)",
+      "Automatic: 32,768 tokens, about 24,000 words · Fits",
+      "4,096 tokens, about 3,000 words · Fits",
+      "8,192 tokens, about 6,000 words · Fits",
+      "16,384 tokens, about 12,000 words · Fits",
+      "32,768 tokens, about 24,000 words · Fits",
+      "40,960 tokens, about 30,000 words · Fits with limits",
+    ]);
+    expect(optionTexts("Use the graphics card")[3]).toBe("Don't use it · Fits");
+    // With these choices it fits: the too-large line goes, and Automatic says what it would pick.
+    expect(screen.queryByRole("alert")).toBeNull();
+    await choose("How much it can remember", "auto");
+    await settle();
+    expect(document.body.textContent).toContain("Automatic: 32,768 tokens, about 24,000 words, on this computer right now");
+    expect(ipcMock.setModelLoadSettings).not.toHaveBeenCalled();
+
+    // Undone: the saved marks again, without asking.
+    const asked = ipcMock.previewModelLoadSettings.mock.calls.length;
+    await choose("Save memory", "default");
+    await choose("How much it can remember", "default");
+    await settle();
+    expect(ipcMock.previewModelLoadSettings.mock.calls.length).toBe(asked);
+    expect(optionTexts("How much it can remember")[5]).toBe("32,768 tokens, about 24,000 words · Fits with limits");
+    expect(screen.getByRole("alert").textContent).toContain("Too large for this computer");
+  });
+
+  it("ignores a fit answer for choices that changed since it was asked", async () => {
+    let slow: (info: ModelLoadInfo) => void = () => undefined;
+    ipcMock.previewModelLoadSettings.mockImplementation((path, overrides) =>
+      overrides.saveMemory === "on"
+        ? new Promise((resolve) => (slow = resolve))
+        : Promise.resolve({ ...sample(path), overrides }),
+    );
+    await openPanel(sample());
+    await choose("Save memory", "on");
+    await settle();
+    await choose("Save memory", "off");
+    await settle();
+    // The answer for "on" arrives after "off" was chosen: the marks stay those of "off".
+    await act(async () => slow(withSaveMemory("/models/model.gguf", { ...DEFAULTS, saveMemory: "on" })));
+    expect(optionTexts("How much it can remember")[5]).toBe("32,768 tokens, about 24,000 words · Fits with limits");
+  });
+
+  it("keeps the saved marks when the fit of unsaved choices cannot be read", async () => {
+    ipcMock.previewModelLoadSettings.mockRejectedValue({ code: "bad_request", message: "No.", nextStep: "", details: "" });
+    await openPanel(sample());
+    await choose("Save memory", "on");
+    await settle();
+    expect(optionTexts("How much it can remember")[5]).toBe("32,768 tokens, about 24,000 words · Fits with limits");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says what the loaded model's Automatic chose until a choice changes, then what it would choose", async () => {
+    const info = sample();
+    info.loaded = true;
+    info.autoCtx = 20_480;
+    info.overrides = { ...DEFAULTS, context: "auto" };
+    ipcMock.previewModelLoadSettings.mockImplementation(async (path, overrides) => withSaveMemory(path, overrides));
+    await openPanel(info);
+    expect(document.body.textContent).toContain("Automatic: 20,480 tokens, about 15,000 words, on this computer right now");
+    await choose("Save memory", "on");
+    await settle();
+    expect(document.body.textContent).toContain("Automatic: 32,768 tokens, about 24,000 words, on this computer right now");
   });
 
   it("names graphics cards by name and memory, and says Use Apple graphics on a Mac", async () => {

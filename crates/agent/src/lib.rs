@@ -22,7 +22,7 @@
 //!   onto the current model, and the one [`Sanitizer`] for untrusted text;
 //! - [`context`]: the context budget, compaction and truncation;
 //! - [`turn`]: [`run_turn`], one agent turn from the user's message to the final answer;
-//! - [`thinking`]: [`ThinkingLimit`], the per-request limit on thinking (0.0.5).
+//! - [`thinking`]: [`ThinkingLimit`], the per-request limit on thinking (0.0.6).
 
 #![warn(missing_docs)]
 

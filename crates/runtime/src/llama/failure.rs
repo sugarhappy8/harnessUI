@@ -86,7 +86,8 @@ impl LoadFailure {
     /// A device or driver that cannot do it shows as a failed context (llama.cpp refuses a
     /// q8_0 memory without flash attention) or as a crash. A failure to allocate the
     /// weights ([`LoadFailure::OutOfMemory`]) happens before the context exists, so Save
-    /// memory cannot cause it; turning it off would only need more memory.
+    /// memory cannot cause it; turning it off would only need more memory. The supervisor
+    /// asks this only on a graphics backend: the processor can always do Save memory.
     pub fn save_memory_may_be_the_cause(&self) -> bool {
         matches!(self, Self::ContextTooLarge | Self::Unknown)
     }

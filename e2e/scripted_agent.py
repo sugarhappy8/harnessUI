@@ -3177,8 +3177,9 @@ def p_chat_memory(c, notes):
     message the summary stands for, whose Show summary shows the model's summary as plain
     text, also after a window reload. A summary that fails is reported and the reply goes
     on. A document longer than its share of the context is cut, with a note for the model
-    and one for the user. With the real small model (TEST_GGUF) loaded at 4,096 tokens, the
-    same with the model server's own token counts (_chat_memory_real)."""
+    and one for the user. With the real small model (TEST_GGUF) loaded at 4,096 tokens, a long
+    document, also one of numbers, is cut to its share in the model server's own tokens and
+    answered (_chat_memory_real)."""
     s = c.s
     s.invoke("set_setting", {"key": "remoteContextLength", "value": 4096})
     try:
@@ -3223,8 +3224,9 @@ def _chat_memory_real(c, notes):
     """0.0.6 WP3b, with the real small model on the processor at 4,096 tokens, where the loop
     counts with the model server's own tokens, not the app's estimate: a long document is cut
     to its share and answered (never refused as too long), also when its text tokenises
-    densely (numbers); and a long chat is summarised by the real model, with the line and its
-    Show summary. Skipped without TEST_GGUF."""
+    densely (numbers). Skipped without TEST_GGUF. (A long chat summarised by the real model
+    is not tried here: on this processor each request of a full 4,096-token context takes
+    minutes; the fake endpoint above covers the summary's path.)"""
     s = c.s
     model = os.environ.get("TEST_GGUF", "")
     if not os.path.isfile(model):
@@ -3245,14 +3247,17 @@ def _chat_memory_real(c, notes):
     status = s.invoke("runtime_status")
     assert status["state"] == "ready" and status["nCtx"] == 4096, status
     try:
-        chat = s.invoke("create_chat", {"modelRef": f"local:{model}"})["id"]
-        s.invoke("set_chat_tools", {"chatId": chat, "enabled": c.default_tools})
-        s.invoke("set_chat_thinking", {"chatId": chat, "on": False})
         ask = "In one short sentence: what is this file about?"
         for name, text in (
             ("prose.txt", "".join(f"Line {i}: the river runs past the old mill and on to the sea.\n" for i in range(1, 801))),
+            # A token per digit for this model: cut by the estimate alone, this took about
+            # 60% of 4,096 tokens and the turn stopped with "too long" (before 0.0.6 WP3b).
             ("numbers.csv", "".join(f"{i},{(i * 7919) % 100003},{(i * 104729) % 1000003},{(i * 31337) % 99991}\n" for i in range(1, 1201))),
         ):
+            # A chat of its own, with the tools that are on by default.
+            chat = s.invoke("create_chat", {"modelRef": f"local:{model}"})["id"]
+            s.invoke("set_chat_tools", {"chatId": chat, "enabled": c.default_tools})
+            s.invoke("set_chat_thinking", {"chatId": chat, "on": False})
             began = time.time()
             events, last = _memory_real_send(s, chat, ask, [(name, text)])
             said = json.dumps(events)
@@ -4408,6 +4413,26 @@ def p_folder_chip(c, notes):
         con.close()
         s.wait_for(lambda: folder_chip(s) == label + f"{c.work.name} + 2 more", 10, "the chip with three folders")
         s.screenshot(str(OUT / "folder-chip.png"))
+        # The narrowest window (720 pixels): the chip and the approval mode stay in the header.
+        rect = s._req("GET", s._s("/window/rect"))
+        try:
+            s._req("POST", s._s("/window/rect"), {"width": 720, "height": rect["height"]})
+            time.sleep(0.8)
+            fit = s.execute(
+                """
+                const h = document.querySelector('[data-folder-chip]').closest('header').getBoundingClientRect();
+                const inside = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= h.left && r.right <= h.right + 0.5; };
+                return {width: window.innerWidth, chip: inside(document.querySelector('[data-folder-chip]')),
+                        mode: inside(document.querySelector('button[aria-label="Ask first"]')),
+                        chipWidth: document.querySelector('[data-folder-chip]').getBoundingClientRect().width};
+                """)
+            notes.append("narrow window: " + json.dumps(fit))
+            s.screenshot(str(OUT / "folder-chip-narrow.png"))
+            if fit["width"] <= 760:
+                assert fit["chip"] and fit["mode"], fit
+        finally:
+            s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
+            time.sleep(0.5)
         s.click_button(label + f"{c.work.name} + 2 more")
         menu = menu_text()
         s.screenshot(str(OUT / "folder-chip-menu.png"))

@@ -828,5 +828,16 @@ mod tests {
         assert_eq!(json["data"]["from"], "rocm");
         let state = serde_json::to_value(ServerEvent::State(ServerState::Ready)).expect("json");
         assert_eq!(state["data"]["state"], "ready");
+        let stage = serde_json::to_value(ServerEvent::Stage(LoadStage::RetryingWithLessGpu {
+            backend: BackendKind::Vulkan,
+        }))
+        .expect("json");
+        assert_eq!(
+            stage,
+            serde_json::json!({
+                "type": "stage",
+                "data": {"kind": "retryingWithLessGpu", "backend": "vulkan"}
+            })
+        );
     }
 }

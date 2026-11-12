@@ -1,4 +1,4 @@
-//! How long a thinking model may think in one request (0.0.5 D4, "How long it may think").
+//! How long a thinking model may think in one request (0.0.6 D4, "How long it may think").
 //!
 //! A per-request limit applied by the agent loop (`limit_thinking`), not a launch flag: the
 //! request's thinking budget is min(the choice's tokens, `max_tokens` / 2), never below

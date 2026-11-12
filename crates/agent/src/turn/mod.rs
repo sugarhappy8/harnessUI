@@ -430,7 +430,7 @@ pub struct TurnInput {
     pub template: RequestTemplate,
     /// Whether thinking is on (ignored when the model cannot think).
     pub thinking: bool,
-    /// How long the model may think in one request (0.0.5, "How long it may think"): each
+    /// How long the model may think in one request (0.0.6, "How long it may think"): each
     /// request with thinking on gets a budget of min(the choice's tokens, half its output
     /// limit) ([`ThinkingLimit::budget`]); llama-server only. The app fills it from the
     /// model's load settings; [`ThinkingLimit::NoLimit`] keeps half the output limit.

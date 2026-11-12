@@ -349,7 +349,11 @@ fn https_link(text: &str) -> Option<String> {
     let url = Url::parse(text.trim()).ok()?;
     (url.scheme() == "https" && url.host_str().is_some() && url.username().is_empty())
         .then(|| url.to_string())
+        .filter(|u| u.len() <= MAX_LINK_CHARS)
 }
+
+/// The longest licence link kept (a link is percent-encoded ASCII once parsed).
+const MAX_LINK_CHARS: usize = 500;
 
 /// What the uploader lists, from a repository answer (`repo_id` already validated).
 fn parse_hub_info(repo_id: &str, commit: &str, endpoint: &Url, v: &serde_json::Value) -> HubInfo {
@@ -1021,7 +1025,7 @@ fn parse_next_link(link: &str) -> Option<String> {
 
 /// The fields [`HfClient::repo`] asks for besides `gguf` (expand[] limits the answer to
 /// the listed fields).
-const REPO_EXPAND: [&str; 10] = [
+pub const REPO_EXPAND: [&str; 10] = [
     "sha",
     "gated",
     "tags",
@@ -1034,7 +1038,10 @@ const REPO_EXPAND: [&str; 10] = [
     "pipeline_tag",
 ];
 
-fn parse_repo_detail(
+/// Reads a repository answer (`GET /api/models/<repo>` with [`REPO_EXPAND`]) for
+/// `repo_id`, already validated. Public so other crates' tests can read fixtures; the app
+/// gets it through [`HfClient::repo`].
+pub fn parse_repo_detail(
     repo_id: &str,
     v: &serde_json::Value,
     endpoint: &Url,
@@ -1351,8 +1358,14 @@ mod tests {
         // A licence name is one line of at most 300 characters; a javascript: link is not
         // a link.
         let l = i.license.as_deref().unwrap();
-        assert!((290..=UPLOADER_TEXT_CAP).contains(&l.chars().count()), "{l}");
-        assert!(l.starts_with("AAAA") && l.ends_with('…') && !l.contains('\n'), "{l}");
+        assert!(
+            (290..=UPLOADER_TEXT_CAP).contains(&l.chars().count()),
+            "{l}"
+        );
+        assert!(
+            l.starts_with("AAAA") && l.ends_with('…') && !l.contains('\n'),
+            "{l}"
+        );
         assert_eq!(i.license_url, None);
         assert_eq!(d.gated, Gated::Manual);
         // Nothing invisible survives anywhere.
@@ -1387,6 +1400,30 @@ mod tests {
         // An escape is never cut in half.
         let cut = uploader_text(&format!("{}\u{202E}tail", "a".repeat(295)), 300);
         assert_eq!(cut, format!("{}…", "a".repeat(295)));
+    }
+
+    #[test]
+    fn licence_links() {
+        assert_eq!(
+            https_link(" https://example.com/licence ").as_deref(),
+            Some("https://example.com/licence")
+        );
+        for bad in [
+            "http://example.com/licence",
+            "javascript:alert(1)",
+            "https://user@example.com/x",
+            "LICENSE",
+            "",
+        ] {
+            assert_eq!(https_link(bad), None, "{bad}");
+        }
+        assert_eq!(
+            https_link(&format!("https://example.com/{}", "a".repeat(600))),
+            None
+        );
+        // Invisible characters in a link are percent-encoded, never kept as they are.
+        let l = https_link("https://example.com/a\u{202E}b").unwrap();
+        assert!(!l.contains('\u{202E}') && l.contains("%E2%80%AE"), "{l}");
     }
 
     #[test]

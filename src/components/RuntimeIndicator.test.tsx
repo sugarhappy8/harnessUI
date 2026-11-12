@@ -38,6 +38,7 @@ vi.mock("../lib/ipc", () => ipcMock);
 const { RuntimeIndicator, runtimeNotes } = await import("./RuntimeIndicator");
 const { useApp } = await import("../store/app");
 const { useRestartNote, useWaiting } = await import("../store/modelChange");
+const { useApprovalMode } = await import("../lib/approvalMode");
 
 function status(patch: Partial<RuntimeStatus> = {}): RuntimeStatus {
   return {
@@ -183,6 +184,25 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect(ipcMock.unloadModel).toHaveBeenCalledWith(false);
   });
 
+  it("asks the D3 question the same way in Ask first, Allow all and Full access (it is the user's action, not a tool's)", async () => {
+    ipcMock.modelBusy.mockResolvedValue({ chatTurns: 1, modelChecks: 0, otherApps: 0 });
+    for (const mode of ["ask", "allowAll", "fullAccess"] as const) {
+      vi.clearAllMocks();
+      ipcMock.modelBusy.mockResolvedValue({ chatTurns: 1, modelChecks: 0, otherApps: 0 });
+      ipcMock.shareStatus.mockResolvedValue(SHARE_OFF);
+      useApprovalMode.setState({ modes: { 3: mode }, defaultMode: mode });
+      await show(status());
+      await openMenu();
+      await click(screen.getByRole("menuitem", { name: /Reload/ }));
+      expect(screen.getByText("A reply is being written. Stop it and restart the model?"), mode).toBeTruthy();
+      expect(ipcMock.reloadLocalModel, mode).not.toHaveBeenCalled();
+      await click(screen.getByRole("button", { name: "Restart when it ends" }));
+      expect(ipcMock.reloadLocalModel, mode).toHaveBeenCalledWith(true, true);
+      cleanup();
+    }
+    useApprovalMode.setState({ modes: {}, defaultMode: "ask" });
+  });
+
   it("shows the waiting line with Cancel while a change waits", async () => {
     await show(status({ reloadWaiting: true }));
     expect(screen.getByRole("status").textContent).toContain("Restarts when the reply ends");
@@ -230,6 +250,61 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     cleanup();
     await show(status({ slow: true, speedTps: 2.7 }));
     expect(screen.getByRole("status").textContent).toContain("Replies are slow here (about 2 words a second).");
+  });
+
+  it("after the whole step-down chain, says where the model runs now, in the specification's words", async () => {
+    // What WP1a's supervisor reports for a graphics card that runs out of memory with Save
+    // memory on: Save memory off, then As much as fits, then the processor.
+    const chain: RuntimeStatus["adjustments"] = [
+      { kind: "retryingWithoutSaveMemory", backend: "vulkan" },
+      { kind: "retryingWithLessGpu", backend: "vulkan" },
+      { kind: "steppingDown", from: "vulkan", to: "cpu", reason: { code: "out_of_memory" } },
+    ];
+    await show(status({ backend: "cpu", adjustments: chain }));
+    expect(screen.getByRole("status").textContent).toBe(
+      "Running on the processor because the graphics card ran out of memory. Reload to try the graphics card again.Reload",
+    );
+    // "Part of the model runs on the processor" is no longer true once all of it does.
+    const notes = runtimeNotes(status({ backend: "cpu", adjustments: chain }), { restarted: false, hasMessages: false });
+    expect(notes.map((n) => n.text)).toEqual([
+      "Running on the processor because the graphics card ran out of memory. Reload to try the graphics card again.",
+      "Save memory doesn't work with this graphics card, so it was turned off for this load.",
+    ]);
+    expect(notes.map((n) => n.action)).toEqual(["reload", "settings"]);
+    await click(screen.getByRole("button", { name: "Reload" }));
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(true, false);
+
+    // Two step-downs: only the last says where it runs now; the slow part-on-the-processor
+    // line comes back when the lower graphics backend runs only part of the model.
+    const twice = runtimeNotes(
+      status({
+        backend: "vulkan",
+        offloadedLayers: 12,
+        totalLayers: 30,
+        adjustments: [
+          { kind: "retryingWithLessGpu", backend: "rocm" },
+          { kind: "steppingDown", from: "rocm", to: "vulkan", reason: { code: "out_of_memory" } },
+        ],
+      }),
+      { restarted: false, hasMessages: false },
+    );
+    expect(twice.map((n) => n.text)).toEqual([
+      "Running on the graphics card because the AMD graphics card ran out of memory. Reload to try the AMD graphics card again.",
+      "Part of the model runs on the processor, so replies are slower. Save memory or a smaller memory size lets more fit on the graphics card.",
+    ]);
+    const chained = runtimeNotes(
+      status({
+        backend: "cpu",
+        adjustments: [
+          { kind: "steppingDown", from: "rocm", to: "vulkan", reason: { code: "missing_runtime_dll" } },
+          { kind: "steppingDown", from: "vulkan", to: "cpu", reason: { code: "out_of_memory" } },
+        ],
+      }),
+      { restarted: false, hasMessages: false },
+    );
+    expect(chained.map((n) => n.text)).toEqual([
+      "Running on the processor because the graphics card ran out of memory. Reload to try the graphics card again.",
+    ]);
   });
 
   it("lists every note in order, most important first", () => {

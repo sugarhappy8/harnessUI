@@ -189,6 +189,31 @@ describe("ContextInspector", () => {
     expect(apiMock.inspectContext).toHaveBeenCalledTimes(6);
   });
 
+  // [0.0.6 WP3b] The loop's newer stage: a summary written when the model could remember
+  // more is rewritten shorter before the next request (src-tauri/src/context_cmd.rs).
+  it("shows the stage that rewrites a summary too long for this model's memory, as plain text", async () => {
+    const refold =
+      "The summary of earlier messages was written when the model could remember more. Before the next request, " +
+      "the model rewrites it shorter; it is shown here cut to that length. Nothing is left out now.";
+    const summaryRow = {
+      id: "summary",
+      title: "Summary of earlier messages",
+      detail:
+        "Written by the model to stand for the messages left out. Too long for this model's memory now: the next " +
+        "request has it rewritten shorter",
+      tokens: 512,
+      text: "Goal: <b>tidy</b> the notes.",
+    };
+    const v = view({ nextDrop: refold, sections: [...view().sections, summaryRow] });
+    await show(v);
+    expect(document.querySelector("[data-inspector-next]")!.textContent).toBe(`Left out next: ${refold}`);
+    expect(within(row("summary")).getByText(summaryRow.detail)).toBeTruthy();
+    fireEvent.click(within(row("summary")).getByRole("button"));
+    expect(row("summary").querySelector("pre")!.textContent).toBe("Goal: <b>tidy</b> the notes.");
+    expect(row("summary").querySelector("b")).toBeNull();
+    expect(copyAllText(v)).toContain(`Left out next: ${refold}`);
+  });
+
   it("shows the app's error as text", async () => {
     apiMock.inspectContext.mockRejectedValue({ code: "not_found", message: "That chat no longer exists.", nextStep: "", details: "" });
     await act(async () => {
