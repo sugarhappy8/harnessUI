@@ -2806,7 +2806,7 @@ mod tests {
             .unwrap_err(),
             format!(
                 "{docs} is a folder, not a file. write_file needs the path of a file inside it, for example {}. list_dir shows what is in the folder.",
-                shown(&root.join("docs/notes.txt"))
+                shown(&root.join("docs").join("notes.txt"))
             )
         );
         assert_eq!(
@@ -2820,7 +2820,7 @@ mod tests {
             .unwrap_err(),
             format!(
                 "{} cannot be used: {a} is a file, not a folder, so nothing can be inside it.",
-                shown(&root.join("docs/a.txt/b.txt"))
+                shown(&root.join("docs").join("a.txt").join("b.txt"))
             )
         );
         assert_eq!(
