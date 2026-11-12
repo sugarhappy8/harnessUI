@@ -55,9 +55,11 @@ are summarised in Part 5.
   starts its own dev server when port 1420 is free. Runs take turns through a lock:
   `cargo +1.99 build -p app` then
   `flock /tmp/harness-e2e.lock env PROBES=<name> E2E_OUT=<your own scratch folder> timeout 1200 xvfb-run -a python3 -I e2e/scripted_agent.py`.
-  Add `E2E_TRACE=1` to see what the app did. A real small model is at
-  `/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf` with llama-server in
-  `/home/user/llama-dev/llama-b12110/` (see `e2e/m1_chat.py` for how a script loads it).
+  Add `E2E_TRACE=1` to see what the app did. The pinned llama-server is in
+  `.cache/llama-linux/` and a real small model in `.cache/models/` (fetched by
+  `scripts/fetch_llama.py linux` and `scripts/fetch_test_model.py .cache/models`); the
+  contract tests and the m1/m3/m9/m10 suites find them through `LLAMA_SERVER_BIN` and
+  `TEST_GGUF` (see `.github/workflows/ci.yml` and `e2e/m1_chat.py`).
   Claude Code 2.1.322 is installed on this machine (`claude`); Codex is not.
 - Tests are part of the work. Write the test first where practical and say which tests you
   saw fail first. Never weaken or delete an existing test to get green. If a test pins
