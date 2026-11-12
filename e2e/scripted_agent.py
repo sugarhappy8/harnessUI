@@ -2708,22 +2708,22 @@ def p_context_inspector(c, notes):
     assert pin_text in s.execute(f"return document.querySelector('{aside} [data-section=\"pinned\"]').innerText;")
     s.screenshot(str(OUT / "context-inspector.png"))
 
-    # Copy all: what goes to the clipboard has the system prompt and the pin.
-    s.execute("""
-        window.__copied = null;
-        const internals = window.__TAURI_INTERNALS__;
-        const original = internals.invoke.bind(internals);
-        internals.invoke = (cmd, args, options) => {
-          if (String(cmd).includes('clipboard')) window.__copied = JSON.stringify(args);
-          return original(cmd, args, options);
-        };
-    """)
+    # Copy all: what goes to the clipboard has the system prompt and the pin (pasted into
+    # the message box to read it, then cleared).
     s.execute(f"[...document.querySelectorAll('{aside} button')].find(b => b.innerText.trim() === 'Copy all').click();")
-    s.wait_for(lambda: s.execute("return window.__copied;"), 10, "the copied text")
-    copied = s.execute("return window.__copied;")
+    s.wait_for(lambda: s.execute(f"return [...document.querySelectorAll('{aside} button')].some(b => b.innerText.trim() === 'Copied');"), 10, "the copy done")
+    box = s.find("textarea")
+    s.type(box, "\ue009v\ue009")
+    s.wait_for(lambda: len(s.execute("return document.querySelector('textarea').value;") or "") > 50, 10, "the pasted text")
+    copied = s.execute("return document.querySelector('textarea').value;")
+    s.execute("""
+        const el = document.querySelector('textarea');
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, '');
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+    """)
     view = s.invoke("inspect_context", {"chatId": chat})
     system_prompt = next(x for x in view["sections"] if x["id"] == "system")["text"]
-    assert system_prompt and json.dumps(system_prompt)[1:-1] in copied, (system_prompt, copied[:300])
+    assert system_prompt and system_prompt in copied, (system_prompt, copied[:300])
     assert pin_text in copied, copied[:600]
     # No key and no address in what the tab gets.
     for secret in ("sk-test", "127.0.0.1"):
