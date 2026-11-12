@@ -407,7 +407,7 @@ impl ManagedServer {
                 _ = cancel.cancelled() => break End::Cancelled,
                 answer = &mut rx => break End::Answer(answer),
                 _ = alive.notified() => {
-                    let _ = &idle;
+                    idle.as_mut().reset(Instant::now() + timeout);
                     if let Some(progress) = &progress
                         && last_tick.is_none_or(|t| t.elapsed() >= TICK_EVERY)
                     {
