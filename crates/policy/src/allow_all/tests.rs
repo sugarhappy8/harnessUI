@@ -98,6 +98,7 @@ fn turn(allow_all: bool, untrusted: bool, recovered: bool) -> TurnContext {
         recovered_from_text: recovered,
         untrusted_in_turn: untrusted,
         allow_all,
+        full_access: false,
     }
 }
 

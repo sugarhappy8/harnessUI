@@ -983,6 +983,7 @@ mod tests {
         let chat = ChatContext {
             chat_id: 7,
             result_cap_tokens: 2000,
+            full_access: false,
             ..Default::default()
         };
         let ctx = || CallContext {
@@ -1056,6 +1057,7 @@ mod tests {
         let chat = ChatContext {
             chat_id: 7,
             result_cap_tokens: 2000,
+            full_access: false,
             ..Default::default()
         };
         let args = |v: Value| v.as_object().cloned().unwrap();

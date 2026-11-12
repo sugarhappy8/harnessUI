@@ -180,11 +180,19 @@ impl TerminalServer {
         .0
     }
 
+    /// The shell and its arguments for `command`. For Windows PowerShell the script around
+    /// the command: UTF-8 output, no progress records (they reach a redirected stderr as
+    /// CLIXML), and the exit code. `$?` is false when the last program wrote to its error
+    /// stream, even if it succeeded: Windows PowerShell turns each such line into an error
+    /// record (`NativeCommandError`). So a failure is the program's own exit code when it set
+    /// one, and only an error of PowerShell's own otherwise (0.0.5: before, a program that
+    /// printed a warning, such as Node's ExperimentalWarning or npm's notices, was reported as
+    /// failed with exit code 1).
     fn command_line(&self, command: &str) -> (PathBuf, Vec<String>) {
         match &self.config.shell {
             TerminalShell::PowerShell { program } => {
                 let script = format!(
-                    "$ErrorActionPreference='Continue'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8\n{command}\n$__ok=$?; $__code=$LASTEXITCODE; if (-not $__ok) {{ if ($__code) {{ exit $__code }} else {{ exit 1 }} }} else {{ exit 0 }}"
+                    "$ErrorActionPreference='Continue'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8\n{command}\n$__ok=$?; $__code=$LASTEXITCODE; if (-not $__ok) {{ if ($__code) {{ exit $__code }} elseif ($Error.Count -gt 0 -and \"$($Error[0].FullyQualifiedErrorId)\" -like 'NativeCommandError*') {{ exit 0 }} else {{ exit 1 }} }} else {{ exit 0 }}"
                 );
                 let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
                 let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
@@ -234,9 +242,122 @@ fn says_not_found(code: Option<i32>, output: &str) -> bool {
         || output.contains("is not recognized as")
 }
 
+/// Windows PowerShell started with `-EncodedCommand` writes its error, warning and progress
+/// streams to stderr as CLIXML (`#< CLIXML` and `<Objs …>` blocks) when stderr is not a
+/// console. Left as it is, that buries a command's real output and error messages under XML
+/// (seen by the owner in 0.0.4: commands looked as if they did not run). This keeps the text
+/// of the error, warning, verbose, debug and information records and drops the rest
+/// (progress). Text without such blocks is returned unchanged; a block cut at either end
+/// (the kept end of a long stream) is handled too.
+fn decode_clixml(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("</Objs>") && !text.contains("<Objs ") && !text.contains("#< CLIXML") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let plain = |t: &str| {
+        t.replace("#< CLIXML\r\n", "")
+            .replace("#< CLIXML\n", "")
+            .replace("#< CLIXML", "")
+    };
+    let mut out = String::new();
+    let mut rest = text;
+    loop {
+        let start = rest.find("<Objs ");
+        let orphan_end = rest.find("</Objs>");
+        match (start, orphan_end) {
+            // The end of a block whose start was cut off.
+            (s, Some(e)) if s.is_none_or(|s| e < s) => {
+                out.push_str(&clixml_streams(&rest[..e]));
+                rest = &rest[e + "</Objs>".len()..];
+            }
+            (Some(s), _) => {
+                out.push_str(&plain(&rest[..s]));
+                let block = &rest[s..];
+                match block.find("</Objs>") {
+                    Some(e) => {
+                        out.push_str(&clixml_streams(&block[..e]));
+                        rest = &block[e + "</Objs>".len()..];
+                    }
+                    None => {
+                        out.push_str(&clixml_streams(block));
+                        break;
+                    }
+                }
+            }
+            (None, _) => {
+                out.push_str(&plain(rest));
+                break;
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// The text of the stream records (`<S S="Error">…</S>` and the like) in a CLIXML block.
+fn clixml_streams(block: &str) -> String {
+    const KEPT: &[&str] = &["error", "warning", "verbose", "debug", "information"];
+    let mut out = String::new();
+    let mut rest = block;
+    while let Some(i) = rest.find("<S S=\"") {
+        let after = &rest[i + "<S S=\"".len()..];
+        let Some(q) = after.find('"') else { break };
+        let kind = after[..q].to_ascii_lowercase();
+        let Some(gt) = after[q..].find('>') else {
+            break;
+        };
+        let body = &after[q + gt + 1..];
+        let Some(end) = body.find("</S>") else {
+            if KEPT.contains(&kind.as_str()) {
+                out.push_str(&clixml_text(body));
+            }
+            break;
+        };
+        if KEPT.contains(&kind.as_str()) {
+            out.push_str(&clixml_text(&body[..end]));
+        }
+        rest = &body[end + "</S>".len()..];
+    }
+    out
+}
+
+/// Undoes CLIXML's escapes: XML entities and `_xHHHH_` characters (`_x000D__x000A_` is a
+/// line break).
+fn clixml_text(t: &str) -> String {
+    let t = t
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&");
+    let mut out = String::with_capacity(t.len());
+    let mut rest = t.as_str();
+    while let Some(i) = rest.find("_x") {
+        out.push_str(&rest[..i]);
+        let code = rest.get(i + 2..i + 6);
+        let closes = rest.get(i + 6..i + 7) == Some("_");
+        match code
+            .filter(|_| closes)
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .and_then(char::from_u32)
+        {
+            Some('\r') => rest = &rest[i + 7..],
+            Some(c) => {
+                out.push(c);
+                rest = &rest[i + 7..];
+            }
+            None => {
+                out.push_str("_x");
+                rest = &rest[i + 2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The last lines of a command's error stream, from the bytes kept of its end.
 fn last_lines(tail: &[u8], cut_at_start: bool) -> String {
-    let text = String::from_utf8_lossy(tail);
+    let raw = String::from_utf8_lossy(tail);
+    let text = decode_clixml(&raw);
     let mut lines: Vec<&str> = text.lines().collect();
     // The kept bytes may start in the middle of a line.
     if cut_at_start && lines.len() > 1 {
@@ -244,6 +365,230 @@ fn last_lines(tail: &[u8], cut_at_start: bool) -> String {
     }
     let from = lines.len().saturating_sub(STDERR_TAIL_LINES);
     lines[from..].join("\n")
+}
+
+/// Why `command` is refused when its text names one of the app's own folders (the
+/// database, logs and install folder, 13.4 step 1), in every mode. The file tools never reach
+/// those folders; this keeps an obvious command (`sqlite3 <data>/app.db`, `cat <logs>/…`)
+/// from reaching them either. It reads text, so a command that builds the path from pieces
+/// is not caught: the folders bind the app's tools, not the programs a command starts.
+fn names_app_folder(command: &str, forbidden: &[String]) -> Option<String> {
+    let text = command.to_lowercase().replace('\\', "/");
+    let mut marks: Vec<String> = Vec::new();
+    for f in forbidden {
+        let mut forms = vec![f.clone()];
+        if let Ok(c) = dunce::canonicalize(f) {
+            forms.push(c.display().to_string());
+        }
+        for form in forms {
+            let form = form.to_lowercase().replace('\\', "/");
+            let form = form.trim_end_matches('/').to_string();
+            // The app's identifier (`io.github.<owner>.<app>`) names its data and log folders
+            // on every system, also when written from `~` or an environment variable.
+            if let Some(last) = form.rsplit('/').next()
+                && last.matches('.').count() >= 2
+                && last.len() >= 12
+            {
+                marks.push(last.to_string());
+            }
+            if form.len() > 3 {
+                marks.push(form);
+            }
+        }
+    }
+    marks.iter().any(|m| text.contains(m.as_str())).then(|| {
+        "The command names the app's own folders (its database, logs or program files), which tools never reach. Nothing was run.".to_string()
+    })
+}
+
+/// Programs that move, rename or change the rights of what they are given: a folder that
+/// holds the app's own folders is never handed to one (nor to a delete).
+const MOVES_OR_LOCKS: &[&str] = &[
+    "mv",
+    "move",
+    "move-item",
+    "mi",
+    "ren",
+    "rename",
+    "rename-item",
+    "rni",
+    "chmod",
+    "chown",
+    "icacls",
+    "takeown",
+    "attrib",
+    "robocopy",
+];
+
+/// Why `command` is refused when one of its words, read as a path, reaches the app's own
+/// folders (0.0.5): a path inside one of them, also through a glob (`io.github.*`), `~`, an
+/// environment variable or `..`; or, for a delete, a move or a change of rights, a path that
+/// holds one of them (`rm -rf ~`). Words are taken from the text, split at spaces and shell
+/// punctuation, so a quoted path counts too. What it cannot see: a path built from pieces or
+/// variables it does not know, and what a script or program does once it runs.
+fn reaches_app_folder(
+    command: &str,
+    cwd: &str,
+    destroys: bool,
+    forbidden: &[String],
+) -> Option<String> {
+    let folders: Vec<Vec<String>> = forbidden
+        .iter()
+        .flat_map(|f| {
+            let mut forms = vec![f.clone()];
+            if let Ok(c) = dunce::canonicalize(f) {
+                forms.push(c.display().to_string());
+            }
+            forms
+        })
+        .filter_map(|f| components(&f, None))
+        .filter(|c| c.len() > 1)
+        .collect();
+    if folders.is_empty() {
+        return None;
+    }
+    let words: Vec<String> = command
+        .split(|c: char| c.is_whitespace() || ";|&()<>{}=,`".contains(c))
+        .map(|w| w.trim_matches(|c| c == '"' || c == '\''))
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    let destroys = destroys
+        || words
+            .iter()
+            .any(|w| MOVES_OR_LOCKS.contains(&w.to_lowercase().as_str()));
+    for word in &words {
+        if word.starts_with('-') && !word.contains(['/', '\\']) {
+            continue;
+        }
+        let Some(path) = components(word, Some(cwd)) else {
+            continue;
+        };
+        for folder in &folders {
+            let n = path.len().min(folder.len());
+            let same = path[..n]
+                .iter()
+                .zip(&folder[..n])
+                .all(|(p, f)| wildcard(p, f));
+            if !same {
+                continue;
+            }
+            let inside = path.len() >= folder.len();
+            if inside || destroys {
+                return Some(if inside {
+                    "The command names a path in the app's own folders (its database, logs, program files or the system's key stores), which tools never reach. Nothing was run.".to_string()
+                } else {
+                    "The command would delete, move or lock a folder that holds the app's own folders (its database, logs, program files or the system's key stores). Nothing was run. Name the folders inside it that should change instead.".to_string()
+                });
+            }
+        }
+    }
+    None
+}
+
+/// A word as the components of an absolute path, lower-cased with `/` as separator: `~`,
+/// `$HOME`, `${VAR}`, `$env:VAR` and `%VAR%` at its start are expanded from this process's
+/// environment, a relative word is joined to `cwd`, and `.` and `..` are resolved. `None`
+/// when the word is relative and there is no `cwd`, or names a variable that is not set.
+fn components(word: &str, cwd: Option<&str>) -> Option<Vec<String>> {
+    let var = |name: &str| {
+        let name = if name.eq_ignore_ascii_case("home") && std::env::var("HOME").is_err() {
+            "USERPROFILE"
+        } else {
+            name
+        };
+        std::env::var(name).ok()
+    };
+    let (head, rest): (Option<String>, &str) = if let Some(rest) = word.strip_prefix('~') {
+        (var("HOME").or_else(|| var("USERPROFILE")), rest)
+    } else if let Some(rest) = word
+        .strip_prefix("$env:")
+        .or_else(|| word.strip_prefix("$ENV:"))
+    {
+        let end = rest.find(['/', '\\']).unwrap_or(rest.len());
+        (var(&rest[..end]), &rest[end..])
+    } else if let Some(rest) = word.strip_prefix("${") {
+        let end = rest.find('}')?;
+        (var(&rest[..end]), &rest[end + 1..])
+    } else if let Some(rest) = word.strip_prefix('$') {
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        (var(&rest[..end]), &rest[end..])
+    } else if let Some(rest) = word.strip_prefix('%') {
+        let end = rest.find('%')?;
+        (var(&rest[..end]), &rest[end + 1..])
+    } else {
+        (None, word)
+    };
+    let text = match head {
+        Some(h) => format!("{h}/{rest}"),
+        None if word.starts_with(['~', '$', '%']) => return None,
+        None => rest.to_string(),
+    };
+    let text = text.replace('\\', "/").to_lowercase();
+    let absolute = text.starts_with('/')
+        || (text.len() >= 2
+            && text.as_bytes()[1] == b':'
+            && text.as_bytes()[0].is_ascii_alphabetic());
+    let full = if absolute {
+        text
+    } else {
+        format!("{}/{text}", cwd?.replace('\\', "/").to_lowercase())
+    };
+    let mut out: Vec<String> = Vec::new();
+    for part in full.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            p => out.push(p.to_string()),
+        }
+    }
+    Some(out)
+}
+
+/// Whether the glob `pattern` (`*`, `?`, and `[...]` taken as any one character) matches the
+/// path component `name`. Both are lower case. It matches at least what a shell would, so
+/// `*` also matches a name that starts with a dot.
+fn wildcard(pattern: &str, name: &str) -> bool {
+    let mut p: Vec<char> = Vec::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            for d in chars.by_ref() {
+                if d == ']' {
+                    break;
+                }
+            }
+            p.push('?');
+        } else {
+            p.push(c);
+        }
+    }
+    let n: Vec<char> = name.chars().collect();
+    let (mut i, mut j, mut star, mut mark) = (0, 0, None, 0);
+    while j < n.len() {
+        if i < p.len() && (p[i] == '?' || p[i] == n[j]) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == '*' {
+            star = Some(i);
+            mark = j;
+            i += 1;
+        } else if let Some(s) = star {
+            i = s + 1;
+            mark += 1;
+            j = mark;
+        } else {
+            return false;
+        }
+    }
+    while i < p.len() && p[i] == '*' {
+        i += 1;
+    }
+    i == p.len()
 }
 
 fn arg_looks_like_path(a: &str) -> bool {
@@ -327,6 +672,9 @@ impl BuiltinServer for TerminalServer {
                 payload: Value::Null,
             })
         };
+        if let Some(why) = names_app_folder(&command, &chat.forbidden_folders) {
+            return deny(why);
+        }
         let Some(cwd_arg) = cwd_arg else {
             return deny("No folder is approved for this chat, so commands have nowhere to run. The user can approve a folder in the Tools panel.".into());
         };
@@ -363,6 +711,15 @@ impl BuiltinServer for TerminalServer {
             }
         };
         let verdict = classify(self.config.shell.grammar(), &command);
+        let destroys = matches!(
+            verdict.keep_asking,
+            Some((policy::KeepAsking::Delete | policy::KeepAsking::Destroy, _))
+        );
+        if let Some(why) =
+            reaches_app_folder(&command, &cwd.canonical, destroys, &chat.forbidden_folders)
+        {
+            return deny(why);
+        }
         let mut preview = format!(
             "$ {shown_cmd}\nin {}",
             policy::sanitize::visible(&cwd.canonical)
@@ -536,7 +893,7 @@ impl BuiltinServer for TerminalServer {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             if let Some(p) = &progress {
-                                p(String::from_utf8_lossy(&buf[..n]).into_owned());
+                                p(decode_clixml(&String::from_utf8_lossy(&buf[..n])).into_owned());
                             }
                             if is_stderr && let Ok(mut end) = stderr_end.lock() {
                                 end.0.extend_from_slice(&buf[..n]);
@@ -573,7 +930,7 @@ impl BuiltinServer for TerminalServer {
             let _ = tokio::time::timeout(Duration::from_secs(2), r).await;
         }
         let bytes = output.lock().map(|o| o.clone()).unwrap_or_default();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let text = decode_clixml(&String::from_utf8_lossy(&bytes)).into_owned();
         let header = match &outcome {
             Ok(Ok(status)) => match status.code() {
                 Some(code) => format!(
@@ -732,6 +1089,7 @@ mod tests {
             skill_folders: vec![],
             skill_roots: vec![],
             result_cap_tokens: 2000,
+            full_access: false,
         }
     }
 
@@ -897,6 +1255,117 @@ mod tests {
         assert!(matches!(a.scope, Scope::Commands { .. }));
         let a = describe(&s, &c, json!({"command": "echo $(whoami)"})).await;
         assert_eq!(a.risk, Risk::AlwaysAsk);
+    }
+
+    /// A command that names the app's own folders is refused before anything else, in every
+    /// mode and with the whole computer approved (Full access): by its path, written either
+    /// way round, in any letter case, or by the app's identifier.
+    #[tokio::test]
+    async fn a_command_that_names_the_app_folders_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let data = root.join(".local/share/io.github.someone.someapp");
+        std::fs::create_dir_all(data.join("logs")).unwrap();
+        let s = server(&[]);
+        let c = ChatContext {
+            forbidden_folders: vec![data.display().to_string()],
+            full_access: true,
+            ..chat(&root)
+        };
+        let db = data.join("app.db").display().to_string();
+        for command in [
+            format!("sqlite3 {db} .dump"),
+            format!("cat {}", db.to_uppercase()),
+            format!("python3 -c \"open('{}')\"", db.replace('/', "\\\\")),
+            "cat ~/.local/share/io.github.someone.someapp/app.db".to_string(),
+            "Get-Content $env:APPDATA\\io.github.someone.someapp\\app.db".to_string(),
+        ] {
+            let a = describe(&s, &c, json!({ "command": command })).await;
+            let why = a
+                .hard_limit
+                .unwrap_or_else(|| panic!("{command} was let through"));
+            assert!(why.contains("app's own folders"), "{why}");
+        }
+        for command in ["cargo build", "ls io.github", "cat notes.txt"] {
+            let a = describe(&s, &c, json!({ "command": command })).await;
+            assert!(a.hard_limit.is_none(), "{command}: {:?}", a.hard_limit);
+        }
+
+        // Globs, `..`, and a delete, move or lock of a folder that holds the app's folder.
+        let root_text = root.display().to_string();
+        for command in [
+            format!("sqlite3 {root_text}/.local/share/io.github.some*/app.db .dump"),
+            format!("cat {root_text}/.local/share/*/app.db"),
+            format!("rm -rf {root_text}/.local/share/io.github.someone.*"),
+            format!("rm -rf {root_text}/.local"),
+            format!("rm -rf {root_text}"),
+            "rm -rf .".to_string(),
+            "rm -rf *".to_string(),
+            format!("mv {root_text} /tmp/elsewhere"),
+            format!("chmod -R 000 {root_text}"),
+            format!("cat {root_text}/sub/../.local/share/io.github.someone.someapp/app.db"),
+        ] {
+            let a = describe(&s, &c, json!({ "command": command })).await;
+            assert!(a.hard_limit.is_some(), "{command} was let through");
+        }
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        for command in [
+            "rm -rf build".to_string(),
+            "ls *".to_string(),
+            "cat *.txt".to_string(),
+            format!("ls {root_text}"),
+            "mv build out".to_string(),
+        ] {
+            let a = describe(&s, &c, json!({ "command": command })).await;
+            assert!(a.hard_limit.is_none(), "{command}: {:?}", a.hard_limit);
+        }
+    }
+
+    /// What Windows PowerShell writes to a redirected stderr (seen on the owner's computer):
+    /// the error text survives, the progress records and the XML go.
+    #[test]
+    fn powershell_clixml_on_stderr_becomes_plain_text() {
+        let raw = "Building...\r\n#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\"><Obj S=\"progress\" RefId=\"0\"><TN RefId=\"0\"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N=\"SourceId\">1</I64><PR N=\"Record\"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><S S=\"Error\">npm ERR! Missing script: &quot;build:cached&quot;_x000D__x000A_</S><S S=\"Error\">npm ERR! A &lt;b&gt; &amp; c_x000D__x000A_</S></Objs>\r\ndone\r\n";
+        let text = decode_clixml(raw);
+        assert!(
+            !text.contains("<Objs") && !text.contains("CLIXML") && !text.contains("Preparing"),
+            "{text}"
+        );
+        assert!(text.contains("Building..."), "{text}");
+        assert!(
+            text.contains("npm ERR! Missing script: \"build:cached\"\n"),
+            "{text}"
+        );
+        assert!(text.contains("npm ERR! A <b> & c\n"), "{text}");
+        assert!(text.contains("done"), "{text}");
+        // The kept end of a long stream starts inside a block.
+        let cut = "x000A_</S><S S=\"Error\">the last error_x000D__x000A_</S></Objs>";
+        assert_eq!(decode_clixml(cut), "the last error\n");
+        // Ordinary output is left alone, also text that merely mentions _x.
+        assert_eq!(decode_clixml("plain _x01 text\n"), "plain _x01 text\n");
+        assert!(matches!(
+            decode_clixml("plain"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn globs_match_like_a_shell_or_more() {
+        assert!(wildcard("io.github.*", "io.github.someone.app"));
+        assert!(wildcard("*", ".local"));
+        assert!(wildcard("a?c", "abc") && !wildcard("a?c", "abbc"));
+        assert!(wildcard("[ab]pp", "app") && wildcard("*.db", "app.db"));
+        assert!(!wildcard("*.log", "app.db") && !wildcard("io.x*", "io.github"));
+        assert_eq!(
+            components("/a/b/../c/./d", None).unwrap(),
+            vec!["a", "c", "d"]
+        );
+        assert_eq!(components("x/y", Some("/w")).unwrap(), vec!["w", "x", "y"]);
+        assert_eq!(
+            components("C:\\Users\\Me", None).unwrap(),
+            vec!["c:", "users", "me"]
+        );
+        assert!(components("$SURELY_NOT_SET_12345/x", Some("/w")).is_none());
     }
 
     /// The file and git tools do not write in skill folders; the terminal still runs there
@@ -1238,5 +1707,112 @@ mod encoding_tests {
         assert!(script.contains("OutputEncoding"));
         assert!(args.contains(&"-EncodedCommand".to_string()));
         assert!(args.contains(&"-NoProfile".to_string()));
+    }
+}
+
+/// Real Windows PowerShell (CI runs these on Windows): what a program writes to its error
+/// stream is shown as text, and it fails the command only through its exit code.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    async fn run(command: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let program = PathBuf::from(system_root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        let base: BTreeMap<String, String> = std::env::vars()
+            .filter(|(k, _)| {
+                [
+                    "PATH",
+                    "SYSTEMROOT",
+                    "WINDIR",
+                    "COMSPEC",
+                    "PATHEXT",
+                    "TEMP",
+                    "TMP",
+                    "USERPROFILE",
+                ]
+                .contains(&k.to_uppercase().as_str())
+            })
+            .collect();
+        let s = TerminalServer::new(TerminalConfig {
+            shell: TerminalShell::PowerShell { program },
+            base_env: base,
+            pass_through: vec![],
+        });
+        let c = ChatContext {
+            chat_id: 1,
+            approved_folders: vec![root.display().to_string()],
+            working_folder: None,
+            forbidden_folders: vec![],
+            skill_folders: vec![],
+            skill_roots: vec![],
+            result_cap_tokens: 4000,
+            full_access: true,
+        };
+        let args = json!({ "command": command });
+        let args = args.as_object().unwrap();
+        let Described::Action(action) = s.describe("run_command", args, &c).await else {
+            panic!("not described");
+        };
+        assert!(
+            action.hard_limit.is_none(),
+            "refused: {:?}",
+            action.hard_limit
+        );
+        let out = s
+            .call(
+                "run_command",
+                args,
+                &action,
+                CallContext {
+                    chat: c,
+                    cancel: CancellationToken::new(),
+                    progress: None,
+                },
+            )
+            .await;
+        out.joined_text()
+    }
+
+    #[tokio::test]
+    async fn a_program_that_writes_to_stderr_and_succeeds_is_not_a_failure() {
+        let text = run("cmd /c \"echo a-warning 1>&2\"").await;
+        assert!(text.starts_with("Exit code 0"), "{text}");
+        assert!(text.contains("a-warning"), "{text}");
+        assert!(
+            !text.contains("<Objs") && !text.contains("CLIXML"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_program_keeps_its_exit_code_and_its_message_is_readable() {
+        let text = run("cmd /c \"echo it-broke 1>&2 & exit 3\"").await;
+        assert!(text.starts_with("Exit code 3"), "{text}");
+        assert!(text.contains("it-broke"), "{text}");
+        assert!(
+            !text.contains("<Objs") && !text.contains("CLIXML"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_of_powershell_itself_still_fails() {
+        let text = run("Write-Error \"it-went-wrong\"").await;
+        assert!(text.contains("it-went-wrong"), "{text}");
+        assert!(text.starts_with("Exit code 1"), "{text}");
+        assert!(!text.contains("<Objs"), "{text}");
+        let text = run("Write-Output fine").await;
+        assert!(
+            text.starts_with("Exit code 0") && text.contains("fine"),
+            "{text}"
+        );
     }
 }

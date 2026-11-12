@@ -254,6 +254,9 @@ pub struct ToolDto {
     pub shown: bool,
 }
 
+/// What the Tools panel says about a folder tool in a chat that is not in Full access.
+const ONLY_IN_FULL_ACCESS: &str = "Works only when Full access is on in this chat.";
+
 fn summary_of(cfg: &ServerConfig) -> (String, String) {
     match cfg {
         ServerConfig::Stdio { command, args, .. } => {
@@ -916,10 +919,16 @@ async fn chat_tool_list(
     let mut list = tool_list(state, &selection).await;
     // Computer use: only for a model that can see images.
     let no_computer = computer_unavailable(state, chat).await;
+    // [0.0.5 full access] The tools that create, move and delete folders work only while the
+    // chat is in Full access; otherwise the Tools panel says so and no turn offers them.
+    let full_access = crate::approvals::modes().full_access(chat.id.0);
     for (_, dto) in &mut list {
         let why_not = match dto.server.as_str() {
             computer::SERVER_NAME => no_computer.as_deref(),
             BROWSER_SERVER => no_browser.as_deref(),
+            "files" if !full_access && tools::files::organize::is_tool(&dto.original) => {
+                Some(ONLY_IN_FULL_ACCESS)
+            }
             _ => None,
         };
         if let Some(reason) = why_not {
@@ -930,6 +939,18 @@ async fn chat_tool_list(
     let setting = crate::tool_select::settings(state).await;
     let mut dtos: Vec<&mut ToolDto> = list.iter_mut().map(|(_, dto)| dto).collect();
     companions_follow(&mut dtos, setting.auto);
+    // [0.0.5 full access] The folder tools come with `write_file`, and only in Full access.
+    // They follow it instead of being switches of their own, so a chat whose tool list was
+    // saved before they existed has them as soon as Full access is on.
+    let write_on = list
+        .iter()
+        .any(|(_, d)| d.server == "files" && d.original == "write_file" && d.enabled_in_chat);
+    for (_, dto) in &mut list {
+        if dto.server == "files" && tools::files::organize::is_tool(&dto.original) {
+            dto.companion = true;
+            dto.enabled_in_chat = write_on && full_access;
+        }
+    }
     // Which of the offered tools the next turn shows whatever the user writes.
     let offered: Vec<crate::tool_select::Candidate> = list
         .iter()

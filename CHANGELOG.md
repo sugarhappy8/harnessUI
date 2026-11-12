@@ -2,6 +2,23 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.0.5 (2026-11-12)
+
+The owner asked for the app to "stop asking me to allow everything", named *Full access*, and for models to be able to make their own folders, move around the computer, delete and organise, only when Full access is on. The four things first planned for 0.0.5 (context per model, plain-language loading settings, talking to Claude and Codex, model comparisons) moved to 0.0.6; the plan and the half-built work are in `docs/dev/0.0.6/`.
+
+### Added
+- **Full access.** The shield button in a chat's header now opens a menu with three modes: *Ask first*, *Allow all* and *Full access*. In Full access nothing asks: the model runs commands, reads, writes, edits and deletes files, browses and uses its other tools without a card, and the file tools reach the whole computer, not only your approved folders. Only the app's own folders (its database, logs and install folder) and the folders where the system keeps saved keys stay out of reach of its file tools; a program the model runs has your full rights. Turning it on shows a plain warning and asks you to confirm; turning it off takes one click and reaches a reply that is running at once. *Settings → Permissions → Approvals* chooses the mode every chat starts in; if that is Full access, the app asks again each time it starts, because a program could have changed the setting. Calls that ran this way are listed in the audit log as "allowed by Full access". [SECURITY.md](SECURITY.md) says what it means for safety: a web page or a file that tricks the model is no longer stopped by an approval card.
+- **Folder tools in Full access.** `make_folder`, `move_path` and `delete_folder` let the model create folders, move and rename files and folders, and delete whole folders. A move never replaces anything, and a move into an existing folder puts the item inside it. A folder that holds the app's own data (your home folder does) or a drive's top is never moved or deleted. The tools come with *write_file* and are offered only while the chat is in Full access.
+
+### Changed
+- `list_dir` and `search_files` no longer go into the app's own folders when they lie inside the folder being listed or searched (in every mode); a listing names such a folder and marks it "not reachable".
+- A terminal command that names the app's own folders (its database, logs or program files, the app's identifier, or a path that reaches them through `~`, an environment variable, `..` or a wildcard), or that deletes, moves or locks a folder holding them, is refused, in every mode.
+- The file tools leave devices, pipes and sockets alone; reading one could hang or never end. A search skips `/proc`, `/sys` and `/dev`.
+- The folders where the system keeps saved keys, and on macOS the whole app bundle, are among the folders tools never reach.
+
+### Fixed
+- **On Windows, commands that worked were reported as failed, and their output was buried in XML.** Windows PowerShell turns every line a program writes to its error stream (a warning from Node or npm, for example) into an error record, which made the app report exit code 1 although the program succeeded, and it writes those records and its progress messages as CLIXML (`<Objs Version="1.1.0.1" …>`). A command now fails only through the program's own exit code or an error of PowerShell itself, progress messages are switched off, and any CLIXML left is turned back into plain text, so the real error message is what the model and you see. Found by the owner on their PC; tests run real Windows PowerShell on CI.
+
 ## 0.0.4 (2026-11-12)
 
 The owner asked for thirteen things in 0.0.4 and split the work into three steps. Step 1 brought an Allow all button, artifacts beside the chat, web search with sources, and a short tool list per task. Steps 2 and 3 brought helpful tool errors and manageable tool output, a visible and resumable task, file and symbol mentions, pinned instructions and a context inspector, tested settings per model, and coding benchmarks. All of it is built and was reviewed; the developers' reports and the two independent reviews are in `docs/dev/0.0.4/`. *Settings → General* now also shows which build it is.

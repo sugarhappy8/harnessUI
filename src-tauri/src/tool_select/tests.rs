@@ -10,11 +10,17 @@ use super::*;
 use crate::tool_catalog;
 
 /// Built-in tools as the selection sees them, in the order the app registers their
-/// servers: the given groups' tools, from the catalog.
+/// servers: the given groups' tools, from the catalog, in a chat that is not in Full access
+/// (the tools that organise folders are removed before the selection, `turns::assemble`).
 fn on(groups: &[&str]) -> Vec<Candidate> {
+    on_in(groups, false)
+}
+
+fn on_in(groups: &[&str], full_access: bool) -> Vec<Candidate> {
     tool_catalog::ENTRIES
         .iter()
         .filter(|e| groups.contains(&e.group))
+        .filter(|e| full_access || !(e.group == "files" && tools::files::organize::is_tool(e.name)))
         .map(|e| Candidate {
             name: e.name.to_string(),
             server: e.group.to_string(),
@@ -283,6 +289,28 @@ fn matching_groups_are_ordered_by_score() {
 }
 
 // ---- the shown set ------------------------------------------------------------------------
+
+/// [0.0.5 full access] A request to organise brings in the tools that create and move
+/// folders, when the chat is in Full access and they are offered at all.
+#[test]
+fn a_request_to_organise_shows_the_folder_tools_in_full_access() {
+    let tools = on_in(&["files", "toolfinder", "outputs", "task"], true);
+    assert!(tools.iter().any(|t| t.name == "move_path"));
+    let shown = pick(
+        &tools,
+        &["Organize my Downloads folder: put the PDFs in a new folder"],
+        &[],
+        &[],
+    );
+    for tool in ["make_folder", "move_path"] {
+        assert!(shown.contains(&tool.to_string()), "{tool}: {shown:?}");
+    }
+    assert!(
+        on(&["files"])
+            .iter()
+            .all(|t| !tools::files::organize::is_tool(&t.name))
+    );
+}
 
 #[test]
 fn a_plain_request_shows_the_companions_and_the_core_file_tools() {

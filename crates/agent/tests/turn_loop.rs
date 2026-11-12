@@ -246,6 +246,7 @@ impl PolicyGate for FakePolicy {
             recovered_from_text: recovered,
             untrusted_in_turn: untrusted,
             allow_all: self.allow_all.load(std::sync::atomic::Ordering::Relaxed),
+            full_access: false,
         };
         let grants = self.grants.lock().unwrap();
         policy::evaluate(action, &turn, &*grants)
@@ -2070,6 +2071,7 @@ fn linux_preamble() -> agent::Preamble {
         approved_folders: vec!["/home/me/project".into()],
         os: "Linux".into(),
         path_separator: "/".into(),
+        full_access: false,
     }
 }
 

@@ -10,7 +10,7 @@ import { SystemPromptDialog } from "./SystemPromptDialog";
 import { ErrorBanner } from "./ErrorBanner";
 import { ToolCallCard, type ToolCallView } from "./ToolCallCard";
 import { ToolsPanel } from "./ToolsPanel";
-import { AllowAllButton } from "./AllowAllButton";
+import { ApprovalModeMenu } from "./AllowAllButton";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
 import { EmptyChat, Welcome } from "./Welcome";
@@ -191,7 +191,7 @@ export function ChatView() {
             unsupported={!!modelRef?.startsWith("local:") && runtime?.state === "ready" && !runtime.supportsTools}
           />
         )}
-        {detail && <AllowAllButton chatId={detail.chat.id} />}
+        {detail && <ApprovalModeMenu chatId={detail.chat.id} />}
         {detail && (
           <button
             type="button"

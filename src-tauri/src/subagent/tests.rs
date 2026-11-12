@@ -589,6 +589,7 @@ async fn the_tool_is_described_for_the_policy_engine() {
         recovered_from_text: true,
         untrusted_in_turn: true,
         allow_all: false,
+        full_access: false,
     };
     let none = std::collections::BTreeSet::<policy::Scope>::new();
     assert_eq!(
@@ -1099,12 +1100,14 @@ fn a_helper_is_in_its_chats_approval_mode() {
             recovered: bool,
             untrusted: bool,
         ) -> policy::Decision {
+            let mode = crate::approvals::for_decision(CHAT, untrusted);
             let turn = policy::TurnContext {
                 tool_enabled: true,
                 server_ready: true,
                 recovered_from_text: recovered,
                 untrusted_in_turn: untrusted,
-                allow_all: crate::approvals::for_decision(CHAT, untrusted),
+                allow_all: mode == crate::approvals::ApprovalMode::AllowAll,
+                full_access: mode == crate::approvals::ApprovalMode::FullAccess,
             };
             policy::evaluate(
                 action,

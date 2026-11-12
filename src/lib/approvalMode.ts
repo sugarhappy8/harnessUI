@@ -1,59 +1,63 @@
-// The approval mode of each chat as the window knows it: Ask first, or Allow all.
+// The approval mode of each chat as the window knows it: Ask first, Allow all or Full access.
 //
-// The mode itself lives in Rust (memory only, like grants) and changes only through the
-// two commands below, which only this window may call. This store is a mirror for the
-// header button, the approval cards and Settings, so they agree with each other.
+// The mode itself lives in Rust (memory only, like grants; the default is saved) and
+// changes only through the commands below, which only this window may call. This store is
+// a mirror for the header menu, the approval cards and Settings, so they agree with each
+// other.
 import { create } from "zustand";
 import * as ipc from "./ipc";
+import type { ApprovalModeName } from "./ipc";
+
+export type { ApprovalModeName };
 
 interface ApprovalModeState {
-  /** Chats whose mode was read: true = Allow all, false = Ask first. */
-  modes: Record<number, boolean>;
-  /** "Allow all in every chat", as last read (false until then). */
-  defaultOn: boolean;
-  /** Reads "Allow all in every chat" from the app. */
+  /** Chats whose mode was read. */
+  modes: Record<number, ApprovalModeName>;
+  /** The mode every chat starts in, as last read ("ask" until then). */
+  defaultMode: ApprovalModeName;
+  /** Reads the mode every chat starts in from the app. */
   loadDefault: () => Promise<void>;
   /** Reads a chat's mode from the app. */
   load: (chatId: number) => Promise<void>;
   /** Switches a chat. Rejects when the app refuses; the mirror then stays as it was. */
-  setMode: (chatId: number, allowAll: boolean) => Promise<void>;
-  /** Switches "Allow all in every chat", then reads the chats on screen again. */
-  setDefault: (on: boolean) => Promise<void>;
+  setMode: (chatId: number, mode: ApprovalModeName) => Promise<void>;
+  /** Changes the mode every chat starts in, then reads the chats on screen again. */
+  setDefault: (mode: ApprovalModeName) => Promise<void>;
   /** The app says a mode changed: reads that chat again, or every chat read so far. */
   refresh: (chatId: number | null) => Promise<void>;
 }
 
 export const useApprovalMode = create<ApprovalModeState>((set, get) => ({
   modes: {},
-  defaultOn: false,
+  defaultMode: "ask",
   loadDefault: async () => {
-    set({ defaultOn: await ipc.getAllowAllDefault() });
+    set({ defaultMode: await ipc.getDefaultApprovalMode() });
   },
   load: async (chatId) => {
-    const allowAll = await ipc.getApprovalMode(chatId);
-    set({ modes: { ...get().modes, [chatId]: allowAll } });
+    const mode = await ipc.getChatApprovalMode(chatId);
+    set({ modes: { ...get().modes, [chatId]: mode } });
   },
-  setMode: async (chatId, allowAll) => {
-    const now = await ipc.setApprovalMode(chatId, allowAll);
+  setMode: async (chatId, mode) => {
+    const now = await ipc.setChatApprovalMode(chatId, mode);
     set({ modes: { ...get().modes, [chatId]: now } });
   },
-  setDefault: async (on) => {
-    await ipc.setAllowAllDefault(on);
-    set({ defaultOn: on });
-    // Every chat follows the default again unless switched by hand: read them afresh.
+  setDefault: async (mode) => {
+    await ipc.setDefaultApprovalMode(mode);
+    set({ defaultMode: mode });
+    // Every chat follows the new default, also chats switched by hand: read them afresh.
     await get().refresh(null);
   },
   refresh: async (chatId) => {
     if (chatId !== null) return get().load(chatId);
     const known = Object.keys(get().modes).map(Number);
     const entries = await Promise.all(
-      known.map(async (id) => [id, await ipc.getApprovalMode(id)] as const),
+      known.map(async (id) => [id, await ipc.getChatApprovalMode(id)] as const),
     );
     set({ modes: { ...get().modes, ...Object.fromEntries(entries) } });
   },
 }));
 
-/** Whether the chat is in Allow all, as far as the window knows (false until read). */
-export function useAllowAll(chatId: number): boolean {
-  return useApprovalMode((s) => s.modes[chatId] ?? false);
+/** The chat's mode, as far as the window knows ("ask" until read: never more than it is). */
+export function useChatMode(chatId: number): ApprovalModeName {
+  return useApprovalMode((s) => s.modes[chatId] ?? "ask");
 }

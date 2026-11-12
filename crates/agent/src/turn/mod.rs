@@ -173,6 +173,8 @@ pub enum CallDecision {
     AllowedByGrant,
     /// The chat is in Allow all and the action is not one that keeps asking.
     AllowedByMode,
+    /// The chat is in Full access: nothing asks (0.0.5).
+    AllowedByFullAccess,
     /// The user denied it.
     Denied {
         /// The user's note.

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ShieldAlert, ShieldQuestion } from "lucide-react";
 import type { ApprovalRequest, KeepAsking } from "../lib/types";
-import { useAllowAll, useApprovalMode } from "../lib/approvalMode";
+import { useApprovalMode, useChatMode } from "../lib/approvalMode";
 import { toErrorInfo, useApp } from "../store/app";
 import { AllowAllConfirm } from "./AllowAllButton";
 
@@ -57,7 +57,8 @@ export function ApprovalCard(props: {
   const [note, setNote] = useState("");
   const [showNote, setShowNote] = useState(false);
   const [confirmAll, setConfirmAll] = useState(false);
-  const allowAll = useAllowAll(request.chatId);
+  // A card should not appear in Full access at all; if one does, it reads as in Allow all.
+  const allowAll = useChatMode(request.chatId) !== "ask";
   const denyRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -76,7 +77,7 @@ export function ApprovalCard(props: {
   const allowAllInChat = () => {
     void useApprovalMode
       .getState()
-      .setMode(request.chatId, true)
+      .setMode(request.chatId, "allowAll")
       .then(() => props.onDecide("allowOnce", null))
       .catch((e) => useApp.getState().showError(toErrorInfo(e)));
   };

@@ -79,6 +79,37 @@ server. Control, right-to-left-override and zero-width characters are shown as v
 escapes. *Allow* never has default focus or an Enter binding, and clicks are ignored for a
 short moment after a card appears.
 
+## Allow all and Full access
+
+Every chat starts in *Ask first*, the order above. You can switch a chat, or the mode every
+chat starts in, to one of two other modes. Only you can: the switch is in the chat's header
+and in *Settings → Permissions*, both behind a confirmation, and no tool or model output
+can reach it.
+
+- **Allow all** (0.0.4) answers most cards for you. Deleting, throwing away work, system
+  commands, sensitive places, paying and publishing still ask, and so does sending data
+  out after the model has read outside content in the same turn. It is a guard built on
+  the command parser, not a sandbox.
+- **Full access** (0.0.5) asks for nothing. The model can run any command, read, change,
+  move and delete any file or folder on the computer (deleted files do not go to the
+  trash), and use the browser and the accounts you are logged in to. Only the hard limits
+  remain: a tool that is off stays off, and the app's own folders (its database, logs and
+  install folder) and the folders where the system keeps saved keys stay out of reach of
+  its file tools. A saved "every chat starts in Full access" is asked again each time the
+  app starts, because a program could have written that setting.
+
+What Full access means for safety, plainly: prompt injection is no longer stopped by an
+approval card. A web page, a file or a tool result that tricks the model can make it do
+anything your account can do, without asking. The app still marks such content as data,
+but a model that follows it anyway is not stopped. A command that names the app's folders,
+or deletes or moves a folder that holds them, is refused in every mode, also through `~`,
+environment variables and wildcards. But the app reads only the command line: a program
+the model runs, or a command that builds the path from pieces, can still read the app's
+database or ask the system keychain for your keys, as any program you run can. On Windows
+any program you run can read Credential Manager entries without a prompt. Use Full access for a task you watch, with a model you trust, and switch it off
+afterwards (one click). Calls that ran this way are in the audit log as "allowed by Full
+access".
+
 ## Files
 
 Tools only reach folders you approved, for all chats or for one. The app's own data
@@ -86,6 +117,9 @@ folder, its install folder and the agent browser's profile are never reachable, 
 you approve. Every path is checked lexically first (so a network path such as
 `\\server\share` is refused before Windows tries to connect to it), then resolved through
 symlinks and junctions and checked again, case-insensitively where the volume is.
+In Full access the approved folders are the whole computer; the app's own folders stay
+out of reach, a folder that holds one of them is never moved or deleted by the folder
+tools, and listings and searches do not go into them.
 
 ## The terminal is not a sandbox
 

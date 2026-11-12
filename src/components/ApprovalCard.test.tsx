@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ApprovalRequest, KeepAsking } from "../lib/types";
+import type { ApprovalModeName } from "../lib/ipc";
 
 // The chat's approval mode is switched through these commands only.
 const ipcMock = vi.hoisted(() => ({
-  getApprovalMode: vi.fn<(chatId: number) => Promise<boolean>>(async () => false),
-  setApprovalMode: vi.fn<(chatId: number, allowAll: boolean) => Promise<boolean>>(async (_chat, on) => on),
-  getAllowAllDefault: vi.fn(async () => false),
-  setAllowAllDefault: vi.fn(async () => undefined),
+  getChatApprovalMode: vi.fn<(chatId: number) => Promise<ApprovalModeName>>(async () => "ask"),
+  setChatApprovalMode: vi.fn<(chatId: number, mode: ApprovalModeName) => Promise<ApprovalModeName>>(
+    async (_chat, mode) => mode,
+  ),
+  getDefaultApprovalMode: vi.fn<() => Promise<ApprovalModeName>>(async () => "ask"),
+  setDefaultApprovalMode: vi.fn(async () => undefined),
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 
@@ -99,7 +102,7 @@ describe("ApprovalCard: Allow all in this chat", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
-    ipcMock.setApprovalMode.mockImplementation(async (_chat, on) => on);
+    ipcMock.setChatApprovalMode.mockImplementation(async (_chat, mode) => mode);
     useApprovalMode.setState({ modes: {} });
     useApp.setState({ error: null });
   });
@@ -143,7 +146,7 @@ describe("ApprovalCard: Allow all in this chat", () => {
     openConfirm();
     const d = dialog();
     // Nothing has happened yet: opening the dialog changes nothing.
-    expect(ipcMock.setApprovalMode).not.toHaveBeenCalled();
+    expect(ipcMock.setChatApprovalMode).not.toHaveBeenCalled();
     expect(onDecide).not.toHaveBeenCalled();
     const still = within(d).getByRole("list", { name: "Still asks" });
     expect(within(still).getAllByRole("listitem").map((li) => li.textContent)).toEqual([...STILL_ASKS]);
@@ -154,18 +157,18 @@ describe("ApprovalCard: Allow all in this chat", () => {
     expect(document.activeElement).not.toBe(confirm);
     // The confirm button ignores a click that comes too soon (a double click).
     fireEvent.click(confirm);
-    expect(ipcMock.setApprovalMode).not.toHaveBeenCalled();
+    expect(ipcMock.setChatApprovalMode).not.toHaveBeenCalled();
     arm(CONFIRM_INPUT_DELAY_MS);
     await act(async () => {
       fireEvent.click(confirm);
     });
-    expect(ipcMock.setApprovalMode).toHaveBeenCalledWith(1, true);
+    expect(ipcMock.setChatApprovalMode).toHaveBeenCalledWith(1, "allowAll");
     expect(onDecide).toHaveBeenCalledWith("allowOnce", null);
     // The chat is switched before the card is approved.
-    const switched = ipcMock.setApprovalMode.mock.invocationCallOrder[0] ?? Infinity;
+    const switched = ipcMock.setChatApprovalMode.mock.invocationCallOrder[0] ?? Infinity;
     const approved = onDecide.mock.invocationCallOrder[0] ?? -1;
     expect(switched).toBeLessThan(approved);
-    expect(useApprovalMode.getState().modes[1]).toBe(true);
+    expect(useApprovalMode.getState().modes[1]).toBe("allowAll");
   });
 
   it("approves nothing when the confirmation is cancelled", async () => {
@@ -177,13 +180,13 @@ describe("ApprovalCard: Allow all in this chat", () => {
       fireEvent.click(within(dialog()).getByText("Cancel"));
     });
     expect(screen.queryByText("Allow all in this chat?")).toBeNull();
-    expect(ipcMock.setApprovalMode).not.toHaveBeenCalled();
+    expect(ipcMock.setChatApprovalMode).not.toHaveBeenCalled();
     expect(onDecide).not.toHaveBeenCalled();
     expect(useApprovalMode.getState().modes[1]).toBeUndefined();
   });
 
   it("approves nothing when the app refuses the switch", async () => {
-    ipcMock.setApprovalMode.mockRejectedValueOnce({
+    ipcMock.setChatApprovalMode.mockRejectedValueOnce({
       code: "bad_request",
       message: "That chat no longer exists.",
       nextStep: "",
@@ -208,12 +211,25 @@ describe("ApprovalCard: Allow all in this chat", () => {
     expect(screen.getByText(/this action sends data out/)).toBeTruthy();
     expect(screen.queryByText(ALLOW_ALL_AFTER_UNTRUSTED)).toBeNull();
     unmount();
-    useApprovalMode.setState({ modes: { 1: true } });
+    useApprovalMode.setState({ modes: { 1: "allowAll" } });
     render(<ApprovalCard request={request} onDecide={() => {}} />);
     expect(screen.queryByText("Allow all in this chat")).toBeNull();
     expect(screen.getByText("Allow for this chat")).toBeTruthy();
     expect(screen.getByText(ALLOW_ALL_AFTER_UNTRUSTED)).toBeTruthy();
     expect(ALLOW_ALL_AFTER_UNTRUSTED).toContain("Allow all is on in this chat");
+  });
+
+  it("is not offered in Full access either, where the card reads as in Allow all", () => {
+    // A card should not appear in Full access at all; if one does, it offers no more than
+    // in Allow all, and no Full access button.
+    useApprovalMode.setState({ modes: { 1: "fullAccess" } });
+    render(<ApprovalCard request={{ ...base, reason: "untrustedContentThenOutbound" }} onDecide={() => {}} />);
+    expect(screen.queryByText("Allow all in this chat")).toBeNull();
+    expect(screen.queryByText(/Full access/)).toBeNull();
+    expect(screen.getByText("Allow once")).toBeTruthy();
+    expect(screen.getByText("Allow for this chat")).toBeTruthy();
+    expect(screen.getByText("Deny")).toBeTruthy();
+    expect(screen.getByText(ALLOW_ALL_AFTER_UNTRUSTED)).toBeTruthy();
   });
 
   it("says why an action still asks in Allow all", () => {

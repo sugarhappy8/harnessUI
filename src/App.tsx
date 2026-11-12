@@ -7,6 +7,7 @@ import { ModelsDialog } from "./components/ModelsDialog";
 import { FirstRun } from "./components/FirstRun";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { AppNotices } from "./components/AppNotices";
+import { FullAccessStartCheck } from "./components/AllowAllButton";
 import { useApp, toErrorInfo } from "./store/app";
 import * as ipc from "./lib/ipc";
 
@@ -149,6 +150,8 @@ export default function App() {
         <Workbench />
       </div>
       {dialogs}
+      {/* Only with the main window on screen, after first run: it asks about chats. */}
+      {ipc.isTauri() && <FullAccessStartCheck />}
     </div>
   );
 }

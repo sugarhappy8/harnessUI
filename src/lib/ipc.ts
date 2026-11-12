@@ -233,12 +233,24 @@ export function onStopRequested(handler: () => void): Promise<UnlistenFn> {
 // Agent turns: approvals
 export const resolveApproval = (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) =>
   invoke<void>("resolve_approval", { id, decision, note });
-// Approval modes: Ask first, or Allow all (only these commands change them)
-export const getApprovalMode = (chatId: number) => invoke<boolean>("get_approval_mode", { chatId });
-export const setApprovalMode = (chatId: number, allowAll: boolean) =>
-  invoke<boolean>("set_approval_mode", { chatId, allowAll });
-export const getAllowAllDefault = () => invoke<boolean>("get_allow_all_default");
-export const setAllowAllDefault = (on: boolean) => invoke<void>("set_allow_all_default", { on });
+// Approval modes: Ask first, Allow all or Full access (only these commands change them)
+/** How a chat's tool calls are approved, as the app names the modes. */
+export type ApprovalModeName = "ask" | "allowAll" | "fullAccess";
+export const getChatApprovalMode = (chatId: number) =>
+  invoke<ApprovalModeName>("get_chat_approval_mode", { chatId });
+/** Resolves to the mode the chat is in now. */
+export const setChatApprovalMode = (chatId: number, mode: ApprovalModeName) =>
+  invoke<ApprovalModeName>("set_chat_approval_mode", { chatId, mode });
+export const getDefaultApprovalMode = () => invoke<ApprovalModeName>("get_default_approval_mode");
+/** Saved across restarts. Every chat follows the new default, also chats switched by hand. */
+export const setDefaultApprovalMode = (mode: ApprovalModeName) =>
+  invoke<void>("set_default_approval_mode", { mode });
+/** True when the saved default is Full access and the user has not confirmed it since the
+ *  app started: until then every chat starts in Ask first. */
+export const getFullAccessDefaultPending = () => invoke<boolean>("get_full_access_default_pending");
+/** The answer to that question: true starts every chat in Full access for this run (kept
+ *  saved); false saves Ask first. */
+export const answerFullAccessDefault = (on: boolean) => invoke<void>("answer_full_access_default", { on });
 
 // Tools and MCP servers
 export const listChatTools = (chatId: number) => invoke<ToolDto[]>("list_chat_tools", { chatId });

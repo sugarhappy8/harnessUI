@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
+import { RadioGroup } from "radix-ui";
 import { FolderPlus, Trash2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import type { ApprovedFolder, AuditRow, ErrorInfo, HotkeyStatus } from "../lib/types";
 import { toErrorInfo } from "../store/app";
-import { useApprovalMode } from "../lib/approvalMode";
-import { AllowAllConfirm } from "./AllowAllButton";
+import { useApprovalMode, type ApprovalModeName } from "../lib/approvalMode";
+import { APPROVAL_MODES, AllowAllConfirm, FullAccessConfirm, MODE_LOOK } from "./AllowAllButton";
 import { ErrorBanner } from "./ErrorBanner";
 
 /** Approved folders for every chat, and the stop hotkey. */
@@ -59,7 +60,7 @@ export function PermissionsSettings() {
   return (
     <div className="space-y-5 text-sm">
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
-      <AllowAllDefault onError={setError} />
+      <DefaultApprovalMode onError={setError} />
       <section>
         <h3 className="mb-1 font-medium">Folders tools may use in every chat</h3>
         <p className="mb-2 text-xs text-fg-muted">
@@ -120,51 +121,85 @@ export function PermissionsSettings() {
 }
 
 /**
- * "Allow all in every chat": every chat starts in Allow all instead of asking first.
- * Off unless the user switches it on, and switching it on asks first.
+ * The mode every chat starts in: Ask first (where a new install starts), Allow all or Full
+ * access. Ask first saves at once; the other two ask first, as in the chat header.
  */
-function AllowAllDefault(props: { onError: (e: ErrorInfo) => void }) {
+function DefaultApprovalMode(props: { onError: (e: ErrorInfo) => void }) {
   const { onError } = props;
-  const [on, setOn] = useState(false);
-  const [confirm, setConfirm] = useState(false);
+  const mode = useApprovalMode((s) => s.defaultMode);
+  const [confirm, setConfirm] = useState<"allowAll" | "fullAccess" | null>(null);
   useEffect(() => {
     let alive = true;
-    ipc
-      .getAllowAllDefault()
-      .then((v) => alive && setOn(v))
+    useApprovalMode
+      .getState()
+      .loadDefault()
       .catch((e) => alive && onError(toErrorInfo(e)));
     return () => {
       alive = false;
     };
   }, [onError]);
-  async function save(next: boolean) {
+  async function save(next: ApprovalModeName) {
     try {
       await useApprovalMode.getState().setDefault(next);
-      setOn(next);
     } catch (e) {
       onError(toErrorInfo(e));
     }
   }
+  // Even a step down from Full access to Allow all asks: the new default also applies to
+  // chats switched by hand, and some of those may have been in Ask first.
+  function choose(next: ApprovalModeName) {
+    if (next === mode) return;
+    if (next === "ask") void save("ask");
+    else setConfirm(next);
+  }
+  const closeConfirm = (open: boolean) => {
+    if (!open) setConfirm(null);
+  };
   return (
     <section>
       <h3 className="mb-1 font-medium">Approvals</h3>
       <p className="mb-2 text-xs text-fg-muted">
-        Every chat starts by asking before the model acts. You can allow all for one chat with the shield button
-        in the chat&apos;s header. This switch does it for every chat. Deleting, paying, publishing and a few other
-        things still ask.
+        Choose how much the model may do without asking you: Ask first, Allow all or Full access. Every chat starts
+        in the mode you choose here, and changing it also changes chats you switched by hand. To change one chat
+        only, use the shield button in the chat&apos;s header.
       </p>
-      <label className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          role="switch"
-          aria-checked={on}
-          checked={on}
-          onChange={(e) => (e.target.checked ? setConfirm(true) : void save(false))}
-          className="h-4 w-4"
-        />
-        <span className={on ? "font-medium text-warning" : ""}>Allow all in every chat</span>
-      </label>
-      <AllowAllConfirm open={confirm} scope="every" onOpenChange={setConfirm} onConfirm={() => void save(true)} />
+      {/* Controlled by the saved default: a choice that asks first shows only once confirmed. */}
+      <RadioGroup.Root
+        value={mode}
+        onValueChange={(v) => choose(v as ApprovalModeName)}
+        aria-label="Every chat starts in"
+        className="space-y-1"
+      >
+        {APPROVAL_MODES.map((m) => (
+          <RadioGroup.Item
+            key={m.mode}
+            value={m.mode}
+            className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-bg-muted"
+          >
+            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-border-strong">
+              <RadioGroup.Indicator className="h-2 w-2 rounded-full bg-fg" />
+            </span>
+            <span>
+              <span className={mode === m.mode && m.mode !== "ask" ? "font-medium " + MODE_LOOK[m.mode].text : ""}>
+                {m.label}
+              </span>
+              <span className="block text-xs text-fg-muted">{m.description}</span>
+            </span>
+          </RadioGroup.Item>
+        ))}
+      </RadioGroup.Root>
+      <AllowAllConfirm
+        open={confirm === "allowAll"}
+        scope="every"
+        onOpenChange={closeConfirm}
+        onConfirm={() => void save("allowAll")}
+      />
+      <FullAccessConfirm
+        open={confirm === "fullAccess"}
+        scope="every"
+        onOpenChange={closeConfirm}
+        onConfirm={() => void save("fullAccess")}
+      />
     </section>
   );
 }
@@ -221,16 +256,29 @@ const DECISIONS = [
   ["allow_once", "Allowed once"],
   ["allow_for_chat", "Allowed for the chat"],
   ["allowed_by_grant", "Allowed by an earlier grant"],
-  ["allowed_by_mode", "Allowed by Allow all"],
+  ["allowed_by_mode", "Allowed by Allow all or Full access"],
   ["allowed_without_prompt", "Allowed without asking"],
   ["denied", "Denied"],
   ["cancelled", "Cancelled"],
   ["refused_by_policy", "Refused by policy"],
 ] as const;
 
+/** The note on an audit row of an action that ran because the chat was in Full access.
+ *  The stored decision is `allowed_by_mode`, as for Allow all (FULL_ACCESS_NOTE in
+ *  src-tauri/src/approvals.rs; keep the two in step). */
+export const FULL_ACCESS_NOTE = "Full access";
+
+/** Whether the row's note only names the mode that let the call through. */
+function noteNamesMode(decision: string, note: string | null): boolean {
+  return decision === "allowed_by_mode" && note === FULL_ACCESS_NOTE;
+}
+
 /** How a stored decision reads in the table. */
-export function decisionLabel(decision: string): string {
-  return decision === "allowed_by_mode" ? "allowed by Allow all" : decision.replaceAll("_", " ");
+export function decisionLabel(decision: string, note: string | null = null): string {
+  if (decision === "allowed_by_mode") {
+    return noteNamesMode(decision, note) ? "allowed by Full access" : "allowed by Allow all";
+  }
+  return decision.replaceAll("_", " ");
 }
 
 /** Every tool call with its decision and result (13.7). */
@@ -320,8 +368,8 @@ export function AuditLogView() {
                   {r.preview}
                 </td>
                 <td className="px-2 py-1">
-                  {decisionLabel(r.decision)}
-                  {r.note ? ` (“${r.note}”)` : ""}
+                  {decisionLabel(r.decision, r.note)}
+                  {r.note && !noteNamesMode(r.decision, r.note) ? ` (“${r.note}”)` : ""}
                 </td>
                 <td className="px-2 py-1">{r.result_status ?? "—"}</td>
               </tr>

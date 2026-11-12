@@ -249,6 +249,7 @@ fn chat() -> ChatContext {
     ChatContext {
         chat_id: 7,
         result_cap_tokens: 4000,
+        full_access: false,
         ..Default::default()
     }
 }

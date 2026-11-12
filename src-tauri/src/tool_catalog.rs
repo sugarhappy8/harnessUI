@@ -60,7 +60,8 @@ pub const GROUPS: &[Group] = &[
         server: "files",
         label: "Files",
         // The tools for reading and changing files are always shown; these words bring in
-        // `delete_file`.
+        // `delete_file` (and, in Full access, `delete_folder`). The other folder tools come in
+        // by their own keywords.
         strong: &["delete", "remove", "erase", "get rid of"],
         weak: &[],
     },
@@ -299,6 +300,34 @@ pub const ENTRIES: &[Entry] = &[
         keywords: &["remove", "erase"],
         rank: 3,
         examples: &[r#"{"path": "notes/old-draft.txt"}"#],
+    },
+    // [0.0.5 full access] Offered only while the chat is in Full access.
+    Entry {
+        name: "make_folder",
+        group: "files",
+        purpose: "Create a folder (Full access only).",
+        keywords: &["folder", "directory", "mkdir", "organize", "organise"],
+        rank: 2,
+        examples: &[r#"{"path": "Documents/Invoices/2026"}"#],
+    },
+    Entry {
+        name: "move_path",
+        group: "files",
+        purpose: "Move or rename a file or folder, never replacing anything (Full access only).",
+        keywords: &["move", "rename", "organize", "organise", "sort", "tidy"],
+        rank: 2,
+        examples: &[
+            r#"{"from": "Downloads/report.pdf", "to": "Documents/Reports"}"#,
+            r#"{"from": "notes/draft.md", "to": "notes/final.md"}"#,
+        ],
+    },
+    Entry {
+        name: "delete_folder",
+        group: "files",
+        purpose: "Delete a folder and everything in it (Full access only).",
+        keywords: &["remove", "erase", "folder", "directory"],
+        rank: 3,
+        examples: &[r#"{"path": "Downloads/old-installers"}"#],
     },
     // ---- terminal ----
     Entry {

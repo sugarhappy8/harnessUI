@@ -1522,6 +1522,7 @@ impl<'a> Turn<'a> {
             }
             policy::Decision::AllowedByGrant => CallDecision::AllowedByGrant,
             policy::Decision::AllowedByMode => CallDecision::AllowedByMode,
+            policy::Decision::AllowedByFullAccess => CallDecision::AllowedByFullAccess,
             policy::Decision::Ask { card, reason } => {
                 let request = ApprovalRequest {
                     call_id: record.id.clone(),
