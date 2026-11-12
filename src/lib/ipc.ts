@@ -29,6 +29,9 @@ import type {
   DiagnosticsReport,
   DiskUsage,
   DocumentInput,
+  MentionCheck,
+  MentionInput,
+  MentionSearch,
   DownloadGroup,
   FirstRunInfo,
   HardwareInfo,
@@ -52,6 +55,8 @@ export interface AppInfo {
   identifier: string;
   os: string;
   arch: string;
+  /** The start of the commit the build was made from; empty when the build could not tell. */
+  commit: string;
 }
 
 export function isTauri(): boolean {
@@ -84,6 +89,8 @@ export interface SendOptions {
   parentId: number | null;
   images?: ImageInput[];
   documents?: DocumentInput[];
+  /** Mentions chosen in the picker. */
+  mentions?: MentionInput[];
 }
 
 export function sendMessage(opts: SendOptions, onEvent: (e: TurnStreamEvent) => void) {
@@ -104,11 +111,28 @@ export function regenerate(
 
 export const stopGeneration = () => invoke<void>("stop_generation");
 
+// Mentions
+export const searchMentions = (chatId: number | null, query: string, limit?: number) =>
+  invoke<MentionSearch>("search_mentions", { chatId, query, limit });
+export const resolveMentions = (chatId: number, mentions: MentionInput[]) =>
+  invoke<MentionCheck[]>("resolve_mentions", { chatId, mentions });
+
 // Models and runtime
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
 export const listBackends = (reprobe: boolean) => invoke<BackendInfo[]>("list_backends", { reprobe });
-export const loadLocalModel = (path: string, settings: LocalModelSettings) =>
-  invoke<void>("load_local_model", { path, settings });
+/**
+ * Loads a local model and resolves when it is ready. Resolves to `false` when another
+ * model was picked meanwhile: that load replaced this one, which is not an error.
+ */
+export async function loadLocalModel(path: string, settings: LocalModelSettings): Promise<boolean> {
+  try {
+    await invoke<void>("load_local_model", { path, settings });
+    return true;
+  } catch (err) {
+    if (err && typeof err === "object" && (err as { code?: unknown }).code === "load_replaced") return false;
+    throw err;
+  }
+}
 export const unloadModel = () => invoke<void>("unload_model");
 export const listModelOptions = () => invoke<ModelOption[]>("list_model_options");
 export const getLocalModelSettings = () =>
@@ -209,11 +233,24 @@ export function onStopRequested(handler: () => void): Promise<UnlistenFn> {
 // Agent turns: approvals
 export const resolveApproval = (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) =>
   invoke<void>("resolve_approval", { id, decision, note });
+// Approval modes: Ask first, or Allow all (only these commands change them)
+export const getApprovalMode = (chatId: number) => invoke<boolean>("get_approval_mode", { chatId });
+export const setApprovalMode = (chatId: number, allowAll: boolean) =>
+  invoke<boolean>("set_approval_mode", { chatId, allowAll });
+export const getAllowAllDefault = () => invoke<boolean>("get_allow_all_default");
+export const setAllowAllDefault = (on: boolean) => invoke<void>("set_allow_all_default", { on });
 
 // Tools and MCP servers
 export const listChatTools = (chatId: number) => invoke<ToolDto[]>("list_chat_tools", { chatId });
 export const setChatTools = (chatId: number, enabled: string[]) =>
-  invoke<void>("set_chat_tools", { chatId, enabled });
+  invoke<void>("set_chat_tools", { chatId, enabled }).then(() => {
+    // [0.0.4 context] The Context tab reads the next request again.
+    window.dispatchEvent(new CustomEvent("chat-tools-changed", { detail: chatId }));
+  });
+// Adaptive tool selection: which of the tools that are on a turn shows the model.
+export const getToolSelection = () => invoke<import("./types").ToolSelection>("get_tool_selection");
+export const setToolSelection = (auto: boolean) =>
+  invoke<import("./types").ToolSelection>("set_tool_selection", { auto });
 export const clearChatGrants = (chatId: number) => invoke<void>("clear_chat_grants", { chatId });
 export const listMcpServers = () => invoke<McpServerDto[]>("list_mcp_servers");
 export const previewMcpConfig = (json: string) => invoke<McpImportPreview[]>("preview_mcp_config", { json });
@@ -238,6 +275,11 @@ export function onApprovalRequest(handler: (r: ApprovalRequest) => void): Promis
 
 export function onApprovalClosed(handler: (id: string) => void): Promise<UnlistenFn> {
   return listen<string>("approval-closed", (e) => handler(e.payload));
+}
+
+/** A chat's approval mode changed in the app (null: every chat's may have). */
+export function onApprovalModeChanged(handler: (chatId: number | null) => void): Promise<UnlistenFn> {
+  return listen<number | null>("approval-mode-changed", (e) => handler(e.payload));
 }
 
 export function onMcpChanged(handler: () => void): Promise<UnlistenFn> {
@@ -299,3 +341,38 @@ export const setGitToken = (host: string, token: string) => invoke<string[]>("se
 export const removeGitToken = (host: string) => invoke<string[]>("remove_git_token", { host });
 export const setGitIdentity = (identity: GitIdentity) => invoke<void>("set_git_identity", { identity });
 export const minimizeMainWindow = () => invoke<void>("minimize_main_window");
+
+// Saved tool output (0.0.4): the whole text of a result the model saw shortened.
+export interface SavedToolOutput {
+  id: number;
+  tool: string;
+  lines: number;
+  bytes: number;
+  text: string;
+}
+export const getToolOutput = (chatId: number, id: number) =>
+  invoke<SavedToolOutput>("get_tool_output", { chatId, id });
+/** The output the app saved for one tool call of the chat, if any. */
+export const toolOutputForCall = (chatId: number, callId: string) =>
+  invoke<number | null>("tool_output_for_call", { chatId, callId });
+
+// Tested settings per model, and coding benchmarks (0.0.4, src-tauri/src/evals/).
+export const getModelProfile = (modelRef: string) =>
+  invoke<import("../components/evals/types").ProfileView>("get_model_profile", { modelRef });
+export const forgetModelProfile = (key: string) => invoke<boolean>("forget_model_profile", { key });
+export const startCapabilityCheck = (modelRef: string) =>
+  invoke<import("../components/evals/types").ModelProfile>("start_capability_check", { modelRef });
+export const cancelEval = () => invoke<boolean>("cancel_eval");
+export const listBenchTasks = () =>
+  invoke<import("../components/evals/types").BenchTaskInfo[]>("list_bench_tasks");
+export const startBenchmark = (modelRef: string) =>
+  invoke<import("../components/evals/types").BenchRun>("start_benchmark", { modelRef });
+export const listBenchRuns = () =>
+  invoke<import("../components/evals/types").BenchSummary[]>("list_bench_runs");
+export const getBenchRun = (id: string) =>
+  invoke<import("../components/evals/types").BenchRun>("get_bench_run", { id });
+export function onEvalProgress(
+  handler: (p: import("../components/evals/types").EvalProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<import("../components/evals/types").EvalProgress>("eval-progress", (e) => handler(e.payload));
+}

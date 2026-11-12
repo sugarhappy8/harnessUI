@@ -538,6 +538,74 @@ fn list_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The message for a path that is not in a skill's folder: similar names among its files
+/// (the call was let through to read the skill), and where the list of files is.
+fn missing_skill_file(skill: &Skill, path: &str) -> String {
+    let files: Vec<String> = list_files(&skill.dir)
+        .iter()
+        .map(|f| {
+            f.strip_prefix(&skill.dir)
+                .unwrap_or(f)
+                .display()
+                .to_string()
+                .replace('\\', "/")
+        })
+        .collect();
+    let wanted = path.replace('\\', "/");
+    let wanted = wanted.trim_start_matches("./");
+    // The same name in another folder of the skill counts as similar too.
+    let by_name = |f: &String| f.rsplit('/').next().unwrap_or(f).to_string();
+    let mut similar =
+        crate::errors::similar_names(wanted, files.clone(), crate::errors::MAX_SIMILAR_NAMES);
+    let leaf = wanted.rsplit('/').next().unwrap_or(wanted);
+    for f in &files {
+        if similar.len() < crate::errors::MAX_SIMILAR_NAMES
+            && !similar.contains(f)
+            && f != wanted
+            && (by_name(f).eq_ignore_ascii_case(leaf)
+                || !crate::errors::similar_names(leaf, [by_name(f)], 1).is_empty())
+        {
+            similar.push(f.clone());
+        }
+    }
+    let shown = policy::sanitize::one_line(path, 300);
+    let name = policy::sanitize::one_line(&skill.name, 64);
+    if similar.is_empty() {
+        format!("{shown} is not in the skill {name}. load_skill lists the skill's files.")
+    } else {
+        let names: Vec<String> = similar
+            .iter()
+            .map(|f| policy::sanitize::one_line(f, 300))
+            .collect();
+        format!(
+            "{shown} is not in the skill {name}. Similar names: {}. load_skill lists the skill's files.",
+            names.join(", ")
+        )
+    }
+}
+
+impl SkillsServer {
+    /// The message for a skill name that is not an enabled skill: the names that are.
+    fn unknown_skill(&self, name: &str) -> String {
+        let shown = policy::sanitize::one_line(name, 64);
+        let names: Vec<String> = self
+            .enabled()
+            .iter()
+            .map(|s| policy::sanitize::one_line(&s.name, 64))
+            .collect();
+        if names.is_empty() {
+            format!(
+                "There is no enabled skill named \"{shown}\": no skill is enabled. The user can turn skills on in Settings → Skills."
+            )
+        } else {
+            format!(
+                "There is no enabled skill named \"{shown}\". Enabled skills: {}. Use one of these names; the user can turn on others in Settings → Skills.",
+                names.join(", ")
+            )
+        }
+    }
+}
+
 #[async_trait]
 impl BuiltinServer for SkillsServer {
     fn name(&self) -> &str {
@@ -584,11 +652,7 @@ impl BuiltinServer for SkillsServer {
             return Described::Invalid("name is required".into());
         };
         let Some(skill) = self.find(name) else {
-            let names: Vec<String> = self.enabled().iter().map(|s| s.name.clone()).collect();
-            return Described::Invalid(format!(
-                "no enabled skill named \"{name}\"; enabled: {}",
-                names.join(", ")
-            ));
+            return Described::Invalid(self.unknown_skill(name));
         };
         let mut payload = json!({"dir": skill.dir.display().to_string()});
         if tool == "read_skill_file" {
@@ -615,8 +679,11 @@ impl BuiltinServer for SkillsServer {
                         risk: Risk::Normal,
                         read_only: true,
                         outbound: false,
+                        keep_asking: None,
+                        network: false,
                         hard_limit: Some(format!(
-                            "{e}; read_skill_file only reads inside the skill's folder"
+                            "{e}; read_skill_file only reads inside the skill's folder ({}). Pass a path relative to that folder, as load_skill lists them.",
+                            policy::sanitize::one_line(&dir, 300)
                         )),
                         payload: Value::Null,
                     });
@@ -640,6 +707,8 @@ impl BuiltinServer for SkillsServer {
             risk: Risk::Normal,
             read_only: true,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload,
         })
@@ -654,7 +723,7 @@ impl BuiltinServer for SkillsServer {
     ) -> ToolOutput {
         let name = args.get("name").and_then(Value::as_str).unwrap_or("");
         let Some(skill) = self.find(name) else {
-            return ToolOutput::error(format!("no enabled skill named \"{name}\""));
+            return ToolOutput::error(self.unknown_skill(name));
         };
         match tool {
             "load_skill" => {
@@ -671,7 +740,12 @@ impl BuiltinServer for SkillsServer {
                 }
                 let md = match std::fs::read_to_string(skill.dir.join("SKILL.md")) {
                     Ok(t) => t,
-                    Err(e) => return ToolOutput::error(format!("could not read SKILL.md: {e}")),
+                    Err(e) => {
+                        return ToolOutput::error(format!(
+                            "could not read SKILL.md of the skill {name} in {}: {e}. The skill's folder may have been moved or deleted; the user can check the skill in Settings → Skills.",
+                            skill.dir.display()
+                        ));
+                    }
                 };
                 // All loaded skill text together may use about 30% of the context.
                 let budget_chars = self.context_tokens.load(Ordering::Relaxed) * 3 * 3 / 10;
@@ -722,14 +796,24 @@ impl BuiltinServer for SkillsServer {
                 let Some(file) = action.payload.get("file").and_then(Value::as_str) else {
                     return ToolOutput::error("internal error: no file in the approved action");
                 };
+                let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+                if Path::new(file).is_dir() {
+                    return ToolOutput::error(format!(
+                        "{} is a folder in the skill {name}; read_skill_file reads one file. load_skill lists the skill's files.",
+                        policy::sanitize::one_line(path, 300)
+                    ));
+                }
                 let text = match std::fs::read(file) {
                     Ok(b) if b.iter().take(8192).any(|&c| c == 0) => {
                         return ToolOutput::text(format!(
-                            "{file} is a binary file ({} bytes).",
+                            "{file} is a binary file ({} bytes); read_skill_file only shows text.",
                             b.len()
                         ));
                     }
                     Ok(b) => String::from_utf8_lossy(&b[..b.len().min(1024 * 1024)]).into_owned(),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return ToolOutput::error(missing_skill_file(&skill, path));
+                    }
                     Err(e) => return ToolOutput::error(format!("could not read {file}: {e}")),
                 };
                 let lines: Vec<&str> = text.lines().collect();
@@ -738,6 +822,15 @@ impl BuiltinServer for SkillsServer {
                     .and_then(Value::as_u64)
                     .unwrap_or(1)
                     .max(1) as usize;
+                if offset > lines.len().max(1) {
+                    return ToolOutput::error(format!(
+                        "offset {offset} is past the end of {}: it has {} line{}. Use an offset from 1 to {}.",
+                        policy::sanitize::one_line(path, 300),
+                        lines.len(),
+                        if lines.len() == 1 { "" } else { "s" },
+                        lines.len().max(1)
+                    ));
+                }
                 let limit = args
                     .get("limit")
                     .and_then(Value::as_u64)
@@ -948,5 +1041,126 @@ mod tests {
             server.describe("load_skill", &unknown, &chat).await,
             Described::Invalid(_)
         ));
+    }
+
+    /// Each failure says why and what to call instead.
+    #[tokio::test]
+    async fn skill_failures_say_what_to_do_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let sdir = dunce::canonicalize(dir.path()).unwrap().join("pdf-tools");
+        std::fs::create_dir_all(sdir.join("scripts")).unwrap();
+        std::fs::write(sdir.join("SKILL.md"), GOOD).unwrap();
+        std::fs::write(sdir.join("scripts/extract.py"), "print(1)\n").unwrap();
+        std::fs::write(sdir.join("scripts/merge.py"), "print(2)\n").unwrap();
+        let server = SkillsServer::new();
+        let chat = ChatContext {
+            chat_id: 7,
+            result_cap_tokens: 2000,
+            ..Default::default()
+        };
+        let args = |v: Value| v.as_object().cloned().unwrap();
+        let invalid = |d: Described| match d {
+            Described::Invalid(why) => why,
+            Described::Action(a) => panic!("{a:?}"),
+        };
+        // No skill enabled, then one.
+        assert_eq!(
+            invalid(
+                server
+                    .describe("load_skill", &args(json!({"name": "pdf"})), &chat)
+                    .await
+            ),
+            "There is no enabled skill named \"pdf\": no skill is enabled. The user can turn skills on in Settings → Skills."
+        );
+        server.set_enabled(vec![parse(GOOD, &sdir).unwrap()]);
+        assert_eq!(
+            invalid(
+                server
+                    .describe("load_skill", &args(json!({"name": "pdf\ntools"})), &chat)
+                    .await
+            ),
+            "There is no enabled skill named \"pdf\\ntools\". Enabled skills: pdf-tools. Use one of these names; the user can turn on others in Settings → Skills."
+        );
+        let call = |a: Value| {
+            let server = &server;
+            let chat = chat.clone();
+            async move {
+                let a = args(a);
+                let Described::Action(action) = server.describe("read_skill_file", &a, &chat).await
+                else {
+                    panic!("not described")
+                };
+                if let Some(why) = action.hard_limit {
+                    return (true, why);
+                }
+                let out = server
+                    .call(
+                        "read_skill_file",
+                        &a,
+                        &action,
+                        CallContext {
+                            chat: chat.clone(),
+                            cancel: CancellationToken::new(),
+                            progress: None,
+                        },
+                    )
+                    .await;
+                (out.is_error, out.joined_text())
+            }
+        };
+        // A file that is not there: similar names among the skill's files.
+        assert_eq!(
+            call(json!({"name": "pdf-tools", "path": "extract.py"})).await,
+            (true, "extract.py is not in the skill pdf-tools. Similar names: scripts/extract.py. load_skill lists the skill's files.".into())
+        );
+        assert_eq!(
+            call(json!({"name": "pdf-tools", "path": "scripts/extrct.py"})).await,
+            (true, "scripts/extrct.py is not in the skill pdf-tools. Similar names: scripts/extract.py. load_skill lists the skill's files.".into())
+        );
+        assert_eq!(
+            call(json!({"name": "pdf-tools", "path": "nothing-like-it.txt"})).await,
+            (true, "nothing-like-it.txt is not in the skill pdf-tools. load_skill lists the skill's files.".into())
+        );
+        // A folder, and an offset past the end.
+        assert_eq!(
+            call(json!({"name": "pdf-tools", "path": "scripts"})).await,
+            (true, "scripts is a folder in the skill pdf-tools; read_skill_file reads one file. load_skill lists the skill's files.".into())
+        );
+        assert_eq!(
+            call(json!({"name": "pdf-tools", "path": "scripts/merge.py", "offset": 4})).await,
+            (true, "offset 4 is past the end of scripts/merge.py: it has 1 line. Use an offset from 1 to 1.".into())
+        );
+        // Outside the skill's folder.
+        let (refused, why) = call(json!({"name": "pdf-tools", "path": "../other/x.md"})).await;
+        assert!(refused);
+        assert!(
+            why.ends_with(&format!("; read_skill_file only reads inside the skill's folder ({}). Pass a path relative to that folder, as load_skill lists them.", sdir.display())),
+            "{why}"
+        );
+        // SKILL.md gone since the skill was enabled.
+        std::fs::remove_file(sdir.join("SKILL.md")).unwrap();
+        let a = args(json!({"name": "pdf-tools"}));
+        let Described::Action(action) = server.describe("load_skill", &a, &chat).await else {
+            panic!()
+        };
+        let out = server
+            .call(
+                "load_skill",
+                &a,
+                &action,
+                CallContext {
+                    chat: chat.clone(),
+                    cancel: CancellationToken::new(),
+                    progress: None,
+                },
+            )
+            .await;
+        assert!(out.is_error);
+        let text = out.joined_text();
+        assert!(
+            text.starts_with(&format!("could not read SKILL.md of the skill pdf-tools in {}: ", sdir.display()))
+                && text.ends_with(". The skill's folder may have been moved or deleted; the user can check the skill in Settings → Skills."),
+            "{text}"
+        );
     }
 }

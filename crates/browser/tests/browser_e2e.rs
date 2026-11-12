@@ -425,6 +425,69 @@ async fn navigate_snapshot_click_and_type() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_navigation_waits_until_the_tab_is_under_the_request_checks() {
+    // Found through CI (a pop-up test that hung, twice): a tab counted as usable as soon
+    // as it was attached, while its requests were put under the checks by a task that
+    // might not have run yet. A navigation sent in that moment was not checked at all:
+    // not its redirects, and the tab got no granted site. The hook holds that moment
+    // open; the redirect to a loopback address must still be blocked.
+    if !have_browser() {
+        return;
+    }
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_port = closed.local_addr().unwrap().port();
+    let handler: Handler = Arc::new(move |_, path, _| match path {
+        "/to-loopback" => redirect(&format!("http://127.0.0.1:{closed_port}/llama")),
+        _ => html("<title>Start</title>"),
+    });
+    let site = start_site(handler).await;
+    let h = harness_with(&[site.port], Answer::Allow, ConnectionMode::Pipe, |c| {
+        c.test_setup_delay = Duration::from_millis(1500);
+    });
+    let (_, out) = h
+        .run("browser_navigate", json!({"url": site.url("/to-loopback")}))
+        .await;
+    assert!(out.is_error, "{}", out.joined_text());
+    assert!(
+        out.joined_text().contains("loopback"),
+        "{}",
+        out.joined_text()
+    );
+    h.server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_call_waits_until_the_tab_reports_its_pages() {
+    // The first version of the fix above let a call go as soon as the requests were
+    // checked, before the tab was asked to report its page events. A page could then
+    // load unseen, and the first snapshot said `Page "" at about:blank` with frames it
+    // knew nothing about (a CI failure). The hook holds that second moment open as well.
+    if !have_browser() {
+        return;
+    }
+    // The frame answers after a second, so the page finishes loading between the two
+    // held moments: after the tab reports page events, before its frame tree is recorded.
+    let handler: Handler = Arc::new(|_, path, _| match path {
+        "/inner" => {
+            std::thread::sleep(Duration::from_millis(1000));
+            html("<p>Inner frame text</p>")
+        }
+        _ => html("<title>Ready</title><h1>Heading here</h1><iframe src=\"/inner\"></iframe>"),
+    });
+    let site = start_site(handler).await;
+    let h = harness_with(&[site.port], Answer::Deny, ConnectionMode::Pipe, |c| {
+        c.test_setup_delay = Duration::from_millis(700);
+    });
+    let snap = h
+        .ok("browser_navigate", json!({"url": site.url("/")}))
+        .await;
+    assert!(snap.contains("Page \"Ready\""), "{snap}");
+    assert!(snap.contains("Heading here"), "{snap}");
+    assert!(snap.contains("Inner frame text"), "{snap}");
+    h.server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn redirects_to_private_and_loopback_addresses_are_blocked_at_the_request() {
     if !have_browser() {
         return;
@@ -1627,5 +1690,170 @@ async fn acting_in_a_sandboxed_frame_always_asks() {
         }
     );
     assert_eq!(action.risk, policy::Risk::AlwaysAsk, "{}", action.preview);
+    h.server.shutdown().await;
+}
+
+/// Allow all (0.0.4), on a real page: what each action tells the policy engine. Reading,
+/// same-site navigation and ordinary clicks send nothing; typing and submissions can; a
+/// control or a form whose button says pay, delete or the like keeps asking; and a label
+/// that turns into one after the action was described is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn allow_all_facts_on_a_real_page() {
+    if !have_browser() {
+        return;
+    }
+    use policy::KeepAsking::{Destroy, Publish};
+    let mut pages = HashMap::new();
+    pages.insert(
+        "/shop",
+        r#"<title>Shop</title>
+        <form action="/search" method="get"><input name="q" aria-label="Find"><button id="s">Search</button></form>
+        <form action="/submit" method="post"><input name="card" aria-label="Card number"><button id="pay">Pay now</button></form>
+        <button type="button" onclick="this.textContent='Shown'">Show more</button>
+        <button type="button" onclick="document.getElementById('s').textContent='Pay now'; document.getElementById('about').textContent='Delete'">Arm</button>
+        <a href="/delete?id=1">Delete</a>
+        <a id="about" href="/about">About us</a>"#
+            .to_string(),
+    );
+    pages.insert("/about", "<title>About</title><h1>about</h1>".to_string());
+    let site = start_site(routes(pages)).await;
+    let other = start_site(routes(HashMap::new())).await;
+    let h = harness(&[site.port, other.port], Answer::Deny, ConnectionMode::Pipe);
+
+    // With no page open, any navigation goes to another site.
+    let first = h
+        .describe("browser_navigate", json!({"url": site.url("/shop")}))
+        .await;
+    assert_eq!((first.keep_asking, first.network), (None, true));
+    let snap = h
+        .ok("browser_navigate", json!({"url": site.url("/shop")}))
+        .await;
+    // Within the site the tab is on, a navigation sends nothing anywhere new.
+    let same = h
+        .describe("browser_navigate", json!({"url": site.url("/about")}))
+        .await;
+    assert_eq!((same.keep_asking, same.network), (None, false));
+    let elsewhere = h
+        .describe("browser_navigate", json!({"url": other.url("/")}))
+        .await;
+    assert_eq!((elsewhere.keep_asking, elsewhere.network), (None, true));
+
+    // Reading.
+    for tool in [
+        "browser_snapshot",
+        "browser_read_text",
+        "browser_screenshot",
+    ] {
+        let a = h.describe(tool, json!({})).await;
+        assert_eq!((a.keep_asking, a.network), (None, false), "{tool}");
+    }
+
+    // Clicks: (element, keeps asking, can send data).
+    for (needle, keep_asking, network) in [
+        ("button \"Show more\"", None, false),
+        ("link \"About us\"", None, false),
+        ("button \"Search\"", None, true),
+        ("button \"Pay now\"", Some(Publish), true),
+        ("link \"Delete\"", Some(Destroy), false),
+    ] {
+        let r = ref_of(&snap, needle);
+        let a = h.describe("browser_click", json!({"ref": r})).await;
+        assert_eq!(a.keep_asking, keep_asking, "{needle}");
+        assert_eq!(a.network, network, "{needle}");
+    }
+    // In Ask mode the link is an ordinary, grantable click, as before.
+    let delete = ref_of(&snap, "link \"Delete\"");
+    let a = h.describe("browser_click", json!({"ref": delete})).await;
+    assert_eq!(a.risk, policy::Risk::Normal);
+
+    // Typing shows text to the page. Enter in a field asks when the form's own button
+    // says so, and not for an ordinary form.
+    let find = ref_of(&snap, "textbox \"Find\"");
+    let card = ref_of(&snap, "textbox \"Card number\"");
+    let a = h
+        .describe("browser_type", json!({"ref": find, "text": "socks"}))
+        .await;
+    assert_eq!((a.keep_asking, a.network), (None, true));
+    let a = h
+        .describe(
+            "browser_type",
+            json!({"ref": find, "text": "socks", "submit": true}),
+        )
+        .await;
+    assert_eq!((a.keep_asking, a.network), (None, true));
+    let a = h
+        .describe(
+            "browser_type",
+            json!({"ref": card, "text": "4111", "submit": true}),
+        )
+        .await;
+    assert_eq!((a.keep_asking, a.network), (Some(Publish), true));
+    let a = h
+        .describe(
+            "browser_fill_form",
+            json!({"fields": [{"ref": card, "value": "4111"}]}),
+        )
+        .await;
+    assert_eq!((a.keep_asking, a.network), (None, true));
+
+    // Keys: Enter in the payment form's field, Enter in the search field, a key that
+    // only moves around.
+    h.ok("browser_click", json!({"ref": card})).await;
+    let a = h
+        .describe("browser_press_key", json!({"key": "Enter"}))
+        .await;
+    assert_eq!((a.keep_asking, a.network), (Some(Publish), true));
+    let a = h.describe("browser_press_key", json!({"key": "x"})).await;
+    assert_eq!(
+        (a.keep_asking, a.network),
+        (None, true),
+        "typing a character"
+    );
+    h.ok("browser_click", json!({"ref": find})).await;
+    let a = h
+        .describe("browser_press_key", json!({"key": "Enter"}))
+        .await;
+    assert_eq!((a.keep_asking, a.network), (None, true));
+    let a = h
+        .describe("browser_press_key", json!({"key": "PageDown"}))
+        .await;
+    assert_eq!((a.keep_asking, a.network), (None, false));
+
+    // A control whose label turns into one that always asks after the action was
+    // described is refused: what runs is what was shown. The page relabels its Search
+    // button and its About link when "Arm" is clicked.
+    let search = ref_of(&snap, "button \"Search\"");
+    let about = ref_of(&snap, "link \"About us\"");
+    let submit = h.describe("browser_click", json!({"ref": search})).await;
+    let follow = h.describe("browser_click", json!({"ref": about})).await;
+    assert_eq!(submit.risk, policy::Risk::AlwaysAsk);
+    assert_eq!((submit.keep_asking, follow.keep_asking), (None, None));
+    let arm = ref_of(&snap, "button \"Arm\"");
+    h.ok("browser_click", json!({"ref": arm})).await;
+    for (r, described) in [(&search, &submit), (&about, &follow)] {
+        let out = h
+            .call_action(
+                "browser_click",
+                json!({"ref": r}),
+                described,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(out.is_error, "{}", out.joined_text());
+        assert!(
+            out.joined_text().contains("always asks the user"),
+            "{}",
+            out.joined_text()
+        );
+    }
+    assert!(
+        h.server.active_url().await.unwrap().ends_with("/shop"),
+        "neither click went through"
+    );
+    // Described again, they keep asking.
+    let again = h.describe("browser_click", json!({"ref": search})).await;
+    assert_eq!(again.keep_asking, Some(Publish));
+    let again = h.describe("browser_click", json!({"ref": about})).await;
+    assert_eq!(again.keep_asking, Some(Destroy));
     h.server.shutdown().await;
 }

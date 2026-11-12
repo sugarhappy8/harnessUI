@@ -61,6 +61,18 @@ pub async fn build_host(
     host.add_builtin(skills);
     // Lists `run_subagent` (the "Subagents" group, off in a new chat); the turn runs it.
     host.add_builtin(Arc::new(crate::subagent::SubagentsServer));
+    // The "Artifacts" group (0.0.4): documents, pages and diagrams shown beside the chat.
+    host.add_builtin(Arc::new(crate::artifacts::ArtifactsServer::new(
+        app.clone(),
+    )));
+    // The "Search" group (0.0.4): web search with numbered sources an answer can cite.
+    host.add_builtin(Arc::new(crate::search_cmd::SearchServer::new(app.clone())));
+    // Lists `find_tools` and `call_tool` (0.0.4, adaptive tool selection); the turn runs them.
+    host.add_builtin(Arc::new(crate::tool_select::ToolFinderServer));
+    // `read_output` (0.0.4): more of a shortened result, offered with any other tool.
+    host.add_builtin(Arc::new(crate::outputs::OutputsServer::new(app.clone())));
+    // `update_task` (0.0.4): the chat's task state, offered with any other tool.
+    host.add_builtin(Arc::new(crate::task::TaskServer::new(app.clone())));
     host
 }
 
@@ -101,6 +113,11 @@ pub async fn rebuild_git(state: &AppState, identity: &crate::git_cmd::GitIdentit
 /// The captured login environment (macOS), kept to rebuild the terminal server.
 static CAPTURED: std::sync::OnceLock<Option<std::collections::BTreeMap<String, String>>> =
     std::sync::OnceLock::new();
+
+/// [0.0.4 evals] The captured login environment (macOS), for the benchmark terminal.
+pub fn captured_env_now() -> Option<std::collections::BTreeMap<String, String>> {
+    CAPTURED.get().cloned().flatten()
+}
 
 /// The terminal's pass-through list.
 #[tauri::command]

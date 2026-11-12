@@ -5,11 +5,18 @@
 //!   stored in the OS keychain; the saved config keeps `${secret:<name>}` placeholders.
 //! - Tools of a new server start off (D10). A tool whose fingerprint changed starts off
 //!   again and loses its grants (9.2).
-//! - A new chat starts with the file and skill tools, and with the browser tools when a
-//!   browser is available and the model's context is at least 8,192 tokens (D10 as the
-//!   owner changed it on 2026-11-11). Every other built-in group starts off, the Subagents
-//!   group (`run_subagent`) included. [`Selection`] is the one place that decides this,
-//!   for the Tools panel and for the turn.
+//! - A new chat starts with the file, skill, artifact and web search tools, and with the
+//!   browser tools when a browser is available and the model's context is at least 8,192
+//!   tokens (D10 as the owner changed it on 2026-11-11, artifacts and search added in
+//!   0.0.4). Every other built-in group starts off, the Subagents group (`run_subagent`)
+//!   included. [`Selection`] is the one place that decides this, for the Tools panel and
+//!   for the turn.
+//! - The companion tools (`find_tools`, `call_tool`, `read_output`, `update_task`) are not
+//!   switches: they come along whenever at least one other tool is on in the chat
+//!   ([`companions_follow`]).
+//! - Which tools are ON is decided here, by the user's switches only. Which of those a
+//!   turn SHOWS the model is decided in `tool_select.rs`, which may change what a chat
+//!   remembers as shown and found ([`change_selection_memory`]) and nothing else.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -26,18 +33,24 @@ use crate::toolset::mcp_secret_key;
 
 /// Setting: the tools of the last chat whose tools the user changed (new chats start so).
 /// The name carries a version: the defaults changed on 2026-11-11 (Browser on when it
-/// fits), and a last choice saved before that would keep every new chat on the old set
-/// without the user ever having decided against the browser. Old saved choices under
-/// "defaultChatTools" are simply no longer read.
-const DEFAULT_TOOLS: &str = "defaultChatTools2";
+/// fits) and again in 0.0.4 (Artifacts and Web search on), and a last choice saved before
+/// a change would keep every new chat on the old set without the user ever having decided
+/// against the new groups. Old saved choices under [`EARLIER_DEFAULT_TOOLS`] are simply no
+/// longer read. A chat with its own saved choice keeps it: its new groups start off.
+const DEFAULT_TOOLS: &str = "defaultChatTools3";
+
+/// The names the last choice was saved under before the defaults changed.
+#[cfg(test)]
+const EARLIER_DEFAULT_TOOLS: &[&str] = &["defaultChatTools", "defaultChatTools2"];
 
 /// Groups that are switched on for one chat only: the saved last choice never turns them
 /// on in a new chat. Both let the model act widely (the whole screen; helpers that work on
 /// their own), so each chat gets its own decision.
 const PER_CHAT_ONLY: &[&str] = &[computer::SERVER_NAME, crate::subagent::SERVER_NAME];
 
-/// Built-in servers whose tools are on in every new chat (D10).
-const DEFAULT_ON_BUILTIN: &[&str] = &["files", "skills"];
+/// Built-in servers whose tools are on in every new chat (D10; artifacts and search
+/// since 0.0.4).
+const DEFAULT_ON_BUILTIN: &[&str] = &["files", "skills", "artifacts", "search"];
 
 /// The built-in browser server's name.
 const BROWSER_SERVER: &str = "browser";
@@ -231,6 +244,14 @@ pub struct ToolDto {
     pub schema_error: Option<String>,
     /// Rough cost of offering the tool, in tokens.
     pub token_estimate: u32,
+    /// One of the tools that come along with any other tool (`find_tools`, `call_tool`,
+    /// `read_output`, `update_task`). Not a switch: `enabled_in_chat` follows the others.
+    pub companion: bool,
+    /// On, and in the list the model gets whatever the next message says (adaptive tool
+    /// selection, `tool_select.rs`). A tool that is on but not shown is "on request": the
+    /// model finds it with `find_tools` and runs it with `call_tool`, or gets it in its
+    /// list when a message is about its group. Always false for a tool that is not offered.
+    pub shown: bool,
 }
 
 fn summary_of(cfg: &ServerConfig) -> (String, String) {
@@ -745,6 +766,125 @@ impl ToolDto {
     }
 }
 
+/// The companion rule (0.0.4): `find_tools`, `call_tool`, `read_output` and `update_task`
+/// are on in a chat exactly when at least one other tool is offered in it. They are never
+/// switched by the user, and a saved choice that names them changes nothing.
+///
+/// With "choose tools for each task" off (`auto` false) every tool that is on is shown,
+/// so there is nothing to find and nothing to call through: `find_tools` and `call_tool`
+/// are then not offered, and a turn's tool list is what it was before 0.0.4.
+fn companions_follow(tools: &mut [&mut ToolDto], auto: bool) {
+    let another_is_on = tools.iter().any(|d| !d.companion && d.offered());
+    for dto in tools.iter_mut().filter(|d| d.companion) {
+        let finder = dto.server == crate::tool_select::finder::SERVER_NAME;
+        dto.enabled_in_chat = another_is_on && (auto || !finder);
+    }
+}
+
+/// The groups that exist but have no tool on, in the order of the list: at least one of
+/// their tools could be switched on in the Tools panel, and none is. The companions are
+/// not groups of their own.
+fn groups_that_are_off<'a>(tools: impl Iterator<Item = &'a ToolDto>) -> Vec<String> {
+    // (server, a tool could be switched on, a tool is on)
+    let mut groups: Vec<(String, bool, bool)> = Vec::new();
+    for dto in tools.filter(|d| !d.companion) {
+        let usable = dto.available && dto.schema_error.is_none();
+        let on = dto.enabled_in_chat;
+        match groups
+            .iter_mut()
+            .find(|(server, _, _)| *server == dto.server)
+        {
+            Some(group) => {
+                group.1 |= usable;
+                group.2 |= on;
+            }
+            None => groups.push((dto.server.clone(), usable, on)),
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(_, usable, on)| *usable && !*on)
+        .map(|(server, _, _)| server)
+        .collect()
+}
+
+/// The groups that are switched off in a chat, for `find_tools`: it may say that a group
+/// is off, and that the user can switch it on. It cannot switch it on.
+pub(crate) async fn off_groups(state: &AppState, chat_id: store::ChatId) -> Vec<String> {
+    let Ok(Some(chat)) = state.store.get_chat(chat_id).await else {
+        return Vec::new();
+    };
+    let list = chat_tool_list(state, &chat, None).await;
+    groups_that_are_off(list.iter().map(|(_, dto)| dto))
+}
+
+/// The names a user's choice of tools is saved with: registered tools only, and never a
+/// companion (they are not switches; see [`companions_follow`]).
+fn user_switches(
+    enabled: Vec<String>,
+    registered: &[mcp_host::RegisteredTool],
+    builtin: &BTreeSet<String>,
+) -> Vec<String> {
+    let is_switch = |name: &str| {
+        registered.iter().any(|t| {
+            t.exposed == name && !crate::tool_select::is_companion_server(&t.server, builtin)
+        })
+    };
+    enabled.into_iter().filter(|e| is_switch(e)).collect()
+}
+
+/// One change at a time to a chat's stored tool choices: each is read, changed and
+/// written back, and a turn (remembering what it showed) may do so while the user changes
+/// a switch. Without the lock, the later write would undo the earlier change.
+static PREFS_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Reads a chat's stored tool choices, changes them and writes them back, as one step.
+async fn change_chat_prefs(
+    state: &AppState,
+    chat_id: store::ChatId,
+    change: impl FnOnce(&mut crate::turns::ChatTools),
+) -> AppResult<()> {
+    let _one_at_a_time = PREFS_WRITES.lock().await;
+    let chat = state
+        .store
+        .get_chat(chat_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("chat"))?;
+    let mut prefs: crate::turns::ChatTools =
+        serde_json::from_value(chat.tool_prefs.clone()).unwrap_or_default();
+    change(&mut prefs);
+    let value = serde_json::to_value(&prefs).map_err(AppError::internal)?;
+    if value == chat.tool_prefs {
+        return Ok(());
+    }
+    state
+        .store
+        .update_chat(
+            chat_id,
+            store::ChatPatch {
+                tool_prefs: Some(value),
+                ..Default::default()
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Changes what a chat remembers about the tool selection: the tools it was shown, and
+/// the tools that wait to be shown (`tool_select.rs`). This is all a turn can change in a
+/// chat's tool choices. Which tools are on is not within its reach: only the user's
+/// switches ([`set_chat_tools`]) change that.
+pub(crate) async fn change_selection_memory(
+    state: &AppState,
+    chat_id: store::ChatId,
+    change: impl FnOnce(&mut Vec<String>, &mut Vec<String>),
+) -> AppResult<()> {
+    change_chat_prefs(state, chat_id, |prefs| {
+        change(&mut prefs.shown, &mut prefs.found)
+    })
+    .await
+}
+
 async fn chat_tool_list(
     state: &AppState,
     chat: &store::Chat,
@@ -785,6 +925,39 @@ async fn chat_tool_list(
         if let Some(reason) = why_not {
             dto.mark_unavailable(reason);
         }
+    }
+    // The companions follow the other tools, once it is known which of those can work.
+    let setting = crate::tool_select::settings(state).await;
+    let mut dtos: Vec<&mut ToolDto> = list.iter_mut().map(|(_, dto)| dto).collect();
+    companions_follow(&mut dtos, setting.auto);
+    // Which of the offered tools the next turn shows whatever the user writes.
+    let offered: Vec<crate::tool_select::Candidate> = list
+        .iter()
+        .filter(|(_, dto)| dto.offered())
+        .map(|(tool, dto)| crate::tool_select::Candidate::of(tool, dto.builtin))
+        .collect();
+    // With the model's context known, the list is also held to what fits in it.
+    let known_context = match turn_context {
+        Some(n) => Some(n),
+        None => context_for_defaults(state, chat).await.tokens(),
+    };
+    let room = match known_context {
+        Some(n) => Some(crate::tool_select::allowance(
+            n,
+            crate::tool_select::other_fixed(state, chat).await,
+        )),
+        None => None,
+    };
+    let shown = crate::tool_select::shown_before_a_message(
+        &offered,
+        &prefs,
+        &crate::tool_select::skill_words(state),
+        !state.skills.loaded_in(chat.id.0).is_empty(),
+        setting,
+        room,
+    );
+    for (_, dto) in &mut list {
+        dto.shown = dto.offered() && shown.contains(&dto.exposed);
     }
     list
 }
@@ -903,6 +1076,10 @@ async fn tool_list(
             ready: state.host.tool_ready(&t.exposed),
             schema_error: t.schema_error.clone(),
             token_estimate: token_estimate(&t),
+            companion: builtin
+                && crate::tool_select::COMPANION_SERVERS.contains(&t.server.as_str()),
+            // Decided per chat, in `chat_tool_list`.
+            shown: false,
         };
         out.push((t, dto));
     }
@@ -933,25 +1110,11 @@ pub async fn set_chat_thinking(
     chat_id: store::ChatId,
     on: bool,
 ) -> AppResult<()> {
-    let chat = state
-        .store
-        .get_chat(chat_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("chat"))?;
-    let mut prefs: crate::turns::ChatTools =
-        serde_json::from_value(chat.tool_prefs).unwrap_or_default();
-    prefs.thinking_off = !on;
-    state
-        .store
-        .update_chat(
-            chat_id,
-            store::ChatPatch {
-                tool_prefs: Some(serde_json::to_value(&prefs).map_err(AppError::internal)?),
-                ..Default::default()
-            },
-        )
-        .await?;
-    Ok(())
+    change_chat_prefs(&state, chat_id, |prefs| {
+        prefs.thinking_off = !on;
+        prefs.thinking_chosen = true; // [0.0.4 profile] the user's choice beats a model profile
+    })
+    .await
 }
 
 /// One server's tools with the user's switches (Settings → MCP servers).
@@ -974,29 +1137,17 @@ pub async fn set_chat_tools(
     chat_id: store::ChatId,
     enabled: Vec<String>,
 ) -> AppResult<()> {
-    let known: BTreeSet<String> = state.host.tools().into_iter().map(|t| t.exposed).collect();
-    let enabled: Vec<String> = enabled.into_iter().filter(|e| known.contains(e)).collect();
-    let chat = state
-        .store
-        .get_chat(chat_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("chat"))?;
-    let mut prefs: crate::turns::ChatTools =
-        serde_json::from_value(chat.tool_prefs).unwrap_or_default();
+    let enabled = user_switches(
+        enabled,
+        &state.host.tools(),
+        &crate::tool_catalog::builtin_servers(&state.host),
+    );
+    if state.store.get_chat(chat_id).await?.is_none() {
+        return Err(AppError::not_found("chat"));
+    }
     // The last choice becomes the default for new chats (9.3).
     state.store.set_setting(DEFAULT_TOOLS, &enabled).await?;
-    prefs.enabled = Some(enabled);
-    state
-        .store
-        .update_chat(
-            chat_id,
-            store::ChatPatch {
-                tool_prefs: Some(serde_json::to_value(&prefs).map_err(AppError::internal)?),
-                ..Default::default()
-            },
-        )
-        .await?;
-    Ok(())
+    change_chat_prefs(&state, chat_id, |prefs| prefs.enabled = Some(enabled)).await
 }
 
 /// The user's switches for one external tool in its server's list. Turning a tool on
@@ -1062,6 +1213,9 @@ pub async fn clear_chat_grants(
     state: State<'_, AppState>,
     chat_id: store::ChatId,
 ) -> AppResult<()> {
+    // [0.0.4 allow all] What the user allowed in this chat includes Allow all: forgetting
+    // it puts the chat back to asking first.
+    crate::approvals::ask_first(chat_id.0);
     crate::turns::save_grants(&state, chat_id.0, &BTreeSet::new()).await
 }
 
@@ -1088,7 +1242,8 @@ mod tests {
     }
 
     /// D10 as changed on 2026-11-11: files and skills always; the browser when one is
-    /// available and the context is at least 8,192 tokens; nothing else.
+    /// available and the context is at least 8,192 tokens; nothing else. Since 0.0.4
+    /// also artifacts and web search, always.
     #[test]
     fn a_new_chat_starts_with_files_skills_and_the_browser_when_it_fits() {
         for (available, context, browser_on) in [
@@ -1108,10 +1263,35 @@ mod tests {
             );
             assert!(default_on("files", available, context));
             assert!(default_on("skills", available, context));
+            assert!(default_on("artifacts", available, context));
+            assert!(default_on("search", available, context));
             for off in ["terminal", "git", "computer", "weather"] {
                 assert!(!default_on(off, available, context), "{off}");
             }
+            // The companions are not on by a default of their own: they follow the others.
+            for companion in crate::tool_select::COMPANION_SERVERS {
+                assert!(!default_on(companion, available, context), "{companion}");
+            }
         }
+    }
+
+    /// 0.0.4 changed the defaults (artifacts and web search on), so the last choice is
+    /// saved under a new name: one saved before would keep every new chat without the new
+    /// groups, though the user never decided against them.
+    #[test]
+    fn the_last_choice_is_saved_under_a_new_name_since_the_defaults_changed() {
+        assert!(!EARLIER_DEFAULT_TOOLS.contains(&DEFAULT_TOOLS));
+        assert_eq!(DEFAULT_TOOLS, "defaultChatTools3");
+        // A new chat with no last choice gets the new groups.
+        let new_chat = Selection::for_chat(None, None, false, None);
+        assert!(new_chat.on("create_artifact", "artifacts", true));
+        assert!(new_chat.on("web_search", "search", true));
+        // A chat with its own saved choice keeps it: its new groups start off.
+        let own = names(&["read_file", "git_status"]);
+        let chat = Selection::for_chat(Some(&own), None, true, Some(32768));
+        assert!(!chat.on("create_artifact", "artifacts", true));
+        assert!(!chat.on("web_search", "search", true));
+        assert!(chat.on("git_status", "git", true));
     }
 
     /// The Subagents group is never on by itself, whatever the model and whatever else is
@@ -1241,6 +1421,7 @@ mod tests {
         // An MCP server the user named "browser" or "files" gets nothing by default.
         assert!(!s.on("browser_navigate", "browser", false));
         assert!(!s.on("files_read", "files", false));
+        assert!(!s.on("search__web", "search", false));
         assert!(!Selection::NoChat.on("files_read", "files", true));
     }
 
@@ -1260,7 +1441,156 @@ mod tests {
             ready: true,
             schema_error: None,
             token_estimate: 100,
+            companion: false,
+            shown: false,
         }
+    }
+
+    fn companion(server: &str, tool: &str) -> ToolDto {
+        ToolDto {
+            exposed: tool.into(),
+            original: tool.into(),
+            companion: true,
+            ..dto(server, false)
+        }
+    }
+
+    fn four_companions() -> Vec<ToolDto> {
+        vec![
+            companion("toolfinder", "find_tools"),
+            companion("toolfinder", "call_tool"),
+            companion("outputs", "read_output"),
+            companion("task", "update_task"),
+        ]
+    }
+
+    fn on_after_rule(mut list: Vec<ToolDto>, auto: bool) -> Vec<(String, bool)> {
+        let mut refs: Vec<&mut ToolDto> = list.iter_mut().collect();
+        companions_follow(&mut refs, auto);
+        list.into_iter()
+            .map(|d| (d.exposed, d.enabled_in_chat))
+            .collect()
+    }
+
+    /// The companion rule: the four come along exactly when another tool is offered.
+    #[test]
+    fn companions_come_along_whenever_another_tool_is_on() {
+        let on = |list: Vec<ToolDto>| -> Vec<String> {
+            on_after_rule(list, true)
+                .into_iter()
+                .filter(|(_, on)| *on)
+                .map(|(name, _)| name)
+                .collect()
+        };
+        // One other tool on: all four.
+        let mut list = vec![dto("files", true), dto("git", false)];
+        list.extend(four_companions());
+        assert_eq!(
+            on(list),
+            names(&[
+                "files_tool",
+                "find_tools",
+                "call_tool",
+                "read_output",
+                "update_task"
+            ])
+        );
+        // Nothing else on: none of them, so a chat without tools sends no tools at all.
+        let mut list = vec![dto("files", false), dto("git", false)];
+        list.extend(four_companions());
+        assert!(on(list).is_empty());
+        // A tool that is on but cannot work is not "another tool": the model gets nothing
+        // it could use the companions with.
+        let mut broken = dto("browser", true);
+        broken.mark_unavailable("No browser was found.");
+        let mut list = vec![broken];
+        list.extend(four_companions());
+        assert_eq!(on(list), names(&["browser_tool"]), "only the switch itself");
+        // They are not switches: a saved choice that names them does not keep them on,
+        // and one that leaves them out does not keep them off.
+        let mut saved_on = four_companions();
+        for c in &mut saved_on {
+            c.enabled_in_chat = true;
+        }
+        assert!(on(saved_on).is_empty());
+        // An external server that happens to be called "task" is an ordinary group: its
+        // tool is a switch, and it counts as another tool.
+        let mut other = dto("task", true);
+        other.builtin = false;
+        let mut list = vec![other];
+        list.extend(four_companions());
+        assert_eq!(on(list).len(), 5);
+    }
+
+    /// With "choose tools for each task" off, every tool that is on is shown, so there is
+    /// nothing to find or to call through: the list is what it was before 0.0.4, plus the
+    /// other features' companions.
+    #[test]
+    fn without_automatic_selection_the_finder_tools_are_not_offered() {
+        let mut list = vec![dto("files", true)];
+        list.extend(four_companions());
+        let after = on_after_rule(list, false);
+        assert_eq!(
+            after,
+            vec![
+                ("files_tool".to_string(), true),
+                ("find_tools".to_string(), false),
+                ("call_tool".to_string(), false),
+                ("read_output".to_string(), true),
+                ("update_task".to_string(), true),
+            ]
+        );
+    }
+
+    /// `find_tools` may name the groups that are switched off. A group counts as off when
+    /// it could be switched on in the Tools panel and none of its tools is on.
+    #[test]
+    fn groups_that_are_off_are_the_ones_the_user_could_switch_on() {
+        let mut no_browser = dto("browser", false);
+        no_browser.mark_unavailable("No browser was found.");
+        let mut partly = dto("files", false);
+        partly.exposed = "delete_file".into();
+        let list = vec![
+            dto("files", true),
+            partly,
+            dto("git", false),
+            dto("git", false),
+            dto("terminal", false),
+            no_browser,
+            dto("weather", false),
+            companion("toolfinder", "find_tools"),
+            companion("task", "update_task"),
+        ];
+        assert_eq!(
+            groups_that_are_off(list.iter()),
+            names(&["git", "terminal", "weather"])
+        );
+        assert!(groups_that_are_off([].iter()).is_empty());
+    }
+
+    /// A saved choice holds switches only: registered tools, and never a companion.
+    #[test]
+    fn a_saved_choice_never_holds_a_companion_or_an_unknown_tool() {
+        let host = crate::tool_catalog::tests::builtin_host();
+        let builtin = crate::tool_catalog::builtin_servers(&host);
+        let saved = user_switches(
+            names(&[
+                "read_file",
+                "find_tools",
+                "call_tool",
+                "no_such_tool",
+                "git_status",
+            ]),
+            &host.tools(),
+            &builtin,
+        );
+        assert_eq!(saved, names(&["read_file", "git_status"]));
+        // An external server with a companion's name is an ordinary server.
+        let mut external = host.tools().into_iter().next().expect("a tool");
+        external.server = "task".into();
+        external.exposed = "task__add".into();
+        let saved = user_switches(names(&["task__add"]), &[external], &builtin);
+        assert_eq!(saved, names(&["task__add"]));
     }
 
     /// A tool that cannot work is not offered to the model even when it is switched on,

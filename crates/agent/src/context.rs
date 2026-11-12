@@ -9,7 +9,9 @@
 //! - trigger = 80% of the budget;
 //! - per-result cap = min(8,000, 20% of `n_ctx`, (budget − F) / 3), where F is the fixed
 //!   overhead (system prompt, preamble, skills, tool schemas);
-//! - tools fit when F ≤ 40% of the budget.
+//! - tools fit when F ≤ 40% of the budget, not counting pinned instructions;
+//! - pinned instructions fit when they take ≤ 25% of the budget. They are part of F (they
+//!   are in the system message of every request), so compaction never removes them.
 //!
 //! **Compaction** happens in three stages when the next request would pass the trigger; the
 //! loop ([`crate::turn`]) drives them with these helpers:
@@ -40,6 +42,10 @@ pub const TRIGGER_PERCENT: u32 = 80;
 /// Tools are offered only when the fixed overhead is at most this share of the budget
 /// (percent).
 pub const TOOLS_FIT_PERCENT: u32 = 40;
+/// The user's pinned instructions may take at most this share of the budget (percent).
+/// They have a share of their own, beside the one for tools, so a pin never takes room
+/// from the tool list that was chosen to fit.
+pub const PINNED_FIT_PERCENT: u32 = 25;
 /// Tokens counted for one image when estimating (the server counts exactly).
 pub const IMAGE_TOKENS_ESTIMATE: u32 = 1_024;
 /// Tokens counted per message for the template's own markup when estimating.
@@ -158,6 +164,47 @@ impl ToolsDoNotFit {
              raise the context size.",
             group_digits(u64::from(self.tool_tokens)),
             group_digits(u64::from(self.n_ctx))
+        )
+    }
+}
+
+/// How many tokens the pinned instructions may take with this budget.
+pub fn pinned_allowance(budget: &ContextBudget) -> u32 {
+    percent(budget.budget, PINNED_FIT_PERCENT)
+}
+
+/// The "pinned instructions do not fit" refusal, with the numbers for the message. Pins
+/// are never shortened or left out to make a request fit: the turn does not start, and
+/// the user decides what to remove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinnedDoNotFit {
+    /// How many instructions are pinned.
+    pub pin_count: usize,
+    /// About how many tokens they take in a request.
+    pub pinned_tokens: u32,
+    /// The most they may take ([`pinned_allowance`]).
+    pub allowed_tokens: u32,
+    /// The model's context window.
+    pub n_ctx: u32,
+}
+
+impl PinnedDoNotFit {
+    /// "Your 20 pinned instructions need about 6,700 tokens; this model's window is 4,096,
+    /// and pinned instructions may take up to 748 of it."
+    pub fn message(&self) -> String {
+        let pins = if self.pin_count == 1 {
+            "Your pinned instruction needs".to_owned()
+        } else {
+            format!("Your {} pinned instructions need", self.pin_count)
+        };
+        format!(
+            "{pins} about {} tokens; this model's window is {}, and pinned instructions may \
+             take up to {} of it. Remove or shorten pins in the Context tab, or raise the \
+             context size.",
+            group_digits(u64::from(self.pinned_tokens)),
+            group_digits(u64::from(self.n_ctx)),
+            group_digits(u64::from(self.allowed_tokens))
         )
     }
 }
@@ -593,6 +640,41 @@ mod tests {
             refusal.message(),
             "These 23 tools need about 3,500 tokens; this model's window is 8,192. Turn some tool \
              groups off or raise the context size."
+        );
+    }
+
+    #[test]
+    fn pinned_instructions_get_a_quarter_of_the_budget() {
+        // 4k: budget 2,992; 8k: 6,048; 32k: 28,480.
+        assert_eq!(pinned_allowance(&ContextBudget::new(4_096, 0)), 748);
+        assert_eq!(pinned_allowance(&ContextBudget::new(8_192, 0)), 1_512);
+        assert_eq!(pinned_allowance(&ContextBudget::new(32_768, 0)), 7_120);
+        // The allowance does not shrink as the fixed part grows.
+        assert_eq!(pinned_allowance(&ContextBudget::new(8_192, 2_000)), 1_512);
+        // Tools and pins together leave room for the conversation.
+        const { assert!(TOOLS_FIT_PERCENT + PINNED_FIT_PERCENT < TRIGGER_PERCENT) };
+        let refusal = PinnedDoNotFit {
+            pin_count: 20,
+            pinned_tokens: 6_741,
+            allowed_tokens: 748,
+            n_ctx: 4_096,
+        };
+        assert_eq!(
+            refusal.message(),
+            "Your 20 pinned instructions need about 6,741 tokens; this model's window is 4,096, \
+             and pinned instructions may take up to 748 of it. Remove or shorten pins in the \
+             Context tab, or raise the context size."
+        );
+        let one = PinnedDoNotFit {
+            pin_count: 1,
+            pinned_tokens: 900,
+            ..refusal
+        };
+        assert!(
+            one.message()
+                .starts_with("Your pinned instruction needs about 900 tokens; "),
+            "{}",
+            one.message()
         );
     }
 

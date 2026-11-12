@@ -110,6 +110,29 @@ class Session:
     def wait_text(self, needle: str, timeout: float = 60):
         return self.wait_for(lambda: needle in self.page_text(), timeout, f"text {needle!r}")
 
+    def click_menu_item(self, label: str, timeout: float = 20):
+        """Clicks the item of the open menu whose text contains `label`. Use this, not
+        `click_button`, when a button elsewhere on the page can carry the same text (a
+        model's name is also on the menu's own trigger and on the welcome screen)."""
+
+        def find():
+            el = self.execute(
+                """
+                const label = arguments[0];
+                return [...document.querySelectorAll('[role=menuitem]')]
+                  .find(b => (b.innerText || '').includes(label)) || null;
+                """,
+                label,
+            )
+            return el or False
+
+        el = self.wait_for(find, timeout, f"menu item {label!r}")
+        element_id = next(iter(el.values()))
+        try:
+            self.click(element_id)
+        except WebDriverError:
+            self.execute("arguments[0].click();", el)
+
     def click_button(self, label: str, timeout: float = 20):
         """Clicks (with a real pointer click) the first visible button or menu item whose
         text contains `label` or whose aria-label equals it."""

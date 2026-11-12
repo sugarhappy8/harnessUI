@@ -1,6 +1,19 @@
-import { useState } from "react";
-import { minimizeMainWindow } from "../lib/ipc";
-import { Ban, CheckCircle2, ChevronDown, ChevronRight, Hand, Loader2, Wrench, XCircle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { getToolOutput, isTauri, minimizeMainWindow, toolOutputForCall, type SavedToolOutput } from "../lib/ipc";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useApp } from "../store/app";
+import { TOOL_CARD_EXTRAS } from "./toolcards";
+import {
+  Ban,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  Hand,
+  Loader2,
+  Wrench,
+  XCircle,
+} from "lucide-react";
 
 /** How much of a result is shown before "Show all". */
 const RESULT_PREVIEW_CHARS = 4000;
@@ -54,6 +67,118 @@ const STATUS_TEXT: Record<string, string> = {
   refused: "Not allowed",
 };
 
+/**
+ * Whether a result ends like one the app shortened (src-tauri/src/outputs.rs,
+ * `shortened_line`). Anyone can write such a line (a file's last line, a server's
+ * result), so this only decides whether to ask the app; which output, if any, comes from
+ * the app's own record of the call.
+ */
+export function looksShortened(text: string): boolean {
+  const lines = text.trimEnd().split("\n");
+  return (lines[lines.length - 1] ?? "").startsWith("[Shortened: ");
+}
+
+/** The output the app saved for this call of the chat on screen, or null. */
+function useSavedOutput(callId: string, text: string, finished: boolean): number | null {
+  const chatId = useApp((s) => s.activeChatId);
+  const ask = finished && chatId !== null && callId !== "" && looksShortened(text);
+  const [found, setFound] = useState<{ key: string; id: number | null } | null>(null);
+  const key = `${chatId}:${callId}`;
+  useEffect(() => {
+    if (!ask || chatId === null) return;
+    let live = true;
+    toolOutputForCall(chatId, callId).then(
+      (id) => live && setFound({ key, id }),
+      () => live && setFound({ key, id: null }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [ask, chatId, callId, key]);
+  return ask && found?.key === key ? found.id : null;
+}
+
+type FullOutputState =
+  | { kind: "closed" }
+  | { kind: "loading" }
+  | { kind: "shown"; output: SavedToolOutput }
+  | { kind: "failed" };
+
+/**
+ * "Full output": the whole text of a shortened result, saved by the app, shown in the card
+ * as plain text. Only the chat on screen's own outputs can be opened.
+ */
+function FullOutput(props: { id: number }) {
+  const chatId = useApp((s) => s.activeChatId);
+  const [state, setState] = useState<FullOutputState>({ kind: "closed" });
+  const [copied, setCopied] = useState(false);
+
+  async function open() {
+    if (chatId === null) return;
+    setState({ kind: "loading" });
+    try {
+      setState({ kind: "shown", output: await getToolOutput(chatId, props.id) });
+    } catch {
+      setState({ kind: "failed" });
+    }
+  }
+
+  async function copy(text: string) {
+    try {
+      if (isTauri()) await writeText(text);
+      else await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  const button = "rounded-md border border-border px-2 py-1 text-xs hover:border-border-strong hover:bg-bg-muted";
+  if (state.kind === "shown") {
+    const o = state.output;
+    return (
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2 text-xs text-fg-muted">
+          <span className="min-w-0 flex-1 truncate">
+            Output #{o.id} · {o.lines.toLocaleString()} lines
+          </span>
+          <button type="button" className={button} onClick={() => void copy(o.text)}>
+            {copied ? "Copied" : "Copy output"}
+          </button>
+          <button type="button" className={button} onClick={() => setState({ kind: "closed" })}>
+            Hide
+          </button>
+        </div>
+        <pre
+          aria-label={`Output #${o.id}`}
+          className="max-h-96 overflow-auto rounded bg-bg p-2 font-mono text-xs whitespace-pre-wrap break-all"
+        >
+          {o.text}
+        </pre>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        className={`flex items-center gap-1.5 ${button}`}
+        disabled={chatId === null || state.kind === "loading"}
+        onClick={() => void open()}
+      >
+        <FileText size={13} aria-hidden />
+        {state.kind === "loading" ? "Opening…" : "Full output"}
+      </button>
+      {state.kind === "failed" && (
+        <span className="text-xs text-fg-muted">
+          The full output could not be opened. A chat keeps only its 200 newest saved outputs.
+        </span>
+      )}
+    </div>
+  );
+}
+
 /** The tool that hands a task to a helper (src-tauri/src/subagent.rs). */
 const SUBAGENT_TOOL = "run_subagent";
 
@@ -77,18 +202,23 @@ export function ToolCallCard(props: { call: ToolCallView }) {
   const [all, setAll] = useState(false);
   const result = c.text || c.progress || "";
   const shown = all ? result : result.slice(0, RESULT_PREVIEW_CHARS);
+  // The name is the model's: only a card of its own, never something every object has.
+  const extra = Object.hasOwn(TOOL_CARD_EXTRAS, c.name) ? (TOOL_CARD_EXTRAS[c.name]?.(c) ?? null) : null;
+  const savedId = useSavedOutput(c.callId, c.text, c.status !== "running" && c.status !== "waiting");
   const helperNow =
     c.name === SUBAGENT_TOOL && (c.status === "running" || c.status === "waiting") ? lastLine(c.progress ?? "") : "";
   return (
-    <div className="rounded-md border border-border bg-bg-subtle text-sm">
+    <div className="enter overflow-hidden rounded-xl border border-border bg-surface text-sm shadow-soft">
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-bg-muted/60"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
         {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-        <Wrench size={14} className="text-fg-muted" aria-hidden />
+        <span className="rounded-md bg-bg-muted p-1 text-accent">
+          <Wrench size={13} aria-hidden />
+        </span>
         <span className="font-medium">{c.name}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg-muted">{argSummary(c.arguments)}</span>
         <StatusIcon status={c.status} />
@@ -99,8 +229,14 @@ export function ToolCallCard(props: { call: ToolCallView }) {
           {helperNow}
         </p>
       )}
+      {extra && <div className="border-t border-border px-3 py-2">{extra}</div>}
+      {savedId !== null && (
+        <div className="border-t border-border px-3 py-2">
+          <FullOutput key={savedId} id={savedId} />
+        </div>
+      )}
       {open && (
-        <div className="space-y-2 border-t border-border px-3 py-2">
+        <div className="enter-fade space-y-2 border-t border-border px-3 py-2">
           {c.recovered && (
             <p className="text-xs text-warning">This call was recovered from the model&apos;s text.</p>
           )}

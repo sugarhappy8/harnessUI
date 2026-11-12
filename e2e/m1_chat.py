@@ -73,6 +73,29 @@ class FakeOpenAI(BaseHTTPRequestHandler):
         self.wfile.write(f"data: {json.dumps(done)}\n\ndata: [DONE]\n\n".encode())
 
 
+# Starts a model load the way the UI does, without waiting for it: the result lands in
+# `window[slot]`.
+FIRE_LOAD = """
+const [slot, path, settings] = arguments;
+window[slot] = 'pending';
+window.__TAURI_INTERNALS__.invoke('load_local_model', {path, settings})
+  .then(() => { window[slot] = {ok: true}; })
+  .catch(e => { window[slot] = {ok: false, error: e}; });
+"""
+
+
+def loads_done(s, timeout: float = 180):
+    """Waits for the two loads started with FIRE_LOAD and returns their results."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        first = s.execute("return window.__load1")
+        second = s.execute("return window.__load2")
+        if first != "pending" and second != "pending":
+            return first, second
+        time.sleep(0.2)
+    raise AssertionError("the model loads did not finish")
+
+
 def step(name):
     print(f"--- {name}", flush=True)
 
@@ -118,12 +141,51 @@ def main() -> int:
         assert status["nCtx"] == 4096, status
         print("    backend:", status["backend"], "n_ctx:", status["nCtx"])
 
-        step("new chat with the local model")
-        s.click_button("New chat")
-        time.sleep(0.5)
+        # Reported from a real PC: a model picked with no chat open loaded without any
+        # sign of it, so it was picked again, and the first load "was cancelled".
+        step("the same model picked again while it loads joins that load")
+        s.invoke("unload_model")
+        s.execute(FIRE_LOAD, "__load1", MODEL, settings)
+        time.sleep(0.4)
+        s.execute(FIRE_LOAD, "__load2", MODEL, settings)
+        first, second = loads_done(s)
+        assert first == {"ok": True} and second == {"ok": True}, (first, second)
+        assert s.invoke("runtime_status")["state"] == "ready"
+
+        step("another model picked while one loads replaces it quietly")
+        other = OUT / "other-model.gguf"
+        if other.is_symlink() or other.exists():
+            other.unlink()
+        other.symlink_to(MODEL)
+        s.invoke("unload_model")
+        s.execute(FIRE_LOAD, "__load1", MODEL, settings)
+        time.sleep(0.4)
+        s.execute(FIRE_LOAD, "__load2", str(other), settings)
+        first, second = loads_done(s)
+        assert first.get("error", {}).get("code") == "load_replaced", first
+        assert second == {"ok": True}, second
+        status = s.invoke("runtime_status")
+        assert status["state"] == "ready" and status["modelName"] == other.name, status
+        assert status.get("error") is None, status
+        assert "Loading was" not in s.page_text()
+        s.invoke("unload_model")
+
+        step("picking a model with no chat open opens a chat and shows it loading")
+        header = "return document.querySelector('button[aria-label=\"Model for this chat\"]').textContent"
+        assert s.invoke("list_chats", {"query": None}) == []
+        assert s.execute(header) == "Choose a model", s.execute(header)
         s.click_button("Model for this chat")
-        s.click_button(os.path.basename(MODEL))
-        s.wait_for(lambda: s.invoke("runtime_status")["state"] == "ready", 120, "model ready")
+        s.click_menu_item(os.path.basename(MODEL))
+        shown_loading = False
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            shown_loading = shown_loading or "Loading model" in s.page_text()
+            if s.invoke("runtime_status")["state"] == "ready":
+                break
+            time.sleep(0.05)
+        assert shown_loading, "the header never showed the model loading"
+        assert len(s.invoke("list_chats", {"query": None})) == 1
+        s.wait_for(lambda: s.execute(header) == os.path.basename(MODEL), 10, "the header names the model")
         s.wait_for(lambda: "still loading" not in s.page_text(), 20, "composer enabled")
 
         step("send a message and stream the reply")

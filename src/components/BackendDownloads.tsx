@@ -148,8 +148,8 @@ export function BackendDownloads(props: { onChanged: () => void }) {
       </ul>
       <AlertDialog.Root open={confirm !== null} onOpenChange={(o) => !o && setConfirm(null)}>
         <AlertDialog.Portal>
-          <AlertDialog.Overlay className="fixed inset-0 bg-black/40" />
-          <AlertDialog.Content className="fixed top-1/2 left-1/2 w-[30rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-bg p-5 shadow-xl">
+          <AlertDialog.Overlay className="dialog-overlay fixed inset-0" />
+          <AlertDialog.Content className="fixed top-1/2 left-1/2 w-[30rem] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 shadow-pop">
             <AlertDialog.Title className="text-base font-semibold">Download {confirm?.title}?</AlertDialog.Title>
             <AlertDialog.Description className="mt-2 text-sm text-fg-muted">
               {formatBytes(confirm?.downloadBytes)} from GitHub. This backend includes software under:{" "}

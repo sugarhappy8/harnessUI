@@ -27,3 +27,14 @@ export function formatEta(remainingBytes: number, bytesPerSecond: number | null)
   if (s < 3600) return `${Math.ceil(s / 60)} min left`;
   return `${(s / 3600).toFixed(1)} h left`;
 }
+
+/** The heading a chat goes under in the list, from when it was last used. */
+export function dayGroup(updatedAt: number, now: number = Date.now()): "Today" | "Yesterday" | "This week" | "Earlier" {
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const day = 24 * 60 * 60 * 1000;
+  if (updatedAt >= startOfToday.getTime()) return "Today";
+  if (updatedAt >= startOfToday.getTime() - day) return "Yesterday";
+  if (updatedAt >= startOfToday.getTime() - 6 * day) return "This week";
+  return "Earlier";
+}

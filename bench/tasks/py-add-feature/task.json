@@ -1,0 +1,43 @@
+{
+  "title": "Add a small feature (Python)",
+  "kind": "python",
+  "needs": "python",
+  "prompt": "Add two methods to the TodoList class in todo.py: `complete(title)`, which marks the item with that title as done and raises KeyError when there is no such item, and `pending()`, which returns the titles of the items that are not done yet, in the order they were added. Add a test for them to test_todo.py and run the tests with `{python} -m unittest -q`.",
+  "checks": [
+    {
+      "type": "run",
+      "script": "verify.py",
+      "expect": {
+        "start": {
+          "value": [
+            "a",
+            "b",
+            "c"
+          ]
+        },
+        "completeB": "ok",
+        "afterB": {
+          "value": [
+            "a",
+            "c"
+          ]
+        },
+        "titles": {
+          "value": [
+            "a",
+            "b",
+            "c"
+          ]
+        },
+        "completeRest": "ok",
+        "allDone": {
+          "value": []
+        },
+        "missing": "KeyError"
+      }
+    }
+  ],
+  "parse": [
+    "py"
+  ]
+}

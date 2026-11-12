@@ -8,8 +8,15 @@
 //!   forces UTF-8 output and returns the real exit code.
 //! - macOS: `/bin/zsh -lc …` with the environment captured from a login shell.
 //! - The environment drops variables whose names look like secrets.
-//! - Output streams into the tool card, is capped at 1 MiB, and the model sees the head
-//!   and tail sized to the per-result cap. Default timeout 120 s. Stop kills the tree.
+//! - Output streams into the tool card and is capped at 1 MiB. A result always starts
+//!   with the line `Exit code N (… s)` (or what ended the command instead). An output too
+//!   long for the per-result cap is shown as its first lines, the lines in between that
+//!   look like errors with their line numbers, and its last lines (`shorten`); the whole
+//!   text goes to the app, which stores it for `read_output`. Default timeout 120 s. Stop
+//!   kills the tree.
+//! - A failure says what to do next (app 0.0.4): a program that is not there is named
+//!   with close names on PATH, a timeout says how to allow more time, a working folder
+//!   that is not allowed names the allowed ones.
 //!
 //! The classifier in `policy::command` decides what a grant can cover; it fails closed.
 
@@ -27,11 +34,21 @@ use policy::{Action, Risk, Scope};
 use serde_json::{Map, Value, json};
 use tokio::io::AsyncReadExt;
 
+use crate::{errors, shorten};
+
 /// Output kept at most (8.4 raw limit).
 pub const OUTPUT_LIMIT: usize = 1024 * 1024;
 /// Default and maximum timeouts.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Bytes of the end of the error stream kept apart, to show when later output buries it.
+const STDERR_TAIL_BYTES: usize = 2048;
+/// Lines of the end of the error stream shown at most.
+const STDERR_TAIL_LINES: usize = 8;
+/// Folders on PATH and names in them looked at when a program was not found.
+const MAX_PATH_FOLDERS: usize = 200;
+const MAX_PATH_NAMES: usize = 20_000;
 
 /// Which shell runs commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,31 +210,45 @@ impl TerminalServer {
     }
 }
 
+/// What a timed-out result says after the output.
+fn timeout_note(seconds: u64) -> String {
+    const NO_INPUT: &str =
+        "A command that waits for input never finishes here: commands get no input.";
+    if seconds >= MAX_TIMEOUT.as_secs() {
+        format!(
+            "[It was ended after {seconds} s, the longest a command may run. Run it in smaller steps. {NO_INPUT}]"
+        )
+    } else {
+        format!(
+            "[It was ended after the {seconds} s it was given. If it only needs more time, pass a larger timeout_seconds (at most {}). {NO_INPUT}]",
+            MAX_TIMEOUT.as_secs()
+        )
+    }
+}
+
+/// Whether a failed command's output says that a program was not found: exit code 127
+/// from a POSIX shell, PowerShell's own error otherwise.
+fn says_not_found(code: Option<i32>, output: &str) -> bool {
+    code == Some(127)
+        || output.contains("CommandNotFoundException")
+        || output.contains("is not recognized as")
+}
+
+/// The last lines of a command's error stream, from the bytes kept of its end.
+fn last_lines(tail: &[u8], cut_at_start: bool) -> String {
+    let text = String::from_utf8_lossy(tail);
+    let mut lines: Vec<&str> = text.lines().collect();
+    // The kept bytes may start in the middle of a line.
+    if cut_at_start && lines.len() > 1 {
+        lines.remove(0);
+    }
+    let from = lines.len().saturating_sub(STDERR_TAIL_LINES);
+    lines[from..].join("\n")
+}
+
 fn arg_looks_like_path(a: &str) -> bool {
     !a.starts_with('-')
         && (a.contains('/') || a.contains('\\') || a.starts_with('.') || a.starts_with('~'))
-}
-
-fn head_tail(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        return text.to_string();
-    }
-    let half = max_chars / 2;
-    let mut a = half;
-    while !text.is_char_boundary(a) {
-        a -= 1;
-    }
-    let mut b = text.len() - half;
-    while !text.is_char_boundary(b) {
-        b += 1;
-    }
-    let omitted = b - a;
-    format!(
-        "{}\n[... {omitted} characters (about {} tokens) omitted ...]\n{}",
-        &text[..a],
-        omitted / 3,
-        &text[b..]
-    )
 }
 
 #[async_trait]
@@ -290,20 +321,45 @@ impl BuiltinServer for TerminalServer {
                 risk: Risk::AlwaysAsk,
                 read_only: false,
                 outbound: true,
+                keep_asking: None,
+                network: true,
                 hard_limit: Some(why),
                 payload: Value::Null,
             })
         };
         let Some(cwd_arg) = cwd_arg else {
-            return deny("No folder is approved for this chat, so commands have nowhere to run. Ask the user to approve one.".into());
+            return deny("No folder is approved for this chat, so commands have nowhere to run. The user can approve a folder in the Tools panel.".into());
+        };
+        let folders = || -> String {
+            let folders: Vec<String> = sb.roots().iter().map(|r| r.canonical.to_string()).collect();
+            folders.join(", ")
         };
         let cwd = match sb.check(&cwd_arg, base.as_deref(), &RealFs) {
             Ok(c) if std::path::Path::new(&c.canonical).is_dir() => c,
-            Ok(c) => return Described::Invalid(format!("{} is not a folder", c.canonical)),
+            Ok(c) => {
+                let shown = policy::sanitize::visible(&c.canonical);
+                let instead = match &base {
+                    Some(base) => format!(
+                        "leave cwd out to run in {}",
+                        policy::sanitize::visible(base)
+                    ),
+                    None => "leave cwd out".to_string(),
+                };
+                return Described::Invalid(if c.exists {
+                    format!(
+                        "cwd {shown} is a file, not a folder. Pass a folder as cwd, or {instead}."
+                    )
+                } else {
+                    format!(
+                        "cwd {shown} does not exist. Pass a folder that exists as cwd, or {instead}."
+                    )
+                });
+            }
             Err(e) => {
-                let folders: Vec<String> =
-                    sb.roots().iter().map(|r| r.canonical.to_string()).collect();
-                return deny(format!("{e}. Commands may run in: {}.", folders.join(", ")));
+                return deny(format!(
+                    "{e}. Commands may run in: {}. Pass one of these folders, or a folder inside one, as cwd; the user can approve another folder in the Tools panel.",
+                    folders()
+                ));
             }
         };
         let verdict = classify(self.config.shell.grammar(), &command);
@@ -325,7 +381,11 @@ impl BuiltinServer for TerminalServer {
                         // are held to approved folders.
                         for a in c.args.iter().filter(|a| arg_looks_like_path(a)) {
                             if let Err(e) = sb.check(a, Some(&cwd.canonical), &RealFs) {
-                                return deny(format!("{} reads {a}: {e}", c.program));
+                                return deny(format!(
+                                    "{} reads {a}: {e}. Commands may read files in: {}. The user can approve another folder in the Tools panel.",
+                                    c.program,
+                                    folders()
+                                ));
                             }
                         }
                         parts.push(Scope::ReadOnlyProgram { program });
@@ -370,6 +430,10 @@ impl BuiltinServer for TerminalServer {
             },
             read_only: verdict.read_only,
             outbound: true,
+            // Allow all: the classifier says whether the command still asks (deletes,
+            // destroys, publishes, hides what it runs) and whether it can reach the network.
+            keep_asking: verdict.keep_asking.as_ref().map(|(kind, _)| *kind),
+            network: verdict.network,
             hard_limit: None,
             payload: json!({
                 "cwd": cwd.canonical,
@@ -413,7 +477,9 @@ impl BuiltinServer for TerminalServer {
                 .unwrap_or(false),
         };
         if let Err(e) = self.sandbox(&ctx.chat).recheck(&checked, &RealFs) {
-            return ToolOutput::error(format!("the working folder changed after approval: {e}"));
+            return ToolOutput::error(format!(
+                "The working folder changed after the command was approved ({e}), so it was not run. Call run_command again."
+            ));
         }
         let timeout = Duration::from_secs(
             p.get("timeoutSeconds")
@@ -429,25 +495,39 @@ impl BuiltinServer for TerminalServer {
             .stderr(runtime::StdioMode::Piped);
         let mut child = match runtime::spawn(spec) {
             Ok(c) => c,
-            Err(e) => return ToolOutput::error(format!("the command could not start: {e}")),
+            Err(e) => {
+                return ToolOutput::error(format!(
+                    "The shell ({}) could not be started, so the command did not run: {e}. This is a problem with this computer's setup, not with the command; tell the user.",
+                    program.display()
+                ));
+            }
         };
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
         let truncated = Arc::new(Mutex::new(false));
+        // The end of the error stream, kept apart: (bytes, bytes were dropped before them).
+        let stderr_end = Arc::new(Mutex::new((Vec::<u8>::new(), false)));
         let mut readers = Vec::new();
-        let streams: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = [
-            child
-                .take_stdout()
-                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-            child
-                .take_stderr()
-                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        let streams: Vec<(bool, Box<dyn tokio::io::AsyncRead + Unpin + Send>)> = [
+            child.take_stdout().map(|s| {
+                (
+                    false,
+                    Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+                )
+            }),
+            child.take_stderr().map(|s| {
+                (
+                    true,
+                    Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+                )
+            }),
         ]
         .into_iter()
         .flatten()
         .collect();
-        for mut stream in streams {
+        for (is_stderr, mut stream) in streams {
             let out = output.clone();
             let cut = truncated.clone();
+            let stderr_end = stderr_end.clone();
             let progress = ctx.progress.clone();
             readers.push(tokio::spawn(async move {
                 let mut buf = vec![0u8; 16 * 1024];
@@ -457,6 +537,14 @@ impl BuiltinServer for TerminalServer {
                         Ok(n) => {
                             if let Some(p) = &progress {
                                 p(String::from_utf8_lossy(&buf[..n]).into_owned());
+                            }
+                            if is_stderr && let Ok(mut end) = stderr_end.lock() {
+                                end.0.extend_from_slice(&buf[..n]);
+                                if end.0.len() > STDERR_TAIL_BYTES {
+                                    let drop = end.0.len() - STDERR_TAIL_BYTES;
+                                    end.0.drain(..drop);
+                                    end.1 = true;
+                                }
                             }
                             if let Ok(mut o) = out.lock() {
                                 let room = OUTPUT_LIMIT.saturating_sub(o.len());
@@ -501,23 +589,132 @@ impl BuiltinServer for TerminalServer {
                 timeout.as_secs()
             ),
         };
-        let cut_note = if truncated.lock().map(|c| *c).unwrap_or(false) {
-            "\n[output beyond 1 MiB was not kept]"
-        } else {
-            ""
-        };
-        let full = format!("{header}\n{text}{cut_note}");
-        let budget = ctx.chat.result_cap_tokens.max(500) * 3;
-        let shown = head_tail(&full, budget);
         let failed = !matches!(&outcome, Ok(Ok(s)) if s.success());
-        ToolOutput {
-            content: vec![mcp_host::Content::Text {
-                text: shown.clone(),
-            }],
-            is_error: failed,
-            full_text: (shown.len() < full.len()).then_some(full),
-            ui: Some(json!({ "command": command, "cwd": cwd })),
+        let timed_out = matches!(&outcome, Err(why) if *why != "cancelled");
+        // The whole result: the header line, the output, then what the app adds about it.
+        let mut full = format!("{header}\n{text}");
+        let mut note = |line: &str| {
+            if !full.ends_with('\n') {
+                full.push('\n');
+            }
+            full.push_str(line);
+        };
+        if timed_out && text.trim().is_empty() {
+            note("(it printed nothing)");
         }
+        if truncated.lock().map(|c| *c).unwrap_or(false) {
+            note("[output beyond 1 MiB was not kept]");
+        }
+        if timed_out {
+            note(&timeout_note(timeout.as_secs()));
+        }
+        let code = match &outcome {
+            Ok(Ok(status)) => status.code(),
+            _ => None,
+        };
+        if failed
+            && says_not_found(code, &text)
+            && let Some(line) = self.not_found_note(command, &text)
+        {
+            note(&line);
+        }
+        let budget = shorten::budget_bytes(ctx.chat.result_cap_tokens);
+        let ui = Some(json!({ "command": command, "cwd": cwd }));
+        // A failed command also shows the end of its error stream, wherever that ended up.
+        let stderr_tail = stderr_end
+            .lock()
+            .map(|end| last_lines(&end.0, end.1))
+            .unwrap_or_default();
+        let stderr_tail = (failed && !stderr_tail.trim().is_empty()).then_some(stderr_tail);
+        match shorten::command_view(&full, budget, stderr_tail.as_deref()) {
+            Some(view) => shorten::shortened(view, full, failed, ui),
+            None => ToolOutput {
+                content: vec![mcp_host::Content::Text { text: full }],
+                is_error: failed,
+                full_text: None,
+                ui,
+            },
+        }
+    }
+}
+
+impl TerminalServer {
+    /// The names of the programs on PATH (without `.exe` and the like on Windows).
+    fn programs_on_path(&self) -> Vec<String> {
+        let Some(path) = self.path_var() else {
+            return Vec::new();
+        };
+        let windows = matches!(self.config.shell, TerminalShell::PowerShell { .. });
+        let mut names = Vec::new();
+        for folder in std::env::split_paths(&path)
+            .filter(|f| f.is_absolute())
+            .take(MAX_PATH_FOLDERS)
+        {
+            let Ok(entries) = std::fs::read_dir(&folder) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                if names.len() >= MAX_PATH_NAMES {
+                    return names;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let name = match name.rsplit_once('.') {
+                    Some((stem, ext))
+                        if windows
+                            && ["exe", "cmd", "bat", "com", "ps1"]
+                                .iter()
+                                .any(|e| ext.eq_ignore_ascii_case(e)) =>
+                    {
+                        stem.to_string()
+                    }
+                    _ => name,
+                };
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    /// For a command that failed because a program was not found: which one, and what is
+    /// on PATH that is close to it. `None` when the command line cannot be broken down, or
+    /// the output does not name a program that is missing.
+    fn not_found_note(&self, command: &str, output: &str) -> Option<String> {
+        let verdict = classify(self.config.shell.grammar(), command);
+        let Parsed::Plain(commands) = &verdict.parsed else {
+            return None;
+        };
+        let path = self.path_var();
+        let missing = commands
+            .iter()
+            .map(|c| c.program.as_str())
+            .find(|program| {
+                !program.is_empty()
+                    && !program.contains(['/', '\\'])
+                    && runtime::resolve_program(program, path.as_deref().map(std::ffi::OsStr::new))
+                        .is_none()
+                    && output.lines().any(|line| {
+                        let lower = line.to_lowercase();
+                        line.contains(program)
+                            && (lower.contains("not found") || lower.contains("not recognized"))
+                    })
+            })?;
+        let shown = policy::sanitize::one_line(missing, 80);
+        let close =
+            errors::similar_names(missing, self.programs_on_path(), errors::MAX_SIMILAR_NAMES);
+        let close: Vec<String> = close
+            .iter()
+            .map(|name| policy::sanitize::one_line(name, 80))
+            .collect();
+        Some(if close.is_empty() {
+            format!(
+                "[\"{shown}\" was not found: no program with that name is on PATH, and nothing on PATH has a similar name. Check the spelling, or ask the user to install it.]"
+            )
+        } else {
+            format!(
+                "[\"{shown}\" was not found: no program with that name is on PATH. Close names on PATH: {}. Check the spelling, or ask the user to install it.]",
+                close.join(", ")
+            )
+        })
     }
 }
 
@@ -737,6 +934,252 @@ mod tests {
         assert!(out.joined_text().contains("SKILL.md"));
     }
 
+    async fn run(s: &TerminalServer, c: &ChatContext, args: Value) -> ToolOutput {
+        let a = describe(s, c, args).await;
+        assert!(a.hard_limit.is_none(), "{:?}", a.hard_limit);
+        s.call(
+            "run_command",
+            &Map::new(),
+            &a,
+            CallContext {
+                chat: c.clone(),
+                cancel: CancellationToken::new(),
+                progress: None,
+            },
+        )
+        .await
+    }
+
+    /// A long output that failed: the exit code, the first lines, the line in the middle
+    /// that looks like an error with its number, the last lines, and the whole text for
+    /// the app to store.
+    #[tokio::test]
+    async fn a_long_failing_output_shows_its_errors_by_line_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let s = server(&[]);
+        let mut c = chat(&root);
+        c.result_cap_tokens = 500;
+        let out = run(
+            &s,
+            &c,
+            json!({"command": "seq 1 1500; echo 'error: the build broke'; seq 1501 3000; exit 3"}),
+        )
+        .await;
+        assert!(out.is_error);
+        let text = out.joined_text();
+        assert!(text.starts_with("Exit code 3 ("), "{text}");
+        assert!(text.contains("\n1\n2\n3\n"), "{text}");
+        // The header is line 1 of the stored text, so the echo is line 1502.
+        let middle = text
+            .split_once("\n[Lines ")
+            .and_then(|(_, rest)| rest.split_once("[The output continues at line "))
+            .map(|(middle, _)| middle)
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(
+            middle.ends_with(
+                " are not shown. One of them looks like an error:]\n1502: error: the build broke\n"
+            ),
+            "{middle}"
+        );
+        assert!(text.ends_with("\n2999\n3000"), "{text}");
+        assert!(text.len() + 200 <= 1500, "{}", text.len());
+        let full = out.full_text.clone().expect("the whole output");
+        assert_eq!(crate::shorten::lines(&full).len(), 3002);
+        assert_eq!(crate::shorten::lines(&full)[1501], "error: the build broke");
+        let mut ui = out.ui.clone();
+        let note = crate::shorten::Shown::take(&mut ui).expect("a note for the app");
+        assert!(note.lines > 20 && note.next.is_some(), "{note:?}");
+        assert_eq!(
+            ui.as_ref()
+                .and_then(|u| u.get("command"))
+                .and_then(Value::as_str)
+                .map(|c| c.starts_with("seq 1 1500")),
+            Some(true)
+        );
+
+        // A long output that worked is shaped the same way and is not an error.
+        let out = run(&s, &c, json!({"command": "seq 1 3000"})).await;
+        assert!(!out.is_error);
+        let text = out.joined_text();
+        assert!(
+            text.starts_with("Exit code 0 (") && text.ends_with("\n3000"),
+            "{text}"
+        );
+        assert!(
+            text.contains(" are not shown.]\n") && out.full_text.is_some(),
+            "{text}"
+        );
+        // A short one is shown whole, with nothing to store.
+        let out = run(&s, &c, json!({"command": "echo hello; exit 4"})).await;
+        assert!(out.is_error && out.full_text.is_none());
+        let text = out.joined_text();
+        assert!(
+            text.starts_with("Exit code 4 (") && text.ends_with("s)\nhello\n"),
+            "{text:?}"
+        );
+        assert_eq!(
+            out.ui,
+            Some(json!({"command": "echo hello; exit 4", "cwd": root.display().to_string()}))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_end_of_the_error_stream_is_shown_when_output_buries_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let s = server(&[]);
+        let mut c = chat(&root);
+        c.result_cap_tokens = 500;
+        let out = run(
+            &s,
+            &c,
+            json!({"command": "echo 'make: *** [all] Error 2' >&2; sleep 0.2; seq 1 3000; exit 2"}),
+        )
+        .await;
+        let text = out.joined_text();
+        assert!(text.starts_with("Exit code 2 ("), "{text}");
+        assert!(
+            text.ends_with(
+                "\n3000\n[The last lines of its error output (stderr):]\nmake: *** [all] Error 2"
+            ),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_program_that_is_not_there_is_named_with_close_names_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["mytool-build", "mytool-test", "unrelated"] {
+            std::fs::write(bin.join(name), "#!/bin/sh\n").unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let s = server(&[("PATH", &path)]);
+        let c = chat(&root);
+        let out = run(&s, &c, json!({"command": "mytool-biuld --release"})).await;
+        assert!(out.is_error);
+        let text = out.joined_text();
+        assert!(text.starts_with("Exit code 127 ("), "{text}");
+        assert_eq!(
+            text.lines().last(),
+            Some(
+                "[\"mytool-biuld\" was not found: no program with that name is on PATH. Close names on PATH: mytool-build. Check the spelling, or ask the user to install it.]"
+            ),
+            "{text}"
+        );
+        // Nothing close: say so.
+        let out = run(&s, &c, json!({"command": "zzqqxxyy-tool"})).await;
+        assert_eq!(
+            out.joined_text().lines().last(),
+            Some(
+                "[\"zzqqxxyy-tool\" was not found: no program with that name is on PATH, and nothing on PATH has a similar name. Check the spelling, or ask the user to install it.]"
+            ),
+        );
+        // A program that is there and fails gets no such line.
+        let out = run(&s, &c, json!({"command": "ls no-such-file-here"})).await;
+        assert!(
+            out.is_error && !out.joined_text().contains("was not found: no program"),
+            "{}",
+            out.joined_text()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timeout_says_how_long_it_ran_what_it_printed_and_how_to_allow_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let s = server(&[]);
+        let c = chat(&root);
+        let out = run(
+            &s,
+            &c,
+            json!({"command": "echo step one; sleep 30", "timeout_seconds": 1}),
+        )
+        .await;
+        assert!(out.is_error);
+        assert_eq!(
+            out.joined_text(),
+            "Timed out after 1 s; the command was ended\nstep one\n[It was ended after the 1 s it was given. If it only needs more time, pass a larger timeout_seconds (at most 600). A command that waits for input never finishes here: commands get no input.]"
+        );
+        let out = run(&s, &c, json!({"command": "sleep 30", "timeout_seconds": 1})).await;
+        assert_eq!(
+            out.joined_text(),
+            "Timed out after 1 s; the command was ended\n(it printed nothing)\n[It was ended after the 1 s it was given. If it only needs more time, pass a larger timeout_seconds (at most 600). A command that waits for input never finishes here: commands get no input.]"
+        );
+        assert_eq!(
+            timeout_note(600),
+            "[It was ended after 600 s, the longest a command may run. Run it in smaller steps. A command that waits for input never finishes here: commands get no input.]"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_working_folder_that_is_not_allowed_names_the_allowed_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("ok")).unwrap();
+        std::fs::write(root.join("ok/file.txt"), "x").unwrap();
+        let s = server(&[]);
+        let ok = root.join("ok").display().to_string();
+        let c = chat(&root.join("ok"));
+        let a = describe(&s, &c, json!({"command": "ls", "cwd": "/"})).await;
+        assert_eq!(
+            a.hard_limit,
+            Some(format!(
+                "the path is outside the approved folders. Commands may run in: {ok}. Pass one of these folders, or a folder inside one, as cwd; the user can approve another folder in the Tools panel."
+            ))
+        );
+        let a = describe(&s, &c, json!({"command": "cat ../secret.txt"})).await;
+        assert_eq!(
+            a.hard_limit,
+            Some(format!(
+                "cat reads ../secret.txt: the path is outside the approved folders. Commands may read files in: {ok}. The user can approve another folder in the Tools panel."
+            ))
+        );
+        let invalid = |args: Value| {
+            let s = s.clone();
+            let c = c.clone();
+            async move {
+                match s
+                    .describe("run_command", args.as_object().unwrap(), &c)
+                    .await
+                {
+                    Described::Invalid(why) => why,
+                    Described::Action(a) => panic!("{a:?}"),
+                }
+            }
+        };
+        assert_eq!(
+            invalid(json!({"command": "ls", "cwd": "file.txt"})).await,
+            format!(
+                "cwd {ok}/file.txt is a file, not a folder. Pass a folder as cwd, or leave cwd out to run in {ok}."
+            )
+        );
+        assert_eq!(
+            invalid(json!({"command": "ls", "cwd": "nowhere"})).await,
+            format!(
+                "cwd {ok}/nowhere does not exist. Pass a folder that exists as cwd, or leave cwd out to run in {ok}."
+            )
+        );
+        let none = ChatContext {
+            approved_folders: vec![],
+            ..c.clone()
+        };
+        let a = describe(&s, &none, json!({"command": "ls"})).await;
+        assert_eq!(
+            a.hard_limit.as_deref(),
+            Some(
+                "No folder is approved for this chat, so commands have nowhere to run. The user can approve a folder in the Tools panel."
+            )
+        );
+    }
+
     #[test]
     fn secret_names() {
         for n in [
@@ -754,12 +1197,17 @@ mod tests {
         }
     }
 
+    /// The same three things the old byte-based helper was held to, on the line-based view
+    /// that replaced it: the start, the end, and a marker for what is missing.
     #[test]
     fn head_and_tail() {
-        let t = "a".repeat(1000) + &"b".repeat(1000);
-        let s = head_tail(&t, 200);
-        assert!(s.starts_with("aaa") && s.ends_with("bbb") && s.contains("omitted"));
-        assert_eq!(head_tail("short", 200), "short");
+        let t = "a".repeat(5000) + &"b".repeat(5000);
+        let s = shorten::command_view(&t, 1500, None)
+            .expect("too long")
+            .text;
+        assert!(s.starts_with("aaa") && s.ends_with("bbb") && s.contains("not shown"));
+        assert!(s.len() <= 1500);
+        assert_eq!(shorten::command_view("short", 1500, None), None);
     }
 }
 

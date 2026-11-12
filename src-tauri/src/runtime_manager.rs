@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dto::{BackendDto, DeviceDto, LocalModelSettings, RuntimeStateDto, RuntimeStatusDto};
 use crate::error::{AppError, AppResult};
+use crate::load_tracker::{LoadTicket, LoadTracker};
 
 /// stderr lines kept for error details.
 const TAIL_LINES: usize = 80;
@@ -41,6 +42,8 @@ pub struct Endpoint {
 }
 
 struct Session {
+    /// The load this server belongs to (see [`LoadTracker`]).
+    seq: u64,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<SupervisorExit>,
 }
@@ -53,6 +56,10 @@ pub struct RuntimeManager {
     probes: Mutex<Option<Vec<(Backend, ProbeResult)>>>,
     session: Mutex<Option<Session>>,
     tail: StdMutex<VecDeque<String>>,
+    loads: LoadTracker,
+    /// Held while a load replaces the previous server and starts its own, so that two
+    /// loads never do that at the same time. Not held while the model loads.
+    load_setup: Mutex<()>,
 }
 
 impl RuntimeManager {
@@ -65,6 +72,8 @@ impl RuntimeManager {
             probes: Mutex::new(None),
             session: Mutex::new(None),
             tail: StdMutex::new(VecDeque::new()),
+            loads: LoadTracker::default(),
+            load_setup: Mutex::new(()),
         }
     }
 
@@ -345,6 +354,17 @@ impl RuntimeManager {
                 model.display().to_string(),
             ));
         }
+        let setup = self.load_setup.lock().await;
+        // The same model picked again while it loads: wait for that load, do not restart
+        // it.
+        if let Some(seq) = self.loads.same_in_progress(&model, &settings) {
+            drop(setup);
+            return self.wait_for_load(seq, &model).await;
+        }
+        // From here this is the current load. A newer one replaces it; the ticket marks
+        // it as over on every way out of this function.
+        let ticket = LoadTicket::begin(&self.loads, &model, &settings);
+        let seq = ticket.seq;
         self.unload().await;
         let (first, candidates) = self.choose(&settings).await?;
         let model_name = model
@@ -416,6 +436,10 @@ impl RuntimeManager {
             let me2 = Arc::clone(&me);
             let exit = supervisor
                 .run(spec, token, move |server, running| {
+                    // A newer load is about to stop this server; its state is not news.
+                    if !me2.loads.is_current(seq) {
+                        return;
+                    }
                     let props = server.props().clone();
                     if let Some(pid) = server.pid() {
                         crate::children::track(&me2.app, pid, &running.backend.server);
@@ -449,13 +473,17 @@ impl RuntimeManager {
                     }
                 })
                 .await;
-            if let Ok(mut e) = me.endpoint.lock() {
-                *e = None;
+            // A newer load publishes its own server; do not wipe that.
+            if me.loads.is_current(seq) {
+                if let Ok(mut e) = me.endpoint.lock() {
+                    *e = None;
+                }
+                crate::children::untrack(&me.app);
             }
-            crate::children::untrack(&me.app);
             exit
         });
-        *self.session.lock().await = Some(Session { cancel, task });
+        *self.session.lock().await = Some(Session { seq, cancel, task });
+        drop(setup);
 
         // Wait for the first ready server, or for the supervisor to give up.
         let outcome = ready_rx.await;
@@ -463,18 +491,34 @@ impl RuntimeManager {
             tracing::info!(model = %model_name, "model ready");
             return Ok(());
         }
-        let exit = match self.session.lock().await.take() {
-            Some(s) => s.task.await.unwrap_or(SupervisorExit::Stopped),
-            None => SupervisorExit::Stopped,
+        // This load's own session only: by now the slot may hold a newer load's server,
+        // which must be left alone. `None`: an unload or a newer load took this one and
+        // stopped it.
+        let mine = {
+            let mut slot = self.session.lock().await;
+            if slot.as_ref().is_some_and(|s| s.seq == seq) {
+                slot.take()
+            } else {
+                None
+            }
         };
+        let exit = match mine {
+            Some(s) => s.task.await.map_err(|e| e.to_string()),
+            None => Ok(SupervisorExit::Stopped),
+        };
+        if !ticket.is_current() {
+            // Another model was picked meanwhile. That load owns the status now, and the
+            // user must not be told that this one "was cancelled".
+            return Err(replaced_error());
+        }
         let err = match exit {
-            SupervisorExit::Failed(failure) => load_error(&failure, self.tail_text()),
-            SupervisorExit::Stopped => AppError::new(
-                "load_cancelled",
-                "Loading was cancelled.",
-                "Pick the model again to load it.",
-                String::new(),
-            ),
+            Ok(SupervisorExit::Failed(failure)) => load_error(&failure, self.tail_text()),
+            // Stopped by an unload (the model or its backend was removed). The unload has
+            // reset the status; there is nothing to mark as failed.
+            Ok(SupervisorExit::Stopped) => return Err(cancelled_error()),
+            // The task that runs the server ended by itself, which only a bug does. It
+            // used to be reported as "Loading was cancelled".
+            Err(why) => loader_stopped_error(why, self.tail_text()),
         };
         self.update(|s| {
             s.state = RuntimeStateDto::Failed;
@@ -482,6 +526,32 @@ impl RuntimeManager {
             s.error = Some(err.clone());
         });
         Err(err)
+    }
+
+    /// When `model` is already being loaded with the same settings: waits for that load
+    /// and returns how it ended. `None` when no such load is in progress.
+    pub async fn join_load(
+        &self,
+        model: &Path,
+        settings: &LocalModelSettings,
+    ) -> Option<AppResult<()>> {
+        let seq = self.loads.same_in_progress(model, settings)?;
+        Some(self.wait_for_load(seq, model).await)
+    }
+
+    /// Waits until load `seq` (of `model`) is over and returns how it ended.
+    async fn wait_for_load(&self, seq: u64, model: &Path) -> AppResult<()> {
+        self.loads.finished(seq).await;
+        let now = self.status();
+        let wanted = model.display().to_string();
+        if now.model_path.as_deref() != Some(wanted.as_str()) {
+            return Err(replaced_error());
+        }
+        if now.state == RuntimeStateDto::Ready {
+            Ok(())
+        } else {
+            Err(now.error.unwrap_or_else(cancelled_error))
+        }
     }
 
     fn on_event(&self, event: ServerEvent) {
@@ -563,6 +633,37 @@ impl RuntimeManager {
             let _ = tokio::time::timeout(Duration::from_secs(5), session.task).await;
         }
     }
+}
+
+/// The code of the error a load ends with when a newer load replaced it. The UI shows
+/// nothing for it.
+pub const LOAD_REPLACED: &str = "load_replaced";
+
+fn replaced_error() -> AppError {
+    AppError::new(
+        LOAD_REPLACED,
+        "Another model was picked while this one was loading.",
+        "Nothing to do: the model picked last is the one being loaded.",
+        String::new(),
+    )
+}
+
+fn cancelled_error() -> AppError {
+    AppError::new(
+        "load_cancelled",
+        "Loading was stopped.",
+        "Pick the model again to load it.",
+        String::new(),
+    )
+}
+
+fn loader_stopped_error(why: String, tail: String) -> AppError {
+    AppError::new(
+        "load_crashed",
+        "The model could not be loaded: the loader stopped unexpectedly.",
+        "Try again. If it keeps happening, run the backend check in Settings → Diagnostics and send the report.",
+        format!("{why}\n{tail}"),
+    )
 }
 
 pub fn kind_name(kind: BackendKind) -> &'static str {

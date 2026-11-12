@@ -78,6 +78,10 @@ pub async fn load_local_model(
     {
         return Ok(());
     }
+    // The same model picked again while it loads: wait for that load, do not restart it.
+    if let Some(result) = state.runtime.join_load(&model, &settings).await {
+        return result;
+    }
     let runtime = state.runtime.clone();
     runtime.load(model, settings).await?;
     state.runtime.set_thinking(thinking);
@@ -190,10 +194,16 @@ pub async fn set_setting(
         "theme",
         settings::DEFAULT_SYSTEM_PROMPT,
         settings::REMOTE_CONTEXT_LENGTH,
+        settings::STEPS_PER_TURN,
     ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(AppError::bad_request(
             "That setting cannot be changed this way.",
+        ));
+    }
+    if key == settings::STEPS_PER_TURN && settings::parse_steps_per_turn(&value).is_none() {
+        return Err(AppError::bad_request(
+            "The step limit must be a whole number from 5 to 500.",
         ));
     }
     if key == settings::REMOTE_CONTEXT_LENGTH && settings::parse_remote_context(&value).is_none() {

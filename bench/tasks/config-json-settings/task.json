@@ -1,0 +1,44 @@
+{
+  "title": "Change settings in a JSON file",
+  "kind": "config",
+  "needs": null,
+  "prompt": "In settings.json, change the server port to 8080 and add a top-level setting \"logLevel\" with the value \"debug\". Keep every other setting as it is. The file must stay valid JSON.",
+  "checks": [
+    {
+      "type": "json",
+      "file": "settings.json",
+      "pointer": "/server/port",
+      "equals": 8080
+    },
+    {
+      "type": "json",
+      "file": "settings.json",
+      "pointer": "/logLevel",
+      "equals": "debug"
+    },
+    {
+      "type": "json",
+      "file": "settings.json",
+      "pointer": "/server/host",
+      "equals": "127.0.0.1"
+    },
+    {
+      "type": "json",
+      "file": "settings.json",
+      "pointer": "/features",
+      "equals": [
+        "search",
+        "export"
+      ]
+    },
+    {
+      "type": "json",
+      "file": "settings.json",
+      "pointer": "/theme",
+      "equals": "light"
+    }
+  ],
+  "parse": [
+    "json"
+  ]
+}

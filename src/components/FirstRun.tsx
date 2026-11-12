@@ -5,8 +5,9 @@ import * as ipc from "../lib/ipc";
 import type { CatalogSuggestion, ErrorInfo, FirstRunInfo } from "../lib/types";
 import { formatBytes } from "../lib/format";
 import { APP_NAME } from "../lib/app";
-import { toErrorInfo } from "../store/app";
+import { toErrorInfo, useApp } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
+import { BrandMark } from "./Brand";
 
 function hardwareLine(info: FirstRunInfo): string {
   const h = info.hardware;
@@ -76,6 +77,8 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
       const m = await ipc.importModel(picked);
       const settings = await ipc.getLocalModelSettings();
       await ipc.loadLocalModel(m.path, settings);
+      // Open a chat with the model, so the first screen after this one is ready to use.
+      await useApp.getState().setChatModel(`local:${m.path}`);
     });
   }
 
@@ -87,10 +90,13 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
   const chosen = info?.suggestions.find((s) => s.id === selected) ?? null;
 
   return (
-    <div className="flex h-full items-center justify-center overflow-y-auto p-6">
-      <div className="w-full max-w-2xl space-y-5">
+    <div className="app-backdrop flex h-full items-center justify-center overflow-y-auto p-6">
+      <div className="enter w-full max-w-2xl space-y-5 rounded-2xl border border-border bg-surface p-7 shadow-float">
         <div>
-          <h1 className="text-xl font-semibold">Welcome to {APP_NAME}</h1>
+          <BrandMark size={44} glow />
+          <h1 className="mt-4 text-2xl font-semibold tracking-tight">
+            Welcome to <span className="brand-text">{APP_NAME}</span>
+          </h1>
           <p className="mt-1 text-sm text-fg-muted">
             Everything runs on this computer. Pick a model to download, or use one you already have.
           </p>
@@ -161,7 +167,7 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
                 props.onOpenModels();
               })
             }
-            className="flex items-center gap-1.5 rounded-md bg-accent px-4 py-2 text-sm text-accent-fg disabled:opacity-40"
+            className="btn-primary flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium"
           >
             <Download size={14} aria-hidden />
             {chosen ? (chosen.installed ? `Use ${chosen.name}` : `Download ${chosen.name}`) : "Download"}

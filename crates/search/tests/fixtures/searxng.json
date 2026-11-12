@@ -1,0 +1,53 @@
+{
+  "query": "tokio spawn_blocking",
+  "number_of_results": 0,
+  "results": [
+    {
+      "url": "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html",
+      "title": "spawn_blocking in tokio::task - Rust",
+      "content": "Runs the provided closure on a thread where blocking is acceptable. In general, issuing a blocking call or performing a lot of compute in a future without yielding is problematic.",
+      "publishedDate": null,
+      "thumbnail": "",
+      "engine": "duckduckgo",
+      "template": "default.html",
+      "parsed_url": ["https", "docs.rs", "/tokio/latest/tokio/task/fn.spawn_blocking.html", "", "", ""],
+      "img_src": "",
+      "priority": "",
+      "engines": ["duckduckgo", "brave"],
+      "positions": [1, 1],
+      "score": 4.0,
+      "category": "general"
+    },
+    {
+      "url": "https://tokio.rs/tokio/tutorial/spawning",
+      "title": "Spawning | Tokio - An asynchronous Rust runtime",
+      "content": "A Tokio task is an asynchronous green thread.",
+      "engine": "brave",
+      "template": "default.html",
+      "parsed_url": ["https", "tokio.rs", "/tokio/tutorial/spawning", "", "", ""],
+      "engines": ["brave"],
+      "positions": [2],
+      "score": 0.5,
+      "category": "general"
+    },
+    {
+      "url": "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html",
+      "title": "The same address a second time",
+      "content": "Listed once only.",
+      "engine": "startpage",
+      "category": "general"
+    },
+    {
+      "url": "https://www.youtube.com/watch?v=abc",
+      "title": "A video result without text",
+      "engine": "youtube",
+      "template": "videos.html",
+      "category": "videos"
+    }
+  ],
+  "answers": [],
+  "corrections": [],
+  "infoboxes": [],
+  "suggestions": ["tokio spawn", "tokio block_in_place"],
+  "unresponsive_engines": [["qwant", "timeout"]]
+}

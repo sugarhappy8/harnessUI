@@ -4,6 +4,7 @@
 //! Nothing here changes policy state. Grants and approved folders are inputs; they are
 //! changed only by commands the UI sends.
 
+pub mod allow_all;
 pub mod command;
 pub mod engine;
 pub mod files;
@@ -11,7 +12,7 @@ pub mod path;
 pub mod sanitize;
 
 pub use engine::{
-    Action, AskReason, CardKind, Decision, Grants, Risk, Scope, TurnContext, evaluate,
+    Action, AskReason, CardKind, Decision, Grants, KeepAsking, Risk, Scope, TurnContext, evaluate,
     external_risk,
 };
 pub use files::{WriteKind, always_ask_reason};

@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check } from "lucide-react";
+import { memo, useEffect, useState } from "react";
+import { AtSign, ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { MessageDto } from "../lib/types";
 import { Markdown } from "./Markdown";
+import { useCitations } from "./sources/useCitations";
 import { ErrorBanner } from "./ErrorBanner";
 import { getAttachment, isTauri } from "../lib/ipc";
+import { PinMessageButton } from "./context/PinMessageButton";
 
 /** An attached image, loaded from the backend as a data: URI. */
 function AttachedImage(props: { id: number }) {
@@ -62,8 +64,11 @@ function BranchSwitcher(props: { message: MessageDto; onSwitch: (id: number) => 
   );
 }
 
-export function MessageItem(props: Props) {
+/** Memoised: while a reply streams in, the messages above it do not render again. */
+export const MessageItem = memo(function MessageItem(props: Props) {
   const m = props.message;
+  // [0.0.4 search] An answer's `[n]` are checked against the chat's stored sources.
+  const citations = useCitations(m.role === "assistant");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(m.text);
   const [copied, setCopied] = useState(false);
@@ -81,7 +86,7 @@ export function MessageItem(props: Props) {
 
   if (m.role === "user") {
     return (
-      <div className="group flex flex-col items-end">
+      <div className="group enter flex flex-col items-end">
         {editing ? (
           <form
             className="w-full max-w-[85%]"
@@ -126,7 +131,29 @@ export function MessageItem(props: Props) {
                 ))}
               </div>
             )}
-            {m.text && <div className="rounded-lg bg-bg-muted px-3 py-2 whitespace-pre-wrap">{m.text}</div>}
+            {(m.mentions ?? []).length > 0 && (
+              <ul aria-label="Mentions" className="flex flex-wrap justify-end gap-1">
+                {(m.mentions ?? []).map((mention) => (
+                  <li
+                    key={mention.attachmentId}
+                    className="flex items-center gap-1 rounded-md border border-border bg-bg-subtle px-2 py-0.5 font-mono text-xs"
+                    title={
+                      mention.kind === "file"
+                        ? `${mention.path}${mention.truncated ? " (first part sent)" : ""}`
+                        : `${mention.kind}, lines ${mention.startLine}-${mention.endLine} of ${mention.path}`
+                    }
+                  >
+                    <AtSign size={11} className="text-accent" aria-hidden />
+                    {mention.label}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {m.text && (
+              <div className="chat-text rounded-2xl rounded-br-md border border-accent/20 bg-accent/10 px-3.5 py-2 whitespace-pre-wrap">
+                {m.text}
+              </div>
+            )}
           </div>
         )}
         <div className="mt-1 flex items-center gap-2 opacity-70 group-hover:opacity-100">
@@ -146,6 +173,8 @@ export function MessageItem(props: Props) {
               <Pencil size={13} aria-hidden />
             </button>
           )}
+          {/* [0.0.4 pinned] Pins this message's stored text for the chat. */}
+          {!editing && m.text && <PinMessageButton messageId={m.id} />}
         </div>
       </div>
     );
@@ -154,16 +183,16 @@ export function MessageItem(props: Props) {
   if (m.role !== "assistant") return null;
 
   return (
-    <div className="group">
+    <div className="group enter">
       {m.reasoning && (
-        <details className="mb-2 rounded-md border border-border bg-bg-subtle px-3 py-1.5 text-sm">
+        <details className="mb-2 rounded-lg border border-border bg-bg-subtle px-3 py-2 text-sm">
           <summary className="cursor-pointer text-fg-muted select-none">Thinking</summary>
           <div className="mt-1 whitespace-pre-wrap text-fg-muted">{m.reasoning}</div>
         </details>
       )}
-      <div className="leading-relaxed">
+      <div className="chat-text">
         {m.text ? (
-          <Markdown text={m.text} />
+          <Markdown text={m.text} citations={citations} />
         ) : m.status === "streaming" ? (
           <span className="text-fg-muted" aria-live="polite">
             …
@@ -199,4 +228,4 @@ export function MessageItem(props: Props) {
       </div>
     </div>
   );
-}
+});

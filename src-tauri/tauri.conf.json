@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "harnessUI",
-  "version": "0.0.2",
+  "version": "0.0.4",
   "identifier": "io.github.sugarhappy8.harnessui",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -56,11 +56,11 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'self'; require-trusted-types-for 'script'",
+      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; frame-src artifact://sandbox.localhost http://artifact.sandbox.localhost; form-action 'none'; base-uri 'self'; require-trusted-types-for 'script'",
       "dangerousDisableAssetCspModification": [
         "style-src"
       ],
-      "freezePrototype": true,
+      "freezePrototype": false,
       "capabilities": [
         "main",
         "overlay",

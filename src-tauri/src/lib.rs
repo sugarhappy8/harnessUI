@@ -3,33 +3,45 @@
 //! Everything with logic worth testing lives in the workspace crates under `crates/`.
 //! This crate wires them to Tauri. See ARCHITECTURE.md section 5.
 
+mod approvals;
+mod artifacts;
 mod attachments;
 mod browser_cmd;
 mod chat;
 mod children;
 mod commands;
 mod computer_cmd;
+mod context_cmd;
 mod diagnostics;
 mod downloads;
 mod dto;
 mod error;
+mod evals;
 mod git_cmd;
 mod gpu;
 mod hotkey;
 mod hub;
+mod load_tracker;
 mod logging;
 mod mcp_cmd;
+mod mentions;
 mod models_cmd;
 mod navigation;
+mod outputs;
 mod overlay;
 mod packs_cmd;
 mod permissions;
+mod pinned;
 mod providers;
 mod runtime_manager;
+mod search_cmd;
 mod settings;
 mod skills_cmd;
 mod state;
 mod subagent;
+mod task;
+mod tool_catalog;
+mod tool_select;
 mod toolset;
 mod turns;
 mod updates;
@@ -81,6 +93,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Artifact previews load from this scheme, into a sandboxed frame (artifacts.rs).
+        .register_asynchronous_uri_scheme_protocol(artifacts::SCHEME, artifacts::serve)
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             chat::list_chats,
@@ -95,6 +109,8 @@ pub fn run() {
             chat::regenerate,
             chat::stop_generation,
             attachments::get_attachment,
+            mentions::search_mentions,
+            mentions::resolve_mentions,
             models_cmd::runtime_status,
             models_cmd::list_backends,
             models_cmd::load_local_model,
@@ -108,6 +124,12 @@ pub fn run() {
             providers::save_provider,
             providers::delete_provider,
             providers::test_provider,
+            search_cmd::get_search_settings,
+            search_cmd::set_search_settings,
+            search_cmd::set_search_key,
+            search_cmd::clear_search_key,
+            search_cmd::test_search,
+            search_cmd::list_sources,
             models_cmd::get_setting,
             models_cmd::set_setting,
             hub::hardware_info,
@@ -146,6 +168,10 @@ pub fn run() {
             permissions::list_audit,
             permissions::export_audit,
             turns::resolve_approval,
+            approvals::get_approval_mode,
+            approvals::set_approval_mode,
+            approvals::get_allow_all_default,
+            approvals::set_allow_all_default,
             mcp_cmd::list_mcp_servers,
             mcp_cmd::preview_mcp_config,
             mcp_cmd::add_mcp_servers,
@@ -159,6 +185,9 @@ pub fn run() {
             mcp_cmd::set_mcp_tool_pref,
             mcp_cmd::clear_chat_grants,
             mcp_cmd::mcp_server_log,
+            tool_select::get_tool_selection,
+            tool_select::set_tool_selection,
+            tool_select::tool_catalog_problems,
             skills_cmd::list_skills,
             skills_cmd::import_skill,
             skills_cmd::set_skill_enabled,
@@ -190,6 +219,41 @@ pub fn run() {
             git_cmd::set_git_token,
             git_cmd::remove_git_token,
             git_cmd::set_git_identity,
+            artifacts::list_artifacts,
+            artifacts::get_artifact,
+            artifacts::artifact_frame,
+            artifacts::allow_artifact_scripts,
+            artifacts::save_artifact_version,
+            artifacts::rename_artifact,
+            artifacts::delete_artifact,
+            artifacts::export_artifact,
+            artifacts::report_artifact_render,
+            artifacts::artifact_isolation,
+            artifacts::begin_artifact_check,
+            artifacts::finish_artifact_check,
+            artifacts::artifact_canary,
+            outputs::get_tool_output,
+            outputs::tool_output_for_call,
+            pinned::list_pins,
+            pinned::add_pin,
+            pinned::edit_pin,
+            pinned::remove_pin,
+            pinned::move_pin,
+            pinned::set_pin_scope,
+            pinned::pin_message,
+            context_cmd::inspect_context,
+            task::get_task,
+            task::edit_task,
+            task::set_task_status,
+            task::clear_task,
+            evals::commands::get_model_profile,
+            evals::commands::forget_model_profile,
+            evals::commands::start_capability_check,
+            evals::commands::cancel_eval,
+            evals::commands::list_bench_tasks,
+            evals::commands::start_benchmark,
+            evals::commands::list_bench_runs,
+            evals::commands::get_bench_run,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -252,6 +316,8 @@ pub fn run() {
                 grants: Default::default(),
             });
             app.manage(turns::PendingApprovals::default());
+            // "Allow all in every chat", if the user switched it on (a saved setting).
+            approvals::load_default(&handle);
             // Before the startup check below, which records what it finds here.
             app.manage(updates::LastFound::default());
             toolset::forward_events(handle.clone(), host);
@@ -337,6 +403,16 @@ pub fn run() {
 /// Builds the windows declared in `tauri.conf.json` (they have `"create": false`)
 /// so navigation and pop-up handlers can be attached. Navigation away from the app's
 /// own origin is blocked, and so is `window.open` (ARCHITECTURE.md 13.2).
+/// The page background (`--bg` in src/styles.css) for the system theme, as the colour of
+/// the main window before its page has painted.
+fn startup_background(dark: bool) -> (u8, u8, u8) {
+    if dark {
+        (0x0e, 0x0f, 0x13)
+    } else {
+        (0xfb, 0xfb, 0xfd)
+    }
+}
+
 fn create_windows(app: &mut tauri::App) -> tauri::Result<()> {
     let product_name = app
         .config()
@@ -347,17 +423,32 @@ fn create_windows(app: &mut tauri::App) -> tauri::Result<()> {
     let dev = cfg!(debug_assertions);
 
     for config in &window_configs {
+        // A frame inside the main window may load an artifact preview (artifacts.rs).
+        let previews = config.label == MAIN_WINDOW;
         let mut builder = WebviewWindowBuilder::from_config(app.handle(), config)?
-            .on_navigation(move |url| navigation::is_allowed(url, dev))
+            .on_navigation(move |url| {
+                navigation::is_allowed(url, dev)
+                    || (previews && artifacts::is_frame_navigation(url))
+            })
             .on_new_window(|_url, _features| NewWindowResponse::Deny);
         if config.label == MAIN_WINDOW {
-            builder = builder.title(&product_name);
+            // Created hidden and shown below with the theme's background: a window is
+            // white until its page has painted, which is a flash on a dark system.
+            builder = builder.title(&product_name).visible(false);
         }
         #[cfg(windows)]
         {
             builder = builder.additional_browser_args(WEBVIEW2_ARGS);
         }
         let window = builder.build()?;
+        if config.label == MAIN_WINDOW {
+            let dark = matches!(window.theme(), Ok(tauri::Theme::Dark));
+            let (r, g, b) = startup_background(dark);
+            let _ = window.set_background_color(Some(tauri::window::Color(r, g, b, 255)));
+            // Shown whatever the calls above returned: a window that stays hidden is
+            // worse than a flash.
+            window.show()?;
+        }
         // Click-through has no config key; it is a runtime call. On Linux (development
         // only) GTK has no native window until the overlay is first shown, so the call is
         // made when M7 shows it.
@@ -369,4 +460,21 @@ fn create_windows(app: &mut tauri::App) -> tauri::Result<()> {
         let _ = &window;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_background;
+
+    /// The window's first colour must be the page's, or the start still flashes.
+    #[test]
+    fn the_startup_background_is_the_page_background() {
+        let css = include_str!("../../src/styles.css");
+        let hex = |(r, g, b): (u8, u8, u8)| format!("--bg: #{r:02x}{g:02x}{b:02x};");
+        let light = hex(startup_background(false));
+        let dark = hex(startup_background(true));
+        // Light is declared once (:root); dark twice (system setting, and chosen).
+        assert_eq!(css.matches(&light).count(), 1, "{light}");
+        assert_eq!(css.matches(&dark).count(), 2, "{dark}");
+    }
 }

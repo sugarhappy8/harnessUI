@@ -254,6 +254,152 @@ CREATE TABLE settings (
 );
 "#;
 
+/// Version 2 (app 0.0.4): artifacts, sources, task state, pinned instructions and stored
+/// tool output. Not shipped until 0.0.4 is released; until then each block may still be
+/// changed by the feature that owns it (the name in brackets), and only by that feature.
+const V2: &str = r#"
+-- [artifacts] Documents, pages, diagrams and small tools the model made, shown beside the chat.
+CREATE TABLE artifacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    title       TEXT    NOT NULL,
+    kind        TEXT    NOT NULL CHECK (kind IN ('markdown', 'html', 'svg', 'mermaid')),
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+CREATE INDEX artifacts_chat ON artifacts(chat_id, updated_at DESC, id DESC);
+
+CREATE TABLE artifact_versions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id  INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    version      INTEGER NOT NULL CHECK (version >= 1),
+    content      TEXT    NOT NULL,
+    author       TEXT    NOT NULL CHECK (author IN ('model', 'user')),
+    note         TEXT,
+    created_at   INTEGER NOT NULL,
+    -- 1 when content from outside the conversation (files, web pages, tool results) had
+    -- entered the chat before this version was written, or when the version it was made
+    -- from has the mark. A page with the mark runs no script until the user allows it.
+    after_outside INTEGER NOT NULL DEFAULT 0 CHECK (after_outside IN (0, 1)),
+    UNIQUE (artifact_id, version)
+);
+-- [/artifacts]
+
+-- [sources] What a web search retrieved, numbered per chat so an answer can cite [n].
+CREATE TABLE sources (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id         INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    n               INTEGER NOT NULL CHECK (n >= 1),
+    url             TEXT    NOT NULL,
+    title           TEXT    NOT NULL,
+    site            TEXT    NOT NULL,
+    snippet         TEXT    NOT NULL DEFAULT '',
+    excerpt         TEXT    NOT NULL DEFAULT '',
+    content_sha256  TEXT,
+    official        INTEGER NOT NULL DEFAULT 0 CHECK (official IN (0, 1)),
+    version_note    TEXT,
+    query           TEXT    NOT NULL DEFAULT '',
+    fetched_at      INTEGER,
+    created_at      INTEGER NOT NULL,
+    UNIQUE (chat_id, n)
+);
+-- An address is one source in a chat: found again, it keeps its number.
+CREATE UNIQUE INDEX sources_chat_url ON sources(chat_id, url);
+-- [/sources]
+
+-- [task] One task record per chat: goal, constraints, steps, changed files, checks, next action.
+CREATE TABLE tasks (
+    chat_id     INTEGER PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    state       TEXT    NOT NULL CHECK (json_valid(state)),
+    status      TEXT    NOT NULL CHECK (status IN ('active', 'paused', 'done')),
+    updated_at  INTEGER NOT NULL
+);
+-- [/task]
+
+-- [pinned] Instructions the user pinned. chat_id NULL: every chat. The text is plain text,
+-- 1 to 1,000 characters (pinned.rs checks it first and says why; this is the backstop).
+CREATE TABLE pinned_instructions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER REFERENCES chats(id) ON DELETE CASCADE,
+    text        TEXT    NOT NULL CHECK (length(text) BETWEEN 1 AND 1000),
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX pinned_instructions_chat ON pinned_instructions(chat_id, position, id);
+-- [/pinned]
+
+-- [outputs] The full text of tool results the model saw shortened, for read_output.
+CREATE TABLE tool_outputs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    call_id     TEXT    NOT NULL,
+    tool        TEXT    NOT NULL,
+    content     TEXT    NOT NULL,
+    bytes       INTEGER NOT NULL CHECK (bytes >= 0),
+    lines       INTEGER NOT NULL CHECK (lines >= 0),
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX tool_outputs_chat ON tool_outputs(chat_id, id);
+-- [/outputs]
+
+-- [allow all] The audit log learns one more decision, 'allowed_by_mode': a call that the
+-- chat's Allow all mode let through without a card. SQLite cannot change a CHECK in place,
+-- so the table is rebuilt: every row is copied with its id, then the indexes and the
+-- append-only triggers are created again exactly as in version 1. Dropping a table fires no
+-- triggers, and renaming the new table carries its own parent reference along.
+CREATE TABLE audit_log_v2 (
+    id               INTEGER PRIMARY KEY,
+    ts               INTEGER NOT NULL,
+    chat_id          INTEGER,
+    server           TEXT    NOT NULL,
+    tool             TEXT    NOT NULL,
+    arguments        TEXT    NOT NULL CHECK (json_valid(arguments)),
+    preview          TEXT    NOT NULL,
+    risk             TEXT    NOT NULL,
+    decision         TEXT    NOT NULL CHECK (decision IN
+                        ('allow_once', 'allow_for_chat', 'allowed_by_grant', 'allowed_without_prompt',
+                         'allowed_by_mode', 'denied', 'cancelled', 'refused_by_policy')),
+    decided_by       TEXT    NOT NULL,
+    note             TEXT,
+    result_status    TEXT,
+    result_summary   TEXT,
+    duration_ms      INTEGER,
+    parent_audit_id  INTEGER REFERENCES audit_log_v2(id)
+);
+INSERT INTO audit_log_v2 (id, ts, chat_id, server, tool, arguments, preview, risk, decision,
+    decided_by, note, result_status, result_summary, duration_ms, parent_audit_id)
+SELECT id, ts, chat_id, server, tool, arguments, preview, risk, decision,
+    decided_by, note, result_status, result_summary, duration_ms, parent_audit_id
+FROM audit_log ORDER BY id;
+DROP TABLE audit_log;
+ALTER TABLE audit_log_v2 RENAME TO audit_log;
+CREATE INDEX audit_log_ts ON audit_log(ts, id);
+CREATE INDEX audit_log_chat ON audit_log(chat_id, ts);
+CREATE INDEX audit_log_parent ON audit_log(parent_audit_id);
+
+CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+CREATE TRIGGER audit_log_no_rewrite BEFORE UPDATE ON audit_log
+WHEN OLD.result_status IS NOT NULL
+  OR NEW.id IS NOT OLD.id
+  OR NEW.ts IS NOT OLD.ts
+  OR NEW.chat_id IS NOT OLD.chat_id
+  OR NEW.server IS NOT OLD.server
+  OR NEW.tool IS NOT OLD.tool
+  OR NEW.arguments IS NOT OLD.arguments
+  OR NEW.preview IS NOT OLD.preview
+  OR NEW.risk IS NOT OLD.risk
+  OR NEW.decision IS NOT OLD.decision
+  OR NEW.decided_by IS NOT OLD.decided_by
+  OR NEW.note IS NOT OLD.note
+  OR NEW.parent_audit_id IS NOT OLD.parent_audit_id
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+-- [/allow all]
+"#;
+
 /// One schema step: the SQL that takes `user_version` from its index to index + 1.
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
@@ -265,7 +411,7 @@ pub struct Migration {
 pub struct Migrations(&'static [Migration]);
 
 /// All schema migrations.
-pub const MIGRATIONS: Migrations = Migrations(&[Migration { sql: V1 }]);
+pub const MIGRATIONS: Migrations = Migrations(&[Migration { sql: V1 }, Migration { sql: V2 }]);
 
 /// Why bringing the schema up to date failed.
 #[derive(Debug, thiserror::Error)]
@@ -439,5 +585,220 @@ mod tests {
             })
             .expect("row kept");
         assert_eq!(decision, "denied");
+    }
+
+    /// [allow all] Version 2 rebuilds the audit log so it accepts 'allowed_by_mode'. A
+    /// database written by version 1 keeps every row with its id, its result and its
+    /// link to a parent row; the log stays append-only; unknown decisions are still
+    /// refused.
+    #[test]
+    fn the_audit_log_of_a_version_1_database_survives_the_rebuild() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .expect("pragma");
+        conn.pragma_update(None, "recursive_triggers", "ON")
+            .expect("pragma");
+        // A database as version 1 left it, with an audit trail.
+        Migrations(&[Migration { sql: V1 }])
+            .to_latest(&mut conn)
+            .expect("version 1");
+        let insert = "INSERT INTO audit_log (id, ts, chat_id, server, tool, arguments, preview, \
+                      risk, decision, decided_by, note, result_status, result_summary, \
+                      duration_ms, parent_audit_id) VALUES ";
+        for row in [
+            "(1, 100, 7, 'files', 'write_file', '{\"path\":\"a\"}', 'p1', 'normal', 'allow_once', \
+             'user', NULL, 'ok', 'Wrote a', 12, NULL)",
+            "(2, 200, 7, 'browser', 'browser_click', '{}', 'p2', 'alwaysask', 'denied', 'user', \
+             'not this one', 'denied', NULL, NULL, 1)",
+            "(5, 300, NULL, 'files', 'read_file', '{}', 'p5', 'normal', 'allowed_by_grant', \
+             'policy', NULL, NULL, NULL, NULL, NULL)",
+        ] {
+            conn.execute(&format!("{insert}{row}"), [])
+                .expect("a version 1 row");
+        }
+        // Version 1 does not know the new decision.
+        assert!(
+            conn.execute(
+                &format!(
+                    "{insert}(9, 1, 7, 's', 't', '{{}}', 'p', 'normal', 'allowed_by_mode', \
+                     'policy', NULL, NULL, NULL, NULL, NULL)"
+                ),
+                [],
+            )
+            .is_err()
+        );
+
+        MIGRATIONS.to_latest(&mut conn).expect("version 2");
+
+        // id, ts, chat, decision, preview, result status, parent.
+        type Kept = (
+            i64,
+            i64,
+            Option<i64>,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+        );
+        let rows: Vec<Kept> = conn
+            .prepare(
+                "SELECT id, ts, chat_id, decision, preview, result_status, parent_audit_id \
+                 FROM audit_log ORDER BY id",
+            )
+            .expect("prepare")
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    1,
+                    100,
+                    Some(7),
+                    "allow_once".into(),
+                    "p1".into(),
+                    Some("ok".into()),
+                    None
+                ),
+                (
+                    2,
+                    200,
+                    Some(7),
+                    "denied".into(),
+                    "p2".into(),
+                    Some("denied".into()),
+                    Some(1)
+                ),
+                (
+                    5,
+                    300,
+                    None,
+                    "allowed_by_grant".into(),
+                    "p5".into(),
+                    None,
+                    None
+                ),
+            ]
+        );
+        let (note, summary, duration): (Option<String>, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT (SELECT note FROM audit_log WHERE id = 2), result_summary, duration_ms \
+                 FROM audit_log WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("columns");
+        assert_eq!(
+            (note.as_deref(), summary.as_deref(), duration),
+            (Some("not this one"), Some("Wrote a"), Some(12))
+        );
+
+        // The new decision is accepted, with the next free id; an unknown one is not.
+        conn.execute(
+            "INSERT INTO audit_log (ts, chat_id, server, tool, arguments, preview, risk, \
+             decision, decided_by, parent_audit_id) VALUES (400, 7, 'files', 'write_file', '{}', \
+             'p', 'normal', 'allowed_by_mode', 'policy', 5)",
+            [],
+        )
+        .expect("the new decision");
+        assert_eq!(conn.last_insert_rowid(), 6);
+        assert!(
+            conn.execute(
+                "INSERT INTO audit_log (ts, server, tool, arguments, preview, risk, decision, \
+                 decided_by) VALUES (0, 's', 't', '{}', 'p', 'normal', 'allowed_anyway', 'x')",
+                [],
+            )
+            .is_err(),
+            "an unknown decision was stored"
+        );
+
+        // Still append-only: no delete, no rewrite, no replace; a result is filled in once.
+        assert!(
+            conn.execute("DELETE FROM audit_log WHERE id = 1", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE audit_log SET decision = 'allowed_by_mode' WHERE id = 2",
+                []
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "INSERT OR REPLACE INTO audit_log (id, ts, server, tool, arguments, preview, risk, \
+                 decision, decided_by) VALUES (1, 0, 's', 't', '{}', 'p', 'r', 'denied', 'user')",
+                [],
+            )
+            .is_err()
+        );
+        conn.execute("UPDATE audit_log SET result_status = 'ok' WHERE id = 5", [])
+            .expect("the one permitted update");
+        assert!(
+            conn.execute(
+                "UPDATE audit_log SET result_status = 'error' WHERE id = 5",
+                []
+            )
+            .is_err()
+        );
+
+        // The parent link points at the rebuilt table, and is enforced.
+        assert!(
+            conn.execute(
+                "INSERT INTO audit_log (ts, server, tool, arguments, preview, risk, decision, \
+                 decided_by, parent_audit_id) VALUES (0, 's', 't', '{}', 'p', 'r', 'denied', \
+                 'user', 4242)",
+                [],
+            )
+            .is_err(),
+            "a row may not point at a parent that does not exist"
+        );
+        let broken: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .expect("check");
+        assert_eq!(broken, 0);
+        // Nothing of the rebuild is left behind, and the indexes and triggers are back.
+        let names: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE tbl_name LIKE 'audit_log%' ORDER BY name",
+            )
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("names");
+        assert_eq!(
+            names,
+            vec![
+                "audit_log",
+                "audit_log_chat",
+                "audit_log_no_delete",
+                "audit_log_no_rewrite",
+                "audit_log_parent",
+                "audit_log_ts",
+            ]
+        );
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'audit_log'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("sql");
+        assert!(!sql.contains("audit_log_v2"), "{sql}");
     }
 }

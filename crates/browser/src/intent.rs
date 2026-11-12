@@ -46,6 +46,9 @@ pub struct ElementInfo {
     pub disabled: bool,
     /// The focused element is inside a frame the tool cannot look into.
     pub opaque_frame: bool,
+    /// The label of the form's default button (its first submit control), which Enter in
+    /// one of the form's fields presses. Empty outside a form or when there is none.
+    pub form_submit_label: String,
 }
 
 /// Why an action may submit something.
@@ -209,6 +212,56 @@ pub fn key_intent(key: &str, focused: Option<&ElementInfo>, typed: bool) -> Opti
     }
     if is_enter && typed {
         return Some(SubmitReason::EnterAfterTyping);
+    }
+    None
+}
+
+// ---- Allow all (0.0.4) ---------------------------------------------------------------
+//
+// In Allow all an ordinary form submission, typing then Enter, and "Submit", "Confirm",
+// "Search", "Next", "Log in" or "Sign up" are let through without a card. What still asks
+// is a control whose label says it spends money, destroys something or publishes
+// (`policy::allow_all::web_label`), and a key sent where nothing can be looked at.
+
+/// Why a click on `el` still asks in Allow all, if it does: its label says it pays,
+/// buys, orders, transfers, deletes, sends, posts or publishes. Buttons, submit controls
+/// and links count: a link drawn as a "Delete" button is one to the person looking at it.
+pub fn click_keeps_asking(el: &ElementInfo) -> Option<policy::KeepAsking> {
+    if el.disabled || !(el.is_button_like || el.is_submit_control || el.is_link) {
+        return None;
+    }
+    policy::allow_all::web_label(&el.label)
+}
+
+/// Why Enter in the field `el` still asks in Allow all, if it does: the form's own
+/// submit button, which Enter presses, has such a label.
+pub fn submit_keeps_asking(el: &ElementInfo) -> Option<policy::KeepAsking> {
+    if !el.in_form {
+        return None;
+    }
+    policy::allow_all::web_label(&el.form_submit_label)
+}
+
+/// Why a key press still asks in Allow all, if it does. Enter or Space on a control a
+/// click would ask for, Enter in a field of a form whose submit button says so, and any
+/// key that lands inside a frame the tool cannot look into (whatever it presses there
+/// cannot be checked).
+pub fn key_keeps_asking(key: &str, focused: Option<&ElementInfo>) -> Option<policy::KeepAsking> {
+    let el = focused?;
+    if el.opaque_frame {
+        return Some(policy::KeepAsking::Hidden);
+    }
+    let press = crate::keys::parse_key(key).ok()?;
+    let is_enter = press.key == "Enter";
+    let is_space = press.key == " ";
+    if !is_enter && !is_space {
+        return None;
+    }
+    if el.is_button_like || el.is_submit_control || (is_enter && el.is_link) {
+        return click_keeps_asking(el);
+    }
+    if is_enter && el.is_editable {
+        return submit_keeps_asking(el);
     }
     None
 }
@@ -393,6 +446,139 @@ mod tests {
             ("", None),
         ] {
             assert_eq!(consequential_verb(label), verb, "{label}");
+        }
+    }
+
+    /// Allow all, rule 5: what a click, Enter in a field or a key press still asks for.
+    #[test]
+    fn allow_all_asks_for_labels_that_spend_destroy_or_publish() {
+        use policy::KeepAsking::{Destroy, Hidden, Publish};
+        let submit = |label: &str| ElementInfo {
+            tag: "button".into(),
+            label: label.into(),
+            is_button_like: true,
+            is_submit_control: true,
+            in_form: true,
+            form_submit_label: label.into(),
+            ..Default::default()
+        };
+        let link = |label: &str| ElementInfo {
+            tag: "a".into(),
+            label: label.into(),
+            is_link: true,
+            href: Some("https://shop.example/x".into()),
+            ..Default::default()
+        };
+        // Clicks: the control's own label.
+        for (el, expected) in [
+            (button("Pay now"), Some(Publish)),
+            (button("Buy"), Some(Publish)),
+            (button("Purchase"), Some(Publish)),
+            (button("Place order"), Some(Publish)),
+            (button("Proceed to checkout"), Some(Publish)),
+            (button("Transfer funds"), Some(Publish)),
+            (button("Send"), Some(Publish)),
+            (button("Post"), Some(Publish)),
+            (button("Publish"), Some(Publish)),
+            (button("Delete account"), Some(Destroy)),
+            (button("Remove"), Some(Destroy)),
+            (submit("Pay now"), Some(Publish)),
+            (submit("Delete"), Some(Destroy)),
+            (link("Delete"), Some(Destroy)),
+            (link("Checkout"), Some(Publish)),
+            // Ordinary submissions and the labels that never ask on their own.
+            (button("Submit"), None),
+            (button("Confirm"), None),
+            (button("Search"), None),
+            (button("Next"), None),
+            (button("Log in"), None),
+            (button("Sign up"), None),
+            (button("Show more"), None),
+            (submit("Search"), None),
+            (submit("Submit"), None),
+            (submit(""), None),
+            (link("Payment details"), None),
+            (link("About us"), None),
+        ] {
+            assert_eq!(click_keeps_asking(&el), expected, "{}", el.label);
+        }
+        // A disabled control does nothing; text that is not a control is not a button.
+        let mut disabled = button("Pay now");
+        disabled.disabled = true;
+        assert_eq!(click_keeps_asking(&disabled), None);
+        let paragraph = ElementInfo {
+            tag: "p".into(),
+            label: "You can delete your order here".into(),
+            ..Default::default()
+        };
+        assert_eq!(click_keeps_asking(&paragraph), None);
+
+        // Enter in a field: the label of the form's own submit button.
+        let field = |submit_label: &str| ElementInfo {
+            tag: "input".into(),
+            input_type: "text".into(),
+            is_editable: true,
+            in_form: true,
+            form_method: Some("post".into()),
+            form_submit_label: submit_label.into(),
+            ..Default::default()
+        };
+        assert_eq!(submit_keeps_asking(&field("Place order")), Some(Publish));
+        assert_eq!(submit_keeps_asking(&field("Delete")), Some(Destroy));
+        assert_eq!(submit_keeps_asking(&field("Search")), None);
+        assert_eq!(submit_keeps_asking(&field("")), None);
+        let loose = ElementInfo {
+            in_form: false,
+            ..field("Pay")
+        };
+        assert_eq!(
+            submit_keeps_asking(&loose),
+            None,
+            "no form, nothing to submit"
+        );
+
+        // Key presses.
+        assert_eq!(
+            key_keeps_asking("Enter", Some(&field("Pay now"))),
+            Some(Publish)
+        );
+        assert_eq!(
+            key_keeps_asking("shift + enter", Some(&field("Pay now"))),
+            Some(Publish)
+        );
+        assert_eq!(key_keeps_asking("Enter", Some(&field("Search"))), None);
+        assert_eq!(key_keeps_asking("Tab", Some(&field("Pay now"))), None);
+        assert_eq!(key_keeps_asking("a", Some(&field("Pay now"))), None);
+        assert_eq!(
+            key_keeps_asking("Enter", Some(&button("Buy now"))),
+            Some(Publish)
+        );
+        assert_eq!(
+            key_keeps_asking("Space", Some(&button("Delete"))),
+            Some(Destroy)
+        );
+        assert_eq!(key_keeps_asking("Enter", Some(&button("Next"))), None);
+        assert_eq!(
+            key_keeps_asking("Enter", Some(&link("Delete"))),
+            Some(Destroy)
+        );
+        assert_eq!(
+            key_keeps_asking("Space", Some(&link("Delete"))),
+            None,
+            "Space scrolls"
+        );
+        assert_eq!(key_keeps_asking("Enter", None), None);
+        // Inside a frame the tool cannot look into, nothing can be checked.
+        let opaque = ElementInfo {
+            opaque_frame: true,
+            ..Default::default()
+        };
+        for key in ["Enter", "Space", "a", "Tab"] {
+            assert_eq!(
+                key_keeps_asking(key, Some(&opaque)),
+                Some(Hidden),
+                "{key:?}"
+            );
         }
     }
 

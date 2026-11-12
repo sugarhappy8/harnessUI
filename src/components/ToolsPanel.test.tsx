@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ApprovedFolder, ToolDto } from "../lib/types";
+import type { ApprovedFolder, ToolDto, ToolSelection } from "../lib/types";
 
 // Radix positions the popover with ResizeObserver, which jsdom does not have.
 globalThis.ResizeObserver ??= class {
@@ -25,6 +25,8 @@ const ipcMock = vi.hoisted(() => ({
   unloadSkill: vi.fn<(chatId: number, name: string) => Promise<void>>(async () => undefined),
   clearChatGrants: vi.fn(async () => undefined),
   setChatTools: vi.fn<(chatId: number, enabled: string[]) => Promise<void>>(async () => undefined),
+  getToolSelection: vi.fn<() => Promise<ToolSelection>>(async () => ({ auto: true, max: 14 })),
+  setToolSelection: vi.fn<(auto: boolean) => Promise<ToolSelection>>(async (auto) => ({ auto, max: 14 })),
   getChat: vi.fn(async () => {
     throw new Error("not used");
   }),
@@ -137,6 +139,9 @@ function tool(server: string, name: string, over: Partial<ToolDto> = {}): ToolDt
     ready: true,
     schemaError: null,
     tokenEstimate: 140,
+    companion: false,
+    // As the backend reports it: a tool that is on is shown unless a test says otherwise.
+    shown: over.enabledInChat === true,
     ...over,
   };
 }
@@ -246,5 +251,127 @@ describe("ToolsPanel: the Subagents group", () => {
     ipcMock.listChatTools.mockImplementation(async () => [tool("files", "read_file", { enabledInChat: true })]);
     await openPanel();
     expect(screen.queryByText(NOTE)).toBeNull();
+  });
+});
+
+describe("ToolsPanel: tools chosen for each task", () => {
+  const companions = [
+    tool("toolfinder", "find_tools", { enabledInChat: true, companion: true, tokenEstimate: 100 }),
+    tool("toolfinder", "call_tool", { enabledInChat: true, companion: true, tokenEstimate: 100 }),
+    tool("task", "update_task", { enabledInChat: true, companion: true, tokenEstimate: 100 }),
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listApprovedFolders.mockImplementation(async () => []);
+    ipcMock.loadedSkills.mockImplementation(async () => []);
+    ipcMock.getToolSelection.mockImplementation(async () => ({ auto: true, max: 14 }));
+    ipcMock.setToolSelection.mockImplementation(async (auto) => ({ auto, max: 14 }));
+  });
+  afterEach(cleanup);
+
+  function row(name: string): HTMLElement {
+    return screen.getByText(name).closest("li") as HTMLElement;
+  }
+
+  it("marks each tool that is on as shown or on request, and a tool that is off not at all", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file", { enabledInChat: true, shown: true }),
+      tool("git", "git_commit", { enabledInChat: true, shown: false }),
+      tool("git", "git_push", { enabledInChat: false }),
+      ...companions,
+    ]);
+    await openPanel();
+    expect(row("read_file").textContent).toContain("shown");
+    expect(row("read_file").textContent).not.toContain("on request");
+    expect(row("git_commit").textContent).toContain("on request");
+    expect(row("git_push").textContent).not.toContain("shown");
+    expect(row("git_push").textContent).not.toContain("on request");
+  });
+
+  it("counts the tools that are on, not the ones shown, and never the companions", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file", { enabledInChat: true, shown: true }),
+      tool("git", "git_commit", { enabledInChat: true, shown: false }),
+      tool("git", "git_push", { enabledInChat: false }),
+      ...companions,
+    ]);
+    await openPanel();
+    expect(screen.getByTitle("Tools for this chat").textContent).toContain("Tools (2)");
+    // The context estimate is what a request carries: the shown tools, companions included.
+    expect(screen.getByTitle("Context the tool descriptions take on every request").textContent).toContain("~440 tokens");
+  });
+
+  it("lists the companions in one line, not as switches", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file", { enabledInChat: true, shown: true }),
+      ...companions,
+    ]);
+    await openPanel();
+    const titles = [...document.querySelectorAll("section > label")].map((l) => l.textContent?.trim());
+    expect(titles).toEqual(["Files"]);
+    const line = screen.getByText(/Always included/);
+    expect(line.textContent).toContain("find_tools, call_tool, update_task");
+    expect(line.closest("label")).toBeNull();
+    expect(document.querySelectorAll("input[type=checkbox]").length).toBe(3);
+    // Switching a group on never sends a companion as a switch.
+    await act(async () => {
+      fireEvent.click(screen.getByText("Files").closest("label")!.querySelector("input")!);
+    });
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT, []);
+  });
+
+  it("says nothing about companions when no tool is on", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file"),
+      ...companions.map((c) => ({ ...c, enabledInChat: false, shown: false })),
+    ]);
+    await openPanel();
+    expect(screen.queryByText(/Always included/)).toBeNull();
+    expect(screen.getByTitle("Tools for this chat").textContent).toContain("Tools (0)");
+  });
+
+  it("has a switch for choosing tools automatically, with one line saying what it does", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file", { enabledInChat: true, shown: true }),
+      tool("git", "git_commit", { enabledInChat: true, shown: false }),
+    ]);
+    await openPanel();
+    const auto = screen.getByRole("switch", { name: "Choose tools for each task automatically" }) as HTMLInputElement;
+    expect(auto.checked).toBe(true);
+    expect(screen.getByText(/gets the tools that fit your message/)).toBeTruthy();
+    // It is not a tool group.
+    expect(auto.closest("section")).toBeNull();
+    // Off: the setting is saved and the list is read again (every tool is shown then).
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file", { enabledInChat: true, shown: true }),
+      tool("git", "git_commit", { enabledInChat: true, shown: true }),
+    ]);
+    const before = ipcMock.listChatTools.mock.calls.length;
+    await act(async () => {
+      fireEvent.click(auto);
+    });
+    expect(ipcMock.setToolSelection).toHaveBeenCalledWith(false);
+    expect(ipcMock.listChatTools.mock.calls.length).toBeGreaterThan(before);
+    expect(auto.checked).toBe(false);
+    expect(row("git_commit").textContent).not.toContain("on request");
+  });
+
+  it("shows the switch as off when the setting is off", async () => {
+    ipcMock.getToolSelection.mockImplementation(async () => ({ auto: false, max: 14 }));
+    ipcMock.listChatTools.mockImplementation(async () => [tool("files", "read_file", { enabledInChat: true })]);
+    await openPanel();
+    const auto = screen.getByRole("switch", { name: "Choose tools for each task automatically" }) as HTMLInputElement;
+    expect(auto.checked).toBe(false);
+  });
+
+  it("names the new groups", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("artifacts", "create_artifact", { enabledInChat: true }),
+      tool("search", "web_search", { enabledInChat: true }),
+    ]);
+    await openPanel();
+    const titles = [...document.querySelectorAll("section > label")].map((l) => l.textContent?.trim());
+    expect(titles).toEqual(["Artifacts", "Web search"]);
   });
 });

@@ -24,6 +24,9 @@ import { SkillsSettings } from "./SkillsSettings";
 import { BrowserSettings } from "./BrowserSettings";
 import { ComputerSettings } from "./ComputerSettings";
 import { GitSettings } from "./GitSettings";
+import { SearchSettings } from "./SearchSettings";
+import { Benchmarks } from "./evals/Benchmarks";
+import { ModelCheck } from "./evals/ModelCheck";
 import type { ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -71,17 +74,83 @@ function General() {
       <section aria-label="About">
         <h3 className="mb-1 text-sm font-medium">About</h3>
         <p className="text-sm text-fg-muted">
-          {info ? `${info.name} ${info.version} · ${info.os} ${info.arch}` : APP_NAME}
+          {info
+            ? `${info.name} ${info.version}${info.commit ? ` (build ${info.commit})` : ""} · ${info.os} ${info.arch}`
+            : APP_NAME}
         </p>
         <p className="mt-1 text-xs text-fg-muted">
           Runs locally. No account, no telemetry. Licenses for bundled software are in
           THIRD-PARTY-NOTICES.md next to the app.
         </p>
       </section>
+      {ipc.isTauri() && <StepsPerTurn />}
       {ipc.isTauri() && <DefaultSystemPrompt />}
       {ipc.isTauri() && <Updates />}
       {ipc.isTauri() && <ModelCatalog />}
     </div>
+  );
+}
+
+const STEP_CHOICES = [25, 50, 100, 200];
+const DEFAULT_STEPS = 50;
+
+/** How many times the model may be called in one turn (setting "stepsPerTurn"). */
+export function StepsPerTurn() {
+  const [steps, setSteps] = useState<number>(DEFAULT_STEPS);
+  const [error, setError] = useState<ErrorInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    ipc
+      .getSetting<unknown>("stepsPerTurn")
+      .then((v) => alive && setSteps(typeof v === "number" ? v : DEFAULT_STEPS))
+      .catch((err) => alive && setError(toErrorInfo(err)));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  async function choose(n: number) {
+    const before = steps;
+    setSteps(n);
+    setError(null);
+    try {
+      await ipc.setSetting("stepsPerTurn", n);
+    } catch (err) {
+      setSteps(before);
+      setError(toErrorInfo(err));
+    }
+  }
+  // A value set some other way still shows as the current choice.
+  const choices = STEP_CHOICES.includes(steps) ? STEP_CHOICES : [...STEP_CHOICES, steps].sort((a, b) => a - b);
+  return (
+    <fieldset>
+      <legend className="mb-1 text-sm font-medium">Steps per turn</legend>
+      <p className="mb-2 text-xs text-fg-muted">
+        How many times the model may act before it stops and reports. A long task, such as installing
+        software, needs more. When the limit is reached you can choose Continue.
+      </p>
+      <div className="flex gap-2" role="radiogroup" aria-label="Steps per turn">
+        {choices.map((n) => (
+          <button
+            key={n}
+            type="button"
+            role="radio"
+            aria-checked={steps === n}
+            onClick={() => void choose(n)}
+            className={
+              "rounded-md border px-3 py-1.5 text-sm " +
+              (steps === n ? "border-accent bg-accent text-accent-fg" : "border-border hover:bg-bg-muted")
+            }
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+      {error && (
+        <div className="mt-2">
+          <ErrorBanner error={error} onDismiss={() => setError(null)} />
+        </div>
+      )}
+    </fieldset>
   );
 }
 
@@ -823,8 +892,8 @@ export function SettingsDialog(props: {
   return (
     <Dialog.Root open={props.open} onOpenChange={props.onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/40" />
-        <Dialog.Content className="fixed top-1/2 left-1/2 flex h-[34rem] w-[48rem] max-w-[94vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-lg border border-border bg-bg shadow-xl">
+        <Dialog.Overlay className="dialog-overlay fixed inset-0" />
+        <Dialog.Content className="fixed top-1/2 left-1/2 flex h-[34rem] w-[48rem] max-w-[94vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-border bg-surface shadow-pop">
           <div className="flex items-center justify-between border-b border-border px-5 py-3">
             <Dialog.Title className="text-base font-semibold">Settings</Dialog.Title>
             <Dialog.Close className="rounded-md p-1 text-fg-muted hover:bg-bg-muted hover:text-fg" aria-label="Close settings">
@@ -843,13 +912,14 @@ export function SettingsDialog(props: {
               <Tabs.Trigger value="git" className={tabClass}>Git</Tabs.Trigger>
               <Tabs.Trigger value="browser" className={tabClass}>Browser</Tabs.Trigger>
               <Tabs.Trigger value="computer" className={tabClass}>Computer use</Tabs.Trigger>
+              <Tabs.Trigger value="search" className={tabClass}>Search</Tabs.Trigger>
               <Tabs.Trigger value="permissions" className={tabClass}>Permissions</Tabs.Trigger>
               <Tabs.Trigger value="audit" className={tabClass}>Audit log</Tabs.Trigger>
               <Tabs.Trigger value="diagnostics" className={tabClass}>Diagnostics</Tabs.Trigger>
             </Tabs.List>
             <div className="min-w-0 flex-1 overflow-y-auto p-5">
               <Tabs.Content value="general"><General /></Tabs.Content>
-              <Tabs.Content value="runtime"><Runtime /></Tabs.Content>
+              <Tabs.Content value="runtime"><Runtime /><ModelCheck /></Tabs.Content>
               <Tabs.Content value="endpoints"><Endpoints /></Tabs.Content>
               <Tabs.Content value="huggingface"><HuggingFace /></Tabs.Content>
               <Tabs.Content value="mcp"><McpSettings /></Tabs.Content>
@@ -857,9 +927,10 @@ export function SettingsDialog(props: {
               <Tabs.Content value="git"><GitSettings /></Tabs.Content>
               <Tabs.Content value="browser"><BrowserSettings /></Tabs.Content>
               <Tabs.Content value="computer"><ComputerSettings /></Tabs.Content>
+              <Tabs.Content value="search"><SearchSettings /></Tabs.Content>
               <Tabs.Content value="permissions"><PermissionsSettings /></Tabs.Content>
               <Tabs.Content value="audit"><AuditLogView /></Tabs.Content>
-              <Tabs.Content value="diagnostics"><Diagnostics /></Tabs.Content>
+              <Tabs.Content value="diagnostics"><Diagnostics /><Benchmarks /></Tabs.Content>
             </div>
           </Tabs.Root>
         </Dialog.Content>

@@ -200,6 +200,8 @@ impl ToolHost for Files {
             risk: Risk::Normal,
             read_only: true,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: json!({ "path": path }),
         })
@@ -353,8 +355,14 @@ async fn real_llama_server_agent_turn() {
     );
     let executed = files.executed.lock().unwrap().clone();
     assert!(!executed.is_empty(), "the model never called read_file");
+    // The model writes the name its own way ("/Notes.txt" on one CI run): compare without
+    // case. What matters is that it asked for the notes file.
     assert!(
-        executed[0]["path"].as_str().unwrap().contains("notes"),
+        executed[0]["path"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("notes"),
         "{executed:?}"
     );
     assert!(

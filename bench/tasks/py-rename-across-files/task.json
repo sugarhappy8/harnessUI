@@ -1,0 +1,32 @@
+{
+  "title": "Rename a function in several files (Python)",
+  "kind": "python",
+  "needs": "python",
+  "prompt": "Rename the function get_usr to get_user everywhere in this project: its definition in users.py and every file that uses it. Then run the tests with `{python} -m unittest -q`.",
+  "checks": [
+    {
+      "type": "run",
+      "script": "verify.py",
+      "expect": {
+        "getUser": {
+          "value": "Ada"
+        },
+        "oldNameGone": true,
+        "greeting2": {
+          "value": "Hello, Grace"
+        },
+        "greeting5": {
+          "value": "Hello, stranger"
+        }
+      }
+    },
+    {
+      "type": "absent",
+      "text": "get_usr",
+      "ext": "py"
+    }
+  ],
+  "parse": [
+    "py"
+  ]
+}

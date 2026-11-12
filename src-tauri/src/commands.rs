@@ -14,6 +14,9 @@ pub struct AppInfo {
     pub identifier: String,
     pub os: &'static str,
     pub arch: &'static str,
+    /// The start of the commit this build was made from, so that two builds with the same
+    /// version number can be told apart. Empty when the build could not tell.
+    pub commit: &'static str,
 }
 
 #[tauri::command]
@@ -28,11 +31,65 @@ pub fn app_info(app: tauri::AppHandle) -> AppInfo {
         identifier: config.identifier.clone(),
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
+        commit: env!("APP_COMMIT"),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// `Object.prototype` is frozen in every page of the app, by the page's first import
+    /// (`src/lib/freeze.ts`), and not by Tauri's setting, which on Windows would freeze it
+    /// in the preview frames of artifacts too, where the diagram library cannot start
+    /// with it frozen. The setting and the imports are changed together or not at all.
+    #[test]
+    fn each_page_of_the_app_freezes_the_prototype_first() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(
+            conf["app"]["security"]["freezePrototype"],
+            serde_json::json!(false),
+            "with freezePrototype on, Tauri freezes the prototype in preview frames on Windows"
+        );
+        let freeze = include_str!("../../src/lib/freeze.ts");
+        // By lines: a checkout on Windows may end them differently.
+        assert!(
+            freeze
+                .lines()
+                .any(|line| line == "Object.freeze(Object.prototype);"),
+            "src/lib/freeze.ts no longer freezes the prototype"
+        );
+        // Every page of the app (the HTML files next to package.json) starts one module.
+        for (page, entry, source, import) in [
+            (
+                include_str!("../../index.html"),
+                "/src/main.tsx",
+                include_str!("../../src/main.tsx"),
+                "import \"./lib/freeze\";",
+            ),
+            (
+                include_str!("../../overlay.html"),
+                "/src/overlay/main.tsx",
+                include_str!("../../src/overlay/main.tsx"),
+                "import \"../lib/freeze\";",
+            ),
+            (
+                include_str!("../../indicator.html"),
+                "/src/overlay/indicator.tsx",
+                include_str!("../../src/overlay/indicator.tsx"),
+                "import \"../lib/freeze\";",
+            ),
+        ] {
+            assert_eq!(page.matches("<script").count(), 1, "{entry}: one script");
+            assert!(
+                page.contains(&format!("<script type=\"module\" src=\"{entry}\">")),
+                "{entry} is not the page's script"
+            );
+            // Imports run in the order they are written: the first one runs before
+            // anything else the page loads.
+            assert_eq!(source.lines().next(), Some(import), "{entry}");
+        }
+    }
+
     /// Every command in `commands.list` is granted to the main window and to no other.
     #[test]
     fn commands_list_matches_capabilities() {
@@ -126,6 +183,16 @@ mod tests {
         assert!(csp.contains("script-src 'self';"));
         assert!(!csp.contains("unsafe-eval"));
         assert!(!csp.contains("127.0.0.1"));
+        // The whole policy, word for word, so that loosening it is a deliberate change
+        // here. `frame-src` names the one origin artifact previews load from, as the two
+        // kinds of webview spell it (artifacts/protocol.rs), and nothing else.
+        assert_eq!(
+            csp,
+            "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; \
+             img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; \
+             object-src 'none'; frame-src artifact://sandbox.localhost http://artifact.sandbox.localhost; \
+             form-action 'none'; base-uri 'self'; require-trusted-types-for 'script'"
+        );
         assert_eq!(conf["app"]["withGlobalTauri"], serde_json::json!(false));
     }
 }

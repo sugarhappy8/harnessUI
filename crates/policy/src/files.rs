@@ -2,6 +2,7 @@
 //! deletes; replacing a file with an empty one; anything under a `.git` folder; shell
 //! start-up files; git and ssh configuration; autostart locations.
 
+use crate::engine::KeepAsking;
 use crate::path::Flavor;
 
 /// Shell and PowerShell start-up files, by file name.
@@ -103,6 +104,25 @@ pub fn always_ask_reason(canonical: &str, kind: WriteKind, flavor: Flavor) -> Op
     None
 }
 
+/// Allow all (0.0.4): why a write still asks while its chat is in Allow all, if it does.
+/// Every write that always asks in Ask mode keeps asking: deleting a file and leaving one
+/// empty count as deleting, the sensitive locations as sensitive.
+pub fn keep_asking(canonical: &str, kind: WriteKind, flavor: Flavor) -> Option<KeepAsking> {
+    always_ask_reason(canonical, kind, flavor)?;
+    let emptied = matches!(
+        kind,
+        WriteKind::Overwrite {
+            existing_len,
+            new_len: 0,
+        } if existing_len > 0
+    );
+    Some(if kind == WriteKind::Delete || emptied {
+        KeepAsking::Delete
+    } else {
+        KeepAsking::Sensitive
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +218,46 @@ mod tests {
             "C:\\Users\\me\\_netrc",
         ] {
             assert!(always_ask_reason(p, WriteKind::Create, W).is_some(), "{p}");
+        }
+    }
+
+    /// Allow all: every write that always asks keeps asking, as a delete (deleting,
+    /// emptying) or as a sensitive place; no other write does.
+    #[test]
+    fn what_always_asks_keeps_asking_in_allow_all() {
+        let emptied = WriteKind::Overwrite {
+            existing_len: 9,
+            new_len: 0,
+        };
+        let shorter = WriteKind::Overwrite {
+            existing_len: 9,
+            new_len: 1,
+        };
+        assert_eq!(
+            keep_asking("/p/a.txt", WriteKind::Delete, P),
+            Some(KeepAsking::Delete)
+        );
+        assert_eq!(
+            keep_asking("/p/a.txt", emptied, P),
+            Some(KeepAsking::Delete)
+        );
+        // Deleting inside a sensitive place is still a delete.
+        assert_eq!(
+            keep_asking("/p/.git/index", WriteKind::Delete, P),
+            Some(KeepAsking::Delete)
+        );
+        for path in ["/p/.git/config", "/home/u/.bashrc", "/home/u/.ssh/config"] {
+            for kind in [WriteKind::Create, WriteKind::Edit, shorter] {
+                assert_eq!(keep_asking(path, kind, P), Some(KeepAsking::Sensitive));
+            }
+        }
+        assert_eq!(
+            keep_asking("C:\\P\\.GIT\\config", WriteKind::Edit, W),
+            Some(KeepAsking::Sensitive)
+        );
+        for kind in [WriteKind::Create, WriteKind::Edit, shorter] {
+            assert_eq!(keep_asking("/p/src/main.rs", kind, P), None);
+            assert_eq!(keep_asking("C:\\Users\\me\\proj\\x.txt", kind, W), None);
         }
     }
 

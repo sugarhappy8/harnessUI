@@ -28,6 +28,8 @@ sql_enum!(
         AllowedByGrant => "allowed_by_grant",
         /// The tool needs no approval (skill reads, decision D11).
         AllowedWithoutPrompt => "allowed_without_prompt",
+        /// The chat was in Allow all and the action is not one that still asks (0.0.4).
+        AllowedByMode => "allowed_by_mode",
         /// The user clicked Deny.
         Denied => "denied",
         /// The user pressed Stop, or the approval timed out.
@@ -665,6 +667,47 @@ mod tests {
         assert_eq!(first["decision"], json!("allow_once"));
         assert_eq!(first["time"], json!("1970-01-01T00:00:05.000Z"));
         assert_eq!(first["preview"], json!("multi\nline"));
+    }
+
+    /// A call that a chat's Allow all mode let through is stored, filtered and exported
+    /// under its own decision.
+    #[tokio::test]
+    async fn calls_allowed_by_the_mode_have_their_own_decision() {
+        let store = Store::open_in_memory().expect("open");
+        let mut by_mode = entry("write_file", AuditDecision::AllowedByMode);
+        by_mode.decided_by = "policy".into();
+        store.append_audit(by_mode).await.expect("append");
+        store
+            .append_audit(entry("write_file", AuditDecision::AllowedByGrant))
+            .await
+            .expect("append");
+        let rows = store
+            .list_audit(AuditQuery {
+                decision: Some(AuditDecision::AllowedByMode),
+                ..AuditQuery::default()
+            })
+            .await
+            .expect("filter");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].decision, AuditDecision::AllowedByMode);
+        assert_eq!(rows[0].decided_by, "policy");
+        assert_eq!(
+            "allowed_by_mode".parse::<AuditDecision>().expect("parse"),
+            AuditDecision::AllowedByMode
+        );
+        let jsonl = store
+            .export_audit_jsonl(AuditQuery::default())
+            .await
+            .expect("jsonl");
+        assert!(
+            jsonl.contains("\"decision\":\"allowed_by_mode\""),
+            "{jsonl}"
+        );
+        let csv = store
+            .export_audit_csv(AuditQuery::default())
+            .await
+            .expect("csv");
+        assert!(csv.contains(",allowed_by_mode,policy,"), "{csv}");
     }
 
     /// Minimal RFC 4180 parser for the round-trip test.

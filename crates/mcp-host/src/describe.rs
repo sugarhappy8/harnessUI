@@ -81,6 +81,11 @@ pub fn describe_external(
         risk: policy::external_risk(tool.destructive_hint, prefs.always_ask),
         read_only: false,
         outbound: true,
+        // Allow all: a tool its server marks destructive, or the user marked always-ask,
+        // keeps asking. Every external call may send data out, so it asks once
+        // untrusted content has entered the turn.
+        keep_asking: policy::allow_all::external(tool.destructive_hint, prefs.always_ask),
+        network: true,
         hard_limit: None,
         payload: json!({
             "kind": "external",
@@ -192,6 +197,63 @@ mod tests {
             describe_external(tool(Some(false)), &a, ask).risk,
             Risk::AlwaysAsk
         );
+    }
+
+    /// Allow all: the same two things that make a tool always-ask keep it asking, and
+    /// every external call counts as able to send data out.
+    #[test]
+    fn allow_all_keeps_asking_for_marked_tools_and_treats_every_call_as_network() {
+        let a = args(json!({"q": 1}));
+        let ask = ToolPrefs {
+            allow_any_args: false,
+            always_ask: true,
+        };
+        for (hint, prefs, keeps_asking) in [
+            (None, ToolPrefs::default(), false),
+            (Some(false), ToolPrefs::default(), false),
+            (Some(true), ToolPrefs::default(), true),
+            (None, ask, true),
+            (Some(false), ask, true),
+        ] {
+            let action = describe_external(tool(hint), &a, prefs);
+            assert_eq!(
+                action.keep_asking,
+                keeps_asking.then_some(policy::KeepAsking::MarkedDestructive),
+                "{hint:?} {prefs:?}"
+            );
+            assert_eq!(action.keep_asking.is_some(), action.risk == Risk::AlwaysAsk);
+            assert!(action.network && action.outbound);
+            let turn = |untrusted: bool| policy::TurnContext {
+                tool_enabled: true,
+                server_ready: true,
+                untrusted_in_turn: untrusted,
+                allow_all: true,
+                ..Default::default()
+            };
+            let none = std::collections::BTreeSet::<Scope>::new();
+            let first = policy::evaluate(&action, &turn(false), &none);
+            let later = policy::evaluate(&action, &turn(true), &none);
+            if keeps_asking {
+                for decision in [first, later] {
+                    assert_eq!(
+                        decision,
+                        policy::Decision::Ask {
+                            card: policy::CardKind::OnceOnly,
+                            reason: policy::AskReason::StillAsksInAllowAll
+                        }
+                    );
+                }
+            } else {
+                assert_eq!(first, policy::Decision::AllowedByMode);
+                assert_eq!(
+                    later,
+                    policy::Decision::Ask {
+                        card: policy::CardKind::Grantable,
+                        reason: policy::AskReason::UntrustedContentThenOutbound
+                    }
+                );
+            }
+        }
     }
 
     #[test]

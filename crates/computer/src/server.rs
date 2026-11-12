@@ -244,6 +244,13 @@ fn op_output(r: Result<String, OpError>) -> ToolOutput {
     }
 }
 
+/// Whether the key deletes what is selected in a file manager: Delete, and on a Mac
+/// Command-Backspace (move to the Trash).
+fn deletes_selected_files(combo: &KeyCombo, mac: bool) -> bool {
+    combo.key == Some(Key::Delete)
+        || (mac && combo.key == Some(Key::Backspace) && combo.has(Key::Meta))
+}
+
 impl ComputerServer {
     /// A server over any capture and injector (the native ones, or the fakes in tests).
     pub fn new(
@@ -378,6 +385,8 @@ impl ComputerServer {
             risk: Risk::Normal,
             read_only: false,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: Value::Null,
         }
@@ -499,6 +508,14 @@ impl ComputerServer {
         } else {
             Risk::Normal
         };
+        // Allow all: whatever always asks here keeps asking. Each reason is input that
+        // reaches outside the application a grant could cover (D7): a terminal or console
+        // window, system settings, a password manager, the system's own shortcuts, a drag
+        // into another application. So an always-ask input that runs was approved by the
+        // user on its own card in every mode, which is what the guard relies on.
+        a.keep_asking = always_ask
+            .is_some()
+            .then_some(policy::KeepAsking::ProtectedApp);
         a.read_only = false;
         a.outbound = outbound;
         a.payload = serde_json::to_value(plan).unwrap_or(Value::Null);
@@ -825,6 +842,16 @@ impl ComputerServer {
         if let Some(why) = target_always_ask_reason(&t, typing) {
             always.get_or_insert_with(|| why.to_string());
         }
+        // Deleting files by key is deleting files: it asks in every mode, and no grant for
+        // keyboard input to the file manager covers it.
+        if let Step::Key { combo, .. } = &step
+            && deletes_selected_files(combo, mac)
+            && crate::apps::is_file_manager(&t.app)
+        {
+            always.get_or_insert_with(|| {
+                "in a file manager this key deletes the selected files".to_string()
+            });
+        }
         let app_name = policy::sanitize::one_line(&t.app.name, 60);
         let preview = format!(
             "{what} into the application in front\n{}",
@@ -849,7 +876,7 @@ impl ComputerServer {
         };
         // Typing discloses the text to another program (9.3: "Typing itself discloses the
         // typed text"), so keyboard input counts as outbound for D9.
-        Self::input_action(
+        let mut described = Self::input_action(
             tool,
             "keyboard",
             summary,
@@ -859,7 +886,17 @@ impl ComputerServer {
             always,
             true,
             &plan,
-        )
+        );
+        // Allow all: typing into a web browser is typing into a page, which asks once
+        // untrusted content is in the turn, whichever tool does the typing. Keyboard
+        // input to other applications is not held back in that mode: every screenshot is
+        // untrusted content, so it would ask every time.
+        if crate::apps::is_browser(&t.app)
+            && let Described::Action(action) = &mut described
+        {
+            action.network = true;
+        }
+        described
     }
 
     async fn call_screenshot(&self, action: &Action, ctx: &CallContext) -> ToolOutput {
@@ -1029,8 +1066,10 @@ impl ComputerServer {
         let guard = self.guard.clone();
         let cancel = ctx.cancel.clone();
         // Only an action the user approved on an always-ask card may reach a target that
-        // always asks; anything else (possibly allowed by a grant) is refused there.
-        let always_ask_approved = action.risk == Risk::AlwaysAsk;
+        // always asks; anything else (possibly allowed by a grant, or by Allow all) is
+        // refused there. An always-ask input always keeps asking (see `input_action`), so
+        // it cannot have been let through by the mode.
+        let always_ask_approved = action.risk == Risk::AlwaysAsk && action.keep_asking.is_some();
         let task = tokio::task::spawn_blocking(move || {
             let _lock = lock;
             run_plan(&guard, &plan, cancel, always_ask_approved)

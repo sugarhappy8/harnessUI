@@ -1,0 +1,36 @@
+{
+  "title": "Fix a bug found by a failing test (Python)",
+  "kind": "python",
+  "needs": "python",
+  "prompt": "A test fails in this small Python project. Run the tests with `{python} -m unittest -q`, find the bug in stats.py and fix it. Do not change the tests.",
+  "checks": [
+    {
+      "type": "run",
+      "script": "verify.py",
+      "expect": {
+        "mean246": {
+          "value": 4
+        },
+        "mean5": {
+          "value": 5
+        },
+        "mean12": {
+          "value": 1.5
+        },
+        "median4132": {
+          "value": 2.5
+        },
+        "median7": {
+          "value": 7
+        }
+      }
+    },
+    {
+      "type": "unchanged",
+      "file": "test_stats.py"
+    }
+  ],
+  "parse": [
+    "py"
+  ]
+}

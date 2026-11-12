@@ -152,6 +152,69 @@ pub fn target_always_ask_reason(target: &Target, keyboard: bool) -> Option<&'sta
     None
 }
 
+/// Whether the application is a file manager, where the Delete key deletes the selected
+/// files (and Command-Backspace on a Mac moves them to the Trash).
+pub fn is_file_manager(app: &AppInfo) -> bool {
+    let exe = app.exe_name.to_ascii_lowercase();
+    let stem = exe.strip_suffix(".exe").unwrap_or(&exe);
+    let bundle = app.bundle_id.as_deref().unwrap_or("").to_ascii_lowercase();
+    bundle == "com.apple.finder"
+        || matches!(
+            stem,
+            "explorer"
+                | "finder"
+                | "nautilus"
+                | "org.gnome.nautilus"
+                | "dolphin"
+                | "thunar"
+                | "nemo"
+                | "pcmanfm"
+                | "pcmanfm-qt"
+                | "caja"
+                | "totalcmd"
+                | "totalcmd64"
+                | "doublecmd"
+        )
+}
+
+/// Whether the application is a web browser: what is typed there can go to any site.
+pub fn is_browser(app: &AppInfo) -> bool {
+    const EXES: &[&str] = &[
+        "chrome",
+        "google-chrome",
+        "chromium",
+        "chromium-browser",
+        "msedge",
+        "microsoft-edge",
+        "firefox",
+        "brave",
+        "brave-browser",
+        "opera",
+        "vivaldi",
+        "safari",
+        "arc",
+        "iexplore",
+        "librewolf",
+        "waterfox",
+        "zen",
+    ];
+    const BUNDLES: &[&str] = &[
+        "com.google.chrome",
+        "org.chromium.chromium",
+        "com.microsoft.edgemac",
+        "org.mozilla.firefox",
+        "com.apple.safari",
+        "com.brave.browser",
+        "com.operasoftware.opera",
+        "com.vivaldi.vivaldi",
+        "company.thebrowser.browser",
+    ];
+    let exe = app.exe_name.to_ascii_lowercase();
+    let stem = exe.strip_suffix(".exe").unwrap_or(&exe);
+    let bundle = app.bundle_id.as_deref().unwrap_or("").to_ascii_lowercase();
+    EXES.contains(&stem) || BUNDLES.iter().any(|b| bundle.starts_with(b))
+}
+
 /// Why an application always asks, if it does.
 pub fn always_ask_reason(app: &AppInfo) -> Option<&'static str> {
     let exe = app.exe_name.as_str();

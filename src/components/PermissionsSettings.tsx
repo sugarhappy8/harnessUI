@@ -3,6 +3,8 @@ import { FolderPlus, Trash2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import type { ApprovedFolder, AuditRow, ErrorInfo, HotkeyStatus } from "../lib/types";
 import { toErrorInfo } from "../store/app";
+import { useApprovalMode } from "../lib/approvalMode";
+import { AllowAllConfirm } from "./AllowAllButton";
 import { ErrorBanner } from "./ErrorBanner";
 
 /** Approved folders for every chat, and the stop hotkey. */
@@ -57,6 +59,7 @@ export function PermissionsSettings() {
   return (
     <div className="space-y-5 text-sm">
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+      <AllowAllDefault onError={setError} />
       <section>
         <h3 className="mb-1 font-medium">Folders tools may use in every chat</h3>
         <p className="mb-2 text-xs text-fg-muted">
@@ -116,6 +119,56 @@ export function PermissionsSettings() {
   );
 }
 
+/**
+ * "Allow all in every chat": every chat starts in Allow all instead of asking first.
+ * Off unless the user switches it on, and switching it on asks first.
+ */
+function AllowAllDefault(props: { onError: (e: ErrorInfo) => void }) {
+  const { onError } = props;
+  const [on, setOn] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    ipc
+      .getAllowAllDefault()
+      .then((v) => alive && setOn(v))
+      .catch((e) => alive && onError(toErrorInfo(e)));
+    return () => {
+      alive = false;
+    };
+  }, [onError]);
+  async function save(next: boolean) {
+    try {
+      await useApprovalMode.getState().setDefault(next);
+      setOn(next);
+    } catch (e) {
+      onError(toErrorInfo(e));
+    }
+  }
+  return (
+    <section>
+      <h3 className="mb-1 font-medium">Approvals</h3>
+      <p className="mb-2 text-xs text-fg-muted">
+        Every chat starts by asking before the model acts. You can allow all for one chat with the shield button
+        in the chat&apos;s header. This switch does it for every chat. Deleting, paying, publishing and a few other
+        things still ask.
+      </p>
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          role="switch"
+          aria-checked={on}
+          checked={on}
+          onChange={(e) => (e.target.checked ? setConfirm(true) : void save(false))}
+          className="h-4 w-4"
+        />
+        <span className={on ? "font-medium text-warning" : ""}>Allow all in every chat</span>
+      </label>
+      <AllowAllConfirm open={confirm} scope="every" onOpenChange={setConfirm} onConfirm={() => void save(true)} />
+    </section>
+  );
+}
+
 /** Variables the terminal passes through although their names look secret (9.3). */
 function TerminalPassThrough(props: { onError: (e: ErrorInfo) => void }) {
   const [text, setText] = useState("");
@@ -168,11 +221,17 @@ const DECISIONS = [
   ["allow_once", "Allowed once"],
   ["allow_for_chat", "Allowed for the chat"],
   ["allowed_by_grant", "Allowed by an earlier grant"],
+  ["allowed_by_mode", "Allowed by Allow all"],
   ["allowed_without_prompt", "Allowed without asking"],
   ["denied", "Denied"],
   ["cancelled", "Cancelled"],
   ["refused_by_policy", "Refused by policy"],
 ] as const;
+
+/** How a stored decision reads in the table. */
+export function decisionLabel(decision: string): string {
+  return decision === "allowed_by_mode" ? "allowed by Allow all" : decision.replaceAll("_", " ");
+}
 
 /** Every tool call with its decision and result (13.7). */
 export function AuditLogView() {
@@ -261,7 +320,7 @@ export function AuditLogView() {
                   {r.preview}
                 </td>
                 <td className="px-2 py-1">
-                  {r.decision.replaceAll("_", " ")}
+                  {decisionLabel(r.decision)}
                   {r.note ? ` (“${r.note}”)` : ""}
                 </td>
                 <td className="px-2 py-1">{r.result_status ?? "—"}</td>

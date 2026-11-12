@@ -1,3 +1,4 @@
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
 import type {
@@ -8,6 +9,7 @@ import type {
   ErrorInfo,
   DocumentInput,
   ImageInput,
+  MentionInput,
   ModelOption,
   RuntimeStatus,
 } from "../lib/types";
@@ -71,6 +73,10 @@ interface AppState {
    * that arrives as a turn ends would otherwise vanish before it can be read. */
   turnNotes: { chatId: number; notes: string[] } | null;
   error: ErrorInfo | null;
+  /** The panel beside the chat (artifacts, task, sources, context). */
+  workbench: { open: boolean; tab: WorkbenchTab };
+  openWorkbench: (tab?: WorkbenchTab) => void;
+  closeWorkbench: () => void;
   /** Approval cards waiting for an answer (any chat). */
   approvals: ApprovalRequest[];
 
@@ -80,13 +86,23 @@ interface AppState {
   newChat: () => Promise<void>;
   renameChat: (chatId: number, title: string) => Promise<void>;
   deleteChat: (chatId: number) => Promise<void>;
-  send: (text: string, parentId?: number | null, images?: ImageInput[], documents?: DocumentInput[]) => Promise<void>;
+  send: (
+    text: string,
+    parentId?: number | null,
+    images?: ImageInput[],
+    documents?: DocumentInput[],
+    mentions?: MentionInput[],
+  ) => Promise<void>;
   regenerate: (assistantMessageId: number) => Promise<void>;
   stop: () => Promise<void>;
   switchBranch: (messageId: number) => Promise<void>;
   setRuntime: (s: RuntimeStatus) => void;
   refreshModelOptions: () => Promise<void>;
   setChatModel: (modelRef: string | null) => Promise<void>;
+  /** Makes a model the open chat's (or a new chat's) and loads it when it is local. */
+  pickModel: (modelRef: string) => Promise<void>;
+  /** Asks for a .gguf file and picks it. */
+  openModelFile: () => Promise<void>;
   setSystemPrompt: (prompt: string | null) => Promise<void>;
   showError: (e: ErrorInfo | null) => void;
   addApproval: (r: ApprovalRequest) => void;
@@ -112,6 +128,9 @@ function lastMessageId(detail: ChatDetail | null): number | null {
   const last = detail?.messages[detail.messages.length - 1];
   return last ? last.id : null;
 }
+
+/** The tabs of the panel beside the chat. */
+export type WorkbenchTab = "artifacts" | "task" | "sources" | "context";
 
 export const useApp = create<AppState>((set, get) => {
   /** Re-reads a chat after a stream event. Never rejects: the chat may have been deleted
@@ -227,7 +246,10 @@ export const useApp = create<AppState>((set, get) => {
             error: {
               code: e.status,
               message: e.message,
-              nextStep: "Ask the model to continue, or rephrase the request.",
+              nextStep:
+                e.status === "stepCap"
+                  ? "Choose Continue to let it carry on. The limit can be raised in Settings → General."
+                  : "Ask the model to continue, or rephrase the request.",
               details: "",
             },
           });
@@ -256,6 +278,9 @@ export const useApp = create<AppState>((set, get) => {
     generation: null,
     turnNotes: null,
     error: null,
+    workbench: { open: false, tab: "artifacts" },
+    openWorkbench: (tab) => set({ workbench: { open: true, tab: tab ?? get().workbench.tab } }),
+    closeWorkbench: () => set({ workbench: { ...get().workbench, open: false } }),
     approvals: [],
 
     setSearch: (q) => {
@@ -280,7 +305,11 @@ export const useApp = create<AppState>((set, get) => {
 
     newChat: async () => {
       const options = get().modelOptions;
-      const lastUsed = get().detail?.chat.modelRef ?? options[0]?.ref ?? null;
+      // The open chat's model, else the one that is loaded, else the most recent.
+      const rt = get().runtime;
+      const loaded =
+        rt && rt.modelPath && (rt.state === "ready" || rt.state === "starting") ? `local:${rt.modelPath}` : null;
+      const lastUsed = get().detail?.chat.modelRef ?? loaded ?? options[0]?.ref ?? null;
       const chat = await ipc.createChat(lastUsed);
       await get().refreshChats();
       await get().openChat(chat.id);
@@ -298,7 +327,7 @@ export const useApp = create<AppState>((set, get) => {
       await get().refreshChats();
     },
 
-    send: async (text, parentId, images, documents) => {
+    send: async (text, parentId, images, documents, mentions) => {
       let chatId = get().activeChatId;
       if (chatId === null) {
         await get().newChat();
@@ -309,7 +338,7 @@ export const useApp = create<AppState>((set, get) => {
       set({ generation: newGeneration(chatId), turnNotes: null, error: null });
       const id = chatId;
       try {
-        await ipc.sendMessage({ chatId: id, text, parentId: parent, images, documents }, (e) =>
+        await ipc.sendMessage({ chatId: id, text, parentId: parent, images, documents, mentions }, (e) =>
           onStreamEvent(id, e),
         );
       } catch (err) {
@@ -348,9 +377,42 @@ export const useApp = create<AppState>((set, get) => {
 
     setChatModel: async (modelRef) => {
       const chatId = get().activeChatId;
-      if (chatId === null) return;
+      if (chatId === null) {
+        // No chat is open: the model needs one to belong to, or picking it shows nothing.
+        if (modelRef === null) return;
+        const chat = await ipc.createChat(modelRef);
+        await get().refreshChats();
+        await get().openChat(chat.id);
+        return;
+      }
       await ipc.setChatModel(chatId, modelRef);
       await get().openChat(chatId);
+    },
+
+    pickModel: async (modelRef) => {
+      try {
+        await get().setChatModel(modelRef);
+        if (modelRef.startsWith("local:")) {
+          const settings = await ipc.getLocalModelSettings();
+          await ipc.loadLocalModel(modelRef.slice(6), settings);
+          await get().refreshModelOptions();
+        }
+      } catch (err) {
+        set({ error: toErrorInfo(err) });
+      }
+    },
+
+    openModelFile: async () => {
+      try {
+        const picked = await openFileDialog({
+          multiple: false,
+          directory: false,
+          filters: [{ name: "GGUF model", extensions: ["gguf"] }],
+        });
+        if (typeof picked === "string") await get().pickModel(`local:${picked}`);
+      } catch (err) {
+        set({ error: toErrorInfo(err) });
+      }
     },
 
     setSystemPrompt: async (prompt) => {

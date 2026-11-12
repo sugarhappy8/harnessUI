@@ -11,6 +11,8 @@
 
 use tree_sitter::{Node, Parser};
 
+use crate::engine::KeepAsking;
+
 /// Which grammar to parse with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
@@ -44,6 +46,12 @@ pub struct Verdict {
     pub always_ask: Option<String>,
     /// Every simple command is on the read-only list.
     pub read_only: bool,
+    /// Allow all (0.0.4): why the command still asks while its chat is in Allow all, if it
+    /// does, with a sentence that names what was found.
+    pub keep_asking: Option<(KeepAsking, String)>,
+    /// Allow all (0.0.4): the command names a network program or cannot be fully broken
+    /// down, so it asks once untrusted content has entered the turn.
+    pub network: bool,
 }
 
 const BASH_KINDS: &[&str] = &[
@@ -78,6 +86,8 @@ const PS_KINDS: &[&str] = &[
     "verbatim_string_characters",
 ];
 const PS_TOKENS: &[&str] = &[";", "|", "&&", "||", " ", "\n"];
+/// A PowerShell double-quoted string: never a plain word for [`parse`].
+const PS_EXPANDABLE: &str = "expandable_string_literal";
 
 fn complex(reason: impl Into<String>) -> Parsed {
     Parsed::Complex {
@@ -87,6 +97,17 @@ fn complex(reason: impl Into<String>) -> Parsed {
 
 /// Parses `line` with the grammar for `shell`.
 pub fn parse(shell: Shell, line: &str) -> Parsed {
+    parse_with(shell, line, false)
+}
+
+/// Like [`parse`], but a PowerShell double-quoted string with nothing to expand (no `$`,
+/// no backtick) counts as the literal it is. Only the Allow-all classification uses this
+/// (`crate::allow_all`): what a grant can cover is still decided by [`parse`].
+pub(crate) fn parse_lenient(shell: Shell, line: &str) -> Parsed {
+    parse_with(shell, line, true)
+}
+
+fn parse_with(shell: Shell, line: &str, lenient: bool) -> Parsed {
     if line.trim().is_empty() {
         return complex("the command is empty");
     }
@@ -110,7 +131,7 @@ pub fn parse(shell: Shell, line: &str) -> Parsed {
     }
     match shell {
         Shell::Posix => posix(root, line),
-        Shell::PowerShell => powershell(root, line),
+        Shell::PowerShell => powershell(root, line, lenient),
     }
 }
 
@@ -254,8 +275,15 @@ fn posix(root: Node, src: &str) -> Parsed {
     Parsed::Plain(commands)
 }
 
-fn powershell(root: Node, src: &str) -> Parsed {
-    if let Err(why) = all_allowed(root, src, PS_KINDS, PS_TOKENS) {
+fn powershell(root: Node, src: &str, lenient: bool) -> Parsed {
+    let checked = if lenient {
+        let mut kinds = PS_KINDS.to_vec();
+        kinds.push(PS_EXPANDABLE);
+        all_allowed(root, src, &kinds, PS_TOKENS)
+    } else {
+        all_allowed(root, src, PS_KINDS, PS_TOKENS)
+    };
+    if let Err(why) = checked {
         return complex(why);
     }
     let mut found: Vec<Node> = Vec::new();
@@ -296,7 +324,7 @@ fn powershell(root: Node, src: &str) -> Parsed {
                                     Some(t.to_string())
                                 }
                             }
-                            "array_literal_expression" => single_quoted(el, src),
+                            "array_literal_expression" => quoted(el, src, lenient),
                             _ => None,
                         };
                         match w {
@@ -323,14 +351,11 @@ fn powershell(root: Node, src: &str) -> Parsed {
     Parsed::Plain(commands)
 }
 
-/// `'text'` wrapped as array_literal_expression > unary_expression > string_literal.
-fn single_quoted(n: Node, src: &str) -> Option<String> {
+/// `'text'` wrapped as array_literal_expression > unary_expression > string_literal. With
+/// `lenient`, also `"text"` that holds nothing to expand.
+fn quoted(n: Node, src: &str, lenient: bool) -> Option<String> {
     let mut cur = n;
-    for want in [
-        "unary_expression",
-        "string_literal",
-        "verbatim_string_characters",
-    ] {
+    for want in ["unary_expression", "string_literal"] {
         let mut c = cur.walk();
         let kids: Vec<Node> = cur.named_children(&mut c).collect();
         match kids.as_slice() {
@@ -338,12 +363,29 @@ fn single_quoted(n: Node, src: &str) -> Option<String> {
             _ => return None,
         }
     }
-    let t = text(cur, src);
-    Some(
-        t.trim_start_matches('\'')
-            .trim_end_matches('\'')
-            .replace("''", "'"),
-    )
+    let mut c = cur.walk();
+    let kids: Vec<Node> = cur.named_children(&mut c).collect();
+    let [leaf] = kids.as_slice() else {
+        return None;
+    };
+    let t = text(*leaf, src);
+    match leaf.kind() {
+        "verbatim_string_characters" => Some(
+            t.trim_start_matches('\'')
+                .trim_end_matches('\'')
+                .replace("''", "'"),
+        ),
+        PS_EXPANDABLE if lenient => {
+            // A plain literal only: nothing inside it (a variable, a sub-expression), and
+            // no `$` or backtick in its text.
+            let inner = t.strip_prefix('"')?.strip_suffix('"')?;
+            if leaf.named_child_count() > 0 || inner.contains(['$', '`']) {
+                return None;
+            }
+            Some(inner.replace("\"\"", "\""))
+        }
+        _ => None,
+    }
 }
 
 /// The program's base name, lower-cased, without a Windows extension.
@@ -361,7 +403,7 @@ pub fn program_name(program: &str) -> String {
     base
 }
 
-const DELETES: &[&str] = &[
+pub(crate) const DELETES: &[&str] = &[
     "rm",
     "unlink",
     "rmdir",
@@ -375,8 +417,8 @@ const DELETES: &[&str] = &[
     "trash",
     "wipe",
 ];
-const ELEVATION: &[&str] = &["sudo", "doas", "su", "runas", "pkexec", "gsudo"];
-const SYSTEM: &[&str] = &[
+pub(crate) const ELEVATION: &[&str] = &["sudo", "doas", "su", "runas", "pkexec", "gsudo"];
+pub(crate) const SYSTEM: &[&str] = &[
     "format",
     "diskpart",
     "dd",
@@ -411,7 +453,7 @@ const SYSTEM: &[&str] = &[
     "vssadmin",
     "wbadmin",
 ];
-const WRAPPERS: &[&str] = &[
+pub(crate) const WRAPPERS: &[&str] = &[
     "env",
     "xargs",
     "nohup",
@@ -443,7 +485,7 @@ const WRAPPERS: &[&str] = &[
     "open",
 ];
 /// Interpreter → flags that take inline code.
-const INLINE: &[(&str, &[&str])] = &[
+pub(crate) const INLINE: &[(&str, &[&str])] = &[
     ("python", &["-c"]),
     ("python3", &["-c"]),
     ("py", &["-c"]),
@@ -479,7 +521,7 @@ const GIT_READ: &[&str] = &[
     "describe",
     "shortlog",
 ];
-const GIT_KNOWN: &[&str] = &[
+pub(crate) const GIT_KNOWN: &[&str] = &[
     "status",
     "log",
     "diff",
@@ -701,6 +743,7 @@ pub fn is_read_only(cmd: &SimpleCommand) -> bool {
 /// Classifies a command line for the policy engine.
 pub fn classify(shell: Shell, line: &str) -> Verdict {
     let parsed = parse(shell, line);
+    let mode = crate::allow_all::command_facts(shell, line, &parsed);
     match &parsed {
         Parsed::Plain(cmds) => {
             let always_ask = cmds.iter().find_map(always_ask);
@@ -709,6 +752,8 @@ pub fn classify(shell: Shell, line: &str) -> Verdict {
                 parsed,
                 always_ask,
                 read_only,
+                keep_asking: mode.keep_asking,
+                network: mode.network,
             }
         }
         Parsed::Complex { reason } => Verdict {
@@ -717,6 +762,8 @@ pub fn classify(shell: Shell, line: &str) -> Verdict {
             )),
             parsed,
             read_only: false,
+            keep_asking: mode.keep_asking,
+            network: mode.network,
         },
     }
 }
@@ -919,6 +966,84 @@ mod tests {
             .read_only
         );
         assert!(!classify(Shell::Posix, "find . -name x -delete").read_only);
+    }
+
+    /// The lenient parse is only for the Allow-all classification: it accepts a PowerShell
+    /// double-quoted string that holds nothing to expand, and nothing else that `parse`
+    /// refuses. `classify` still reports what `parse` says.
+    #[test]
+    fn the_lenient_parse_only_adds_plain_double_quoted_strings() {
+        let lenient = |line: &str| match parse_lenient(Shell::PowerShell, line) {
+            Parsed::Plain(c) => Some(c),
+            Parsed::Complex { .. } => None,
+        };
+        let c = lenient("git commit -m \"Fix the build\"").expect("a plain literal");
+        assert_eq!(c[0].args, vec!["commit", "-m", "Fix the build"]);
+        assert!(is_complex(
+            Shell::PowerShell,
+            "git commit -m \"Fix the build\""
+        ));
+        let v = classify(Shell::PowerShell, "git commit -m \"Fix the build\"");
+        assert!(matches!(v.parsed, Parsed::Complex { .. }) && v.always_ask.is_some());
+        assert_eq!((v.keep_asking, v.network), (None, false));
+
+        for line in [
+            "Write-Output \"$x\"",
+            "Write-Output \"a $env:PATH b\"",
+            "Write-Output \"$(Get-Date)\"",
+            "Write-Output \"a`nb\"",
+            "echo $env:PATH",
+            "& notepad x",
+            "Get-Content x > y",
+            "Get-ChildItem | ForEach-Object { $_ }",
+            "Invoke-Expression (Get-Content x)",
+            "Get-ChildItem *.txt",
+            "$a = 1",
+            "Get-Item @args",
+            "\"notepad\" x",
+        ] {
+            assert!(lenient(line).is_none(), "{line:?} must stay complex");
+        }
+        // The bash grammar is not affected.
+        for line in ["echo \"$HOME\"", "ls > out.txt", "ls *.rs"] {
+            assert!(matches!(
+                parse_lenient(Shell::Posix, line),
+                Parsed::Complex { .. }
+            ));
+        }
+        // Single-quoted strings read as before.
+        assert_eq!(
+            plain(Shell::PowerShell, "Select-String 'it''s'")[0].args,
+            vec!["it's"]
+        );
+    }
+
+    /// `classify` carries the Allow-all facts next to the Ask-mode verdict, which they do
+    /// not change.
+    #[test]
+    fn the_verdict_carries_the_allow_all_facts() {
+        let v = classify(Shell::Posix, "rm -rf build");
+        assert!(v.always_ask.is_some());
+        assert_eq!(
+            v.keep_asking.map(|(kind, _)| kind),
+            Some(KeepAsking::Delete)
+        );
+        // A wrapper always asks in Ask mode; in Allow all it asks only for what it wraps.
+        let v = classify(Shell::Posix, "env CI=1 cargo test");
+        assert!(v.always_ask.is_some());
+        assert_eq!((v.keep_asking, v.network), (None, true));
+        // Grantable in Ask mode, and still a delete handed to another program.
+        let v = classify(Shell::Posix, "npx rimraf dist");
+        assert!(v.always_ask.is_none());
+        assert_eq!(
+            v.keep_asking.map(|(kind, _)| kind),
+            Some(KeepAsking::Delete)
+        );
+        let v = classify(Shell::Posix, "cargo test");
+        assert!(v.always_ask.is_none() && !v.read_only);
+        assert_eq!((v.keep_asking, v.network), (None, false));
+        let v = classify(Shell::Posix, "curl https://example.com");
+        assert_eq!((v.keep_asking, v.network), (None, true));
     }
 
     #[test]

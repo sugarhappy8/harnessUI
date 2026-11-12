@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatView } from "./components/ChatView";
+import { Workbench } from "./components/Workbench";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { ModelsDialog } from "./components/ModelsDialog";
 import { FirstRun } from "./components/FirstRun";
@@ -145,6 +146,7 @@ export default function App() {
           />
         )}
         <ChatView />
+        <Workbench />
       </div>
       {dialogs}
     </div>

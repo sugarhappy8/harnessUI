@@ -1,0 +1,31 @@
+{
+  "query": "tokio spawn_blocking",
+  "follow_up_questions": null,
+  "answer": null,
+  "images": [],
+  "results": [
+    {
+      "title": "spawn_blocking in tokio::task - Rust",
+      "url": "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html",
+      "content": "Runs the provided closure on a thread where blocking is acceptable. In general, issuing a blocking call or performing a lot of compute in a future without yielding is problematic.",
+      "score": 0.9312,
+      "raw_content": null
+    },
+    {
+      "title": "Spawning | Tokio - An asynchronous Rust runtime",
+      "url": "https://tokio.rs/tokio/tutorial/spawning",
+      "content": "A Tokio task is an asynchronous green thread.\nThey are created by passing an async block to tokio::spawn.",
+      "score": 0.8127,
+      "raw_content": null
+    },
+    {
+      "title": "",
+      "url": "https://example.org/untitled",
+      "content": "A result without a title is shown under its address.",
+      "score": 0.2,
+      "raw_content": null
+    }
+  ],
+  "response_time": 1.37,
+  "request_id": "9f1a3d5e-0000-4000-8000-000000000001"
+}

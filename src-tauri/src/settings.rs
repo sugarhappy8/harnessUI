@@ -14,6 +14,27 @@ pub const REMOTE_CONTEXT_LENGTH: &str = "remoteContextLength";
 /// messages without saying so when a request is larger.
 pub const DEFAULT_REMOTE_CONTEXT: u32 = 4096;
 
+/// How many times the model may be called in one turn before the turn wraps up (8.2).
+pub const STEPS_PER_TURN: &str = "stepsPerTurn";
+/// Enough for a task of a few dozen tool calls (installing a toolchain took more than 25
+/// on a real PC), and still a stop for a model that goes on without getting anywhere.
+pub const DEFAULT_STEPS_PER_TURN: u32 = 50;
+
+/// A stored step limit, if it is a whole number the app accepts.
+pub fn parse_steps_per_turn(value: &serde_json::Value) -> Option<u32> {
+    value
+        .as_u64()
+        .filter(|n| (5..=500).contains(n))
+        .and_then(|n| u32::try_from(n).ok())
+}
+
+/// The step limit: the stored setting, or the default when it is missing or not sensible.
+pub fn steps_per_turn(stored: Option<&serde_json::Value>) -> u32 {
+    stored
+        .and_then(parse_steps_per_turn)
+        .unwrap_or(DEFAULT_STEPS_PER_TURN)
+}
+
 /// A stored remote context size, if it is a sensible whole number of tokens.
 pub fn parse_remote_context(value: &serde_json::Value) -> Option<u32> {
     value
@@ -66,6 +87,28 @@ pub async fn remember_local_model(state: &AppState, path: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_step_limit_is_the_setting_or_the_default() {
+        assert_eq!(steps_per_turn(None), DEFAULT_STEPS_PER_TURN);
+        assert_eq!(steps_per_turn(Some(&json!(100))), 100);
+        assert_eq!(steps_per_turn(Some(&json!(5))), 5);
+        assert_eq!(steps_per_turn(Some(&json!(500))), 500);
+        // Not a sensible limit: zero would end every turn at once, and a model that
+        // loops must still be stopped.
+        for bad in [
+            json!(0),
+            json!(4),
+            json!(501),
+            json!(-3),
+            json!(12.5),
+            json!("50"),
+            json!(null),
+        ] {
+            assert_eq!(parse_steps_per_turn(&bad), None, "{bad}");
+            assert_eq!(steps_per_turn(Some(&bad)), DEFAULT_STEPS_PER_TURN, "{bad}");
+        }
+    }
 
     /// 8.4: a remote endpoint that reports no context gets the user's setting, else 4,096.
     #[test]

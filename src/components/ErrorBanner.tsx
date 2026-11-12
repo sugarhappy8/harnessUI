@@ -6,7 +6,15 @@ import { isTauri } from "../lib/ipc";
 
 /** A plain-language error with a next step and the technical details behind
  *  "Copy details". Never a raw stack trace (ARCHITECTURE.md 15). */
-export function ErrorBanner(props: { error: ErrorInfo; onDismiss?: () => void }) {
+export function ErrorBanner(props: {
+  error: ErrorInfo;
+  onDismiss?: () => void;
+  /** "notice": the app stopped on purpose and nothing is broken (a limit was reached). */
+  tone?: "error" | "notice";
+  /** The one thing to do about it, as a button. */
+  action?: { label: string; onClick: () => void };
+}) {
+  const notice = props.tone === "notice";
   const [copied, setCopied] = useState(false);
   async function copy() {
     const text = `${props.error.message}\n${props.error.nextStep}\ncode: ${props.error.code}\n\n${props.error.details}`;
@@ -21,13 +29,25 @@ export function ErrorBanner(props: { error: ErrorInfo; onDismiss?: () => void })
   }
   return (
     <div
-      role="alert"
-      className="flex items-start gap-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm"
+      role={notice ? "status" : "alert"}
+      className={
+        "enter flex items-start gap-3 rounded-xl border px-3.5 py-2.5 text-sm shadow-soft " +
+        (notice ? "border-warning/40 bg-warning/10" : "border-danger/40 bg-danger/10")
+      }
     >
       <div className="flex-1">
         <p className="font-medium">{props.error.message}</p>
         <p className="text-fg-muted">{props.error.nextStep}</p>
       </div>
+      {props.action && (
+        <button
+          type="button"
+          className="btn-primary rounded-lg px-3 py-1 text-sm font-medium"
+          onClick={props.action.onClick}
+        >
+          {props.action.label}
+        </button>
+      )}
       {props.error.details && (
         <button type="button" className="text-xs underline" onClick={() => void copy()}>
           {copied ? "Copied" : "Copy details"}

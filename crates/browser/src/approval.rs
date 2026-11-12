@@ -105,6 +105,24 @@ impl HeldNavigation {
     }
 }
 
+impl HeldNavigation {
+    /// Allow all (0.0.4): whether the app may let this held request through without a
+    /// card while its chat is in Allow all. Only a page moving its tab to another site
+    /// during a call, and only while no untrusted content had entered the turn when that
+    /// call was decided: then nothing the model read can have chosen the destination.
+    ///
+    /// Everything else keeps its card in every mode. A held submission was not announced
+    /// by the action the model described (one that was is released by its intent, with no
+    /// card), it has no label to judge, and it can send what was typed. A request held
+    /// outside a call was started by the page alone.
+    pub fn released_in_allow_all(&self, untrusted_in_turn: bool) -> bool {
+        self.kind == HoldKind::LeavesSite
+            && self.top_level
+            && self.during_tool.is_some()
+            && !untrusted_in_turn
+    }
+}
+
 /// Implemented by the app: shows an always-ask card (Allow once / Deny) for a held
 /// navigation and returns the user's answer. `cancel` fires on Stop of the call in
 /// progress, on the approval timeout and when the browser shuts down; the card must then
@@ -173,6 +191,43 @@ mod tests {
         let bg = HeldNavigation::new(HoldKind::Background, "PUT", &url, None, false, None);
         assert!(bg.summary.contains("background"));
         assert!(bg.preview.contains("embedded frame"));
+    }
+
+    /// Allow all: only a move to another site during a call, before anything untrusted
+    /// entered the turn, is let through without a card.
+    #[test]
+    fn allow_all_releases_only_a_move_to_another_site_before_untrusted_content() {
+        let url = Url::parse("https://other.example/").unwrap();
+        let held = |kind: HoldKind, top_level: bool, tool: Option<&str>| {
+            HeldNavigation::new(
+                kind,
+                "GET",
+                &url,
+                Some("https://a.example"),
+                top_level,
+                tool,
+            )
+        };
+        let leaves = held(HoldKind::LeavesSite, true, Some("browser_navigate"));
+        assert!(leaves.released_in_allow_all(false));
+        assert!(
+            !leaves.released_in_allow_all(true),
+            "after untrusted content a move to another site asks"
+        );
+        // Outside a call the page acted alone.
+        assert!(!held(HoldKind::LeavesSite, true, None).released_in_allow_all(false));
+        assert!(
+            !held(HoldKind::LeavesSite, false, Some("browser_click")).released_in_allow_all(false)
+        );
+        // Submissions and background sends always ask.
+        for kind in [HoldKind::Submission, HoldKind::Background] {
+            for untrusted in [false, true] {
+                assert!(
+                    !held(kind, true, Some("browser_click")).released_in_allow_all(untrusted),
+                    "{kind:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

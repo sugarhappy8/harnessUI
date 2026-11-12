@@ -13,6 +13,8 @@ const SERVER_LABEL: Record<string, string> = {
   browser: "Browser",
   computer: "Computer",
   subagents: "Subagents",
+  artifacts: "Artifacts",
+  search: "Web search",
 };
 
 /** One line under a group's name, for groups that need a word of explanation. */
@@ -24,10 +26,22 @@ const SERVER_NOTE: Record<string, string> = {
 /** Groups shown after every other group. */
 const LAST_GROUPS = ["subagents"];
 
+/** What the small mark next to a tool that is on says, and its tooltip. */
+const MARK = {
+  shown: { text: "shown", title: "Sent with every request in this chat" },
+  onRequest: {
+    text: "on request",
+    title: "Sent when a message is about it, or when the model looks it up",
+  },
+};
+
 /**
- * The tools switched on for this chat (9.3). Only switched-on tools are offered to the
- * model; each costs context, shown as an estimate. Also the chat's loaded skills (10)
- * and the folders its file tools may use, with the working folder.
+ * The tools switched on for this chat (9.3). The switches decide what the model may use.
+ * Of the tools that are on, each request carries a small set that fits the task (marked
+ * "shown"); the others (marked "on request") are sent when a message is about them, and
+ * the model can look them up. The context estimate counts what a request carries.
+ * Also the chat's loaded skills (10) and the folders its file tools may use, with the
+ * working folder.
  */
 export function ToolsPanel(props: {
   chatId: number;
@@ -41,6 +55,8 @@ export function ToolsPanel(props: {
   const [loaded, setLoaded] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
   const [gitFallback, setGitFallback] = useState<string | null>(null);
+  // "Choose tools for each task automatically" (a setting for every chat). On until read.
+  const [auto, setAuto] = useState(true);
   const showError = useApp((s) => s.showError);
   const openChat = useApp((s) => s.openChat);
 
@@ -51,7 +67,8 @@ export function ToolsPanel(props: {
       .catch((e) => showError(toErrorInfo(e)));
   }, [props.chatId, showError]);
 
-  // Global folders and this chat's own; loaded skills. Read when the panel opens.
+  // Global folders and this chat's own; loaded skills; the selection setting. Read when
+  // the panel opens.
   const refreshChatState = useCallback(() => {
     ipc
       .listApprovedFolders(props.chatId)
@@ -60,6 +77,10 @@ export function ToolsPanel(props: {
     ipc
       .loadedSkills(props.chatId)
       .then(setLoaded)
+      .catch((e) => showError(toErrorInfo(e)));
+    ipc
+      .getToolSelection()
+      .then((s) => setAuto(s.auto))
       .catch((e) => showError(toErrorInfo(e)));
   }, [props.chatId, showError]);
 
@@ -79,11 +100,16 @@ export function ToolsPanel(props: {
     return () => un?.();
   }, [refresh, props.nCtx]);
 
-  const enabled = tools.filter((t) => t.enabledInChat && t.available && !t.schemaError);
-  const cost = enabled.reduce((n, t) => n + t.tokenEstimate, 0);
+  // The companions (find_tools, call_tool, read_output, update_task) come along with any
+  // other tool. They are not switches and are not counted as tools that are on.
+  const usable = (t: ToolDto) => t.enabledInChat && t.available && !t.schemaError;
+  const enabled = tools.filter((t) => !t.companion && usable(t));
+  const companions = tools.filter((t) => t.companion && usable(t));
+  // What a request carries: the tools that are shown.
+  const cost = tools.filter((t) => t.shown).reduce((n, t) => n + t.tokenEstimate, 0);
   const groups = useMemo(() => {
     const m = new Map<string, ToolDto[]>();
-    for (const t of tools) m.set(t.server, [...(m.get(t.server) ?? []), t]);
+    for (const t of tools) if (!t.companion) m.set(t.server, [...(m.get(t.server) ?? []), t]);
     const all = [...m.entries()];
     return [...all.filter(([s]) => !LAST_GROUPS.includes(s)), ...all.filter(([s]) => LAST_GROUPS.includes(s))];
   }, [tools]);
@@ -98,12 +124,22 @@ export function ToolsPanel(props: {
   }
 
   function toggle(names: string[], on: boolean) {
-    const current = new Set(tools.filter((t) => t.enabledInChat).map((t) => t.exposed));
+    const current = new Set(tools.filter((t) => t.enabledInChat && !t.companion).map((t) => t.exposed));
     for (const n of names) {
       if (on) current.add(n);
       else current.delete(n);
     }
     void save([...current]);
+  }
+
+  async function chooseAutomatically(on: boolean) {
+    try {
+      const next = await ipc.setToolSelection(on);
+      setAuto(next.auto);
+      refresh();
+    } catch (e) {
+      showError(toErrorInfo(e));
+    }
   }
 
   // The folder the backend uses: the stored one while it is still approved, else the first.
@@ -159,17 +195,17 @@ export function ToolsPanel(props: {
       <Popover.Trigger asChild>
         <button
           type="button"
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-fg-muted hover:bg-bg-muted hover:text-fg"
+          className="flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap text-fg-muted hover:bg-bg-muted hover:text-fg"
           title="Tools for this chat"
         >
-          <Wrench size={14} aria-hidden /> {props.unsupported ? "Tools (unavailable)" : `Tools (${enabled.length})`}
+          <Wrench size={15} aria-hidden /> {props.unsupported ? "Tools (unavailable)" : `Tools (${enabled.length})`}
         </button>
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
           align="end"
           sideOffset={6}
-          className="z-50 max-h-[70vh] w-96 overflow-y-auto rounded-lg border border-border bg-bg p-3 text-sm shadow-lg"
+          className="enter z-50 max-h-[70vh] w-96 overflow-y-auto rounded-xl border border-border bg-surface p-3 text-sm shadow-pop"
         >
           <div className="mb-2 flex items-baseline justify-between">
             <h2 className="font-medium">Tools for this chat</h2>
@@ -191,6 +227,20 @@ export function ToolsPanel(props: {
               The switched-on tools take a large part of the context. Switch off the ones this chat does not need.
             </p>
           )}
+          <div className="mb-3 rounded-lg bg-bg-subtle px-2.5 py-2">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                role="switch"
+                checked={auto}
+                onChange={(e) => void chooseAutomatically(e.target.checked)}
+              />
+              <span className="font-medium">Choose tools for each task automatically</span>
+            </label>
+            <p className="mt-0.5 pl-6 text-xs text-fg-muted">
+              The model gets the tools that fit your message and can look up the others, so requests stay small.
+            </p>
+          </div>
           {groups.map(([server, list]) => {
             const names = list.filter((t) => t.available && !t.schemaError).map((t) => t.exposed);
             const allOn = names.length > 0 && names.every((n) => list.find((t) => t.exposed === n)?.enabledInChat);
@@ -250,6 +300,14 @@ export function ToolsPanel(props: {
                         />
                         <span className="min-w-0 flex-1">
                           <span className="font-mono text-xs">{t.exposed}</span>
+                          {usable(t) && (
+                            <span
+                              className={`ml-1.5 rounded px-1 text-[10px] ${t.shown ? "bg-bg-muted text-fg-muted" : "text-fg-muted"}`}
+                              title={(t.shown ? MARK.shown : MARK.onRequest).title}
+                            >
+                              {(t.shown ? MARK.shown : MARK.onRequest).text}
+                            </span>
+                          )}
                           {!t.ready && t.available && <span className="ml-1 text-xs text-warning">not running</span>}
                           {t.changed && (
                             <span className="ml-1 text-xs text-warning">changed — review it in Settings → MCP servers</span>
@@ -269,6 +327,12 @@ export function ToolsPanel(props: {
               </section>
             );
           })}
+          {companions.length > 0 && (
+            <p className="mb-3 text-xs text-fg-muted">
+              Always included with the tools above:{" "}
+              <span className="font-mono">{companions.map((t) => t.exposed).join(", ")}</span>
+            </p>
+          )}
           {loaded.length > 0 && (
             <section className="mb-3 border-t border-border pt-2" aria-labelledby={`loaded-skills-${props.chatId}`}>
               <h3 id={`loaded-skills-${props.chatId}`} className="font-medium">

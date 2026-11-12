@@ -55,6 +55,8 @@ export interface MessageDto {
   toolCalls: ToolCallDto[];
   /** For a tool message: the result. */
   toolResult: ToolResultDto | null;
+  /** For a user message: the files and definitions it mentioned. */
+  mentions?: MentionRef[];
 }
 
 export interface ToolCallDto {
@@ -79,6 +81,62 @@ export interface DocumentInput {
   fileName: string;
   /** Base64 of the bytes. */
   data: string;
+}
+
+/** A mention chosen in the picker, as sent with a message (`@path` or `@path#name`). */
+export interface MentionInput {
+  /** The file, absolute. */
+  path: string;
+  symbol?: string;
+  container?: string;
+  kind?: string;
+  /** Where the definition was when it was picked. */
+  line?: number;
+}
+
+/** One entry of the mention picker. */
+export interface MentionHit {
+  /** "file", or the kind of the definition ("function", "class", ...). */
+  kind: string;
+  /** The text of the mention: "src/lib.rs" or "src/lib.rs#parse_args". */
+  label: string;
+  path: string;
+  symbol?: string;
+  container?: string;
+  line?: number;
+  endLine?: number;
+}
+
+export interface MentionSearch {
+  hits: MentionHit[];
+  /** Still indexing: asking again may find more. */
+  indexing: boolean;
+  files: number;
+  folders: number;
+}
+
+/** A mention stored with a sent message. */
+export interface MentionRef {
+  attachmentId: number;
+  label: string;
+  kind: string;
+  path: string;
+  symbol?: string;
+  container?: string;
+  startLine: number;
+  endLine: number;
+  truncated: boolean;
+}
+
+/** What the app would send for one mention, or why it cannot. */
+export interface MentionCheck {
+  label: string;
+  kind: string;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  truncated: boolean;
+  error?: string;
 }
 
 /** An image picked, pasted or dropped into the composer. */
@@ -386,8 +444,20 @@ export interface ApprovalRequest {
   summary: string;
   preview: string;
   card: "onceOnly" | "grantable";
-  reason: "normal" | "alwaysAsk" | "recoveredFromText" | "untrustedContentThenOutbound";
+  reason: "normal" | "alwaysAsk" | "recoveredFromText" | "untrustedContentThenOutbound" | "stillAsksInAllowAll";
+  /** Why the action asks whatever the chat's approval mode; null when Allow all would let it through. */
+  keepAsking?: KeepAsking | null;
 }
+
+/** The kinds of action that still ask while a chat is in Allow all. */
+export type KeepAsking =
+  | "delete"
+  | "destroy"
+  | "sensitive"
+  | "publish"
+  | "protectedApp"
+  | "markedDestructive"
+  | "hidden";
 
 export interface ApprovedFolder {
   id: number;
@@ -445,6 +515,16 @@ export interface ToolDto {
   ready: boolean;
   schemaError: string | null;
   tokenEstimate: number;
+  /** Comes along with any other tool (find_tools, call_tool, read_output, update_task): not a switch. */
+  companion: boolean;
+  /** On, and in the list the model gets whatever the next message says. On but not shown: "on request". */
+  shown: boolean;
+}
+
+/** The `toolSelection` setting: choose the tools for each task, and how many a turn shows at most. */
+export interface ToolSelection {
+  auto: boolean;
+  max: number;
 }
 
 export type ServerState =

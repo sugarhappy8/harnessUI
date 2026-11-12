@@ -201,6 +201,18 @@ pub struct ChatTools {
     /// Thinking off for this chat (when the model can think). Default on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub thinking_off: bool,
+    /// [0.0.4 profile] The user switched thinking on or off in this chat, so a model's
+    /// tested settings (`evals::profile`) do not change it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thinking_chosen: bool,
+    /// [0.0.4 tool selection] Tools the model has been shown in this chat (`tool_select.rs`):
+    /// once shown, a tool stays in the list for the chat, so the list only grows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shown: Vec<String>,
+    /// [0.0.4 tool selection] Tools the model found or ran through `call_tool` since the
+    /// last turn started; the next turn shows them when there is room.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub found: Vec<String>,
 }
 
 /// "Allow for this chat" grants, per chat. They live in memory only: they end when the
@@ -294,6 +306,9 @@ pub struct ApprovalDto {
     pub preview: String,
     pub card: policy::CardKind,
     pub reason: policy::AskReason,
+    /// [0.0.4 allow all] Why this action asks whatever the chat's mode, for the card's
+    /// reason line. `None` for an action that Allow all would let through.
+    pub keep_asking: Option<policy::KeepAsking>,
 }
 
 /// Stop: every card still waiting (including ones the browser raised outside a call) is
@@ -426,6 +441,7 @@ pub async fn ask_during_call(
         preview: preview.clone(),
         card: policy::CardKind::OnceOnly,
         reason: policy::AskReason::AlwaysAsk,
+        keep_asking: None,
     };
     let _ = app.emit_to(crate::MAIN_WINDOW, "approval-request", dto);
     let guard = CardGuard {
@@ -494,11 +510,14 @@ impl Approver for AppApprover {
             chat_id: self.chat_id,
             call_id,
             server: req.action.server.clone(),
-            tool: req.tool.clone(),
+            // [0.0.4 tool selection] A call made through `call_tool` shows the card of the
+            // tool it runs: the action is that tool's, and so is the name.
+            tool: crate::tool_select::finder::real_tool(&req.tool, Some(&req.action)),
             summary,
             preview: req.action.preview.clone(),
             card: req.card,
             reason: req.reason,
+            keep_asking: req.action.keep_asking,
         };
         let _ = self
             .app
@@ -624,12 +643,17 @@ impl PolicyGate for AppPolicy {
                 .subagent_recovered
                 .store(recovered, Ordering::Relaxed);
         }
+        // [0.0.4 allow all] the chat's approval mode goes into the turn context here.
         let turn = policy::TurnContext {
             // Only enabled tools are offered; a call to anything else never gets here.
             tool_enabled: true,
             server_ready: (self.ready)(tool),
             recovered_from_text: recovered,
             untrusted_in_turn,
+            // Read on every decision, like the grants below: a switch of the chat's mode
+            // reaches a turn that is already running, and a helper's gate (built for the
+            // same chat) is in the same mode.
+            allow_all: crate::approvals::for_decision(self.chat_id, untrusted_in_turn),
         };
         let grants = self.grants.of_chat(self.chat_id);
         policy::evaluate(action, &turn, &grants)
@@ -648,6 +672,13 @@ struct AppTools {
     /// What `run_subagent` needs to start a helper. `None` in a helper's own tool host: a
     /// helper cannot start another.
     helper: Option<HelperSetup>,
+    /// The app, for the hooks that store or track what a call did.
+    app: AppHandle,
+    /// Tools that are on in the chat but not shown to the model this turn (adaptive tool
+    /// selection, `tool_select.rs`): `find_tools` lists them and `call_tool` runs them.
+    hidden: Vec<mcp_host::RegisteredTool>,
+    /// Shared with the policy gate and the sink: the id of the call in progress.
+    shared: Arc<TurnShared>,
 }
 
 /// What a helper takes over from the turn that starts it (see `subagent.rs`).
@@ -728,6 +759,14 @@ impl AppTools {
             // The card shows one short line per call of the helper, not each tool's output.
             progress: None,
             helper: None,
+            app: setup.app.clone(),
+            hidden: self
+                .hidden
+                .iter()
+                .filter(|t| !crate::subagent::is_tool(t))
+                .cloned()
+                .collect(),
+            shared: Arc::default(),
         };
         let ready_host = self.host.clone();
         let policy = AppPolicy::for_chat(
@@ -778,25 +817,27 @@ impl AppTools {
         };
         crate::subagent::run(helper, args, cancel).await
     }
+
+    /// [0.0.4 tool selection] This turn's tools as `find_tools` and `call_tool` see them:
+    /// what the model has in its list, and what is on in the chat but kept back.
+    fn routing(&self) -> crate::tool_select::finder::Routing<'_> {
+        crate::tool_select::finder::Routing {
+            host: &self.host,
+            shown: &self.enabled,
+            hidden: &self.hidden,
+        }
+    }
 }
 
 #[async_trait]
 impl ToolHost for AppTools {
     fn tools(&self) -> Vec<ToolInfo> {
-        self.enabled
-            .iter()
-            .filter(|t| t.schema_error.is_none())
-            .map(|t| ToolInfo {
-                name: t.exposed.clone(),
-                description: t.def.description.clone(),
-                input_schema: t.def.input_schema.clone(),
-                read_only_hint: t.def.read_only,
-                destructive_hint: t.def.destructive,
-            })
-            .collect()
+        tool_infos(&self.enabled)
     }
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
-        self.host.validate(name, args)
+        // [0.0.4 tool selection] A `call_tool` call is checked as the tool it names, against
+        // that tool's own schema; every other call exactly as before.
+        self.routing().validate(name, args)
     }
     fn llama_schema(&self, name: &str) -> Option<Value> {
         self.host.llama_schema(name)
@@ -804,8 +845,13 @@ impl ToolHost for AppTools {
     async fn describe(&self, name: &str, args: &Map<String, Value>) -> Described {
         let mut chat = self.chat.clone();
         chat.result_cap_tokens = self.result_cap.load(Ordering::Relaxed);
-        let prefs = self.prefs.get(name).cloned().unwrap_or_default();
-        self.host.describe(name, args, &chat, prefs).await
+        // [0.0.4 tool selection] A `call_tool` call is described as the tool it names, by
+        // that tool's own describer and with the user's switches for that tool, so the
+        // gate, the approval card and the audit row see the real action. Every other call
+        // is described exactly as before.
+        self.routing()
+            .describe(name, args, &chat, &self.prefs)
+            .await
     }
     async fn execute(
         &self,
@@ -814,6 +860,9 @@ impl ToolHost for AppTools {
         action: &policy::Action,
         cancel: CancellationToken,
     ) -> ToolOutput {
+        // [0.0.4 artifacts] From here on the chat may hold content from outside the
+        // conversation, unless the tool only touches the app's own data for the chat.
+        crate::artifacts::note_tool_run(self.chat.chat_id, action);
         // Built-in names are fixed (an external tool can never hold one), so this is the
         // app's own tool. It runs here, not in its server: a helper needs the turn's
         // client, policy gate, approver and sink.
@@ -824,9 +873,36 @@ impl ToolHost for AppTools {
                 _ => ToolOutput::error(crate::subagent::NESTED_REFUSAL),
             };
         }
+        // [0.0.4 tool selection] `find_tools` and `call_tool` are the app's own tools too and
+        // are run from here (see `tool_select.rs`). `find_tools` is answered from this
+        // turn's tool lists. `call_tool` becomes the tool it names, with that tool's
+        // arguments, and from here on runs exactly like a direct call to it: the same
+        // code below, the same hooks. `run_subagent` was handled above and is never a
+        // target (`finder::NOT_THROUGH_CALL_TOOL`).
+        use crate::tool_select::finder::{self, Route};
+        let target = match self.routing().route(name, args, action) {
+            Route::Direct => None,
+            Route::Find => {
+                return finder::find(&self.app, self.chat.chat_id, self.routing(), args).await;
+            }
+            Route::Refused(why) => return ToolOutput::error(why),
+            Route::Call(target) => Some(target),
+        };
+        if let Some(target) = target.as_ref().filter(|t| t.hidden) {
+            // A tool the chat ran this way is one the next turn shows, when there is room.
+            let state = self.app.state::<AppState>();
+            let used = [target.name.clone()];
+            crate::tool_select::note_wanted(&state, self.chat.chat_id, &used, true).await;
+        }
+        let (name, args) = match &target {
+            Some(target) => (target.name.as_str(), &target.args),
+            None => (name, args),
+        };
         let mut chat = self.chat.clone();
         chat.result_cap_tokens = self.result_cap.load(Ordering::Relaxed);
-        self.host
+        let chat_id = chat.chat_id;
+        let mut out = self
+            .host
             .call(
                 name,
                 args,
@@ -837,7 +913,14 @@ impl ToolHost for AppTools {
                     progress: self.progress.clone(),
                 },
             )
-            .await
+            .await;
+        // ---- After a call. One line per feature, each a call into that feature's module. ----
+        let call_id = self.shared.current_call();
+        // [0.0.4 outputs] keeps the full text of a shortened result and says how to read it.
+        crate::outputs::after_call(&self.app, chat_id, &call_id, name, &mut out).await;
+        // [0.0.4 task] notes changed files and completed checks in the chat's task.
+        crate::task::after_call(&self.app, chat_id, name, args, action, &out).await;
+        out
     }
 }
 
@@ -1000,6 +1083,12 @@ fn decision_name(d: &CallDecision) -> (&'static str, store::AuditDecision, Optio
             store::AuditDecision::AllowedByGrant,
             None,
         ),
+        // [0.0.4 allow all] the chat was in Allow all and the action is not one that asks.
+        CallDecision::AllowedByMode => (
+            "allowed by Allow all",
+            store::AuditDecision::AllowedByMode,
+            None,
+        ),
         CallDecision::Denied { note } => ("denied", store::AuditDecision::Denied, note.clone()),
         CallDecision::Cancelled => ("cancelled", store::AuditDecision::Cancelled, None),
         CallDecision::Refused { reason } => (
@@ -1024,7 +1113,7 @@ pub(crate) fn audit_entry(
     let (mut label, mut audit_decision, note) = decision_name(decision);
     // Skills and `run_subagent` never prompt (D11): record them as such, not as a grant.
     if audit_decision == store::AuditDecision::AllowedByGrant
-        && action.is_some_and(|a| a.scope == policy::Scope::Skill)
+        && action.is_some_and(|a| matches!(a.scope, policy::Scope::Skill | policy::Scope::AppData))
     {
         audit_decision = store::AuditDecision::AllowedWithoutPrompt;
         label = "no approval needed";
@@ -1037,17 +1126,21 @@ pub(crate) fn audit_entry(
         ),
         None => (String::new(), String::new(), "unknown".into()),
     };
+    // [0.0.4 tool selection] A call made through `call_tool` is logged as the tool it ran,
+    // with that tool's arguments: the row of a direct call.
+    let (tool, arguments) = crate::tool_select::finder::audited(&result.name, arguments, action);
     let entry = store::AuditEntry {
         ts: None,
         chat_id: Some(store::ChatId(chat_id)),
         server,
-        tool: result.name.clone(),
+        tool,
         arguments,
         preview: preview.chars().take(20_000).collect(),
         risk,
         decision: audit_decision,
         decided_by: match decision {
             CallDecision::AllowedByGrant
+            | CallDecision::AllowedByMode
             | CallDecision::Refused { .. }
             | CallDecision::NotEvaluated => "policy".into(),
             CallDecision::Cancelled => "stop".into(),
@@ -1428,7 +1521,7 @@ async fn persist_loop(
 
 /// The folder relative paths resolve against (ARCHITECTURE.md 9.3): the one the user
 /// chose while it is still approved for the chat, otherwise the first approved folder.
-fn working_folder_for(stored: Option<&str>, approved: &[String]) -> Option<String> {
+pub(crate) fn working_folder_for(stored: Option<&str>, approved: &[String]) -> Option<String> {
     stored
         .filter(|w| approved.iter().any(|a| a == w))
         .or_else(|| approved.first().map(String::as_str))
@@ -1447,6 +1540,176 @@ pub struct TurnRequest {
     pub template: agent::turn::RequestTemplate,
 }
 
+/// The tools a turn offers, as the loop sees them: the shown tools whose schema is usable,
+/// in order. The Context tab lists them with this too.
+pub(crate) fn tool_infos(shown: &[mcp_host::RegisteredTool]) -> Vec<ToolInfo> {
+    shown
+        .iter()
+        .filter(|t| t.schema_error.is_none())
+        .map(|t| ToolInfo {
+            name: t.exposed.clone(),
+            description: t.def.description.clone(),
+            input_schema: t.def.input_schema.clone(),
+            read_only_hint: t.def.read_only,
+            destructive_hint: t.def.destructive,
+        })
+        .collect()
+}
+
+/// Whether an assembly is for a turn that starts now, or only shows what it would send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Assembly {
+    /// A real turn: what starting a turn changes is changed (the chat's "outside content"
+    /// mark for artifacts, the computer-use profile, the tools the chat was shown, the
+    /// skills server's turn settings, the task's record that its note was sent).
+    Turn,
+    /// The Context tab's view of the next request: the same reads, and nothing changed.
+    Preview,
+}
+
+/// What a turn sends, as [`assemble`] builds it.
+pub(crate) struct Assembled {
+    /// The turn's input: history, system prompt, pins, preamble, skills, summary, app
+    /// notes, thinking and request settings.
+    pub input: agent::turn::TurnInput,
+    /// The tools shown to the model this turn, in order (`run_subagent` last).
+    pub shown: Vec<mcp_host::RegisteredTool>,
+    /// The tools that are on but kept back (reachable through `find_tools`).
+    pub hidden: Vec<mcp_host::RegisteredTool>,
+    /// The chat's approved folders.
+    pub folders: Vec<String>,
+}
+
+/// Builds what a turn in this chat sends: the one place both a real turn ([`run`]) and the
+/// Context tab (`context_cmd`) get it from, so the tab shows exactly what the next turn
+/// would send. In [`Assembly::Preview`] nothing is changed; in [`Assembly::Turn`] the
+/// turn's start is recorded where it always was.
+pub(crate) async fn assemble(
+    app: &AppHandle,
+    req: &TurnRequest,
+    mode: Assembly,
+) -> AppResult<Assembled> {
+    let state = app.state::<AppState>();
+    let chat_id = req.chat.id;
+    let turn = mode == Assembly::Turn;
+    // A turn answers `reply_to`; the preview shows the branch the chat shows now.
+    let path = if turn {
+        state.store.path_to(chat_id, req.reply_to).await?
+    } else {
+        state.store.current_path(chat_id).await?
+    };
+    let history = history_of(&state, &path).await?;
+    // [0.0.4 artifacts] A page the model writes after content from outside the
+    // conversation entered the chat runs no script until the user allows it.
+    if turn {
+        crate::artifacts::note_history(chat_id.0, &history);
+    }
+
+    // Tools enabled for this chat.
+    if turn {
+        crate::computer_cmd::prepare_turn(app, chat_id.0, &req.model_ref).await;
+    }
+    let enabled = crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
+    // [0.0.4 tool selection] Of the tools that are on in the chat, the ones shown to the
+    // model this turn. The rest stay reachable through `find_tools` and `call_tool`.
+    let (mut enabled, hidden) = if turn {
+        crate::tool_select::for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx).await
+    } else {
+        crate::tool_select::preview_for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx)
+            .await
+    };
+    // `run_subagent` goes last, so a helper's tool list (the same without it) is a prefix
+    // of the turn's and the model server can reuse more of its cached prompt (8.5).
+    enabled.sort_by_key(crate::subagent::is_tool);
+    let folders: Vec<String> = state
+        .store
+        .approved_folders_for_chat(chat_id)
+        .await?
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    let skills_srv = state.skills.clone();
+    if turn {
+        // One turn runs at a time, so the skills server's per-turn settings are global.
+        skills_srv.set_context_tokens(req.caps.n_ctx as usize);
+        // [0.0.4 tool selection] On in the chat, whether or not this turn shows it.
+        skills_srv.set_terminal_enabled(
+            enabled
+                .iter()
+                .chain(&hidden)
+                .any(|t| t.server == "terminal"),
+        );
+    }
+
+    let default_prompt: Option<String> = state
+        .store
+        .get_setting(crate::settings::DEFAULT_SYSTEM_PROMPT)
+        .await
+        .ok()
+        .flatten();
+    let mut input = agent::turn::TurnInput::new(history, req.caps, req.template.clone());
+    let stored_steps: Option<serde_json::Value> = state
+        .store
+        .get_setting(crate::settings::STEPS_PER_TURN)
+        .await
+        .ok()
+        .flatten();
+    input.step_cap = crate::settings::steps_per_turn(stored_steps.as_ref());
+    let chat_prefs: ChatTools =
+        serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
+    input.thinking = !chat_prefs.thinking_off;
+    crate::evals::profile::apply_to_turn(&state, &req.model_ref, &chat_prefs, &mut input).await; // [0.0.4 profile]
+    input.system_prompt = req
+        .chat
+        .system_prompt
+        .clone()
+        .or(default_prompt)
+        .unwrap_or_else(|| "You are a helpful assistant.".into());
+    input.preamble = Some(agent::prompt::Preamble {
+        approved_folders: folders.clone(),
+        os: if cfg!(windows) {
+            "Windows".into()
+        } else {
+            "macOS".into()
+        },
+        path_separator: if cfg!(windows) {
+            "\\".into()
+        } else {
+            "/".into()
+        },
+    });
+    let enabled_skills = skills_srv.enabled();
+    if !enabled_skills.is_empty() {
+        let refs: Vec<&tools::Skill> = enabled_skills.iter().collect();
+        input.skills_index = Some(tools::skills::index_block(&refs));
+    }
+    input.loaded_skills = skills_srv
+        .loaded_in(chat_id.0)
+        .into_iter()
+        .map(|s| agent::prompt::LoadedSkill {
+            name: s.name.clone(),
+            text: s.body.clone(),
+        })
+        .collect();
+    input.pinned = crate::pinned::for_turn(app, chat_id, turn).await?; // [0.0.4 pinned]
+    input.summary = latest_summary(&state, chat_id, &path).await;
+    if turn {
+        input
+            .app_notes
+            .extend(crate::task::begin_turn(app, chat_id.0).await); // [0.0.4 task]
+    } else {
+        input
+            .app_notes
+            .extend(crate::task::note_for_turn(&state, chat_id.0).await);
+    }
+    Ok(Assembled {
+        input,
+        shown: enabled,
+        hidden,
+        folders,
+    })
+}
+
 /// Runs one agent turn for a chat and streams it to `channel`.
 pub async fn run(
     app: &AppHandle,
@@ -1456,39 +1719,31 @@ pub async fn run(
 ) -> AppResult<()> {
     let state = app.state::<AppState>();
     let chat_id = req.chat.id;
-    let path = state.store.path_to(chat_id, req.reply_to).await?;
-    let history = history_of(&state, &path).await?;
+    let local_endpoint = req.caps.local;
+    // Everything the turn sends, built where the Context tab builds it.
+    let Assembled {
+        input,
+        shown: enabled,
+        hidden,
+        folders,
+    } = assemble(app, &req, Assembly::Turn).await?;
 
-    // Tools enabled for this chat.
     let host = state.host.clone();
-    crate::computer_cmd::prepare_turn(app, chat_id.0, &req.model_ref).await;
-    let mut enabled =
-        crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
-    // `run_subagent` goes last, so a helper's tool list (the same without it) is a prefix
-    // of the turn's and the model server can reuse more of its cached prompt (8.5).
-    enabled.sort_by_key(crate::subagent::is_tool);
     let mut tool_prefs = HashMap::new();
-    for t in &enabled {
+    // [0.0.4 tool selection] Also for the tools that are kept back: one run through
+    // `call_tool` is decided with the user's switches for it ("always ask", "any
+    // arguments"), like a direct call.
+    for t in enabled.iter().chain(&hidden) {
         tool_prefs.insert(
             t.exposed.clone(),
             crate::mcp_cmd::tool_prefs_for(&state, &t.server, &t.original).await,
         );
     }
-    let folders: Vec<String> = state
-        .store
-        .approved_folders_for_chat(chat_id)
-        .await?
-        .into_iter()
-        .map(|f| f.path)
-        .collect();
     let skills_srv = state.skills.clone();
-    // One turn runs at a time, so the skills server's per-turn settings are global.
-    skills_srv.set_context_tokens(req.caps.n_ctx as usize);
-    skills_srv.set_terminal_enabled(enabled.iter().any(|t| t.server == "terminal"));
     let chat_ctx = ChatContext {
         chat_id: chat_id.0,
         working_folder: working_folder_for(req.chat.working_folder.as_deref(), &folders),
-        approved_folders: folders.clone(),
+        approved_folders: folders,
         forbidden_folders: crate::permissions::forbidden_for_tools(app),
         skill_folders: skills_srv
             .enabled()
@@ -1517,6 +1772,7 @@ pub async fn run(
         result_cap_tokens: 2000,
     };
     let result_cap = Arc::new(AtomicUsize::new(2000));
+    let shared = Arc::new(TurnShared::default());
     let progress_channel = channel.clone();
     let subagents_on = enabled.iter().any(crate::subagent::is_tool);
     let mut tools = AppTools {
@@ -1533,8 +1789,10 @@ pub async fn run(
         })),
         // Set below, once the turn's input exists.
         helper: None,
+        app: app.clone(),
+        hidden,
+        shared: shared.clone(),
     };
-    let shared = Arc::new(TurnShared::default());
     let ready_host = host.clone();
     let policy = AppPolicy::for_chat(
         state.grants.clone(),
@@ -1571,56 +1829,15 @@ pub async fn run(
         prx,
     ));
 
-    let default_prompt: Option<String> = state
-        .store
-        .get_setting(crate::settings::DEFAULT_SYSTEM_PROMPT)
-        .await
-        .ok()
-        .flatten();
-    let local_endpoint = req.caps.local;
-    let mut input = agent::turn::TurnInput::new(history, req.caps, req.template);
-    let chat_prefs: ChatTools =
-        serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
-    input.thinking = !chat_prefs.thinking_off;
-    input.system_prompt = req
-        .chat
-        .system_prompt
-        .clone()
-        .or(default_prompt)
-        .unwrap_or_else(|| "You are a helpful assistant.".into());
-    input.preamble = Some(agent::prompt::Preamble {
-        approved_folders: folders,
-        os: if cfg!(windows) {
-            "Windows".into()
-        } else {
-            "macOS".into()
-        },
-        path_separator: if cfg!(windows) {
-            "\\".into()
-        } else {
-            "/".into()
-        },
-    });
-    let enabled_skills = skills_srv.enabled();
-    if !enabled_skills.is_empty() {
-        let refs: Vec<&tools::Skill> = enabled_skills.iter().collect();
-        input.skills_index = Some(tools::skills::index_block(&refs));
-    }
-    input.loaded_skills = skills_srv
-        .loaded_in(chat_id.0)
-        .into_iter()
-        .map(|s| agent::prompt::LoadedSkill {
-            name: s.name.clone(),
-            text: s.body.clone(),
-        })
-        .collect();
     let sanitizer = agent::prompt::Sanitizer::for_endpoint(&req.client).await;
     if subagents_on {
-        // A helper gets the same system prompt, preamble and skills, the same model and
-        // request settings, and none of the chat: no history and no summary.
-        let history = std::mem::take(&mut input.history);
-        let helper_input = input.clone();
-        input.history = history;
+        // A helper gets the same system prompt, pins, preamble and skills, the same model
+        // and request settings, and none of the chat: no history, no summary and no app
+        // notes (the task note is the chat's).
+        let mut helper_input = input.clone();
+        helper_input.history = Vec::new();
+        helper_input.summary = None;
+        helper_input.app_notes.clear();
         tools.helper = Some(HelperSetup {
             app: app.clone(),
             client: req.client.clone(),
@@ -1632,7 +1849,6 @@ pub async fn run(
             shared: shared.clone(),
         });
     }
-    input.summary = latest_summary(&state, chat_id, &path).await;
     let _ = channel.send(TurnStreamEvent::Started {
         user_message_id: req.user_message_id.map(|m| m.0),
     });
@@ -1696,7 +1912,7 @@ pub async fn run(
         agent::turn::TurnStatus::Stopped => ("stopped", None),
         agent::turn::TurnStatus::StepCapReached => (
             "stepCap",
-            Some("The step limit for one turn was reached.".to_string()),
+            Some("The model reached the step limit for one turn.".to_string()),
         ),
         agent::turn::TurnStatus::MistakeBudget => (
             "mistakes",
@@ -1745,6 +1961,7 @@ fn failure_next_step(code: &str, local: bool) -> &'static str {
         ("unauthorized", _) => "Check the API key in Settings → Endpoints, then regenerate.",
         ("output_limit", _) => "Ask for a shorter answer, or regenerate.",
         ("no_answer", _) => "Regenerate, or try a different model.",
+        ("pinned_do_not_fit", _) => crate::pinned::next_step(local), // [0.0.4 pinned]
         (_, true) => "Check that the model is still running, then regenerate.",
         (_, false) => {
             "Check that the server is running and its address in Settings → Endpoints is right, then regenerate."
@@ -1955,6 +2172,8 @@ mod tests {
             risk: policy::Risk::Normal,
             read_only: false,
             outbound: false,
+            keep_asking: None,
+            network: false,
             hard_limit: None,
             payload: Value::Null,
         }
@@ -2004,6 +2223,118 @@ mod tests {
         // Nothing to add leaves no empty entry behind.
         grants.add(9, Vec::new());
         assert!(grants.0.lock().unwrap().get(&9).is_none());
+    }
+
+    /// [0.0.4 allow all] The chat's approval mode is read on every decision, like its
+    /// grants: a switch reaches a turn that is already running, in both directions, and a
+    /// helper's gate (built for the same chat, as `run_subagent` builds it) is in the same
+    /// mode. Another chat is not affected, and what keeps asking asks in both modes.
+    #[test]
+    fn a_mode_switch_reaches_a_running_turn_and_its_helpers() {
+        // Chat ids of this test alone: the modes are shared by the whole process.
+        const CHAT: i64 = 904_001;
+        const OTHER: i64 = 904_002;
+        let grants = Arc::new(Grants::default());
+        let gate_for =
+            |chat: i64| AppPolicy::for_chat(grants.clone(), chat, Arc::new(|_: &str| true));
+        let (gate, helper, other) = (gate_for(CHAT), gate_for(CHAT), gate_for(OTHER));
+        let write = action_with(policy::Scope::FileWrite {
+            folder: "/work".into(),
+        });
+        let delete = policy::Action {
+            tool: "delete_file".into(),
+            risk: policy::Risk::AlwaysAsk,
+            keep_asking: Some(policy::KeepAsking::Delete),
+            ..write.clone()
+        };
+        let asks = |d: policy::Decision| matches!(d, policy::Decision::Ask { .. });
+        let still_asks = policy::Decision::Ask {
+            card: policy::CardKind::OnceOnly,
+            reason: policy::AskReason::StillAsksInAllowAll,
+        };
+
+        // Ask first is where every chat starts.
+        assert!(asks(gate.decide("write_file", &write, false, false)));
+
+        // The user switches the chat to Allow all while its turn runs.
+        let modes = crate::approvals::modes();
+        modes.set_chat(CHAT, true);
+        for g in [&gate, &helper] {
+            assert_eq!(
+                g.decide("write_file", &write, false, false),
+                policy::Decision::AllowedByMode
+            );
+            // A call recovered from text, after untrusted content: still a local write.
+            assert_eq!(
+                g.decide("write_file", &write, true, true),
+                policy::Decision::AllowedByMode
+            );
+            assert_eq!(g.decide("delete_file", &delete, false, false), still_asks);
+        }
+        assert!(
+            asks(other.decide("write_file", &write, false, false)),
+            "another chat stays in Ask"
+        );
+        // A tool whose server is not ready is refused in every mode.
+        let not_ready = AppPolicy::for_chat(grants.clone(), CHAT, Arc::new(|_: &str| false));
+        assert!(matches!(
+            not_ready.decide("write_file", &write, false, false),
+            policy::Decision::Refused { .. }
+        ));
+
+        // Switched back: the turn's next call asks again, and so does its helper's.
+        modes.set_chat(CHAT, false);
+        for g in [&gate, &helper] {
+            assert!(asks(g.decide("write_file", &write, false, false)));
+            assert_eq!(
+                g.decide("delete_file", &delete, false, false),
+                policy::Decision::Ask {
+                    card: policy::CardKind::OnceOnly,
+                    reason: policy::AskReason::AlwaysAsk
+                }
+            );
+        }
+    }
+
+    /// [0.0.4 allow all] A call the mode let through is audited as such: decided by
+    /// policy, shown on its tool card as "allowed by Allow all".
+    #[test]
+    fn a_call_allowed_by_the_mode_is_audited_as_allowed_by_allow_all() {
+        let call = CallRecord {
+            id: "c1".into(),
+            name: "write_file".into(),
+            arguments: serde_json::from_value(json!({"path": "a.txt", "content": "x"})).unwrap(),
+            recovered: false,
+        };
+        let mut result = ResultRecord::synthetic(&call, CallStatus::Ok, Vec::new());
+        result.text = "Wrote a.txt (1 bytes).".into();
+        let action = action_with(policy::Scope::FileWrite {
+            folder: "/work".into(),
+        });
+        let (label, entry) = audit_entry(
+            7,
+            Value::Object(call.arguments.clone()),
+            &result,
+            &CallDecision::AllowedByMode,
+            Some(&action),
+            12,
+        );
+        assert_eq!(label, "allowed by Allow all");
+        assert_eq!(entry.decision, store::AuditDecision::AllowedByMode);
+        assert_eq!(entry.decided_by, "policy");
+        assert_eq!(entry.tool, "write_file");
+        assert_eq!(entry.note, None);
+        // The app's own data is still recorded as needing no approval, whatever the mode.
+        let (label, entry) = audit_entry(
+            7,
+            Value::Null,
+            &result,
+            &CallDecision::AllowedByGrant,
+            Some(&action_with(policy::Scope::AppData)),
+            1,
+        );
+        assert_eq!(label, "no approval needed");
+        assert_eq!(entry.decision, store::AuditDecision::AllowedWithoutPrompt);
     }
 
     fn subagent_action() -> policy::Action {

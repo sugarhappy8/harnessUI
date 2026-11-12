@@ -9,17 +9,21 @@ export function RuntimeIndicator() {
   if (runtime.state === "starting") {
     const pct = runtime.progress !== null ? Math.round(runtime.progress * 100) : null;
     return (
-      <div className="flex items-center gap-2 text-xs text-fg-muted" aria-live="polite">
-        <span>
+      <div className="enter-fade flex min-w-0 items-center gap-2 text-xs whitespace-nowrap text-fg-muted" aria-live="polite">
+        <span className="truncate">
           Loading model{runtime.stage ? ` (${runtime.stage.replace("_", " ")})` : ""}
           {pct !== null ? ` ${pct}%` : "…"}
         </span>
-        <div className="h-1.5 w-24 overflow-hidden rounded bg-bg-muted" aria-hidden>
-          <div
-            className="h-full bg-accent transition-all"
-            style={{ width: `${pct ?? 15}%` }}
-          />
-        </div>
+        {pct !== null ? (
+          <div className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-bg-muted" aria-hidden>
+            <div
+              className="brand-gradient h-full rounded-full transition-[width] duration-300 ease-out"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        ) : (
+          <div className="progress-indeterminate h-1.5 w-24 shrink-0 rounded-full bg-bg-muted" aria-hidden />
+        )}
       </div>
     );
   }
@@ -32,8 +36,12 @@ export function RuntimeIndicator() {
       runtime.totalLayers !== null &&
       runtime.offloadedLayers < runtime.totalLayers;
     return (
-      <span className="flex items-center gap-2 text-xs text-fg-muted" title={runtime.modelPath ?? undefined}>
-        <span>
+      <span
+        className="enter-fade flex min-w-0 items-center gap-2 text-xs whitespace-nowrap text-fg-muted"
+        title={runtime.modelPath ?? undefined}
+      >
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-hidden />
+        <span className="truncate">
           {where}
           {runtime.nCtx ? ` · ${runtime.nCtx.toLocaleString()} context` : ""}
         </span>
@@ -56,6 +64,7 @@ export function RuntimeIndicator() {
       </span>
     );
   }
-  if (runtime.state === "failed") return <span className="text-xs text-danger">Model failed to load</span>;
+  if (runtime.state === "failed")
+    return <span className="text-xs whitespace-nowrap text-danger">Model failed to load</span>;
   return null;
 }
