@@ -134,7 +134,11 @@ fn record(s: &mut Scan<'_>, i: usize, mut c: Cur<'_>) -> bool {
         Some(b'{') => true,
         Some(b':') => !c.rest().starts_with("::"),
         // The body on the next line.
-        None => s.m.lines.get(i + 1).is_some_and(|l| l.trim_start().starts_with('{')),
+        None => {
+            s.m.lines
+                .get(i + 1)
+                .is_some_and(|l| l.trim_start().starts_with('{'))
+        }
         _ => false,
     };
     if !opens {
@@ -168,7 +172,12 @@ fn typedef(s: &mut Scan<'_>, i: usize, mut c: Cur<'_>) {
     let ext = s.extent(i, c.pos, false);
     let Some(body) = ext.body else { return };
     let after = &s.m.lines[body.close][body.close_col + 1..];
-    let alias = after.split(';').next().unwrap_or("").trim().trim_start_matches('*');
+    let alias = after
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('*');
     let alias = (!alias.is_empty() && alias.bytes().all(is_ident)).then_some(alias);
     if let Some(name) = alias.or(tag) {
         s.add(name, kind, None, i, &ext);

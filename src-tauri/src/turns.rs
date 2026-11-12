@@ -201,6 +201,10 @@ pub struct ChatTools {
     /// Thinking off for this chat (when the model can think). Default on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub thinking_off: bool,
+    /// [0.0.4 profile] The user switched thinking on or off in this chat, so a model's
+    /// tested settings (`evals::profile`) do not change it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thinking_chosen: bool,
     /// [0.0.4 tool selection] Tools the model has been shown in this chat (`tool_select.rs`):
     /// once shown, a tool stays in the list for the chat, so the list only grows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1527,7 +1531,7 @@ async fn persist_loop(
 
 /// The folder relative paths resolve against (ARCHITECTURE.md 9.3): the one the user
 /// chose while it is still approved for the chat, otherwise the first approved folder.
-fn working_folder_for(stored: Option<&str>, approved: &[String]) -> Option<String> {
+pub(crate) fn working_folder_for(stored: Option<&str>, approved: &[String]) -> Option<String> {
     stored
         .filter(|w| approved.iter().any(|a| a == w))
         .or_else(|| approved.first().map(String::as_str))
@@ -1758,7 +1762,9 @@ pub async fn run(
         });
     }
     input.summary = latest_summary(&state, chat_id, &path).await;
-    input.app_notes.extend(crate::task::begin_turn(app, chat_id.0).await); // [0.0.4 task]
+    input
+        .app_notes
+        .extend(crate::task::begin_turn(app, chat_id.0).await); // [0.0.4 task]
     let _ = channel.send(TurnStreamEvent::Started {
         user_message_id: req.user_message_id.map(|m| m.0),
     });

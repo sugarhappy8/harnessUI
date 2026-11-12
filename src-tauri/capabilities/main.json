@@ -169,6 +169,16 @@
     "allow-get-task",
     "allow-edit-task",
     "allow-set-task-status",
-    "allow-clear-task"
+    "allow-clear-task",
+    "allow-get-model-profile",
+    "allow-forget-model-profile",
+    "allow-start-capability-check",
+    "allow-cancel-eval",
+    "allow-list-bench-tasks",
+    "allow-start-benchmark",
+    "allow-list-bench-runs",
+    "allow-get-bench-run",
+    "allow-search-mentions",
+    "allow-resolve-mentions"
   ]
 }

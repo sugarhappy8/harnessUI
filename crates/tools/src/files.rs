@@ -710,7 +710,9 @@ impl BuiltinServer for FilesServer {
                 if path_buf.is_dir() {
                     return Described::Invalid(format!(
                         "{shown} is a folder, not a file. write_file needs the path of a file inside it, for example {}. list_dir shows what is in the folder.",
-                        policy::sanitize::visible(&path_buf.join("notes.txt").display().to_string())
+                        policy::sanitize::visible(
+                            &path_buf.join("notes.txt").display().to_string()
+                        )
                     ));
                 }
                 if let Some(file) = file_on_the_way(&path_buf) {
@@ -1860,7 +1862,10 @@ mod tests {
         .unwrap();
         assert!(action.read_only && out.is_error, "{out:?}");
         assert!(out.joined_text().contains("3 times"));
-        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "a a a");
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "a a a"
+        );
         let (_, out) = run(
             &fs,
             &c,
@@ -1948,13 +1953,18 @@ mod tests {
             format!("Edit {} (match 2 of 2, at line 7)", shown(&file))
         );
         assert!(
-            action.preview.contains("@@ -4,6 +4,6 @@") && action.preview.contains("+    let total = 1;"),
+            action.preview.contains("@@ -4,6 +4,6 @@")
+                && action.preview.contains("+    let total = 1;"),
             "{}",
             action.preview
         );
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            CALC.replacen("    let total = price * qty;\n    total * 0.2", "    let total = 1;\n    total * 0.2", 1)
+            CALC.replacen(
+                "    let total = price * qty;\n    total * 0.2",
+                "    let total = 1;\n    total * 0.2",
+                1
+            )
         );
         assert_eq!(
             out.joined_text(),
@@ -1990,7 +2000,10 @@ mod tests {
     /// `read_file` for the same path, also in a place where writing always asks.
     #[tokio::test]
     async fn an_edit_that_needs_the_file_to_explain_it_is_described_as_a_read() {
-        let (_dir, root) = tree(&[("calc.rs", CALC), (".git/config", "[core]\n\tx = 1\n\tx = 1\n")]);
+        let (_dir, root) = tree(&[
+            ("calc.rs", CALC),
+            (".git/config", "[core]\n\tx = 1\n\tx = 1\n"),
+        ]);
         let c = chat(&root);
         let fs = FilesServer::default();
         for (path, old_text) in [
@@ -2000,15 +2013,30 @@ mod tests {
             (".git/config", "y = 2"),
         ] {
             let read = described(&fs, &c, "read_file", json!({"path": path})).await;
-            let edit = described(&fs, &c, "edit_file", json!({"path": path, "old_text": old_text, "new_text": "z"})).await;
-            assert_eq!(policy_facts(&edit), policy_facts(&read), "{path} {old_text}");
+            let edit = described(
+                &fs,
+                &c,
+                "edit_file",
+                json!({"path": path, "old_text": old_text, "new_text": "z"}),
+            )
+            .await;
+            assert_eq!(
+                policy_facts(&edit),
+                policy_facts(&read),
+                "{path} {old_text}"
+            );
             assert_eq!(edit.tool, "edit_file");
             assert!(edit.read_only && edit.risk == Risk::Normal && edit.keep_asking.is_none());
             let file = shown(&dunce::canonicalize(root.join(path)).unwrap());
-            assert_eq!(edit.summary, format!("Read {file} to explain why an edit cannot be made"));
+            assert_eq!(
+                edit.summary,
+                format!("Read {file} to explain why an edit cannot be made")
+            );
             assert_eq!(
                 edit.preview,
-                format!("The edit to {file} cannot be applied as written. To explain why, the app will look up the lines of this file that match or come closest, and give them to the model. Nothing will be changed.")
+                format!(
+                    "The edit to {file} cannot be applied as written. To explain why, the app will look up the lines of this file that match or come closest, and give them to the model. Nothing will be changed."
+                )
             );
         }
         // An edit that can be made still asks as a write, exactly as before.
@@ -2033,22 +2061,57 @@ mod tests {
         let c = chat(&root);
         let fs = FilesServer::default();
         // Read, then changed: write_file refuses a file that changed since.
-        run(&fs, &c, "read_file", json!({"path": "docs/a.txt"})).await.unwrap();
+        run(&fs, &c, "read_file", json!({"path": "docs/a.txt"}))
+            .await
+            .unwrap();
         std::fs::write(root.join("docs/a.txt"), format!("{body}{MARKER}\n")).unwrap();
         let calls = [
-            ("edit_file", json!({"path": "f.txt", "old_text": "alpha = 1", "new_text": "b", "occurrence": 7})),
-            ("edit_file", json!({"path": "f.txt", "old_text": "alpha = 1", "new_text": "alpha = 1", "replace_all": true})),
-            ("edit_file", json!({"path": "f.txt", "old_text": MARKER, "new_text": MARKER})),
-            ("edit_file", json!({"path": "f.txt", "old_text": "alpha", "new_text": "b", "occurrence": 1, "replace_all": true})),
-            ("edit_file", json!({"path": "docs", "old_text": "a", "new_text": "b"})),
-            ("edit_file", json!({"path": "missing.txt", "old_text": "a", "new_text": "b"})),
-            ("edit_file", json!({"path": "x.bin", "old_text": "alpha", "new_text": "b"})),
-            ("edit_file", json!({"path": "big.txt", "old_text": "alpha", "new_text": "b"})),
-            ("edit_file", json!({"path": "f.txt/inner", "old_text": "a", "new_text": "b"})),
+            (
+                "edit_file",
+                json!({"path": "f.txt", "old_text": "alpha = 1", "new_text": "b", "occurrence": 7}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "f.txt", "old_text": "alpha = 1", "new_text": "alpha = 1", "replace_all": true}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "f.txt", "old_text": MARKER, "new_text": MARKER}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "f.txt", "old_text": "alpha", "new_text": "b", "occurrence": 1, "replace_all": true}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "docs", "old_text": "a", "new_text": "b"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "missing.txt", "old_text": "a", "new_text": "b"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "x.bin", "old_text": "alpha", "new_text": "b"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "big.txt", "old_text": "alpha", "new_text": "b"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "f.txt/inner", "old_text": "a", "new_text": "b"}),
+            ),
             ("write_file", json!({"path": "x.bin", "content": "text"})),
             ("write_file", json!({"path": "docs", "content": "text"})),
-            ("write_file", json!({"path": "f.txt/inner.txt", "content": "text"})),
-            ("write_file", json!({"path": "docs/a.txt", "content": "text"})),
+            (
+                "write_file",
+                json!({"path": "f.txt/inner.txt", "content": "text"}),
+            ),
+            (
+                "write_file",
+                json!({"path": "docs/a.txt", "content": "text"}),
+            ),
             ("delete_file", json!({"path": "docs"})),
             ("delete_file", json!({"path": "missing.txt"})),
             ("read_file", json!({"offset": 1})),
@@ -2066,15 +2129,27 @@ mod tests {
                     None => panic!("{tool} {a}: expected a refusal, got {action:?}"),
                 },
             };
-            assert!(!message.contains("MARKER") && !message.contains("alpha"), "{tool} {a}: {message}");
+            assert!(
+                !message.contains("MARKER") && !message.contains("alpha"),
+                "{tool} {a}: {message}"
+            );
         }
         assert!(invalid >= 14, "{invalid}");
         // The two edits that need the file are reads, and their texts quote nothing.
         for old_text in ["alpha = 1", "beta = 2"] {
-            let action = described(&fs, &c, "edit_file", json!({"path": "f.txt", "old_text": old_text, "new_text": "b"})).await;
+            let action = described(
+                &fs,
+                &c,
+                "edit_file",
+                json!({"path": "f.txt", "old_text": old_text, "new_text": "b"}),
+            )
+            .await;
             assert!(action.read_only);
             for text in [&action.summary, &action.preview] {
-                assert!(!text.contains("MARKER") && !text.contains("alpha"), "{text}");
+                assert!(
+                    !text.contains("MARKER") && !text.contains("alpha"),
+                    "{text}"
+                );
             }
         }
         assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), body);
@@ -2094,7 +2169,10 @@ mod tests {
         };
         assert!(action.read_only);
         let out = fs.call("edit_file", &a, &action, ctx(c.clone())).await;
-        assert!(out.is_error && out.joined_text().contains("found 2 times"), "{out:?}");
+        assert!(
+            out.is_error && out.joined_text().contains("found 2 times"),
+            "{out:?}"
+        );
         assert_eq!(std::fs::read(&file).unwrap(), CALC.as_bytes());
         // Someone removes the second match: the same edit would now apply. Still no write.
         let changed = CALC.replacen(TOTAL, "let total = price;", 1);
@@ -2103,7 +2181,10 @@ mod tests {
         assert!(out.is_error, "{out:?}");
         assert_eq!(
             out.joined_text(),
-            format!("{} changed after the edit was checked, and the edit would now apply as written. Nothing was changed: send the edit_file call again to make the change.", shown(&file))
+            format!(
+                "{} changed after the edit was checked, and the edit would now apply as written. Nothing was changed: send the edit_file call again to make the change.",
+                shown(&file)
+            )
         );
         assert_eq!(std::fs::read(&file).unwrap(), changed.as_bytes());
         // A missing text that appeared in between: no write either.
@@ -2115,12 +2196,20 @@ mod tests {
         let appeared = format!("{changed}fn vat() {{}}\n");
         std::fs::write(&file, &appeared).unwrap();
         let out = fs.call("edit_file", &a, &action, ctx(c.clone())).await;
-        assert!(out.is_error && out.joined_text().contains("would now apply"), "{out:?}");
+        assert!(
+            out.is_error && out.joined_text().contains("would now apply"),
+            "{out:?}"
+        );
         assert_eq!(std::fs::read(&file).unwrap(), appeared.as_bytes());
         // A read-only action never makes the other tools write either.
-        for (tool, extra) in [("write_file", json!({"content": "x"})), ("delete_file", json!({}))] {
+        for (tool, extra) in [
+            ("write_file", json!({"content": "x"})),
+            ("delete_file", json!({})),
+        ] {
             let mut a = json!({"path": "calc.rs"});
-            a.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap());
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().cloned().unwrap());
             let out = fs.call(tool, &args(a), &action, ctx(c.clone())).await;
             assert!(out.is_error, "{tool}: {out:?}");
             assert_eq!(std::fs::read(&file).unwrap(), appeared.as_bytes());
@@ -2146,13 +2235,16 @@ mod tests {
         };
         // Not read yet: the closest lines, and the read to make.
         assert_eq!(
-            explain(json!({"path": "calc.rs", "old_text": "    total * 0.25", "new_text": "x"})).await,
+            explain(json!({"path": "calc.rs", "old_text": "    total * 0.25", "new_text": "x"}))
+                .await,
             format!(
                 "old_text was not found in {file}. Closest lines in the file:\nline 8:     total * 0.2\nline 3:     total\nThis file has not been read in this chat: call read_file {} first, then copy the text to replace exactly as it is in the file, including indentation.",
                 json!({"limit": 20, "offset": 3, "path": file})
             )
         );
-        run(&fs, &c, "read_file", json!({"path": "calc.rs"})).await.unwrap();
+        run(&fs, &c, "read_file", json!({"path": "calc.rs"}))
+            .await
+            .unwrap();
         // Indentation.
         assert_eq!(
             explain(json!({"path": "calc.rs", "old_text": "\tlet total = price * qty;\n\ttotal * 0.2", "new_text": "x"})).await,
@@ -2171,8 +2263,11 @@ mod tests {
         );
         // Nothing like it.
         assert_eq!(
-            explain(json!({"path": "calc.rs", "old_text": "import os, sys", "new_text": "x"})).await,
-            format!("old_text was not found in {file}. Nothing in the file looks like it: check that this is the right file.")
+            explain(json!({"path": "calc.rs", "old_text": "import os, sys", "new_text": "x"}))
+                .await,
+            format!(
+                "old_text was not found in {file}. Nothing in the file looks like it: check that this is the right file."
+            )
         );
     }
 
@@ -2184,42 +2279,97 @@ mod tests {
         let file = shown(&root.join("f.txt"));
         let edit = |extra: Value| {
             let mut a = json!({"path": "f.txt", "old_text": "a", "new_text": "A"});
-            a.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap());
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().cloned().unwrap());
             a
         };
         // Both at once.
         assert_eq!(
-            run(&fs, &c, "edit_file", edit(json!({"occurrence": 1, "replace_all": true}))).await.unwrap_err(),
+            run(
+                &fs,
+                &c,
+                "edit_file",
+                edit(json!({"occurrence": 1, "replace_all": true}))
+            )
+            .await
+            .unwrap_err(),
             "Pass either occurrence or replace_all, not both: occurrence changes one match, replace_all changes every match."
         );
         // A match that is not there.
         assert_eq!(
-            run(&fs, &c, "edit_file", edit(json!({"occurrence": 4}))).await.unwrap_err(),
-            format!("occurrence 4 is out of range: old_text was found 3 times in {file} (at lines 1, 3 and 5). Pass an occurrence from 1 to 3, or replace_all: true.")
+            run(&fs, &c, "edit_file", edit(json!({"occurrence": 4})))
+                .await
+                .unwrap_err(),
+            format!(
+                "occurrence 4 is out of range: old_text was found 3 times in {file} (at lines 1, 3 and 5). Pass an occurrence from 1 to 3, or replace_all: true."
+            )
         );
         // Nothing would change.
         assert_eq!(
-            run(&fs, &c, "edit_file", json!({"path": "f.txt", "old_text": "b", "new_text": "b", "replace_all": true})).await.unwrap_err(),
-            format!("old_text and new_text are the same, so the edit would change nothing in {file}. Put the new wording in new_text.")
+            run(
+                &fs,
+                &c,
+                "edit_file",
+                json!({"path": "f.txt", "old_text": "b", "new_text": "b", "replace_all": true})
+            )
+            .await
+            .unwrap_err(),
+            format!(
+                "old_text and new_text are the same, so the edit would change nothing in {file}. Put the new wording in new_text."
+            )
         );
-        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "a\nb\na\nb\na\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "a\nb\na\nb\na\n"
+        );
         // The preview shows the change that is then made.
-        let (action, out) = run(&fs, &c, "edit_file", edit(json!({"occurrence": 3}))).await.unwrap();
-        assert!(action.preview.contains(" b\n-a\n+A\n"), "{}", action.preview);
-        assert_eq!(action.preview.matches("\n+A").count(), 1, "{}", action.preview);
+        let (action, out) = run(&fs, &c, "edit_file", edit(json!({"occurrence": 3})))
+            .await
+            .unwrap();
+        assert!(
+            action.preview.contains(" b\n-a\n+A\n"),
+            "{}",
+            action.preview
+        );
+        assert_eq!(
+            action.preview.matches("\n+A").count(),
+            1,
+            "{}",
+            action.preview
+        );
         assert!(!out.is_error);
-        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "a\nb\na\nb\nA\n");
-        let (action, out) = run(&fs, &c, "edit_file", edit(json!({"replace_all": true}))).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "a\nb\na\nb\nA\n"
+        );
+        let (action, out) = run(&fs, &c, "edit_file", edit(json!({"replace_all": true})))
+            .await
+            .unwrap();
         assert_eq!(action.summary, format!("Edit {file} (2 replacements)"));
-        assert_eq!(action.preview.matches("\n+A").count(), 2, "{}", action.preview);
-        assert_eq!(out.joined_text(), format!("Edited {file}: replaced all 2 matches."));
-        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "A\nb\nA\nb\nA\n");
+        assert_eq!(
+            action.preview.matches("\n+A").count(),
+            2,
+            "{}",
+            action.preview
+        );
+        assert_eq!(
+            out.joined_text(),
+            format!("Edited {file}: replaced all 2 matches.")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "A\nb\nA\nb\nA\n"
+        );
     }
 
     /// The new arguments change which text is replaced, never what the user is asked.
     #[tokio::test]
     async fn occurrence_and_replace_all_ask_exactly_like_a_plain_edit() {
-        let (_dir, root) = tree(&[(".git/config", "[core]\n\tx = 1\n\tx = 1\n"), ("keep.txt", "data\ndata\n")]);
+        let (_dir, root) = tree(&[
+            (".git/config", "[core]\n\tx = 1\n\tx = 1\n"),
+            ("keep.txt", "data\ndata\n"),
+        ]);
         let c = chat(&root);
         let fs = FilesServer::default();
         let describe = |a: Value| {
@@ -2235,22 +2385,43 @@ mod tests {
         for extra in [json!({"replace_all": true}), json!({"occurrence": 2})] {
             // A sensitive place.
             let mut a = json!({"path": ".git/config", "old_text": "x = 1", "new_text": "x = 2"});
-            a.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap());
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().cloned().unwrap());
             let action = describe(a).await;
             assert_eq!(action.risk, Risk::AlwaysAsk, "{extra}");
-            assert_eq!(action.keep_asking, Some(policy::KeepAsking::Sensitive), "{extra}");
-            assert_eq!(action.scope, Scope::FileWrite { folder: shown(&root) });
+            assert_eq!(
+                action.keep_asking,
+                Some(policy::KeepAsking::Sensitive),
+                "{extra}"
+            );
+            assert_eq!(
+                action.scope,
+                Scope::FileWrite {
+                    folder: shown(&root)
+                }
+            );
             assert!(!action.read_only && !action.outbound && !action.network);
             // An ordinary file.
             let mut a = json!({"path": "keep.txt", "old_text": "data", "new_text": "words"});
-            a.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap());
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().cloned().unwrap());
             let action = describe(a).await;
             assert_eq!(action.risk, Risk::Normal, "{extra}");
             assert_eq!(action.keep_asking, None, "{extra}");
-            assert_eq!(action.scope, Scope::FileWrite { folder: shown(&root) });
+            assert_eq!(
+                action.scope,
+                Scope::FileWrite {
+                    folder: shown(&root)
+                }
+            );
         }
         // Leaving the file empty still asks, however the matches were picked.
-        let action = describe(json!({"path": "keep.txt", "old_text": "data\n", "new_text": "", "replace_all": true})).await;
+        let action = describe(
+            json!({"path": "keep.txt", "old_text": "data\n", "new_text": "", "replace_all": true}),
+        )
+        .await;
         assert_eq!(action.risk, Risk::AlwaysAsk);
         assert_eq!(action.keep_asking, Some(policy::KeepAsking::Delete));
     }
@@ -2266,34 +2437,57 @@ mod tests {
             ("README.rst", "x"),
             ("src/components/App.tsx", "x"),
         ]);
-        let c = ChatContext { working_folder: Some(shown(&root)), ..chat(&root) };
+        let c = ChatContext {
+            working_folder: Some(shown(&root)),
+            ..chat(&root)
+        };
         let fs = FilesServer::default();
         let p = |rel: &str| shown(&root.join(rel));
-        let (_, out) = run(&fs, &c, "read_file", json!({"path": "docs/readme.md"})).await.unwrap();
+        let (_, out) = run(&fs, &c, "read_file", json!({"path": "docs/readme.md"}))
+            .await
+            .unwrap();
         assert!(out.is_error);
         assert_eq!(
             out.joined_text(),
             format!(
                 "{} does not exist. Similar names: {}, {}, {}. Working folder: {}.",
-                p("docs/readme.md"), p("docs/README.md"), p("docs/readme.txt"), p("README.rst"), shown(&root)
+                p("docs/readme.md"),
+                p("docs/README.md"),
+                p("docs/readme.txt"),
+                p("README.rst"),
+                shown(&root)
             )
         );
         // A folder that is misspelled.
-        let (_, out) = run(&fs, &c, "read_file", json!({"path": "src/componets/App.tsx"})).await.unwrap();
+        let (_, out) = run(
+            &fs,
+            &c,
+            "read_file",
+            json!({"path": "src/componets/App.tsx"}),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             out.joined_text(),
             format!(
                 "{} does not exist: there is no folder {}. Similar names: {}. Working folder: {}.",
-                p("src/componets/App.tsx"), p("src/componets"), p("src/components"), shown(&root)
+                p("src/componets/App.tsx"),
+                p("src/componets"),
+                p("src/components"),
+                shown(&root)
             )
         );
         // Nothing alike.
-        let (_, out) = run(&fs, &c, "list_dir", json!({"path": "zzz"})).await.unwrap();
+        let (_, out) = run(&fs, &c, "list_dir", json!({"path": "zzz"}))
+            .await
+            .unwrap();
         assert_eq!(
             out.joined_text(),
             format!(
                 "{} does not exist. Nothing with a similar name is in {} or the folder above it. list_dir shows what a folder holds. Working folder: {}.",
-                p("zzz"), shown(&root), shown(&root)
+                p("zzz"),
+                shown(&root),
+                shown(&root)
             )
         );
         // A failed edit or delete is answered before anyone was asked: no names.
@@ -2301,17 +2495,27 @@ mod tests {
             (
                 "edit_file",
                 json!({"path": "docs/readme.md", "old_text": "a", "new_text": "b"}),
-                format!("{} does not exist, so there is nothing to edit. Working folder: {}. list_dir shows the names that exist; write_file creates a file.", p("docs/readme.md"), shown(&root)),
+                format!(
+                    "{} does not exist, so there is nothing to edit. Working folder: {}. list_dir shows the names that exist; write_file creates a file.",
+                    p("docs/readme.md"),
+                    shown(&root)
+                ),
             ),
             (
                 "delete_file",
                 json!({"path": "docs/readme.md"}),
-                format!("{} does not exist, so there is nothing to delete.", p("docs/readme.md")),
+                format!(
+                    "{} does not exist, so there is nothing to delete.",
+                    p("docs/readme.md")
+                ),
             ),
         ] {
             let why = run(&fs, &c, tool, a).await.unwrap_err();
             assert_eq!(why, expected);
-            assert!(!why.contains("README") && !why.contains("readme.txt"), "{why}");
+            assert!(
+                !why.contains("README") && !why.contains("readme.txt"),
+                "{why}"
+            );
         }
     }
 
@@ -2321,7 +2525,9 @@ mod tests {
         let (_dir, root) = tree(&[("secret-notes.txt", "x"), ("ok/other.txt", "x")]);
         let c = chat(&root.join("ok"));
         let fs = FilesServer::default();
-        let (_, out) = run(&fs, &c, "read_file", json!({"path": "secret-note.txt"})).await.unwrap();
+        let (_, out) = run(&fs, &c, "read_file", json!({"path": "secret-note.txt"}))
+            .await
+            .unwrap();
         let text = out.joined_text();
         assert!(out.is_error && !text.contains("secret-notes.txt"), "{text}");
         assert!(text.contains("Nothing with a similar name"), "{text}");
@@ -2333,27 +2539,72 @@ mod tests {
         let c = chat(&root);
         let fs = FilesServer::default();
         let (docs, a) = (shown(&root.join("docs")), shown(&root.join("docs/a.txt")));
-        let (_, out) = run(&fs, &c, "read_file", json!({"path": "docs"})).await.unwrap();
+        let (_, out) = run(&fs, &c, "read_file", json!({"path": "docs"}))
+            .await
+            .unwrap();
         assert!(out.is_error);
-        assert_eq!(out.joined_text(), format!("{docs} is a folder, not a file. Use list_dir to see what is in it."));
-        let (_, out) = run(&fs, &c, "list_dir", json!({"path": "docs/a.txt"})).await.unwrap();
+        assert_eq!(
+            out.joined_text(),
+            format!("{docs} is a folder, not a file. Use list_dir to see what is in it.")
+        );
+        let (_, out) = run(&fs, &c, "list_dir", json!({"path": "docs/a.txt"}))
+            .await
+            .unwrap();
         assert!(out.is_error);
-        assert_eq!(out.joined_text(), format!("{a} is a file, not a folder. Use read_file to read it, or list_dir on {docs}."));
         assert_eq!(
-            run(&fs, &c, "write_file", json!({"path": "docs", "content": "x"})).await.unwrap_err(),
-            format!("{docs} is a folder, not a file. write_file needs the path of a file inside it, for example {}. list_dir shows what is in the folder.", shown(&root.join("docs/notes.txt")))
+            out.joined_text(),
+            format!(
+                "{a} is a file, not a folder. Use read_file to read it, or list_dir on {docs}."
+            )
         );
         assert_eq!(
-            run(&fs, &c, "write_file", json!({"path": "docs/a.txt/b.txt", "content": "x"})).await.unwrap_err(),
-            format!("{} cannot be used: {a} is a file, not a folder, so nothing can be inside it.", shown(&root.join("docs/a.txt/b.txt")))
+            run(
+                &fs,
+                &c,
+                "write_file",
+                json!({"path": "docs", "content": "x"})
+            )
+            .await
+            .unwrap_err(),
+            format!(
+                "{docs} is a folder, not a file. write_file needs the path of a file inside it, for example {}. list_dir shows what is in the folder.",
+                shown(&root.join("docs/notes.txt"))
+            )
         );
         assert_eq!(
-            run(&fs, &c, "edit_file", json!({"path": "docs", "old_text": "a", "new_text": "b"})).await.unwrap_err(),
-            format!("{docs} is a folder, not a file. edit_file changes one file; list_dir shows what is in the folder.")
+            run(
+                &fs,
+                &c,
+                "write_file",
+                json!({"path": "docs/a.txt/b.txt", "content": "x"})
+            )
+            .await
+            .unwrap_err(),
+            format!(
+                "{} cannot be used: {a} is a file, not a folder, so nothing can be inside it.",
+                shown(&root.join("docs/a.txt/b.txt"))
+            )
         );
         assert_eq!(
-            run(&fs, &c, "delete_file", json!({"path": "docs"})).await.unwrap_err(),
-            format!("{docs} is a folder. delete_file only deletes files; a folder is removed with a command (run_command).")
+            run(
+                &fs,
+                &c,
+                "edit_file",
+                json!({"path": "docs", "old_text": "a", "new_text": "b"})
+            )
+            .await
+            .unwrap_err(),
+            format!(
+                "{docs} is a folder, not a file. edit_file changes one file; list_dir shows what is in the folder."
+            )
+        );
+        assert_eq!(
+            run(&fs, &c, "delete_file", json!({"path": "docs"}))
+                .await
+                .unwrap_err(),
+            format!(
+                "{docs} is a folder. delete_file only deletes files; a folder is removed with a command (run_command)."
+            )
         );
         assert!(root.join("docs/a.txt").is_file());
     }
@@ -2364,23 +2615,46 @@ mod tests {
         let c = chat(&root);
         let fs = FilesServer::default();
         let file = shown(&root.join("f.txt"));
-        run(&fs, &c, "read_file", json!({"path": "f.txt"})).await.unwrap();
+        run(&fs, &c, "read_file", json!({"path": "f.txt"}))
+            .await
+            .unwrap();
         std::fs::write(root.join("f.txt"), "changed by the user\n").unwrap();
         let write = json!({"path": "f.txt", "content": "v2\n"});
         assert_eq!(
             run(&fs, &c, "write_file", write.clone()).await.unwrap_err(),
-            format!("{file} has changed since it was read in this chat, so it was not replaced. Call read_file on it again to see what is there now, then write_file or edit_file.")
+            format!(
+                "{file} has changed since it was read in this chat, so it was not replaced. Call read_file on it again to see what is there now, then write_file or edit_file."
+            )
         );
-        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "changed by the user\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "changed by the user\n"
+        );
         // Read again: the write goes ahead, and what was written counts as known.
-        run(&fs, &c, "read_file", json!({"path": "f.txt"})).await.unwrap();
+        run(&fs, &c, "read_file", json!({"path": "f.txt"}))
+            .await
+            .unwrap();
         let (_, out) = run(&fs, &c, "write_file", write).await.unwrap();
         assert!(!out.is_error, "{out:?}");
-        let (_, out) = run(&fs, &c, "write_file", json!({"path": "f.txt", "content": "v3\n"})).await.unwrap();
+        let (_, out) = run(
+            &fs,
+            &c,
+            "write_file",
+            json!({"path": "f.txt", "content": "v3\n"}),
+        )
+        .await
+        .unwrap();
         assert!(!out.is_error, "{out:?}");
         // A file this chat never read is replaced as before (the card shows the change).
         std::fs::write(root.join("g.txt"), "x\n").unwrap();
-        let (_, out) = run(&fs, &c, "write_file", json!({"path": "g.txt", "content": "y\n"})).await.unwrap();
+        let (_, out) = run(
+            &fs,
+            &c,
+            "write_file",
+            json!({"path": "g.txt", "content": "y\n"}),
+        )
+        .await
+        .unwrap();
         assert!(!out.is_error, "{out:?}");
     }
 
@@ -2388,28 +2662,69 @@ mod tests {
     async fn binary_and_very_large_files_say_what_to_do_instead() {
         let (_dir, root) = tree(&[]);
         std::fs::write(root.join("x.bin"), [0u8, 1, 2, 3]).unwrap();
-        std::fs::write(root.join("big.txt"), vec![b'a'; (MAX_EDIT_BYTES + 1) as usize]).unwrap();
+        std::fs::write(
+            root.join("big.txt"),
+            vec![b'a'; (MAX_EDIT_BYTES + 1) as usize],
+        )
+        .unwrap();
         let c = chat(&root);
         let fs = FilesServer::default();
         let (bin, big) = (shown(&root.join("x.bin")), shown(&root.join("big.txt")));
         assert_eq!(
-            run(&fs, &c, "write_file", json!({"path": "x.bin", "content": "text"})).await.unwrap_err(),
-            format!("{bin} is a binary file, so it was not replaced: write_file only writes text. Write the text to another path, or delete the file with delete_file first if it should be replaced.")
+            run(
+                &fs,
+                &c,
+                "write_file",
+                json!({"path": "x.bin", "content": "text"})
+            )
+            .await
+            .unwrap_err(),
+            format!(
+                "{bin} is a binary file, so it was not replaced: write_file only writes text. Write the text to another path, or delete the file with delete_file first if it should be replaced."
+            )
         );
         assert_eq!(
-            run(&fs, &c, "edit_file", json!({"path": "x.bin", "old_text": "a", "new_text": "b"})).await.unwrap_err(),
+            run(
+                &fs,
+                &c,
+                "edit_file",
+                json!({"path": "x.bin", "old_text": "a", "new_text": "b"})
+            )
+            .await
+            .unwrap_err(),
             format!("{bin} is a binary file. edit_file only changes text files.")
         );
         assert_eq!(
-            run(&fs, &c, "edit_file", json!({"path": "big.txt", "old_text": "a", "new_text": "b"})).await.unwrap_err(),
-            format!("{big} is too large for edit_file: it has {} bytes and the limit is {MAX_EDIT_BYTES} (4 MB). Change it with a command (run_command) instead.", MAX_EDIT_BYTES + 1)
+            run(
+                &fs,
+                &c,
+                "edit_file",
+                json!({"path": "big.txt", "old_text": "a", "new_text": "b"})
+            )
+            .await
+            .unwrap_err(),
+            format!(
+                "{big} is too large for edit_file: it has {} bytes and the limit is {MAX_EDIT_BYTES} (4 MB). Change it with a command (run_command) instead.",
+                MAX_EDIT_BYTES + 1
+            )
         );
-        let (_, out) = run(&fs, &c, "read_file", json!({"path": "x.bin"})).await.unwrap();
-        assert_eq!(out.joined_text(), format!("{bin} is a binary file (4 bytes); read_file only shows text."));
+        let (_, out) = run(&fs, &c, "read_file", json!({"path": "x.bin"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.joined_text(),
+            format!("{bin} is a binary file (4 bytes); read_file only shows text.")
+        );
         // A file larger than one read holds says so, and how to see the rest.
-        let (_, out) = run(&fs, &c, "read_file", json!({"path": "big.txt"})).await.unwrap();
+        let (_, out) = run(&fs, &c, "read_file", json!({"path": "big.txt"}))
+            .await
+            .unwrap();
         let text = out.joined_text();
-        assert!(text.contains(&format!("[Line 1 is longer than one result can hold: its first ")), "{}", &text[text.len() - 300..]);
+        assert!(
+            text.contains("[Line 1 is longer than one result can hold: its first "),
+            "{}",
+            &text[text.len() - 300..]
+        );
         assert!(text.ends_with(&format!("[The file has {} bytes; read_file reads only the first 1 MiB. A command (run_command) can show a later part.]", MAX_EDIT_BYTES + 1)), "{}", &text[text.len() - 300..]);
     }
 
@@ -2420,13 +2735,28 @@ mod tests {
         let fs = FilesServer::default();
         for tool in ["read_file", "list_dir", "delete_file"] {
             assert_eq!(
-                run(&fs, &c, tool, json!({"path": "../secret.txt"})).await.unwrap_err(),
-                format!("the path is outside the approved folders. Approved folders: {}. Use a path inside one of them; the user can approve another folder in the Tools panel.", shown(&root.join("ok")))
+                run(&fs, &c, tool, json!({"path": "../secret.txt"}))
+                    .await
+                    .unwrap_err(),
+                format!(
+                    "the path is outside the approved folders. Approved folders: {}. Use a path inside one of them; the user can approve another folder in the Tools panel.",
+                    shown(&root.join("ok"))
+                )
             );
         }
-        let none = ChatContext { approved_folders: vec![], ..c.clone() };
+        let none = ChatContext {
+            approved_folders: vec![],
+            ..c.clone()
+        };
         assert_eq!(
-            run(&fs, &none, "write_file", json!({"path": "/tmp/x.txt", "content": "x"})).await.unwrap_err(),
+            run(
+                &fs,
+                &none,
+                "write_file",
+                json!({"path": "/tmp/x.txt", "content": "x"})
+            )
+            .await
+            .unwrap_err(),
             "the path is outside the approved folders. No folder is approved for this chat yet, so the file tools cannot reach anything. The user can approve a folder in the Tools panel."
         );
     }
@@ -2434,11 +2764,21 @@ mod tests {
     #[tokio::test]
     async fn an_offset_past_the_end_says_how_long_the_file_is() {
         let (_dir, root) = tree(&[("f.txt", "one\ntwo\nthree\n")]);
-        let (_, out) = run(&FilesServer::default(), &chat(&root), "read_file", json!({"path": "f.txt", "offset": 9})).await.unwrap();
+        let (_, out) = run(
+            &FilesServer::default(),
+            &chat(&root),
+            "read_file",
+            json!({"path": "f.txt", "offset": 9}),
+        )
+        .await
+        .unwrap();
         assert!(out.is_error);
         assert_eq!(
             out.joined_text(),
-            format!("offset 9 is past the end of {}: it has 3 lines. Use an offset from 1 to 3.", shown(&root.join("f.txt")))
+            format!(
+                "offset 9 is past the end of {}: it has 3 lines. Use an offset from 1 to 3.",
+                shown(&root.join("f.txt"))
+            )
         );
     }
 
@@ -2446,7 +2786,9 @@ mod tests {
     /// what was shown.
     #[tokio::test]
     async fn a_shortened_read_search_or_listing_keeps_the_whole_text() {
-        let body: String = (1..=3000).map(|i| format!("line number {i} with a needle\n")).collect();
+        let body: String = (1..=3000)
+            .map(|i| format!("line number {i} with a needle\n"))
+            .collect();
         let (_dir, root) = tree(&[("big.txt", &body)]);
         for i in 0..300 {
             std::fs::write(root.join(format!("many-{i:03}.txt")), "x").unwrap();
@@ -2458,38 +2800,85 @@ mod tests {
             let mut ui = out.ui.clone();
             crate::shorten::Shown::take(&mut ui).expect("a note for the app")
         };
-        let (_, out) = run(&fs, &c, "read_file", json!({"path": "big.txt"})).await.unwrap();
+        let (_, out) = run(&fs, &c, "read_file", json!({"path": "big.txt"}))
+            .await
+            .unwrap();
         let text = out.joined_text();
-        let shown_lines = text.lines().filter(|l| l.contains("\tline number ")).count();
-        assert!(shown_lines > 10 && text.len() + 200 <= 1500, "{} lines, {} bytes", shown_lines, text.len());
+        let shown_lines = text
+            .lines()
+            .filter(|l| l.contains("\tline number "))
+            .count();
+        assert!(
+            shown_lines > 10 && text.len() + 200 <= 1500,
+            "{} lines, {} bytes",
+            shown_lines,
+            text.len()
+        );
         assert!(text.ends_with(&format!("[Showing lines 1–{shown_lines} of 3000. Call read_file with offset={} to continue.]", shown_lines + 1)), "{}", &text[text.len() - 120..]);
         assert_eq!(out.full_text.as_deref(), Some(body.as_str()));
         let note = hint(&out);
         assert_eq!(note.lines, shown_lines);
         assert_eq!(note.next, Some((shown_lines + 1, 2 * shown_lines)));
         // From an offset: the numbers are still the file's.
-        let (_, out) = run(&fs, &c, "read_file", json!({"path": "big.txt", "offset": 1000})).await.unwrap();
+        let (_, out) = run(
+            &fs,
+            &c,
+            "read_file",
+            json!({"path": "big.txt", "offset": 1000}),
+        )
+        .await
+        .unwrap();
         let note = hint(&out);
         assert_eq!(note.next.map(|(a, _)| a), Some(1000 + note.lines));
         // Asked for a part that fits: nothing was shortened.
-        let (_, out) = run(&fs, &c, "read_file", json!({"path": "big.txt", "offset": 5, "limit": 3})).await.unwrap();
+        let (_, out) = run(
+            &fs,
+            &c,
+            "read_file",
+            json!({"path": "big.txt", "offset": 5, "limit": 3}),
+        )
+        .await
+        .unwrap();
         assert!(out.full_text.is_none() && out.ui.is_none(), "{out:?}");
         assert!(out.joined_text().contains("[Showing lines 5–7 of 3000."));
 
-        let (_, out) = run(&fs, &c, "search_files", json!({"path": "big.txt", "query": "needle"})).await.unwrap();
+        let (_, out) = run(
+            &fs,
+            &c,
+            "search_files",
+            json!({"path": "big.txt", "query": "needle"}),
+        )
+        .await
+        .unwrap();
         let text = out.joined_text();
         let full = out.full_text.clone().expect("every match");
         assert_eq!(full.lines().count(), 3000);
         let note = hint(&out);
-        assert!(text.contains(&format!("[Showing matches 1–{} of 3000. Call search_files with offset={} to continue.]", note.lines, note.lines)), "{}", &text[text.len() - 120..]);
+        assert!(
+            text.contains(&format!(
+                "[Showing matches 1–{} of 3000. Call search_files with offset={} to continue.]",
+                note.lines, note.lines
+            )),
+            "{}",
+            &text[text.len() - 120..]
+        );
         assert!(text.len() + 200 <= 1500);
 
-        let (_, out) = run(&fs, &c, "list_dir", json!({"path": "."})).await.unwrap();
+        let (_, out) = run(&fs, &c, "list_dir", json!({"path": "."}))
+            .await
+            .unwrap();
         let text = out.joined_text();
         let full = out.full_text.clone().expect("every entry");
         assert_eq!(full.lines().count(), 301);
         let note = hint(&out);
-        assert!(text.ends_with(&format!("[Showing {} of 301 entries. List a subfolder to see more.]", note.lines)), "{}", &text[text.len() - 120..]);
+        assert!(
+            text.ends_with(&format!(
+                "[Showing {} of 301 entries. List a subfolder to see more.]",
+                note.lines
+            )),
+            "{}",
+            &text[text.len() - 120..]
+        );
         assert!(text.len() + 200 <= 1500);
     }
 

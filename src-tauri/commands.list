@@ -143,3 +143,13 @@ get_task
 edit_task
 set_task_status
 clear_task
+get_model_profile
+forget_model_profile
+start_capability_check
+cancel_eval
+list_bench_tasks
+start_benchmark
+list_bench_runs
+get_bench_run
+search_mentions
+resolve_mentions

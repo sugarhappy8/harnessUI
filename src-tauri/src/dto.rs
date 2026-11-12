@@ -56,6 +56,9 @@ pub struct MessageDto {
     pub tool_calls: Vec<ToolCallDto>,
     /// For a tool message: the result.
     pub tool_result: Option<ToolResultDto>,
+    /// For a user message: the files and definitions it mentioned (shown as chips).
+    #[serde(default)]
+    pub mentions: Vec<crate::mentions::MentionRef>,
 }
 
 #[derive(Debug, Clone, Serialize)]

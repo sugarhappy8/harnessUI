@@ -114,6 +114,11 @@ pub async fn rebuild_git(state: &AppState, identity: &crate::git_cmd::GitIdentit
 static CAPTURED: std::sync::OnceLock<Option<std::collections::BTreeMap<String, String>>> =
     std::sync::OnceLock::new();
 
+/// [0.0.4 evals] The captured login environment (macOS), for the benchmark terminal.
+pub fn captured_env_now() -> Option<std::collections::BTreeMap<String, String>> {
+    CAPTURED.get().cloned().flatten()
+}
+
 /// The terminal's pass-through list.
 #[tauri::command]
 pub async fn get_terminal_pass_through(

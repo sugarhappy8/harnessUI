@@ -29,7 +29,7 @@ pub const TOOL_NAME: &str = "update_task";
 pub const HELPER_REFUSAL: &str = "The task belongs to the main conversation, and a helper cannot change it. Nothing was saved. Carry on with the work you were given.";
 
 /// Kept short: this definition is sent with every request of a chat that has tools on.
-const DESCRIPTION: &str = "Record the task you are working on: goal, constraints, steps, next action. The user sees it, and it lets the work resume later. Send what changed; a list replaces the old one.";
+const DESCRIPTION: &str = "Save the task state the user sees and work resumes from. Send only what changed; a list replaces the old one.";
 
 /// The tool as offered to the model.
 pub fn tool_def() -> ToolDef {

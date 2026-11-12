@@ -23,6 +23,7 @@ mod hub;
 mod load_tracker;
 mod logging;
 mod mcp_cmd;
+mod mentions;
 mod models_cmd;
 mod navigation;
 mod outputs;
@@ -107,6 +108,8 @@ pub fn run() {
             chat::regenerate,
             chat::stop_generation,
             attachments::get_attachment,
+            mentions::search_mentions,
+            mentions::resolve_mentions,
             models_cmd::runtime_status,
             models_cmd::list_backends,
             models_cmd::load_local_model,
@@ -239,6 +242,14 @@ pub fn run() {
             task::edit_task,
             task::set_task_status,
             task::clear_task,
+            evals::commands::get_model_profile,
+            evals::commands::forget_model_profile,
+            evals::commands::start_capability_check,
+            evals::commands::cancel_eval,
+            evals::commands::list_bench_tasks,
+            evals::commands::start_benchmark,
+            evals::commands::list_bench_runs,
+            evals::commands::get_bench_run,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

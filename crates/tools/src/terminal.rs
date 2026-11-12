@@ -508,12 +508,18 @@ impl BuiltinServer for TerminalServer {
         let stderr_end = Arc::new(Mutex::new((Vec::<u8>::new(), false)));
         let mut readers = Vec::new();
         let streams: Vec<(bool, Box<dyn tokio::io::AsyncRead + Unpin + Send>)> = [
-            child
-                .take_stdout()
-                .map(|s| (false, Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>)),
-            child
-                .take_stderr()
-                .map(|s| (true, Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>)),
+            child.take_stdout().map(|s| {
+                (
+                    false,
+                    Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+                )
+            }),
+            child.take_stderr().map(|s| {
+                (
+                    true,
+                    Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+                )
+            }),
         ]
         .into_iter()
         .flatten()
@@ -678,19 +684,23 @@ impl TerminalServer {
             return None;
         };
         let path = self.path_var();
-        let missing = commands.iter().map(|c| c.program.as_str()).find(|program| {
-            !program.is_empty()
-                && !program.contains(['/', '\\'])
-                && runtime::resolve_program(program, path.as_deref().map(std::ffi::OsStr::new))
-                    .is_none()
-                && output.lines().any(|line| {
-                    let lower = line.to_lowercase();
-                    line.contains(program)
-                        && (lower.contains("not found") || lower.contains("not recognized"))
-                })
-        })?;
+        let missing = commands
+            .iter()
+            .map(|c| c.program.as_str())
+            .find(|program| {
+                !program.is_empty()
+                    && !program.contains(['/', '\\'])
+                    && runtime::resolve_program(program, path.as_deref().map(std::ffi::OsStr::new))
+                        .is_none()
+                    && output.lines().any(|line| {
+                        let lower = line.to_lowercase();
+                        line.contains(program)
+                            && (lower.contains("not found") || lower.contains("not recognized"))
+                    })
+            })?;
         let shown = policy::sanitize::one_line(missing, 80);
-        let close = errors::similar_names(missing, self.programs_on_path(), errors::MAX_SIMILAR_NAMES);
+        let close =
+            errors::similar_names(missing, self.programs_on_path(), errors::MAX_SIMILAR_NAMES);
         let close: Vec<String> = close
             .iter()
             .map(|name| policy::sanitize::one_line(name, 80))
@@ -967,7 +977,9 @@ mod tests {
             .map(|(middle, _)| middle)
             .unwrap_or_else(|| panic!("{text}"));
         assert!(
-            middle.ends_with(" are not shown. One of them looks like an error:]\n1502: error: the build broke\n"),
+            middle.ends_with(
+                " are not shown. One of them looks like an error:]\n1502: error: the build broke\n"
+            ),
             "{middle}"
         );
         assert!(text.ends_with("\n2999\n3000"), "{text}");
@@ -978,20 +990,38 @@ mod tests {
         let mut ui = out.ui.clone();
         let note = crate::shorten::Shown::take(&mut ui).expect("a note for the app");
         assert!(note.lines > 20 && note.next.is_some(), "{note:?}");
-        assert_eq!(ui.as_ref().and_then(|u| u.get("command")).and_then(Value::as_str).map(|c| c.starts_with("seq 1 1500")), Some(true));
+        assert_eq!(
+            ui.as_ref()
+                .and_then(|u| u.get("command"))
+                .and_then(Value::as_str)
+                .map(|c| c.starts_with("seq 1 1500")),
+            Some(true)
+        );
 
         // A long output that worked is shaped the same way and is not an error.
         let out = run(&s, &c, json!({"command": "seq 1 3000"})).await;
         assert!(!out.is_error);
         let text = out.joined_text();
-        assert!(text.starts_with("Exit code 0 (") && text.ends_with("\n3000"), "{text}");
-        assert!(text.contains(" are not shown.]\n") && out.full_text.is_some(), "{text}");
+        assert!(
+            text.starts_with("Exit code 0 (") && text.ends_with("\n3000"),
+            "{text}"
+        );
+        assert!(
+            text.contains(" are not shown.]\n") && out.full_text.is_some(),
+            "{text}"
+        );
         // A short one is shown whole, with nothing to store.
         let out = run(&s, &c, json!({"command": "echo hello; exit 4"})).await;
         assert!(out.is_error && out.full_text.is_none());
         let text = out.joined_text();
-        assert!(text.starts_with("Exit code 4 (") && text.ends_with("s)\nhello\n"), "{text:?}");
-        assert_eq!(out.ui, Some(json!({"command": "echo hello; exit 4", "cwd": root.display().to_string()})));
+        assert!(
+            text.starts_with("Exit code 4 (") && text.ends_with("s)\nhello\n"),
+            "{text:?}"
+        );
+        assert_eq!(
+            out.ui,
+            Some(json!({"command": "echo hello; exit 4", "cwd": root.display().to_string()}))
+        );
     }
 
     #[tokio::test]
@@ -1010,7 +1040,9 @@ mod tests {
         let text = out.joined_text();
         assert!(text.starts_with("Exit code 2 ("), "{text}");
         assert!(
-            text.ends_with("\n3000\n[The last lines of its error output (stderr):]\nmake: *** [all] Error 2"),
+            text.ends_with(
+                "\n3000\n[The last lines of its error output (stderr):]\nmake: *** [all] Error 2"
+            ),
             "{text}"
         );
     }
@@ -1024,7 +1056,11 @@ mod tests {
         for name in ["mytool-build", "mytool-test", "unrelated"] {
             std::fs::write(bin.join(name), "#!/bin/sh\n").unwrap();
         }
-        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let s = server(&[("PATH", &path)]);
         let c = chat(&root);
         let out = run(&s, &c, json!({"command": "mytool-biuld --release"})).await;
@@ -1033,18 +1069,26 @@ mod tests {
         assert!(text.starts_with("Exit code 127 ("), "{text}");
         assert_eq!(
             text.lines().last(),
-            Some("[\"mytool-biuld\" was not found: no program with that name is on PATH. Close names on PATH: mytool-build. Check the spelling, or ask the user to install it.]"),
+            Some(
+                "[\"mytool-biuld\" was not found: no program with that name is on PATH. Close names on PATH: mytool-build. Check the spelling, or ask the user to install it.]"
+            ),
             "{text}"
         );
         // Nothing close: say so.
         let out = run(&s, &c, json!({"command": "zzqqxxyy-tool"})).await;
         assert_eq!(
             out.joined_text().lines().last(),
-            Some("[\"zzqqxxyy-tool\" was not found: no program with that name is on PATH, and nothing on PATH has a similar name. Check the spelling, or ask the user to install it.]"),
+            Some(
+                "[\"zzqqxxyy-tool\" was not found: no program with that name is on PATH, and nothing on PATH has a similar name. Check the spelling, or ask the user to install it.]"
+            ),
         );
         // A program that is there and fails gets no such line.
         let out = run(&s, &c, json!({"command": "ls no-such-file-here"})).await;
-        assert!(out.is_error && !out.joined_text().contains("was not found: no program"), "{}", out.joined_text());
+        assert!(
+            out.is_error && !out.joined_text().contains("was not found: no program"),
+            "{}",
+            out.joined_text()
+        );
     }
 
     #[tokio::test]
@@ -1087,18 +1131,25 @@ mod tests {
         let a = describe(&s, &c, json!({"command": "ls", "cwd": "/"})).await;
         assert_eq!(
             a.hard_limit,
-            Some(format!("the path is outside the approved folders. Commands may run in: {ok}. Pass one of these folders, or a folder inside one, as cwd; the user can approve another folder in the Tools panel."))
+            Some(format!(
+                "the path is outside the approved folders. Commands may run in: {ok}. Pass one of these folders, or a folder inside one, as cwd; the user can approve another folder in the Tools panel."
+            ))
         );
         let a = describe(&s, &c, json!({"command": "cat ../secret.txt"})).await;
         assert_eq!(
             a.hard_limit,
-            Some(format!("cat reads ../secret.txt: the path is outside the approved folders. Commands may read files in: {ok}. The user can approve another folder in the Tools panel."))
+            Some(format!(
+                "cat reads ../secret.txt: the path is outside the approved folders. Commands may read files in: {ok}. The user can approve another folder in the Tools panel."
+            ))
         );
         let invalid = |args: Value| {
             let s = s.clone();
             let c = c.clone();
             async move {
-                match s.describe("run_command", args.as_object().unwrap(), &c).await {
+                match s
+                    .describe("run_command", args.as_object().unwrap(), &c)
+                    .await
+                {
                     Described::Invalid(why) => why,
                     Described::Action(a) => panic!("{a:?}"),
                 }
@@ -1106,17 +1157,26 @@ mod tests {
         };
         assert_eq!(
             invalid(json!({"command": "ls", "cwd": "file.txt"})).await,
-            format!("cwd {ok}/file.txt is a file, not a folder. Pass a folder as cwd, or leave cwd out to run in {ok}.")
+            format!(
+                "cwd {ok}/file.txt is a file, not a folder. Pass a folder as cwd, or leave cwd out to run in {ok}."
+            )
         );
         assert_eq!(
             invalid(json!({"command": "ls", "cwd": "nowhere"})).await,
-            format!("cwd {ok}/nowhere does not exist. Pass a folder that exists as cwd, or leave cwd out to run in {ok}.")
+            format!(
+                "cwd {ok}/nowhere does not exist. Pass a folder that exists as cwd, or leave cwd out to run in {ok}."
+            )
         );
-        let none = ChatContext { approved_folders: vec![], ..c.clone() };
+        let none = ChatContext {
+            approved_folders: vec![],
+            ..c.clone()
+        };
         let a = describe(&s, &none, json!({"command": "ls"})).await;
         assert_eq!(
             a.hard_limit.as_deref(),
-            Some("No folder is approved for this chat, so commands have nowhere to run. The user can approve a folder in the Tools panel.")
+            Some(
+                "No folder is approved for this chat, so commands have nowhere to run. The user can approve a folder in the Tools panel."
+            )
         );
     }
 
@@ -1142,7 +1202,9 @@ mod tests {
     #[test]
     fn head_and_tail() {
         let t = "a".repeat(5000) + &"b".repeat(5000);
-        let s = shorten::command_view(&t, 1500, None).expect("too long").text;
+        let s = shorten::command_view(&t, 1500, None)
+            .expect("too long")
+            .text;
         assert!(s.starts_with("aaa") && s.ends_with("bbb") && s.contains("not shown"));
         assert!(s.len() <= 1500);
         assert_eq!(shorten::command_view("short", 1500, None), None);

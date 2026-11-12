@@ -31,7 +31,10 @@ async fn a_solved_run_records_its_calls_tokens_and_audit_rows() {
             "edit_file",
             json!({"path": "notes.txt", "old_text": "two", "new_text": "three"}),
         ),
-        call("write_file", json!({"path": "new.txt", "content": "made\n"})),
+        call(
+            "write_file",
+            json!({"path": "new.txt", "content": "made\n"}),
+        ),
         text("I changed two to three and made new.txt."),
     ])
     .await;
@@ -54,7 +57,14 @@ async fn a_solved_run_records_its_calls_tokens_and_audit_rows() {
     assert_eq!(record.prompt_tokens, 4 * 500);
     assert_eq!(record.completion_tokens, 4 * 10);
     assert_eq!(record.answer, "I changed two to three and made new.txt.");
-    assert_eq!((record.failed_edits(), record.tool_failures(), record.blocked()), (0, 0, 0));
+    assert_eq!(
+        (
+            record.failed_edits(),
+            record.tool_failures(),
+            record.blocked()
+        ),
+        (0, 0, 0)
+    );
     // One audit row per call, decided by the rule, belonging to no chat.
     let rows = rows.lock().unwrap();
     assert_eq!(rows.len(), 3);
@@ -67,7 +77,12 @@ async fn a_solved_run_records_its_calls_tokens_and_audit_rows() {
     // The model was offered the file tools and nothing else: no delete, no terminal.
     let offered = tool_names(&endpoint.requests()[0]);
     assert!(offered.contains(&"edit_file".to_owned()), "{offered:?}");
-    assert!(!offered.iter().any(|t| t == "delete_file" || t == "run_command"), "{offered:?}");
+    assert!(
+        !offered
+            .iter()
+            .any(|t| t == "delete_file" || t == "run_command"),
+        "{offered:?}"
+    );
 }
 
 #[tokio::test]
@@ -77,7 +92,8 @@ async fn refused_calls_are_counted_as_blocked_and_the_run_goes_on() {
     outside
         .write_files([("secret.txt", b"keep\n".as_slice())])
         .unwrap();
-    ws.write_files([("notes.txt", b"one\n".as_slice())]).unwrap();
+    ws.write_files([("notes.txt", b"one\n".as_slice())])
+        .unwrap();
     let secret = outside.path().join("secret.txt").display().to_string();
     let endpoint = Endpoint::playing(vec![
         call("write_file", json!({"path": secret, "content": "gone"})),
@@ -104,17 +120,20 @@ async fn refused_calls_are_counted_as_blocked_and_the_run_goes_on() {
         .iter()
         .map(|c| (c.tool.as_str(), c.blocked))
         .collect();
-    // `run_command` is not a tool of this run at all: an invalid call, not a blocked one.
+    // `delete_file` and `run_command` are not offered in this run: the agent loop refuses
+    // them as unknown tools before any describer or tool sees them (an invalid call, not
+    // a blocked one). Were one to reach the gate, the rule refuses it too (sandbox tests).
     assert_eq!(
         statuses,
         [
             ("write_file", true),
-            ("delete_file", true),
+            ("delete_file", false),
             ("write_file", true),
             ("run_command", false)
         ]
     );
-    assert_eq!(record.blocked(), 3);
+    assert_eq!(record.calls[1].status, "error");
+    assert_eq!(record.blocked(), 2);
     // The model was told why, and the reply went on.
     let results = tool_results(endpoint.requests().last().unwrap());
     assert!(results.len() >= 3, "{results:?}");
@@ -197,7 +216,11 @@ async fn stop_ends_a_run_within_two_seconds() {
     let started = Instant::now();
     let record = run(&model(&endpoint), spec("go", false), &ws, cancel, audit).await;
     assert_eq!(record.status, "stopped", "{record:?}");
-    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -208,7 +231,14 @@ async fn the_time_limit_stops_a_run() {
     let mut spec = spec("go", false);
     spec.time_limit = Duration::from_millis(400);
     let started = Instant::now();
-    let record = run(&model(&endpoint), spec, &ws, CancellationToken::new(), audit).await;
+    let record = run(
+        &model(&endpoint),
+        spec,
+        &ws,
+        CancellationToken::new(),
+        audit,
+    )
+    .await;
     assert_eq!(record.status, "timeLimit", "{record:?}");
     assert!(started.elapsed() < Duration::from_secs(3));
 }
@@ -216,8 +246,8 @@ async fn the_time_limit_stops_a_run() {
 #[tokio::test]
 async fn a_failed_request_ends_the_run_as_failed() {
     let ws = Workspace::create().unwrap();
-    let endpoint = Endpoint::playing(vec![Say::Status(500), Say::Status(500), Say::Status(500)])
-        .await;
+    let endpoint =
+        Endpoint::playing(vec![Say::Status(500), Say::Status(500), Say::Status(500)]).await;
     let (audit, _) = audit_rows();
     let record = run(
         &model(&endpoint),
@@ -238,9 +268,19 @@ async fn the_settings_reach_the_request() {
     let (audit, _) = audit_rows();
     let mut spec = spec("go", false);
     spec.settings.temperature = Some(0.2);
-    run(&model(&endpoint), spec, &ws, CancellationToken::new(), audit).await;
+    run(
+        &model(&endpoint),
+        spec,
+        &ws,
+        CancellationToken::new(),
+        audit,
+    )
+    .await;
     let request = &endpoint.requests()[0];
-    assert!((request["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-6, "{request}");
+    assert!(
+        (request["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-6,
+        "{request}"
+    );
 }
 
 /// Benchmarks have the terminal: plain commands run in the run's folder, and commands the
@@ -256,9 +296,15 @@ async fn a_benchmark_run_has_the_terminal_under_the_rule() {
     ws.write_files([("hello.py", b"print('hello from the run')\n".as_slice())])
         .unwrap();
     let endpoint = Endpoint::playing(vec![
-        call("run_command", json!({"command": "python3 hello.py > out.txt"})),
+        call(
+            "run_command",
+            json!({"command": "python3 hello.py > out.txt"}),
+        ),
         call("run_command", json!({"command": "rm hello.py"})),
-        call("run_command", json!({"command": "curl https://example.com"})),
+        call(
+            "run_command",
+            json!({"command": "curl https://example.com"}),
+        ),
         text("Done."),
     ])
     .await;
@@ -271,7 +317,11 @@ async fn a_benchmark_run_has_the_terminal_under_the_rule() {
         audit,
     )
     .await;
-    assert_eq!(ws.read("out.txt").as_deref(), Some("hello from the run\n"), "{record:?}");
+    assert_eq!(
+        ws.read("out.txt").as_deref(),
+        Some("hello from the run\n"),
+        "{record:?}"
+    );
     assert!(ws.read("hello.py").is_some());
     let blocked: Vec<bool> = record.calls.iter().map(|c| c.blocked).collect();
     assert_eq!(blocked, [false, true, true], "{:?}", record.calls);

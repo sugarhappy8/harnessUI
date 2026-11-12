@@ -155,13 +155,17 @@ async fn calls_written_as_text_are_reported() {
 
 #[test]
 fn variants_follow_what_the_model_can_do() {
-    let labels = |can_think| -> Vec<String> {
-        variants(can_think).into_iter().map(|(l, _)| l).collect()
-    };
+    let labels =
+        |can_think| -> Vec<String> { variants(can_think).into_iter().map(|(l, _)| l).collect() };
     assert_eq!(labels(false), ["Default", "Temperature 0.2"]);
     assert_eq!(
         labels(true),
-        ["Default", "Thinking off", "Temperature 0.2", "Thinking off, temperature 0.2"]
+        [
+            "Default",
+            "Thinking off",
+            "Temperature 0.2",
+            "Thinking off, temperature 0.2"
+        ]
     );
     assert_eq!(variants(true)[0].1, Settings::default());
 }
@@ -178,7 +182,12 @@ fn variant(label: &str, passed: u32, tool_failures: u32) -> VariantResult {
 
 #[test]
 fn the_best_variant_passes_most_then_fails_least_then_comes_first() {
-    let results = [variant("a", 2, 1), variant("b", 3, 2), variant("c", 3, 0), variant("d", 3, 0)];
+    let results = [
+        variant("a", 2, 1),
+        variant("b", 3, 2),
+        variant("c", 3, 0),
+        variant("d", 3, 0),
+    ];
     assert_eq!(best(&results).unwrap().label, "c");
     let tie = [variant("a", 2, 0), variant("b", 2, 0)];
     assert_eq!(best(&tie).unwrap().label, "a");
@@ -205,7 +214,11 @@ async fn the_check_finds_the_settings_that_work() {
         let cool = request["temperature"]
             .as_f64()
             .is_some_and(|t| (t - 0.2).abs() < 1e-6);
-        if cool { capable(request) } else { careless(request) }
+        if cool {
+            capable(request)
+        } else {
+            careless(request)
+        }
     }
     let endpoint = Endpoint::start(cool_only).await;
     let (audit, rows) = audit_rows();
@@ -217,7 +230,9 @@ async fn the_check_finds_the_settings_that_work() {
         &[],
         CancellationToken::new(),
         audit,
-        std::sync::Arc::new(move |done, total, what| kept.lock().unwrap().push((done, total, what))),
+        std::sync::Arc::new(move |done, total, what| {
+            kept.lock().unwrap().push((done, total, what))
+        }),
     )
     .await;
     assert_eq!(results.len(), 2);

@@ -302,7 +302,8 @@ mod tests {
             }
         }
         // A profile whose check passed nothing has no defaults either.
-        let mut input = TurnInput::new(Vec::new(), ModelCaps::default(), RequestTemplate::default());
+        let mut input =
+            TurnInput::new(Vec::new(), ModelCaps::default(), RequestTemplate::default());
         apply_to_input(&mut input, None, false);
         assert!(input.thinking);
         assert_eq!(input.template.temperature, None);
@@ -310,7 +311,8 @@ mod tests {
 
     #[test]
     fn a_profile_fills_in_what_the_user_did_not_choose() {
-        let mut input = TurnInput::new(Vec::new(), ModelCaps::default(), RequestTemplate::default());
+        let mut input =
+            TurnInput::new(Vec::new(), ModelCaps::default(), RequestTemplate::default());
         apply_to_input(&mut input, Some(&off_cool()), false);
         assert!(!input.thinking);
         assert_eq!(input.template.temperature, Some(0.2));
@@ -351,8 +353,12 @@ mod tests {
             serde_json::from_value(value).unwrap()
         };
         assert!(!user_chose_thinking(&prefs(serde_json::json!({}))));
-        assert!(user_chose_thinking(&prefs(serde_json::json!({"thinkingOff": true}))));
-        assert!(user_chose_thinking(&prefs(serde_json::json!({"thinkingChosen": true}))));
+        assert!(user_chose_thinking(&prefs(
+            serde_json::json!({"thinkingOff": true})
+        )));
+        assert!(user_chose_thinking(&prefs(
+            serde_json::json!({"thinkingChosen": true})
+        )));
         // Not stored when not chosen, so an untouched chat's stored value is unchanged.
         let untouched = serde_json::to_value(prefs(serde_json::json!({"enabled": ["a"]}))).unwrap();
         assert_eq!(untouched, serde_json::json!({"enabled": ["a"]}));
@@ -366,7 +372,10 @@ mod tests {
             backend: backend.into(),
         };
         let key = local("vulkan", 10).key();
-        assert!(key.starts_with(KEY_PREFIX) && key.len() == KEY_PREFIX.len() + 16, "{key}");
+        assert!(
+            key.starts_with(KEY_PREFIX) && key.len() == KEY_PREFIX.len() + 16,
+            "{key}"
+        );
         assert_eq!(key, local("Vulkan", 10).key());
         assert_ne!(key, local("cpu", 10).key());
         assert_ne!(key, local("vulkan", 11).key());
@@ -385,7 +394,10 @@ mod tests {
         let source = include_str!("../models_cmd.rs");
         let start = source.find("const ALLOWED").expect("the allow-list");
         let list = &source[start..start + source[start..].find("];").unwrap()];
-        assert!(!list.contains("modelProfile") && !list.contains("profile"), "{list}");
+        assert!(
+            !list.contains("modelProfile") && !list.contains("profile"),
+            "{list}"
+        );
         assert!(!list.contains("KEY_PREFIX"), "{list}");
     }
 

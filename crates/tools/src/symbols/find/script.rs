@@ -4,7 +4,14 @@
 use super::{Cur, Scan, ScopeKind, SymbolKind};
 
 /// Callees whose argument is a component or function even when it is an arrow.
-const WRAPPERS: [&str; 6] = ["memo", "forwardRef", "observer", "lazy", "debounce", "throttle"];
+const WRAPPERS: [&str; 6] = [
+    "memo",
+    "forwardRef",
+    "observer",
+    "lazy",
+    "debounce",
+    "throttle",
+];
 
 /// Words that can stand before a member name in a class body.
 const MEMBER_MODIFIERS: [&str; 12] = [
@@ -279,7 +286,9 @@ fn member(s: &mut Scan<'_>, i: usize, mut c: Cur<'_>) -> bool {
         Some(b'=' | b':') => {
             // `onClick = (e) => {`, `handler: Fn = async () => {`
             let rest = c.rest();
-            let Some(eq) = rest.find('=') else { return true };
+            let Some(eq) = rest.find('=') else {
+                return true;
+            };
             if rest[eq + 1..].starts_with(['=', '>']) {
                 return true;
             }

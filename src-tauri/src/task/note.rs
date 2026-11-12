@@ -113,7 +113,8 @@ fn since_line(task: &Task, say_pause: bool) -> Option<String> {
     if !changed.is_empty() {
         parts.push(format!("changed {}", sentence(&changed)));
     }
-    (!parts.is_empty()).then(|| format!("- since you last saw this, the user: {}", parts.join("; ")))
+    (!parts.is_empty())
+        .then(|| format!("- since you last saw this, the user: {}", parts.join("; ")))
 }
 
 fn status_word(status: StepStatus) -> &'static str {
@@ -158,9 +159,9 @@ fn common_folder(paths: &[&str]) -> Option<String> {
         if common.is_empty() {
             return None;
         }
-        let at_boundary = dirs.iter().all(|d| {
-            d.len() == common.len() || d[common.len()..].starts_with(is_separator)
-        });
+        let at_boundary = dirs
+            .iter()
+            .all(|d| d.len() == common.len() || d[common.len()..].starts_with(is_separator));
         if at_boundary {
             break;
         }
@@ -240,7 +241,13 @@ impl Lines {
 
     /// Fills a list line with as many items as fit, in order. `render(n)` is the line with
     /// the first `n` items, or `None` for a line that cannot be shown with `n` items.
-    fn fill(&mut self, slot: Slot, count: usize, header: Option<&str>, render: impl Fn(usize) -> Option<String>) {
+    fn fill(
+        &mut self,
+        slot: Slot,
+        count: usize,
+        header: Option<&str>,
+        render: impl Fn(usize) -> Option<String>,
+    ) {
         for n in 1..=count {
             let Some(line) = render(n) else { continue };
             let previous = self.slot(slot).replace(line);
@@ -271,7 +278,11 @@ fn render(task: &Task, header: Option<&str>, in_turn: bool) -> String {
 
     // The goal and the next action matter most: always there, cut short if need be.
     if !state.goal.is_empty() {
-        let label = if user.goal { "- goal (the user wrote it): " } else { "- goal: " };
+        let label = if user.goal {
+            "- goal (the user wrote it): "
+        } else {
+            "- goal: "
+        };
         lines.goal = Some(format!("{label}{}", quote(&state.goal, GOAL_TOKENS)));
     }
     if !state.next_action.is_empty() {
@@ -280,7 +291,10 @@ fn render(task: &Task, header: Option<&str>, in_turn: bool) -> String {
         } else {
             "- next action: "
         };
-        lines.next_action = Some(format!("{label}{}", quote(&state.next_action, NEXT_ACTION_TOKENS)));
+        lines.next_action = Some(format!(
+            "{label}{}",
+            quote(&state.next_action, NEXT_ACTION_TOKENS)
+        ));
     }
 
     // Then the lists, in this order, each with as many items as still fit.
@@ -288,16 +302,28 @@ fn render(task: &Task, header: Option<&str>, in_turn: bool) -> String {
         .constraints
         .iter()
         .map(|c| {
-            let mark = if user.constraints.contains(c) { " (user)" } else { "" };
+            let mark = if user.constraints.contains(c) {
+                " (user)"
+            } else {
+                ""
+            };
             format!("{}{mark}", quote(c, ITEM_TOKENS))
         })
         .collect();
     lines.fill(Slot::Constraints, constraints.len(), header, |n| {
-        Some(list_line("- constraints: ", &constraints[..n], constraints.len() - n))
+        Some(list_line(
+            "- constraints: ",
+            &constraints[..n],
+            constraints.len() - n,
+        ))
     });
 
     let total = state.steps.len();
-    let done = state.steps.iter().filter(|s| s.status == StepStatus::Done).count();
+    let done = state
+        .steps
+        .iter()
+        .filter(|s| s.status == StepStatus::Done)
+        .count();
     if total > 0 && done == total {
         lines.steps = Some(format!("- steps: all {total} done"));
         if !fits(&lines.join(header)) {
@@ -313,7 +339,11 @@ fn render(task: &Task, header: Option<&str>, in_turn: bool) -> String {
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let mark = if user.steps.contains(&s.text) { " (user)" } else { "" };
+                let mark = if user.steps.contains(&s.text) {
+                    " (user)"
+                } else {
+                    ""
+                };
                 format!(
                     "{} [{}] {}{mark}",
                     start + i + 1,
@@ -353,7 +383,8 @@ fn render(task: &Task, header: Option<&str>, in_turn: bool) -> String {
     });
 
     // Changed files: the newest first, relative to the folder they share.
-    let recent: Vec<&store::ChangedFile> = state.changed_files.iter().rev().take(MAX_FILES).collect();
+    let recent: Vec<&store::ChangedFile> =
+        state.changed_files.iter().rev().take(MAX_FILES).collect();
     let all = state.changed_files.len() + state.files_not_listed as usize;
     if !recent.is_empty() {
         let paths: Vec<&str> = recent.iter().map(|f| f.path.as_str()).collect();
@@ -399,7 +430,11 @@ pub fn for_turn(task: &Task) -> Option<String> {
             "- status: done (the user marked this task done)".to_owned(),
         ];
         if !task.state.goal.is_empty() {
-            let label = if task.state.user.goal { "- goal (the user wrote it): " } else { "- goal: " };
+            let label = if task.state.user.goal {
+                "- goal (the user wrote it): "
+            } else {
+                "- goal: "
+            };
             lines.push(format!("{label}{}", quote(&task.state.goal, GOAL_TOKENS)));
         }
         return Some(lines.join("\n"));

@@ -277,7 +277,10 @@ fn shape(full: &str, budget: usize, how: &Shape<'_>) -> Option<View> {
                     errors::quote(line.trim_end(), ERROR_LINE_CHARS)
                 ));
             }
-            text.push_str(&format!("[The output continues at line {}:]\n", last_hidden + 1));
+            text.push_str(&format!(
+                "[The output continues at line {}:]\n",
+                last_hidden + 1
+            ));
         }
     }
     text.push_str(&tail);
@@ -440,11 +443,7 @@ mod tests {
     fn output_without_errors_gets_a_plain_marker() {
         let full: String = (1..=400).map(|i| format!("row {i}\n")).collect();
         let view = command_view(&full, 1500, None).expect("shortened");
-        assert!(
-            view.text.contains("\n[Lines "),
-            "{}",
-            view.text
-        );
+        assert!(view.text.contains("\n[Lines "), "{}", view.text);
         let marker = view
             .text
             .lines()
@@ -477,7 +476,10 @@ mod tests {
 
     #[test]
     fn text_that_fits_is_left_alone() {
-        assert_eq!(command_view("Exit code 0 (0.1 s)\nhello\n", 1500, None), None);
+        assert_eq!(
+            command_view("Exit code 0 (0.1 s)\nhello\n", 1500, None),
+            None
+        );
         assert_eq!(head_and_tail(&"x\n".repeat(700), 1500, 50), None);
         assert!(head_and_tail(&"x\n".repeat(800), 1500, 50).is_some());
     }
@@ -488,8 +490,15 @@ mod tests {
         let view = head_and_tail(&full, 1500, 75).expect("shortened");
         let (head, tail) = view.text.split_once("\n[Lines ").expect("a marker");
         let tail = tail.split_once("]\n").expect("the marker's end").1;
-        assert!(head.lines().count() > 2 * tail.lines().count(), "{}", view.text);
-        assert_eq!(view.shown.lines, head.lines().count() + tail.lines().count());
+        assert!(
+            head.lines().count() > 2 * tail.lines().count(),
+            "{}",
+            view.text
+        );
+        assert_eq!(
+            view.shown.lines,
+            head.lines().count() + tail.lines().count()
+        );
         let first_hidden = head.lines().count() + 1;
         assert_eq!(view.shown.next.map(|(a, _)| a), Some(first_hidden));
         assert!(view.text.len() + NOTE_ROOM / 2 <= 1500);
@@ -503,7 +512,11 @@ mod tests {
         assert_eq!(pieces(&full), 5);
         let view = head_and_tail(&full, 1500, 50).expect("shortened");
         assert!(view.text.starts_with("ééé") && view.text.ends_with("ééé"));
-        assert!(view.text.contains("…\n[Lines 2-4 are not shown.]\n…"), "{}", &view.text[..60]);
+        assert!(
+            view.text.contains("…\n[Lines 2-4 are not shown.]\n…"),
+            "{}",
+            &view.text[..60]
+        );
         assert!(view.text.len() <= 1500);
         assert_eq!(view.shown.lines, 2);
         assert_eq!(view.shown.next, Some((2, 4)));
@@ -533,7 +546,9 @@ mod tests {
         let mut ui = shown.attach(Some(json!({"command": "ls", "cwd": "/w"})));
         assert_eq!(
             ui,
-            Some(json!({"command": "ls", "cwd": "/w", "shortened": {"lines": 30, "next": [13, 42]}}))
+            Some(
+                json!({"command": "ls", "cwd": "/w", "shortened": {"lines": 30, "next": [13, 42]}})
+            )
         );
         assert_eq!(Shown::take(&mut ui), Some(shown));
         assert_eq!(ui, Some(json!({"command": "ls", "cwd": "/w"})));

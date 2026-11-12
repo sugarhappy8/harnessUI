@@ -182,11 +182,17 @@ mod tests {
         let temp = dunce::canonicalize(std::env::temp_dir()).unwrap();
         assert!(a.path().starts_with(&temp), "{:?}", a.path());
         let name = a.path().file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with(PREFIX) && name.len() > PREFIX.len() + 20, "{name}");
+        assert!(
+            name.starts_with(PREFIX) && name.len() > PREFIX.len() + 20,
+            "{name}"
+        );
         assert_eq!(std::fs::read_dir(a.path()).unwrap().count(), 0);
         a.write_files([("src/deep/x.py", b"x = 1\n".as_slice()), ("r.md", b"# r\n")])
             .unwrap();
-        assert_eq!(a.files(), vec!["r.md".to_owned(), "src/deep/x.py".to_owned()]);
+        assert_eq!(
+            a.files(),
+            vec!["r.md".to_owned(), "src/deep/x.py".to_owned()]
+        );
         assert_eq!(a.read("src/deep/x.py").as_deref(), Some("x = 1\n"));
         let path = a.path().to_path_buf();
         drop(a);

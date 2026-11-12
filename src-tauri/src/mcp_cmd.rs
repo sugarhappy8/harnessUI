@@ -1110,7 +1110,11 @@ pub async fn set_chat_thinking(
     chat_id: store::ChatId,
     on: bool,
 ) -> AppResult<()> {
-    change_chat_prefs(&state, chat_id, |prefs| prefs.thinking_off = !on).await
+    change_chat_prefs(&state, chat_id, |prefs| {
+        prefs.thinking_off = !on;
+        prefs.thinking_chosen = true; // [0.0.4 profile] the user's choice beats a model profile
+    })
+    .await
 }
 
 /// One server's tools with the user's switches (Settings → MCP servers).

@@ -25,8 +25,23 @@ const JAVA_MODIFIERS: [&str; 13] = [
 ];
 
 const CSHARP_MODIFIERS: [&str; 17] = [
-    "public", "private", "protected", "internal", "static", "readonly", "sealed", "abstract",
-    "virtual", "override", "async", "extern", "unsafe", "new", "partial", "file", "required",
+    "public",
+    "private",
+    "protected",
+    "internal",
+    "static",
+    "readonly",
+    "sealed",
+    "abstract",
+    "virtual",
+    "override",
+    "async",
+    "extern",
+    "unsafe",
+    "new",
+    "partial",
+    "file",
+    "required",
 ];
 
 const KOTLIN_MODIFIERS: [&str; 25] = [
@@ -390,8 +405,7 @@ fn swift(s: &mut Scan<'_>, i: usize) {
     if !skip_annotations(&mut c) {
         return;
     }
-    loop {
-        let Some(w) = c.word() else { break };
+    while let Some(w) = c.word() {
         let modifier = SWIFT_MODIFIERS.contains(&w) || {
             // `class func`, `class var`: a modifier, not a class.
             let mut ahead = c;

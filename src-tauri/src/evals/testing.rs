@@ -278,7 +278,10 @@ pub fn spec(prompt: &str, terminal: bool) -> crate::evals::harness::Spec {
 }
 
 /// An audit function that keeps the rows.
-pub fn audit_rows() -> (crate::evals::harness::AuditFn, Arc<Mutex<Vec<store::AuditEntry>>>) {
+pub fn audit_rows() -> (
+    crate::evals::harness::AuditFn,
+    Arc<Mutex<Vec<store::AuditEntry>>>,
+) {
     let rows = Arc::new(Mutex::new(Vec::new()));
     let kept = rows.clone();
     (

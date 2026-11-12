@@ -367,7 +367,10 @@ fn read_call(path: &str, around: Option<usize>) -> String {
 /// tool describes it as a read of the file and explains it from `call`, inside the markers
 /// that say "this is data". The other problems are explained with numbers alone.
 pub fn needs_file_text(problem: &EditProblem) -> bool {
-    matches!(problem, EditProblem::NotFound | EditProblem::Ambiguous { .. })
+    matches!(
+        problem,
+        EditProblem::NotFound | EditProblem::Ambiguous { .. }
+    )
 }
 
 /// The message for an edit that cannot be made: what is wrong, the candidates, and the
@@ -445,7 +448,9 @@ pub fn edit_problem_message(problem: &EditProblem, ctx: &EditContext<'_>) -> Str
             const COPY: &str =
                 "copy the text to replace exactly as it is in the file, including indentation";
             if closest.is_empty() {
-                text.push_str(" Nothing in the file looks like it: check that this is the right file.");
+                text.push_str(
+                    " Nothing in the file looks like it: check that this is the right file.",
+                );
             } else {
                 text.push_str(" Closest lines in the file:\n");
                 for (n, line) in &closest {
@@ -721,7 +726,9 @@ mod tests {
     #[test]
     fn only_not_found_and_ambiguous_need_the_file_text() {
         assert!(needs_file_text(&EditProblem::NotFound));
-        assert!(needs_file_text(&EditProblem::Ambiguous { lines: vec![2, 7] }));
+        assert!(needs_file_text(&EditProblem::Ambiguous {
+            lines: vec![2, 7]
+        }));
         assert!(!needs_file_text(&EditProblem::NoChange));
         assert!(!needs_file_text(&EditProblem::OutOfRange {
             asked: 3,
@@ -736,9 +743,13 @@ mod tests {
                     lines: vec![2, 7],
                 },
             ] {
-                let message = edit_problem_message(&problem, &ctx(FILE, "let total = price * qty;", known));
+                let message =
+                    edit_problem_message(&problem, &ctx(FILE, "let total = price * qty;", known));
                 for line in FILE.lines().filter(|l| l.trim().len() > 3) {
-                    assert!(!message.contains(line.trim()), "{problem:?} quoted {line:?}: {message}");
+                    assert!(
+                        !message.contains(line.trim()),
+                        "{problem:?} quoted {line:?}: {message}"
+                    );
                 }
             }
         }
@@ -768,7 +779,10 @@ mod tests {
              The file has changed since it was read in this chat: call read_file {\"limit\":20,\"offset\":3,\"path\":\"/w/calc.rs\"} again, then copy the text to replace exactly as it is in the file, including indentation."
         );
         assert_eq!(
-            edit_problem_message(&EditProblem::NotFound, &ctx(FILE, "import os, sys, json", Known::No)),
+            edit_problem_message(
+                &EditProblem::NotFound,
+                &ctx(FILE, "import os, sys, json", Known::No)
+            ),
             "old_text was not found in /w/calc.rs. Nothing in the file looks like it: check that this is the right file. This file has not been read in this chat: call read_file {\"path\":\"/w/calc.rs\"} first to see what is in it."
         );
     }
@@ -1055,7 +1069,11 @@ mod tests {
             similar: &many,
             working_folder: None,
         });
-        assert_eq!(message.matches("/w/a").count(), 1 + MAX_SIMILAR_NAMES, "{message}");
+        assert_eq!(
+            message.matches("/w/a").count(),
+            1 + MAX_SIMILAR_NAMES,
+            "{message}"
+        );
     }
 
     #[test]

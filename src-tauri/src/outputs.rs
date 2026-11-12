@@ -123,7 +123,11 @@ pub async fn record(store: &Store, chat_id: i64, call_id: &str, tool: &str, out:
     let info = match added {
         Ok(info) => info,
         Err(e) => {
-            tracing::warn!(chat_id, tool, "could not store a shortened tool output: {e}");
+            tracing::warn!(
+                chat_id,
+                tool,
+                "could not store a shortened tool output: {e}"
+            );
             out.full_text = Some(full);
             return;
         }
@@ -135,14 +139,10 @@ pub async fn record(store: &Store, chat_id: i64, call_id: &str, tool: &str, out:
         .or_else(|| Shown::next_range(shown + 1, shown, total))
         .unwrap_or((1, total.clamp(1, MAX_NEXT_LINES)));
     let line = shortened_line(info.id, shown, info.lines, next);
-    match out
-        .content
-        .iter_mut()
-        .rev()
-        .find_map(|c| match c {
-            Content::Text { text } => Some(text),
-            _ => None,
-        }) {
+    match out.content.iter_mut().rev().find_map(|c| match c {
+        Content::Text { text } => Some(text),
+        _ => None,
+    }) {
         Some(text) => {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
@@ -183,8 +183,14 @@ enum Request {
 /// Reads and checks the arguments. The errors name the argument and what to send.
 fn parse(args: &Map<String, Value>) -> Result<(i64, Request), String> {
     let id = match args.get("id") {
-        Some(v) => v.as_i64().ok_or("id must be a whole number: the number after \"output #\" in a [Shortened: …] line.")?,
-        None => return Err("id is required: the number after \"output #\" in a [Shortened: …] line.".into()),
+        Some(v) => v.as_i64().ok_or(
+            "id must be a whole number: the number after \"output #\" in a [Shortened: …] line.",
+        )?,
+        None => {
+            return Err(
+                "id is required: the number after \"output #\" in a [Shortened: …] line.".into(),
+            );
+        }
     };
     let lines = args.get("lines").and_then(Value::as_str);
     let grep = args.get("grep").and_then(Value::as_str);
@@ -223,7 +229,10 @@ fn parse_range(range: &str) -> Result<(usize, usize), String> {
         }
     };
     if a == 0 {
-        return Err(format!("lines start at 1, not 0: for example \"1-{}\".", b.max(1)));
+        return Err(format!(
+            "lines start at 1, not 0: for example \"1-{}\".",
+            b.max(1)
+        ));
     }
     if a > b {
         return Err(format!(
@@ -274,7 +283,12 @@ fn numbered(n: usize, sep: char, text: &str) -> String {
 
 /// The call: the part of the chat's stored output `id` that was asked for, at most
 /// `budget` bytes. Only outputs of `chat` can be read.
-pub async fn read(store: &Store, chat: ChatId, args: &Map<String, Value>, budget: usize) -> ToolOutput {
+pub async fn read(
+    store: &Store,
+    chat: ChatId,
+    args: &Map<String, Value>,
+    budget: usize,
+) -> ToolOutput {
     let (id, request) = match parse(args) {
         Ok(v) => v,
         Err(why) => return ToolOutput::error(why),
@@ -367,7 +381,11 @@ pub async fn read(store: &Store, chat: ChatId, args: &Map<String, Value>, budget
                     block.push_str("--\n");
                 }
                 for (i, line) in lines.iter().enumerate().take(to).skip(from) {
-                    let sep = if hits.binary_search(&i).is_ok() { ':' } else { '-' };
+                    let sep = if hits.binary_search(&i).is_ok() {
+                        ':'
+                    } else {
+                        '-'
+                    };
                     block.push_str(&numbered(i + 1, sep, line.text));
                 }
                 if shown_hits > 0 && out.len() + block.len() > room {
@@ -395,11 +413,17 @@ pub async fn read(store: &Store, chat: ChatId, args: &Map<String, Value>, budget
 /// The message for an id that is not one of the chat's saved outputs.
 async fn unknown_id(store: &Store, chat: ChatId, id: i64) -> String {
     let ids: Vec<String> = match store.list_tool_outputs(chat).await {
-        Ok(list) => list.iter().take(MAX_IDS_LISTED + 1).map(|o| format!("#{}", o.id)).collect(),
+        Ok(list) => list
+            .iter()
+            .take(MAX_IDS_LISTED + 1)
+            .map(|o| format!("#{}", o.id))
+            .collect(),
         Err(_) => Vec::new(),
     };
     match ids.len() {
-        0 => format!("There is no output #{id} in this chat: this chat has no saved outputs. Outputs are saved when a result is shortened; its last line names the id."),
+        0 => format!(
+            "There is no output #{id} in this chat: this chat has no saved outputs. Outputs are saved when a result is shortened; its last line names the id."
+        ),
         n if n > MAX_IDS_LISTED => format!(
             "There is no output #{id} in this chat. The newest saved outputs are {} and older ones. The last line of a shortened result names its id.",
             ids[..MAX_IDS_LISTED].join(", ")
@@ -481,7 +505,9 @@ pub async fn get_tool_output(
     id: i64,
 ) -> AppResult<ToolOutputDto> {
     if window.label() != crate::MAIN_WINDOW {
-        return Err(AppError::bad_request("Only the main window shows tool output."));
+        return Err(AppError::bad_request(
+            "Only the main window shows tool output.",
+        ));
     }
     let stored = state
         .store

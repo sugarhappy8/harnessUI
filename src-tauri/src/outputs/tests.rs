@@ -84,7 +84,11 @@ async fn a_shortened_result_is_stored_and_the_model_is_told_how_to_read_more() {
         format!("{view}\n{}", shortened_line(id, 10, 100, (11, 30)))
     );
     assert!(out.full_text.is_none(), "the card shows what the model saw");
-    assert_eq!(out.ui, Some(json!({"command": "x"})), "the note is taken out");
+    assert_eq!(
+        out.ui,
+        Some(json!({"command": "x"})),
+        "the note is taken out"
+    );
     assert!(!out.is_error);
     let stored = store
         .get_tool_output(ChatId(c), id)
@@ -92,7 +96,10 @@ async fn a_shortened_result_is_stored_and_the_model_is_told_how_to_read_more() {
         .expect("get")
         .expect("stored");
     assert_eq!(stored.content, full);
-    assert_eq!((stored.info.call_id.as_str(), stored.info.tool.as_str()), ("call_7", "run_command"));
+    assert_eq!(
+        (stored.info.call_id.as_str(), stored.info.tool.as_str()),
+        ("call_7", "run_command")
+    );
 }
 
 #[tokio::test]
@@ -106,7 +113,10 @@ async fn a_tool_without_a_note_is_counted_by_the_lines_it_showed() {
     record(&store, c, "", "read_artifact", &mut out).await;
     let id = store.list_tool_outputs(ChatId(c)).await.expect("list")[0].id;
     assert!(
-        out.joined_text().ends_with(&format!("version.]\n{}", shortened_line(id, 7, 50, (8, 27)))),
+        out.joined_text().ends_with(&format!(
+            "version.]\n{}",
+            shortened_line(id, 7, 50, (8, 27))
+        )),
         "{}",
         out.joined_text()
     );
@@ -121,13 +131,23 @@ async fn results_that_were_not_shortened_and_read_output_itself_are_left_alone()
     assert_eq!(plain.joined_text(), "all of it");
     let mut again = ToolOutput {
         full_text: Some("x".into()),
-        ui: Shown { lines: 1, next: None }.attach(None),
+        ui: Shown {
+            lines: 1,
+            next: None,
+        }
+        .attach(None),
         ..ToolOutput::text("x")
     };
     record(&store, c, "", TOOL_NAME, &mut again).await;
     assert_eq!(again.joined_text(), "x");
     assert!(again.ui.is_none(), "the note never leaves the app");
-    assert!(store.list_tool_outputs(ChatId(c)).await.expect("list").is_empty());
+    assert!(
+        store
+            .list_tool_outputs(ChatId(c))
+            .await
+            .expect("list")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -166,14 +186,24 @@ async fn another_chats_output_cannot_be_read() {
     assert!(out.is_error);
     assert_eq!(
         out.joined_text(),
-        format!("There is no output #{id} in this chat: this chat has no saved outputs. Outputs are saved when a result is shortened; its last line names the id.")
+        format!(
+            "There is no output #{id} in this chat: this chat has no saved outputs. Outputs are saved when a result is shortened; its last line names the id."
+        )
     );
     assert!(!out.joined_text().contains("secret"));
     let own = stored(&store, other, "theirs\n").await;
-    let out = read(&store, ChatId(other), &args(json!({"id": id, "grep": "secret"})), 6000).await;
+    let out = read(
+        &store,
+        ChatId(other),
+        &args(json!({"id": id, "grep": "secret"})),
+        6000,
+    )
+    .await;
     assert_eq!(
         out.joined_text(),
-        format!("There is no output #{id} in this chat. Saved outputs: #{own} (newest first). The last line of a shortened result names its id.")
+        format!(
+            "There is no output #{id} in this chat. Saved outputs: #{own} (newest first). The last line of a shortened result names its id."
+        )
     );
     let out = read(&store, ChatId(mine), &args(json!({"id": id})), 6000).await;
     assert!(!out.is_error && out.joined_text().contains("secret of my chat"));
@@ -192,24 +222,39 @@ async fn a_range_of_lines_is_read_with_its_numbers_and_the_next_range() {
     assert!(!out.is_error);
     assert_eq!(
         out.joined_text(),
-        format!("     3: line 3\n     4: line 4\n     5: line 5\n[Showing lines 3-5 of 30. Next: read_output {{\"id\": {id}, \"lines\": \"6-25\"}}.]")
+        format!(
+            "     3: line 3\n     4: line 4\n     5: line 5\n[Showing lines 3-5 of 30. Next: read_output {{\"id\": {id}, \"lines\": \"6-25\"}}.]"
+        )
     );
     let out = read(json!({"id": id, "lines": "28-40"})).await;
     assert_eq!(
         out.joined_text(),
-        format!("    28: line 28\n    29: line 29\n    30: line 30\n[Showing lines 28-30: output #{id} ends at line 30.]")
+        format!(
+            "    28: line 28\n    29: line 29\n    30: line 30\n[Showing lines 28-30: output #{id} ends at line 30.]"
+        )
     );
     let out = read(json!({"id": id})).await;
-    assert!(out.joined_text().ends_with(&format!("[Showing lines 1-30 of 30: the end of output #{id}.]")));
+    assert!(out.joined_text().ends_with(&format!(
+        "[Showing lines 1-30 of 30: the end of output #{id}.]"
+    )));
     // A range larger than one result: what fits, and where to go on.
     let out = super::read(&store, ChatId(c), &args(json!({"id": id})), 500).await;
     let text = out.joined_text();
-    assert!(text.contains("     1: line 1\n") && text.len() <= 500, "{text}");
-    assert!(text.contains(" (as many as fit in one result). Next: read_output"), "{text}");
+    assert!(
+        text.contains("     1: line 1\n") && text.len() <= 500,
+        "{text}"
+    );
+    assert!(
+        text.contains(" (as many as fit in one result). Next: read_output"),
+        "{text}"
+    );
     // Errors.
     let out = read(json!({"id": id, "lines": "31-35"})).await;
     assert!(out.is_error);
-    assert_eq!(out.joined_text(), format!("Output #{id} has 30 lines, so there is no line 31. Ask for lines from 1 to 30."));
+    assert_eq!(
+        out.joined_text(),
+        format!("Output #{id} has 30 lines, so there is no line 31. Ask for lines from 1 to 30.")
+    );
 }
 
 #[tokio::test]
@@ -218,7 +263,13 @@ async fn grep_returns_the_matching_lines_with_context_and_numbers() {
     let c = chat(&store).await;
     let text = "compiling a\ncompiling b\nerror: first\nnote\ncompiling c\ncompiling d\ncompiling e\ncompiling f\nERROR: second\ndone\n";
     let id = stored(&store, c, text).await;
-    let out = read(&store, ChatId(c), &args(json!({"id": id, "grep": "error", "context": 1})), 6000).await;
+    let out = read(
+        &store,
+        ChatId(c),
+        &args(json!({"id": id, "grep": "error", "context": 1})),
+        6000,
+    )
+    .await;
     assert!(!out.is_error);
     assert_eq!(
         out.joined_text(),
@@ -227,14 +278,28 @@ async fn grep_returns_the_matching_lines_with_context_and_numbers() {
         )
     );
     // Default context is 2; overlapping windows are printed once.
-    let out = read(&store, ChatId(c), &args(json!({"id": id, "grep": "compiling d"})), 6000).await;
+    let out = read(
+        &store,
+        ChatId(c),
+        &args(json!({"id": id, "grep": "compiling d"})),
+        6000,
+    )
+    .await;
     assert!(out.joined_text().ends_with("     4- note\n     5- compiling c\n     6: compiling d\n     7- compiling e\n     8- compiling f\n"), "{}", out.joined_text());
     // No match: says how long the output is, as a plain result.
-    let out = read(&store, ChatId(c), &args(json!({"id": id, "grep": "panic"})), 6000).await;
+    let out = read(
+        &store,
+        ChatId(c),
+        &args(json!({"id": id, "grep": "panic"})),
+        6000,
+    )
+    .await;
     assert!(!out.is_error);
     assert_eq!(
         out.joined_text(),
-        format!("No line of output #{id} contains \"panic\" (letter case ignored). It has 10 lines; read_output {{\"id\": {id}, \"lines\": \"1-10\"}} shows the first ones.")
+        format!(
+            "No line of output #{id} contains \"panic\" (letter case ignored). It has 10 lines; read_output {{\"id\": {id}, \"lines\": \"1-10\"}} shows the first ones."
+        )
     );
 }
 
@@ -245,7 +310,13 @@ fn read_output_is_the_apps_own_data_and_never_asks() {
     };
     assert_eq!(a.scope, policy::Scope::AppData);
     assert_eq!(a.risk, policy::Risk::Normal);
-    assert!(a.read_only && !a.outbound && !a.network && a.keep_asking.is_none() && a.hard_limit.is_none());
+    assert!(
+        a.read_only
+            && !a.outbound
+            && !a.network
+            && a.keep_asking.is_none()
+            && a.hard_limit.is_none()
+    );
     assert_eq!(a.summary, "Find \"error\" in saved output #3");
     // Not even after untrusted content entered the turn.
     let turn = policy::TurnContext {
@@ -256,7 +327,13 @@ fn read_output_is_the_apps_own_data_and_never_asks() {
     };
     let no_grants = std::collections::BTreeSet::<policy::Scope>::new();
     let decision = policy::evaluate(&a, &turn, &no_grants);
-    assert!(!matches!(decision, policy::Decision::Ask { .. } | policy::Decision::Denied { .. }), "{decision:?}");
+    assert!(
+        !matches!(
+            decision,
+            policy::Decision::Ask { .. } | policy::Decision::Denied { .. }
+        ),
+        "{decision:?}"
+    );
 }
 
 #[test]
@@ -265,7 +342,10 @@ fn bad_arguments_say_what_to_send() {
         Described::Invalid(why) => why,
         Described::Action(a) => panic!("{a:?}"),
     };
-    assert_eq!(why(json!({})), "id is required: the number after \"output #\" in a [Shortened: …] line.");
+    assert_eq!(
+        why(json!({})),
+        "id is required: the number after \"output #\" in a [Shortened: …] line."
+    );
     assert_eq!(
         why(json!({"id": 1, "lines": "1-5", "grep": "x"})),
         "Pass lines or grep, not both: lines reads a range, grep finds the lines that contain some text."
@@ -274,9 +354,18 @@ fn bad_arguments_say_what_to_send() {
         why(json!({"id": 1, "lines": "ten"})),
         "lines \"ten\" is not a range: write it as \"A-B\" with line numbers from 1, for example \"1-80\"."
     );
-    assert_eq!(why(json!({"id": 1, "lines": "9-3"})), "lines \"9-3\" is backwards: the first line comes first, as in \"3-9\".");
-    assert_eq!(why(json!({"id": 1, "lines": "0-3"})), "lines start at 1, not 0: for example \"1-3\".");
-    assert_eq!(why(json!({"id": 1, "grep": " "})), "grep is empty: pass the text to look for.");
+    assert_eq!(
+        why(json!({"id": 1, "lines": "9-3"})),
+        "lines \"9-3\" is backwards: the first line comes first, as in \"3-9\"."
+    );
+    assert_eq!(
+        why(json!({"id": 1, "lines": "0-3"})),
+        "lines start at 1, not 0: for example \"1-3\"."
+    );
+    assert_eq!(
+        why(json!({"id": 1, "grep": " "})),
+        "grep is empty: pass the text to look for."
+    );
 }
 
 /// Small models get a tight allowance for tool definitions.

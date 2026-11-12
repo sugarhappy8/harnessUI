@@ -82,11 +82,11 @@ const SKIP_DIRS: &[&str] = &[
 
 /// Extensions of files that are never text: left out without reading them.
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "ico", "icns", "webp", "tif", "tiff", "psd", "pdf",
-    "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "zst", "jar", "war", "exe", "dll", "so",
-    "dylib", "a", "lib", "o", "obj", "pdb", "class", "pyc", "wasm", "woff", "woff2", "ttf",
-    "otf", "eot", "mp3", "mp4", "m4a", "wav", "ogg", "flac", "mov", "avi", "mkv", "webm",
-    "gguf", "bin", "db", "sqlite", "sqlite3", "rlib", "rmeta", "node",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "icns", "webp", "tif", "tiff", "psd", "pdf", "zip",
+    "gz", "tgz", "bz2", "xz", "7z", "rar", "zst", "jar", "war", "exe", "dll", "so", "dylib", "a",
+    "lib", "o", "obj", "pdb", "class", "pyc", "wasm", "woff", "woff2", "ttf", "otf", "eot", "mp3",
+    "mp4", "m4a", "wav", "ogg", "flac", "mov", "avi", "mkv", "webm", "gguf", "bin", "db", "sqlite",
+    "sqlite3", "rlib", "rmeta", "node",
 ];
 
 /// One file in an index.
@@ -97,7 +97,7 @@ pub struct FileEntry {
     pub size: u64,
     pub modified: Option<SystemTime>,
     /// Definitions read, `None` until the file was read.
-    symbols: Option<Box<[Symbol]>>,
+    symbols: Option<Arc<[Symbol]>>,
     /// The file turned out to be binary or unreadable: not shown.
     hidden: bool,
 }
@@ -275,7 +275,7 @@ impl FolderIndex {
             let path = self.root.join(&*files[k].rel);
             let (symbols, hidden) = read_symbols(&path, &files[k].rel, MAX_SYMBOLS - total_symbols);
             total_symbols += symbols.len();
-            files[k].symbols = Some(symbols.into_boxed_slice());
+            files[k].symbols = Some(symbols.into());
             files[k].hidden = hidden;
             since += 1;
             if since >= PUBLISH_EVERY && (!old.complete || old.files.is_empty()) {
@@ -332,8 +332,12 @@ impl FolderIndex {
                 }
                 // Skill folders were refused with their folder; this is the per-file part
                 // (`.bashrc`, `.git-credentials`, ...).
-                if always_ask_reason(&path.display().to_string(), WriteKind::Edit, Flavor::native())
-                    .is_some()
+                if always_ask_reason(
+                    &path.display().to_string(),
+                    WriteKind::Edit,
+                    Flavor::native(),
+                )
+                .is_some()
                 {
                     continue;
                 }

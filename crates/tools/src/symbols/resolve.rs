@@ -203,7 +203,9 @@ pub fn resolve(req: &MentionRequest, chat: &ChatContext, cap: usize) -> Result<R
         ));
     }
     if bytes.iter().take(8192).any(|&b| b == 0) {
-        return Err(format!("{shown} is a binary file. Only text files can be mentioned."));
+        return Err(format!(
+            "{shown} is a binary file. Only text files can be mentioned."
+        ));
     }
     let text = String::from_utf8_lossy(&bytes);
     let roots: Vec<String> = sb.roots().iter().map(|r| r.canonical.to_string()).collect();
@@ -240,8 +242,9 @@ pub fn resolve(req: &MentionRequest, chat: &ChatContext, cap: usize) -> Result<R
             })
         }
         Some(wanted) => {
-            let lang = Lang::from_path(&checked.canonical)
-                .ok_or_else(|| format!("{shown} is not a kind of file whose definitions are known."))?;
+            let lang = Lang::from_path(&checked.canonical).ok_or_else(|| {
+                format!("{shown} is not a kind of file whose definitions are known.")
+            })?;
             let all = find_symbols(&text, lang);
             let sym = pick(&all, wanted, req)
                 .ok_or_else(|| format!("{} was not found in {shown} any more.", one(wanted)))?;
@@ -287,15 +290,13 @@ fn pick<'a>(all: &'a [Symbol], wanted: &str, req: &MentionRequest) -> Option<&'a
     let container = req.container.as_deref().or(from_name);
     let kind = req.kind.as_deref().and_then(SymbolKind::parse);
     let line = req.line.unwrap_or(0);
-    all.iter()
-        .filter(|s| &*s.name == name)
-        .min_by_key(|s| {
-            (
-                container.is_some() && s.container.as_deref() != container,
-                kind.is_some() && Some(s.kind) != kind,
-                s.line.abs_diff(line),
-            )
-        })
+    all.iter().filter(|s| &*s.name == name).min_by_key(|s| {
+        (
+            container.is_some() && s.container.as_deref() != container,
+            kind.is_some() && Some(s.kind) != kind,
+            s.line.abs_diff(line),
+        )
+    })
 }
 
 /// Lines `from..=to` (1-based) in `read_file`'s format, as many as fit in `room`

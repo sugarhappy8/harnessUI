@@ -56,8 +56,10 @@ const WORDS: &[&str] = &[
 
 pub const EDIT_BEFORE: &str = "name = demo\ncolor = blue\nsize = 3\n";
 pub const EDIT_AFTER: &str = "name = demo\ncolor = green\nsize = 3\n";
-pub const RECOVERY_BEFORE: &str = "[client]\nlimit = 10\nretries = 2\n\n[server]\nlimit = 10\nretries = 2\n";
-pub const RECOVERY_AFTER: &str = "[client]\nlimit = 10\nretries = 2\n\n[server]\nlimit = 20\nretries = 2\n";
+pub const RECOVERY_BEFORE: &str =
+    "[client]\nlimit = 10\nretries = 2\n\n[server]\nlimit = 10\nretries = 2\n";
+pub const RECOVERY_AFTER: &str =
+    "[client]\nlimit = 10\nretries = 2\n\n[server]\nlimit = 20\nretries = 2\n";
 
 /// One probe's outcome under one variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -178,7 +180,10 @@ pub fn judge(probe: Probe, setup: &Setup, record: &Record, ws: &Workspace) -> (b
             if record.succeeded("read_file") == 0 {
                 (false, "The file was not read with read_file.".into())
             } else if !says_word(&record.answer, word) {
-                (false, "The reply did not contain the word from the file.".into())
+                (
+                    false,
+                    "The reply did not contain the word from the file.".into(),
+                )
             } else {
                 (true, "Read the file and reported the word.".into())
             }
@@ -198,7 +203,10 @@ pub fn judge(probe: Probe, setup: &Setup, record: &Record, ws: &Workspace) -> (b
                 };
                 (true, how.into())
             } else if content.as_deref() == Some(expected) {
-                (false, "The file is right, but not through edit_file.".into())
+                (
+                    false,
+                    "The file is right, but not through edit_file.".into(),
+                )
             } else if record.succeeded("edit_file") == 0 {
                 (false, "No edit succeeded.".into())
             } else {

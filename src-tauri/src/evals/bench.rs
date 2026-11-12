@@ -183,7 +183,9 @@ pub async fn run_task(setup: &Setup<'_>, task: &Task, cancel: &CancellationToken
     }
     let ws = match Workspace::create() {
         Ok(ws) => ws,
-        Err(e) => return TaskResult::skipped(task, format!("The run's folder could not be made: {e}")),
+        Err(e) => {
+            return TaskResult::skipped(task, format!("The run's folder could not be made: {e}"));
+        }
     };
     if let Err(e) = ws.write_files(task.files.iter().map(|(p, c)| (p.as_str(), *c))) {
         return TaskResult::skipped(task, format!("The task's files could not be written: {e}"));

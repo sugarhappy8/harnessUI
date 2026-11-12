@@ -26,114 +26,120 @@ macro_rules! task {
 
 /// Every shipped file of every task, embedded when the app is built.
 pub static SHIPPED: &[(&str, &[(&str, &[u8])])] = &[
-    task!("py-fix-failing-test", [
-        "task.json",
-        "files/stats.py",
-        "files/test_stats.py",
-        "verify/verify.py",
-    ]),
-    task!("py-add-feature", [
-        "task.json",
-        "files/todo.py",
-        "files/test_todo.py",
-        "verify/verify.py",
-    ]),
-    task!("py-fix-from-error", [
-        "task.json",
-        "files/report.py",
-        "files/orders.json",
-        "verify/verify.py",
-    ]),
-    task!("py-rename-across-files", [
-        "task.json",
-        "files/users.py",
-        "files/app.py",
-        "files/test_app.py",
-        "verify/verify.py",
-    ]),
-    task!("js-fix-failing-test", [
-        "task.json",
-        "files/slugify.js",
-        "files/test.js",
-        "verify/verify.cjs",
-    ]),
-    task!("js-add-feature", [
-        "task.json",
-        "files/cart.js",
-        "files/cart.test.js",
-        "verify/verify.cjs",
-    ]),
-    task!("js-fix-from-error", [
-        "task.json",
-        "files/names.js",
-        "files/index.js",
-        "files/users.json",
-        "verify/verify.cjs",
-    ]),
-    task!("config-json-settings", [
-        "task.json",
-        "files/settings.json",
-    ]),
-    task!("config-ini-section", [
-        "task.json",
-        "files/app.ini",
-    ]),
-    task!("docs-readme-install", [
-        "task.json",
-        "files/README.md",
-    ]),
-    task!("docs-changelog-release", [
-        "task.json",
-        "files/package.json",
-        "files/CHANGELOG.md",
-    ]),
+    task!(
+        "py-fix-failing-test",
+        [
+            "task.json",
+            "files/stats.py",
+            "files/test_stats.py",
+            "verify/verify.py",
+        ]
+    ),
+    task!(
+        "py-add-feature",
+        [
+            "task.json",
+            "files/todo.py",
+            "files/test_todo.py",
+            "verify/verify.py",
+        ]
+    ),
+    task!(
+        "py-fix-from-error",
+        [
+            "task.json",
+            "files/report.py",
+            "files/orders.json",
+            "verify/verify.py",
+        ]
+    ),
+    task!(
+        "py-rename-across-files",
+        [
+            "task.json",
+            "files/users.py",
+            "files/app.py",
+            "files/test_app.py",
+            "verify/verify.py",
+        ]
+    ),
+    task!(
+        "js-fix-failing-test",
+        [
+            "task.json",
+            "files/slugify.js",
+            "files/test.js",
+            "verify/verify.cjs",
+        ]
+    ),
+    task!(
+        "js-add-feature",
+        [
+            "task.json",
+            "files/cart.js",
+            "files/cart.test.js",
+            "verify/verify.cjs",
+        ]
+    ),
+    task!(
+        "js-fix-from-error",
+        [
+            "task.json",
+            "files/names.js",
+            "files/index.js",
+            "files/users.json",
+            "verify/verify.cjs",
+        ]
+    ),
+    task!(
+        "config-json-settings",
+        ["task.json", "files/settings.json",]
+    ),
+    task!("config-ini-section", ["task.json", "files/app.ini",]),
+    task!("docs-readme-install", ["task.json", "files/README.md",]),
+    task!(
+        "docs-changelog-release",
+        ["task.json", "files/package.json", "files/CHANGELOG.md",]
+    ),
 ];
 /// A correct solution and, for some tasks, a plausible wrong one: files written over the
 /// fixture by the scripted model in tests. Not part of the app.
 #[cfg(test)]
 pub static ANSWERS: &[(&str, &[(&str, &[u8])])] = &[
-    task!("py-fix-failing-test", [
-        "solution/stats.py",
-        "wrong/test_stats.py",
-    ]),
-    task!("py-add-feature", [
-        "solution/todo.py",
-    ]),
-    task!("py-fix-from-error", [
-        "solution/report.py",
-    ]),
-    task!("py-rename-across-files", [
-        "solution/users.py",
-        "solution/app.py",
-        "solution/test_app.py",
-        "wrong/users.py",
-    ]),
-    task!("js-fix-failing-test", [
-        "solution/slugify.js",
-    ]),
-    task!("js-add-feature", [
-        "solution/cart.js",
-    ]),
-    task!("js-fix-from-error", [
-        "solution/names.js",
-        "wrong/names.js",
-    ]),
-    task!("config-json-settings", [
-        "solution/settings.json",
-        "wrong/settings.json",
-    ]),
-    task!("config-ini-section", [
-        "solution/app.ini",
-        "wrong/app.ini",
-    ]),
-    task!("docs-readme-install", [
-        "solution/README.md",
-        "wrong/README.md",
-    ]),
-    task!("docs-changelog-release", [
-        "solution/package.json",
-        "solution/CHANGELOG.md",
-    ]),
+    task!(
+        "py-fix-failing-test",
+        ["solution/stats.py", "wrong/test_stats.py",]
+    ),
+    task!("py-add-feature", ["solution/todo.py",]),
+    task!("py-fix-from-error", ["solution/report.py",]),
+    task!(
+        "py-rename-across-files",
+        [
+            "solution/users.py",
+            "solution/app.py",
+            "solution/test_app.py",
+            "wrong/users.py",
+        ]
+    ),
+    task!("js-fix-failing-test", ["solution/slugify.js",]),
+    task!("js-add-feature", ["solution/cart.js",]),
+    task!(
+        "js-fix-from-error",
+        ["solution/names.js", "wrong/names.js",]
+    ),
+    task!(
+        "config-json-settings",
+        ["solution/settings.json", "wrong/settings.json",]
+    ),
+    task!("config-ini-section", ["solution/app.ini", "wrong/app.ini",]),
+    task!(
+        "docs-readme-install",
+        ["solution/README.md", "wrong/README.md",]
+    ),
+    task!(
+        "docs-changelog-release",
+        ["solution/package.json", "solution/CHANGELOG.md",]
+    ),
 ];
 
 /// The toolchain a task's verification runs with.
@@ -225,10 +231,7 @@ impl Task {
     }
 }
 
-fn under<'a>(
-    files: &[(&'a str, &'static [u8])],
-    folder: &str,
-) -> Vec<(String, &'static [u8])> {
+fn under<'a>(files: &[(&'a str, &'static [u8])], folder: &str) -> Vec<(String, &'static [u8])> {
     files
         .iter()
         .filter_map(|(path, content)| {
@@ -327,16 +330,26 @@ mod tests {
         let kinds: BTreeSet<&str> = tasks.iter().map(|t| t.spec.kind.as_str()).collect();
         assert_eq!(
             kinds,
-            ["config", "docs", "javascript", "python"].into_iter().collect()
+            ["config", "docs", "javascript", "python"]
+                .into_iter()
+                .collect()
         );
         for task in &tasks {
             assert!(!task.files.is_empty(), "{}", task.name);
             assert!(!task.spec.checks.is_empty(), "{}", task.name);
-            assert!(answer(&task.name, "solution").is_some(), "{} has no solution", task.name);
+            assert!(
+                answer(&task.name, "solution").is_some(),
+                "{} has no solution",
+                task.name
+            );
             // A script check has its script, and a toolchain to run it with.
             for check in &task.spec.checks {
                 if let Check::Run { script } = check {
-                    assert!(task.verify.iter().any(|(p, _)| p == script), "{}", task.name);
+                    assert!(
+                        task.verify.iter().any(|(p, _)| p == script),
+                        "{}",
+                        task.name
+                    );
                     assert!(task.spec.needs.is_some(), "{}", task.name);
                 }
                 if let Check::Unchanged { file } = check {

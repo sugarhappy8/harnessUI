@@ -130,6 +130,52 @@ fn a_file_call_that_succeeded_is_a_changed_file() {
     }
 }
 
+/// An `edit_file` that fails can be described as a read (it reads the file to explain
+/// why) and is answered as an error. Only a write that did not fail changed a file.
+#[test]
+fn a_failed_or_read_only_edit_is_not_a_changed_file() {
+    let payload =
+        json!({"canonical": "/work/a.rs", "root": 0, "exists": true, "wasSymlink": false});
+    let mut read_only = action(
+        "files",
+        "edit_file",
+        policy::Scope::FileRead {
+            folder: "/work".into(),
+        },
+        payload.clone(),
+    );
+    read_only.read_only = true;
+    let write = file_action("edit_file", payload.clone());
+    let mut write_marked_read_only = write.clone();
+    write_marked_read_only.read_only = true;
+    for (a, out) in [
+        // The read that explains the failure, with its error result.
+        (
+            &read_only,
+            failed("old_text was not found; the file starts with …"),
+        ),
+        // Even if such a result were not an error.
+        (&read_only, text("ok")),
+        // A write that failed.
+        (
+            &write,
+            failed("The file changed since the edit was described."),
+        ),
+        // A write described as read-only.
+        (&write_marked_read_only, text("ok")),
+    ] {
+        assert_eq!(
+            fact_of(a, &out, 5),
+            None,
+            "{:?} {}",
+            a.scope,
+            out.joined_text()
+        );
+    }
+    // The same write that succeeded is one.
+    assert!(fact_of(&write, &text("ok"), 5).is_some());
+}
+
 #[test]
 fn other_calls_are_not_changed_files() {
     let payload =
@@ -683,6 +729,48 @@ async fn a_turn_starts_with_the_task_note_and_records_that_it_was_sent() {
     );
     assert_eq!(start_turn(&store, chat).await, (None, false));
     assert_eq!(note_in(&store, chat).await, None);
+}
+
+/// `note_for_turn` (the Context inspector) and `begin_turn` (a real turn) wrap `note_in`
+/// and `start_turn`: for the same stored task both give the same text.
+#[tokio::test]
+async fn the_inspector_and_the_turn_get_the_same_note() {
+    let mut states: Vec<Task> = Vec::new();
+    states.push(written_task());
+    let mut paused = written_task();
+    paused.status = TaskStatus::Paused;
+    paused.state.user = UserMarks {
+        goal: true,
+        next_action: true,
+        changed: vec!["goal".into(), "steps".into(), "next action".into()],
+        paused: true,
+        ..UserMarks::default()
+    };
+    states.push(paused);
+    let mut marked_done = written_task();
+    marked_done.status = TaskStatus::Done;
+    marked_done.state.user.done = true;
+    states.push(marked_done);
+    let mut done = written_task();
+    done.status = TaskStatus::Done;
+    states.push(done);
+    let mut facts = Task::new(ChatId(0));
+    facts.state.record_file("/work/a.rs", FileChange::Edited, 1);
+    states.push(facts);
+
+    for task in states {
+        let (store, chat) = store_with_chat().await;
+        let seeded = task.clone();
+        store
+            .change_task(ChatId(chat), move |slot| *slot = Some(seeded))
+            .await
+            .expect("seed");
+        let inspector = note_in(&store, chat).await;
+        let again = note_in(&store, chat).await;
+        let (turn, _) = start_turn(&store, chat).await;
+        assert_eq!(inspector, again, "reading twice gives the same text");
+        assert_eq!(inspector, turn, "{:?} {:?}", task.status, task.state.user);
+    }
 }
 
 #[tokio::test]

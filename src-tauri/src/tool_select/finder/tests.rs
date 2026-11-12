@@ -141,6 +141,12 @@ async fn call_tool_is_described_exactly_as_the_tool_it_names() {
         // What the tool's own describer refuses is refused the same way.
         (
             "edit_file",
+            json!({"path": "notes.txt", "old_text": "one", "new_text": "1", "occurrence": 9}),
+        ),
+        // An edit that needs the file's lines to explain why it fails is described as a
+        // read of the file (0.0.4), through call_tool too.
+        (
+            "edit_file",
             json!({"path": "notes.txt", "old_text": "absent", "new_text": "1"}),
         ),
     ];
@@ -203,7 +209,7 @@ async fn call_tool_is_described_exactly_as_the_tool_it_names() {
             }
         }
     }
-    assert_eq!(actions, 7, "the cases no longer reach the policy engine");
+    assert_eq!(actions, 8, "the cases no longer reach the policy engine");
 }
 
 /// The decisions that matter most, spelled out: nothing gets easier through `call_tool`.

@@ -555,7 +555,8 @@ fn missing_skill_file(skill: &Skill, path: &str) -> String {
     let wanted = wanted.trim_start_matches("./");
     // The same name in another folder of the skill counts as similar too.
     let by_name = |f: &String| f.rsplit('/').next().unwrap_or(f).to_string();
-    let mut similar = crate::errors::similar_names(wanted, files.clone(), crate::errors::MAX_SIMILAR_NAMES);
+    let mut similar =
+        crate::errors::similar_names(wanted, files.clone(), crate::errors::MAX_SIMILAR_NAMES);
     let leaf = wanted.rsplit('/').next().unwrap_or(wanted);
     for f in &files {
         if similar.len() < crate::errors::MAX_SIMILAR_NAMES
@@ -1064,12 +1065,20 @@ mod tests {
         };
         // No skill enabled, then one.
         assert_eq!(
-            invalid(server.describe("load_skill", &args(json!({"name": "pdf"})), &chat).await),
+            invalid(
+                server
+                    .describe("load_skill", &args(json!({"name": "pdf"})), &chat)
+                    .await
+            ),
             "There is no enabled skill named \"pdf\": no skill is enabled. The user can turn skills on in Settings → Skills."
         );
         server.set_enabled(vec![parse(GOOD, &sdir).unwrap()]);
         assert_eq!(
-            invalid(server.describe("load_skill", &args(json!({"name": "pdf\ntools"})), &chat).await),
+            invalid(
+                server
+                    .describe("load_skill", &args(json!({"name": "pdf\ntools"})), &chat)
+                    .await
+            ),
             "There is no enabled skill named \"pdf\\ntools\". Enabled skills: pdf-tools. Use one of these names; the user can turn on others in Settings → Skills."
         );
         let call = |a: Value| {
@@ -1077,7 +1086,8 @@ mod tests {
             let chat = chat.clone();
             async move {
                 let a = args(a);
-                let Described::Action(action) = server.describe("read_skill_file", &a, &chat).await else {
+                let Described::Action(action) = server.describe("read_skill_file", &a, &chat).await
+                else {
                     panic!("not described")
                 };
                 if let Some(why) = action.hard_limit {
@@ -1134,7 +1144,16 @@ mod tests {
             panic!()
         };
         let out = server
-            .call("load_skill", &a, &action, CallContext { chat: chat.clone(), cancel: CancellationToken::new(), progress: None })
+            .call(
+                "load_skill",
+                &a,
+                &action,
+                CallContext {
+                    chat: chat.clone(),
+                    cancel: CancellationToken::new(),
+                    progress: None,
+                },
+            )
             .await;
         assert!(out.is_error);
         let text = out.joined_text();

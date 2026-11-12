@@ -58,7 +58,11 @@ fn clean_noting(text: &str, max: usize) -> (String, bool) {
 
 /// A list of texts cleaned: empty ones dropped, each kept once, at most `max_items`.
 /// Returns the list and whether anything had to be shortened or left out.
-fn clean_list(items: impl IntoIterator<Item = String>, max_chars: usize, max_items: usize) -> (Vec<String>, bool) {
+fn clean_list(
+    items: impl IntoIterator<Item = String>,
+    max_chars: usize,
+    max_items: usize,
+) -> (Vec<String>, bool) {
     let mut out: Vec<String> = Vec::new();
     let mut cut = false;
     for item in items {
@@ -171,7 +175,9 @@ impl ModelUpdate {
                 let mut steps = Vec::new();
                 for item in items {
                     let Some(object) = item.as_object() else {
-                        return Err("`steps` must be a list of objects with `text` and `status`.".into());
+                        return Err(
+                            "`steps` must be a list of objects with `text` and `status`.".into(),
+                        );
                     };
                     let Some(text) = object.get("text").and_then(Value::as_str) else {
                         return Err("Each step needs a `text` string.".into());
@@ -341,7 +347,10 @@ pub fn apply_model(slot: &mut Option<Task>, update: ModelUpdate, now: i64) -> Ap
     if let Some(list) = steps
         && list != state.steps
     {
-        state.user.steps.retain(|t| list.iter().any(|s| s.text == *t));
+        state
+            .user
+            .steps
+            .retain(|t| list.iter().any(|s| s.text == *t));
         state.steps = list;
     }
     if let Some(next) = next_action
@@ -351,7 +360,10 @@ pub fn apply_model(slot: &mut Option<Task>, update: ModelUpdate, now: i64) -> Ap
         state.user.next_action = false;
     }
     if let Some(note) = update.note {
-        state.notes.push(TaskNote { text: note, at: now });
+        state.notes.push(TaskNote {
+            text: note,
+            at: now,
+        });
         let extra = state.notes.len().saturating_sub(MAX_NOTES);
         state.notes.drain(..extra);
     }
@@ -442,7 +454,8 @@ pub fn apply_user(slot: &mut Option<Task>, edit: UserEdit, now: i64) -> bool {
     if let Some(list) = edit.constraints {
         let (list, _) = clean_list(list, ITEM_CHARS, MAX_CONSTRAINTS);
         if list != state.constraints {
-            state.user.constraints = users_items(&list, &state.constraints, &state.user.constraints);
+            state.user.constraints =
+                users_items(&list, &state.constraints, &state.user.constraints);
             state.constraints = list;
             mark_changed(&mut state.user, CONSTRAINTS);
         }

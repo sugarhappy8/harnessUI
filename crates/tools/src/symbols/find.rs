@@ -305,13 +305,6 @@ fn trailing_word(text: &str) -> (usize, &str) {
     (start, &text[start..])
 }
 
-/// The first identifier in `text`.
-fn first_word(text: &str) -> &str {
-    let text = text.trim_start();
-    let end = text.bytes().position(|b| !is_ident(b)).unwrap_or(text.len());
-    &text[..end]
-}
-
 /// A reading position in one masked line.
 #[derive(Debug, Clone, Copy)]
 struct Cur<'a> {

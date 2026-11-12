@@ -72,7 +72,14 @@ fn languages_are_told_by_the_file_extension() {
     ] {
         assert_eq!(Lang::from_path(path), Some(lang), "{path}");
     }
-    for path in ["notes.txt", "Makefile", "a.rs.bak", ".rs", "dir.rs/readme", ""] {
+    for path in [
+        "notes.txt",
+        "Makefile",
+        "a.rs.bak",
+        ".rs",
+        "dir.rs/readme",
+        "",
+    ] {
         assert_eq!(Lang::from_path(path), None, "{path}");
     }
 }
@@ -1004,7 +1011,10 @@ fn swift_functions_types_and_members() {
     );
     let ext: Vec<_> = all.iter().filter(|s| s.kind == Impl).collect();
     assert_eq!(ext.len(), 1);
-    assert_eq!((&*ext[0].name, ext[0].line, ext[0].end_line), ("Cart", 43, 47));
+    assert_eq!(
+        (&*ext[0].name, ext[0].line, ext[0].end_line),
+        ("Cart", 43, 47)
+    );
     absent(
         &all,
         &[
@@ -1274,7 +1284,10 @@ fn names_shown_to_the_user() {
     let new = one(&all, "new");
     assert_eq!(new.qualified(Lang::Rust), "Point::new");
     let all = find_symbols(TYPESCRIPT, Lang::TypeScript);
-    assert_eq!(one(&all, "create").qualified(Lang::TypeScript), "Store.create");
+    assert_eq!(
+        one(&all, "create").qualified(Lang::TypeScript),
+        "Store.create"
+    );
     assert_eq!(one_fn(&all, "add").qualified(Lang::TypeScript), "add");
     for kind in [
         Function, Method, Class, Struct, Enum, Trait, Interface, Impl, Module, Const, Type,

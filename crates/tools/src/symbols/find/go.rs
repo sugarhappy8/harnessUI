@@ -10,9 +10,10 @@ pub(super) fn line(s: &mut Scan<'_>, i: usize) {
     let text: &str = &m.lines[i];
     let mut c = Cur::new(text);
     c.ws();
-    let in_group = s.scopes.last().is_some_and(|sc| {
-        &*sc.name == GROUP && sc.depth == m.curly[i] && m.round[i] == 1
-    });
+    let in_group = s
+        .scopes
+        .last()
+        .is_some_and(|sc| &*sc.name == GROUP && sc.depth == m.curly[i] && m.round[i] == 1);
     if in_group {
         type_spec(s, i, c);
         return;

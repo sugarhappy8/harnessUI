@@ -254,7 +254,57 @@ pub async fn save_documents(
     Ok(parts)
 }
 
-/// The documents referenced by a message's content: (attachment id, file name).
+/// Stores `text` (a resolved mention) as a text document of the chat and returns its
+/// attachment id. The text is copied into the app's own attachments folder `dir`: the row
+/// never points at the user's file, because the paths of a deleted chat's attachments are
+/// returned for deletion (`Store::delete_chat`).
+pub async fn save_text_in(
+    store: &store::Store,
+    dir: &std::path::Path,
+    chat_id: store::ChatId,
+    name: &str,
+    text: &str,
+) -> AppResult<i64> {
+    let bytes = text.as_bytes();
+    let sha: String = Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let path = dir.join(format!("{sha}.txt"));
+    if !path.exists() {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, bytes).map_err(|e| AppError::internal(e.to_string()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| AppError::internal(e.to_string()))?;
+    }
+    let name: String = name.chars().filter(|c| !c.is_control()).take(200).collect();
+    let id = store
+        .insert_attachment(store::NewAttachment {
+            chat_id,
+            sha256: sha,
+            mime: "text/plain".into(),
+            file_name: name,
+            size_bytes: bytes.len() as u64,
+            bytes_path: path.display().to_string(),
+            extracted_text: Some(text.to_string()),
+        })
+        .await?;
+    Ok(id.0)
+}
+
+/// [`save_text_in`] in the app's attachments folder.
+pub async fn save_text(
+    app: &AppHandle,
+    state: &AppState,
+    chat_id: store::ChatId,
+    name: &str,
+    text: &str,
+) -> AppResult<i64> {
+    let dir = store_dir(app)?;
+    save_text_in(&state.store, &dir, chat_id, name, text).await
+}
+
+/// The documents referenced by a message's content: (attachment id, file name). Mentions
+/// are documents too, but are listed by `mentions::mention_refs`.
 pub fn document_refs(content: &serde_json::Value) -> Vec<(i64, String)> {
     content
         .as_array()
@@ -262,6 +312,7 @@ pub fn document_refs(content: &serde_json::Value) -> Vec<(i64, String)> {
             parts
                 .iter()
                 .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("document"))
+                .filter(|p| p.get("mention").is_none())
                 .filter_map(|p| {
                     Some((
                         p.get("attachment_id")?.as_i64()?,

@@ -412,7 +412,10 @@ fn without_redirections(words: &[String]) -> Vec<String> {
 
 /// The base name of a word, lower case (`./scripts/Run-Tests.ps1` → `run-tests.ps1`).
 fn base_name(word: &str) -> String {
-    word.rsplit(['/', '\\']).next().unwrap_or(word).to_lowercase()
+    word.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(word)
+        .to_lowercase()
 }
 
 fn has_script_ending(word: &str) -> bool {
@@ -471,9 +474,7 @@ fn words_are_a_check(words: &[String], depth: usize) -> bool {
 
     // Formatters count when they only report.
     if FORMATTERS.contains(&p) {
-        let reports = args
-            .iter()
-            .any(|w| w == "--check" || w == "--check-only");
+        let reports = args.iter().any(|w| w == "--check" || w == "--check-only");
         let right_sub = match p {
             "cargo" => first_plain().as_deref() == Some("fmt"),
             "ruff" => first_plain().as_deref() == Some("format"),
@@ -534,7 +535,9 @@ fn words_are_a_check(words: &[String], depth: usize) -> bool {
                 return depth < MAX_NESTING && is_check_at(&text, depth + 1);
             }
             if lower == "-file" {
-                return args.get(i + 1).is_some_and(|s| named_like_a_check(&base_name(s)));
+                return args
+                    .get(i + 1)
+                    .is_some_and(|s| named_like_a_check(&base_name(s)));
             }
             if !is_option(w) && !(p == "cmd" && w.starts_with('/')) {
                 // A script the shell runs.
@@ -660,7 +663,11 @@ pub fn outcome(out: &ToolOutput) -> Outcome {
             .last()
             .unwrap_or(""),
         // No exit code: the tool's own word on what happened.
-        None => text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(""),
+        None => text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or(""),
     };
     Outcome {
         exit_code,

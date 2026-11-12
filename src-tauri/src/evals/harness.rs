@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use agent::history::{CallStatus, HistoryMessage};
 use agent::turn::{
-    CallDecision, ModelCaps, RequestTemplate, ToolHost, TurnDeps, TurnEvent, TurnInput,
-    TurnSink, TurnStatus,
+    CallDecision, ModelCaps, RequestTemplate, ToolHost, TurnDeps, TurnEvent, TurnInput, TurnSink,
+    TurnStatus,
 };
 use agent::{OpenAiClient, Role, Sanitizer, ToolInfo};
 use async_trait::async_trait;
@@ -262,10 +262,17 @@ pub async fn run(
     timer.abort();
     token.cancel();
 
-    let mut record = sink.state.lock().map(|s| s.record.clone()).unwrap_or_default();
+    let mut record = sink
+        .state
+        .lock()
+        .map(|s| s.record.clone())
+        .unwrap_or_default();
     if approver.asked() > 0 {
         // The gate never asks; should anything have, it was refused and is counted.
-        tracing::warn!(asked = approver.asked(), "a headless run asked for approval");
+        tracing::warn!(
+            asked = approver.asked(),
+            "a headless run asked for approval"
+        );
     }
     record.prompt_tokens = outcome.usage.prompt_tokens;
     record.completion_tokens = outcome.usage.completion_tokens;

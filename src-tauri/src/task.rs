@@ -194,6 +194,10 @@ pub async fn after_call(
 /// The task note the next turn of a chat would start with, or `None` when there is
 /// nothing to tell. Read-only: for the Context inspector, and the same text
 /// [`begin_turn`] gives the turn.
+#[allow(
+    dead_code,
+    reason = "for the Context inspector (feature I), which calls it"
+)]
 pub async fn note_for_turn(state: &AppState, chat_id: i64) -> Option<String> {
     note_in(&state.store, chat_id).await
 }

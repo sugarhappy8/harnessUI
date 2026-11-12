@@ -2637,3 +2637,30 @@ async fn without_pins_the_tools_are_refused_or_accepted_as_before() {
         "{accepted:?} {refused:?}"
     );
 }
+
+/// A file the user attached or mentioned (a `Part::Attachment` in the user's message) is
+/// untrusted content in the turn from its start: the first policy decision already sees it
+/// (D9), and the request carries it inside the attachment markers.
+#[tokio::test]
+async fn an_attachment_in_the_user_message_marks_the_turn_untrusted() {
+    let h = Harness::new(vec![
+        reply_text(sse::tool_call("c1", "read_file", json!({"path": "/p/a"}))),
+        reply_text(sse::text("Done.")),
+    ])
+    .await;
+    h.grant_files();
+    let mut input = input("Explain this");
+    input.history[0].parts.push(Part::Attachment {
+        name: "calc.py#add".into(),
+        text: "File: /p/calc.py, lines 1-2 (function add)\n     1\tdef add(a, b):\n     2\t    return a + b\n".into(),
+    });
+    let outcome = h.run(input).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    let calls = h.policy.calls.lock().unwrap().clone();
+    assert_eq!(calls[0], ("read_file".to_owned(), false, true));
+    let first = all_text(&h.chats()[0]);
+    assert!(
+        first.contains("tool=\"attachment\"") && first.contains("def add(a, b):"),
+        "{first}"
+    );
+}

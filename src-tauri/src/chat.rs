@@ -89,6 +89,7 @@ async fn message_dto(state: &AppState, m: &store::Message) -> AppResult<MessageD
             .collect(),
         tool_calls: tool_calls_of(&m.content),
         tool_result: tool_result_of(&m.content),
+        mentions: crate::mentions::mention_refs(&m.content),
     })
 }
 
@@ -199,8 +200,12 @@ pub async fn get_chat(
     for m in &path {
         messages.push(message_dto(&state, m).await?);
     }
+    let mut dto = chat_dto(&chat);
+    // [0.0.4 profile] Thinking as the next turn has it: the user's choice, else the
+    // model's tested settings, else on.
+    dto.thinking = crate::evals::profile::chat_thinking(&state, &chat).await;
     Ok(ChatDetailDto {
-        chat: chat_dto(&chat),
+        chat: dto,
         messages,
     })
 }
@@ -319,12 +324,14 @@ pub async fn send_message(
     parent_id: Option<store::MessageId>,
     images: Option<Vec<crate::attachments::ImageInput>>,
     documents: Option<Vec<crate::attachments::DocumentInput>>,
+    mentions: Option<Vec<tools::symbols::resolve::MentionRequest>>,
     on_event: Channel<TurnStreamEvent>,
 ) -> AppResult<()> {
     let text = text.trim().to_string();
     let images = images.unwrap_or_default();
     let documents = documents.unwrap_or_default();
-    if text.is_empty() && images.is_empty() && documents.is_empty() {
+    let mentions = mentions.unwrap_or_default();
+    if text.is_empty() && images.is_empty() && documents.is_empty() && mentions.is_empty() {
         return Err(AppError::bad_request("The message is empty."));
     }
     let chat = state
@@ -341,10 +348,17 @@ pub async fn send_message(
             String::new(),
         ));
     }
+    // [0.0.4 mentions] The chips the user chose, read through the path sandbox first: one
+    // that cannot be read fails the send before anything is stored.
+    let n_ctx = target
+        .n_ctx
+        .unwrap_or(crate::settings::DEFAULT_REMOTE_CONTEXT) as usize;
+    let mention_parts = crate::mentions::attach(&app, &state, chat_id, mentions, n_ctx).await?;
     let mut content = text_content(&text);
     if let Some(parts) = content.as_array_mut() {
         parts.extend(crate::attachments::save_images(&app, &state, chat_id, &images).await?);
         parts.extend(crate::attachments::save_documents(&app, &state, chat_id, &documents).await?);
+        parts.extend(mention_parts);
     }
     let user_id = state
         .store

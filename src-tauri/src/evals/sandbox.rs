@@ -15,6 +15,7 @@
 //! | A file action whose resolved path, or a command whose working folder, is not inside the run's folder | blocked |
 //! | A command that names a place outside the run's folder, goes up out of it with `..`, or uses a variable or `~` (the app cannot tell where those point) | blocked |
 //! | A command that installs or downloads software (`pip`, `npm install`, `npx`, …) | blocked |
+//! | `node --test` alone (with only `--test-…` flags): the classifier marks an interpreter without a file as unreadable, but the test runner reads no code from standard input | read as a plain command, then judged by the rows above |
 //! | Everything else: reads, writes and edits inside the folder, plain commands | runs |
 //!
 //! Every call reaches this rule through the tool's own describer and
@@ -117,6 +118,28 @@ impl Rules {
                 format!("the tool {} is not part of this run", action.tool)
             });
         }
+        // `node --test` alone: the classifier reads an interpreter without a file as one
+        // that takes its code from standard input and so cannot be read (`network`). The
+        // test runner takes no code from standard input; it runs the test files it finds
+        // in the working folder. Only this exact form is read as a plain command.
+        let corrected;
+        let action = if action.server == "terminal"
+            && action.network
+            && action.keep_asking.is_none()
+            && action
+                .payload
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|line| self.is_node_test_runner(line))
+        {
+            corrected = Action {
+                network: false,
+                ..action.clone()
+            };
+            &corrected
+        } else {
+            action
+        };
         // 2. The policy engine, in Allow all, with the turn treated as holding untrusted
         //    content from its first call. Whatever it would not allow by itself is refused.
         let turn = TurnContext {
@@ -179,6 +202,23 @@ impl Rules {
             return Verdict::Blocked(why);
         }
         Verdict::Run
+    }
+
+    /// A line that is exactly one plain `node --test` command: `node` (or `nodejs`) and
+    /// nothing but `--test` and `--test-…` flags.
+    fn is_node_test_runner(&self, line: &str) -> bool {
+        let Parsed::Plain(commands) = policy::command::parse(self.shell, line) else {
+            return false;
+        };
+        let [command] = commands.as_slice() else {
+            return false;
+        };
+        matches!(program_name(&command.program).as_str(), "node" | "nodejs")
+            && command.args.iter().any(|a| a == "--test")
+            && command
+                .args
+                .iter()
+                .all(|a| a == "--test" || a.starts_with("--test-"))
     }
 
     /// The simple commands of a line, each as its words. A line the classifier can break

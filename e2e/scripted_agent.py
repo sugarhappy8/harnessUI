@@ -2155,9 +2155,232 @@ def p_pinned(c, notes):
     s.click_button("Panel")
 
 
+@probe("tool-errors-output")
+def p_tool_errors_output(c, notes):
+    """Owner items 7 and 8 (0.0.4): a failing edit says why and how to fix it, and a long
+    result is shortened with a line that says how to read the rest."""
+    import re
+    s = c.s
+    files = ["read_file", "list_dir", "search_files", "write_file", "edit_file"]
+    chat = new_chat(c, tools=[t for t in files if t in c.all_tools])
+    folder = c.work / "errors-output"
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir()
+    calc = folder / "calc.py"
+    calc.write_text("def price(qty):\n    total = 2 * qty\n    return total\n\n\ndef tax(qty):\n    total = 2 * qty\n    return total * 0.2\n")
+    big = folder / "big.txt"
+    big.write_text("".join(f"row {i}: value {i * 7}\n" if i % 1500 else f"row {i}: needle {i}\n" for i in range(1, 6001)))
+
+    def tool_message(req):
+        return [m for m in req.get("messages", []) if m.get("role") == "tool"][-1]["content"]
+
+    def last_result():
+        return [m for m in messages(s, chat) if m["role"] == "tool"][-1]["toolResult"]
+
+    # 1. An ambiguous edit. Explaining it needs the file's lines, so the app asks to read
+    #    the file (a read card, not an edit card) and answers with the matches as data.
+    Fake.queue.append({"tool_calls": [{"name": "edit_file", "arguments": {
+        "path": str(calc), "old_text": "    total = 2 * qty", "new_text": "    total = 3 * qty"}}]})
+    Fake.queue.append({"tool_calls": [{"name": "edit_file", "arguments": {
+        "path": str(calc), "old_text": "    total = 2 * qty", "new_text": "    total = 3 * qty", "occurrence": 2}}]})
+    Fake.queue.append({"content": "The tax total is changed."})
+    Fake.requests.clear()
+    send(s, "make the tax total three times the quantity")
+    s.wait_for(lambda: "Allow once" in s.page_text(), 30, "the read card for the failed edit")
+    card = s.page_text()
+    assert "to explain why an edit cannot be made" in card, card[-600:]
+    assert "Nothing will be changed." in card, card[-600:]
+    s.screenshot(str(OUT / "tool-errors-read-card.png"))
+    time.sleep(0.9)
+    s.click_button("Allow once")
+    # 2. The edit with occurrence: an edit card, then the change.
+    s.wait_for(lambda: "Allow once" in s.page_text() and len(Fake.requests) >= 2, 30, "the edit card")
+    card = s.page_text()
+    assert "match 2 of 2, at line 7" in card, card[-600:]
+    time.sleep(0.9)
+    s.click_button("Allow once")
+    wait_idle(s)
+    assert calc.read_text().count("total = 3 * qty") == 1 and "    total = 3 * qty\n    return total * 0.2" in calc.read_text(), calc.read_text()
+    seen = tool_message(Fake.requests[1])
+    notes.append("model saw: " + seen.replace("\n", " | ")[:700])
+    assert "Matches:\nline 2:     total = 2 * qty\nline 7:     total = 2 * qty\n" in seen, seen
+    assert "occurrence (1 to 2, counted from the top)" in seen, seen
+    # Inside the untrusted-data markers, as an error result, and not as an app note.
+    head = seen.split("\n", 1)[0]
+    assert head.startswith("<") and 'tool="edit_file"' in head and 'status="error"' in head, head
+    assert "[App note]" not in seen, seen
+    assert "Edited " in tool_message(Fake.requests[2]), tool_message(Fake.requests[2])
+
+    # 3. A long read is shortened, saved, and names how to read more.
+    Fake.queue.append({"tool_calls": [{"name": "read_file", "arguments": {"path": str(big)}}]})
+    Fake.queue.append({"content": "It is long."})
+    send(s, "read big.txt")
+    answer_card(s, "Allow for this chat")
+    wait_idle(s)
+    text = last_result()["text"]
+    last = text.rstrip().split("\n")[-1]
+    notes.append("shortened line: " + last)
+    m = re.fullmatch(r'\[Shortened: (\d+) of 6000 lines shown\. Full output is saved as output #(\d+)\. '
+                     r'Read more with read_output \{"id": (\d+), "lines": "(\d+)-(\d+)"\} or \{"id": (\d+), "grep": "text"\}\.\]', last)
+    assert m, last
+    shown, oid = int(m.group(1)), int(m.group(2))
+    assert m.group(3) == m.group(6) == str(oid) and int(m.group(4)) == shown + 1, last
+    saved = s.invoke("get_tool_output", {"chatId": chat, "id": oid})
+    assert saved["text"] == big.read_text() and saved["lines"] == 6000, {k: v for k, v in saved.items() if k != "text"}
+    other = s.invoke("create_chat", {"modelRef": c.model_ref})["id"]
+    try:
+        s.invoke("get_tool_output", {"chatId": other, "id": oid})
+        raise AssertionError("another chat read the saved output")
+    except WebDriverError as e:
+        assert "not found" in str(e), e
+    s.invoke("delete_chat", {"chatId": other})
+
+    # 4. read_output with grep: the matching lines, with no card.
+    Fake.queue.append({"tool_calls": [{"name": "read_output", "arguments": {"id": oid, "grep": "needle", "context": 1}}]})
+    Fake.queue.append({"content": "Found them."})
+    send(s, "where are the needles")
+    time.sleep(0.4)
+    deadline = time.time() + 60
+    while not idle(s):
+        assert "Allow once" not in s.page_text(), "read_output asked for approval"
+        assert time.time() < deadline, "the turn did not finish"
+        time.sleep(0.2)
+    found = last_result()["text"]
+    notes.append("grep: " + found.replace("\n", " | ")[:400])
+    assert found.startswith(f'4 lines of output #{oid} contain "needle"'), found[:300]
+    for n in (1500, 3000, 4500, 6000):
+        assert f"{n:>6}: row {n}: needle {n}" in found, (n, found)
+    seen = tool_message(Fake.requests[-1])
+    assert seen.startswith("<") and 'tool="read_output"' in seen.split("\n", 1)[0], seen[:200]
+
+    # 5. The read_file card offers the full output, opened in the card.
+    s.wait_for(lambda: s.execute("return [...document.querySelectorAll('button')].some(b => b.innerText.trim() === 'Full output');"), 10, "the Full output button")
+    s.execute("[...document.querySelectorAll('button')].find(b => b.innerText.trim() === 'Full output').click();")
+    s.wait_for(lambda: s.execute(f"const p = document.querySelector('pre[aria-label=\"Output #{oid}\"]'); return !!p && p.textContent.includes('row 5999: value 41993');"), 10, "the full output in the card")
+    s.screenshot(str(OUT / "tool-errors-full-output.png"))
+
+
+@probe("task-state")
+def p_task_state(c, notes):
+    """Visible, resumable task state (0.0.4): a scripted update_task sets the goal and
+    steps, a write_file shows under changed files, Pause during a streamed reply stops it,
+    the task survives a reload, and Resume sends the continue message with the task note,
+    which is in the request once."""
+    s = c.s
+    aside = 'aside[aria-label="Workbench"]'
+    header = "Task state, from the app's record of the work in this chat."
+    goal = "Put a dark mode switch in the header"
+    tools = [t for t in ["read_file", "write_file", "update_task"] if t in c.all_tools]
+    chat = new_chat(c, tools=tools)
+    s.invoke("rename_chat", {"chatId": chat, "title": "Task state"})
+    folder = c.work / "task-state"
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir()
+    target = folder / "Switch.tsx"
+
+    def open_task_tab():
+        s.wait_for(lambda: s.execute("return !!document.querySelector('button[aria-label=\"Panel\"]');"), 10, "the panel button")
+        if not s.execute(f"return !!document.querySelector('{aside}');"):
+            s.click_button("Panel")
+        s.wait_for(lambda: s.execute(f"return !!document.querySelector('{aside}');"), 10, "the panel")
+        s.execute(f"[...document.querySelectorAll('{aside} [role=tab]')].find(b => b.innerText.trim().startsWith('Task')).click();")
+
+    def tab_text():
+        return s.execute(f"const a = document.querySelector('{aside}'); return a ? a.innerText : '';")
+
+    def status():
+        return s.execute(f"const e = document.querySelector('{aside} [data-task-status]'); return e ? e.dataset.taskStatus : null;")
+
+    def press(label):
+        s.execute(f"[...document.querySelectorAll('{aside} button')].find(b => b.innerText.trim() === arguments[0]).click();", label)
+
+    def user_text(req):
+        users = [m for m in req.get("messages", []) if m.get("role") == "user"]
+        content = users[-1]["content"] if users else ""
+        return content if isinstance(content, str) else json.dumps(content)
+
+    # 1. The model records the task, then writes a file (the card is answered).
+    Fake.requests.clear()
+    Fake.queue.append({"tool_calls": [{"name": "update_task", "arguments": {
+        "goal": goal,
+        "steps": [{"text": "Read the header", "status": "done"}, {"text": "Add the switch", "status": "doing"},
+                  {"text": "Run the tests"}],
+        "next_action": "Add the switch to the header"}}]})
+    Fake.queue.append({"tool_calls": [{"name": "write_file", "arguments": {
+        "path": str(target), "content": "export const Switch = () => null;\n"}}]})
+    Fake.queue.append({"content": "The switch file is written."})
+    send(s, "add a dark mode switch")
+    answer_card(s, "Allow once")
+    wait_idle(s)
+    assert target.exists(), "the file was not written"
+    assert "[App note] Task state" not in json.dumps(Fake.requests[0]), "a note was sent before there was a task"
+    seen = [m for m in Fake.requests[1]["messages"] if m.get("role") == "tool"][-1]["content"]
+    notes.append("update_task result: " + seen.replace("\n", " | ")[:300])
+    assert "Task saved." in seen and goal in seen, seen
+
+    # 2. The tab shows the goal, the steps and the changed file.
+    open_task_tab()
+    s.wait_for(lambda: goal in tab_text() and "Switch.tsx" in tab_text(), 10, "the task in the tab")
+    text = tab_text()
+    assert "Add the switch" in text and "Run the tests" in text, text[:800]
+    assert status() == "active", status()
+    path = s.execute(f"const b = document.querySelector('{aside} [data-path]'); return b ? b.dataset.path : null;")
+    assert path == str(target.resolve()), path
+    s.screenshot(str(OUT / "task-state-tab.png"))
+
+    # 3. A slow reply; Pause stops it and the task shows paused.
+    Fake.requests.clear()
+    Fake.queue.append({"content": "Working on the switch now. " * 30, "delay": 0.05, "chunk": 8})
+    send(s, "go on with it")
+    s.wait_for(lambda: not idle(s), 10, "the reply streaming")
+    time.sleep(0.6)
+    press("Pause")
+    wait_idle(s, 30)
+    s.wait_for(lambda: status() == "paused", 10, "the paused status")
+    assert "Paused" in tab_text()
+    assert s.invoke("get_task", {"chatId": chat})["status"] == "paused"
+    assert len(Fake.requests) == 1, len(Fake.requests)
+    first_note = user_text(Fake.requests[0])
+    assert header in first_note and goal in first_note, first_note[-900:]
+    reply = [m for m in messages(s, chat) if m["role"] == "assistant"][-1]["text"]
+    assert len(reply) < len("Working on the switch now. " * 30), "the reply was not stopped"
+
+    # 4. After a reload the tab still shows the task, paused, with Resume.
+    s.execute("window.location.reload();")
+    time.sleep(1.5)
+    s.wait_for(lambda: "Task state" in s.page_text(), 20, "sidebar after reload")
+    s.execute(HOOK)
+    s.execute("[...document.querySelectorAll('nav[aria-label=\"Chat history\"] button')].find(b => b.innerText.includes('Task state')).click();")
+    time.sleep(0.8)
+    open_task_tab()
+    s.wait_for(lambda: goal in tab_text() and "Switch.tsx" in tab_text(), 10, "the task after the reload")
+    assert status() == "paused", status()
+
+    # 5. Resume sends the continue message; the request carries the task note, once.
+    Fake.requests.clear()
+    Fake.queue.append({"content": "Continuing with the switch."})
+    press("Resume")
+    wait_idle(s)
+    assert Fake.requests, "Resume sent nothing"
+    req = Fake.requests[0]
+    last = user_text(req)
+    notes.append("task note: " + last.split("[App note] ", 1)[-1].replace("\n", " | ")[:900])
+    assert "Continue the task. Start with the next action." in last, last[-900:]
+    assert header in last, last[-900:]
+    assert f'goal: "{goal}"' in last, last[-900:]
+    assert "paused this task and has now resumed it" in last, last[-900:]
+    assert 'created "Switch.tsx"' in last or "Switch.tsx" in last, last[-900:]
+    assert 'next action: "Add the switch to the header"' in last, last[-900:]
+    whole = json.dumps(req.get("messages", []))
+    assert whole.count("Task state, from the app") == 1, whole.count("Task state, from the app")
+    s.wait_for(lambda: status() == "active", 10, "the active status")
+    s.click_button("Panel")
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
-          p_tool_selection, p_artifacts, p_search, p_pinned]
+          p_tool_selection, p_artifacts, p_search, p_pinned,
+          p_tool_errors_output, p_task_state]
 
 
 def main() -> int:

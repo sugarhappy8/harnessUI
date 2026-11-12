@@ -77,7 +77,8 @@ impl Run {
     }
 
     async fn command(&self, command: &str) -> Verdict {
-        self.rules.judge(&self.command_in(command, None).await, false)
+        self.rules
+            .judge(&self.command_in(command, None).await, false)
     }
 }
 
@@ -97,8 +98,14 @@ async fn file_work_inside_the_folder_runs() {
         ("read_file", json!({"path": "notes.txt"})),
         ("search_files", json!({"path": ".", "query": "two"})),
         ("write_file", json!({"path": "new.txt", "content": "x\n"})),
-        ("write_file", json!({"path": "src/deep/er.py", "content": "y = 1\n"})),
-        ("write_file", json!({"path": "notes.txt", "content": "replaced\n"})),
+        (
+            "write_file",
+            json!({"path": "src/deep/er.py", "content": "y = 1\n"}),
+        ),
+        (
+            "write_file",
+            json!({"path": "notes.txt", "content": "replaced\n"}),
+        ),
         (
             "edit_file",
             json!({"path": "notes.txt", "old_text": "two", "new_text": "three"}),
@@ -109,9 +116,17 @@ async fn file_work_inside_the_folder_runs() {
         ),
     ] {
         let action = run.file(tool, args.clone()).await;
-        assert_eq!(run.rules.judge(&action, false), Verdict::Run, "{tool} {args}");
+        assert_eq!(
+            run.rules.judge(&action, false),
+            Verdict::Run,
+            "{tool} {args}"
+        );
         // A call read from the reply's text is decided the same way.
-        assert_eq!(run.rules.judge(&action, true), Verdict::Run, "{tool} {args}");
+        assert_eq!(
+            run.rules.judge(&action, true),
+            Verdict::Run,
+            "{tool} {args}"
+        );
     }
 }
 
@@ -123,11 +138,17 @@ async fn a_path_outside_the_folder_is_refused() {
     for (tool, args) in [
         ("read_file", json!({"path": secret})),
         ("write_file", json!({"path": secret, "content": "x"})),
-        ("write_file", json!({"path": "../outside/new.txt", "content": "x"})),
+        (
+            "write_file",
+            json!({"path": "../outside/new.txt", "content": "x"}),
+        ),
         ("read_file", json!({"path": "../outside/secret.txt"})),
         ("read_file", json!({"path": "src/../../outside/secret.txt"})),
         ("list_dir", json!({"path": ".."})),
-        ("list_dir", json!({"path": run.outside.display().to_string()})),
+        (
+            "list_dir",
+            json!({"path": run.outside.display().to_string()}),
+        ),
         (
             "edit_file",
             json!({"path": "../outside/secret.txt", "old_text": "do", "new_text": "x"}),
@@ -136,7 +157,10 @@ async fn a_path_outside_the_folder_is_refused() {
         let action = run.file(tool, args.clone()).await;
         assert!(action.hard_limit.is_some(), "{tool} {args}: {action:?}");
         let verdict = run.rules.judge(&action, false);
-        assert!(blocked(&verdict).contains("outside"), "{tool} {args}: {verdict:?}");
+        assert!(
+            blocked(&verdict).contains("outside"),
+            "{tool} {args}: {verdict:?}"
+        );
     }
     assert_eq!(
         std::fs::read_to_string(run.outside.join("secret.txt")).unwrap(),
@@ -150,14 +174,14 @@ async fn a_path_outside_the_folder_is_refused() {
 async fn a_link_out_of_the_folder_is_refused() {
     let run = Run::new(true);
     std::os::unix::fs::symlink(&run.outside, run.work.join("way-out")).unwrap();
-    std::os::unix::fs::symlink(
-        run.outside.join("secret.txt"),
-        run.work.join("linked.txt"),
-    )
-    .unwrap();
+    std::os::unix::fs::symlink(run.outside.join("secret.txt"), run.work.join("linked.txt"))
+        .unwrap();
     for (tool, args) in [
         ("read_file", json!({"path": "way-out/secret.txt"})),
-        ("write_file", json!({"path": "way-out/new.txt", "content": "x"})),
+        (
+            "write_file",
+            json!({"path": "way-out/new.txt", "content": "x"}),
+        ),
         ("read_file", json!({"path": "linked.txt"})),
         ("write_file", json!({"path": "linked.txt", "content": "x"})),
     ] {
@@ -302,7 +326,10 @@ async fn a_command_that_leaves_the_folder_is_blocked() {
         assert!(!verdict.runs(), "{line} would have run");
     }
     // Steps up that stay inside one by one must stay inside together.
-    for line in ["cd .. && cd .. && ls", "ls .. ; cat ../../outside/secret.txt"] {
+    for line in [
+        "cd .. && cd .. && ls",
+        "ls .. ; cat ../../outside/secret.txt",
+    ] {
         let action = run.command_in(line, Some("src")).await;
         assert!(!run.rules.judge(&action, false).runs(), "{line}");
     }
@@ -393,9 +420,7 @@ fn forged(server: &str, tool: &str, payload: Value) -> Action {
         tool: tool.into(),
         summary: String::new(),
         preview: String::new(),
-        scope: policy::Scope::FileWrite {
-            folder: "/".into(),
-        },
+        scope: policy::Scope::FileWrite { folder: "/".into() },
         risk: policy::Risk::Normal,
         read_only: false,
         outbound: false,
@@ -414,9 +439,11 @@ async fn the_rule_checks_the_resolved_path_itself() {
     let run = Run::new(true);
     let outside = run.outside.join("x.txt").display().to_string();
     let inside = run.work.join("x.txt").display().to_string();
-    let payload = |path: &str| json!({"canonical": path, "root": 0, "exists": false, "wasSymlink": false});
+    let payload =
+        |path: &str| json!({"canonical": path, "root": 0, "exists": false, "wasSymlink": false});
     assert_eq!(
-        run.rules.judge(&forged("files", "write_file", payload(&inside)), false),
+        run.rules
+            .judge(&forged("files", "write_file", payload(&inside)), false),
         Verdict::Run
     );
     for bad in [
@@ -424,8 +451,16 @@ async fn the_rule_checks_the_resolved_path_itself() {
         forged("files", "write_file", payload("relative.txt")),
         forged("files", "write_file", Value::Null),
         forged("files", "read_file", json!({"canonical": 7})),
-        forged("terminal", "run_command", json!({"cwd": run.outside.display().to_string(), "command": "ls"})),
-        forged("terminal", "run_command", json!({"cwd": run.work.display().to_string()})),
+        forged(
+            "terminal",
+            "run_command",
+            json!({"cwd": run.outside.display().to_string(), "command": "ls"}),
+        ),
+        forged(
+            "terminal",
+            "run_command",
+            json!({"cwd": run.work.display().to_string()}),
+        ),
     ] {
         assert!(!run.rules.judge(&bad, false).runs(), "{bad:?}");
     }
@@ -534,4 +569,59 @@ async fn nothing_is_asked_and_nothing_is_allowed_by_asking() {
         assert!(matches!(answer, Approval::Deny { .. }), "{answer:?}");
     }
     assert_eq!(nobody.asked(), 2);
+}
+
+/// `node --test` runs (the test runner reads no code from standard input), and only that
+/// exact form is read as a plain command: anything added to it is judged as before.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_node_test_runner_runs_and_nothing_rides_along() {
+    let run = Run::new(true);
+    for line in [
+        "node --test",
+        "node --test --test-reporter=spec",
+        "node test.js",
+        "node --test test.js",
+    ] {
+        assert_eq!(run.command(line).await, Verdict::Run, "{line}");
+    }
+    for line in [
+        "node",
+        "node --eval 1",
+        "node --test --eval 'require(1)'",
+        "node --test -e 1",
+        "node --test -p 1",
+        "cat notes.txt | node --test",
+        "node --test < notes.txt",
+        "node --test && curl https://example.com",
+        "node --test; rm notes.txt",
+        "node --test --test-reporter-destination=/tmp/harness-eval-leak.txt",
+        "sh -c 'node --test'",
+    ] {
+        assert!(!run.command(line).await.runs(), "{line} would have run");
+    }
+}
+
+/// A failing edit whose explanation needs the file's text is described as a read-only
+/// look at the file (the edit tool answers it with an error): inside the folder it runs,
+/// outside it does not.
+#[tokio::test]
+async fn a_read_only_look_by_the_edit_tool_runs_inside_only() {
+    let run = Run::new(false);
+    let look = |path: &str| {
+        let mut action = forged(
+            "files",
+            "edit_file",
+            json!({"canonical": path, "root": 0, "exists": true, "wasSymlink": false}),
+        );
+        action.read_only = true;
+        action.scope = policy::Scope::FileRead {
+            folder: run.work.display().to_string(),
+        };
+        action
+    };
+    let inside = run.work.join("notes.txt").display().to_string();
+    let outside = run.outside.join("secret.txt").display().to_string();
+    assert_eq!(run.rules.judge(&look(&inside), false), Verdict::Run);
+    assert!(!run.rules.judge(&look(&outside), false).runs());
 }

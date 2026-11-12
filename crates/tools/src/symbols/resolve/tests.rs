@@ -62,7 +62,11 @@ fn refused(s: &Setup, c: &ChatContext, req: &MentionRequest) -> String {
 fn a_path_outside_the_approved_folders_is_refused() {
     let s = setup();
     let c = chat(&s);
-    let why = refused(&s, &c, &file(s.outside.join("secret.txt").display().to_string()));
+    let why = refused(
+        &s,
+        &c,
+        &file(s.outside.join("secret.txt").display().to_string()),
+    );
     assert!(why.contains("outside the approved folders"), "{why}");
 }
 
@@ -70,7 +74,10 @@ fn a_path_outside_the_approved_folders_is_refused() {
 fn a_path_that_climbs_out_with_dot_dot_is_refused() {
     let s = setup();
     let c = chat(&s);
-    for p in ["../elsewhere/secret.txt", "./sub/../../elsewhere/secret.txt"] {
+    for p in [
+        "../elsewhere/secret.txt",
+        "./sub/../../elsewhere/secret.txt",
+    ] {
         let why = refused(&s, &c, &file(p));
         assert!(why.contains("outside the approved folders"), "{p}: {why}");
     }
@@ -161,7 +168,11 @@ fn a_folder_a_missing_file_and_no_approved_folder_are_refused() {
         working_folder: None,
         ..chat(&s)
     };
-    let why = refused(&s, &none, &file(s.root.join("notes.txt").display().to_string()));
+    let why = refused(
+        &s,
+        &none,
+        &file(s.root.join("notes.txt").display().to_string()),
+    );
     assert!(why.contains("outside the approved folders"), "{why}");
 }
 
@@ -191,7 +202,11 @@ fn a_long_file_sends_its_start_and_says_what_was_left_out() {
     assert!(r.truncated);
     assert!(r.text.len() <= 2_000, "{}", r.text.len());
     assert!(r.text.contains("     1\tline number 1\n"));
-    let last = r.text.lines().filter(|l| l.contains("\tline number")).count();
+    let last = r
+        .text
+        .lines()
+        .filter(|l| l.contains("\tline number"))
+        .count();
     let note = format!(
         "[Lines {}-500 of the file were left out ({} lines). The file tools can read more: call read_file with offset={}.]",
         last + 1,
@@ -228,7 +243,11 @@ fn a_symbol_comes_with_its_definition_lines_path_and_range() {
     assert_eq!((r.start_line, r.end_line), (6, 7));
     // Gone: refused, not some other text.
     std::fs::write(s.root.join("calc.py"), "def other():\n    pass\n").unwrap();
-    assert!(resolve(&req, &c, 10_000).unwrap_err().contains("was not found"));
+    assert!(
+        resolve(&req, &c, 10_000)
+            .unwrap_err()
+            .contains("was not found")
+    );
 }
 
 #[test]
@@ -259,7 +278,10 @@ fn names_are_relative_to_the_working_folder_or_start_with_the_folder_name() {
         display_path("/w/app/src/a.rs", &roots, Some("/w/app")),
         "src/a.rs"
     );
-    assert_eq!(display_path("/w/lib/b.rs", &roots, Some("/w/app")), "lib/b.rs");
+    assert_eq!(
+        display_path("/w/lib/b.rs", &roots, Some("/w/app")),
+        "lib/b.rs"
+    );
     assert_eq!(display_path("/w/app/c.rs", &roots, None), "app/c.rs");
 }
 

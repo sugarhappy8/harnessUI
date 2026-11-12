@@ -49,7 +49,8 @@ impl Toolchains {
                     continue;
                 };
                 let cwd = std::env::temp_dir();
-                let ran = run_program(&program, &["--version"], &cwd, None, SHORT_TIME, &path).await;
+                let ran =
+                    run_program(&program, &["--version"], &cwd, None, SHORT_TIME, &path).await;
                 if ran.is_ok_and(|r| r.code == Some(0)) {
                     found.insert(toolchain, program);
                     break;
@@ -119,7 +120,11 @@ fn outcome(check: String, result: Result<(), String>) -> CheckOutcome {
 
 /// A built-in content check.
 pub fn builtin(task: &Task, check: &Check, ws: &Workspace) -> CheckOutcome {
-    let read = |file: &str| ws.read(file).map(|t| lf(&t)).ok_or(format!("{file} is missing or not text"));
+    let read = |file: &str| {
+        ws.read(file)
+            .map(|t| lf(&t))
+            .ok_or(format!("{file} is missing or not text"))
+    };
     match check {
         Check::Run { script } => outcome(
             format!("{script} passes"),
@@ -129,46 +134,55 @@ pub fn builtin(task: &Task, check: &Check, ws: &Workspace) -> CheckOutcome {
             file,
             pointer,
             equals,
-        } => outcome(format!("{file} {pointer} is {equals}"), (|| {
-            let text = read(file)?;
-            let value: Value =
-                serde_json::from_str(&text).map_err(|e| format!("{file} is not valid JSON: {e}"))?;
-            match value.pointer(pointer) {
-                Some(found) if found == equals => Ok(()),
-                Some(found) => Err(format!("it is {found}")),
-                None => Err("it is missing".into()),
-            }
-        })()),
+        } => outcome(
+            format!("{file} {pointer} is {equals}"),
+            (|| {
+                let text = read(file)?;
+                let value: Value = serde_json::from_str(&text)
+                    .map_err(|e| format!("{file} is not valid JSON: {e}"))?;
+                match value.pointer(pointer) {
+                    Some(found) if found == equals => Ok(()),
+                    Some(found) => Err(format!("it is {found}")),
+                    None => Err("it is missing".into()),
+                }
+            })(),
+        ),
         Check::Ini {
             file,
             section,
             key,
             equals,
-        } => outcome(format!("{file} [{section}] {key} is {equals}"), (|| {
-            let text = read(file)?;
-            match ini_value(&text, section, key) {
-                Some(found) if found == *equals => Ok(()),
-                Some(found) => Err(format!("it is {found}")),
-                None => Err("it is missing".into()),
-            }
-        })()),
-        Check::Order { file, texts } => outcome(format!("{file} has its parts in order"), (|| {
-            let text = read(file)?;
-            let mut from = 0;
-            for part in texts {
-                match text[from..].find(part.as_str()) {
-                    Some(at) => from += at + part.len(),
-                    None => {
-                        return Err(if text.contains(part.as_str()) {
-                            format!("\"{part}\" is in the wrong place")
-                        } else {
-                            format!("\"{part}\" is missing")
-                        });
+        } => outcome(
+            format!("{file} [{section}] {key} is {equals}"),
+            (|| {
+                let text = read(file)?;
+                match ini_value(&text, section, key) {
+                    Some(found) if found == *equals => Ok(()),
+                    Some(found) => Err(format!("it is {found}")),
+                    None => Err("it is missing".into()),
+                }
+            })(),
+        ),
+        Check::Order { file, texts } => outcome(
+            format!("{file} has its parts in order"),
+            (|| {
+                let text = read(file)?;
+                let mut from = 0;
+                for part in texts {
+                    match text[from..].find(part.as_str()) {
+                        Some(at) => from += at + part.len(),
+                        None => {
+                            return Err(if text.contains(part.as_str()) {
+                                format!("\"{part}\" is in the wrong place")
+                            } else {
+                                format!("\"{part}\" is missing")
+                            });
+                        }
                     }
                 }
-            }
-            Ok(())
-        })()),
+                Ok(())
+            })(),
+        ),
         Check::Absent { text, ext } => outcome(format!("no .{ext} file contains {text}"), {
             let hits: Vec<String> = ws
                 .files()
@@ -235,7 +249,12 @@ async fn run_script(
     };
     let private = match Workspace::create_private() {
         Ok(folder) => folder,
-        Err(e) => return outcome(check, Err(format!("could not make the check's folder: {e}"))),
+        Err(e) => {
+            return outcome(
+                check,
+                Err(format!("could not make the check's folder: {e}")),
+            );
+        }
     };
     if let Err(e) = private.write_files(task.verify.iter().map(|(p, c)| (p.as_str(), *c))) {
         return outcome(check, Err(format!("could not write the check: {e}")));
@@ -270,7 +289,8 @@ async fn run_script(
         )),
         Ok(r) => {
             let last = r.stdout.lines().rev().find(|l| !l.trim().is_empty());
-            if r.code == Some(0) && last.map(str::trim) == Some(format!("VERIFIED {nonce}").as_str())
+            if r.code == Some(0)
+                && last.map(str::trim) == Some(format!("VERIFIED {nonce}").as_str())
             {
                 Ok(())
             } else {
@@ -283,7 +303,11 @@ async fn run_script(
 
 /// The last lines of what a failed check printed.
 fn tail(stderr: &str, stdout: &str) -> String {
-    let text = if stderr.trim().is_empty() { stdout } else { stderr };
+    let text = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(4);
     let joined = lines[start..].join(" | ");
@@ -337,8 +361,15 @@ pub async fn unparsable(task: &Task, ws: &Workspace, toolchains: &Toolchains) ->
             let Some(program) = toolchains.get(toolchain) else {
                 continue;
             };
-            match run_program(program, &args, ws.path(), None, SHORT_TIME, &toolchains.path)
-                .await
+            match run_program(
+                program,
+                &args,
+                ws.path(),
+                None,
+                SHORT_TIME,
+                &toolchains.path,
+            )
+            .await
             {
                 Ok(r) => r.code == Some(0),
                 Err(_) => continue,
@@ -411,16 +442,14 @@ pub async fn run_program(
         }
         String::from_utf8_lossy(&out).into_owned()
     };
-    let stdout = tokio::spawn(read(
-        child
-            .take_stdout()
-            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-    ));
-    let stderr = tokio::spawn(read(
-        child
-            .take_stderr()
-            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-    ));
+    let stdout =
+        tokio::spawn(read(child.take_stdout().map(|s| {
+            Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>
+        })));
+    let stderr =
+        tokio::spawn(read(child.take_stderr().map(|s| {
+            Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>
+        })));
     let mut ran = Ran::default();
     match tokio::time::timeout(limit, child.wait()).await {
         Ok(status) => ran.code = status?.code(),

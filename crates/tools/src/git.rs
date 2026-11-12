@@ -945,9 +945,7 @@ impl BuiltinServer for GitServer {
             return match self.call_fallback(tool, args, action, &ctx).await {
                 Ok(text) => {
                     let text = shown(text);
-                    let note = (tool == "git_status")
-                        .then(|| status_note(&text))
-                        .flatten();
+                    let note = (tool == "git_status").then(|| status_note(&text)).flatten();
                     sized_output(tool, 0, text, note, &ctx)
                 }
                 Err(e) => ToolOutput::error(with_advice(tool, shown(e))),
@@ -1148,9 +1146,7 @@ impl BuiltinServer for GitServer {
             Ok((code, text)) => {
                 let text = shown(text);
                 let note = if code == 0 {
-                    (tool == "git_status")
-                        .then(|| status_note(&text))
-                        .flatten()
+                    (tool == "git_status").then(|| status_note(&text)).flatten()
                 } else if mentions_conflicts(&text)
                     && let Some(root) = &repo
                 {
@@ -1195,11 +1191,25 @@ fn advice(tool: &str, text: &str) -> Option<String> {
         "asked for a kind of sign-in",
     ]) {
         "The remote did not accept the sign-in. Credentials are the user's to set up (a credential helper, an access token or an SSH key); this app does not type passwords. Tell the user, and do not try again until they have.".to_string()
-    } else if has(&["unmerged files", "unresolved conflict", "conflict (", "fix conflicts", "unmerged paths"]) {
+    } else if has(&[
+        "unmerged files",
+        "unresolved conflict",
+        "conflict (",
+        "fix conflicts",
+        "unmerged paths",
+    ]) {
         format!("There are merge conflicts. {RESOLVE} git_status lists the files.")
-    } else if has(&["nothing to commit", "nothing added to commit", "no changes added to commit"]) {
+    } else if has(&[
+        "nothing to commit",
+        "nothing added to commit",
+        "no changes added to commit",
+    ]) {
         "Nothing was committed: there are no changes to commit. That is fine if the work was committed before; git_status shows the state.".to_string()
-    } else if has(&["not currently on a branch", "head is detached", "head detached"]) {
+    } else if has(&[
+        "not currently on a branch",
+        "head is detached",
+        "head detached",
+    ]) {
         format!(
             "No branch is checked out (HEAD is detached), so {tool} has no branch to work on. Ask the user which branch to use; git switch (run_command) checks one out."
         )
@@ -1208,13 +1218,19 @@ fn advice(tool: &str, text: &str) -> Option<String> {
     } else if has(&["not possible to fast-forward"]) {
         "The branch and its upstream have both changed, so it cannot be fast-forwarded. git_pull does nothing else: merging or rebasing is for the user to decide.".to_string()
     } else if has(&["[rejected]", "non-fast-forward", "fetch first"]) {
-        "The remote has commits this branch does not have. Pull first (git_pull), then push again.".to_string()
+        "The remote has commits this branch does not have. Pull first (git_pull), then push again."
+            .to_string()
     } else if has(&["would be overwritten by"]) {
         "Changes in the working tree are in the way. Commit them with git_commit first, then pull again.".to_string()
     } else if has(&["pathspec"]) && has(&["did not match"]) {
         "A path matches no file. Paths are relative to the repository's root folder; git_status lists the changed files.".to_string()
-    } else if has(&["please tell me who you are", "author identity unknown", "committer identity unknown"]) {
-        "Git does not know the author's name and e-mail. The user enters them in Settings, Git.".to_string()
+    } else if has(&[
+        "please tell me who you are",
+        "author identity unknown",
+        "committer identity unknown",
+    ]) {
+        "Git does not know the author's name and e-mail. The user enters them in Settings, Git."
+            .to_string()
     } else if has(&[
         "could not resolve host",
         "could not read from remote repository",
@@ -1249,9 +1265,15 @@ fn with_advice(tool: &str, message: String) -> String {
 /// Whether a failed command's output is about unresolved conflicts.
 fn mentions_conflicts(text: &str) -> bool {
     let lower = text.to_lowercase();
-    ["unmerged files", "unresolved conflict", "conflict (", "fix conflicts", "unmerged paths"]
-        .iter()
-        .any(|n| lower.contains(n))
+    [
+        "unmerged files",
+        "unresolved conflict",
+        "conflict (",
+        "fix conflicts",
+        "unmerged paths",
+    ]
+    .iter()
+    .any(|n| lower.contains(n))
 }
 
 /// The files a status listing (`XY path`, as `git status --porcelain=v1` prints it) marks
@@ -1344,11 +1366,20 @@ impl GitServer {
     /// cannot be listed.
     async fn unmerged_files(&self, root: &Path) -> Vec<String> {
         let cancel = CancellationToken::new();
-        let args: Vec<String> = ["diff", "--name-only", "--diff-filter=U", "--no-ext-diff", "--"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        match self.run(root, &args, &cancel, Duration::from_secs(20)).await {
+        let args: Vec<String> = [
+            "diff",
+            "--name-only",
+            "--diff-filter=U",
+            "--no-ext-diff",
+            "--",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        match self
+            .run(root, &args, &cancel, Duration::from_secs(20))
+            .await
+        {
             Ok((0, out)) => out
                 .lines()
                 .map(str::trim)
@@ -1641,8 +1672,14 @@ mod tests {
         let said = |tool: &str, text: &str| advice(tool, text);
         // Not a repository.
         assert_eq!(
-            said("git_status", "fatal: not a git repository (or any of the parent directories): .git").as_deref(),
-            Some("Pass a folder inside a repository as repo. A new repository is made with git init (run_command) or git_clone.")
+            said(
+                "git_status",
+                "fatal: not a git repository (or any of the parent directories): .git"
+            )
+            .as_deref(),
+            Some(
+                "Pass a folder inside a repository as repo. A new repository is made with git init (run_command) or git_clone."
+            )
         );
         assert_eq!(
             said("git_log", "/w/notes is not inside a git repository"),
@@ -1650,8 +1687,14 @@ mod tests {
         );
         // Nothing to commit.
         assert_eq!(
-            said("git_commit", "On branch main\nnothing to commit, working tree clean").as_deref(),
-            Some("Nothing was committed: there are no changes to commit. That is fine if the work was committed before; git_status shows the state.")
+            said(
+                "git_commit",
+                "On branch main\nnothing to commit, working tree clean"
+            )
+            .as_deref(),
+            Some(
+                "Nothing was committed: there are no changes to commit. That is fine if the work was committed before; git_status shows the state."
+            )
         );
         // Sign-in, in git's several wordings and the built-in library's.
         for text in [
@@ -1660,12 +1703,18 @@ mod tests {
             "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
             "github.com needs a sign-in. Add an access token for github.com in the app's Git settings, then try again",
         ] {
-            assert_eq!(said("git_push", text).as_deref(), Some(SAY_CREDENTIALS), "{text}");
+            assert_eq!(
+                said("git_push", text).as_deref(),
+                Some(SAY_CREDENTIALS),
+                "{text}"
+            );
         }
         // No branch.
         assert_eq!(
             said("git_pull", "fatal: You are not currently on a branch.").as_deref(),
-            Some("No branch is checked out (HEAD is detached), so git_pull has no branch to work on. Ask the user which branch to use; git switch (run_command) checks one out.")
+            Some(
+                "No branch is checked out (HEAD is detached), so git_pull has no branch to work on. Ask the user which branch to use; git switch (run_command) checks one out."
+            )
         );
         assert_eq!(
             said("git_push", "HEAD is detached (no branch is checked out); check out a branch first"),
@@ -1673,39 +1722,74 @@ mod tests {
         );
         // Conflicts, when the files are not known.
         assert_eq!(
-            said("git_commit", "error: Committing is not possible because you have unmerged files.").as_deref(),
-            Some("There are merge conflicts. In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit. git_status lists the files.")
+            said(
+                "git_commit",
+                "error: Committing is not possible because you have unmerged files."
+            )
+            .as_deref(),
+            Some(
+                "There are merge conflicts. In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit. git_status lists the files."
+            )
         );
         // The rest of what comes up.
         assert_eq!(
             said("git_pull", "fatal: Not possible to fast-forward, aborting.").as_deref(),
-            Some("The branch and its upstream have both changed, so it cannot be fast-forwarded. git_pull does nothing else: merging or rebasing is for the user to decide.")
+            Some(
+                "The branch and its upstream have both changed, so it cannot be fast-forwarded. git_pull does nothing else: merging or rebasing is for the user to decide."
+            )
         );
         assert_eq!(
-            said("git_push", " ! [rejected]        main -> main (fetch first)").as_deref(),
-            Some("The remote has commits this branch does not have. Pull first (git_pull), then push again.")
+            said(
+                "git_push",
+                " ! [rejected]        main -> main (fetch first)"
+            )
+            .as_deref(),
+            Some(
+                "The remote has commits this branch does not have. Pull first (git_pull), then push again."
+            )
         );
         assert_eq!(
-            said("git_push", "fatal: The current branch topic has no upstream branch.").as_deref(),
-            Some("The branch has no upstream on the remote yet. git_push and git_pull work on a branch that has one; the first push of a new branch is git push --set-upstream (run_command).")
+            said(
+                "git_push",
+                "fatal: The current branch topic has no upstream branch."
+            )
+            .as_deref(),
+            Some(
+                "The branch has no upstream on the remote yet. git_push and git_pull work on a branch that has one; the first push of a new branch is git push --set-upstream (run_command)."
+            )
         );
         assert_eq!(
             said("git_pull", "error: Your local changes to the following files would be overwritten by merge:\n\ta.txt").as_deref(),
             Some("Changes in the working tree are in the way. Commit them with git_commit first, then pull again.")
         );
         assert_eq!(
-            said("git_commit", "fatal: pathspec 'nope.txt' did not match any files").as_deref(),
-            Some("A path matches no file. Paths are relative to the repository's root folder; git_status lists the changed files.")
+            said(
+                "git_commit",
+                "fatal: pathspec 'nope.txt' did not match any files"
+            )
+            .as_deref(),
+            Some(
+                "A path matches no file. Paths are relative to the repository's root folder; git_status lists the changed files."
+            )
         );
         assert_eq!(
-            said("git_commit", "Author identity unknown\n\n*** Please tell me who you are.").as_deref(),
-            Some("Git does not know the author's name and e-mail. The user enters them in Settings, Git.")
+            said(
+                "git_commit",
+                "Author identity unknown\n\n*** Please tell me who you are."
+            )
+            .as_deref(),
+            Some(
+                "Git does not know the author's name and e-mail. The user enters them in Settings, Git."
+            )
         );
         assert_eq!(
             said("git_clone", "fatal: unable to access 'https://nowhere.example/r.git/': Could not resolve host: nowhere.example").as_deref(),
             Some("The remote could not be reached. Check the URL and the network connection.")
         );
-        assert_eq!(said("git_diff", "fatal: something nobody has seen before"), None);
+        assert_eq!(
+            said("git_diff", "fatal: something nobody has seen before"),
+            None
+        );
     }
 
     #[test]
@@ -1717,21 +1801,30 @@ mod tests {
         );
         assert_eq!(
             status_note(status).as_deref(),
-            Some("Merge conflicts in 4 files: src/a.rs, b.txt, gone.txt, \"with space.txt\". In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit.")
+            Some(
+                "Merge conflicts in 4 files: src/a.rs, b.txt, gone.txt, \"with space.txt\". In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit."
+            )
         );
         assert_eq!(
             status_note("## main\nUU only.txt").as_deref(),
-            Some("Merge conflicts in 1 file: only.txt. In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit.")
+            Some(
+                "Merge conflicts in 1 file: only.txt. In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit."
+            )
         );
         assert_eq!(
             status_note("## HEAD (no branch)\n M a.txt").as_deref(),
-            Some("No branch is checked out (HEAD is detached): a commit made now belongs to no branch. Ask the user which branch to use; git switch (run_command) checks one out.")
+            Some(
+                "No branch is checked out (HEAD is detached): a commit made now belongs to no branch. Ask the user which branch to use; git switch (run_command) checks one out."
+            )
         );
         assert_eq!(status_note("## main\n M a.txt\n?? b.txt"), None);
         // Many files: the first ten, and how many more.
         let many: String = (0..14).map(|i| format!("UU f{i}.txt\n")).collect();
         let note = status_note(&format!("## main\n{many}")).expect("a note");
-        assert!(note.starts_with("Merge conflicts in 14 files: f0.txt, "), "{note}");
+        assert!(
+            note.starts_with("Merge conflicts in 14 files: f0.txt, "),
+            "{note}"
+        );
         assert!(note.contains("f9.txt and 4 more. In each file"), "{note}");
     }
 
@@ -1746,7 +1839,10 @@ mod tests {
                 .unwrap_err();
             assert_eq!(
                 why,
-                format!("{} is not inside a git repository. Pass a folder inside a repository as repo. A new repository is made with git init (run_command) or git_clone.", root.display())
+                format!(
+                    "{} is not inside a git repository. Pass a folder inside a repository as repo. A new repository is made with git init (run_command) or git_clone.",
+                    root.display()
+                )
             );
         }
     }
@@ -1764,15 +1860,21 @@ mod tests {
             let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             async move {
                 let cancel = CancellationToken::new();
-                s.run(&root, &args, &cancel, Duration::from_secs(20)).await.unwrap()
+                s.run(&root, &args, &cancel, Duration::from_secs(20))
+                    .await
+                    .unwrap()
             }
         };
         std::fs::write(root.join("a.txt"), "base\n").unwrap();
-        let (_, out) = go(&s, &c, "git_commit", json!({"message": "base"})).await.unwrap();
+        let (_, out) = go(&s, &c, "git_commit", json!({"message": "base"}))
+            .await
+            .unwrap();
         assert!(!out.is_error, "{}", out.joined_text());
 
         // Nothing to commit.
-        let (_, out) = go(&s, &c, "git_commit", json!({"message": "again"})).await.unwrap();
+        let (_, out) = go(&s, &c, "git_commit", json!({"message": "again"}))
+            .await
+            .unwrap();
         let text = out.joined_text();
         assert!(out.is_error && text.starts_with("exit code 1\n"), "{text}");
         assert!(
@@ -1798,7 +1900,14 @@ mod tests {
         );
         // A commit of another path is refused by git while a.txt is unresolved.
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
-        let (_, out) = go(&s, &c, "git_commit", json!({"message": "b", "paths": ["b.txt"]})).await.unwrap();
+        let (_, out) = go(
+            &s,
+            &c,
+            "git_commit",
+            json!({"message": "b", "paths": ["b.txt"]}),
+        )
+        .await
+        .unwrap();
         let text = out.joined_text();
         assert!(out.is_error, "{text}");
         assert!(
