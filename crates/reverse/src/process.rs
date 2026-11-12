@@ -272,7 +272,12 @@ impl ReaProcess {
         Self::build(layout, platform, launch_managed(), PathBuf::from("/"))
     }
 
-    fn build(layout: ReverseLayout, platform: Platform, launch: Launch, apple_root: PathBuf) -> Self {
+    fn build(
+        layout: ReverseLayout,
+        platform: Platform,
+        launch: Launch,
+        apple_root: PathBuf,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 installer: StdMutex::new(Arc::new(Installer::new(layout.clone(), platform))),
@@ -419,9 +424,8 @@ impl ReaGuard {
         if shared.status().quitting {
             return Err(ReverseError::Stopped);
         }
-        check_before_start(&shared, &config)?;
-        let old = {
-            let mut s = shared.status();
+        {
+            let s = shared.status();
             if let Some(running) = &s.running
                 && running.server.is_running()
                 && running.config.same_as(&config)
@@ -433,6 +437,10 @@ impl ReaGuard {
                     fresh: false,
                 });
             }
+        }
+        check_before_start(&shared, &config)?;
+        let old = {
+            let mut s = shared.status();
             if let Some(task) = s.idle_task.take() {
                 task.abort();
             }
@@ -763,7 +771,10 @@ mod tests {
                 ));
             }
             self.running.store(true, Ordering::SeqCst);
-            Ok(vec![("open_binary".into(), serde_json::json!({"type": "object"}))])
+            Ok(vec![(
+                "open_binary".into(),
+                serde_json::json!({"type": "object"}),
+            )])
         }
         async fn call(
             &self,
@@ -844,7 +855,12 @@ mod tests {
         std::fs::write(dir.join(".complete"), marker.to_string()).unwrap();
     }
 
-    fn bench_with(platform: Platform, kuna: bool, apple_root: PathBuf, fake: fn() -> FakeRea) -> Bench {
+    fn bench_with(
+        platform: Platform,
+        kuna: bool,
+        apple_root: PathBuf,
+        fake: fn() -> FakeRea,
+    ) -> Bench {
         let dir = tempfile::tempdir().unwrap();
         let layout = ReverseLayout::new(dir.path().join("reverse"));
         write_part(layout.root(), "rea", &["scripts/rea.mjs"]);
@@ -873,16 +889,32 @@ mod tests {
     }
 
     fn bench(kuna: bool) -> Bench {
-        bench_with(Platform::LinuxX64, kuna, PathBuf::from("/"), FakeRea::default)
+        bench_with(
+            Platform::LinuxX64,
+            kuna,
+            PathBuf::from("/"),
+            FakeRea::default,
+        )
     }
 
     impl Bench {
         fn config(&self, decompiler: Option<Decompiler>) -> RunConfig {
             let installation = self.process.shared.installer().installation();
-            run_config(&self.layout, &installation, decompiler, Flavor::Linux, false)
+            run_config(
+                &self.layout,
+                &installation,
+                decompiler,
+                Flavor::Linux,
+                false,
+            )
         }
         fn last(&self) -> Arc<FakeRea> {
-            self.launched.lock().unwrap().last().cloned().expect("launched")
+            self.launched
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("launched")
         }
         fn count(&self) -> usize {
             self.launched.lock().unwrap().len()
@@ -893,11 +925,22 @@ mod tests {
         ToolAllowList::new(["open_binary", "list_procedures"])
     }
 
-    async fn run_call(process: &ReaProcess, config: RunConfig, name: &str) -> Result<ToolOutput, ReverseError> {
+    async fn run_call(
+        process: &ReaProcess,
+        config: RunConfig,
+        name: &str,
+    ) -> Result<ToolOutput, ReverseError> {
         let mut g = process.lock().await;
         g.ensure_started(config).await?;
-        g.call(&allow(), name, Map::new(), Duration::from_secs(5), &CancellationToken::new(), None)
-            .await
+        g.call(
+            &allow(),
+            name,
+            Map::new(),
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+            None,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -917,7 +960,14 @@ mod tests {
         assert_eq!(again.generation, 1);
         assert_eq!(g.generation(), 1);
         let out = g
-            .call(&allow(), "list_procedures", Map::new(), Duration::from_secs(5), &CancellationToken::new(), None)
+            .call(
+                &allow(),
+                "list_procedures",
+                Map::new(),
+                Duration::from_secs(5),
+                &CancellationToken::new(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(out.joined_text(), "ran list_procedures");
@@ -936,7 +986,12 @@ mod tests {
         // reverse/tmp was emptied; the folders the environment names exist.
         assert!(b.layout.tmp().is_dir());
         assert!(!b.layout.tmp().join("old").exists());
-        for f in [b.layout.home(), b.layout.work(), b.layout.kuna_cache(), b.layout.home().join(".config")] {
+        for f in [
+            b.layout.home(),
+            b.layout.work(),
+            b.layout.kuna_cache(),
+            b.layout.home().join(".config"),
+        ] {
             assert!(f.is_dir(), "{}", f.display());
         }
     }
@@ -946,7 +1001,9 @@ mod tests {
         let b = bench(false);
         let logs = b.layout.root().join("logs");
         b.process.set_log_dir(Some(&logs));
-        run_call(&b.process, b.config(None), "open_binary").await.unwrap();
+        run_call(&b.process, b.config(None), "open_binary")
+            .await
+            .unwrap();
         let spec = b.last().spec.lock().unwrap().clone().unwrap();
         assert_eq!(spec.log_file, Some(logs.join("mcp-reverse.log")));
     }
@@ -954,7 +1011,9 @@ mod tests {
     #[tokio::test]
     async fn restart_stops_rea_and_the_next_start_raises_the_generation() {
         let b = bench(true);
-        run_call(&b.process, b.config(Some(Decompiler::Kuna)), "open_binary").await.unwrap();
+        run_call(&b.process, b.config(Some(Decompiler::Kuna)), "open_binary")
+            .await
+            .unwrap();
         let first = b.last();
         b.process.restart(RestartReason::DecompilerChanged).await;
         assert_eq!(*first.stops.lock().unwrap(), vec![STOP_GRACE]);
@@ -972,7 +1031,9 @@ mod tests {
     #[tokio::test]
     async fn another_configuration_is_never_served_by_the_running_rea() {
         let b = bench(true);
-        run_call(&b.process, b.config(Some(Decompiler::Kuna)), "open_binary").await.unwrap();
+        run_call(&b.process, b.config(Some(Decompiler::Kuna)), "open_binary")
+            .await
+            .unwrap();
         let kuna = b.last();
         let mut g = b.process.lock().await;
         let s = g.ensure_started(b.config(None)).await.unwrap();
@@ -980,7 +1041,11 @@ mod tests {
         assert_eq!(kuna.stops.lock().unwrap().len(), 1);
         assert!(!kuna.is_running());
         let env = &b.last().spec.lock().unwrap().clone().unwrap().env;
-        assert!(env.set.iter().any(|(k, v)| k == "REA_ANALYSIS_PROVIDER" && v == "ghidra"));
+        assert!(
+            env.set
+                .iter()
+                .any(|(k, v)| k == "REA_ANALYSIS_PROVIDER" && v == "ghidra")
+        );
         assert!(!env.set.iter().any(|(k, _)| k == "REA_KUNA_COMMAND"));
     }
 
@@ -990,41 +1055,107 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let layout = ReverseLayout::new(dir.path().join("reverse"));
         let b = bench(false);
-        let empty = ReaProcess::build(layout.clone(), Platform::LinuxX64, b.process.shared.launch.clone(), PathBuf::from("/"));
-        empty.set_installer(Arc::new(Installer::new(layout.clone(), Platform::LinuxX64).with_release_rules(false)));
+        let empty = ReaProcess::build(
+            layout.clone(),
+            Platform::LinuxX64,
+            b.process.shared.launch.clone(),
+            PathBuf::from("/"),
+        );
+        empty.set_installer(Arc::new(
+            Installer::new(layout.clone(), Platform::LinuxX64).with_release_rules(false),
+        ));
         let installation = empty.shared.installer().installation();
         let config = run_config(&layout, &installation, None, Flavor::Linux, false);
         let e = empty.lock().await.ensure_started(config).await.unwrap_err();
-        assert_eq!(e, ReverseError::NotInstalled { component: Component::Rea });
+        assert_eq!(
+            e,
+            ReverseError::NotInstalled {
+                component: Component::Rea
+            }
+        );
         // The marker is missing: the part counts as not there.
         let b = bench(false);
         let config = b.config(None);
-        let rea_dir = b.layout.part_dir(&lock::embedded().part("rea").unwrap().dir);
+        let rea_dir = b
+            .layout
+            .part_dir(&lock::embedded().part("rea").unwrap().dir);
         std::fs::remove_file(rea_dir.join(".complete")).unwrap();
-        let e = b.process.lock().await.ensure_started(config.clone()).await.unwrap_err();
-        assert!(matches!(e, ReverseError::Missing { .. } | ReverseError::NotInstalled { .. }), "{e:?}");
+        let e = b
+            .process
+            .lock()
+            .await
+            .ensure_started(config.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                e,
+                ReverseError::Missing { .. } | ReverseError::NotInstalled { .. }
+            ),
+            "{e:?}"
+        );
         // Broken: a program is gone.
         let b = bench(false);
         let config = b.config(None);
-        std::fs::remove_file(b.layout.part_dir(&lock::embedded().part("node").unwrap().dir).join("bin/node")).unwrap();
-        let e = b.process.lock().await.ensure_started(config).await.unwrap_err();
-        assert_eq!(e, ReverseError::Missing { part: "node".into() });
+        std::fs::remove_file(
+            b.layout
+                .part_dir(&lock::embedded().part("node").unwrap().dir)
+                .join("bin/node"),
+        )
+        .unwrap();
+        let e = b
+            .process
+            .lock()
+            .await
+            .ensure_started(config)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ReverseError::Missing {
+                part: "node".into()
+            }
+        );
         // NeedsUpdate: only an older rea, below the lock's minimum, is on disk.
         let b = bench(false);
         let config = b.config(None);
         let pinned = lock::embedded().part("rea").unwrap();
         let old_dir = b.layout.root().join("rea-6.8.0");
         std::fs::rename(b.layout.part_dir(&pinned.dir), &old_dir).unwrap();
-        let marker = std::fs::read_to_string(old_dir.join(".complete")).unwrap().replace("6.9.0", "6.8.0");
+        let marker = std::fs::read_to_string(old_dir.join(".complete"))
+            .unwrap()
+            .replace("6.9.0", "6.8.0");
         std::fs::write(old_dir.join(".complete"), marker).unwrap();
-        let e = b.process.lock().await.ensure_started(config).await.unwrap_err();
+        let e = b
+            .process
+            .lock()
+            .await
+            .ensure_started(config)
+            .await
+            .unwrap_err();
         assert_eq!(e, ReverseError::NeedsUpdate { part: "rea".into() });
         // A decompiler the configuration names must be usable too.
         let b = bench(true);
         let config = b.config(Some(Decompiler::Kuna));
-        std::fs::remove_file(b.layout.part_dir(&lock::embedded().part("kuna").unwrap().dir).join("kuna")).unwrap();
-        let e = b.process.lock().await.ensure_started(config).await.unwrap_err();
-        assert_eq!(e, ReverseError::Missing { part: "kuna".into() });
+        std::fs::remove_file(
+            b.layout
+                .part_dir(&lock::embedded().part("kuna").unwrap().dir)
+                .join("kuna"),
+        )
+        .unwrap();
+        let e = b
+            .process
+            .lock()
+            .await
+            .ensure_started(config)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ReverseError::Missing {
+                part: "kuna".into()
+            }
+        );
         assert_eq!(b.count(), 0, "nothing was launched");
     }
 
@@ -1050,8 +1181,20 @@ mod tests {
         c.env = c.env.set("REA_ANALYSIS_PROVIDER", "auto");
         variants.push(c);
         for config in variants {
-            let e = b.process.lock().await.ensure_started(config.clone()).await.unwrap_err();
-            assert!(matches!(e, ReverseError::Missing { .. } | ReverseError::StartFailed { .. }), "{config:?}: {e:?}");
+            let e = b
+                .process
+                .lock()
+                .await
+                .ensure_started(config.clone())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    e,
+                    ReverseError::Missing { .. } | ReverseError::StartFailed { .. }
+                ),
+                "{config:?}: {e:?}"
+            );
         }
         assert_eq!(b.count(), 0);
         b.process.lock().await.ensure_started(good).await.unwrap();
@@ -1061,14 +1204,33 @@ mod tests {
     #[tokio::test]
     async fn a_mac_without_apple_tools_never_starts_rea() {
         let fake_root = tempfile::tempdir().unwrap();
-        let b = bench_with(Platform::MacosArm64, true, fake_root.path().to_path_buf(), FakeRea::default);
+        let b = bench_with(
+            Platform::MacosArm64,
+            true,
+            fake_root.path().to_path_buf(),
+            FakeRea::default,
+        );
         let installation = b.process.shared.installer().installation();
-        let config = run_config(&b.layout, &installation, Some(Decompiler::Kuna), Flavor::Macos, false);
-        let e = b.process.lock().await.ensure_started(config.clone()).await.unwrap_err();
+        let config = run_config(
+            &b.layout,
+            &installation,
+            Some(Decompiler::Kuna),
+            Flavor::Macos,
+            false,
+        );
+        let e = b
+            .process
+            .lock()
+            .await
+            .ensure_started(config.clone())
+            .await
+            .unwrap_err();
         assert_eq!(e, ReverseError::AppleToolsMissing);
         assert_eq!(b.count(), 0);
         // Checked fresh: once the tools are there, rea starts without an app restart.
-        let swiftc = fake_root.path().join("Library/Developer/CommandLineTools/usr/bin/swiftc");
+        let swiftc = fake_root
+            .path()
+            .join("Library/Developer/CommandLineTools/usr/bin/swiftc");
         std::fs::create_dir_all(swiftc.parent().unwrap()).unwrap();
         std::fs::write(&swiftc, b"").unwrap();
         b.process.lock().await.ensure_started(config).await.unwrap();
@@ -1078,16 +1240,23 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn rea_stops_after_15_minutes_without_a_call() {
         let b = bench(false);
-        run_call(&b.process, b.config(None), "open_binary").await.unwrap();
+        run_call(&b.process, b.config(None), "open_binary")
+            .await
+            .unwrap();
         let rea = b.last();
         tokio::time::sleep(Duration::from_secs(14 * 60)).await;
         assert!(rea.is_running());
         // A call resets the clock.
-        run_call(&b.process, b.config(None), "list_procedures").await.unwrap();
+        run_call(&b.process, b.config(None), "list_procedures")
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_secs(14 * 60)).await;
         assert!(rea.is_running(), "stopped 14 minutes after the last call");
         tokio::time::sleep(Duration::from_secs(2 * 60)).await;
-        assert!(!rea.is_running(), "still running 16 minutes after the last call");
+        assert!(
+            !rea.is_running(),
+            "still running 16 minutes after the last call"
+        );
         assert_eq!(*rea.stops.lock().unwrap(), vec![STOP_GRACE]);
         assert_eq!(b.process.state(), RunState::Stopped);
         // The next call starts a new rea with a new generation.
@@ -1113,7 +1282,14 @@ mod tests {
         });
         // A call that runs for 20 minutes holds rea; the idle stop waits for it.
         let e = g
-            .call(&allow(), "open_binary", Map::new(), Duration::from_secs(3600), &cancel, None)
+            .call(
+                &allow(),
+                "open_binary",
+                Map::new(),
+                Duration::from_secs(3600),
+                &cancel,
+                None,
+            )
             .await
             .unwrap_err();
         assert_eq!(e, ReverseError::Cancelled);
@@ -1139,7 +1315,14 @@ mod tests {
         let process = &b.process;
         let cancel = CancellationToken::new();
         let names = allow();
-        let call = g.call(&names, "open_binary", Map::new(), Duration::from_secs(60), &cancel, None);
+        let call = g.call(
+            &names,
+            "open_binary",
+            Map::new(),
+            Duration::from_secs(60),
+            &cancel,
+            None,
+        );
         let watch = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(process.state(), RunState::Busy { chat_id: 42 });
@@ -1158,7 +1341,10 @@ mod tests {
             panic!("{:?}", process.state())
         };
         assert!(reason.contains("[harnessUI's rea folder]"), "{reason}");
-        assert!(!reason.contains(&b.layout.root().display().to_string()), "{reason}");
+        assert!(
+            !reason.contains(&b.layout.root().display().to_string()),
+            "{reason}"
+        );
         assert!(!reason.contains('\u{202E}'), "{reason}");
         // The next use starts again.
         let mut g = b.process.lock().await;
@@ -1173,9 +1359,20 @@ mod tests {
             fail_start: true,
             ..FakeRea::default()
         });
-        let e = b.process.lock().await.ensure_started(b.config(None)).await.unwrap_err();
-        let ReverseError::StartFailed { message } = e else { panic!("{e:?}") };
-        assert!(message.contains("before completing the handshake"), "{message}");
+        let e = b
+            .process
+            .lock()
+            .await
+            .ensure_started(b.config(None))
+            .await
+            .unwrap_err();
+        let ReverseError::StartFailed { message } = e else {
+            panic!("{e:?}")
+        };
+        assert!(
+            message.contains("before completing the handshake"),
+            "{message}"
+        );
         assert!(message.contains("[harnessUI's rea folder]"), "{message}");
         assert!(matches!(b.process.state(), RunState::Failed { .. }));
         assert_eq!(b.process.generation(), 0);
@@ -1194,7 +1391,14 @@ mod tests {
         let process = &b.process;
         let cancel = CancellationToken::new();
         let names = allow();
-        let call = g.call(&names, "open_binary", Map::new(), Duration::from_secs(60), &cancel, None);
+        let call = g.call(
+            &names,
+            "open_binary",
+            Map::new(),
+            Duration::from_secs(60),
+            &cancel,
+            None,
+        );
         // The stop does not wait for the lock the call holds.
         let stop = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1217,12 +1421,22 @@ mod tests {
         assert_send(&lock);
         assert_send(&b.process.stop(STOP_GRACE));
         assert_send(&b.process.restart(RestartReason::Updated));
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut g = runtime.block_on(lock);
         let cancel = CancellationToken::new();
         let allow = allow();
         assert_send(&g.ensure_started(b.config(None)));
-        assert_send(&g.call(&allow, "open_binary", Map::new(), Duration::from_secs(1), &cancel, None));
+        assert_send(&g.call(
+            &allow,
+            "open_binary",
+            Map::new(),
+            Duration::from_secs(1),
+            &cancel,
+            None,
+        ));
         fn assert_sync<T: Send + Sync>() {}
         assert_sync::<ReaProcess>();
         assert_sync::<ReaGuard>();
@@ -1243,11 +1457,18 @@ mod tests {
         let layout = ReverseLayout::new(dir.path().join("reverse"));
         let installer = Arc::new(
             Installer::new(layout.clone(), platform)
-                .with_fetch(Arc::new(crate::install::DirFetch::new(PathBuf::from(cache))))
+                .with_fetch(Arc::new(crate::install::DirFetch::new(PathBuf::from(
+                    cache,
+                ))))
                 .with_release_rules(false),
         );
-        let with_kuna = platform::availability_with(lock::embedded(), Component::Kuna, platform, false).0;
-        let row = if with_kuna { Component::Kuna } else { Component::Rea };
+        let with_kuna =
+            platform::availability_with(lock::embedded(), Component::Kuna, platform, false).0;
+        let row = if with_kuna {
+            Component::Kuna
+        } else {
+            Component::Rea
+        };
         installer
             .download(row, &CancellationToken::new(), &|_| {})
             .await
@@ -1256,7 +1477,13 @@ mod tests {
         process.set_installer(installer.clone());
         process.set_log_dir(Some(&dir.path().join("logs")));
         let decompiler = with_kuna.then_some(Decompiler::Kuna);
-        let config = run_config(&layout, &installer.installation(), decompiler, Flavor::current(), true);
+        let config = run_config(
+            &layout,
+            &installer.installation(),
+            decompiler,
+            Flavor::current(),
+            true,
+        );
         let begun = std::time::Instant::now();
         let mut g = process.lock().await;
         let started = g.ensure_started(config.clone()).await.expect("rea starts");
@@ -1266,7 +1493,13 @@ mod tests {
             started.tools.len()
         );
         let names: Vec<&str> = started.tools.iter().map(|(n, _)| n.as_str()).collect();
-        for wanted in ["open_binary", "list_procedures", "procedure_pseudo_code", "inspect_pe_imports", "inspect_analysis_view"] {
+        for wanted in [
+            "open_binary",
+            "list_procedures",
+            "procedure_pseudo_code",
+            "inspect_pe_imports",
+            "inspect_analysis_view",
+        ] {
             assert!(names.contains(&wanted), "{wanted} missing from {names:?}");
         }
         // The families left out of REA_MCP_TOOL_FAMILIES are not listed.
@@ -1279,16 +1512,26 @@ mod tests {
             .call(
                 &allow,
                 "binary_session",
-                serde_json::json!({"detail": "summary"}).as_object().cloned().unwrap(),
+                serde_json::json!({"detail": "summary"})
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
                 Duration::from_secs(60),
                 &CancellationToken::new(),
                 None,
             )
             .await
             .expect("binary_session answers");
-        eprintln!("real rea: binary_session: {}", out.joined_text().chars().take(300).collect::<String>());
+        eprintln!(
+            "real rea: binary_session: {}",
+            out.joined_text().chars().take(300).collect::<String>()
+        );
         // Stop during an open: rea gets the grace, then it is stopped if it never answers.
-        if let Some(target) = ["/bin/ls", "/usr/bin/ls"].iter().map(Path::new).find(|p| p.is_file()) {
+        if let Some(target) = ["/bin/ls", "/usr/bin/ls"]
+            .iter()
+            .map(Path::new)
+            .find(|p| p.is_file())
+        {
             let cancel = CancellationToken::new();
             let trigger = cancel.clone();
             tokio::spawn(async move {
@@ -1300,7 +1543,10 @@ mod tests {
                 .call(
                     &allow,
                     "open_binary",
-                    serde_json::json!({"path": target}).as_object().cloned().unwrap(),
+                    serde_json::json!({"path": target})
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
                     Duration::from_secs(900),
                     &cancel,
                     None,
@@ -1311,17 +1557,74 @@ mod tests {
                 begun.elapsed().as_secs_f64(),
                 process.state()
             );
-            assert!(matches!(stopped, Err(ReverseError::Cancelled) | Ok(_)), "{stopped:?}");
+            assert!(
+                matches!(stopped, Err(ReverseError::Cancelled) | Ok(_)),
+                "{stopped:?}"
+            );
         }
         drop(g);
-        // Started again (if the Stop ended it), then stopped by closing its input.
+        // Started again (if the Stop ended it); with Kuna, a whole open works with this
+        // environment (REA_KUNA_COMMAND, its cache and home inside the reverse folder).
         let mut g = process.lock().await;
-        g.ensure_started(config.clone()).await.expect("rea starts again");
+        g.ensure_started(config.clone())
+            .await
+            .expect("rea starts again");
+        let target = ["/bin/ls", "/usr/bin/ls"]
+            .iter()
+            .map(Path::new)
+            .find(|p| p.is_file());
+        if let (true, Some(target)) = (with_kuna, target) {
+            let allow = ToolAllowList::new(["open_binary", "list_procedures"]);
+            let begun = std::time::Instant::now();
+            let opened = g
+                .call(
+                    &allow,
+                    "open_binary",
+                    serde_json::json!({"path": target})
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                    Duration::from_secs(600),
+                    &CancellationToken::new(),
+                    None,
+                )
+                .await
+                .expect("open_binary answers");
+            eprintln!(
+                "real rea: open_binary {} with Kuna in {:.1} s, error: {}: {}",
+                target.display(),
+                begun.elapsed().as_secs_f64(),
+                opened.is_error,
+                opened.joined_text().chars().take(300).collect::<String>()
+            );
+            assert!(!opened.is_error, "{opened:?}");
+            let listed = g
+                .call(
+                    &allow,
+                    "list_procedures",
+                    serde_json::json!({"detail": "summary"})
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                    Duration::from_secs(300),
+                    &CancellationToken::new(),
+                    None,
+                )
+                .await
+                .expect("list_procedures answers");
+            eprintln!(
+                "real rea: list_procedures: {}",
+                listed.joined_text().chars().take(300).collect::<String>()
+            );
+            assert!(!listed.is_error, "{listed:?}");
+            assert!(layout.kuna_cache().is_dir());
+        }
         drop(g);
         let begun = std::time::Instant::now();
         process.stop(STOP_GRACE).await;
         eprintln!("real rea: stop took {:.1} s", begun.elapsed().as_secs_f64());
-        let log = std::fs::read_to_string(dir.path().join("logs").join(LOG_FILE_NAME)).unwrap_or_default();
+        let log = std::fs::read_to_string(dir.path().join("logs").join(LOG_FILE_NAME))
+            .unwrap_or_default();
         let notes: Vec<&str> = log.lines().filter(|l| l.starts_with("--- ")).collect();
         eprintln!("real rea: log notes {notes:#?}");
         assert!(!log.is_empty(), "nothing in the log file");
@@ -1337,7 +1640,10 @@ mod tests {
         let mut first = b.process.lock().await;
         first.ensure_started(config.clone()).await.unwrap();
         let second = tokio::time::timeout(Duration::from_millis(100), b.process.lock()).await;
-        assert!(second.is_err(), "a second caller got rea while the first held it");
+        assert!(
+            second.is_err(),
+            "a second caller got rea while the first held it"
+        );
         drop(first);
         let second = tokio::time::timeout(Duration::from_secs(1), b.process.lock()).await;
         assert!(second.is_ok());

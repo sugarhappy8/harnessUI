@@ -39,14 +39,16 @@ pub mod messages {
     pub const OUTSIDE: &str =
         "That file is outside this chat's folders. Ask the user to add its folder to this chat.";
     /// Inside the app's own folders (or a system key store).
-    pub const APP_FOLDERS: &str = "That file is in harnessUI's own folders, which tools can't reach.";
+    pub const APP_FOLDERS: &str =
+        "That file is in harnessUI's own folders, which tools can't reach.";
     /// A link out of reach inside a folder (the link's path follows, then a full stop).
     pub const LINK_OUT: &str = "That folder contains a link to a place this chat can't reach: ";
     /// A folder over the walk's limits.
     pub const TOO_LARGE: &str =
         "This folder is too large for rea to check. Point at the program file or a smaller folder.";
     /// A device or pipe inside a folder (its path follows, then a full stop).
-    pub const DEVICE_IN_FOLDER: &str = "That folder contains a device or pipe, which rea doesn't read: ";
+    pub const DEVICE_IN_FOLDER: &str =
+        "That folder contains a device or pipe, which rea doesn't read: ";
     /// A session call with no file open for this chat.
     pub const NO_FILE_OPEN: &str =
         "No file is open in rea for this chat. Open one with open_binary first.";
@@ -60,8 +62,7 @@ pub mod messages {
     /// A result id this chat does not hold.
     pub const UNKNOWN_ID: &str = "That id isn't one of this chat's rea results, or rea no longer has it (rea was restarted or another chat opened a file). Run the step that gave it again.";
     /// No decompiler, Windows (Ghidra is the only one offered).
-    pub const NO_DECOMPILER_GHIDRA: &str =
-        "No decompiler is installed. The user can install Ghidra in Settings → Reverse engineering.";
+    pub const NO_DECOMPILER_GHIDRA: &str = "No decompiler is installed. The user can install Ghidra in Settings → Reverse engineering.";
     /// No decompiler, where both are offered.
     pub const NO_DECOMPILER_BOTH: &str = "No decompiler is installed. The user can install Kuna or Ghidra in Settings → Reverse engineering.";
     /// No decompiler, a Mac without Ghidra's Mac decompiler.
@@ -80,7 +81,8 @@ pub mod messages {
     /// (WP9c) The path itself is a device, pipe or socket (its path follows, then a full stop).
     pub const DEVICE: &str = "That is a device or pipe, which rea doesn't read: ";
     /// (WP9c) A folder the walk could not read (its path follows, then a full stop).
-    pub const UNREADABLE: &str = "rea can't check everything in that folder, so it won't look inside it: ";
+    pub const UNREADABLE: &str =
+        "rea can't check everything in that folder, so it won't look inside it: ";
     /// (WP9c) Nothing at the path (the path follows, then a full stop).
     pub const NOT_FOUND: &str = "There is no file at ";
     /// (WP9c) A folder where a file is needed (the path follows, then a full stop).
@@ -249,8 +251,7 @@ pub fn unavailable(tool: &AllowedTool, a: &Availability, platform: Platform) -> 
         m::NEEDS_UPDATE
     } else if a.changed_tools.iter().any(|t| t == tool.name) {
         m::CHANGED_TOOL
-    } else if a.decompiler.is_none() && matches!(tool.class, ToolClass::Open | ToolClass::Session)
-    {
+    } else if a.decompiler.is_none() && matches!(tool.class, ToolClass::Open | ToolClass::Session) {
         no_decompiler_message(platform)
     } else {
         return None;
@@ -390,7 +391,13 @@ impl Cx<'_, '_> {
         out
     }
 
-    fn action(&self, scope: Scope, summary: String, preview: String, payload: Payload) -> Described {
+    fn action(
+        &self,
+        scope: Scope,
+        summary: String,
+        preview: String,
+        payload: Payload,
+    ) -> Described {
         Described::Action(Action {
             server: SERVER.into(),
             tool: self.t.name.into(),
@@ -411,7 +418,11 @@ impl Cx<'_, '_> {
 
     fn path_call(&self) -> Described {
         let property = self.t.paths[0];
-        let given = self.args.get(property).and_then(Value::as_str).unwrap_or("");
+        let given = self
+            .args
+            .get(property)
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if let Some(bad) = self.bad_source_path() {
             return Described::Invalid(format!("{}{}.", m::SOURCE_PATH, shown(bad)));
         }
@@ -482,7 +493,8 @@ impl Cx<'_, '_> {
             | PathError::DeviceName(_)
             | PathError::AlternateStream(_) => self.denied(given, m::NETWORK.into()),
             other => Described::Invalid(format!(
-                "That path can't be used: {other}. Give the file's full path."
+                "That path can't be used: {}. Give the file's full path.",
+                policy::sanitize::one_line(&other.to_string(), 300)
             )),
         }
     }
@@ -528,7 +540,12 @@ impl Cx<'_, '_> {
             evidence: None,
             store_epoch: None,
         };
-        self.action(Scope::FileAnalysis { folder: root }, summary, preview, payload)
+        self.action(
+            Scope::FileAnalysis { folder: root },
+            summary,
+            preview,
+            payload,
+        )
     }
 
     /// The first `source_paths` entry that is not a plain relative path.

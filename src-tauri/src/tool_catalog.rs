@@ -247,6 +247,10 @@ pub const GROUPS: &[Group] = &[
     },
     // [0.0.6 item 5] rea. Words match whole words, so a file name such as "notepad.exe"
     // counts through "exe".
+    // TODO(0.0.6): the selection also counts the words of the tools' names, and rea's names
+    // hold everyday ones ("function", "strings", "python", "rust", "view"), so "Write a Python
+    // function" points at this group once it is on. Decide in `tool_select::group_score`
+    // whether this group should match by the words below only (item5-spec.md R18 assumes so).
     Group {
         server: "reverse",
         label: "Reverse engineering",
@@ -749,7 +753,15 @@ pub const ENTRIES: &[Entry] = &[
         name: "open_binary",
         group: "reverse",
         purpose: "Open a program or library file in rea so the other reverse engineering tools can analyse it.",
-        keywords: &["open", "decompile", "binary", "exe", "dll", "executable", "program"],
+        keywords: &[
+            "open",
+            "decompile",
+            "binary",
+            "exe",
+            "dll",
+            "executable",
+            "program",
+        ],
         rank: 1,
         examples: &[r#"{"path": "hello.exe"}"#, r#"{"path": "bin/tool"}"#],
     },
@@ -1747,7 +1759,10 @@ pub(crate) mod tests {
         for t in tools.iter().filter(|t| t.server == "reverse") {
             assert_eq!(t.exposed, t.original, "rea's own name");
             assert!(t.schema_error.is_none(), "{}", t.exposed);
-            assert_eq!(group(&t.server).map(|g| g.label), Some("Reverse engineering"));
+            assert_eq!(
+                group(&t.server).map(|g| g.label),
+                Some("Reverse engineering")
+            );
         }
         let fixture: Value = serde_json::from_str(include_str!(
             "../../crates/reverse/tests/fixtures/rea-6.9.0-catalog.json"
@@ -1772,7 +1787,10 @@ pub(crate) mod tests {
             .filter_map(Value::as_str)
             .filter(|n| !reverse::allow::MODEL_TOOLS.contains(n))
         {
-            assert!(!tools.iter().any(|t| t.exposed == name), "{name} is registered");
+            assert!(
+                !tools.iter().any(|t| t.exposed == name),
+                "{name} is registered"
+            );
             match host
                 .describe(name, &Map::new(), &chat, mcp_host::ToolPrefs::default())
                 .await

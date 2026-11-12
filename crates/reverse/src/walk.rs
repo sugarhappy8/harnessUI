@@ -104,9 +104,10 @@ impl WalkRefusal {
     }
 }
 
-/// A path as a message or card shows it: one line, invisible characters escaped.
+/// A path as a message or card shows it: one line, invisible characters escaped, never cut
+/// short (a cut could hide which file it is).
 pub(crate) fn shown(path: &str) -> String {
-    policy::sanitize::one_line(path, 500)
+    policy::sanitize::one_line(path, usize::MAX)
 }
 
 /// The real file system.
@@ -405,7 +406,9 @@ pub fn walk_folder(
                 None | Some(EntryKind::File) => None,
                 Some(EntryKind::Dir) => Some(path),
                 Some(EntryKind::Link) => check_link(fs, &path, flavor, sandbox)?,
-                Some(EntryKind::Device | EntryKind::Pipe | EntryKind::Socket | EntryKind::Other) => {
+                Some(
+                    EntryKind::Device | EntryKind::Pipe | EntryKind::Socket | EntryKind::Other,
+                ) => {
                     return Err(WalkRefusal::Device { path });
                 }
             };
@@ -567,8 +570,8 @@ pub(crate) mod fake {
                         cur.components.pop();
                         let base = cur.to_string();
                         // Windows reports absolute links in the verbatim form.
-                        let target = super::verbatim_drive(&target)
-                            .map_or(target.clone(), str::to_string);
+                        let target =
+                            super::verbatim_drive(&target).map_or(target.clone(), str::to_string);
                         let t = if super::is_absolute(&target, self.flavor) {
                             target
                         } else {
@@ -961,15 +964,30 @@ mod tests {
         let s = |p: &Path| p.display().to_string();
         let sb = |approved: &[&Path]| {
             let a: Vec<String> = approved.iter().map(|p| s(p)).collect();
-            PathSandbox::new(Flavor::Posix, &a, &[], &RealWalkFs, &|p| RealWalkFs.case_of(p)).0
+            PathSandbox::new(Flavor::Posix, &a, &[], &RealWalkFs, &|p| {
+                RealWalkFs.case_of(p)
+            })
+            .0
         };
-        assert_eq!(walk_folder(&RealWalkFs, &s(&app), &sb(&[&app]), false), Ok(()));
-        assert_eq!(RealWalkFs.kind(&s(&app.join("lib/rel"))), Some(EntryKind::Link));
         assert_eq!(
-            RealWalkFs.read_link(&s(&app.join("lib/rel"))).unwrap().as_deref(),
+            walk_folder(&RealWalkFs, &s(&app), &sb(&[&app]), false),
+            Ok(())
+        );
+        assert_eq!(
+            RealWalkFs.kind(&s(&app.join("lib/rel"))),
+            Some(EntryKind::Link)
+        );
+        assert_eq!(
+            RealWalkFs
+                .read_link(&s(&app.join("lib/rel")))
+                .unwrap()
+                .as_deref(),
             Some("../main.js")
         );
-        assert_eq!(RealWalkFs.read_link(&s(&app.join("main.js"))).unwrap(), None);
+        assert_eq!(
+            RealWalkFs.read_link(&s(&app.join("main.js"))).unwrap(),
+            None
+        );
         assert!(RealWalkFs.identity(&s(&app.join("main.js"))).is_some());
         assert!(RealWalkFs.identity(&s(&app)).is_none());
 
@@ -980,7 +998,10 @@ mod tests {
                 link: s(&app.join("lib/out"))
             })
         );
-        assert_eq!(walk_folder(&RealWalkFs, &s(&app), &sb(&[&root]), false), Ok(()));
+        assert_eq!(
+            walk_folder(&RealWalkFs, &s(&app), &sb(&[&root]), false),
+            Ok(())
+        );
         std::fs::remove_file(app.join("lib/out")).unwrap();
 
         let fifo = app.join("pipe");

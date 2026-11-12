@@ -267,11 +267,7 @@ pub fn run_config_with(
     RunConfig {
         program: installed.node().unwrap_or_default(),
         args: vec![
-            installed
-                .rea_entry
-                .as_deref()
-                .map(text)
-                .unwrap_or_default(),
+            installed.rea_entry.as_deref().map(text).unwrap_or_default(),
             "mcp".into(),
         ],
         env,
@@ -378,7 +374,12 @@ mod tests {
             ghidra: Some(installed(
                 Component::Ghidra,
                 vec![
-                    part("ghidra", "12.1.4", "ghidra-12.1.4", Some("support/analyzeHeadless")),
+                    part(
+                        "ghidra",
+                        "12.1.4",
+                        "ghidra-12.1.4",
+                        Some("support/analyzeHeadless"),
+                    ),
                     part("java", "21.0.13+9", "java-21.0.13+9", Some("bin/java")),
                 ],
             )),
@@ -389,7 +390,8 @@ mod tests {
 
     fn lock() -> ReverseLock {
         let mut lock = lock::embedded().clone();
-        lock.families = "direct,enhanced,native,artifact,managed,session,electron,application".into();
+        lock.families =
+            "direct,enhanced,native,artifact,managed,session,electron,application".into();
         lock.disabled_ghidra_analyzers = BTreeMap::from([
             ("windows-x86_64".to_owned(), "PDB Universal".to_owned()),
             ("linux-x86_64".to_owned(), "PDB Universal".to_owned()),
@@ -447,7 +449,10 @@ mod tests {
         put("HOME", p("home"));
         match flavor {
             Flavor::Windows => {
-                put("PATH", r"D:\Win\System32;D:\Win;D:\Win\System32\Wbem".into());
+                put(
+                    "PATH",
+                    r"D:\Win\System32;D:\Win;D:\Win\System32\Wbem".into(),
+                );
                 put("USERPROFILE", p("home"));
                 put("APPDATA", p("home/AppData/Roaming"));
                 put("LOCALAPPDATA", p("home/AppData/Local"));
@@ -475,8 +480,14 @@ mod tests {
             ("REA_ANALYSIS_PROVIDER".to_owned(), "kuna".to_owned()),
             ("REA_KUNA_COMMAND".to_owned(), p("kuna-1.990/kuna")),
             ("REA_KUNA_CACHE_DIR".to_owned(), p("cache/kuna")),
-            ("REA_KUNA_CACHE_MAX_BYTES".to_owned(), "1073741824".to_owned()),
-            ("REA_KUNA_PROJECT_TIMEOUT_MS".to_owned(), "900000".to_owned()),
+            (
+                "REA_KUNA_CACHE_MAX_BYTES".to_owned(),
+                "1073741824".to_owned(),
+            ),
+            (
+                "REA_KUNA_PROJECT_TIMEOUT_MS".to_owned(),
+                "900000".to_owned(),
+            ),
             ("REA_KUNA_TIMEOUT_MS".to_owned(), "120000".to_owned()),
         ])
     }
@@ -487,7 +498,10 @@ mod tests {
             ("GHIDRA_INSTALL_DIR".to_owned(), p("ghidra-12.1.4")),
             ("JAVA_HOME".to_owned(), p("java-21.0.13+9")),
             ("GHIDRA_HEADLESS_MAXMEM".to_owned(), "2G".to_owned()),
-            ("REA_GHIDRA_STARTUP_TIMEOUT_MS".to_owned(), "900000".to_owned()),
+            (
+                "REA_GHIDRA_STARTUP_TIMEOUT_MS".to_owned(),
+                "900000".to_owned(),
+            ),
         ]);
         if analyzers {
             m.insert(
@@ -521,8 +535,14 @@ mod tests {
                     Flavor::Windows => assert_eq!(copied, WINDOWS_COPIED, "{flavor:?}"),
                     _ => assert_eq!(copied, UNIX_COPIED, "{flavor:?}"),
                 }
-                assert_eq!(config.program, Path::new(ROOT).join("node-24.22.3/bin/node"));
-                assert_eq!(config.args, vec![p("rea-6.9.0/scripts/rea.mjs"), "mcp".into()]);
+                assert_eq!(
+                    config.program,
+                    Path::new(ROOT).join("node-24.22.3/bin/node")
+                );
+                assert_eq!(
+                    config.args,
+                    vec![p("rea-6.9.0/scripts/rea.mjs"), "mcp".into()]
+                );
                 assert_eq!(config.cwd, Path::new(ROOT).join("work"));
                 assert_eq!(config.start_timeout, Duration::from_secs(60));
             }
@@ -574,9 +594,21 @@ mod tests {
                 // even an app full of forbidden variables passes none of them on.
                 let parent: Vec<(std::ffi::OsString, std::ffi::OsString)> = NEVER
                     .iter()
-                    .chain(["HTTPS_PROXY", "http_proxy", "ALL_PROXY", "REA_JEB_MCP_URL", "REA_ILSPY_CMD_PATH"].iter())
+                    .chain(
+                        [
+                            "HTTPS_PROXY",
+                            "http_proxy",
+                            "ALL_PROXY",
+                            "REA_JEB_MCP_URL",
+                            "REA_ILSPY_CMD_PATH",
+                        ]
+                        .iter(),
+                    )
                     .map(|n| ((*n).into(), "x".into()))
-                    .chain([("USER".into(), "me".into()), ("SYSTEMROOT".into(), r"C:\Windows".into())])
+                    .chain([
+                        ("USER".into(), "me".into()),
+                        ("SYSTEMROOT".into(), r"C:\Windows".into()),
+                    ])
                     .collect();
                 for (name, _) in config.env.resolve_from(parent) {
                     let name = name.to_string_lossy().into_owned();
@@ -645,12 +677,21 @@ mod tests {
 
     #[test]
     fn a_strange_systemroot_falls_back_to_the_usual_one() {
-        for bad in [r"\\server\share", "C:\\Win;C:\\evil", "relative", "C:\\%X%", "C:\\a\nb"] {
+        for bad in [
+            r"\\server\share",
+            "C:\\Win;C:\\evil",
+            "relative",
+            "C:\\%X%",
+            "C:\\a\nb",
+        ] {
             let env = move |n: &str| (n == "SYSTEMROOT").then(|| bad.to_owned());
             assert_eq!(system_root(&env), r"C:\Windows", "{bad:?}");
         }
         assert_eq!(system_root(&|_| None), r"C:\Windows");
-        assert_eq!(system_root(&|n| (n == "SystemRoot").then(|| r"E:\WINNT\".into())), r"E:\WINNT");
+        assert_eq!(
+            system_root(&|n| (n == "SystemRoot").then(|| r"E:\WINNT\".into())),
+            r"E:\WINNT"
+        );
     }
 
     #[test]

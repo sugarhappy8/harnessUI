@@ -13,7 +13,12 @@ Collected while the packages run. Each needs doing (or a decision) before the re
 - **WP7 and WP6 developers returned before their checks finished** (they waited on a
   background run); the checks were re-run by the reviewers and checkers, but re-run WP7's
   `folder-chip` scenario at integration.
-- **WP6 finished two fix rounds with one major left** (a long option such as `--frozen`
+- **WP6 done after four fix rounds** (the last two only on the coding-app classifier; the
+  lead added the `claude/versions/<build>` folder of Claude Code's own installer). The limits
+  that stay are listed in the module docs of `crates/policy/src/command/coding_apps.rs`
+  and pinned by `patterns_that_fix_too_little_are_a_known_gap`: copy them into ARCHITECTURE
+  13.3 and SECURITY.md. History:
+- WP6 had finished two fix rounds with one major left (a long option such as `--frozen`
   after `uv run` hid the program from the coding-app rule) and two minors (one-letter
   patterns after a wrapper; slow reading of many parentheses): round 3 run wf_a82a9107-f79.
   WP6 also fixed a classifier-wide bug: a backslash before CR LF let `echo \<CR><LF>rm -rf x`

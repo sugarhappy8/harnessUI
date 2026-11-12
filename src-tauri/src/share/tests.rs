@@ -1733,6 +1733,20 @@ async fn no_approval_mode_changes_sharing() {
             .await
             .unwrap();
         assert_eq!(with.status(), 200, "{mode}");
+        // Round 1: an image given as a link is refused by the proxy's own rule in every
+        // mode, Full access included, with its row.
+        let link = client
+            .post(&url)
+            .header("x-api-key", &key)
+            .body(
+                json!({"messages": [{"role": "user", "content": [{"type": "image",
+                "source": {"type": "url", "url": "http://example.com/a.png"}}]}]})
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(link.status(), 400, "{mode}");
         let mut rows = Vec::new();
         for _ in 0..100 {
             rows = env
@@ -1743,18 +1757,22 @@ async fn no_approval_mode_changes_sharing() {
                 })
                 .await
                 .unwrap();
-            if rows.iter().all(|r| r.result_status.is_some()) && !rows.is_empty() {
+            if rows.iter().all(|r| r.result_status.is_some()) && rows.len() >= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(rows.len(), 1, "{mode}");
-        assert_eq!(
-            rows[0].decision,
-            store::AuditDecision::AllowedWithoutPrompt,
-            "{mode}"
+        assert_eq!(rows.len(), 2, "{mode}");
+        let seen: Vec<(store::AuditDecision, Option<&str>)> = rows
+            .iter()
+            .map(|r| (r.decision, r.result_status.as_deref()))
+            .collect();
+        assert!(
+            seen.contains(&(store::AuditDecision::AllowedWithoutPrompt, Some("ok")))
+                && seen.contains(&(store::AuditDecision::RefusedByPolicy, Some("not_run"))),
+            "{mode}: {seen:?}"
         );
-        assert_eq!(rows[0].note, None, "{mode}");
+        assert!(rows.iter().all(|r| r.note.is_none()), "{mode}");
         sharing.set_enabled(&env, false).await.unwrap();
         assert!(!port_open(port).await, "{mode}");
         sharing.shutdown().await;

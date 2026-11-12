@@ -943,6 +943,8 @@ fn the_answer_names_groups_that_are_off_without_listing_their_tools() {
             "subagents",
             "skills",
             "coding_apps",
+            // [0.0.6 item 5] rea's group, off in new chats.
+            "reverse",
         ],
     );
     let off = vec!["git".to_string(), "browser".to_string()];

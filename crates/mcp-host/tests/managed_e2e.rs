@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Hidden flag that turns this binary into the fake server; the next argument is the mode:
 /// `normal`, `answers-cancel`, `ignores-cancel`, `lingers` (ignores its standard input
-/// closing), `no-handshake`.
+/// closing), `stubborn` (both), `no-handshake`.
 const FAKE_FLAG: &str = "--mcp-host-test-fake-managed";
 
 /// Set in this process only; must never reach the server.
@@ -52,7 +52,15 @@ const FIXED_PATH: &str = if cfg!(windows) {
 
 /// Every name the fake lists, over two pages.
 const FAKE_TOOLS: [&str; 9] = [
-    "echo", "env", "cwd", "args", "pid", "slow", "progress", "crash", "start_gdb_session",
+    "echo",
+    "env",
+    "cwd",
+    "args",
+    "pid",
+    "slow",
+    "progress",
+    "crash",
+    "start_gdb_session",
 ];
 
 fn main() {
@@ -72,12 +80,21 @@ fn main() {
         .build()
         .expect("tokio runtime");
     runtime.block_on(async {
-        run("environment_arguments_and_folder_are_exact", exact_environment()).await;
+        run(
+            "environment_arguments_and_folder_are_exact",
+            exact_environment(),
+        )
+        .await;
         run("lists_pages_calls_and_logs_stderr", lists_and_calls()).await;
         run("names_outside_the_allow_list_never_reach_it", allow_list()).await;
-        run("progress_keeps_a_call_alive_and_its_text_stays_out", progress()).await;
+        run(
+            "progress_keeps_a_call_alive_and_its_text_stays_out",
+            progress(),
+        )
+        .await;
         run("an_answered_cancel_keeps_the_server", answered_cancel()).await;
         run("an_ignored_cancel_stops_the_server", ignored_cancel()).await;
+        run("a_server_that_ignores_everything_is_killed", stubborn()).await;
         run("timeouts_are_handled_like_cancels", timeouts()).await;
         run("stop_lets_a_server_end_on_stdin_close", stop_by_itself()).await;
         run("stop_kills_a_server_that_ignores_stdin_close", stop_kills()).await;
@@ -289,7 +306,10 @@ async fn exact_environment() {
             "{name} is missing: {env:?}"
         );
     }
-    let path = env.iter().find(|(k, _)| same_name(k, "PATH")).map(|(_, v)| v);
+    let path = env
+        .iter()
+        .find(|(k, _)| same_name(k, "PATH"))
+        .map(|(_, v)| v);
     assert_eq!(path.map(String::as_str), Some(FIXED_PATH));
     // Working folder and argument list, exactly.
     let cwd = text(&server, "cwd", json!({})).await;
@@ -369,7 +389,10 @@ async fn allow_list() {
                 None,
             )
             .await;
-        assert!(matches!(refused, Err(HostError::NotFound(_))), "{name}: {refused:?}");
+        assert!(
+            matches!(refused, Err(HostError::NotFound(_))),
+            "{name}: {refused:?}"
+        );
         // The plain call refuses it the same way.
         let refused = server
             .call(
@@ -478,10 +501,9 @@ async fn answered_cancel() {
         .map(|m| m["id"].clone())
         .expect("slow call");
     assert!(
-        received
-            .iter()
-            .any(|m| m["method"] == "notifications/cancelled"
-                && m["params"]["requestId"] == call_id),
+        received.iter().any(
+            |m| m["method"] == "notifications/cancelled" && m["params"]["requestId"] == call_id
+        ),
         "{received:?}"
     );
     assert!(server.is_running());
@@ -501,7 +523,10 @@ async fn ignored_cancel() {
         "{took:?}"
     );
     assert!(!server.is_running());
-    assert!(!server.ended_unexpectedly(), "a stop on purpose is not a crash");
+    assert!(
+        !server.ended_unexpectedly(),
+        "a stop on purpose is not a crash"
+    );
     #[cfg(unix)]
     assert!(
         eventually(Duration::from_secs(5), || !alive(pid)).await,
@@ -526,11 +551,42 @@ async fn ignored_cancel() {
             None,
         )
         .await;
-    assert!(matches!(refused, Err(HostError::NotReady(_))), "{refused:?}");
+    assert!(
+        matches!(refused, Err(HostError::NotReady(_))),
+        "{refused:?}"
+    );
     server.start().await.expect("restarts");
     let again: u32 = text(&server, "pid", json!({})).await.parse().unwrap();
     assert_ne!(again, pid);
     server.stop(STOP_AFTER_CANCEL).await;
+}
+
+async fn stubborn() {
+    let scratch = Scratch::new();
+    let server = started(scratch.spec("stubborn")).await;
+    let pid: u32 = text(&server, "pid", json!({})).await.parse().unwrap();
+    let (out, took) = cancel_slow_call(&server).await;
+    assert_eq!(out, CallOutcome::Cancelled { stopped: true });
+    // The grace for the answer, then the grace after closing its input, then the kill.
+    assert!(took >= CANCEL_GRACE + STOP_AFTER_CANCEL, "{took:?}");
+    assert!(
+        took < CANCEL_GRACE + STOP_AFTER_CANCEL + Duration::from_secs(3),
+        "{took:?}"
+    );
+    assert!(!server.is_running());
+    #[cfg(unix)]
+    assert!(eventually(Duration::from_secs(5), || !alive(pid)).await);
+    #[cfg(not(unix))]
+    let _ = pid;
+    assert!(!scratch.eof_marker().exists(), "it never ended by itself");
+    assert!(
+        server
+            .stderr_tail()
+            .iter()
+            .any(|l| l.contains("was still running after 3 seconds, so it was ended")),
+        "{:?}",
+        server.stderr_tail()
+    );
 }
 
 async fn timeouts() {
@@ -564,7 +620,12 @@ async fn timeouts() {
         )
         .await
         .unwrap();
-    assert!(plain.is_error && plain.joined_text().contains("did not finish within 1 seconds"));
+    assert!(
+        plain.is_error
+            && plain
+                .joined_text()
+                .contains("did not finish within 1 seconds")
+    );
     server.stop(STOP_AFTER_CANCEL).await;
     // Ignored: the server is stopped after the grace.
     let scratch = Scratch::new();
@@ -592,8 +653,15 @@ async fn stop_by_itself() {
     let begun = Instant::now();
     let outcome = server.stop_with(STOP_AFTER_CANCEL).await;
     assert_eq!(outcome, StopOutcome::Exited("exited with code 0".into()));
-    assert!(begun.elapsed() < Duration::from_secs(2), "{:?}", begun.elapsed());
-    assert!(scratch.eof_marker().exists(), "the server saw its input close");
+    assert!(
+        begun.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        begun.elapsed()
+    );
+    assert!(
+        scratch.eof_marker().exists(),
+        "the server saw its input close"
+    );
     assert!(!server.is_running());
     assert!(
         server
@@ -614,7 +682,10 @@ async fn stop_kills() {
     let outcome = server.stop_with(grace).await;
     let took = begun.elapsed();
     assert_eq!(outcome, StopOutcome::Killed);
-    assert!(took >= grace && took < grace + Duration::from_secs(3), "{took:?}");
+    assert!(
+        took >= grace && took < grace + Duration::from_secs(3),
+        "{took:?}"
+    );
     #[cfg(unix)]
     assert!(eventually(Duration::from_secs(5), || !alive(pid)).await);
     #[cfg(not(unix))]
@@ -628,12 +699,21 @@ async fn start_limit() {
     spec.start_timeout = Duration::from_secs(2);
     let server = ManagedServer::new(spec);
     let begun = Instant::now();
-    let error = server.start().await.expect_err("never answers the handshake");
+    let error = server
+        .start()
+        .await
+        .expect_err("never answers the handshake");
     let took = begun.elapsed();
-    assert!(took >= Duration::from_secs(2) && took < Duration::from_secs(8), "{took:?}");
+    assert!(
+        took >= Duration::from_secs(2) && took < Duration::from_secs(8),
+        "{took:?}"
+    );
     let message = error.to_string();
     assert!(message.contains("within 2 seconds"), "{message}");
-    assert!(message.contains("fake rea: ready (no-handshake)"), "{message}");
+    assert!(
+        message.contains("fake rea: ready (no-handshake)"),
+        "{message}"
+    );
     assert!(!server.is_running());
     #[cfg(unix)]
     {
@@ -710,7 +790,9 @@ mod fake {
 
     fn tool(name: &str) -> Value {
         let schema = match name {
-            "echo" => json!({"type": "object", "properties": {"text": {"type": "string"}, "fail": {"type": "boolean"}}}),
+            "echo" => {
+                json!({"type": "object", "properties": {"text": {"type": "string"}, "fail": {"type": "boolean"}}})
+            }
             _ => json!({"type": "object"}),
         };
         json!({"name": name, "description": format!("fake {name}"), "inputSchema": schema})
@@ -783,7 +865,7 @@ mod fake {
             }
         }
         // Standard input closed.
-        if mode == "lingers" {
+        if mode == "lingers" || mode == "stubborn" {
             std::thread::sleep(Duration::from_secs(60));
         }
         if let Ok(path) = std::env::var("FAKE_REA_EOF_MARKER") {

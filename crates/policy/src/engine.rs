@@ -1185,7 +1185,11 @@ mod tests {
         // Allow all: runs, grant or not, untrusted content or not.
         for t in turns(true, false) {
             for grants in [&none, &granted] {
-                assert_eq!(evaluate(&open, &t, grants), Decision::AllowedByMode, "{t:?}");
+                assert_eq!(
+                    evaluate(&open, &t, grants),
+                    Decision::AllowedByMode,
+                    "{t:?}"
+                );
             }
             assert_eq!(evaluate(&session, &t, &none), Decision::AllowedByGrant);
         }

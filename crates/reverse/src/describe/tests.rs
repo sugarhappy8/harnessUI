@@ -157,7 +157,10 @@ fn a_file_inside_asks_first_and_runs_in_the_other_modes() {
             }
         );
         assert!(a.read_only && !a.outbound && !a.network);
-        assert_eq!((a.risk, a.keep_asking, a.hard_limit.clone()), (Risk::Normal, None, None));
+        assert_eq!(
+            (a.risk, a.keep_asking, a.hard_limit.clone()),
+            (Risk::Normal, None, None)
+        );
         assert_eq!(a.summary, "Open hello-linux-x64 in rea (Kuna)");
         assert_eq!(
             a.preview,
@@ -191,7 +194,12 @@ fn a_file_inside_asks_first_and_runs_in_the_other_modes() {
 fn the_grant_and_the_turn() {
     let fs = tree();
     let c = chat(Mode::AskFirst, &[WORK]);
-    let d = run(&fs, &c, "inspect_pe_imports", json!({"path": "/home/me/work/notes.txt"}));
+    let d = run(
+        &fs,
+        &c,
+        "inspect_pe_imports",
+        json!({"path": "/home/me/work/notes.txt"}),
+    );
     let rea: BTreeSet<Scope> = [Scope::FileAnalysis {
         folder: WORK.into(),
     }]
@@ -200,12 +208,14 @@ fn the_grant_and_the_turn() {
         folder: WORK.into(),
     }]
     .into();
-    assert_eq!(
-        decide(&d, Mode::AskFirst, &rea),
-        Decision::AllowedByGrant
-    );
+    assert_eq!(decide(&d, Mode::AskFirst, &rea), Decision::AllowedByGrant);
     assert_eq!(decide(&d, Mode::AskFirst, &read), CARD);
-    assert!(!policy::Grants::covers(&rea, &Scope::FileRead { folder: WORK.into() }));
+    assert!(!policy::Grants::covers(
+        &rea,
+        &Scope::FileRead {
+            folder: WORK.into()
+        }
+    ));
     for (untrusted, recovered) in [(true, false), (false, true), (true, true)] {
         let t = TurnContext {
             untrusted_in_turn: untrusted,
@@ -232,11 +242,21 @@ fn the_grant_and_the_turn() {
 fn outside_the_folders_is_denied_except_in_full_access() {
     let fs = tree();
     for mode in [Mode::AskFirst, Mode::AllowAll] {
-        let d = run(&fs, &chat(mode, &[WORK]), "open_binary", json!({"path": "/home/me/other/x.exe"}));
+        let d = run(
+            &fs,
+            &chat(mode, &[WORK]),
+            "open_binary",
+            json!({"path": "/home/me/other/x.exe"}),
+        );
         assert_eq!(denied_with(&d, mode), m::OUTSIDE, "{mode:?}");
         // Through a link inside the folder too.
         let fs = tree().link("/home/me/work/link.exe", "/home/me/other/x.exe");
-        let d = run(&fs, &chat(mode, &[WORK]), "open_binary", json!({"path": "link.exe"}));
+        let d = run(
+            &fs,
+            &chat(mode, &[WORK]),
+            "open_binary",
+            json!({"path": "link.exe"}),
+        );
         assert_eq!(denied_with(&d, mode), m::OUTSIDE, "{mode:?}");
     }
     let d = run(
@@ -268,7 +288,10 @@ fn outside_the_folders_is_denied_except_in_full_access() {
 /// included, and so is a link that leads into them.
 #[test]
 fn the_app_folders_and_key_stores_are_denied_in_every_mode() {
-    let fs = tree().link("/home/me/work/sneaky", "/data/harnessUI/reverse/rea-6.9.0/scripts/rea.mjs");
+    let fs = tree().link(
+        "/home/me/work/sneaky",
+        "/data/harnessUI/reverse/rea-6.9.0/scripts/rea.mjs",
+    );
     for mode in MODES {
         for path in [
             "/data/harnessUI/reverse/rea-6.9.0/scripts/rea.mjs",
@@ -278,7 +301,11 @@ fn the_app_folders_and_key_stores_are_denied_in_every_mode() {
             let c = chat(mode, &[WORK, APP_DATA]);
             for tool in ["open_binary", "inspect_pe_imports"] {
                 let d = run(&fs, &c, tool, json!({"path": path}));
-                assert_eq!(denied_with(&d, mode), m::APP_FOLDERS, "{mode:?} {tool} {path}");
+                assert_eq!(
+                    denied_with(&d, mode),
+                    m::APP_FOLDERS,
+                    "{mode:?} {tool} {path}"
+                );
             }
         }
     }
@@ -449,13 +476,21 @@ fn folders_are_walked() {
 /// A Mac app bundle is a folder: walked for `open_binary` and `inspect_electron_fuses`.
 #[test]
 fn an_app_bundle_with_an_escaping_link_is_refused() {
-    let fs = tree().link("/home/me/work/Tool.app/Contents/Frameworks/x", "/etc/passwd");
+    let fs = tree().link(
+        "/home/me/work/Tool.app/Contents/Frameworks/x",
+        "/etc/passwd",
+    );
     for tool in ["open_binary", "inspect_electron_fuses"] {
         for mode in [Mode::AskFirst, Mode::AllowAll] {
             let d = run(&fs, &chat(mode, &[WORK]), tool, json!({"path": "Tool.app"}));
             assert!(denied_with(&d, mode).starts_with(m::LINK_OUT), "{tool}");
         }
-        let d = run(&tree(), &chat(Mode::AskFirst, &[WORK]), tool, json!({"path": "Tool.app"}));
+        let d = run(
+            &tree(),
+            &chat(Mode::AskFirst, &[WORK]),
+            tool,
+            json!({"path": "Tool.app"}),
+        );
         assert_eq!(decide(&d, Mode::AskFirst, &none()), CARD, "{tool}");
     }
 }
@@ -500,7 +535,12 @@ fn a_link_to_a_share_inside_a_folder_causes_no_io() {
 fn a_device_is_refused_in_every_mode() {
     let fs = tree();
     for mode in MODES {
-        let d = run(&fs, &chat(mode, &[WORK, "/dev"]), "inspect_pe_imports", json!({"path": "/dev/zero"}));
+        let d = run(
+            &fs,
+            &chat(mode, &[WORK, "/dev"]),
+            "inspect_pe_imports",
+            json!({"path": "/dev/zero"}),
+        );
         assert_eq!(
             denied_with(&d, mode),
             "That is a device or pipe, which rea doesn't read: /dev/zero."
@@ -515,13 +555,25 @@ fn a_path_names_what_the_tool_takes() {
     let cases = [
         ("inspect_pe_imports", json!({"path": "app"}), m::WANTS_FILE),
         ("open_binary", json!({"path": "app"}), m::WANTS_PROGRAM),
-        ("inspect_electron_fuses", json!({"path": "app"}), m::WANTS_PROGRAM),
-        ("inspect_desktop_application", json!({"path": "notes.txt"}), m::WANTS_FOLDER),
+        (
+            "inspect_electron_fuses",
+            json!({"path": "app"}),
+            m::WANTS_PROGRAM,
+        ),
+        (
+            "inspect_desktop_application",
+            json!({"path": "notes.txt"}),
+            m::WANTS_FOLDER,
+        ),
         ("open_binary", json!({"path": "missing.exe"}), m::NOT_FOUND),
     ];
     for (tool, a, start) in cases {
         let d = run(&fs, &c, tool, a.clone());
-        assert!(invalid(&d).starts_with(start), "{tool} {a}: {}", invalid(&d));
+        assert!(
+            invalid(&d).starts_with(start),
+            "{tool} {a}: {}",
+            invalid(&d)
+        );
     }
     for input in ["app", "app/main.js"] {
         let d = run(
@@ -531,10 +583,21 @@ fn a_path_names_what_the_tool_takes() {
             json!({"input_path": input, "source_paths": ["main.js", "lib/a.js"]}),
         );
         let p = Payload::of(action(&d), "analyze_javascript_application").unwrap();
-        assert!(p.args["input_path"].as_str().unwrap().starts_with("/home/me/work/app"));
+        assert!(
+            p.args["input_path"]
+                .as_str()
+                .unwrap()
+                .starts_with("/home/me/work/app")
+        );
         assert_eq!(p.args["source_paths"], json!(["main.js", "lib/a.js"]));
     }
-    for bad in ["../x.js", "/etc/passwd", "C:\\x.js", "a/../../b.js", "~/x.js"] {
+    for bad in [
+        "../x.js",
+        "/etc/passwd",
+        "C:\\x.js",
+        "a/../../b.js",
+        "~/x.js",
+    ] {
         let d = run(
             &fs,
             &c,
@@ -555,12 +618,20 @@ fn without_a_path() {
         ("inspect_managed_artifact", json!({})),
         ("inspect_managed_members", json!({"path": "  "})),
         ("open_binary", json!({})),
-        ("analyze_javascript_application", json!({"source_paths": ["a.js"]})),
+        (
+            "analyze_javascript_application",
+            json!({"source_paths": ["a.js"]}),
+        ),
     ] {
         assert_eq!(invalid(&run(&fs, &c, tool, a)), m::NO_PATH, "{tool}");
     }
     // Arguments outside the schema are refused even when the host is skipped.
-    let d = run(&fs, &c, "open_binary", json!({"path": "hello-linux-x64", "provider_id": "hopper"}));
+    let d = run(
+        &fs,
+        &c,
+        "open_binary",
+        json!({"path": "hello-linux-x64", "provider_id": "hopper"}),
+    );
     assert!(invalid(&d).contains("provider_id"), "{}", invalid(&d));
 }
 
@@ -574,18 +645,32 @@ fn every_other_rea_tool_is_no_such_tool() {
     let fs = tree();
     let c = chat(Mode::FullAccess, &[WORK]);
     let mut refused = 0;
-    for name in fixture["tool_names"].as_array().unwrap().iter().filter_map(Value::as_str) {
+    for name in fixture["tool_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+    {
         if allow::MODEL_TOOLS.contains(&name) {
             continue;
         }
         fs.clear();
-        let d = run(&fs, &c, name, json!({"path": "/home/me/work/hello-linux-x64"}));
+        let d = run(
+            &fs,
+            &c,
+            name,
+            json!({"path": "/home/me/work/hello-linux-x64"}),
+        );
         assert!(invalid(&d).starts_with("there is no tool named"), "{name}");
         assert!(fs.accessed().is_empty(), "{name}");
         refused += 1;
     }
     assert_eq!(refused, 255 - 37);
-    for name in ["reset_investigation", "start_gdb_session", "instrument_with_frida"] {
+    for name in [
+        "reset_investigation",
+        "start_gdb_session",
+        "instrument_with_frida",
+    ] {
         assert!(invalid(&run(&fs, &c, name, json!({}))).starts_with("there is no tool named"));
     }
 }
@@ -597,8 +682,16 @@ fn availability_comes_first_with_each_message_on_each_platform() {
     let fs = tree();
     let c = chat(Mode::AskFirst, &[WORK]);
     let calls: [(&str, Value, ToolClass); 4] = [
-        ("open_binary", json!({"path": "hello-linux-x64"}), ToolClass::Open),
-        ("inspect_pe_imports", json!({"path": "notes.txt"}), ToolClass::FileCheck),
+        (
+            "open_binary",
+            json!({"path": "hello-linux-x64"}),
+            ToolClass::Open,
+        ),
+        (
+            "inspect_pe_imports",
+            json!({"path": "notes.txt"}),
+            ToolClass::FileCheck,
+        ),
         ("binary_overview", json!({}), ToolClass::Session),
         (
             "inspect_analysis_view",
@@ -749,12 +842,22 @@ fn session_call(fs: &FakeFs, c: &ChatContext, tool: &str, a: Value, s: &SessionV
 fn session_tools_work_on_this_chats_file_without_a_card() {
     let fs = tree();
     let s = session_with(
-        Some(binding(1, "/home/me/work/hello-linux-x64", Decompiler::Kuna)),
+        Some(binding(
+            1,
+            "/home/me/work/hello-linux-x64",
+            Decompiler::Kuna,
+        )),
         &[],
     );
     for mode in MODES {
         let c = chat(mode, &[WORK]);
-        let d = session_call(&fs, &c, "procedure_pseudo_code", json!({"procedure": "main"}), &s);
+        let d = session_call(
+            &fs,
+            &c,
+            "procedure_pseudo_code",
+            json!({"procedure": "main"}),
+            &s,
+        );
         let a = action(&d);
         assert_eq!(a.scope, Scope::FileAnalysisSession);
         assert!(a.read_only && !a.outbound && !a.network && a.hard_limit.is_none());
@@ -788,7 +891,12 @@ fn session_tools_work_on_this_chats_file_without_a_card() {
         "summary"
     );
     let d = session_call(&fs, &c, "close_binary", json!({}), &s);
-    assert!(Payload::of(action(&d), "close_binary").unwrap().args.is_empty());
+    assert!(
+        Payload::of(action(&d), "close_binary")
+            .unwrap()
+            .args
+            .is_empty()
+    );
 }
 
 #[test]
@@ -801,10 +909,17 @@ fn session_tools_refuse_anything_but_this_chats_reachable_file() {
     // Nothing open.
     assert_eq!(call(&SessionView::default()), m::NO_FILE_OPEN);
     // Another chat's file.
-    let other = Some(binding(2, "/home/me/work/hello-linux-x64", Decompiler::Kuna));
+    let other = Some(binding(
+        2,
+        "/home/me/work/hello-linux-x64",
+        Decompiler::Kuna,
+    ));
     assert_eq!(call(&session_with(other.clone(), &[])), m::NO_FILE_OPEN);
     assert_eq!(
-        call(&session_with(other.clone(), &[(1, ClosedReason::OtherChat)])),
+        call(&session_with(
+            other.clone(),
+            &[(1, ClosedReason::OtherChat)]
+        )),
         m::CLOSED_OTHER_CHAT
     );
     assert_eq!(
@@ -813,13 +928,21 @@ fn session_tools_refuse_anything_but_this_chats_reachable_file() {
     );
     // This chat's file opened with the other decompiler.
     let ghidra = session_with(
-        Some(binding(1, "/home/me/work/hello-linux-x64", Decompiler::Ghidra)),
+        Some(binding(
+            1,
+            "/home/me/work/hello-linux-x64",
+            Decompiler::Ghidra,
+        )),
         &[],
     );
     assert_eq!(call(&ghidra), m::CLOSED_SETTINGS);
     // This chat's file, whose folder lost its approval: refused, and nothing changes.
     let s = session_with(
-        Some(binding(1, "/home/me/work/hello-linux-x64", Decompiler::Kuna)),
+        Some(binding(
+            1,
+            "/home/me/work/hello-linux-x64",
+            Decompiler::Kuna,
+        )),
         &[],
     );
     let before = s.clone();
@@ -832,11 +955,18 @@ fn session_tools_refuse_anything_but_this_chats_reachable_file() {
         "describe only looks"
     );
     // A file that is gone, or now inside a forbidden folder.
-    let gone = session_with(Some(binding(1, "/home/me/work/gone", Decompiler::Kuna)), &[]);
+    let gone = session_with(
+        Some(binding(1, "/home/me/work/gone", Decompiler::Kuna)),
+        &[],
+    );
     assert_eq!(call(&gone), m::NO_LONGER_REACHABLE);
     let c2 = chat(Mode::FullAccess, &[WORK]);
     let inside_app = session_with(
-        Some(binding(1, "/data/harnessUI/reverse/rea-6.9.0/scripts/rea.mjs", Decompiler::Kuna)),
+        Some(binding(
+            1,
+            "/data/harnessUI/reverse/rea-6.9.0/scripts/rea.mjs",
+            Decompiler::Kuna,
+        )),
         &[],
     );
     let d = session_call(&fs, &c2, "list_procedures", json!({}), &inside_app);
@@ -886,12 +1016,18 @@ fn the_view_reads_only_this_chats_results() {
             &s,
         )
     };
-    let d = view(&mine, json!({"kind": "native", "facet": "pseudocode", "offset": 0, "limit": 128}));
+    let d = view(
+        &mine,
+        json!({"kind": "native", "facet": "pseudocode", "offset": 0, "limit": 128}),
+    );
     let a = action(&d);
     assert_eq!(a.scope, Scope::FileAnalysisSession);
     let p = Payload::of(a, "inspect_analysis_view").unwrap();
     let e = p.evidence.unwrap();
-    assert_eq!((e.id.as_str(), e.chat_id, e.store_epoch), (mine.as_str(), 1, 5));
+    assert_eq!(
+        (e.id.as_str(), e.chat_id, e.store_epoch),
+        (mine.as_str(), 1, 5)
+    );
     for mode in [Mode::AskFirst, Mode::AllowAll] {
         assert_eq!(decide(&d, mode, &none()), Decision::AllowedByGrant);
     }
@@ -902,7 +1038,10 @@ fn the_view_reads_only_this_chats_results() {
     let summary = json!({"kind": "summary"});
     assert_eq!(invalid(&view(&theirs, summary.clone())), m::UNKNOWN_ID);
     assert_eq!(invalid(&view(&old, summary.clone())), m::UNKNOWN_ID);
-    assert_eq!(invalid(&view(&evidence_id(9), summary.clone())), m::UNKNOWN_ID);
+    assert_eq!(
+        invalid(&view(&evidence_id(9), summary.clone())),
+        m::UNKNOWN_ID
+    );
     assert_eq!(invalid(&view(&lost, summary)), m::EVIDENCE_GONE);
     for v in [
         json!({"kind": "inventory", "logical_paths": ["/etc/passwd"]}),
@@ -931,19 +1070,58 @@ fn the_view_reads_only_this_chats_results() {
 #[test]
 fn every_card_line_is_pinned_and_a_hostile_name_is_escaped() {
     let lines = [
-        ("inspect_pe_imports", "rea will read <path> and list the functions it uses from other libraries."),
-        ("inspect_pe_resources", "rea will read <path> and list the resources inside it (icons, version text, manifests)."),
-        ("inspect_pe_certificates", "rea will read <path> and show who signed it."),
-        ("inspect_native_exports", "rea will read <path> and list the functions it offers to other programs."),
-        ("inspect_binary_hardening", "rea will read <path> and show which built-in protections it was built with."),
-        ("inspect_go_binary", "rea will read <path> and show the Go version and modules it was built from."),
-        ("inspect_rust_binary", "rea will read <path> and show the Rust packages it was built from."),
-        ("inspect_managed_artifact", "rea will read <path> and show what this .NET program or library is made of."),
-        ("inspect_managed_members", "rea will read <path> and list its .NET classes and methods."),
-        ("inspect_python_pyc", "rea will read <path> and show what this compiled Python file contains."),
-        ("inspect_electron_fuses", "rea will read <path> and show this Electron app's security switches."),
-        ("analyze_javascript_application", "rea will read <path> and map the app's JavaScript code."),
-        ("open_binary", "rea will read <path> and work out its code with <decompiler>."),
+        (
+            "inspect_pe_imports",
+            "rea will read <path> and list the functions it uses from other libraries.",
+        ),
+        (
+            "inspect_pe_resources",
+            "rea will read <path> and list the resources inside it (icons, version text, manifests).",
+        ),
+        (
+            "inspect_pe_certificates",
+            "rea will read <path> and show who signed it.",
+        ),
+        (
+            "inspect_native_exports",
+            "rea will read <path> and list the functions it offers to other programs.",
+        ),
+        (
+            "inspect_binary_hardening",
+            "rea will read <path> and show which built-in protections it was built with.",
+        ),
+        (
+            "inspect_go_binary",
+            "rea will read <path> and show the Go version and modules it was built from.",
+        ),
+        (
+            "inspect_rust_binary",
+            "rea will read <path> and show the Rust packages it was built from.",
+        ),
+        (
+            "inspect_managed_artifact",
+            "rea will read <path> and show what this .NET program or library is made of.",
+        ),
+        (
+            "inspect_managed_members",
+            "rea will read <path> and list its .NET classes and methods.",
+        ),
+        (
+            "inspect_python_pyc",
+            "rea will read <path> and show what this compiled Python file contains.",
+        ),
+        (
+            "inspect_electron_fuses",
+            "rea will read <path> and show this Electron app's security switches.",
+        ),
+        (
+            "analyze_javascript_application",
+            "rea will read <path> and map the app's JavaScript code.",
+        ),
+        (
+            "open_binary",
+            "rea will read <path> and work out its code with <decompiler>.",
+        ),
     ];
     let hostile = "/home/me/work/evil\u{202E}gpj.exe\u{200B}";
     let fs = tree().file(hostile);
@@ -986,6 +1164,103 @@ fn the_payload_is_read_back_only_from_its_own_action() {
     let mut other = a.clone();
     other.server = "files".into();
     assert!(Payload::of(&other, "inspect_pe_imports").is_none());
-    let refused = run(&fs, &c, "inspect_pe_imports", json!({"path": "/etc/passwd"}));
+    let refused = run(
+        &fs,
+        &c,
+        "inspect_pe_imports",
+        json!({"path": "/etc/passwd"}),
+    );
     assert!(Payload::of(action(&refused), "inspect_pe_imports").is_none());
+}
+
+// ---- The real file system and the fixture programs ---------------------------------------
+
+fn fixtures() -> std::path::PathBuf {
+    dunce::canonicalize(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"))
+        .unwrap()
+}
+
+/// The test programs are small and of their kind: an ELF file with `main`, a PE file that
+/// imports from kernel32.dll, a .NET library.
+#[test]
+fn the_fixture_programs_are_small_and_of_their_kind() {
+    let read = |name: &str| std::fs::read(fixtures().join(name)).unwrap();
+    let has = |bytes: &[u8], what: &[u8]| bytes.windows(what.len()).any(|w| w == what);
+    for name in [
+        "hello-linux-x64",
+        "hello-win-x64.exe",
+        "hello-dotnet.dll",
+        "hello.c",
+    ] {
+        assert!(read(name).len() < 20 * 1024, "{name}");
+    }
+    let elf = read("hello-linux-x64");
+    assert!(elf.starts_with(b"\x7fELF") && has(&elf, b"main\0"));
+    let exe = read("hello-win-x64.exe");
+    assert!(exe.starts_with(b"MZ") && has(&exe, b"PE\0\0"));
+    assert!(has(&exe, b"kernel32.dll") && has(&exe, b"GetStdHandle"));
+    let dll = read("hello-dotnet.dll");
+    // "BSJB" starts .NET metadata.
+    assert!(dll.starts_with(b"MZ") && has(&dll, b"BSJB") && has(&dll, b"Greeter"));
+}
+
+/// The describer on the real file system, with the real sandbox: the fixture folder as the
+/// chat's folder; its programs open, the folder itself is checked by the folder walk.
+#[test]
+fn the_real_file_system_through_the_describer() {
+    let dir = fixtures();
+    let folder = dir.display().to_string();
+    let c = ChatContext {
+        chat_id: 1,
+        approved_folders: vec![folder.clone()],
+        working_folder: Some(folder.clone()),
+        ..ChatContext::default()
+    };
+    let session = SessionView::default();
+    let availability = ready();
+    let env = DescribeEnv {
+        fs: &crate::walk::RealWalkFs,
+        session: &session,
+        availability: &availability,
+    };
+    let d = describe(
+        "open_binary",
+        &args(json!({"path": "hello-linux-x64"})),
+        &c,
+        &env,
+    );
+    let a = action(&d);
+    assert_eq!(
+        a.scope,
+        Scope::FileAnalysis {
+            folder: folder.clone()
+        }
+    );
+    let p = Payload::of(a, "open_binary").unwrap();
+    let target = p.target.unwrap();
+    assert_eq!(
+        target.identity,
+        Some(FileIdentity::of(&dir.join("hello-linux-x64")).unwrap())
+    );
+    assert_eq!(
+        p.args["path"],
+        dir.join("hello-linux-x64").display().to_string()
+    );
+    // The folder: walked, no identity.
+    let d = describe(
+        "analyze_javascript_application",
+        &args(json!({"input_path": folder})),
+        &c,
+        &env,
+    );
+    let p = Payload::of(action(&d), "analyze_javascript_application").unwrap();
+    assert!(p.target.unwrap().folder);
+    // Outside the folder.
+    let d = describe(
+        "inspect_pe_imports",
+        &args(json!({"path": dir.parent().unwrap().join("Cargo.toml").display().to_string()})),
+        &c,
+        &env,
+    );
+    assert_eq!(action(&d).hard_limit.as_deref(), Some(m::OUTSIDE));
 }

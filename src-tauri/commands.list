@@ -178,3 +178,11 @@ new_share_key
 share_setup
 coding_apps_status
 find_coding_apps
+reverse_status
+reverse_download
+reverse_cancel
+reverse_discard_partial
+reverse_remove
+reverse_set_decompiler
+reverse_clear_cache
+reverse_install_apple_tools

@@ -4498,6 +4498,19 @@ def p_share_proxy(c, notes):
         assert status == 503 and json.loads(body)["error"]["message"] == no_model, body
         st = s.invoke("share_status")
         assert st["refused"] == 3 and st["modelCtx"] is None and not st["inUse"], st
+        # Round 1: connections that never send the key cannot fill every slot. With more idle
+        # connections open than the proxy serves at once (64), an app with the key gets in.
+        idle = []
+        try:
+            for _ in range(80):
+                idle.append(socket.create_connection(("127.0.0.1", port), timeout=2))
+            time.sleep(0.3)
+            started = time.monotonic()
+            status, body = share_call(port, "GET", "/v1/models", key=key)
+            assert status == 200 and time.monotonic() - started < 3, (status, body)
+        finally:
+            for sock in idle:
+                sock.close()
 
         if not os.path.isfile(model):
             notes.append(f"the model part was skipped: no test model at {model}")

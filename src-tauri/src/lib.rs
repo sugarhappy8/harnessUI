@@ -35,6 +35,7 @@ mod packs_cmd;
 mod permissions;
 mod pinned;
 mod providers;
+mod reverse_cmd;
 mod runtime_manager;
 mod search_cmd;
 mod settings;
@@ -279,6 +280,15 @@ pub fn run() {
             share::share_setup,
             outside_agent::coding_apps_status,
             outside_agent::find_coding_apps,
+            // 0.0.6 item 5: Settings → Reverse engineering (rea, Kuna, Ghidra).
+            reverse_cmd::reverse_status,
+            reverse_cmd::reverse_download,
+            reverse_cmd::reverse_cancel,
+            reverse_cmd::reverse_discard_partial,
+            reverse_cmd::reverse_remove,
+            reverse_cmd::reverse_set_decompiler,
+            reverse_cmd::reverse_clear_cache,
+            reverse_cmd::reverse_install_apple_tools,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -342,6 +352,8 @@ pub fn run() {
                 model_busy: Default::default(),
             });
             app.manage(turns::PendingApprovals::default());
+            // 0.0.6 item 5: the decompiler chosen in Settings → Reverse engineering.
+            reverse_cmd::load_saved_choice(&handle);
             // 0.0.5: sharing the loaded model with other apps; listens again only if the
             // user left it on.
             app.manage(share::Sharing::default());

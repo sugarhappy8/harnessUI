@@ -204,6 +204,14 @@
     "allow-new-share-key",
     "allow-share-setup",
     "allow-coding-apps-status",
-    "allow-find-coding-apps"
+    "allow-find-coding-apps",
+    "allow-reverse-status",
+    "allow-reverse-download",
+    "allow-reverse-cancel",
+    "allow-reverse-discard-partial",
+    "allow-reverse-remove",
+    "allow-reverse-set-decompiler",
+    "allow-reverse-clear-cache",
+    "allow-reverse-install-apple-tools"
   ]
 }

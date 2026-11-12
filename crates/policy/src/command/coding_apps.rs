@@ -34,17 +34,42 @@
 //! and with its escapes taken away too (the POSIX shell runs `cod\ex` as `codex`), each
 //! with two lines joined by a backslash read as one and with braces expanded. Reading a
 //! line many ways has a limit of work; a line beyond it counts as starting an assistant.
-//! A locator's command longer than [`MAX_LOCATOR_SPAN`] is not read.
+//! A locator's command is read to its end, however long it is.
 //!
-//! Known limits: this reads names. A copy of one of these programs under another name, or
-//! a link to it (`ln -s "$(which claude)" helper; ./helper -p …`), is not seen, nor is code
-//! in a script file or code that builds the name from pieces (`"cl" + "aude"`,
-//! `$'\x63laude'`, `c=cl; ${c}aude`), a name kept in a file or passed in from outside
-//! the line, a program named by a setting
-//! (`git -c core.pager=claude`), a project's own script or task (`make claude`,
-//! `npm run claude`), a program that runs on another computer (`ssh host claude`), or a
-//! program not listed here that runs the next word it is given without a word such as
-//! `run`, `exec` or `--` before it.
+//! A pattern in the place of the program counts when it can expand to an assistant's name
+//! and fixes enough of it for its place ([`Place`]): any pattern as a command's first word
+//! (`cl?ude -p x`); after a wrapper or a run word, one that fixes at least one letter of
+//! the name (`timeout 9 ~/.local/bin/c*`), so a folder's files (`timeout 60 ./build/*`,
+//! `uv run ./scripts/*`) stay arguments; where the word before may be an option's value, or
+//! after a bare `--`, one that fixes the name's first letter (`kubectl exec pod -- c*`), so
+//! file patterns there (`pnpm test -- src/*`, `go run . -- *`) stay arguments. Anywhere
+//! among the words a wrapper or a run word runs, a pattern that fixes two letters of a name
+//! counts (`*laude`).
+//!
+//! Known limits. This is a classifier of text: it reads names on the line. Allow all is a
+//! guard against a line that starts an assistant without a card, not a sandbox, and these
+//! stay unseen by design:
+//!
+//! - a copy of one of these programs under another name, or a link to it
+//!   (`ln -s "$(which claude)" helper; ./helper -p …`);
+//! - a name built from pieces (`"cl" + "aude"`, `$'\x63laude'`, `c=cl; ${c}aude`), kept in
+//!   a file or a script file, or passed in from outside the line;
+//! - a program named by a setting (`git -c core.pager=claude`);
+//! - a project's own script or task (`make claude`, `npm run claude`);
+//! - a program that runs on another computer (`ssh host claude`);
+//! - a program not listed here that runs the next word it is given without a word such as
+//!   `run`, `exec` or `--` before it;
+//! - after a wrapper or a run word, a pattern that fixes no letter of the name
+//!   (`uv run ~/.local/bin/??????`, `timeout 9 ~/.local/bin/*`), and, where the word before
+//!   may be an option's value or after a bare `--`, one that fixes a single letter but not
+//!   the first (`uv run --frozen ~/.local/bin/?????e`): such a pattern runs whichever file
+//!   comes first, and file patterns look the same;
+//! - a pattern with fewer than two fixed letters after a wrapper's option that takes two
+//!   values (`bwrap --bind /a /b ~/.local/bin/c*`: `/b` is taken for the program), or after
+//!   a runner's own subcommand (`tmux new-window ~/.local/bin/c*`,
+//!   `perf record ~/.local/bin/c*`, `pueue add ~/.local/bin/c*`), or after a run word
+//!   inside the program a run word runs (`uv run uv run ~/.local/bin/c*`); the full name
+//!   in those places is seen.
 
 use std::cell::Cell;
 
@@ -349,7 +374,7 @@ pub fn find(line: &str, parsed: &Parsed) -> Option<String> {
         Parsed::Plain(commands) => {
             if let Some(why) = commands
                 .iter()
-                .find_map(|c| command(&c.program, &c.args, 0))
+                .find_map(|c| command(&c.program, &c.args, Place::Own, 0))
             {
                 return Some(why);
             }
@@ -442,26 +467,80 @@ fn clean(word: &str) -> String {
 
 /// Whether a word among a program's arguments names a coding assistant: by name, or as a
 /// pattern the shell expands to one (`cl?ude`, `~/.local/bin/clau*`) that spells at
-/// least two letters of it.
+/// least two letters of it, an extension such as `.exe` not counted (`*.exe` stays a file
+/// pattern).
 fn is_assistant(word: &str) -> bool {
-    names_assistant(word, 2)
+    names_assistant(word, Fixes::Chars(2))
 }
 
-/// Whether a word in the program's place names a coding assistant: by name, or as any
-/// pattern the shell can expand to one.
-fn is_assistant_program(word: &str) -> bool {
-    names_assistant(word, 0)
+/// Whether a word that may be the program names a coding assistant: by name, or as a
+/// pattern that fixes as much of the name as its place asks for ([`Place`]).
+fn names_assistant_in(word: &str, place: Place) -> bool {
+    let fixes = match place {
+        Place::Own => Fixes::Nothing,
+        Place::Sure => Fixes::Chars(1),
+        Place::Unsure => Fixes::TheFirstLetter,
+    };
+    names_assistant(word, fixes)
 }
 
-/// Whether `word` names an assistant, as written or as a pattern with at least `letters`
-/// fixed characters in its last part.
-fn names_assistant(word: &str, letters: usize) -> bool {
+/// Where a word that may be the program stands, which decides how much of an assistant's
+/// name a pattern there must fix to count.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Place {
+    /// The first word of a command: any pattern the shell can expand to an assistant's name
+    /// (`cl?ude -p x`, `~/.local/bin/c* -p x`).
+    Own,
+    /// After a wrapper's or a run word's own options, settings and numbers
+    /// (`timeout 9 ~/.local/bin/c*`, `uv run c*`): a pattern that fixes at least one letter
+    /// of the name, an extension such as `.exe` not counted, so a folder's files
+    /// (`timeout 60 ./build/*`, `uv run ./scripts/*`, `./build/*.exe`) stay arguments.
+    Sure,
+    /// Where the word before may have been an option's value (`docker run -it img c*`), or
+    /// after a bare `--`, before which file patterns are common (`pnpm test -- src/*`,
+    /// `go run . -- *`): a pattern that fixes the first letter of the name
+    /// (`kubectl exec pod -- c*`).
+    Unsure,
+}
+
+/// How much of an assistant's name a pattern must fix.
+#[derive(Clone, Copy)]
+enum Fixes {
+    /// Nothing: any pattern the shell can expand to the name.
+    Nothing,
+    /// At least this many characters of its last part, an extension such as `.exe` not
+    /// counted.
+    Chars(usize),
+    /// The first character of its last part.
+    TheFirstLetter,
+}
+
+/// The extensions of a program on Windows.
+const EXTENSIONS: &[&str] = &[".exe", ".cmd", ".bat", ".com", ".ps1"];
+
+/// Whether `word` is a program inside the folder where Claude Code's own installer keeps
+/// its builds (`…/claude/versions/<version>`, the target of the `claude` link it puts on
+/// `PATH`). Whatever the last part is (a version number or a pattern), it runs Claude Code.
+fn in_versions_folder(word: &str) -> bool {
+    let lower = word.to_lowercase().replace('\\', "/");
+    let mut parts: Vec<&str> = lower.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    parts.pop();
+    let n = parts.len();
+    parts[n - 1] == "versions" && matches!(parts[n - 2], "claude" | ".claude")
+}
+
+/// Whether `word` names an assistant, as written or as a pattern that fixes as much of its
+/// last part as `fixes` asks for.
+fn names_assistant(word: &str, fixes: Fixes) -> bool {
     let word = clean(word);
     if word.is_empty() {
         return false;
     }
     let name = program_name(&word);
-    if ASSISTANTS.contains(&name.as_str()) {
+    if ASSISTANTS.contains(&name.as_str()) || in_versions_folder(&word) {
         return true;
     }
     let last = word
@@ -469,13 +548,27 @@ fn names_assistant(word: &str, letters: usize) -> bool {
         .next()
         .unwrap_or(&word)
         .to_lowercase();
-    if !last.contains(['*', '?', '[']) || fixed_chars(&last) < letters {
+    if !last.contains(['*', '?', '[']) {
+        return false;
+    }
+    let enough = match fixes {
+        Fixes::Nothing => true,
+        Fixes::Chars(count) => {
+            let name = EXTENSIONS
+                .iter()
+                .find_map(|ext| last.strip_suffix(ext))
+                .unwrap_or(&last);
+            fixed_chars(name) >= count
+        }
+        Fixes::TheFirstLetter => !last.starts_with(['*', '?']),
+    };
+    if !enough {
         return false;
     }
     let pattern: Vec<char> = last.chars().collect();
     ASSISTANTS.iter().any(|a| {
-        ["", ".exe", ".cmd", ".bat", ".com", ".ps1"]
-            .iter()
+        std::iter::once("")
+            .chain(EXTENSIONS.iter().copied())
             .any(|ext| {
                 let candidate: Vec<char> = format!("{a}{ext}").chars().collect();
                 glob_matches(&pattern, &candidate)
@@ -690,15 +783,17 @@ fn is_wrapper(name: &str) -> bool {
 /// How many programs inside programs are followed (`sudo env timeout 9 npx claude`).
 const MAX_DEPTH: usize = 8;
 
-/// Why one simple command starts a coding assistant, if it does.
-fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
+/// Why one simple command starts a coding assistant, if it does. `place` is where its
+/// program word stands: a command's own first word, or a word in the place of the program
+/// a wrapper or a run word runs.
+fn command(program: &str, args: &[String], place: Place, depth: usize) -> Option<String> {
     if depth > MAX_DEPTH {
         return None;
     }
     let name = program_name(&clean(program));
     let name = name.as_str();
     // (a) The program itself, also written as a pattern the shell expands (`cl?ude`).
-    if is_assistant_program(program) {
+    if names_assistant_in(program, place) {
         let program = program.trim();
         return Some(format!(
             "{program} is a coding assistant: it works online with your account and can change files"
@@ -728,7 +823,7 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
     if let Some((_, flags)) = PROGRAM_FLAGS.iter().find(|(n, _)| *n == name) {
         for at in (0..args.len()).filter(|&i| flags.contains(&args[i].as_str())) {
             if let Some(next) = args.get(at + 1)
-                && let Some(why) = command(next, &args[at + 2..], depth + 1)
+                && let Some(why) = command(next, &args[at + 2..], Place::Own, depth + 1)
             {
                 return Some(why);
             }
@@ -766,7 +861,7 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
             .or_else(|| {
                 args.iter()
                     .map(String::as_str)
-                    .find(|a| place.next(a).is_some_and(|fixed| names_assistant(a, fixed)))
+                    .find(|a| place.next(a).is_some_and(|at| names_assistant_in(a, at)))
             });
         if let Some(found) = found {
             return Some(format!(
@@ -785,21 +880,23 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
     if SHELLS.contains(&name)
         && let Some(at) = (1..args.len())
             .find(|&i| args[i - 1].starts_with(['-', '/']) && !args[i].starts_with(['-', '/']))
-        && let Some(why) = command(&args[at], &args[at + 1..], depth + 1)
+        && let Some(why) = command(&args[at], &args[at + 1..], Place::Own, depth + 1)
     {
         return Some(why);
     }
     // The program a wrapper runs, in the place after its own options, settings and numbers
     // (`env nix run nixpkgs#claude-code`, `sudo kubectl exec pod -- codex`,
-    // `timeout 9 pixi run …`).
+    // `timeout 9 pixi run …`), judged as a word in that place.
     let program_at = wraps
         .then(|| {
             let mut place = ProgramPlace::new();
-            args.iter().position(|a| place.next(a).is_some())
+            args.iter()
+                .enumerate()
+                .find_map(|(at, a)| place.next(a).map(|place| (at, place)))
         })
         .flatten();
-    if let Some(at) = program_at
-        && let Some(why) = command(&args[at], &args[at + 1..], depth + 1)
+    if let Some((at, place)) = program_at
+        && let Some(why) = command(&args[at], &args[at + 1..], place, depth + 1)
     {
         return Some(why);
     }
@@ -814,31 +911,34 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
             || SHELLS.contains(&n.as_str())
             || is_wrapper(&n)
     })?;
-    if Some(at) == program_at {
+    if program_at.is_some_and(|(program_at, _)| program_at == at) {
         return None;
     }
-    command(&args[at], &args[at + 1..], depth + 1)
+    command(&args[at], &args[at + 1..], Place::Own, depth + 1)
 }
 
 /// Why a program that runs what follows one of its words (`uv run claude`, `bundle exec
 /// codex`, `kubectl exec pod -- claude`, `docker run img claude`, `nix develop -c claude`)
 /// starts a coding assistant, if it does. The word is one of [`RUN_WORDS`] among its first
-/// three plain words (the value of a long option before it not counted:
-/// `uv --directory . run`), or one of [`LONG_RUN_FLAGS`] anywhere; from there on, every
-/// plain word that names an assistant (or its package, or holds a command line that starts
-/// one) counts, except the value of an option known to take one ([`LONG_VALUE_FLAGS`]:
-/// `--model claude`); any other option may take no value (`uv run --frozen claude`). A
-/// pattern in the program's place counts as in the place of a wrapper's program
-/// ([`ProgramPlace`]: `uv run c*`). After one of [`SHORT_RUN_FLAGS`] only the next word
-/// counts. Programs that only read are left out.
+/// three plain words, or one of [`LONG_RUN_FLAGS`] anywhere. Before the run word, the word
+/// after an option may be the option's value and is not counted among the three
+/// (`uv --directory . run`, `docker compose -f a.yml -f b.yml run`); it may be the run word
+/// itself. From the run word on, every plain word that names an assistant (or its package,
+/// or holds a command line that starts one) counts, except the value of an option known to
+/// take one ([`LONG_VALUE_FLAGS`]: `--model claude`); any other option may take no value
+/// (`uv run --frozen claude`). A pattern in the program's place counts as in the place of a
+/// wrapper's program ([`ProgramPlace`]: `uv run c*`; after a bare `--` the place is unsure,
+/// [`Place::Unsure`]), and a wrapper or a shell there is read as a command of its own
+/// (`uv run env ~/.local/bin/c*`, `poetry run nice -n 5 c*`). After one of
+/// [`SHORT_RUN_FLAGS`] only the next word counts. Programs that only read are left out.
 fn after_a_run_word(program: &str, name: &str, args: &[String], depth: usize) -> Option<String> {
     if OWN_RUN_WORDS.contains(&name) || READ_ONLY.contains(&name) {
         return None;
     }
-    // `fixed`: where the word may be the program, how many letters a pattern in it must fix.
-    let runs = |word: &str, fixed: Option<usize>| -> Option<String> {
+    // `place`: where the word may be the program, how sure that place is.
+    let runs = |word: &str, place: Option<Place>| -> Option<String> {
         if is_assistant(word)
-            || fixed.is_some_and(|fixed| names_assistant(word, fixed))
+            || place.is_some_and(|place| names_assistant_in(word, place))
             || names_assistant_package(word)
         {
             let found = word.trim();
@@ -853,16 +953,21 @@ fn after_a_run_word(program: &str, name: &str, args: &[String], depth: usize) ->
     };
     let mut plain = 0;
     let mut started = false;
-    // Whether the word before was a long option that may take this word as its value.
+    // Whether the word before was an option that may take this word as its value.
     let mut skip_value = false;
     let mut place = ProgramPlace::new();
+    // Whether a wrapper or a shell in the program's place was read as a command of its own:
+    // once, so that the work stays bounded.
+    let mut nested = false;
     for (i, arg) in args.iter().enumerate() {
         let lower = arg.to_lowercase();
         if SHORT_RUN_FLAGS.contains(&lower.as_str()) {
             if let Some(why) = args.get(i + 1).and_then(|next| runs(next, None)) {
                 return Some(why);
             }
-            skip_value = false;
+            // Before the run word, the next word may be this option's value
+            // (`docker -c ctx compose run …`).
+            skip_value = !started;
             place.next(arg);
             continue;
         }
@@ -870,7 +975,7 @@ fn after_a_run_word(program: &str, name: &str, args: &[String], depth: usize) ->
             && LONG_RUN_FLAGS.contains(&flag)
         {
             let value = &arg[flag.len() + 1..];
-            if let Some(why) = runs(value, Some(0)) {
+            if let Some(why) = runs(value, Some(Place::Sure)) {
                 return Some(why);
             }
             started = true;
@@ -883,15 +988,19 @@ fn after_a_run_word(program: &str, name: &str, args: &[String], depth: usize) ->
         if LONG_RUN_FLAGS.contains(&lower.as_str()) {
             started = true;
             skip_value = false;
-            place = ProgramPlace::new();
+            place = if lower == "--" {
+                ProgramPlace::after_dashes()
+            } else {
+                ProgramPlace::new()
+            };
             continue;
         }
         if arg.starts_with('-') {
-            // Before the run word, any long option may take the next word as its value;
-            // after it, only one known to take one does.
-            skip_value = arg.starts_with("--")
-                && !arg.contains('=')
-                && (!started || LONG_VALUE_FLAGS.contains(&lower.as_str()));
+            // Before the run word, any option may take the next word as its value; after it,
+            // only a long one known to take one does.
+            skip_value = !arg.contains('=')
+                && (!started
+                    || (arg.starts_with("--") && LONG_VALUE_FLAGS.contains(&lower.as_str())));
             place.next(arg);
             continue;
         }
@@ -908,9 +1017,20 @@ fn after_a_run_word(program: &str, name: &str, args: &[String], depth: usize) ->
             place.value();
             continue;
         }
-        let fixed = place.next(arg);
-        if let Some(why) = runs(arg, fixed) {
+        let at = place.next(arg);
+        if let Some(why) = runs(arg, at) {
             return Some(why);
+        }
+        if let Some(at) = at
+            && !nested
+        {
+            let inner = program_name(&clean(arg));
+            if is_wrapper(&inner) || SHELLS.contains(&inner.as_str()) {
+                nested = true;
+                if let Some(why) = command(arg, &args[i + 1..], at, depth + 1) {
+                    return Some(why);
+                }
+            }
         }
     }
     None
@@ -919,7 +1039,8 @@ fn after_a_run_word(program: &str, name: &str, args: &[String], depth: usize) ->
 /// Where the program that a wrapper or a run word runs stands among the words after it,
 /// read one word at a time: the first plain word past options, settings (`FOO=1`) and
 /// numbers (`timeout 9`, `nice -n 5`). A word right after an option may be the option's
-/// value, so the word after it may be the program too; such places are less sure.
+/// value, so the word after it may be the program too; such places are less sure
+/// ([`Place::Unsure`]), and so is every place after a bare `--`.
 struct ProgramPlace {
     /// Whether no word so far may have been the program.
     sure: bool,
@@ -938,11 +1059,16 @@ impl ProgramPlace {
         }
     }
 
-    /// For the next word: whether it may be the program and, if so, how many letters a
-    /// pattern in it must fix to name an assistant: none in a sure place (as in the
-    /// program's own place), one where the word before may have been an option's value
-    /// (so `tests/*` there stays an argument).
-    fn next(&mut self, word: &str) -> Option<usize> {
+    /// After a bare `--`, before which file patterns are common (`pnpm test -- src/*`).
+    fn after_dashes() -> Self {
+        Self {
+            sure: false,
+            ..Self::new()
+        }
+    }
+
+    /// For the next word: whether it may be the program and, if so, how sure its place is.
+    fn next(&mut self, word: &str) -> Option<Place> {
         if self.passed {
             return None;
         }
@@ -955,13 +1081,17 @@ impl ProgramPlace {
             return None;
         }
         let maybe_value = std::mem::take(&mut self.after_option);
-        let fixed = usize::from(!self.sure || maybe_value);
+        let place = if self.sure && !maybe_value {
+            Place::Sure
+        } else {
+            Place::Unsure
+        };
         if maybe_value {
             self.sure = false;
         } else {
             self.passed = true;
         }
-        Some(fixed)
+        Some(place)
     }
 
     /// The next word is the value of the option before it.
@@ -1116,16 +1246,19 @@ fn quoted_strings(code: &str) -> Vec<String> {
     out
 }
 
-/// How far after a `(` or a backtick its end is looked for when a locator's command may
-/// be inside: such a command is short (`$(which claude)`, `(Get-Command claude).Source`).
-/// A longer one is not read (known limit); the bound keeps each `(` cheap.
-const MAX_LOCATOR_SPAN: usize = 1024;
+/// How much of the text after a `(` or a backtick is looked at for a locator's first word
+/// (`which`, `Get-Command`), after the white space in front of it: such a word is short,
+/// and the bound keeps each `(` cheap however its first word is quoted.
+const MAX_LOCATOR_WORD: usize = 256;
 
 /// A command substitution that only finds a coding assistant (`$(which claude)`,
 /// `` `command -v codex` ``, `(Get-Command claude)`) replaced by the name it finds, so the
 /// name stands where the program is run: `$(which claude) -p x` reads as `claude -p x`.
-/// Only a substitution whose first word is a locator's and that ends within
-/// [`MAX_LOCATOR_SPAN`] is read, and the text that takes counts against the limit of work:
+/// Only a substitution whose first word is a locator's is read, to its end however far that
+/// is (`$(which claude<many spaces>)`, `$(which -a -a … claude)`). The end each `(` or
+/// backtick looks for is the next `)` or backtick: the substitutions are read in order, so
+/// once found, that place serves every later one before it and the text is searched once
+/// for each. What the searches and the words read take counts against the limit of work:
 /// `None` past it.
 fn resolve_locators(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len());
@@ -1142,10 +1275,20 @@ fn resolve_locators(text: &str) -> Option<String> {
         }
         has_word
     };
+    // The next `)` and the next backtick in `text` from the point last searched, once
+    // searched: `Some(None)` when there is none to the end.
+    let mut next_end: [Option<Option<usize>>; 2] = [None, None];
+    // The end of the last locator's command read without finding a name. A later one with
+    // the same end starts inside it (`$(which x $(which x …)`), so its words are among the
+    // words already read (in the readings without quotes exactly; [`in_text`] reads those
+    // too): it is not read again, and each piece of text is read once.
+    let mut read_to: [Option<usize>; 2] = [None, None];
     while let Some(open) = rest.find(['(', '`']) {
         let paren = rest[open..].starts_with('(');
         let close = if paren { ')' } else { '`' };
         let after_open = &rest[open + 1..];
+        // Where the substitution's text starts in `text`.
+        let from = text.len() - after_open.len();
         let head = &rest[..open];
         let word_before = after(has_word, head.strip_suffix('$').unwrap_or(head));
         // PowerShell's `( … )` gives a value: `&` or `.` in front of it runs it, and as an
@@ -1154,13 +1297,29 @@ fn resolve_locators(text: &str) -> Option<String> {
         let runs =
             !paren || head.ends_with('$') || head.trim_end().ends_with(['&', '.']) || word_before;
         let mut found = None;
-        let window = cut(after_open, MAX_LOCATOR_SPAN);
-        if runs && may_be_locator(window) {
-            let end = window.find(close);
-            if too_much(end.map_or(window.len(), |end| 2 * end + 1)) {
-                return None;
-            }
-            if let Some(end) = end {
+        if runs && may_be_locator(cut(after_open.trim_start(), MAX_LOCATOR_WORD)) {
+            let kind = usize::from(!paren);
+            let cached = &mut next_end[kind];
+            let end = match *cached {
+                Some(Some(at)) if at >= from => Some(at),
+                Some(None) => None,
+                _ => {
+                    let at = after_open.find(close).map(|end| from + end);
+                    if too_much(at.map_or(after_open.len(), |at| at - from + 1)) {
+                        return None;
+                    }
+                    *cached = Some(at);
+                    at
+                }
+            };
+            if let Some(at) = end
+                && read_to[kind] != Some(at)
+            {
+                read_to[kind] = Some(at);
+                let end = at - from;
+                if too_much(end + 1) {
+                    return None;
+                }
                 let words = shell_words(&after_open[..end]);
                 found = match words.split_first() {
                     Some((first, more)) if LOCATORS.contains(&program_name(first).as_str()) => more
@@ -1200,11 +1359,11 @@ fn cut(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-/// Whether the command at the start of `text` (just after a `(` or backtick) may be a
-/// locator's: its first word, quoted or up to white space or the next `(`, `)` or
-/// backtick, names one. Cheap, so that a line of many `(` is read in linear time: the
-/// first words of two of them do not overlap, except quoted ones, which end at the next
-/// quote.
+/// Whether the command at the start of `text` (the first [`MAX_LOCATOR_WORD`] bytes after a
+/// `(` or backtick and the white space after it) may be a locator's: its first word, quoted
+/// or up to white space or the next `(`, `)` or backtick, names one. Cheap, so that a line
+/// of many `(` is read in linear time: the first words of two of them do not overlap, and a
+/// quoted one is looked for only within the bound.
 fn may_be_locator(text: &str) -> bool {
     let text = text.trim_start();
     let first = match text.chars().next() {
@@ -1496,7 +1655,7 @@ fn read_commands(text: &str, depth: usize, put_names: bool) -> Option<String> {
                 "{program} stands for {name}, a coding assistant that works online with your account"
             ));
         }
-        if let Some(why) = command(program, args, depth + 1) {
+        if let Some(why) = command(program, args, Place::Own, depth + 1) {
             return Some(why);
         }
     }

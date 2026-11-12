@@ -195,11 +195,13 @@ async fn relay_until<T>(
     events: &UnboundedSender<ServerEvent>,
 ) -> T {
     let mut work = std::pin::pin!(work);
+    // `work` first, so a server that logs without pause cannot keep it from being polled;
+    // what is still queued when it ends is passed on below.
     let result = loop {
         tokio::select! {
             biased;
-            Some(event) = from_server.recv() => relay(events, event),
             result = &mut work => break result,
+            Some(event) = from_server.recv() => relay(events, event),
         }
     };
     while let Ok(event) = from_server.try_recv() {
@@ -341,7 +343,8 @@ impl<S: Starter> Supervisor<S> {
     /// Starts `spec`, trying a new port when the port is taken, the retries on the same
     /// backend (Save memory off, As much as fits) and the next backend down when the
     /// failure could be backend-specific. Returns the server and the spec it actually runs
-    /// with, so the caller can tell which load settings are in effect.
+    /// with, so the caller can tell which load settings are in effect. A failure is
+    /// returned, not sent as [`ServerState::Failed`]: [`run`](Self::run) sends that.
     pub async fn start(&mut self, spec: StartSpec) -> Result<(S::Server, StartSpec), StartError> {
         let mut spec = spec;
         let mut port_attempts = 0;

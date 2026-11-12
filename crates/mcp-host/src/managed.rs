@@ -31,8 +31,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, ClientNotification, ClientRequest,
-    CustomNotification, Implementation, RequestId, ServerResult,
+    CallToolRequest, CallToolRequestParams, ClientNotification, ClientRequest, CustomNotification,
+    Implementation, RequestId, ServerResult,
 };
 use rmcp::service::PeerRequestOptions;
 use rmcp::{Peer, RoleClient, ServiceError};
@@ -165,9 +165,12 @@ pub struct ManagedServer {
     start_lock: tokio::sync::Mutex<()>,
 }
 
+/// The server's answer to a call, or why there is none.
+type Answer = Result<Result<ServerResult, ServiceError>, oneshot::error::RecvError>;
+
 /// How a call's wait ended.
 enum End {
-    Answer(Result<Result<ServerResult, ServiceError>, oneshot::error::RecvError>),
+    Answer(Box<Answer>),
     Cancelled,
     TimedOut,
 }
@@ -219,8 +222,8 @@ impl ManagedServer {
         let limit = self.spec.start_timeout;
         let target = Target::Stdio(prepared);
         let work = async {
-            let connection = connection::connect(&target, first, &self.client, &self.log, limit)
-                .await?;
+            let connection =
+                connection::connect(&target, first, &self.client, &self.log, limit).await?;
             match connection::list_tools(&connection, limit).await {
                 Ok(tools) => Ok((connection, tools)),
                 Err(message) => {
@@ -247,14 +250,23 @@ impl ManagedServer {
                 return Err(error);
             }
         };
-        if self.stops.load(Ordering::SeqCst) != stops {
+        let connection = Arc::new(connection);
+        // Checked and stored under the lock `stop_with` takes after counting its stop, so a
+        // stop from another thread either sees this connection or makes the check fail.
+        let stopped_meanwhile = {
+            let mut current = lock(&self.current);
+            let stale = self.stops.load(Ordering::SeqCst) != stops;
+            if !stale {
+                *current = Some(connection.clone());
+            }
+            stale
+        };
+        if stopped_meanwhile {
             connection.close().await;
             return Err(HostError::NotReady("it was stopped while starting".into()));
         }
         *lock(&self.lifecycle) = Some(connection.lifecycle);
-        let connection = Arc::new(connection);
         self.watch_exit(&connection);
-        *lock(&self.current) = Some(connection);
         self.log
             .note(&format!("ready with {} tools", tools.len()))
             .await;
@@ -405,7 +417,7 @@ impl ManagedServer {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break End::Cancelled,
-                answer = &mut rx => break End::Answer(answer),
+                answer = &mut rx => break End::Answer(Box::new(answer)),
                 _ = alive.notified() => {
                     idle.as_mut().reset(Instant::now() + timeout);
                     if let Some(progress) = &progress
@@ -420,18 +432,20 @@ impl ManagedServer {
             }
         };
         match end {
-            End::Answer(Ok(Ok(result))) => Ok(CallOutcome::Done(self.map_result(name, result))),
-            End::Answer(Ok(Err(error))) if !connection::is_connection_lost(&error) => {
-                Ok(CallOutcome::Done(ToolOutput::error(format!(
-                    "{} could not run {}: {}",
-                    self.spec.name,
-                    policy::sanitize::one_line(name, 80),
-                    connection::describe_service_error(&error)
-                ))))
-            }
-            End::Answer(_) => Err(HostError::NotReady(
-                "the server stopped during the call".into(),
-            )),
+            End::Answer(answer) => match *answer {
+                Ok(Ok(result)) => Ok(CallOutcome::Done(self.map_result(name, result))),
+                Ok(Err(error)) if !connection::is_connection_lost(&error) => {
+                    Ok(CallOutcome::Done(ToolOutput::error(format!(
+                        "{} could not run {}: {}",
+                        self.spec.name,
+                        policy::sanitize::one_line(name, 80),
+                        connection::describe_service_error(&error)
+                    ))))
+                }
+                _ => Err(HostError::NotReady(
+                    "the server stopped during the call".into(),
+                )),
+            },
             End::Cancelled => {
                 let stopped = self
                     .give_up(&connection, &peer, &id, &mut rx, "stopped by the user")
@@ -653,7 +667,10 @@ mod tests {
         assert!(matches!(e, HostError::NotReady(_)), "{e}");
         assert!(!server.is_running() && !server.ended_unexpectedly());
         assert_eq!(server.pid(), None);
-        assert_eq!(server.stop_with(Duration::ZERO).await, StopOutcome::NotRunning);
+        assert_eq!(
+            server.stop_with(Duration::ZERO).await,
+            StopOutcome::NotRunning
+        );
     }
 
     #[tokio::test]
@@ -683,7 +700,14 @@ mod tests {
         cancel.cancel();
         let allow = ToolAllowList::new(["open_binary"]);
         let out = server
-            .call_outcome(&allow, "open_binary", Map::new(), Duration::from_secs(1), &cancel, None)
+            .call_outcome(
+                &allow,
+                "open_binary",
+                Map::new(),
+                Duration::from_secs(1),
+                &cancel,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(out, CallOutcome::Cancelled { stopped: false });
