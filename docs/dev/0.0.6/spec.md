@@ -669,9 +669,8 @@ expected arguments and the task on stdin and returns its output.
 ## Part 3b. Items 5 to 8 (added in revision 3)
 
 ### Item 5. rea with a free decompiler
-Research only so far: `item5-rea-research.md` (what rea is, its licence and needs, free
-decompilers and their licences, options and questions). Not designed until the owner chooses
-the decompiler and how it ships. Whatever is chosen: rea is an MCP server, so it runs through
+Designed: `item5-spec.md` (work packages WP9a to WP9h, binding, with the owner's answers at
+the top; WP9f dropped by the owner's answer Q2 = B). Research: `item5-rea-research.md`. Whatever is chosen: rea is an MCP server, so it runs through
 the existing MCP client and policy gate (D12), starts as a process through `crates/runtime`,
 and its files and any decompiler or runtime it needs are listed in the notices.
 
@@ -686,7 +685,8 @@ and its files and any decompiler or runtime it needs are listed in the notices.
   Frida and live-process tools are not offered.
 
 ### Item 6. Usage view and finer offloading controls
-Sketch, research and open questions: `item6-usage-offloading.md`. **D4 is amended (the owner
+Designed: `item6-spec.md` (work packages WP10a to WP10e, binding, with the owner's answers
+at the top). Earlier sketch: `item6-usage-offloading.md`. **D4 is amended (the owner
 chose: Fine control inside each model's settings, live usage always visible under the model
 name):** the plain controls stay the default, unchanged;
 layers on the graphics card, expert parts on the processor, conversation memory on the
