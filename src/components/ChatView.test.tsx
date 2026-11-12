@@ -8,7 +8,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./ModelPicker", () => ({ ModelPicker: () => null }));
 vi.mock("./RuntimeIndicator", () => ({ RuntimeIndicator: () => null }));
 vi.mock("./ToolsPanel", () => ({ ToolsPanel: () => null }));
-vi.mock("./AllowAllButton", () => ({ AllowAllButton: () => null }));
+vi.mock("./AllowAllButton", () => ({ ApprovalModeMenu: () => null }));
 vi.mock("./Composer", () => ({ Composer: () => null }));
 vi.mock("./SystemPromptDialog", () => ({ SystemPromptDialog: () => null }));
 vi.mock("./MessageItem", () => ({

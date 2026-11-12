@@ -15,8 +15,8 @@ The owner is not technical. They use the app on a Windows PC with an AMD Radeon 
 graphics card (Vulkan) and on a 16 GB Apple silicon Mac. This build machine is Linux with no
 graphics card.
 
-Background reading, in this order: this file; `docs/dev/0.0.5/map.md` (combined map of the
-code); `docs/dev/0.0.5/map-details.md` (the readers' findings with file:line references as
+Background reading, in this order: this file; `docs/dev/0.0.6/map.md` (combined map of the
+code); `docs/dev/0.0.6/map-details.md` (the readers' findings with file:line references as
 of commit 226bf13; item 3 lists the verified variable names and flags of the outside apps);
 the `ARCHITECTURE.md` sections your package names. The critiques that shaped this revision
 are summarised in Part 5.
@@ -257,7 +257,7 @@ each), `src/components/ModelsDialog.tsx` (one tab each), `Cargo.toml`, `src-taur
 ---------------------------------------------------------------------------------------
 
 ### Amendments after WP0 (binding)
-- **The contract** is the section "CONTRACT (updated)" of `docs/dev/0.0.5/report-WP0-fix.md`
+- **The contract** is the section "CONTRACT (updated)" of `docs/dev/0.0.6/report-WP0-fix.md`
   (types, fields, command signatures, sample data). Build against it; do not change a
   contract type or signature without the lead.
 - **Owners of files WP0 added:** `crates/runtime/src/llama/stage.rs` → WP1a;
