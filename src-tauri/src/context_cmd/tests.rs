@@ -329,10 +329,14 @@ fn the_command_is_for_the_main_window_only() {
 /// database before and after.)
 #[test]
 fn the_preview_mode_of_the_assembly_changes_nothing() {
+    // A checkout on Windows may end lines differently.
     let source = std::fs::read_to_string(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/turns.rs"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("turns.rs"),
     )
-    .unwrap();
+    .unwrap()
+    .replace("\r\n", "\n");
     let start = source
         .find("pub(crate) async fn assemble(")
         .expect("assemble");

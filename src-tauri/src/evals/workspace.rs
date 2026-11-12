@@ -351,7 +351,9 @@ mod tests {
         let others = [
             format!("harness-run-{hex}x"),
             format!("harness-run-{}", &hex[..31]),
-            "harness-run-0123456789ABCDEF0123456789ABCDEF".to_owned(),
+            // Capitals, and other digits than `hex`: on macOS and Windows a name that
+            // differs only in case would be the same folder as one of ours.
+            "harness-run-FEDCBA9876543210FEDCBA9876543210".to_owned(),
             format!("other-{hex}"),
         ];
         for name in mine.iter().chain(&others) {

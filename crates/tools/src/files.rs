@@ -2653,8 +2653,32 @@ mod tests {
             ..chat(&root)
         };
         let fs = FilesServer::default();
-        let p = |rel: &str| shown(&root.join(rel));
+        // Joined part by part, so the expected text has this system's separators.
+        let p = |rel: &str| shown(&rel.split('/').fold(root.clone(), |at, part| at.join(part)));
+        // On a volume that tells capitals from small letters, a name in another case is a
+        // missing file with a near namesake. On macOS and Windows it is the file itself.
+        let folds_case = root.join("docs").join("readme.md").exists();
         let (_, out) = run(&fs, &c, "read_file", json!({"path": "docs/readme.md"}))
+            .await
+            .unwrap();
+        if folds_case {
+            assert!(!out.is_error, "{}", out.joined_text());
+        } else {
+            assert!(out.is_error);
+            assert_eq!(
+                out.joined_text(),
+                format!(
+                    "{} does not exist. Similar names: {}, {}, {}. Working folder: {}.",
+                    p("docs/readme.md"),
+                    p("docs/README.md"),
+                    p("docs/readme.txt"),
+                    p("README.rst"),
+                    shown(&root)
+                )
+            );
+        }
+        // A name that is missing on every system, with namesakes that have another ending.
+        let (_, out) = run(&fs, &c, "read_file", json!({"path": "docs/readme.rst"}))
             .await
             .unwrap();
         assert!(out.is_error);
@@ -2662,7 +2686,7 @@ mod tests {
             out.joined_text(),
             format!(
                 "{} does not exist. Similar names: {}, {}, {}. Working folder: {}.",
-                p("docs/readme.md"),
+                p("docs/readme.rst"),
                 p("docs/README.md"),
                 p("docs/readme.txt"),
                 p("README.rst"),
@@ -2705,19 +2729,19 @@ mod tests {
         for (tool, a, expected) in [
             (
                 "edit_file",
-                json!({"path": "docs/readme.md", "old_text": "a", "new_text": "b"}),
+                json!({"path": "docs/readme.rst", "old_text": "a", "new_text": "b"}),
                 format!(
                     "{} does not exist, so there is nothing to edit. Working folder: {}. list_dir shows the names that exist; write_file creates a file.",
-                    p("docs/readme.md"),
+                    p("docs/readme.rst"),
                     shown(&root)
                 ),
             ),
             (
                 "delete_file",
-                json!({"path": "docs/readme.md"}),
+                json!({"path": "docs/readme.rst"}),
                 format!(
                     "{} does not exist, so there is nothing to delete.",
-                    p("docs/readme.md")
+                    p("docs/readme.rst")
                 ),
             ),
         ] {
@@ -2749,7 +2773,10 @@ mod tests {
         let (_dir, root) = tree(&[("docs/a.txt", "x\n")]);
         let c = chat(&root);
         let fs = FilesServer::default();
-        let (docs, a) = (shown(&root.join("docs")), shown(&root.join("docs/a.txt")));
+        let (docs, a) = (
+            shown(&root.join("docs")),
+            shown(&root.join("docs").join("a.txt")),
+        );
         let (_, out) = run(&fs, &c, "read_file", json!({"path": "docs"}))
             .await
             .unwrap();
@@ -2964,7 +2991,8 @@ mod tests {
                 &fs,
                 &none,
                 "write_file",
-                json!({"path": "/tmp/x.txt", "content": "x"})
+                // A full path in this system's own form ("/tmp/x.txt" is not one on Windows).
+                json!({"path": shown(&std::env::temp_dir().join("x.txt")), "content": "x"})
             )
             .await
             .unwrap_err(),

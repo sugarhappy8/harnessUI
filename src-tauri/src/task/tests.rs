@@ -441,7 +441,9 @@ fn scratch(name: &str) -> std::path::PathBuf {
         now_ms()
     ));
     std::fs::create_dir_all(&dir).expect("create");
-    dir.canonicalize().expect("canonical")
+    // The plain canonical form: on Windows std's own starts with `\\?\`, which the
+    // approved-folder list never uses.
+    dunce::canonicalize(&dir).expect("canonical")
 }
 
 fn chat_in(dir: &std::path::Path) -> ChatContext {

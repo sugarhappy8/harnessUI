@@ -30,8 +30,11 @@ fn manifest() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// A source file, with the line endings of every system read as one.
 fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+        .replace("\r\n", "\n")
 }
 
 /// Every `.rs` file under `dir`.
