@@ -21,6 +21,8 @@ pub mod describe;
 mod error;
 mod host;
 mod http;
+// rea's own server (item5-spec.md WP9b; the contract stub is WP9a's).
+pub mod managed;
 pub mod names;
 mod result;
 pub mod schema;
@@ -44,6 +46,7 @@ pub use host::{
     MAX_DESCRIPTION_CHARS, RegisteredTool, ServerKind, ServerState, ServerStatus,
 };
 pub use http::{CONNECT_TIMEOUT, MAX_SSE_EVENT_BYTES};
+pub use managed::{ManagedServer, ManagedSpec, ToolAllowList};
 pub use result::MAX_RESULT_BYTES;
 pub use schema::{CompiledSchema, SchemaError, canonical_json, simplify_for_llama};
 pub use secrets::SecretResolver;

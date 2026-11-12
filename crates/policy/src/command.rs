@@ -109,6 +109,85 @@ pub(crate) fn parse_lenient(shell: Shell, line: &str) -> Parsed {
     parse_with(shell, line, true)
 }
 
+/// The line as the POSIX shell reads it before it splits words: a backslash at the end of
+/// a line joins the two lines (`c\<newline>laude` is `claude`), also inside double quotes,
+/// but not inside single quotes or a comment. The grammar reads that backslash as a space
+/// between words, which is not what the shell runs (review of 0.0.6, round 2).
+pub(crate) fn join_lines(line: &str) -> std::borrow::Cow<'_, str> {
+    #[derive(PartialEq)]
+    enum In {
+        Plain,
+        Single,
+        AnsiC,
+        Double,
+        Comment,
+    }
+    if !line.contains("\\\n") {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut state = In::Plain;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match state {
+            In::Single => {
+                out.push(c);
+                if c == '\'' {
+                    state = In::Plain;
+                }
+            }
+            In::AnsiC => {
+                out.push(c);
+                if c == '\\' {
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                } else if c == '\'' {
+                    state = In::Plain;
+                }
+            }
+            In::Comment => {
+                out.push(c);
+                if c == '\n' {
+                    state = In::Plain;
+                }
+            }
+            In::Plain | In::Double => {
+                if c == '\\' {
+                    match chars.next() {
+                        Some('\n') => {}
+                        Some(next) => {
+                            out.push(c);
+                            out.push(next);
+                        }
+                        None => out.push(c),
+                    }
+                    continue;
+                }
+                if state == In::Double {
+                    if c == '"' {
+                        state = In::Plain;
+                    }
+                } else {
+                    let word_starts = out
+                        .chars()
+                        .next_back()
+                        .is_none_or(|p| p.is_whitespace() || ";&|()<>".contains(p));
+                    match c {
+                        '\'' if out.ends_with('$') => state = In::AnsiC,
+                        '\'' => state = In::Single,
+                        '"' => state = In::Double,
+                        '#' if word_starts => state = In::Comment,
+                        _ => {}
+                    }
+                }
+                out.push(c);
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn parse_with(shell: Shell, line: &str, lenient: bool) -> Parsed {
     if line.trim().is_empty() {
         return complex("the command is empty");
@@ -116,6 +195,19 @@ fn parse_with(shell: Shell, line: &str, lenient: bool) -> Parsed {
     if line.len() > 16 * 1024 {
         return complex("the command is too long to check");
     }
+    // The POSIX shell reads a carriage return as part of a word, and a backslash before
+    // one as no join at all; the grammar reads both as a space between words, which can
+    // hide a command on the next line.
+    if shell == Shell::Posix && line.contains('\r') {
+        return complex("the command contains a carriage return");
+    }
+    let joined;
+    let line = if shell == Shell::Posix {
+        joined = join_lines(line);
+        joined.as_ref()
+    } else {
+        line
+    };
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = match shell {
         Shell::Posix => tree_sitter_bash::LANGUAGE.into(),
@@ -568,7 +660,7 @@ pub(crate) const GIT_KNOWN: &[&str] = &[
     "reflog",
 ];
 /// Programs that only read (granted per program; path arguments held to approved folders).
-const READ_ONLY: &[&str] = &[
+pub(crate) const READ_ONLY: &[&str] = &[
     "ls",
     "dir",
     "cat",
@@ -853,6 +945,45 @@ mod tests {
                 is_complex(Shell::PowerShell, line),
                 "{line:?} should be complex"
             );
+        }
+    }
+
+    /// A backslash at the end of a line joins two lines into one word (`r\<newline>m` is
+    /// `rm`), and a backslash before a carriage return is no join at all: the shell runs
+    /// what follows as a command of its own. The grammar reads both as a space between
+    /// words, so the line is read as the shell reads it (review of 0.0.6, round 2).
+    #[test]
+    fn a_line_continuation_is_read_as_the_shell_reads_it() {
+        let facts = |line: &str| {
+            crate::allow_all::command_facts(Shell::Posix, line, &parse(Shell::Posix, line))
+        };
+        // Joined into one word: `rm`, which deletes.
+        let c = plain(Shell::Posix, "r\\\nm -rf foo");
+        assert_eq!(c[0].program, "rm");
+        assert_eq!(c[0].args, ["-rf", "foo"]);
+        assert!(
+            classify(Shell::Posix, "r\\\nm -rf foo")
+                .always_ask
+                .is_some()
+        );
+        assert!(facts("r\\\nm -rf foo").keep_asking.is_some());
+        assert!(classify(Shell::Posix, "ec\\\nho hi").always_ask.is_none());
+        // Inside double quotes the join happens too; inside single quotes it does not.
+        assert_eq!(plain(Shell::Posix, "echo \"a\\\nb\"")[0].args, ["ab"]);
+        assert_eq!(plain(Shell::Posix, "echo 'a\\\nb'")[0].args, ["a\\\nb"]);
+        // An ordinary continuation between words stays a plain command.
+        let c = plain(Shell::Posix, "cargo test \\\n  --package foo");
+        assert_eq!(c[0].args, ["test", "--package", "foo"]);
+        // A backslash in a comment joins nothing: the next line runs.
+        let line = "ls # x \\\nrm -rf foo";
+        assert!(is_complex(Shell::Posix, line));
+        assert!(facts(line).keep_asking.is_some(), "{:?}", facts(line));
+        // A backslash before a carriage return: the shell runs `rm` as its own command.
+        for line in ["echo \\\r\nrm -rf foo", "echo hi\r\nrm -rf foo"] {
+            assert!(is_complex(Shell::Posix, line), "{line:?}");
+            let v = classify(Shell::Posix, line);
+            assert!(v.always_ask.is_some() && !v.read_only, "{line:?}");
+            assert!(facts(line).keep_asking.is_some(), "{line:?}");
         }
     }
 

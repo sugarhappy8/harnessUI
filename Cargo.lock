@@ -162,6 +162,7 @@ dependencies = [
  "rand 0.9.5",
  "regex",
  "reqwest",
+ "reverse",
  "runtime",
  "search",
  "serde",
@@ -4841,6 +4842,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "reverse"
+version = "0.0.5"
+dependencies = [
+ "async-trait",
+ "dunce",
+ "flate2",
+ "jsonschema",
+ "libc",
+ "mcp-host",
+ "models",
+ "policy",
+ "reqwest",
+ "rmcp",
+ "runtime",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "windows 0.62.2",
+ "zip",
+]
+
+[[package]]
 name = "rfd"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7072,6 +7101,18 @@ dependencies = [
  "regex",
  "serde",
  "url",
+]
+
+[[package]]
+name = "usage"
+version = "0.0.5"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
+ "serde",
+ "serde_json",
+ "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]

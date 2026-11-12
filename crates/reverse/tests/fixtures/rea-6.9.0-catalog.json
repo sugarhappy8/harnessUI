@@ -1,0 +1,1577 @@
+{
+ "rea_version": "6.9.0",
+ "source": "package/dist/mcp-catalog.json",
+ "families": "direct,enhanced,native,artifact,managed,session,electron,application",
+ "tool_count": 255,
+ "tool_names": [
+  "act_on_build_computer",
+  "address_name",
+  "address_to_file_offset",
+  "analyze_function",
+  "analyze_javascript_application",
+  "analyze_swift_types",
+  "analyze_web_bundle",
+  "annotate_native_function",
+  "audit_release_exposure",
+  "batch_decompile",
+  "binary_overview",
+  "binary_session",
+  "build_call_path",
+  "build_reconstruction_obligation_ledger",
+  "capture_adb_screen",
+  "capture_browser_scenario",
+  "capture_electron_scenario",
+  "capture_native_ui_scenario",
+  "capture_process_scenario",
+  "capture_web_screenshot",
+  "check_build_task",
+  "close_binary",
+  "close_build_computer",
+  "close_frida_session",
+  "close_gdb_session",
+  "close_rizin_debug_session",
+  "collect_adb_bugreport",
+  "comment",
+  "compare_application_versions",
+  "compare_artifacts",
+  "compare_bundles",
+  "compare_functions",
+  "compare_javascript_export_shapes",
+  "compare_managed_members",
+  "compare_process_captures",
+  "compare_source_to_bundle",
+  "compare_static_and_observed_endpoints",
+  "compare_wasm_interfaces",
+  "compare_web_captures",
+  "compare_web_screenshots",
+  "correlate_static_and_runtime",
+  "current_address",
+  "current_document",
+  "current_procedure",
+  "cutter_command",
+  "decode_android_resources",
+  "decode_interface_builder",
+  "decode_signal_recording",
+  "decompile_all",
+  "decompile_jeb_item",
+  "demangle_swift",
+  "discover_webmcp_tools",
+  "evaluate_reconstruction_coverage",
+  "execute_rizin_command",
+  "export_build_environment",
+  "export_environment_bundle",
+  "export_evidence_bundle",
+  "export_web_scripts",
+  "extract_artifact",
+  "extract_firmware",
+  "find_changed_behavior",
+  "find_xrefs_to_name",
+  "frida_session_status",
+  "gdb_console",
+  "gdb_session_status",
+  "get_call_graph",
+  "get_evidence_bundle",
+  "get_navigation_context",
+  "get_objc_classes",
+  "get_objc_protocols",
+  "goto_address",
+  "guided_workflows",
+  "identify_flutter_build",
+  "import_evidence_bundle",
+  "import_managed_reconstruction",
+  "inline_comment",
+  "inspect_adb_client",
+  "inspect_adb_device",
+  "inspect_adb_display",
+  "inspect_adb_package",
+  "inspect_adb_window",
+  "inspect_address_context",
+  "inspect_analysis_settings",
+  "inspect_analysis_view",
+  "inspect_android_class",
+  "inspect_android_jni_bindings",
+  "inspect_android_method",
+  "inspect_android_package",
+  "inspect_api_contract",
+  "inspect_apk_signature",
+  "inspect_apktool_client",
+  "inspect_apple_ips",
+  "inspect_artifact",
+  "inspect_asset_catalog",
+  "inspect_binary_hardening",
+  "inspect_binary_layout",
+  "inspect_byte_entropy",
+  "inspect_dart_aot",
+  "inspect_desktop_application",
+  "inspect_devicetree",
+  "inspect_electron_fuses",
+  "inspect_electron_page",
+  "inspect_elf_notes",
+  "inspect_elf_unwind_ranges",
+  "inspect_erlang_beam",
+  "inspect_evm_interface",
+  "inspect_firmware_regions",
+  "inspect_go_binary",
+  "inspect_gpu_code_objects",
+  "inspect_il2cpp_metadata",
+  "inspect_jeb_client",
+  "inspect_kernel_build_config",
+  "inspect_kernel_module",
+  "inspect_keyed_archive",
+  "inspect_macho",
+  "inspect_managed_artifact",
+  "inspect_managed_members",
+  "inspect_managed_native_boundaries",
+  "inspect_model_artifact",
+  "inspect_native_api",
+  "inspect_native_data_type",
+  "inspect_native_dispatch_metadata",
+  "inspect_native_exports",
+  "inspect_native_initializers",
+  "inspect_native_instruction",
+  "inspect_native_load_image",
+  "inspect_ntfs_journal",
+  "inspect_packet_capture",
+  "inspect_packet_fields",
+  "inspect_pcap_capture",
+  "inspect_pcap_client",
+  "inspect_pe_certificates",
+  "inspect_pe_imports",
+  "inspect_pe_load_config",
+  "inspect_pe_resources",
+  "inspect_playwright_trace",
+  "inspect_plist",
+  "inspect_python_pyc",
+  "inspect_recorded_crash",
+  "inspect_rust_binary",
+  "inspect_signal_decoders",
+  "inspect_signature",
+  "inspect_sqlite_database",
+  "inspect_v8_code_cache",
+  "inspect_wasm_artifact",
+  "inspect_web_event_listeners",
+  "inspect_web_network_capture",
+  "inspect_web_page",
+  "inspect_windows_shortcut",
+  "inspect_with_objdump",
+  "install_adb_package",
+  "instrument_with_frida",
+  "list_adb_devices",
+  "list_adb_directory",
+  "list_adb_features",
+  "list_adb_packages",
+  "list_adb_processes",
+  "list_adb_services",
+  "list_architectures",
+  "list_bookmarks",
+  "list_browser_targets",
+  "list_cutter_sessions",
+  "list_documents",
+  "list_electron_targets",
+  "list_frida_devices",
+  "list_frida_processes",
+  "list_javascript_runtime_targets",
+  "list_jeb_units",
+  "list_names",
+  "list_procedures",
+  "list_segments",
+  "list_strings",
+  "list_unknowns",
+  "load_frida_script",
+  "mark_build_checkpoint",
+  "match_native_functions",
+  "measure_build_task",
+  "next_address",
+  "observe_javascript_runtime",
+  "observe_native_calls",
+  "observe_native_ui",
+  "observe_web_execution",
+  "observe_web_session",
+  "open_binary",
+  "open_bundle_resources",
+  "open_jeb_project",
+  "prev_address",
+  "procedure_address",
+  "procedure_assembly",
+  "procedure_callees",
+  "procedure_callers",
+  "procedure_info",
+  "procedure_pseudo_code",
+  "procedure_references",
+  "project_android_application_graph",
+  "project_apple_application_graph",
+  "project_harmony_application_graph",
+  "project_managed_application_graph",
+  "pull_adb_file",
+  "pull_adb_package",
+  "push_adb_file",
+  "read_adb_logcat",
+  "read_adb_setting",
+  "read_bytes",
+  "read_function_instructions",
+  "read_guidance_section",
+  "reconcile_javascript_runtime",
+  "record_build_consent",
+  "record_unknown",
+  "recover_javascript_sources",
+  "reset_investigation",
+  "resolve_adb_packages",
+  "resolve_containing_procedure",
+  "resolve_native_call_targets",
+  "resume_frida_session",
+  "rizin_debug_command",
+  "rizin_debug_session_status",
+  "search_android_classes",
+  "search_bytes",
+  "search_guidance",
+  "search_procedures",
+  "search_strings",
+  "set_address_name",
+  "set_addresses_names",
+  "set_bookmark",
+  "set_comment",
+  "set_inline_comment",
+  "start_adb_activity",
+  "start_adb_app",
+  "start_build_capture",
+  "start_build_computer",
+  "start_frida_session",
+  "start_gdb_session",
+  "start_rizin_debug_session",
+  "stop_adb_app",
+  "stop_build_capture",
+  "trace_android_references",
+  "trace_application_feature",
+  "trace_call_path",
+  "trace_dylib_resolution",
+  "trace_feature",
+  "trace_javascript_semantics",
+  "trace_native_ui_action",
+  "trace_native_values",
+  "trace_web_module_imports",
+  "trace_web_source_location",
+  "uninstall_adb_package",
+  "unload_frida_script",
+  "unset_bookmark",
+  "update_analysis_settings",
+  "update_unknown",
+  "verify_managed_native_boundaries",
+  "verify_reconstruction",
+  "verify_unknown_resolution",
+  "xrefs"
+ ],
+ "tool_families": {
+  "act_on_build_computer": "application",
+  "address_name": "direct",
+  "address_to_file_offset": null,
+  "analyze_function": "enhanced",
+  "analyze_javascript_application": "electron",
+  "analyze_swift_types": "enhanced",
+  "analyze_web_bundle": "browser",
+  "annotate_native_function": "direct",
+  "audit_release_exposure": "artifact",
+  "batch_decompile": "enhanced",
+  "binary_overview": "enhanced",
+  "binary_session": "session",
+  "build_call_path": "session",
+  "build_reconstruction_obligation_ledger": "application",
+  "capture_adb_screen": "adb",
+  "capture_browser_scenario": "browser",
+  "capture_electron_scenario": "electron",
+  "capture_native_ui_scenario": "native",
+  "capture_process_scenario": "session",
+  "capture_web_screenshot": "browser",
+  "check_build_task": "application",
+  "close_binary": "session",
+  "close_build_computer": "application",
+  "close_frida_session": "frida",
+  "close_gdb_session": "native",
+  "close_rizin_debug_session": "native",
+  "collect_adb_bugreport": "adb",
+  "comment": "direct",
+  "compare_application_versions": "application",
+  "compare_artifacts": "session",
+  "compare_bundles": "session",
+  "compare_functions": "session",
+  "compare_javascript_export_shapes": "application",
+  "compare_managed_members": "managed",
+  "compare_process_captures": "session",
+  "compare_source_to_bundle": "application",
+  "compare_static_and_observed_endpoints": "application",
+  "compare_wasm_interfaces": null,
+  "compare_web_captures": "browser",
+  "compare_web_screenshots": "browser",
+  "correlate_static_and_runtime": "session",
+  "current_address": "direct",
+  "current_document": "direct",
+  "current_procedure": "direct",
+  "cutter_command": "native",
+  "decode_android_resources": "apktool",
+  "decode_interface_builder": "artifact",
+  "decode_signal_recording": "artifact",
+  "decompile_all": "enhanced",
+  "decompile_jeb_item": "jeb",
+  "demangle_swift": "native",
+  "discover_webmcp_tools": "browser",
+  "evaluate_reconstruction_coverage": "application",
+  "execute_rizin_command": "native",
+  "export_build_environment": "application",
+  "export_environment_bundle": "application",
+  "export_evidence_bundle": "session",
+  "export_web_scripts": "application",
+  "extract_artifact": "artifact",
+  "extract_firmware": "firmware",
+  "find_changed_behavior": "session",
+  "find_xrefs_to_name": "enhanced",
+  "frida_session_status": "frida",
+  "gdb_console": "native",
+  "gdb_session_status": "native",
+  "get_call_graph": "enhanced",
+  "get_evidence_bundle": "session",
+  "get_navigation_context": "session",
+  "get_objc_classes": "enhanced",
+  "get_objc_protocols": "enhanced",
+  "goto_address": "direct",
+  "guided_workflows": "application",
+  "identify_flutter_build": "flutter",
+  "import_evidence_bundle": "session",
+  "import_managed_reconstruction": "managed",
+  "inline_comment": "direct",
+  "inspect_adb_client": "adb",
+  "inspect_adb_device": "adb",
+  "inspect_adb_display": "adb",
+  "inspect_adb_package": "adb",
+  "inspect_adb_window": "adb",
+  "inspect_address_context": "session",
+  "inspect_analysis_settings": "application",
+  "inspect_analysis_view": "application",
+  "inspect_android_class": "android",
+  "inspect_android_jni_bindings": "android",
+  "inspect_android_method": "android",
+  "inspect_android_package": "android",
+  "inspect_api_contract": "application",
+  "inspect_apk_signature": null,
+  "inspect_apktool_client": "apktool",
+  "inspect_apple_ips": "native",
+  "inspect_artifact": "artifact",
+  "inspect_asset_catalog": "artifact",
+  "inspect_binary_hardening": "native",
+  "inspect_binary_layout": "native",
+  "inspect_byte_entropy": "native",
+  "inspect_dart_aot": "flutter",
+  "inspect_desktop_application": "artifact",
+  "inspect_devicetree": "native",
+  "inspect_electron_fuses": "electron",
+  "inspect_electron_page": "electron",
+  "inspect_elf_notes": "native",
+  "inspect_elf_unwind_ranges": "native",
+  "inspect_erlang_beam": "artifact",
+  "inspect_evm_interface": null,
+  "inspect_firmware_regions": "firmware",
+  "inspect_go_binary": "artifact",
+  "inspect_gpu_code_objects": "artifact",
+  "inspect_il2cpp_metadata": "artifact",
+  "inspect_jeb_client": "jeb",
+  "inspect_kernel_build_config": "native",
+  "inspect_kernel_module": "native",
+  "inspect_keyed_archive": "artifact",
+  "inspect_macho": "native",
+  "inspect_managed_artifact": "managed",
+  "inspect_managed_members": "managed",
+  "inspect_managed_native_boundaries": "managed",
+  "inspect_model_artifact": null,
+  "inspect_native_api": "enhanced",
+  "inspect_native_data_type": "direct",
+  "inspect_native_dispatch_metadata": "enhanced",
+  "inspect_native_exports": "native",
+  "inspect_native_initializers": "native",
+  "inspect_native_instruction": "direct",
+  "inspect_native_load_image": "direct",
+  "inspect_ntfs_journal": null,
+  "inspect_packet_capture": "artifact",
+  "inspect_packet_fields": "artifact",
+  "inspect_pcap_capture": "pcap",
+  "inspect_pcap_client": "pcap",
+  "inspect_pe_certificates": "native",
+  "inspect_pe_imports": "native",
+  "inspect_pe_load_config": "native",
+  "inspect_pe_resources": "native",
+  "inspect_playwright_trace": "application",
+  "inspect_plist": "native",
+  "inspect_python_pyc": "artifact",
+  "inspect_recorded_crash": "native",
+  "inspect_rust_binary": "artifact",
+  "inspect_signal_decoders": "artifact",
+  "inspect_signature": "native",
+  "inspect_sqlite_database": "artifact",
+  "inspect_v8_code_cache": "artifact",
+  "inspect_wasm_artifact": null,
+  "inspect_web_event_listeners": "browser",
+  "inspect_web_network_capture": "browser",
+  "inspect_web_page": "browser",
+  "inspect_windows_shortcut": "native",
+  "inspect_with_objdump": "native",
+  "install_adb_package": "adb",
+  "instrument_with_frida": "frida",
+  "list_adb_devices": "adb",
+  "list_adb_directory": "adb",
+  "list_adb_features": "adb",
+  "list_adb_packages": "adb",
+  "list_adb_processes": "adb",
+  "list_adb_services": "adb",
+  "list_architectures": "native",
+  "list_bookmarks": "direct",
+  "list_browser_targets": "browser",
+  "list_cutter_sessions": "native",
+  "list_documents": "direct",
+  "list_electron_targets": "electron",
+  "list_frida_devices": "frida",
+  "list_frida_processes": "frida",
+  "list_javascript_runtime_targets": "javascript-runtime",
+  "list_jeb_units": "jeb",
+  "list_names": "direct",
+  "list_procedures": "direct",
+  "list_segments": "direct",
+  "list_strings": "direct",
+  "list_unknowns": "session",
+  "load_frida_script": "frida",
+  "mark_build_checkpoint": "application",
+  "match_native_functions": "session",
+  "measure_build_task": null,
+  "next_address": "direct",
+  "observe_javascript_runtime": "javascript-runtime",
+  "observe_native_calls": "native",
+  "observe_native_ui": "native",
+  "observe_web_execution": "browser",
+  "observe_web_session": "browser",
+  "open_binary": "session",
+  "open_bundle_resources": "session",
+  "open_jeb_project": "jeb",
+  "prev_address": "direct",
+  "procedure_address": "direct",
+  "procedure_assembly": "direct",
+  "procedure_callees": "direct",
+  "procedure_callers": "direct",
+  "procedure_info": "direct",
+  "procedure_pseudo_code": "direct",
+  "procedure_references": "direct",
+  "project_android_application_graph": "application",
+  "project_apple_application_graph": "application",
+  "project_harmony_application_graph": "application",
+  "project_managed_application_graph": "managed",
+  "pull_adb_file": "adb",
+  "pull_adb_package": "adb",
+  "push_adb_file": "adb",
+  "read_adb_logcat": "adb",
+  "read_adb_setting": "adb",
+  "read_bytes": null,
+  "read_function_instructions": "direct",
+  "read_guidance_section": "application",
+  "reconcile_javascript_runtime": "electron",
+  "record_build_consent": null,
+  "record_unknown": "session",
+  "recover_javascript_sources": "application",
+  "reset_investigation": "session",
+  "resolve_adb_packages": "adb",
+  "resolve_containing_procedure": "direct",
+  "resolve_native_call_targets": "direct",
+  "resume_frida_session": "frida",
+  "rizin_debug_command": "native",
+  "rizin_debug_session_status": "native",
+  "search_android_classes": "android",
+  "search_bytes": null,
+  "search_guidance": "application",
+  "search_procedures": "direct",
+  "search_strings": "direct",
+  "set_address_name": "direct",
+  "set_addresses_names": "direct",
+  "set_bookmark": "direct",
+  "set_comment": "direct",
+  "set_inline_comment": "direct",
+  "start_adb_activity": "adb",
+  "start_adb_app": "adb",
+  "start_build_capture": "application",
+  "start_build_computer": "application",
+  "start_frida_session": "frida",
+  "start_gdb_session": "native",
+  "start_rizin_debug_session": "native",
+  "stop_adb_app": "adb",
+  "stop_build_capture": "application",
+  "trace_android_references": "android",
+  "trace_application_feature": "application",
+  "trace_call_path": "enhanced",
+  "trace_dylib_resolution": "artifact",
+  "trace_feature": "enhanced",
+  "trace_javascript_semantics": "application",
+  "trace_native_ui_action": "enhanced",
+  "trace_native_values": "enhanced",
+  "trace_web_module_imports": "application",
+  "trace_web_source_location": "application",
+  "uninstall_adb_package": "adb",
+  "unload_frida_script": "frida",
+  "unset_bookmark": "direct",
+  "update_analysis_settings": "application",
+  "update_unknown": "session",
+  "verify_managed_native_boundaries": "managed",
+  "verify_reconstruction": "session",
+  "verify_unknown_resolution": "session",
+  "xrefs": "direct"
+ },
+ "allow_listed": {
+  "open_binary": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Absolute local filesystem path for the analysis target; relative paths are rejected."
+    },
+    "format": {
+     "type": "string",
+     "description": "Explicit interpretation: dos-com or raw-binary (headerless), gamecube-dol (GameCube/Wii DOL, never auto-detected), or esp-flash-image (an ESP flash dump read with flash_offset and partition_table_offset). Omission preserves header-based detection."
+    },
+    "architecture": {
+     "type": "string",
+     "description": "Caller-supplied CPU family. Required with format=raw-binary; rejected otherwise. format=gamecube-dol takes powerpc from the header, so it must be omitted."
+    },
+    "entry_point": {
+     "type": "string",
+     "description": "Caller-supplied load and entry address (0xhex). File offset 0 is mapped here. Required with format=raw-binary; rejected otherwise. Optional with format=gamecube-dol; must equal the DOL header entry."
+    },
+    "flash_offset": {
+     "type": "string",
+     "description": "Flash address (0xhex) of the dump's first byte, when it does not start at flash address 0. Only with format=esp-flash-image."
+    },
+    "partition_table_offset": {
+     "type": "string",
+     "description": "Flash address (0xhex, a multiple of 0x1000) of the partition table, which disables the table scan. Only with format=esp-flash-image."
+    },
+    "provider_id": {
+     "type": "string",
+     "description": "Exact deep-analysis provider ID, or automatic selection when omitted."
+    },
+    "snapshot_path": {
+     "type": "string",
+     "description": "Absolute local filesystem path for the analysis snapshot; relative paths are rejected."
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "close_binary": {
+   "type": "object",
+   "properties": {
+    "snapshot_path": {
+     "type": "string",
+     "minLength": 1,
+     "allOf": [
+      {
+       "pattern": "^[^\\x00]*$"
+      },
+      {
+       "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
+      {
+       "pattern": "^\\/"
+      }
+     ]
+    },
+    "overwrite": {
+     "type": "boolean"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "binary_session": {
+   "type": "object",
+   "properties": {
+    "detail": {
+     "type": "string",
+     "enum": [
+      "summary",
+      "complete"
+     ],
+     "description": "Start with summary (default): it keeps open state, the binding, current-route capabilities (including selected Ghidra checkpoint mode), each provider candidate's selection source, availability and target-support status, code and reason with its rejection codes, and every tool's availability, reason and remediation; omitted_fields lists what it leaves out. Request complete only when you need unavailable-candidate remediation, provider or rejection diagnostics, candidate capabilities or static tool surface, effect and annotation flags."
+    },
+    "refresh_candidates": {
+     "type": "boolean"
+    },
+    "expected_package_version": {
+     "type": "string",
+     "minLength": 1
+    },
+    "expected_catalog_digest": {
+     "type": "string",
+     "pattern": "^[a-f0-9]{64}$"
+    },
+    "expected_server_path": {
+     "type": "string",
+     "minLength": 1,
+     "allOf": [
+      {
+       "pattern": "^[^\\x00]*$"
+      },
+      {
+       "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
+      {
+       "pattern": "^\\/"
+      }
+     ]
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "binary_overview": {
+   "type": "object",
+   "properties": {},
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "list_procedures": {
+   "type": "object",
+   "properties": {
+    "document": {
+     "type": "string"
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "search_procedures": {
+   "type": "object",
+   "properties": {
+    "pattern": {
+     "type": "string",
+     "minLength": 1
+    },
+    "mode": {
+     "type": "string",
+     "enum": [
+      "literal",
+      "regex"
+     ]
+    },
+    "case_sensitive": {
+     "type": "boolean"
+    },
+    "document": {
+     "type": "string"
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "required": [
+    "pattern"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "procedure_pseudo_code": {
+   "type": "object",
+   "properties": {
+    "procedure": {
+     "type": "string"
+    },
+    "document": {
+     "type": "string"
+    },
+    "analysis": {
+     "type": "string",
+     "enum": [
+      "independent_fresh"
+     ]
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "required": [
+    "procedure"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "procedure_assembly": {
+   "type": "object",
+   "properties": {
+    "procedure": {
+     "type": "string"
+    },
+    "document": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "procedure"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "procedure_info": {
+   "type": "object",
+   "properties": {
+    "procedure": {
+     "type": "string"
+    },
+    "document": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "procedure"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "procedure_callers": {
+   "type": "object",
+   "properties": {
+    "procedure": {
+     "type": "string"
+    },
+    "document": {
+     "type": "string"
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "required": [
+    "procedure"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "procedure_callees": {
+   "type": "object",
+   "properties": {
+    "procedure": {
+     "type": "string"
+    },
+    "document": {
+     "type": "string"
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "required": [
+    "procedure"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "procedure_references": {
+   "type": "object",
+   "properties": {
+    "procedure": {
+     "type": "string"
+    },
+    "direction": {
+     "type": "string",
+     "enum": [
+      "incoming",
+      "outgoing"
+     ]
+    },
+    "document": {
+     "type": "string"
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "required": [
+    "procedure"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "list_strings": {
+   "type": "object",
+   "properties": {
+    "document": {
+     "type": "string"
+    },
+    "address": {
+     "type": "string"
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "search_strings": {
+   "type": "object",
+   "properties": {
+    "pattern": {
+     "type": "string",
+     "minLength": 1
+    },
+    "mode": {
+     "type": "string",
+     "enum": [
+      "literal",
+      "regex"
+     ]
+    },
+    "case_sensitive": {
+     "type": "boolean"
+    },
+    "document": {
+     "type": "string"
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "required": [
+    "pattern"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "list_names": {
+   "type": "object",
+   "properties": {
+    "document": {
+     "type": "string"
+    },
+    "address": {
+     "type": "string"
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "list_segments": {
+   "type": "object",
+   "properties": {
+    "document": {
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "xrefs": {
+   "type": "object",
+   "properties": {
+    "document": {
+     "type": "string"
+    },
+    "address": {
+     "type": "string"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "find_xrefs_to_name": {
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "get_call_graph": {
+   "type": "object",
+   "properties": {
+    "address": {
+     "type": "string"
+    },
+    "direction": {
+     "type": "string",
+     "enum": [
+      "forward",
+      "backward"
+     ]
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "required": [
+    "address"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "analyze_function": {
+   "type": "object",
+   "properties": {
+    "procedure": {
+     "type": "string",
+     "minLength": 1
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "summary (default) returns a compact dossier and retains the complete analyze_function Evidence in this session; page pseudocode, references and value-flow through normalized_result.parent_evidence_id with inspect_analysis_view. complete returns the full dossier inline."
+    }
+   },
+   "required": [
+    "procedure"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "batch_decompile": {
+   "type": "object",
+   "properties": {
+    "addresses": {
+     "maxItems": 20000,
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "trace_call_path": {
+   "type": "object",
+   "properties": {
+    "start": {
+     "type": "string"
+    },
+    "goal": {
+     "type": "string"
+    },
+    "direction": {
+     "type": "string",
+     "enum": [
+      "forward",
+      "backward"
+     ]
+    }
+   },
+   "required": [
+    "start"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "trace_feature": {
+   "type": "object",
+   "properties": {
+    "query": {
+     "type": "string",
+     "minLength": 1
+    },
+    "case_sensitive": {
+     "type": "boolean"
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "inspect_analysis_view": {
+   "type": "object",
+   "properties": {
+    "source": {
+     "type": "object"
+    },
+    "view": {
+     "type": "object"
+    }
+   },
+   "required": [
+    "source",
+    "view"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "inspect_pe_imports": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Absolute filesystem path to a PE image"
+    },
+    "max_file_bytes": {
+     "type": "integer",
+     "description": "Maximum stable artifact bytes to read (default 64 MiB)"
+    },
+    "max_dlls": {
+     "type": "integer",
+     "description": "Maximum import and delay-load descriptors to examine; exceeding the budget fails without partial success"
+    },
+    "max_functions": {
+     "type": "integer",
+     "description": "Maximum imported functions to examine across every table; exceeding the budget fails without partial success"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "inspect_pe_resources": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Absolute filesystem path to a PE image"
+    },
+    "max_file_bytes": {
+     "type": "integer",
+     "description": "Maximum stable artifact bytes to read (default 64 MiB)"
+    },
+    "max_entries": {
+     "type": "integer",
+     "description": "Maximum resource directory entries to examine; exceeding the budget fails without partial success"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "inspect_pe_certificates": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Absolute filesystem path to a PE image"
+    },
+    "max_file_bytes": {
+     "type": "integer",
+     "description": "Maximum stable artifact bytes to read (default 64 MiB)"
+    },
+    "max_entries": {
+     "type": "integer",
+     "description": "Maximum WIN_CERTIFICATE entries to examine; exceeding the budget fails without partial success"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "inspect_native_exports": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Absolute filesystem path to a PE or ELF image"
+    },
+    "max_file_bytes": {
+     "type": "integer",
+     "description": "Maximum stable artifact bytes to read (default 256 MiB)"
+    },
+    "detail": {
+     "type": "string",
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "inspect_binary_hardening": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Absolute filesystem path to an ELF, PE, or Mach-O image"
+    },
+    "max_file_bytes": {
+     "type": "integer",
+     "description": "Maximum stable artifact bytes to read (default 64 MiB)"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "inspect_go_binary": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Absolute filesystem path to the selected executable or library"
+    },
+    "architecture": {
+     "type": "string",
+     "description": "CPU family of the slice to read from a universal (FAT) Mach-O. Required for universal files and rejected for every other image."
+    },
+    "include_string_literals": {
+     "type": "boolean",
+     "description": "Also recover bounded inferred Go UTF-8 string literals referenced by static (ptr, len) headers in non-executable mapped data"
+    },
+    "max_input_bytes": {
+     "type": "integer",
+     "description": "Stable input byte admission; does not raise report or parser budgets. Default 268435456. Positive safe integer, maximum 9007199254740991; byte maxima reflect runtime Buffer/string representability including base64 expansion. Applies on the next inspection without restart."
+    },
+    "max_report_bytes": {
+     "type": "integer",
+     "description": "Complete normalized Go report byte admission; independent of MCP response delivery. Default 8388608. Positive safe integer, maximum 536870888; byte maxima reflect runtime Buffer/string representability including base64 expansion. Applies on the next inspection without restart."
+    },
+    "max_build_info_bytes": {
+     "type": "integer",
+     "description": "Aggregate embedded Go build-info string bytes, including compiler version and framed module text. Default 1048576. Positive safe integer, maximum 402653166; byte maxima reflect runtime Buffer/string representability including base64 expansion. Applies on the next inspection without restart."
+    },
+    "max_header_search_bytes": {
+     "type": "integer",
+     "description": "Cumulative Go build-info discovery bytes; overlapping search ranges consume work. Default 268435456. Positive safe integer, maximum 9007199254740991; byte maxima reflect runtime Buffer/string representability including base64 expansion. Applies on the next inspection without restart."
+    },
+    "max_string_literals": {
+     "type": "integer",
+     "description": "Maximum returned inferred strings; requires include_string_literals: true. Default 2000. Positive safe integer, maximum 9007199254740991; byte maxima reflect runtime Buffer/string representability including base64 expansion. Applies on the next inspection without restart."
+    },
+    "max_string_literal_bytes": {
+     "type": "integer",
+     "description": "Largest inferred string candidate in bytes; requires include_string_literals: true. Default 4096. Positive safe integer, maximum 536870888; byte maxima reflect runtime Buffer/string representability including base64 expansion. Applies on the next inspection without restart."
+    },
+    "max_string_bytes": {
+     "type": "integer",
+     "description": "Aggregate returned inferred string bytes; requires include_string_literals: true. Default 524288. Positive safe integer, maximum 9007199254740991; byte maxima reflect runtime Buffer/string representability including base64 expansion. Applies on the next inspection without restart."
+    },
+    "max_string_header_scan_bytes": {
+     "type": "integer",
+     "description": "Static string-header and candidate-byte scan work; requires include_string_literals: true. Default 67108864. Positive safe integer, maximum 9007199254740991; byte maxima reflect runtime Buffer/string representability including base64 expansion. Applies on the next inspection without restart."
+    },
+    "max_string_candidates": {
+     "type": "integer",
+     "description": "Distinct static string candidates tracked before projection; requires include_string_literals: true. Default 100000. Positive safe integer, maximum 9007199254740991; byte maxima reflect runtime Buffer/string representability including base64 expansion. Applies on the next inspection without restart."
+    },
+    "detail": {
+     "type": "string",
+     "description": "complete returns all metadata inline; summary retains complete Evidence and returns build identity and counts for subsequent retained Go views."
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "inspect_rust_binary": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Absolute filesystem path to the selected executable or library"
+    },
+    "architecture": {
+     "type": "string",
+     "description": "CPU family of the slice to read from a universal (FAT) Mach-O. Required for universal files and rejected for every other image."
+    },
+    "producer_limits": {
+     "type": "object",
+     "description": "Per-call input_bytes and output_bytes admission for the same complete Rust artifact/report, default 268435456 and 8388608 bytes. Positive safe integers; applies on the next call without restart. Compressed dependency section 1 MiB, inflated JSON 8 MiB/64x, parser nesting and transport limits remain independent."
+    },
+    "max_rustc_hashes": {
+     "type": "integer",
+     "description": "Maximum distinct inferred compiler paths to retain (default 64). Omitted paths leave compiler coverage partial without discarding dependency facts. Raise this value on the next call to recover a larger prefix; complete-report byte admission still applies."
+    },
+    "detail": {
+     "type": "string"
+    },
+    "view": {
+     "type": "object"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "inspect_managed_artifact": {
+   "type": "object",
+   "properties": {
+    "max_snapshot_bytes": {
+     "type": "integer",
+     "exclusiveMinimum": 0,
+     "maximum": 9007199254740991
+    },
+    "max_metadata_representation_bytes": {
+     "type": "integer",
+     "exclusiveMinimum": 0,
+     "maximum": 9007199254740991
+    },
+    "path": {
+     "type": "string",
+     "minLength": 1,
+     "allOf": [
+      {
+       "pattern": "^[^\\x00]*$"
+      },
+      {
+       "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
+      {
+       "pattern": "^\\/"
+      }
+     ]
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "inspect_managed_members": {
+   "type": "object",
+   "properties": {
+    "max_snapshot_bytes": {
+     "type": "integer",
+     "exclusiveMinimum": 0,
+     "maximum": 9007199254740991
+    },
+    "max_metadata_representation_bytes": {
+     "type": "integer",
+     "exclusiveMinimum": 0,
+     "maximum": 9007199254740991
+    },
+    "path": {
+     "type": "string",
+     "minLength": 1,
+     "allOf": [
+      {
+       "pattern": "^[^\\x00]*$"
+      },
+      {
+       "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
+      {
+       "pattern": "^\\/"
+      }
+     ]
+    },
+    "detail": {
+     "type": "string",
+     "enum": [
+      "complete",
+      "summary"
+     ],
+     "description": "complete returns the complete analysis Evidence inline. summary retains that complete Evidence in this session and returns its inspect_analysis_view summary; inspect pages, items or facets through normalized_result.parent_evidence_id."
+    },
+    "type_names": {
+     "minItems": 1,
+     "type": "array",
+     "items": {
+      "type": "string",
+      "minLength": 1
+     },
+     "uniqueItems": true
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "inspect_python_pyc": {
+   "type": "object",
+   "properties": {
+    "max_file_bytes": {
+     "type": "integer",
+     "description": "Maximum selected file size in bytes; exceeding the budget fails without partial success"
+    },
+    "max_objects": {
+     "type": "integer",
+     "description": "Maximum marshal objects to examine; exceeding the budget fails without partial success"
+    },
+    "max_depth": {
+     "type": "integer",
+     "description": "Maximum marshal nesting depth; exceeding the budget fails without partial success"
+    },
+    "max_string_bytes": {
+     "type": "integer",
+     "description": "Maximum bytes retained for one marshal string or byte string; exceeding the budget fails without partial success"
+    },
+    "path": {
+     "type": "string",
+     "description": "Absolute filesystem path to the selected CPython .pyc file"
+    },
+    "detail": {
+     "type": "string"
+    },
+    "view": {
+     "type": "object"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "minProperties": 1,
+   "additionalProperties": false
+  },
+  "inspect_desktop_application": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Local filesystem path used by this operation."
+    },
+    "max_entries": {
+     "type": "integer",
+     "description": "Maximum permitted entries for this operation."
+    },
+    "max_probe_bytes": {
+     "type": "integer",
+     "description": "Maximum permitted probe bytes for this operation."
+    },
+    "detail": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "inspect_electron_fuses": {
+   "type": "object",
+   "properties": {
+    "path": {
+     "type": "string",
+     "description": "Absolute filesystem path to a macOS .app bundle, Electron Framework binary, Windows PE executable, or Linux ELF executable"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "additionalProperties": false
+  },
+  "analyze_javascript_application": {
+   "type": "object",
+   "properties": {
+    "input_path": {
+     "type": "string",
+     "description": "Absolute path to the JavaScript application on the machine running REA."
+    },
+    "format": {
+     "type": "string",
+     "description": "Declared input artifact format."
+    },
+    "integrity_policy": {
+     "type": "string"
+    },
+    "source_paths": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "description": "Exact relevant file paths from the artifact inventory, relative to the application root, analyzed in first-request order before unselected scopes; no globs or implicit dependencies. Omit to analyze all sources."
+    },
+    "semantic_precision": {
+     "type": "object",
+     "description": "Per-source evaluator budgets. Omitted fields preserve defaults: primitive_candidates 256, primitive_bytes 1048576, expression_depth 256, getter_expansions 512, alias_selections 512, wrapper_visits 1000000, wrapper_depth 128. Raising these does not raise graph retention, worker memory, transfer or parent result budgets; cyclic and unsupported values remain unknown."
+    },
+    "max_semantic_nodes": {
+     "type": "integer",
+     "description": "Maximum retained semantic nodes across the application; defaults to 100000. Worker heap and parent result admission remain enforced."
+    },
+    "max_semantic_nodes_per_file": {
+     "type": "integer",
+     "description": "Maximum retained semantic nodes per source file; defaults to 20000, additionally bounded by max_semantic_nodes and memory/transfer limits."
+    },
+    "max_semantic_unknowns": {
+     "type": "integer",
+     "description": "Maximum retained semantic unknown records across the application; defaults to 100000. Omitted emission occurrences are counted by family and reason."
+    },
+    "max_semantic_unknowns_per_file": {
+     "type": "integer",
+     "description": "Maximum retained semantic unknown records per source file; defaults to 20000, additionally bounded by max_semantic_unknowns and memory/transfer limits."
+    },
+    "max_heap_mb": {
+     "type": "integer",
+     "description": "Maximum V8 old-space heap in MiB for the isolated JavaScript source analyzer; defaults to 1024. This does not change the CLI/MCP process heap. When REA runs on Bun, which ignores V8 heap flags, Windows instead limits the analyzer's committed memory to this budget plus a 512 MiB runtime reserve; other Bun hosts enforce no limit."
+    },
+    "analysis_timeout_ms": {
+     "type": "integer",
+     "description": "Maximum startup, analysis and transfer time per JavaScript source, in milliseconds; defaults to 300000. On timeout, return collected partial Evidence and stop the analysis."
+    },
+    "detail": {
+     "type": "string"
+    },
+    "view": {
+     "type": "object"
+    }
+   },
+   "required": [
+    "input_path"
+   ],
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "description": "Advertised in reduced form by the compact input schema profile; the server still validates complete canonical inputs.",
+   "minProperties": 1,
+   "additionalProperties": false
+  }
+ },
+ "app_only": {
+  "close_binary": {
+   "type": "object",
+   "properties": {
+    "snapshot_path": {
+     "type": "string",
+     "minLength": 1,
+     "allOf": [
+      {
+       "pattern": "^[^\\x00]*$"
+      },
+      {
+       "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
+      {
+       "pattern": "^\\/"
+      }
+     ]
+    },
+    "overwrite": {
+     "type": "boolean"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  },
+  "reset_investigation": {
+   "type": "object",
+   "properties": {
+    "save_path": {
+     "type": "string",
+     "minLength": 1,
+     "allOf": [
+      {
+       "pattern": "^[^\\x00]*$"
+      },
+      {
+       "pattern": "^[^\\uD800-\\uDFFF]*$"
+      },
+      {
+       "pattern": "^\\/"
+      }
+     ]
+    },
+    "overwrite": {
+     "type": "boolean"
+    }
+   },
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "additionalProperties": false
+  }
+ }
+}

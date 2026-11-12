@@ -308,12 +308,26 @@ impl RuntimeManager {
     }
 
     /// "Unload to free memory": unloads, and remembers which model it was for
-    /// "Unloaded to free memory · Load".
+    /// "Unloaded to free memory · Load". Called after [`Self::before_change`].
     pub async fn unload_by_user(&self) {
         let path = self.status().model_path;
-        self.unload().await;
+        self.stop_server().await;
         if let Some(path) = path {
             self.update(|s| s.unloaded_path = Some(path));
+        }
+    }
+
+    /// Puts "Unloaded to free memory · Load" back as it was (the backend check, when
+    /// nothing was loaded before it).
+    pub fn set_unloaded_path(&self, path: Option<String>) {
+        self.update(|s| s.unloaded_path = path);
+    }
+
+    /// The model at `path` was removed from Installed: "Unloaded to free memory · Load"
+    /// no longer offers it.
+    pub fn forget_unloaded(&self, path: &str) {
+        if self.status().unloaded_path.as_deref() == Some(path) {
+            self.update(|s| s.unloaded_path = None);
         }
     }
 
@@ -463,7 +477,7 @@ impl RuntimeManager {
         // it as over on every way out of this function.
         let ticket = LoadTicket::begin(&self.loads, &model, &settings);
         let seq = ticket.seq;
-        self.unload().await;
+        self.stop_server().await;
         let (first, candidates) = self.choose(&settings).await?;
         if let Ok(mut c) = self.current.lock() {
             *c = Some(Loaded {
@@ -723,7 +737,18 @@ impl RuntimeManager {
         }
     }
 
+    /// Unloads the model outside the D3 rules: removing the model or its backend. Like any
+    /// newer unload, it cancels the change that waits for the model to be free first, so
+    /// that change cannot load the model again once this has stopped it.
     pub async fn unload(&self) {
+        self.cancel_waiting();
+        self.stop_server().await;
+    }
+
+    /// Stops the server and resets the status, as part of a change that already went
+    /// through [`Self::before_change`] (a load, "Unload to free memory", the backend check):
+    /// the change that waits, if one does, is newer and stays.
+    pub async fn stop_server(&self) {
         let taken = self.session.lock().await.take();
         if let Some(session) = taken {
             self.update(|s| s.state = RuntimeStateDto::Stopping);
@@ -1158,6 +1183,60 @@ mod tests {
             ("ROCm+1".to_string(), None),
             "an unexpected name is passed as it is"
         );
+    }
+
+    /// A device name stored in the settings (a per-model "Which graphics card", possibly
+    /// hand-edited) reaches `--device` only when the probe reported a device of exactly that
+    /// name; anything else, such as text that looks like other arguments, is replaced by the
+    /// device the probe recommends, never passed on.
+    #[test]
+    fn a_device_name_the_probe_did_not_report_is_never_launched() {
+        let vulkan = vec![
+            usable(
+                BackendKind::Vulkan,
+                vec![
+                    device("Vulkan0", "AMD Radeon(TM) Graphics", 512),
+                    device("Vulkan1", "AMD Radeon RX 9070 XT", 16304),
+                ],
+            ),
+            usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
+        ];
+        let rocm = vec![usable(
+            BackendKind::Rocm,
+            vec![
+                device("ROCm0", "AMD Radeon(TM) Graphics", 50246),
+                device("ROCm1", "AMD Radeon RX 9070 XT", 16304),
+            ],
+        )];
+        for wanted in [
+            "--rpc 10.0.0.1:50052",
+            "Vulkan1 --rpc 10.0.0.1:50052",
+            "vulkan1",
+            "ROCm1",
+            "",
+        ] {
+            let c = RuntimeManager::candidates(&vulkan, Some(wanted));
+            assert_eq!(c[0].device.as_deref(), Some("Vulkan1"), "{wanted:?}");
+            assert_eq!(c[0].hip_visible_devices, None, "{wanted:?}");
+            assert_eq!(c[1].device, None, "the processor takes no device");
+            let settings = ResolvedLoad {
+                device: Some(wanted.to_string()),
+                ..resolved(GpuUse::All, false, false)
+            };
+            let (first, _) = first_candidate(&vulkan, &settings).unwrap();
+            let launch = launch_config(&settings, &first, "/m.gguf".into(), None, 1, "k".into());
+            assert_eq!(launch.device.as_deref(), Some("Vulkan1"), "{wanted:?}");
+            assert_eq!(launch.hip_visible_devices, None, "{wanted:?}");
+        }
+        for wanted in ["--rpc 10.0.0.1:50052", "ROCm9", "Vulkan1"] {
+            let c = RuntimeManager::candidates(&rocm, Some(wanted));
+            assert_eq!(c[0].device.as_deref(), Some("ROCm0"), "{wanted:?}");
+            assert_eq!(
+                c[0].hip_visible_devices.as_deref(),
+                Some("1"),
+                "{wanted:?}: the recommended card, masked"
+            );
+        }
     }
 
     /// D3: Auto takes Metal, Vulkan or CPU; CUDA and ROCm only when the user picks them.

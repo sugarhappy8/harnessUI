@@ -247,8 +247,120 @@ fn a_after_programs_that_run_another_program() {
         "fd . -X codex exec",
         "fd --exec claude -p",
         "fdfind -x claude -p",
+        // More runners (review of 0.0.6, round 2): Python and Ruby environments, version
+        // and environment managers, npm tools and other wrappers.
+        "uv run claude -p x",
+        "uv run --with x claude -p x",
+        "poetry run claude -p x",
+        "pipenv run claude -p x",
+        "pdm run claude -p x",
+        "hatch run claude -p x",
+        "conda run claude -p x",
+        "conda run -n env claude -p x",
+        "mamba run -n env codex exec x",
+        "micromamba run -n env claude -p x",
+        "pixi run claude -p x",
+        "bundle exec claude -p x",
+        "rye run claude -p x",
+        "mise exec -- claude -p x",
+        "mise x -- claude -p x",
+        "rtx exec -- claude -p x",
+        "asdf exec claude -p x",
+        "nvm exec 20 claude -p x",
+        "nvm run 20 codex exec x",
+        "volta run claude -p x",
+        "fnm exec -- claude -p x",
+        "direnv exec . claude -p x",
+        "nix-shell -p nodejs --run 'claude -p x'",
+        "nix-shell --command 'codex exec x'",
+        "nix develop -c claude -p x",
+        "nix develop --command codex exec x",
+        "nix shell nixpkgs#nodejs -c claude -p x",
+        "nix run nixpkgs#claude-code",
+        "nix run github:x/y#codex -- exec x",
+        "devbox run claude -p x",
+        "distrobox enter -- claude -p x",
+        "toolbox run claude -p x",
+        "cross-env FOO=1 claude -p x",
+        "cross-env-shell 'claude -p x'",
+        "dotenv -- claude -p x",
+        "dotenvx run -- claude -p x",
+        "env-cmd -f .env claude -p x",
+        "nodemon --exec 'claude -p x'",
+        "concurrently 'claude -p x'",
+        "concurrently 'npm:watch' 'codex exec x'",
+        "watchexec -- claude -p x",
+        "valgrind claude -p x",
+        "gdb --args claude -p x",
+        "lldb -- claude -p x",
+        "torsocks claude -p x",
+        "proxychains4 claude -p x",
+        "proxychains -q claude -p x",
+        "fakeroot claude -p x",
+        "proot claude -p x",
+        "ssh-agent claude -p x",
+        "dbus-launch claude -p x",
+        "setarch x86_64 claude -p x",
+        "chronic claude -p x",
+        "ifne claude -p x",
+        "cpulimit -l 50 -- claude -p x",
+        "entr claude -p x",
+        "lckdo /tmp/l claude -p x",
+        "vglrun claude -p x",
+        "prime-run claude -p x",
+        "gamemoderun claude -p x",
+        "nq claude -p x",
+        "ts claude -p x",
+        "tsp claude -p x",
+        "pueue add -- claude -p x",
+        "expect -c 'spawn claude -p x; interact'",
+        "hyperfine 'claude -p x'",
+        "sandbox-exec -f p.sb claude -p x",
+        "gosu me claude -p x",
+        "su-exec me claude -p x",
+        "setpriv --reuid=1000 claude -p x",
+        "systemd-nspawn -D /x claude -p x",
+        "perf stat claude -p x",
+        "xterm -e claude -p x",
+        "gnome-terminal -- claude -p x",
+        "winpty claude -p x",
+        "zellij run -- claude -p x",
+        "dtach -c /tmp/s claude -p x",
+        // A runner after a wrapper.
+        "env nix run nixpkgs#claude-code",
+        "sudo -u me kubectl exec pod -- codex exec x",
+        "timeout 60 uv run claude -p x",
     ] {
         assert_asks(SH, line);
+    }
+    for line in [
+        "conhost claude -p x",
+        "conhost.exe claude -p x",
+        "wt claude -p x",
+        "wt.exe -w 0 nt claude -p x",
+        "wt new-tab codex exec x",
+    ] {
+        assert_asks(PS, line);
+    }
+    for line in [
+        "uv run pytest",
+        "uv run --with rich python app.py",
+        "poetry run python app.py --model claude",
+        "bundle exec rake",
+        "conda run -n env python x.py",
+        "nvm exec 20 node app.js",
+        "mise exec -- cargo test",
+        "nix develop -c cargo build",
+        "nix run nixpkgs#hello",
+        "cross-env NODE_ENV=production webpack",
+        "hyperfine 'cargo build'",
+        "concurrently 'npm:watch' 'npm:serve'",
+        "nodemon --exec 'cargo run'",
+        "valgrind ./target/debug/app",
+        "gdb --args ./app --name claude",
+        "wt -w 0 nt pwsh",
+    ] {
+        assert_not_seen(SH, line);
     }
     for line in [
         "taskset -c 0 cargo test",
@@ -288,6 +400,72 @@ fn a_a_name_with_escapes_or_quotes_inside() {
     assert_not_seen(SH, "cat no\\tes.txt > out.txt");
 }
 
+/// (a) A name the shell joins from two lines (a backslash at the end of a line), a name
+/// written as a pattern the shell expands (`cl?ude`, `clau*`, `cla[u]de`, `{claude,}`), and
+/// cmd's caret escape (`c^laude`) (review of 0.0.6, round 2).
+#[test]
+fn a_a_name_split_over_lines_or_written_as_a_pattern() {
+    for line in [
+        "c\\\nlaude -p x --allowedTools Bash",
+        "co\\\ndex exec x",
+        "ls; c\\\nlaude -p x",
+        "env c\\\nlaude -p x",
+        "claude \\\n  -p x",
+        "echo task | cl\\\naude -p",
+        "\"c\\\nlaude\" -p x",
+        "/usr/local/bin/cl?ude -p x",
+        "~/.local/bin/clau* -p x",
+        "cla[u]de -p x",
+        "c[!x]aude -p x",
+        "cod[a-z]x exec x",
+        "{claude,} -p x",
+        "{c,}laude -p x",
+        "c{la,}ude -p x",
+        "env cl?ude -p x",
+        "timeout 9 ~/.local/bin/clau* -p x",
+        "sudo /usr/local/bin/co?ex exec x",
+        "x --dangerously-skip-\\\npermissions",
+        "x --yo\\\nlo",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "cmd /c c^laude -p x",
+        "cmd.exe /c c^laude -p x",
+        "cmd /c \"c^laude -p x\"",
+        "cmd /c co^dex exec x",
+        "c`laude -p x",
+    ] {
+        assert_asks(PS, line);
+    }
+    for line in [
+        "cargo test \\\n  --package foo",
+        "echo cl?ude",
+        "ls cla*",
+        "ls *",
+        "timeout 5 ls *",
+        "nohup tar czf a.tgz *",
+        "./*.sh",
+        "cat {a,b}.txt",
+        "echo {claude,codex}",
+        "cp x.txt{,.bak}",
+        // Braces expand to `echo claude -p x`: echo runs.
+        "{echo,claude} -p x",
+    ] {
+        assert_not_seen(SH, line);
+    }
+    // A line continued on the next line is still a plain command that a grant can cover.
+    assert!(matches!(
+        parse(SH, "cargo test \\\n  --package foo"),
+        Parsed::Plain(ref c) if c.len() == 1 && c[0].args == ["test", "--package", "foo"]
+    ));
+    assert!(
+        classify(SH, "cargo test \\\n  --package foo")
+            .always_ask
+            .is_none()
+    );
+}
+
 /// (a) Code handed to an interpreter (`python3 -c`, `node -e`, `perl -e`, …) that runs a
 /// command line given as a string, and the program a locator finds used as a program
 /// (`$(which claude)`, `& (Get-Command claude)`, .NET's `Process.Start`) (review of 0.0.6,
@@ -307,10 +485,20 @@ fn a_inline_code_and_located_programs() {
         "`which codex` exec x",
         "$(command -v claude) -p x",
         "$(type -p codex) exec x",
+        // Quoted, as shellcheck recommends (review of 0.0.6, round 2).
+        "\"$(which claude)\" -p x",
+        "\"`which codex`\" exec x",
+        "\"$(command -v claude)\" -p x",
+        "env \"$(which claude)\" -p x",
+        "$(echo claude) -p x",
+        "$(printf %s codex) exec x",
     ] {
         assert_asks(SH, line);
     }
     for line in [
+        "Start-Process -FilePath (Get-Command claude).Source -ArgumentList '-p x'",
+        "Start-Process (gcm codex).Source",
+        "saps -FilePath (Get-Command claude).Path",
         "& (Get-Command claude) -p x",
         "&(Get-Command claude) -p x",
         "& (gcm codex) exec x",
@@ -338,9 +526,91 @@ fn a_inline_code_and_located_programs() {
     for line in [
         "Get-Command claude",
         "(Get-Command claude).Source",
+        "Write-Output (Get-Command claude).Source",
+        "Test-Path (gcm claude).Path",
         "[Diagnostics.Process]::Start('notepad', 'claude.txt')",
     ] {
         assert_not_seen(PS, line);
+    }
+}
+
+/// (a) A command line fed to a shell on its standard input (`echo 'claude -p x' | sh`,
+/// `… | at now`) (review of 0.0.6, round 2).
+#[test]
+fn a_a_command_line_fed_to_a_shell() {
+    for line in [
+        "echo 'claude -p x' | sh",
+        "echo 'claude -p x' | bash",
+        "echo claude -p x | sh",
+        "printf '%s\\n' 'codex exec x' | bash -s",
+        "echo 'claude -p x' | zsh -",
+        "echo \"claude -p $X\" | sh",
+        "cat notes.txt; echo 'claude -p x' | dash",
+        "echo 'claude -p x' | at now",
+        "at now <<< 'claude -p x'",
+        "batch <<< 'codex exec x'",
+        "sh <<< 'claude -p x'",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "'claude -p x' | cmd",
+        "'codex exec x' | powershell -",
+        "echo 'claude -p x' | pwsh -Command -",
+    ] {
+        assert_asks(PS, line);
+    }
+    for line in [
+        "echo 'ls -la' | sh",
+        "echo claude | grep c",
+        "echo 'claude -p x' > notes.txt",
+        "cat install.sh | sh",
+        "echo 'claude -p x' | sh -c 'cat'",
+        "at -f job.sh now",
+    ] {
+        assert_not_seen(SH, line);
+    }
+}
+
+/// (a) Any program, not only the listed ones, that runs what follows a word such as
+/// `run`, `exec` or `--` (`kubectl exec pod -- claude`, `docker run img claude`), with the
+/// value of a long option left out (`--model claude`) (review of 0.0.6, round 2).
+#[test]
+fn a_after_a_run_word_of_any_program() {
+    for line in [
+        "kubectl exec pod -- claude -p x",
+        "kubectl -n ns exec -it pod -- codex exec x",
+        "docker run --rm -it img claude -p x",
+        "docker exec -it box codex exec x",
+        "podman run img claude -p x",
+        "devcontainer exec --workspace-folder . claude -p x",
+        "someenv run claude -p x",
+        "sometool exec -- codex exec x",
+        "flatpak run org.x.Y --command=sh -- claude",
+        "pm2 start claude -- -p x",
+        "tmux-like split-pane claude",
+        "vagrant ssh -c 'claude -p x'",
+        "anything --exec 'codex exec x'",
+        "anything --run claude",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "docker run --rm img cargo test",
+        "docker run -e MODEL=claude img",
+        "npm run dev -- --provider claude",
+        "poetry run python app.py --model claude",
+        "cargo run -- --name codex",
+        "git checkout -- claude",
+        "git diff -- codex",
+        "grep -c claude notes.txt",
+        "grep -r exec claude",
+        "echo run claude",
+        "kubectl exec pod -- ls",
+        "make run",
+        "psql -c 'select 1'",
+    ] {
+        assert_not_seen(SH, line);
     }
 }
 
@@ -581,6 +851,47 @@ fn deep_nesting_stays_bounded() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// A long ordinary line, such as a file written with a here-document, is read to the end
+/// in every reading (braces, quotes, joined lines) within the limit of work, and stays
+/// ordinary; a line nested past the limit counts, since it was not read to the end.
+#[test]
+fn long_ordinary_lines_are_read_to_the_end() {
+    let code = "fn f(a: u8, b: u8) -> u8 { let x = [a, b]; g(\"{a,b}\", 'c', x) } \\\n".repeat(200);
+    let line = format!("cat > src/lib.rs <<'EOF'\n{code}EOF\ncargo test");
+    assert!(line.len() < 16 * 1024 && line.len() > 10_000);
+    let started = std::time::Instant::now();
+    assert_not_seen(SH, &line);
+    assert_not_seen(PS, &line);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    // Shells inside shells, each with quotes, escapes, braces and joined lines, many times
+    // over: past the limit, the line counts.
+    let mut nested = "echo {a,b} c\\\nd 'x' \"y\" \\z; ".repeat(40);
+    for _ in 0..7 {
+        nested = format!(
+            "sh -c \"{} ; {}\"",
+            nested.replace('"', "\\\""),
+            nested.replace('"', "\\\"")
+        );
+        if nested.len() > 15 * 1024 {
+            break;
+        }
+    }
+    let started = std::time::Instant::now();
+    let facts = command_facts(SH, &nested, &parse(SH, &nested));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    if let Some(why) = facts.coding_app {
+        assert_eq!(why, TOO_MUCH);
+    }
 }
 
 /// The why names what was found, for the card.

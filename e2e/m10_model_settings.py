@@ -20,13 +20,26 @@ Drives the backend commands the model settings panel uses, in the real app:
   Stop and restart stops the reply first;
 - Unload remembers the model (`unloadedPath`); Load again uses its saved settings; Reset
   to defaults; the 0.0.4 command shape `{ctx, backend, device}` still loads as given, and
-  a size outside 512 to 1,048,576 tokens is refused.
+  a size outside 512 to 1,048,576 tokens is refused;
+- the generic `set_setting` (the one command a tool could ever reach) refuses the defaults
+  for all models and a model's own key (D12);
+- settings saved while the model loads show "Settings changed" once it is ready;
+- removing the loaded model from Installed cancels a change that waits for it, so it is
+  not loaded again; removing the unloaded model forgets it (`unloadedPath`);
+- the backend check counts as a model check: a model picked meanwhile waits for it (or
+  stops it with Stop and restart) and is the one loaded afterwards; with nothing loaded,
+  "Unloaded to free memory" is as it was after the check.
+
+The small model sometimes shortens the long reply ("1 ... 500"); a step that needs the
+reply to still stream then tries again with a new reply, and a change that went ahead is
+accepted only when the reply had ended by itself.
 
 The D3 question in the window itself is WP2's scenario (`model-settings`).
 
     python3 -I e2e/m10_model_settings.py
 """
 
+import hashlib
 import json
 import os
 import pathlib
@@ -43,7 +56,7 @@ sys.path.insert(0, str(ROOT / "e2e"))
 from webdriver import Session, WebDriverError  # noqa: E402
 
 APP = os.environ.get("APP_BIN", str(ROOT / "target" / "debug" / "app"))
-MODEL = os.environ.get("TEST_GGUF") or next(iter(sorted((ROOT / ".cache" / "models").glob("*.gguf"))), "")
+MODEL = os.environ.get("TEST_GGUF") or str(next(iter(sorted((ROOT / ".cache" / "models").glob("*.gguf"))), ""))
 LLAMA_DIR = os.environ.get("APP_DEV_LLAMA_DIR", str(ROOT / ".cache" / "llama-linux"))
 OUT = pathlib.Path(os.environ.get("E2E_OUT", tempfile.mkdtemp(prefix="e2e-m10-")))
 IDENTIFIER = "io.github.sugarhappy8.harnessui"
@@ -148,6 +161,54 @@ def busy(s):
     return s.invoke("model_busy")
 
 
+def pending(s, slot):
+    return s.execute(f"return window.{slot}") == "pending"
+
+
+def settings_key(path):
+    """The settings key of one model's own load settings (file name and size)."""
+    name, size = os.path.basename(path), os.path.getsize(path)
+    return "modelLoad:" + hashlib.sha256(f"local\n{name}\n{size}".encode()).hexdigest()[:16]
+
+
+def messages(s, chat_id):
+    return s.invoke("get_chat", {"chatId": chat_id})["messages"]
+
+
+def start_reply(s, chat_id):
+    """Sends the long prompt as a follow-up to the chat's last message and waits until the
+    reply streams. True while it still streams, False when it already ended."""
+    msgs = messages(s, chat_id)
+    s.execute(SEND, chat_id, LONG_REPLY, msgs[-1]["id"] if msgs else None)
+    s.wait_for(lambda: busy(s)["chatTurns"] == 1 or not pending(s, "__sent"), 120, "the reply to start")
+    s.wait_for(lambda: s.execute("return window.__text") > 20 or not pending(s, "__sent"), 300, "the reply to stream")
+    return pending(s, "__sent")
+
+
+def went_ahead(s, chat_id, slot):
+    """A change that was to wait for the reply went ahead: fine only when the reply had
+    ended by itself (status complete), never when the change stopped it."""
+    r = fired(s, slot, 600)
+    fired(s, "__sent", 300)
+    last = messages(s, chat_id)[-1]
+    assert last["role"] == "assistant" and last["status"] == "complete", (
+        f"{slot} went ahead while the reply streamed", r, last["status"])
+    if r.get("ok"):
+        ready(s)
+
+
+def while_a_reply_streams(s, chat_id, name, attempt, tries=4):
+    """Runs `attempt()` while a real reply streams. When the reply ended by itself before
+    `attempt` could check what it needed, `attempt` returns False (after the model is ready
+    again) and it is tried again with a new reply."""
+    for n in range(1, tries + 1):
+        if start_reply(s, chat_id) and attempt():
+            return
+        fired(s, "__sent", 300)
+        print(f"    {name}: the reply ended by itself too soon ({n} of {tries})", flush=True)
+    raise AssertionError(f"{name}: the reply ended by itself too soon {tries} times")
+
+
 CALLS = [0]
 
 
@@ -161,6 +222,116 @@ def call(s, cmd, args=None, timeout=600):
     if not r.get("ok"):
         raise WebDriverError(f"{cmd} failed: {json.dumps(r.get('error'))[:800]}")
     return r.get("value")
+
+
+def check_settings_saved_while_loading(s):
+    """Settings saved while the model loads mark it "Settings changed" once it is ready
+    (only a ready model can be compared, so the save itself could not)."""
+    call(s, "unload_model")
+    s.execute(FIRE, "__midload", "load_local_model", {"path": MODEL})
+    s.wait_for(lambda: s.invoke("runtime_status")["state"] == "starting", 60, "the load to start")
+    call(s, "set_model_load_settings", {"path": MODEL, "overrides": {"saveMemory": "on"}})
+    r = fired(s, "__midload", 600)
+    assert r.get("ok"), r
+    st = ready(s)
+    info = call(s, "model_load_info", {"path": MODEL})
+    assert info["olderSettingsLoaded"] is True, info
+    assert st["settingsChanged"] is True, ("Settings changed is not shown for settings saved during the load", st)
+    call(s, "reset_model_load_settings", {"path": MODEL})
+    assert s.invoke("runtime_status")["settingsChanged"] is False, "the loaded copy matches the settings again"
+
+
+def check_removing_the_loaded_model(s, home, chat_id):
+    """Removing the loaded model from Installed while a change waits for it ("Restart when
+    it ends"): the change is cancelled and the model is not loaded again."""
+    installed = call(s, "import_model", {"path": MODEL})
+
+    def remove_while_waiting():
+        s.execute(FIRE, "__reload3", "reload_local_model", {"force": True, "whenIdle": True})
+        s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"] or not pending(s, "__reload3"), 10,
+                   "reloadWaiting while the reply streams")
+        if not pending(s, "__reload3"):
+            went_ahead(s, chat_id, "__reload3")
+            return False
+        call(s, "delete_model", {"id": installed["id"], "deleteFiles": False})
+        r = fired(s, "__reload3", 120)
+        assert r.get("ok") is False and r["error"]["code"] == "load_replaced", (
+            "removing the model did not cancel the change that waited", r)
+        fired(s, "__sent", 120)
+        time.sleep(1.0)
+        st = s.invoke("runtime_status")
+        assert st["state"] == "stopped" and st["modelPath"] is None and st["reloadWaiting"] is False, (
+            "the removed model was loaded again", st)
+        assert server_processes(home) == [], server_processes(home)
+        return True
+
+    while_a_reply_streams(s, chat_id, "removing the loaded model", remove_while_waiting)
+
+
+def check_removing_the_unloaded_model(s):
+    """Removing the model the user unloaded forgets it: no "Unloaded to free memory · Load"
+    for a model that is no longer installed."""
+    call(s, "load_local_model", {"path": MODEL})
+    ready(s)
+    call(s, "unload_model")
+    assert s.invoke("runtime_status")["unloadedPath"] == MODEL
+    installed = call(s, "import_model", {"path": MODEL})
+    call(s, "delete_model", {"id": installed["id"], "deleteFiles": False})
+    st = s.invoke("runtime_status")
+    assert st["unloadedPath"] is None, ("the removed model is still offered to load", st)
+
+
+def check_the_backend_check_keeps_the_unloaded_model(s, home):
+    """The backend check (`run_diagnostics`) with nothing loaded leaves nothing loaded and
+    "Unloaded to free memory · Load" as it was."""
+    call(s, "load_local_model", {"path": MODEL})
+    ready(s)
+    call(s, "unload_model")
+    call(s, "run_diagnostics", {"modelPath": MODEL}, timeout=1200)
+    st = s.invoke("runtime_status")
+    assert st["state"] == "stopped" and st["unloadedPath"] == MODEL, ("not as it was before the check", st)
+    assert server_processes(home) == [], server_processes(home)
+
+
+def check_a_pick_waits_for_the_backend_check(s):
+    """The backend check counts as a model check while it runs (D3): a model picked with
+    "Restart when it ends" waits for it and is the one loaded afterwards."""
+    second = OUT / "second-model.gguf"
+    if not second.exists():
+        try:
+            os.link(MODEL, second)
+        except OSError:
+            os.symlink(MODEL, second)
+    call(s, "load_local_model", {"path": MODEL})
+    ready(s)
+    s.execute(FIRE, "__diag", "run_diagnostics", {"modelPath": MODEL})
+    s.wait_for(lambda: busy(s)["modelChecks"] == 1 or not pending(s, "__diag"), 300, "the check to start")
+    assert pending(s, "__diag") and busy(s)["modelChecks"] == 1, ("the check does not count as a model check", busy(s))
+    s.execute(FIRE, "__pick", "load_local_model", {"path": str(second), "settings": None, "whenIdle": True})
+    s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"] or not pending(s, "__pick"), 10, "the pick to wait")
+    assert pending(s, "__pick") or not pending(s, "__diag"), "the pick did not wait for the check"
+    r = fired(s, "__diag", 1200)
+    assert r.get("ok"), r
+    r = fired(s, "__pick", 600)
+    assert r.get("ok"), ("the model picked during the check did not load", r)
+    st = ready(s)
+    assert st["modelPath"] == str(second) and st["reloadWaiting"] is False, ("the check undid the pick", st)
+    assert busy(s)["modelChecks"] == 0
+
+
+def check_stop_and_restart_stops_the_backend_check(s):
+    """A model picked with "Stop and restart" during the backend check stops the check and
+    is the one loaded afterwards (the check does not put back what was there before it)."""
+    s.execute(FIRE, "__diag2", "run_diagnostics", {"modelPath": MODEL})
+    s.wait_for(lambda: busy(s)["modelChecks"] == 1 or not pending(s, "__diag2"), 300, "the check to start")
+    assert pending(s, "__diag2") and busy(s)["modelChecks"] == 1, ("the check does not count as a model check", busy(s))
+    call(s, "load_local_model", {"path": MODEL, "settings": None, "whenIdle": False})
+    r = fired(s, "__diag2", 1200)
+    assert r.get("ok"), r
+    print("    the check was stopped:", "stopped: what is loaded was changed" in r["value"]["text"])
+    time.sleep(1.0)
+    st = ready(s)
+    assert st["modelPath"] == MODEL and busy(s)["modelChecks"] == 0, ("the check undid the pick", st)
 
 
 def main() -> int:
@@ -282,6 +453,16 @@ def main() -> int:
         r = info["resolved"]
         assert (r["ctx"], r["ctxChoice"], r["ctxSource"], r["saveMemory"], r["keepInMemory"]) == (
             8192, {"fixed": 8192}, "modelSetting", True, True), r
+        own_key = settings_key(MODEL)
+        assert stored_setting(own_key)["context"] == {"fixed": 8192}, (own_key, stored_setting(own_key))
+
+        step("the generic setting command (the one a tool could reach) refuses model settings")
+        for key in ("localModel", own_key):
+            before = stored_setting(key)
+            e = error_of(s, "set_setting", {"key": key, "value": {
+                "ctx": 1048576, "contextAuto": False, "keepInMemory": "on", "context": {"fixed": 1048576}}})
+            assert "cannot be changed this way" in json.dumps(e), (key, e)
+            assert stored_setting(key) == before, (key, "changed", stored_setting(key))
 
         step("load with no settings: the model's own")
         call(s, "load_local_model", {"path": MODEL})
@@ -344,53 +525,79 @@ def main() -> int:
         chat = s.invoke("create_chat", {"modelRef": f"local:{MODEL}"})
         # No tools: the reply is text, which a stopped reply keeps.
         s.invoke("set_chat_tools", {"chatId": chat["id"], "enabled": []})
-        s.execute(SEND, chat["id"], LONG_REPLY, None)
-        s.wait_for(lambda: busy(s)["chatTurns"] == 1, 120, "the reply to start")
-        s.wait_for(lambda: s.execute("return window.__text") > 20, 300, "the reply to stream")
-        s.execute(FIRE, "__reload1", "reload_local_model", {"force": True, "whenIdle": True})
-        s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"], 10, "reloadWaiting")
-        time.sleep(1.0)
-        assert s.execute("return window.__reload1") == "pending", "it did not wait"
-        assert the_server(home)[0] == pid and busy(s)["chatTurns"] == 1
-        s.invoke("cancel_pending_reload")
-        r = fired(s, "__reload1", 10)
-        assert r.get("ok") is False and r["error"]["code"] == "load_replaced", r
-        assert s.invoke("runtime_status")["reloadWaiting"] is False
-        assert the_server(home)[0] == pid and busy(s)["chatTurns"] == 1, "the reply was touched"
+
+        def change_went_ahead(slot):
+            nonlocal pid
+            went_ahead(s, chat["id"], slot)
+            pid = the_server(home)[0]
+            return False
+
+        def wait_then_cancel():
+            s.execute(FIRE, "__reload1", "reload_local_model", {"force": True, "whenIdle": True})
+            s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"] or not pending(s, "__reload1"), 10,
+                       "reloadWaiting while the reply streams")
+            time.sleep(1.0)
+            if not pending(s, "__reload1"):
+                return change_went_ahead("__reload1")
+            assert the_server(home)[0] == pid, "the model restarted while the change waited"
+            s.invoke("cancel_pending_reload")
+            r = fired(s, "__reload1", 10)
+            if r.get("ok"):  # the reply ended by itself just before Cancel landed
+                return change_went_ahead("__reload1")
+            assert r["error"]["code"] == "load_replaced", ("Cancel did not end the wait with load_replaced", r)
+            assert s.invoke("runtime_status")["reloadWaiting"] is False, "still shown as waiting after Cancel"
+            assert the_server(home)[0] == pid, "Cancel restarted the model"
+            return True
+
+        while_a_reply_streams(s, chat["id"], "Restart when it ends, Cancel", wait_then_cancel)
 
         step("Restart when it ends: goes ahead once the reply has ended")
-        s.execute(FIRE, "__reload2", "reload_local_model", {"force": True, "whenIdle": True})
-        s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"], 10, "reloadWaiting")
-        time.sleep(0.5)
-        assert s.execute("return window.__reload2") == "pending"
-        s.invoke("stop_generation")
-        r = fired(s, "__reload2", 600)
-        assert r.get("ok") is True, r
-        st = ready(s)
-        assert st["reloadWaiting"] is False and busy(s)["chatTurns"] == 0, (st, busy(s))
-        new_pid, _ = the_server(home)
-        assert new_pid != pid
-        pid = new_pid
-        fired(s, "__sent", 120)
+
+        def wait_then_stop():
+            nonlocal pid
+            s.execute(FIRE, "__reload2", "reload_local_model", {"force": True, "whenIdle": True})
+            s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"] or not pending(s, "__reload2"), 10,
+                       "reloadWaiting while the reply streams")
+            time.sleep(0.5)
+            if not pending(s, "__reload2"):
+                return change_went_ahead("__reload2")
+            s.invoke("stop_generation")
+            r = fired(s, "__reload2", 600)
+            assert r.get("ok") is True, ("the waiting reload did not go ahead once the reply ended", r)
+            st = ready(s)
+            assert st["reloadWaiting"] is False and busy(s)["chatTurns"] == 0, (st, busy(s))
+            new_pid = the_server(home)[0]
+            assert new_pid != pid, "the model did not restart"
+            pid = new_pid
+            fired(s, "__sent", 120)
+            return True
+
+        while_a_reply_streams(s, chat["id"], "Restart when it ends, goes ahead", wait_then_stop)
 
         step("Stop and restart: the reply is stopped first and keeps what it wrote")
-        # A follow-up to the first (stopped) reply, so both are on the chat's path.
-        leaf = s.invoke("get_chat", {"chatId": chat["id"]})["messages"][-1]
-        assert leaf["role"] == "assistant", leaf
-        s.execute(SEND, chat["id"], LONG_REPLY, leaf["id"])
-        s.wait_for(lambda: s.execute("return window.__text") > 20, 300, "the second reply to stream")
-        assert busy(s)["chatTurns"] == 1
-        call(s, "reload_local_model", {"force": True, "whenIdle": False})
-        assert busy(s)["chatTurns"] == 0
-        sent = fired(s, "__sent", 120)
-        print("    the stopped reply's call ended with:", sent)
-        st = ready(s)
-        new_pid, _ = the_server(home)
-        assert new_pid != pid
-        pid = new_pid
-        replies = [m for m in s.invoke("get_chat", {"chatId": chat["id"]})["messages"] if m["role"] == "assistant"]
+
+        def stop_and_restart():
+            nonlocal pid
+            if busy(s)["chatTurns"] != 1:
+                return False
+            call(s, "reload_local_model", {"force": True, "whenIdle": False})
+            assert busy(s)["chatTurns"] == 0, "Stop and restart did not stop the reply first"
+            sent = fired(s, "__sent", 120)
+            print("    the stopped reply's call ended with:", sent)
+            ready(s)
+            new_pid = the_server(home)[0]
+            assert new_pid != pid, "the model did not restart"
+            pid = new_pid
+            last = messages(s, chat["id"])[-1]
+            if last["status"] == "complete":  # it ended by itself just before; nothing to stop
+                return False
+            assert last["role"] == "assistant" and last["text"], ("the stopped reply lost what it wrote", last)
+            return True
+
+        while_a_reply_streams(s, chat["id"], "Stop and restart", stop_and_restart)
+        replies = [m for m in messages(s, chat["id"]) if m["role"] == "assistant"]
         print("    assistant messages:", [(m["status"], len(m["text"] or "")) for m in replies])
-        assert len(replies) == 2 and all(m["text"] for m in replies), replies
+        assert all(m["text"] for m in replies if m["status"] != "complete"), replies
 
         step("Unload remembers the model; Load again uses its saved settings")
         call(s, "unload_model")
@@ -417,6 +624,24 @@ def main() -> int:
         ready(s)
         args = the_server(home)[1]
         assert not {"-fa", "-ctk", "-ctv", "-lm"} & set(args), ("Save memory or Keep in memory without the setting", args)
+
+        step("settings saved while the model loads: Settings changed once it is ready")
+        check_settings_saved_while_loading(s)
+
+        step("removing the loaded model cancels a change that waits for it")
+        check_removing_the_loaded_model(s, home, chat["id"])
+
+        step("removing the unloaded model forgets it")
+        check_removing_the_unloaded_model(s)
+
+        step("the backend check with nothing loaded keeps \"Unloaded to free memory\"")
+        check_the_backend_check_keeps_the_unloaded_model(s, home)
+
+        step("a model picked during the backend check waits for it, then loads")
+        check_a_pick_waits_for_the_backend_check(s)
+
+        step("Stop and restart stops the backend check; the model picked is the one loaded")
+        check_stop_and_restart_stops_the_backend_check(s)
 
         step("the 0.0.4 command shape still loads exactly as given")
         old = {"ctx": 4096, "backend": None, "device": None}

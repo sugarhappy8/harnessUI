@@ -15,6 +15,7 @@ import {
   goodAtSentence,
   joinWords,
   languageWords,
+  licenseWords,
   pipelineWords,
   quantFromFile,
   sizeAnswer,
@@ -104,20 +105,32 @@ const INVISIBLE =
   /[\u{0}-\u{8}\u{B}-\u{1F}\u{7F}-\u{9F}\u{AD}\u{61C}\u{115F}\u{1160}\u{17B4}\u{17B5}\u{180B}-\u{180F}\u{200B}-\u{200F}\u{202A}-\u{202E}\u{2060}-\u{206F}\u{3164}\u{FE00}-\u{FE0F}\u{FEFF}\u{FFA0}\u{FFF9}-\u{FFFB}\u{1D173}-\u{1D17A}\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 
 /**
+ * Joiners and emoji selectors, kept in long free text (a model card): emoji and several
+ * scripts need them, and they cannot reorder text. Short fields escape them too.
+ */
+const JOINERS = new Set([0x200c, 0x200d, 0xfe0e, 0xfe0f]);
+
+/**
  * Untrusted text as it is shown: invisible characters made visible, at most `cap`
  * characters (counted whole, so a character outside the basic plane is never cut in half).
+ * `keepJoiners` is for a model card (see `JOINERS`); direction overrides and zero-width
+ * spaces are made visible there too.
  */
-export function shown(text: string, cap = 300): string {
-  const visible = text.replace(
-    INVISIBLE,
-    (ch) => `[U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}]`,
-  );
+export function shown(text: string, cap = 300, keepJoiners = false): string {
+  const visible = text.replace(INVISIBLE, (ch) => {
+    const code = ch.codePointAt(0) ?? 0;
+    if (keepJoiners && JOINERS.has(code)) return ch;
+    return `[U+${code.toString(16).toUpperCase().padStart(4, "0")}]`;
+  });
   const chars = Array.from(visible);
   return chars.length > cap ? `${chars.slice(0, cap - 1).join("")}…` : visible;
 }
 
-/** Text from outside the app: made visible, capped and isolated from the text around it. */
-function Outside(props: { text: string; cap?: number }) {
+/**
+ * Text from outside the app (Hugging Face, a model file, the catalog): made visible,
+ * capped and isolated from the text around it. Browse and the repository page use it too.
+ */
+export function Outside(props: { text: string; cap?: number }) {
   return <bdi>{shown(props.text, props.cap)}</bdi>;
 }
 
@@ -294,10 +307,12 @@ function languages(f: CompareFacts): Answer | null {
 }
 
 function madeFrom(f: CompareFacts): Answer | null {
-  const base = f.hub?.baseModel ?? f.baseCatalog?.baseModel ?? null;
-  if (base) return { node: <Outside text={base} />, source: SOURCE.uploader };
+  // An exact catalog match names the publisher's model it was made from; an uploader's
+  // claim is only a claim, so it comes second.
   const repo = cardRepo(f.catalog?.source ?? null);
-  return repo ? { node: <Outside text={repo} />, source: SOURCE.catalog } : null;
+  if (repo) return { node: <Outside text={repo} />, source: SOURCE.catalog };
+  const base = f.hub?.baseModel ?? f.baseCatalog?.baseModel ?? null;
+  return base ? { node: <Outside text={base} />, source: SOURCE.uploader } : null;
 }
 
 function released(f: CompareFacts): Answer | null {
@@ -313,7 +328,7 @@ function license(f: CompareFacts): Answer | null {
   return {
     node: (
       <>
-        <Outside text={l.name} />
+        <Outside text={licenseWords(l.name)} />
         {l.url && (
           <>
             {" "}
@@ -781,6 +796,15 @@ function Cell(props: { column: Column; answer: Answer | null }) {
   );
 }
 
+/**
+ * The model card "Show model card" opens: a Hugging Face column's own repository page; for
+ * a catalog model, the publisher's card its description is quoted from.
+ */
+export function modelCardUrl(f: CompareFacts): string | null {
+  if ("repo" in f.item) return f.hub?.cardUrl ?? f.catalog?.source ?? null;
+  return f.catalog?.source ?? f.hub?.cardUrl ?? null;
+}
+
 function columnTitle(c: Column, fallbackName: string | undefined): string {
   if (c.facts?.title) return c.facts.title;
   const e = c.entry;
@@ -806,7 +830,7 @@ function ColumnHead(props: {
   const file = f?.file ?? ("repo" in c.entry ? c.entry.file : null);
   const quant = f?.quant ?? f?.fileFacts?.quantization ?? quantFromFile(file);
   const fileLine = fileWords(quant) ?? (file ? (file.split("/").pop() ?? file) : null);
-  const cardUrl = f?.hub?.cardUrl ?? f?.catalog?.source ?? null;
+  const cardUrl = f ? modelCardUrl(f) : null;
   const problemText =
     c.problem === null
       ? null
@@ -939,6 +963,9 @@ function FileChange(props: {
 
 const FIT_LABEL = { green: "Fits", yellow: "Fits with limits", red: "Too large" } as const;
 
+/** Suggested models shown before "Show N more" (the catalog's best for this computer first). */
+export const SUGGESTED_SHOWN = 4;
+
 function Suggestions(props: {
   list: CatalogListEntry[] | null;
   error: ErrorInfo | null;
@@ -953,8 +980,12 @@ function Suggestions(props: {
         sameEntry(e, { repo: s.repo, file: s.file }) ||
         (s.installedPath !== null && sameEntry(e, { installedPath: s.installedPath })),
     );
+  const [all, setAll] = useState(false);
   const list = props.list?.filter((s) => !chosen(s)) ?? null;
   if (list && list.length === 0 && !props.error) return null;
+  // The best for this computer come first; the rest on request, so the table stays in view.
+  const visible = list && !all ? list.slice(0, SUGGESTED_SHOWN) : list;
+  const hidden = list ? list.length - (visible?.length ?? 0) : 0;
   return (
     <section aria-labelledby="compare-suggested" className="space-y-2">
       <div>
@@ -966,7 +997,7 @@ function Suggestions(props: {
       {props.error && <p className="text-xs text-fg-muted">Suggestions could not be loaded. {props.error.message}</p>}
       {!list && !props.error && <p className="text-xs text-fg-muted">Loading suggestions…</p>}
       <ul className="space-y-2">
-        {list?.map((s) => {
+        {visible?.map((s) => {
           const sentence = goodAtSentence(s.catalog.goodAt);
           return (
             <li key={s.catalog.id} className="flex items-start gap-3 rounded-md border border-border px-3 py-2 text-sm">
@@ -997,6 +1028,16 @@ function Suggestions(props: {
           );
         })}
       </ul>
+      {hidden > 0 && (
+        <button type="button" className="text-xs text-accent underline" onClick={() => setAll(true)}>
+          Show {hidden} more suggested {hidden === 1 ? "model" : "models"}
+        </button>
+      )}
+      {all && list && list.length > SUGGESTED_SHOWN && (
+        <button type="button" className="text-xs text-accent underline" onClick={() => setAll(false)}>
+          Show fewer
+        </button>
+      )}
     </section>
   );
 }

@@ -5,7 +5,8 @@
 //!   on an *exact* match: the same SHA-256 for every file (every shard of a split model),
 //!   the same repository and file path, or the catalog id (an id saved at download
 //!   counts, unless the file's SHA-256 says it is another file). An installed model keeps
-//!   only its first file's SHA-256, which decides alone only against a single file. A Hugging Face repository whose uploader names a catalog model's
+//!   only its first file's SHA-256, which decides alone only against a single file. A
+//!   Hugging Face repository whose uploader names a catalog model's
 //!   source as its base model gets that entry's text only as [`BaseModelFacts`], shown
 //!   under "The uploader says this is made from …", stripped of the capabilities, sizes and
 //!   licence, and never used for the fit.

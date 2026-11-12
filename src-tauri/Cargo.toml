@@ -40,6 +40,8 @@ policy = { workspace = true }
 tools = { workspace = true }
 browser = { workspace = true }
 search = { workspace = true }
+# Reverse engineering with rea (item5-spec.md): pinned downloads, rea's process, the `reverse` server.
+reverse = { workspace = true }
 computer = { workspace = true }
 mcp-host = { workspace = true }
 # Signed, opt-in updates (registered only when the build carries the updater key).

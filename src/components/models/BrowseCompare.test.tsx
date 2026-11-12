@@ -152,3 +152,53 @@ describe("A repository page", () => {
     expect(openUrl).toHaveBeenCalledWith("https://huggingface.co/someone/alpha-GGUF");
   });
 });
+
+describe("Uploader text on Browse and a repository page", () => {
+  it("names a license in words and makes hidden characters in it visible", async () => {
+    ipcMock.hubSearch.mockResolvedValue({
+      items: [
+        { id: "someone/alpha-GGUF", downloads: 10, likes: 1, gated: "no", license: "apache-2.0", lastModified: null, pipelineTag: null },
+        { id: "someone/beta-GGUF", downloads: 5, likes: 0, gated: "no", license: "free\u202Eesu", lastModified: null, pipelineTag: null },
+      ],
+      next: null,
+    });
+    render(<Browse onStarted={() => undefined} />);
+    await settle();
+    const rows = screen.getAllByRole("listitem");
+    expect(rows[0]!.textContent).toContain("Apache 2.0");
+    expect(rows[1]!.textContent).toContain("free[U+202E]esu");
+    expect(document.body.textContent).not.toContain("\u202E");
+  });
+
+  it("shows the model card and the file's fields as text, with direction overrides visible", async () => {
+    ipcMock.hubRepo.mockResolvedValue({
+      ...VIEW,
+      architecture: "arch\u200Bname",
+      license: "other",
+      variants: [variant("Q4\u202EK_M")],
+      card: '<b>bold</b> <img src=x onerror="alert(1)"> safe\u202Etxt.exe ok \u{1F680}\uFE0F done',
+    });
+    render(<RepoDetail repoId="someone/alpha-GGUF" onBack={() => undefined} onStarted={() => undefined} />);
+    await settle();
+    expect(screen.getByText("arch[U+200B]name")).toBeTruthy();
+    expect(screen.getByText("Another license (read the model card)")).toBeTruthy();
+    expect(screen.getByText("Q4[U+202E]K_M")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add to comparison: Q4[U+202E]K_M" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show model card" }));
+    const card = document.querySelector("pre")!;
+    expect(card.querySelector("b, img")).toBeNull();
+    expect(card.textContent).toContain('<b>bold</b> <img src=x onerror="alert(1)">');
+    expect(card.textContent).toContain("safe[U+202E]txt.exe");
+    // An emoji keeps its presentation selector in a card.
+    expect(card.textContent).toContain("\u{1F680}\uFE0F done");
+    expect(document.body.textContent).not.toContain("\u202E");
+    expect(document.body.textContent).not.toContain("\u200B");
+  });
+
+  it("says token counts with words", async () => {
+    render(<RepoDetail repoId="someone/alpha-GGUF" onBack={() => undefined} onStarted={() => undefined} />);
+    await settle();
+    expect(screen.getByText("remembers up to 32,768 tokens, about 24,000 words")).toBeTruthy();
+    expect(screen.getByText("Memory estimates assume the model remembers 8,192 tokens, about 6,000 words.")).toBeTruthy();
+  });
+});

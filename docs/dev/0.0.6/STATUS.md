@@ -78,6 +78,10 @@ one starts from this file and `README.md`.
   `integration-todo.md`); WP4c done; WP6, WP4a in fixing; WP1a reviewed, WP1b in review,
   WP2 developed; WP3a in review, WP3b and WP5b developed, WP5a in development; WP9a and
   WP10c in development.
+- 20:51 UTC check: done: WP7, WP4c, WP4a, WP10c (each reviewed, fixed, checked). WP6 in a
+  second fix round; WP1a fixed (being checked), WP1b fixing, WP2 reviewed; WP3a, WP3b, WP5b
+  reviewed, WP5a in review; WP4b finishing against the real data; WP9a in development.
+  Disk was down to 6.6 GB: old scratch files removed.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

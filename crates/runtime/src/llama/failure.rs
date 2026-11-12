@@ -87,7 +87,8 @@ impl LoadFailure {
     /// q8_0 memory without flash attention) or as a crash. A failure to allocate the
     /// weights ([`LoadFailure::OutOfMemory`]) happens before the context exists, so Save
     /// memory cannot cause it; turning it off would only need more memory. The supervisor
-    /// asks this only on a graphics backend: the processor can always do Save memory.
+    /// asks this only while a graphics card is in use; anywhere else it retries without
+    /// Save memory only when the log shows the model refusing it ([`save_memory_refused`]).
     pub fn save_memory_may_be_the_cause(&self) -> bool {
         matches!(self, Self::ContextTooLarge | Self::Unknown)
     }
@@ -175,6 +176,39 @@ pub fn classify(stderr_tail: &[String], exit_code: Option<i32>) -> LoadFailure {
         return LoadFailure::ModelFileInvalid;
     }
     LoadFailure::Unknown
+}
+
+/// Lines the pinned build logs when the **model** cannot take Save memory's settings
+/// (`-fa on -ctk q8_0 -ctv q8_0`), on every backend, the processor included
+/// (`llama_init_from_model` and `llama_context` in `src/llama-context.cpp` at b12110):
+/// - a q8_0 block of 32 values does not divide the model's attention head size (80 in
+///   some model families): "K cache type q8_0 with block size 32 does not divide
+///   n_embd_head_k=80", and the same for V;
+/// - the model cannot use flash attention, which a quantized V memory needs: "flash_attn
+///   is not compatible with Grok - forcing off" followed by "quantized V cache requires
+///   flash_attn to be enabled", or "quantized V cache was requested, but this requires
+///   Flash Attention".
+///
+/// Each is followed by "failed to create context", so [`classify`] still says
+/// [`LoadFailure::ContextTooLarge`]. Not here: "enabling flash_attn since it is required
+/// for quantized V cache", which only `-fa auto` prints.
+const SAVE_MEMORY_REFUSALS: &[&str] = &[
+    "does not divide n_embd_head",
+    "quantized v cache requires flash_attn",
+    "quantized v cache was requested, but this requires flash attention",
+];
+
+/// Whether the last lines of a failed load show the model refusing Save memory
+/// ([`SAVE_MEMORY_REFUSALS`]). Then a retry without it can load the model on any backend,
+/// while for a plain memory failure on the processor it would only need more memory
+/// (0.0.6 D2c, see [`Supervisor`](super::server::Supervisor)).
+pub fn save_memory_refused(stderr_tail: &[String]) -> bool {
+    stderr_tail.iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        SAVE_MEMORY_REFUSALS
+            .iter()
+            .any(|needle| lower.contains(needle))
+    })
 }
 
 /// Extracts `X` from `... invalid device: X`.
@@ -380,6 +414,37 @@ mod tests {
             );
             assert_eq!(failure.is_out_of_memory(), memory, "{failure:?}");
         }
+    }
+
+    /// The lines the pinned build (b12110, `llama_init_from_model` and `llama_context` in
+    /// `src/llama-context.cpp`) logs when the model refuses flash attention with a q8_0
+    /// memory, on any backend; and lines that look alike but are not a refusal.
+    #[test]
+    fn save_memory_refusals_from_the_pinned_build() {
+        for line in [
+            "E llama_init_from_model: K cache type q8_0 with block size 32 does not divide n_embd_head_k=80",
+            "E llama_init_from_model: V cache type q8_0 with block size 32 does not divide n_embd_head_v=80",
+            "E llama_init_from_model: quantized V cache requires flash_attn to be enabled",
+            "E llama_init_from_model: failed to initialize the context: quantized V cache was requested, but this requires Flash Attention",
+        ] {
+            let tail = lines(&format!(
+                "I llama_context: constructing llama_context\n{line}\nE common_init_result: failed to create context with model 'm.gguf'"
+            ));
+            assert!(save_memory_refused(&tail), "{line}");
+            // The classification is unchanged: the context could not be made.
+            assert_eq!(classify(&tail, Some(1)), LoadFailure::ContextTooLarge);
+        }
+        for line in [
+            // A warning; the refusal, if any, is the next line.
+            "W llama_init_from_model: flash_attn is not compatible with Grok - forcing off",
+            // Printed only with `-fa auto`, never with Save memory's `-fa on`.
+            "I llama_init_from_model: enabling flash_attn since it is required for quantized V cache",
+            "E llama_init_from_model: failed to create context",
+            "llama_kv_cache: size =  127.00 MiB (  2048 cells,  28 layers,  1/1 seqs), K (q8_0):   63.50 MiB, V (q8_0):   63.50 MiB",
+        ] {
+            assert!(!save_memory_refused(&lines(line)), "{line}");
+        }
+        assert!(!save_memory_refused(&[]));
     }
 
     /// By the time an out-of-memory failure is shown, the app has already tried less of

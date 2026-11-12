@@ -1,0 +1,2 @@
+Renderer Utilization %	35
+Alloc system memory	3221225472

@@ -11,29 +11,42 @@
 //! everything there. [`find`] says why a line is such a line, if it is:
 //!
 //! - (a) the program, also after a wrapper (`env`, `timeout`, `sudo`, `cmd /c`,
-//!   `Start-Process`, `taskset`, `tmux`, `firejail`, a shell given a command, …), after
-//!   `find -exec` or `fd -x`, inside code handed to an interpreter (`python3 -c
-//!   "os.system('claude …')"`), or as a locator finds it (`$(which claude)`), is a coding
-//!   assistant ([`ASSISTANTS`], with `.exe`, `.cmd` and the like);
+//!   `Start-Process`, `taskset`, `tmux`, `firejail`, `cross-env`, `valgrind`, a shell given
+//!   a command, …), after a word of any program that runs what follows (`uv run`,
+//!   `bundle exec`, `kubectl exec pod --`, `docker run img`), after `find -exec` or
+//!   `fd -x`, inside code handed to an interpreter (`python3 -c "os.system('claude …')"`),
+//!   fed to a shell on its standard input (`echo 'claude …' | sh`), or as a locator finds
+//!   it (`$(which claude)`, `(Get-Command claude).Source`), is a coding assistant
+//!   ([`ASSISTANTS`], with `.exe`, `.cmd` and the like, also written as a pattern the
+//!   shell expands: `cl?ude`, `clau*`, `{claude,}`);
 //! - (b) such a name is the package handed to a package runner (`npx`, `npm exec`,
-//!   `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`), as `claude`, `@openai/codex`,
-//!   `@google/gemini-cli`, `aider-chat` and the like, or the program a package manager is
-//!   handed by name (`yarn claude`, `pnpm codex`, `bun run claude`);
+//!   `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`, `nix run`), as `claude`,
+//!   `@openai/codex`, `@google/gemini-cli`, `aider-chat`, `nixpkgs#claude-code` and the
+//!   like, or the program a package manager is handed by name (`yarn claude`,
+//!   `pnpm codex`, `bun run claude`);
 //! - (c) `node`, `bun` or `deno` is handed a script inside one of the assistants' npm
 //!   packages ([`PACKAGES`]);
 //! - (d) a token that turns off an assistant's permission checks ([`BYPASS_TOKENS`])
-//!   appears anywhere on the line, quoted or not.
+//!   appears anywhere on the line, quoted or not, also split over two lines.
 //!
 //! A line that cannot be broken down into plain commands is read as text: the first word
 //! of every command in it is checked the same way, as written, with its quotes taken away,
-//! and with its escapes taken away too (the POSIX shell runs `cod\ex` as `codex`).
+//! and with its escapes taken away too (the POSIX shell runs `cod\ex` as `codex`), each
+//! with two lines joined by a backslash read as one and with braces expanded. Reading a
+//! line many ways has a limit of work; a line beyond it counts as starting an assistant.
 //!
-//! Known limit: this reads names. A copy of one of these programs under another name, or
+//! Known limits: this reads names. A copy of one of these programs under another name, or
 //! a link to it (`ln -s "$(which claude)" helper; ./helper -p …`), is not seen, nor is code
 //! in a script file or code that builds the name from pieces (`"cl" + "aude"`,
-//! `$'\x63laude'`).
+//! `$'\x63laude'`, `$c='claude'; & $c`), a program named by a setting
+//! (`git -c core.pager=claude`), a project's own script or task (`make claude`,
+//! `npm run claude`), a program that runs on another computer (`ssh host claude`), or a
+//! program not listed here that runs the next word it is given without a word such as
+//! `run`, `exec` or `--` before it.
 
-use crate::command::{ELEVATION, INLINE, Parsed, WRAPPERS, program_name};
+use std::cell::Cell;
+
+use crate::command::{ELEVATION, INLINE, Parsed, READ_ONLY, WRAPPERS, join_lines, program_name};
 
 /// The program names of coding assistants (D8 as amended for 0.0.6 allows them here).
 pub const ASSISTANTS: &[&str] = &[
@@ -82,8 +95,9 @@ const RUNNER_SUBCOMMANDS: &[(&str, &[&str])] = &[
 ];
 
 /// Programs that change how another program runs (processor, priority, limits, terminal,
-/// sandbox, namespace, tracing, clock) and then run it, beyond the classifier's wrapper
-/// lists. Only this rule follows them.
+/// sandbox, namespace, tracing, clock, environment, network, debugger, job queue, file
+/// watcher) and then run it, beyond the classifier's wrapper lists. Only this rule follows
+/// them: any word among their arguments that names an assistant counts.
 const PROGRAM_RUNNERS: &[&str] = &[
     "taskset",
     "numactl",
@@ -107,7 +121,130 @@ const PROGRAM_RUNNERS: &[&str] = &[
     "ltrace",
     "faketime",
     "corepack",
+    // Review of 0.0.6, round 2.
+    "valgrind",
+    "torsocks",
+    "tsocks",
+    "proxychains",
+    "proxychains4",
+    "fakeroot",
+    "fakechroot",
+    "proot",
+    "ssh-agent",
+    "dbus-launch",
+    "setarch",
+    "linux32",
+    "linux64",
+    "chronic",
+    "ifne",
+    "cpulimit",
+    "entr",
+    "lckdo",
+    "vglrun",
+    "prime-run",
+    "optirun",
+    "primusrun",
+    "gamemoderun",
+    "nq",
+    "ts",
+    "tsp",
+    "pueue",
+    "expect",
+    "hyperfine",
+    "sandbox-exec",
+    "conhost",
+    "wt",
+    "cross-env",
+    "cross-env-shell",
+    "dotenv",
+    "dotenvx",
+    "env-cmd",
+    "nodemon",
+    "concurrently",
+    "watchexec",
+    "nix-shell",
+    "gosu",
+    "su-exec",
+    "setpriv",
+    "chpst",
+    "tini",
+    "dumb-init",
+    "systemd-nspawn",
+    "systemd-inhibit",
+    "schroot",
+    "perf",
+    "rr",
+    "heaptrack",
+    "xterm",
+    "uxterm",
+    "gnome-terminal",
+    "konsole",
+    "kitty",
+    "alacritty",
+    "wezterm",
+    "foot",
+    "terminator",
+    "tilix",
+    "x-terminal-emulator",
+    "winpty",
+    "mintty",
+    "dtach",
+    "abduco",
+    "zellij",
+    "byobu",
+    "steam-run",
+    "flatpak-spawn",
 ];
+
+/// Words of a program's own after which it runs the program that follows (`uv run`,
+/// `bundle exec`, `kubectl exec`, `distrobox enter`, `nix develop`, `wt nt`), for any
+/// program: they count among its first three plain words.
+const RUN_WORDS: &[&str] = &[
+    "run",
+    "exec",
+    "x",
+    "dlx",
+    "enter",
+    "shell",
+    "develop",
+    "spawn",
+    "launch",
+    "start",
+    "nt",
+    "new-tab",
+    "sp",
+    "split-pane",
+    "new-window",
+    "neww",
+    "split-window",
+    "splitw",
+    "new-session",
+];
+
+/// Options after which any program runs what follows (`kubectl exec pod -- claude`,
+/// `nodemon --exec '…'`, `gdb --args claude`).
+const LONG_RUN_FLAGS: &[&str] = &[
+    "--",
+    "--command",
+    "--cmd",
+    "--run",
+    "--exec",
+    "--execute",
+    "--args",
+];
+
+/// Short options that hand a program a command (`nix develop -c claude`, `vagrant ssh -c
+/// '…'`, `xterm -e claude`): only the next word counts, since these letters mean other
+/// things to other programs.
+const SHORT_RUN_FLAGS: &[&str] = &["-c", "-e", "-x"];
+
+/// Programs whose `run` or `--` means something else: npm runs a project's scripts (its
+/// programs run through `npm exec`, rule (b)), and git's `--` comes before file names.
+const OWN_RUN_WORDS: &[&str] = &["npm", "git"];
+
+/// Programs that run the commands they read on standard input (`at now <<< '…'`), besides
+/// shells.
+const INPUT_RUNNERS: &[&str] = &["at", "batch"];
 
 /// Programs that hand each file they find to a program named after a flag
 /// (`find . -exec claude …`, `fd -x claude …`).
@@ -136,7 +273,8 @@ const BIN_RUNNER_VALUE_FLAGS: &[&str] = &[
     "--config",
 ];
 
-/// Programs that print where a program is (`$(which claude) -p …`).
+/// Programs that print where a program is, or its name (`$(which claude) -p …`,
+/// `$(echo claude) -p …`).
 const LOCATORS: &[&str] = &[
     "which",
     "where",
@@ -145,6 +283,9 @@ const LOCATORS: &[&str] = &[
     "command",
     "get-command",
     "gcm",
+    "echo",
+    "printf",
+    "write-output",
 ];
 
 /// Programs that run a JavaScript file they are handed.
@@ -179,10 +320,26 @@ pub fn find(line: &str, parsed: &Parsed) -> Option<String> {
             "the command contains {token}, which turns off a coding assistant's permission checks"
         ));
     }
+    WORK.with(|w| w.set(0));
     match parsed {
-        Parsed::Plain(commands) => commands
-            .iter()
-            .find_map(|c| command(&c.program, &c.args, 0)),
+        Parsed::Plain(commands) => {
+            if let Some(why) = commands
+                .iter()
+                .find_map(|c| command(&c.program, &c.args, 0))
+            {
+                return Some(why);
+            }
+            // A command line fed to a shell on its standard input (`echo 'claude -p x' | sh`):
+            // what the other commands print may be what it runs.
+            let fed = |c: &&crate::command::SimpleCommand| reads_commands(&c.program, &c.args);
+            if commands.iter().any(|c| fed(&c)) {
+                return commands
+                    .iter()
+                    .filter(|c| !fed(c))
+                    .find_map(|c| fed_line(&c.args, 1));
+            }
+            None
+        }
         Parsed::Complex { .. } => in_text(line, 0),
     }
 }
@@ -190,20 +347,201 @@ pub fn find(line: &str, parsed: &Parsed) -> Option<String> {
 /// The first bypass token on the line, as listed.
 pub fn bypass_token(line: &str) -> Option<&'static str> {
     let lower = line.to_lowercase();
-    let unquoted: String = lower
+    // Two lines joined by an escape (`\`, PowerShell's backtick, cmd's caret) as one.
+    let joined = join_escaped_lines(&lower);
+    let unquoted: String = joined
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '\\' | '`' | '^'))
         .collect();
     BYPASS_TOKENS.iter().copied().find(|token| {
         let token = token.to_lowercase();
-        lower.contains(&token) || unquoted.contains(&token)
+        lower.contains(&token) || joined.contains(&token) || unquoted.contains(&token)
     })
 }
 
-/// Whether a word, as a program, is a coding assistant.
+/// `text` with every escape at the end of a line taken away with the line break: a
+/// backslash (POSIX), a backtick (PowerShell) or a caret (cmd). More than any one shell
+/// joins; only used to find more.
+fn join_escaped_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(c, '\\' | '`' | '^') {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+                continue;
+            }
+            if chars.peek() == Some(&'\r') {
+                let mut ahead = chars.clone();
+                ahead.next();
+                if ahead.peek() == Some(&'\n') {
+                    chars.next();
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A word as a name: white space and quotes around it, and cmd's and PowerShell's escapes
+/// (`c^laude`, ``c`laude``) inside it, taken away.
+fn clean(word: &str) -> String {
+    word.trim()
+        .trim_matches(|c| matches!(c, '\'' | '"' | '`'))
+        .chars()
+        .filter(|c| !matches!(c, '^' | '`'))
+        .collect()
+}
+
+/// Whether a word among a program's arguments names a coding assistant: by name, or as a
+/// pattern the shell expands to one (`cl?ude`, `~/.local/bin/clau*`) that spells at
+/// least two letters of it.
 fn is_assistant(word: &str) -> bool {
-    let word = word.trim_matches(|c| matches!(c, '\'' | '"' | '`'));
-    !word.is_empty() && ASSISTANTS.contains(&program_name(word).as_str())
+    names_assistant(word, 2)
+}
+
+/// Whether a word in the program's place names a coding assistant: by name, or as any
+/// pattern the shell can expand to one.
+fn is_assistant_program(word: &str) -> bool {
+    names_assistant(word, 0)
+}
+
+/// Whether `word` names an assistant, as written or as a pattern with at least `letters`
+/// fixed characters in its last part.
+fn names_assistant(word: &str, letters: usize) -> bool {
+    let word = clean(word);
+    if word.is_empty() {
+        return false;
+    }
+    let name = program_name(&word);
+    if ASSISTANTS.contains(&name.as_str()) {
+        return true;
+    }
+    let last = word
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&word)
+        .to_lowercase();
+    if !last.contains(['*', '?', '[']) || fixed_chars(&last) < letters {
+        return false;
+    }
+    let pattern: Vec<char> = last.chars().collect();
+    ASSISTANTS.iter().any(|a| {
+        ["", ".exe", ".cmd", ".bat", ".com", ".ps1"]
+            .iter()
+            .any(|ext| {
+                let candidate: Vec<char> = format!("{a}{ext}").chars().collect();
+                glob_matches(&pattern, &candidate)
+            })
+    })
+}
+
+/// How many characters of a pattern are fixed (a `[…]` class counts as one).
+fn fixed_chars(pattern: &str) -> usize {
+    let mut count = 0;
+    let mut in_class = false;
+    for c in pattern.chars() {
+        match c {
+            '[' if !in_class => in_class = true,
+            ']' if in_class => {
+                in_class = false;
+                count += 1;
+            }
+            '*' | '?' if !in_class => {}
+            _ if !in_class => count += 1,
+            _ => {}
+        }
+    }
+    count
+}
+
+/// Whether a shell pattern (`*`, `?`, `[…]` with `!` or `^` and ranges) matches `name`.
+fn glob_matches(pattern: &[char], name: &[char]) -> bool {
+    let (mut p, mut n) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        if let Some(&c) = pattern.get(p) {
+            match c {
+                '*' => {
+                    star = Some((p, n));
+                    p += 1;
+                    continue;
+                }
+                '?' => {
+                    p += 1;
+                    n += 1;
+                    continue;
+                }
+                '[' => {
+                    if let Some((matched, next)) = class_matches(pattern, p, name[n]) {
+                        if matched {
+                            p = next;
+                            n += 1;
+                            continue;
+                        }
+                    } else if name[n] == '[' {
+                        p += 1;
+                        n += 1;
+                        continue;
+                    }
+                }
+                '\\' if pattern.get(p + 1) == Some(&name[n]) => {
+                    p += 2;
+                    n += 1;
+                    continue;
+                }
+                c if c == name[n] => {
+                    p += 1;
+                    n += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        match star {
+            Some((sp, sn)) => {
+                p = sp + 1;
+                n = sn + 1;
+                star = Some((sp, sn + 1));
+            }
+            None => return false,
+        }
+    }
+    pattern[p..].iter().all(|&c| c == '*')
+}
+
+/// Whether the class `[…]` at `start` of a pattern matches `c`, and where the pattern goes
+/// on after it; `None` when it has no closing bracket (then `[` is a plain character).
+fn class_matches(pattern: &[char], start: usize, c: char) -> Option<(bool, usize)> {
+    let mut i = start + 1;
+    let negated = matches!(pattern.get(i), Some('!' | '^'));
+    if negated {
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    loop {
+        let &d = pattern.get(i)?;
+        if d == ']' && !first {
+            return Some((matched != negated, i + 1));
+        }
+        first = false;
+        if pattern.get(i + 1) == Some(&'-') && pattern.get(i + 2).is_some_and(|&e| e != ']') {
+            let e = pattern[i + 2];
+            if d <= c && c <= e {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if d == c {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
 }
 
 /// Whether a word holds the path of a script inside an assistant's npm package.
@@ -224,6 +562,14 @@ fn names_assistant_package(spec: &str) -> bool {
     }
     if names_package_path(&spec) {
         return true;
+    }
+    // Nix's installables (`nixpkgs#claude-code`, `github:owner/repo#codex`) and Deno's npm
+    // packages (`npm:aider-chat`): the package after the `#` or the `npm:`.
+    if let Some((_, package)) = spec.rsplit_once('#') {
+        return names_assistant_package(package);
+    }
+    if let Some(package) = spec.strip_prefix("npm:") {
+        return names_assistant_package(package);
     }
     // The version after the name: `@scope/name@1.2`, `name@latest`.
     let without_version = match spec.strip_prefix('@') {
@@ -280,10 +626,11 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
     if depth > MAX_DEPTH {
         return None;
     }
-    let name = program_name(program.trim_matches(|c| matches!(c, '\'' | '"' | '`')));
+    let name = program_name(&clean(program));
     let name = name.as_str();
-    // (a) The program itself.
-    if ASSISTANTS.contains(&name) {
+    // (a) The program itself, also written as a pattern the shell expands (`cl?ude`).
+    if is_assistant_program(program) {
+        let program = program.trim();
         return Some(format!(
             "{program} is a coding assistant: it works online with your account and can change files"
         ));
@@ -328,7 +675,17 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
     // (a) After a wrapper, or inside a command handed to a shell.
     let wraps = is_wrapper(name);
     if !wraps && !SHELLS.contains(&name) {
-        return None;
+        // A program that runs the commands it reads (`at now <<< 'claude -p x'`).
+        if INPUT_RUNNERS.contains(&name)
+            && let Some(why) = args
+                .iter()
+                .filter(|a| a.contains(char::is_whitespace))
+                .find_map(|a| in_text(a, depth + 1))
+        {
+            return Some(why);
+        }
+        // Any program that runs what follows a word such as `run`, `exec` or `--`.
+        return after_a_run_word(program, name, args, depth);
     }
     if wraps
         && let Some(found) = words(args)
@@ -354,8 +711,20 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
     {
         return Some(why);
     }
+    // The program a wrapper runs, in the place after its own options and settings
+    // (`env nix run nixpkgs#claude-code`, `sudo kubectl exec pod -- codex`).
+    let program_at = args
+        .iter()
+        .position(|a| !a.starts_with('-') && !a.contains('='))
+        .filter(|_| wraps);
+    if let Some(at) = program_at
+        && let Some(why) = command(&args[at], &args[at + 1..], depth + 1)
+    {
+        return Some(why);
+    }
     // The first program among the arguments that can run another one: a runner, a script
-    // host, a shell or another wrapper (`env npx …`, `timeout 9 node …`).
+    // host, a shell or another wrapper (`env npx …`, `timeout 9 node …`), unless it was
+    // just read in the program's place.
     let at = args.iter().position(|a| {
         let n = program_name(a);
         RUNNERS.contains(&n.as_str())
@@ -364,7 +733,108 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
             || SHELLS.contains(&n.as_str())
             || is_wrapper(&n)
     })?;
+    if Some(at) == program_at {
+        return None;
+    }
     command(&args[at], &args[at + 1..], depth + 1)
+}
+
+/// Why a program that runs what follows one of its words (`uv run claude`, `bundle exec
+/// codex`, `kubectl exec pod -- claude`, `docker run img claude`, `nix develop -c claude`)
+/// starts a coding assistant, if it does. The word is one of [`RUN_WORDS`] among its first
+/// three plain words, or one of [`LONG_RUN_FLAGS`] anywhere; from there on, every plain
+/// word that names an assistant (or its package, or holds a command line that starts one)
+/// counts, except the value of a long option (`--model claude`). After one of
+/// [`SHORT_RUN_FLAGS`] only the next word counts. Programs that only read are left out.
+fn after_a_run_word(program: &str, name: &str, args: &[String], depth: usize) -> Option<String> {
+    if OWN_RUN_WORDS.contains(&name) || READ_ONLY.contains(&name) {
+        return None;
+    }
+    let runs = |word: &str| -> Option<String> {
+        if is_assistant(word) || names_assistant_package(word) {
+            let found = word.trim();
+            return Some(format!(
+                "{program} runs {found}, a coding assistant that works online with your account"
+            ));
+        }
+        if word.contains(char::is_whitespace) {
+            return in_text(word, depth + 1);
+        }
+        None
+    };
+    let mut plain = 0;
+    let mut started = false;
+    let mut skip_value = false;
+    for (i, arg) in args.iter().enumerate() {
+        let lower = arg.to_lowercase();
+        if SHORT_RUN_FLAGS.contains(&lower.as_str()) {
+            if let Some(why) = args.get(i + 1).and_then(|next| runs(next)) {
+                return Some(why);
+            }
+            skip_value = false;
+            continue;
+        }
+        if let Some((flag, _)) = lower.split_once('=')
+            && LONG_RUN_FLAGS.contains(&flag)
+        {
+            if let Some(why) = runs(&arg[flag.len() + 1..]) {
+                return Some(why);
+            }
+            started = true;
+            skip_value = false;
+            continue;
+        }
+        if LONG_RUN_FLAGS.contains(&lower.as_str()) {
+            started = true;
+            skip_value = false;
+            continue;
+        }
+        if arg.starts_with("--") {
+            skip_value = !arg.contains('=');
+            continue;
+        }
+        if arg.starts_with('-') {
+            skip_value = false;
+            continue;
+        }
+        plain += 1;
+        if !started {
+            started = plain <= 3 && RUN_WORDS.contains(&lower.as_str());
+            continue;
+        }
+        if std::mem::take(&mut skip_value) {
+            continue;
+        }
+        if let Some(why) = runs(arg) {
+            return Some(why);
+        }
+    }
+    None
+}
+
+/// Whether a command runs the commands it reads on standard input: a shell handed no
+/// command or script (`sh`, `bash -s`, `zsh -`, `pwsh -Command -`, `cmd`), or `at` or
+/// `batch` without `-f`.
+fn reads_commands(program: &str, args: &[String]) -> bool {
+    let name = program_name(&clean(program));
+    if INPUT_RUNNERS.contains(&name.as_str()) {
+        return !args.iter().any(|a| a == "-f");
+    }
+    if !SHELLS.contains(&name.as_str()) {
+        return false;
+    }
+    let option = |a: &String| a.starts_with('-') || (name == "cmd" && a.starts_with('/'));
+    args.iter().any(|a| a == "-s") || args.iter().all(|a| a == "-" || option(a))
+}
+
+/// Why the words of a command whose output a shell runs start a coding assistant, if they
+/// do: each word holding a command line, and the words together (`echo claude -p x`).
+fn fed_line(words: &[String], depth: usize) -> Option<String> {
+    words
+        .iter()
+        .filter(|w| w.contains(char::is_whitespace))
+        .find_map(|w| in_text(w, depth))
+        .or_else(|| in_text(&words.join(" "), depth))
 }
 
 /// What a package runner is handed, if `name` is one: `npx …`, or what follows the
@@ -480,17 +950,33 @@ fn quoted_strings(code: &str) -> Vec<String> {
 fn resolve_locators(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
+    // Whether the command being read has a word before the current point.
+    let mut has_word = false;
+    let after = |mut has_word: bool, text: &str| {
+        for c in text.chars() {
+            if ";|&\n{()".contains(c) {
+                has_word = false;
+            } else if !c.is_whitespace() {
+                has_word = true;
+            }
+        }
+        has_word
+    };
     while let Some(open) = rest.find(['(', '`']) {
         let paren = rest[open..].starts_with('(');
         let close = if paren { ')' } else { '`' };
-        let after = &rest[open + 1..];
-        let Some(end) = after.find(close) else {
+        let after_open = &rest[open + 1..];
+        let Some(end) = after_open.find(close) else {
             break;
         };
-        // PowerShell's `( … )` gives a value; only `&` or `.` in front of it runs it.
+        let head = &rest[..open];
+        let word_before = after(has_word, head.strip_suffix('$').unwrap_or(head));
+        // PowerShell's `( … )` gives a value: `&` or `.` in front of it runs it, and as an
+        // argument it can be the program another one runs (`Start-Process -FilePath
+        // (Get-Command claude).Source`). In the program's own place it is only a value.
         let runs =
-            !paren || rest[..open].ends_with('$') || rest[..open].trim_end().ends_with(['&', '.']);
-        let words = shell_words(&after[..end]);
+            !paren || head.ends_with('$') || head.trim_end().ends_with(['&', '.']) || word_before;
+        let words = shell_words(&after_open[..end]);
         let found = match words.split_first() {
             Some((first, more)) if runs && LOCATORS.contains(&program_name(first).as_str()) => {
                 more.iter().find(|w| !w.starts_with('-') && is_assistant(w))
@@ -499,16 +985,17 @@ fn resolve_locators(text: &str) -> String {
         };
         match found {
             Some(name) => {
-                let head = &rest[..open];
                 out.push_str(head.strip_suffix('$').unwrap_or(head));
                 out.push(' ');
                 out.push_str(name);
                 out.push(' ');
-                rest = &after[end + 1..];
+                has_word = true;
+                rest = &after_open[end + 1..];
             }
             None => {
                 out.push_str(&rest[..=open]);
-                rest = after;
+                has_word = after(has_word, &rest[..=open]);
+                rest = after_open;
             }
         }
     }
@@ -516,10 +1003,123 @@ fn resolve_locators(text: &str) -> String {
     out
 }
 
+/// The words a word gives once the shell expands its braces (`{claude,}` gives `claude`,
+/// `c{la,}ude` gives `claude cude`); a word without a brace group with a comma is itself.
+/// At most [`MAX_BRACE_WORDS`] words; what is left after that stays as written.
+fn brace_words(word: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut todo = vec![word.to_string()];
+    while let Some(word) = todo.pop() {
+        if out.len() + todo.len() >= MAX_BRACE_WORDS {
+            out.push(word);
+            continue;
+        }
+        match brace_group(&word) {
+            Some((open, commas, close)) => {
+                let (head, tail) = (&word[..open], &word[close + 1..]);
+                let mut from = open + 1;
+                let mut parts = Vec::new();
+                for at in commas.into_iter().chain(std::iter::once(close)) {
+                    parts.push(format!("{head}{}{tail}", &word[from..at]));
+                    from = at + 1;
+                }
+                // In their order: the stack takes the last first.
+                todo.extend(parts.into_iter().rev());
+            }
+            None if word.is_empty() => {}
+            None => out.push(word),
+        }
+    }
+    out
+}
+
+/// How many words [`brace_words`] gives at most.
+const MAX_BRACE_WORDS: usize = 64;
+
+/// The first brace group of a word that holds a comma at its own level (not `${…}`): where
+/// it opens, its commas, and where it closes.
+fn brace_group(word: &str) -> Option<(usize, Vec<usize>, usize)> {
+    for (open, c) in word.char_indices() {
+        if c != '{' || word[..open].ends_with('$') {
+            continue;
+        }
+        let mut level = 0;
+        let mut commas = Vec::new();
+        for (i, d) in word[open..].char_indices() {
+            match d {
+                '{' => level += 1,
+                ',' if level == 1 => commas.push(open + i),
+                '}' => {
+                    level -= 1;
+                    if level == 0 {
+                        if !commas.is_empty() {
+                            return Some((open, commas, open + i));
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// A text with each of its words expanded as the shell expands braces.
+fn expand_braces(text: &str) -> String {
+    if !text.contains('{') || !text.contains(',') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if brace_group(word).is_some() {
+            out.push_str(&brace_words(word).join(" "));
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_whitespace() {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// The most text, in bytes, that the readings of one line may take together; past it the
+/// line counts as starting a coding assistant, since it was not read to the end.
+const MAX_WORK: usize = 8 * 1024 * 1024;
+
+/// Why a line counts when it was too much to read to the end.
+const TOO_MUCH: &str =
+    "the command is too long or too deeply nested to check whether it starts a coding assistant";
+
+thread_local! {
+    /// The text read so far for the line [`find`] is reading.
+    static WORK: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Counts `bytes` of text read; whether the line is now past [`MAX_WORK`].
+fn too_much(bytes: usize) -> bool {
+    WORK.with(|w| {
+        let total = w.get().saturating_add(bytes);
+        w.set(total);
+        total > MAX_WORK
+    })
+}
+
 /// For a line that cannot be broken down: the first word of every command in it, read as
-/// a program (as written with a locator's finding in its place, with quotes taken away,
-/// and with quotes and escapes taken away), and a script inside an assistant's package
-/// anywhere in it.
+/// a program, in every reading of the line: as written, with quotes taken away, and with
+/// quotes and escapes taken away; each also with two lines joined by an escape read as
+/// one, with a locator's finding in its place, and with braces expanded. A script inside
+/// an assistant's package anywhere in it counts too, and so does what a command prints
+/// when a shell on the line runs it (`echo "claude -p $x" | sh`).
 fn in_text(line: &str, depth: usize) -> Option<String> {
     if depth > MAX_DEPTH {
         return None;
@@ -527,34 +1127,53 @@ fn in_text(line: &str, depth: usize) -> Option<String> {
     if names_package_path(line) {
         return Some("the command runs a script of a coding assistant".into());
     }
-    // `find`'s `{}` and `\;` (or `';'`) are words, not braces or the end of a command:
-    // `find . -exec echo {} \; -exec claude -p {} \;` stays one command.
-    let lower = line
-        .to_lowercase()
-        .replace("\\;", " _ ")
-        .replace("';'", " _ ")
-        .replace("\";\"", " _ ")
-        .replace("{}", " _ ");
-    let unquoted: String = lower
-        .chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '`' | '^'))
-        .collect();
-    // As the POSIX shell reads a word: escapes and quotes taken away (`cod\ex`, `$'claude'`).
-    let mut unescaped = String::with_capacity(lower.len());
-    let mut chars = lower.chars().peekable();
-    while let Some(c) = chars.next() {
-        let quote_follows = matches!(chars.peek(), Some('\'' | '"'));
-        if !(matches!(c, '\'' | '"' | '`' | '^' | '\\') || (c == '$' && quote_follows)) {
-            unescaped.push(c);
+    if too_much(line.len()) {
+        return Some(TOO_MUCH.into());
+    }
+    let lower = line.to_lowercase();
+    let mut bases = vec![lower.clone()];
+    for joined in [join_lines(&lower).into_owned(), join_escaped_lines(&lower)] {
+        if !bases.contains(&joined) {
+            bases.push(joined);
         }
     }
-    let mut readings = vec![resolve_locators(&lower)];
-    for text in [unquoted, unescaped] {
-        if !readings.contains(&text) {
-            readings.push(text);
+    let mut readings: Vec<String> = Vec::new();
+    for base in bases {
+        // `find`'s `{}` and `\;` (or `';'`) are words, not braces or the end of a command:
+        // `find . -exec echo {} \; -exec claude -p {} \;` stays one command.
+        let base = base
+            .replace("\\;", " _ ")
+            .replace("';'", " _ ")
+            .replace("\";\"", " _ ")
+            .replace("{}", " _ ");
+        let unquoted: String = base
+            .chars()
+            .filter(|c| !matches!(c, '\'' | '"' | '`' | '^'))
+            .collect();
+        // As the POSIX shell reads a word: escapes and quotes taken away (`cod\ex`,
+        // `$'claude'`).
+        let mut unescaped = String::with_capacity(base.len());
+        let mut chars = base.chars().peekable();
+        while let Some(c) = chars.next() {
+            let quote_follows = matches!(chars.peek(), Some('\'' | '"'));
+            if !(matches!(c, '\'' | '"' | '`' | '^' | '\\') || (c == '$' && quote_follows)) {
+                unescaped.push(c);
+            }
+        }
+        for text in [base, unquoted, unescaped] {
+            let located = resolve_locators(&text);
+            let expanded = expand_braces(&located);
+            for reading in [located, expanded] {
+                if !readings.contains(&reading) {
+                    readings.push(reading);
+                }
+            }
         }
     }
     for text in &readings {
+        if too_much(text.len()) {
+            return Some(TOO_MUCH.into());
+        }
         // .NET's `[Diagnostics.Process]::Start('claude', '-p x')`: the first argument is a
         // program.
         for (at, _) in text.match_indices("::start(") {
@@ -569,34 +1188,59 @@ fn in_text(line: &str, depth: usize) -> Option<String> {
                 ));
             }
         }
-        for segment in text.split([';', '\n', '(', ')', '{', '}', '|', '&', '`']) {
-            let mut words = shell_words(segment);
-            // Keywords and settings in front of a program are not its name.
-            while let Some(first) = words.first() {
-                let keyword = matches!(
-                    first.as_str(),
-                    "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "!" | "." | "time"
-                );
-                let setting = first.split_once('=').is_some_and(|(name, _)| {
-                    !name.is_empty()
-                        && name
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == ':')
-                });
-                if keyword || setting {
-                    words.remove(0);
-                } else {
-                    break;
-                }
-            }
+        let commands: Vec<Vec<String>> = text
+            .split([';', '\n', '(', ')', '{', '}', '|', '&', '`'])
+            .map(command_words)
+            .collect();
+        for words in &commands {
             if let Some((program, args)) = words.split_first()
                 && let Some(why) = command(program, args, depth + 1)
             {
                 return Some(why);
             }
         }
+        // A shell on the line that runs what it reads (`echo "claude -p $x" | sh`): what
+        // the other commands print may be what it runs.
+        let fed = |words: &Vec<String>| {
+            words
+                .split_first()
+                .is_some_and(|(program, args)| reads_commands(program, args))
+        };
+        if commands.iter().any(fed)
+            && let Some(why) = commands
+                .iter()
+                .filter(|words| !fed(words) && !words.is_empty())
+                .find_map(|words| fed_line(&words[1..], depth + 1))
+        {
+            return Some(why);
+        }
     }
     None
+}
+
+/// The words of one command read as text, without the keywords and settings in front of
+/// its program (`then`, `if`, `FOO=1`).
+fn command_words(segment: &str) -> Vec<String> {
+    let mut words = shell_words(segment);
+    // Keywords and settings in front of a program are not its name.
+    while let Some(first) = words.first() {
+        let keyword = matches!(
+            first.as_str(),
+            "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "!" | "." | "time"
+        );
+        let setting = first.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == ':')
+        });
+        if keyword || setting {
+            words.remove(0);
+        } else {
+            break;
+        }
+    }
+    words
 }
 
 /// The words of a piece of a command line: split at white space, except inside quotes,

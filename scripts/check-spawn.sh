@@ -13,4 +13,17 @@ if [ -n "$hits" ]; then
   echo "$hits"
   exit 1
 fi
+# The same rule for the operating system's own ways to start a program or load a
+# library at run time (no file needs them; the usage readers in crates/usage call
+# the system directly and must never start or load anything). No exemption comment.
+# Lines that are only a comment are skipped (prose may name these calls); a call
+# followed by a comment is still caught.
+low=$(grep -rnE 'CreateProcess|ShellExecute|WinExec|posix_spawn|fork\(|execv|execl|popen|libc::system|dlopen|LoadLibrary|libloading' --include='*.rs' crates src-tauri/src \
+  | grep -v '^crates/runtime/src/spawn' \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)
+if [ -n "$low" ]; then
+  echo "Low-level process creation or library loading outside crates/runtime/src/spawn*:"
+  echo "$low"
+  exit 1
+fi
 echo "spawn check passed"

@@ -312,6 +312,15 @@ impl Found {
 /// The Allow-all facts of a command line. `strict` is what [`crate::command::parse`]
 /// made of it.
 pub fn command_facts(shell: Shell, line: &str, strict: &Parsed) -> CommandFacts {
+    // The text is read as the POSIX shell reads it: two lines joined by a backslash are
+    // one (as `parse` reads them).
+    let joined;
+    let line = if shell == Shell::Posix {
+        joined = crate::command::join_lines(line);
+        joined.as_ref()
+    } else {
+        line
+    };
     // For this mode a PowerShell double-quoted string with nothing to expand is the
     // literal it is; on Windows almost every quoted argument is written that way.
     let lenient;

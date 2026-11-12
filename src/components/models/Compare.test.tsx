@@ -32,7 +32,7 @@ vi.mock("../../store/app", () => ({
       : { code: "unexpected", message: "Something went wrong.", nextStep: "Try again.", details: String(e) },
 }));
 
-const { Compare, CompareTabLabel, PROBLEM_WORDS, EMPTY_TEXT, NO_DESCRIPTION, SOURCE, fitSource, shown } =
+const { Compare, CompareTabLabel, PROBLEM_WORDS, EMPTY_TEXT, NO_DESCRIPTION, SOURCE, SUGGESTED_SHOWN, fitSource, shown } =
   await import("./Compare");
 const { useCompare } = await import("../../store/compare");
 
@@ -275,7 +275,8 @@ describe("Compare: rows and where each answer comes from", () => {
     expect(cell("Languages").textContent).toBe(`English and French${SOURCE.card}`);
     expect(cell("Made from").textContent).toBe(`example-org/alpha${SOURCE.catalog}`);
     expect(cell("Released or last updated").textContent).toBe(`Released March 2026${SOURCE.card}`);
-    expect(cell("License").textContent).toBe(`apache-2.0 Read the license${SOURCE.catalog}`);
+    // A license id in words.
+    expect(cell("License").textContent).toBe(`Apache 2.0 Read the license${SOURCE.catalog}`);
     // Missing data.
     expect(cell("Downloads on Hugging Face").textContent).toBe("Not known");
     expect(cell("Your test results").textContent).toContain("No tests on this computer yet.");
@@ -291,7 +292,7 @@ describe("Compare: rows and where each answer comes from", () => {
     expect(cell("Can it use tools?").textContent).toBe(`No${SOURCE.file}`);
     expect(cell("Languages").textContent).toBe(`German${SOURCE.uploader}`);
     expect(cell("Released or last updated").textContent).toBe(`Last updated February 3, 2026${SOURCE.hub}`);
-    expect(cell("License").textContent).toBe(`mit${SOURCE.uploader}`);
+    expect(cell("License").textContent).toBe(`MIT${SOURCE.uploader}`);
     expect(cell("Downloads on Hugging Face").textContent).toBe(`12,345 in the last 30 days, 6 likes${SOURCE.hub}`);
     expect(cell("Made from").textContent).toBe("Not known");
     expect(screen.getByText("Q4_K_M: smaller file, good quality")).toBeTruthy();
@@ -535,7 +536,7 @@ describe("Compare: uploader text is shown as text", () => {
         title: "someone/alpha-GGUF",
         hub: hub("someone/alpha-GGUF", {
           author: '<img src=x onerror="alert(1)">',
-          baseModel: "evil‮fdp.exe",
+          baseModel: "evil\u202Efdp.exe",
           license: { name: "<b>bold</b>", url: "javascript:alert(1)" },
         }),
       });
@@ -546,10 +547,10 @@ describe("Compare: uploader text is shown as text", () => {
     expect(table.querySelector("b")).toBeNull();
     expect(cell("Who made it?").textContent).toContain('<img src=x onerror="alert(1)">');
     expect(cell("Made from").textContent).toContain("evil[U+202E]fdp.exe");
-    expect(cell("Made from").textContent).not.toContain("‮");
+    expect(cell("Made from").textContent).not.toContain("\u202E");
     // A javascript: link is not a link.
     expect(within(cell("License")).queryByRole("button")).toBeNull();
-    expect(shown("a​b⁦c", 300)).toBe("a[U+200B]b[U+2066]c");
+    expect(shown("a\u200Bb\u2066c", 300)).toBe("a[U+200B]b[U+2066]c");
     expect(shown("x".repeat(400))).toHaveLength(300);
   });
 
@@ -558,7 +559,7 @@ describe("Compare: uploader text is shown as text", () => {
     // hidden tag characters, variation selectors, fillers, interlinear annotations.
     const hidden = String.fromCodePoint(0xe0041, 0xe0042);
     expect(shown(`a${hidden}b`)).toBe("a[U+E0041][U+E0042]b");
-    expect(shown("a️bㅤc￹d᠋eᅟf")).toBe("a[U+FE0F]b[U+3164]c[U+FFF9]d[U+180B]e[U+115F]f");
+    expect(shown("a\uFE0Fb\u3164c\uFFF9d\u180Be\u115Ff")).toBe("a[U+FE0F]b[U+3164]c[U+FFF9]d[U+180B]e[U+115F]f");
     expect(shown(`x${String.fromCodePoint(0xe0100)}`)).toBe("x[U+E0100]");
     // Tabs and new lines stay as they are.
     expect(shown("a\tb\nc")).toBe("a\tb\nc");
@@ -566,5 +567,163 @@ describe("Compare: uploader text is shown as text", () => {
     const capped = shown(`${"x".repeat(298)}😀😀😀`, 300);
     expect(capped).toBe(`${"x".repeat(298)}😀…`);
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(capped)).toBe(false);
+  });
+});
+
+describe("Compare: columns as the backend fills them", () => {
+  it("shows a catalog model's facts without the internet, and says what is missing and why", async () => {
+    // What compare_facts returns for a catalog model that is not downloaded, offline: the
+    // catalog's facts, no file facts, no fit, no Hugging Face facts.
+    factsFor = (item, ctx) =>
+      facts(item, ctx, {
+        file: "one-Q4_K_M.gguf",
+        sizeBytes: 3413361504,
+        ctx: 32768,
+        fit: null,
+        hub: null,
+        fileFacts: null,
+        problem: "offline",
+        catalog: catalog("one", {
+          source: "https://huggingface.co/example-org/one",
+          languages: ["multilingual"],
+          released: "2026-08-25",
+          capabilities: ["tools", "vision", "thinking"],
+          license: { name: "apache-2.0", url: null },
+        }),
+      });
+    useCompare.setState({ entries: [{ catalogId: "one" }] });
+    await show();
+    expect(screen.getByRole("status").textContent).toContain(PROBLEM_WORDS.offline);
+    expect(within(screen.getByRole("status")).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(cell("What is it good at?").textContent).toBe(
+      `“A small model that answers questions.”Good at everyday chat and coding.${SOURCE.card}`,
+    );
+    expect(cell("Who made it?").textContent).toBe(`Example Org${SOURCE.card}`);
+    expect(cell("How big is it?").textContent).toBe(
+      `9 billion parameters. Bigger models are usually smarter but slower.${SOURCE.card}`,
+    );
+    expect(cell("Will it fit on this computer?").textContent).toBe("Not known");
+    expect(cell("Download size").textContent).toBe(`3.4 GB${SOURCE.catalog}`);
+    expect(cell("Can it read images?").textContent).toBe(`Yes${SOURCE.catalog}`);
+    expect(cell("Longest conversation it was made for").textContent).toBe("Not known");
+    expect(cell("Languages").textContent).toBe(`Many languages${SOURCE.card}`);
+    expect(cell("Made from").textContent).toBe(`example-org/one${SOURCE.catalog}`);
+    expect(cell("Released or last updated").textContent).toBe(`Released August 25, 2026${SOURCE.card}`);
+    expect(cell("License").textContent).toBe(`Apache 2.0${SOURCE.catalog}`);
+    expect(cell("Downloads on Hugging Face").textContent).toBe("Not known");
+    const head = screen.getAllByRole("columnheader")[1]!;
+    expect(within(head).getByText("Model one")).toBeTruthy();
+    expect(within(head).getByText("Q4_K_M: smaller file, good quality")).toBeTruthy();
+    expect(within(head).queryByText("On this computer")).toBeNull();
+    expect(within(head).getByRole("button", { name: "Show model card" })).toBeTruthy();
+  });
+
+  it("shows an installed file's own facts, and nothing it does not know", async () => {
+    factsFor = (item, ctx) =>
+      facts(item, ctx, {
+        title: "local-Q8_0.gguf",
+        file: "local-Q8_0.gguf",
+        quant: "Q8_0",
+        sizeBytes: 639446688,
+        ctx: 32768,
+        catalog: null,
+        hub: null,
+        fileFacts: fileFacts({ parameters: 6e8, contextLength: 40960, tools: true, thinking: true, quantization: "Q8_0" }),
+        fit: fit("green", "Needs about 5.0 GB; your computer has 11.4 GB free. Fits."),
+      });
+    useCompare.setState({ entries: [{ installedPath: "/models/local-Q8_0.gguf" }] });
+    await show();
+    const head = screen.getAllByRole("columnheader")[1]!;
+    expect(within(head).getByText("local-Q8_0.gguf")).toBeTruthy();
+    expect(within(head).getByText("Q8_0: large file, almost the original quality")).toBeTruthy();
+    expect(within(head).getByText("On this computer")).toBeTruthy();
+    // No card to show: an imported file has no Hugging Face page and no catalog entry.
+    expect(within(head).queryByRole("button", { name: "Show model card" })).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(cell("What is it good at?").textContent).toBe(NO_DESCRIPTION);
+    expect(cell("Who made it?").textContent).toBe("Not known");
+    expect(cell("How big is it?").textContent).toBe(
+      `600 million parameters. Bigger models are usually smarter but slower.${SOURCE.file}`,
+    );
+    expect(cell("Will it fit on this computer?").textContent).toContain("your computer has 11.4 GB free");
+    expect(within(cell("Will it fit on this computer?")).getByText(fitSource(32768))).toBeTruthy();
+    expect(cell("Download size").textContent).toBe(`639 MB${SOURCE.disk}`);
+    expect(cell("Can it use tools?").textContent).toBe(`Yes${SOURCE.file}`);
+    expect(cell("Can it read images?").textContent).toBe(`No${SOURCE.file}`);
+    expect(cell("Does it think before answering?").textContent).toBe(`Yes${SOURCE.file}`);
+    expect(cell("Longest conversation it was made for").textContent).toBe(
+      `40,960 tokens, about 30,000 words${SOURCE.file}`,
+    );
+    for (const q of ["Languages", "Made from", "Released or last updated", "License", "Downloads on Hugging Face"]) {
+      expect(cell(q).textContent).toBe("Not known");
+    }
+    // Nothing on this screen downloads or loads a model.
+    expect(screen.queryByRole("button", { name: /Download|Load|Use/ })).toBeNull();
+  });
+
+  it("names the catalog's publisher model as what a matched file is made from, over the uploader's claim", async () => {
+    factsFor = (item, ctx) =>
+      facts(item, ctx, {
+        catalog: catalog("one", { source: "https://huggingface.co/example-org/one" }),
+        hub: hub("someone/one-GGUF", { baseModel: "someone-else/other" }),
+      });
+    useCompare.setState({ entries: [{ repo: "someone/one-GGUF", file: "one-Q4_K_M.gguf" }] });
+    await show();
+    expect(cell("Made from").textContent).toBe(`example-org/one${SOURCE.catalog}`);
+  });
+
+  it("opens a Hugging Face column's own page, and a catalog model's publisher card", async () => {
+    factsFor = (item, ctx) =>
+      facts(item, ctx, {
+        catalog: catalog("one", { source: "https://huggingface.co/example-org/one" }),
+        hub: hub("someone/one-GGUF"),
+      });
+    useCompare.setState({ entries: [{ repo: "someone/one-GGUF", file: "one-Q4_K_M.gguf" }, { catalogId: "one" }] });
+    await show();
+    const heads = screen.getAllByRole("columnheader");
+    for (const [i, url] of [
+      [1, "https://huggingface.co/someone/one-GGUF"],
+      [2, "https://huggingface.co/example-org/one"],
+    ] as const) {
+      fireEvent.click(within(heads[i]!).getByRole("button", { name: "Show model card" }));
+      const dialog = await screen.findByRole("alertdialog");
+      expect(within(dialog).getByText(url)).toBeTruthy();
+      fireEvent.click(within(dialog).getByRole("button", { name: "Open in browser" }));
+      expect(openUrl).toHaveBeenLastCalledWith(url);
+    }
+  });
+});
+
+describe("Compare: suggested models", () => {
+  it("shows the best four first and the rest on request", async () => {
+    ipcMock.catalogList.mockImplementation(async () => ["a", "b", "c", "d", "e", "f"].map(listEntry));
+    await show();
+    const offered = () =>
+      screen.getAllByRole("button", { name: /^Add to comparison: / }).map((b) => b.getAttribute("aria-label"));
+    expect(SUGGESTED_SHOWN).toBe(4);
+    expect(offered()).toEqual(["a", "b", "c", "d"].map((id) => `Add to comparison: Model ${id}`));
+    fireEvent.click(screen.getByRole("button", { name: "Show 2 more suggested models" }));
+    expect(offered()).toHaveLength(6);
+    fireEvent.click(screen.getByRole("button", { name: "Show fewer" }));
+    expect(offered()).toHaveLength(4);
+    // A chosen model leaves the list, and the next one moves up.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Add to comparison: Model b" }));
+    });
+    expect(offered()).toEqual(["a", "c", "d", "e"].map((id) => `Add to comparison: Model ${id}`));
+    expect(screen.getByRole("button", { name: "Show 1 more suggested model" })).toBeTruthy();
+  });
+
+  it("says which suggestions are already on this computer, with their fit", async () => {
+    ipcMock.catalogList.mockImplementation(async () => [
+      { ...listEntry("a"), installedPath: "/models/a.gguf", fit: fit("yellow", "Needs a shorter memory here.") },
+      { ...listEntry("b"), fit: null },
+    ]);
+    await show();
+    const items = screen.getAllByRole("listitem");
+    expect(items[0]!.textContent).toContain("Q4_K_M: smaller file, good quality · 2.7 GB download · On this computer");
+    expect(items[0]!.textContent).toContain("Fits with limits.");
+    expect(items[1]!.textContent).not.toContain("On this computer");
+    expect(items[1]!.textContent).not.toContain("Fits");
   });
 });

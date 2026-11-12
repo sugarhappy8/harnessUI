@@ -527,12 +527,16 @@ pub struct HeaderFacts {
 }
 
 impl HeaderFacts {
+    /// A trained length under [`CTX_RANGE`]'s 512 tokens (0 in a damaged file) is not
+    /// believed and reads as unknown: capped to it, a load would ask for `-c 0` (the whole
+    /// trained length) or a size the commands refuse.
     pub fn from_summary(s: &models::ModelSummary) -> Self {
         use models::summary::KvCacheType;
         Self {
             trained_ctx: s
                 .context_length
-                .map(|t| u32::try_from(t).unwrap_or(u32::MAX)),
+                .map(|t| u32::try_from(t).unwrap_or(u32::MAX))
+                .filter(|t| *t >= *CTX_RANGE.start()),
             kv_f16: s.kv_bytes_per_token_as(KvCacheType::F16),
             kv_q8: s.kv_bytes_per_token_as(KvCacheType::Q8_0),
             vocab: s.vocab_size.unwrap_or(0),
@@ -844,6 +848,8 @@ pub fn resolve(
             (tokens, ContextSource::Automatic)
         }
     };
+    // Never a size the commands would refuse, whatever the facts say.
+    let ctx = ctx.clamp(*CTX_RANGE.start(), *CTX_RANGE.end());
     ResolvedLoad {
         ctx,
         ctx_choice,
@@ -993,6 +999,9 @@ pub struct Plan {
     pub machine: Machine,
     pub overrides: ModelLoadSettings,
     pub defaults: LocalModelSettings,
+    /// Resolved from the saved settings (not the 0.0.4 command shape or a draft): a load
+    /// of it is what "Settings changed" compares with the saved settings again.
+    pub saved: bool,
 }
 
 impl Plan {
@@ -1085,6 +1094,7 @@ async fn settings_for(
 }
 
 async fn plan_from(state: &crate::state::AppState, path: &str, source: Source) -> Plan {
+    let saved = matches!(source, Source::Saved);
     let (defaults, overrides) = settings_for(&state.store, path, source).await;
     let mmproj = crate::hub::projector_for(state, path).await;
     let model = std::path::Path::new(path);
@@ -1105,6 +1115,7 @@ async fn plan_from(state: &crate::state::AppState, path: &str, source: Source) -
         machine,
         overrides,
         defaults,
+        saved,
     }
 }
 
@@ -2239,6 +2250,64 @@ mod tests {
         // 2 layers × 2 rows × 2 heads × 64 values: 2 bytes each, or 4 blocks of 34 bytes.
         assert_eq!(header.kv_f16, 1024);
         assert_eq!(header.kv_q8, 2 * 2 * 4 * 34);
+    }
+
+    /// A header whose trained length is under 512 tokens (0 in a damaged file) is not
+    /// believed: capped to it, `-c` would get 0 (the whole trained length) or a size the
+    /// commands refuse. The length reads as unknown, and no load ever asks for a size
+    /// outside [`CTX_RANGE`], whatever the facts say.
+    #[tokio::test]
+    async fn a_trained_length_under_512_is_not_believed() {
+        let dir = Scratch::new();
+        for (trained, read) in [
+            (0, None),
+            (300, None),
+            (511, None),
+            (512, Some(512)),
+            (40_960, Some(40_960)),
+        ] {
+            let path = dir.path().join(format!("ctx-{trained}.gguf"));
+            let gguf = models::gguf::testing::Writer::new()
+                .str("general.architecture", "llama")
+                .u32("llama.context_length", trained)
+                .u32("llama.block_count", 2)
+                .u32("llama.embedding_length", 256)
+                .u32("llama.attention.head_count", 4)
+                .u32("llama.attention.head_count_kv", 2)
+                .build();
+            std::fs::write(&path, gguf).unwrap();
+            let facts = read_facts(&path, None).await.unwrap();
+            assert_eq!(facts.trained_ctx(), read, "trained {trained}");
+        }
+        // Facts that carry such a length anyway still give a size in the range.
+        let tiny = ModelFacts {
+            header: Some(HeaderFacts {
+                trained_ctx: Some(300),
+                ..facts().header.unwrap()
+            }),
+            ..facts()
+        };
+        let cpu = Machine::from_probes(
+            &[probe(runtime::BackendKind::Cpu, &[("CPU", "CPU", 0, 0)])],
+            None,
+            None,
+            64 * GB,
+            &Freed::default(),
+        );
+        for context in [
+            ContextChoice::Default,
+            ContextChoice::Auto,
+            ContextChoice::Fixed(4096),
+        ] {
+            let own = ModelLoadSettings {
+                context,
+                ..ModelLoadSettings::default()
+            };
+            for defaults in [auto_defaults(), LocalModelSettings::default()] {
+                let r = resolve(&own, &defaults, None, Some(&tiny), &cpu);
+                assert!(CTX_RANGE.contains(&r.ctx), "{context:?}: {}", r.ctx);
+            }
+        }
     }
 
     /// How exact Automatic is, against the pinned llama-server and a real model (set

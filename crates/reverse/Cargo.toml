@@ -1,0 +1,74 @@
+[package]
+name = "reverse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Reverse engineering with rea: pinned downloads, the rea process and the built-in `reverse` tool server (item5-spec.md)."
+
+[lib]
+name = "reverse"
+path = "src/lib.rs"
+
+[dependencies]
+policy = { workspace = true }
+runtime = { workspace = true }
+mcp-host = { workspace = true }
+# Total memory for the Ghidra line in Settings (models::hardware already reads it per OS).
+models = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "fs"] }
+tokio-util = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true }
+dunce = { workspace = true }
+# Unpacking the pinned archives: rea, Node.js, Kuna and Temurin ship as .tar.gz (tar is in
+# the lock through the updater; without default features it reads no extended attributes).
+tar = { version = "0.4.46", default-features = false }
+flate2 = "1.1"
+# Ghidra, Temurin and Node.js for Windows ship as .zip.
+zip = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Free disk space (statvfs) and opening files without blocking on a pipe.
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Free disk space, the volume's file system, file identity and 8.3 short names. Same major
+# as the rest of the app (already in the lock).
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "io-std", "io-util", "process"] }
+# The fake rea of tests/fake_rea.rs (WP9g) is built on rmcp's server side.
+rmcp = { workspace = true }
+# Schema checks of the allow-list against the pinned catalog (WP9c).
+jsonschema = { workspace = true }
+flate2 = "1.1"
+tar = { version = "0.4.46", default-features = false }
+
+# Install from local archives through `Fetch` (WP9a), and from the pinned archives when
+# REVERSE_PACK_CACHE names a cache filled by `scripts/pin_reverse.py --download-to`.
+[[test]]
+name = "install"
+path = "tests/install.rs"
+
+# Doubles as a fake rea (an MCP server on stdio) when started with its flag (WP9g).
+[[test]]
+name = "fake_rea"
+path = "tests/fake_rea.rs"
+harness = false
+
+# The real rea, Node.js, Kuna, Ghidra and Java from REVERSE_PACK_CACHE (WP9e).
+[[test]]
+name = "real_rea"
+path = "tests/real_rea.rs"
+
+[lints]
+workspace = true

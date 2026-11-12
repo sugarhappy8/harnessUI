@@ -271,6 +271,37 @@ export function sizeAnswer(parameters: number | null, active: number | null, moe
   return `${total} parameters. Bigger models are usually smarter but slower.`;
 }
 
+/**
+ * Common license ids (as Hugging Face and the catalog write them) as their names. Licenses
+ * named after a model family have no entry (no model name appears here) and are shown as
+ * the uploader or catalog writes them.
+ */
+export const LICENSE_WORDS: Record<string, string> = {
+  "apache-2.0": "Apache 2.0",
+  mit: "MIT",
+  "bsd-2-clause": "BSD 2-Clause",
+  "bsd-3-clause": "BSD 3-Clause",
+  "gpl-2.0": "GPL 2.0",
+  "gpl-3.0": "GPL 3.0",
+  "lgpl-3.0": "LGPL 3.0",
+  "agpl-3.0": "AGPL 3.0",
+  "mpl-2.0": "Mozilla Public License 2.0",
+  "cc-by-4.0": "Creative Commons Attribution 4.0",
+  "cc-by-sa-4.0": "Creative Commons Attribution-ShareAlike 4.0",
+  "cc-by-nc-4.0": "Creative Commons Attribution-NonCommercial 4.0 (no commercial use)",
+  "cc-by-nc-sa-4.0": "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 (no commercial use)",
+  "cc0-1.0": "Public domain (CC0)",
+  unlicense: "Public domain (Unlicense)",
+  openrail: "OpenRAIL",
+  other: "Another license (read the model card)",
+};
+
+/** A license id as its name ("apache-2.0" → "Apache 2.0"); anything else as it is written. */
+export function licenseWords(name: string): string {
+  const key = name.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(LICENSE_WORDS, key) ? (LICENSE_WORDS[key] ?? name) : name;
+}
+
 /** Yes or No for "Can it use tools?" and its neighbours. */
 export function capabilityAnswer(yes: boolean): string {
   return yes ? "Yes" : "No";

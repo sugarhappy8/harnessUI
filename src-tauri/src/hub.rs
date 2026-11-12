@@ -950,6 +950,7 @@ pub async fn delete_model(
         }
     }
     state.store.delete_model(rec.id).await?;
+    state.runtime.forget_unloaded(&rec.path);
     Ok(())
 }
 
@@ -1391,7 +1392,12 @@ mod tests {
         partial.as_object_mut().unwrap().remove("cardUrl");
         let mut wrong_type = hub.clone();
         wrong_type["tags"] = serde_json::json!("code");
-        for bad in [partial, wrong_type, serde_json::json!("text"), serde_json::Value::Null] {
+        for bad in [
+            partial,
+            wrong_type,
+            serde_json::json!("text"),
+            serde_json::Value::Null,
+        ] {
             let s: StoredSummary = serde_json::from_value(summary(bad.clone()))
                 .unwrap_or_else(|e| panic!("{bad}: {e}"));
             assert!(s.hub.is_none(), "{bad}");

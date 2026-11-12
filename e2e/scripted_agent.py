@@ -3030,12 +3030,44 @@ COMPARE_QUESTIONS = [
     "Longest conversation it was made for", "Languages", "Made from", "Released or last updated", "License",
     "Downloads on Hugging Face", "Your test results",
 ]
+COMPARE_OFFLINE = "These facts need the internet. They are saved once the model is downloaded."
+COMPARE_BUSY = "Hugging Face is busy. Try again in a minute."
+COMPARE_GATED = "This model needs a Hugging Face token. Add one in Settings → Hugging Face."
+COMPARE_FULL = "You can compare up to 4 models. Remove one first."
+COMPARE_TABLE = 'table[aria-label="Model comparison"]'
 
 
 def compare_columns(s):
     return s.execute(
         "const t = document.querySelector('table[aria-label=\"Model comparison\"]');"
         "return t ? t.querySelectorAll('thead th').length - 1 : 0;")
+
+
+def compare_heads(s):
+    """Each column head's text, left to right."""
+    return s.execute(f"return [...document.querySelectorAll('{COMPARE_TABLE} thead th')].slice(1).map(th => th.innerText);")
+
+
+def compare_row(s, question):
+    """Each column's answer to one question (the answer, then its source on the next line)."""
+    return s.execute(
+        f"const row = [...document.querySelectorAll('{COMPARE_TABLE} tbody tr')]"
+        ".find(r => r.querySelector('th').innerText.trim() === arguments[0]);"
+        "return row ? [...row.querySelectorAll('td')].map(td => td.innerText.trim()) : null;", question)
+
+
+def compare_click(s, column, label):
+    """Clicks the button in one column's head whose text starts with `label`."""
+    found = s.execute(
+        f"const th = document.querySelectorAll('{COMPARE_TABLE} thead th')[arguments[0] + 1];"
+        "const b = th && [...th.querySelectorAll('button')].find(b => b.innerText.trim().startsWith(arguments[1]));"
+        "if (b) b.click(); return !!b;", column, label)
+    assert found, (column, label, compare_heads(s))
+
+
+def compare_settled(s):
+    text = s.page_text()
+    return "Getting the facts" not in text and "Choosing a file" not in text
 
 
 def any_gguf():
@@ -3050,21 +3082,220 @@ def any_gguf():
     return None
 
 
+# The screen's plain words, rebuilt here so the scenario checks the facts themselves
+# (src/lib/words.ts, src/lib/abilities.ts, the date words in Compare.tsx).
+def words_tokens(n):
+    about = n * 3 // 4
+    about = about // 1000 * 1000 if about >= 1000 else about // 100 * 100
+    return f"{n:,} tokens, about {about:,} words"
+
+
+def words_parameters(n):
+    def one(v):
+        r = round(v * 10) / 10
+        return str(int(r)) if r == int(r) else f"{r:.1f}"
+    if n >= 1e12:
+        return f"{one(n / 1e12)} trillion"
+    if n >= 1e9:
+        v = n / 1e9
+        return f"{round(v) if v >= 10 else one(v)} billion"
+    if n >= 1e6:
+        return f"{round(n / 1e6)} million"
+    return f"{n:,}"
+
+
+def words_date(text):
+    months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+              "November", "December"]
+    y, m, *rest = text[:10].split("-")
+    return f"{months[int(m) - 1]} {int(rest[0])}, {y}" if rest else f"{months[int(m) - 1]} {y}"
+
+
+# ---- A stand-in for Hugging Face over https (compare-models) --------------------------
+# The app's Hugging Face client talks https only, to huggingface.co or a mirror set in
+# Settings → Hugging Face. The scenario sets the mirror to this server on 127.0.0.1, with a
+# certificate made for this run that the app trusts through SSL_CERT_FILE (the system's
+# certificates plus this one), so Hugging Face columns are driven without the internet:
+# search results, repository listings, a GGUF header (the first bytes of the test model
+# stand in for every file), a model card, a rate limit (429) and a gated repository.
+
+FAKE_COMMIT = "e2e0" * 10
+FAKE_TINY = "e2e-uploader/Tiny-Chat-GGUF"
+FAKE_BUSY = "e2e-uploader/Busy-GGUF"
+FAKE_LOCKED = "e2e-uploader/Locked-GGUF"
+FAKE_CARD = '# Tiny chat\n<b>bold</b> <img src=x onerror="alert(1)"> safe\u202etxt.exe ok\n'
+COMPARE_HUB = {}
+
+
+class FakeHub(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    listings = {}  # repo id -> listing JSON (any revision)
+    errors = {}  # repo id -> (status, headers)
+    search = []
+    gguf = None  # the file whose first bytes are every file's header
+    requests = []
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, status, body=b"", ctype="application/json", headers=()):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in headers:
+            self.send_header(k, v)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _json(self, obj):
+        self._send(200, json.dumps(obj).encode())
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_GET(self):
+        import urllib.parse
+        url = urllib.parse.urlsplit(self.path)
+        parts = [urllib.parse.unquote(p) for p in url.path.strip("/").split("/")]
+        FakeHub.requests.append(f"{self.command} {url.path}")
+        if parts == ["api", "models"]:
+            return self._json(FakeHub.search)
+        if parts[:2] == ["api", "models"] and len(parts) >= 4:
+            repo = "/".join(parts[2:4])
+            if repo in FakeHub.errors:
+                status, headers = FakeHub.errors[repo]
+                return self._send(status, b'{"error":"scripted"}', headers=headers)
+            if repo in FakeHub.listings:
+                return self._json(FakeHub.listings[repo])
+            return self._send(404, b'{"error":"Repository not found"}', headers=[("x-error-code", "RepoNotFound")])
+        if len(parts) >= 5 and parts[2] == "resolve":
+            repo, file = "/".join(parts[:2]), "/".join(parts[4:])
+            listing = FakeHub.listings.get(repo)
+            size = next((f["size"] for f in (listing or {}).get("siblings", []) if f["rfilename"] == file), None)
+            if size is None or FakeHub.gguf is None:
+                return self._send(404, headers=[("x-error-code", "EntryNotFound")])
+            if self.command == "HEAD":
+                self.send_response(200)
+                self.send_header("Content-Length", str(size))
+                self.send_header("x-repo-commit", listing["sha"])
+                self.end_headers()
+                return None
+            rng = self.headers.get("Range", "bytes=0-")
+            end = int(rng.split("-")[1] or 0) if rng.startswith("bytes=0-") else 0
+            with open(FakeHub.gguf, "rb") as fh:
+                data = fh.read(end + 1 if end else 1 << 20)
+            return self._send(206, data, "application/octet-stream",
+                              [("Content-Range", f"bytes 0-{len(data) - 1}/{size}")])
+        if len(parts) >= 5 and parts[2] == "raw" and parts[-1] == "README.md":
+            return self._send(200, FAKE_CARD.encode(), "text/plain; charset=utf-8")
+        return self._send(404, b'{"error":"not here"}')
+
+
+def fake_hub_tls():
+    """A certificate for 127.0.0.1 made for this run, and a bundle of the system's
+    certificates plus it. None when openssl is missing."""
+    import ssl
+    openssl = shutil.which("openssl")
+    if not openssl:
+        return None
+    d = OUT / "fake-hub"
+    d.mkdir(parents=True, exist_ok=True)
+    cert, key = d / "cert.pem", d / "key.pem"
+    made = subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key), "-out", str(cert),
+                           "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"],
+                          capture_output=True, timeout=60, check=False)
+    if made.returncode != 0:
+        return None
+    base = os.environ.get("SSL_CERT_FILE") or ssl.get_default_verify_paths().openssl_cafile
+    system = pathlib.Path(base).read_text() if base and pathlib.Path(base).is_file() else ""
+    bundle = d / "bundle.pem"
+    bundle.write_text(system + "\n" + cert.read_text())
+    return cert, key, bundle
+
+
+def compare_hub_env():
+    """Environment for the app: trust the stand-in's certificate as well as the system's.
+    Only when compare-models runs."""
+    if ONLY and "compare-models" not in ONLY:
+        return {}
+    tls = fake_hub_tls()
+    if tls is None:
+        return {}
+    COMPARE_HUB["tls"] = tls
+    return {"SSL_CERT_FILE": str(tls[2])}
+
+
+def fake_hub_start(catalog, gguf):
+    """Starts the stand-in; returns (server, base URL) or None without a certificate."""
+    import ssl
+    tls = COMPARE_HUB.get("tls")
+    if tls is None:
+        return None
+    FakeHub.gguf = gguf
+    FakeHub.requests = []
+    FakeHub.listings = {}
+    for e in catalog.values():
+        files = e["files"] + ([e["mmproj"]] if e.get("mmproj") else [])
+        source = e.get("source") or ""
+        base = "/".join(source.split("huggingface.co/", 1)[-1].split("/")[:2]) if "huggingface.co/" in source else None
+        FakeHub.listings[e["repo"]] = {
+            "id": e["repo"], "sha": e["revision"], "gated": False, "author": e["repo"].split("/")[0],
+            "downloads": 12345, "likes": 89, "lastModified": "2026-04-05T06:07:08.000Z", "pipeline_tag": "text-generation",
+            "tags": ["gguf", "conversational", "license:" + e["license"]["spdx"]],
+            "cardData": {"base_model": base, "license": e["license"]["spdx"]},
+            "siblings": [{"rfilename": f["path"], "size": f["size"], "lfs": {"size": f["size"], "sha256": f["sha256"]}} for f in files],
+        }
+    tiny = [("Tiny-Chat-Q2_K.gguf", 400_000_000), ("Tiny-Chat-Q4_K_M.gguf", 600_000_000), ("Tiny-Chat-Q8_0.gguf", 48_000_000_000)]
+    FakeHub.listings[FAKE_TINY] = {
+        "id": FAKE_TINY, "sha": FAKE_COMMIT, "gated": False, "author": "e2e-uploader", "downloads": 4321, "likes": 7,
+        "lastModified": "2026-05-06T07:08:09.000Z", "pipeline_tag": "text-generation",
+        "tags": ["gguf", "conversational", "imatrix", "license:mit", "region:us"],
+        "cardData": {"base_model": "e2e-lab/Tiny-Chat", "language": ["en", "fr"], "license": "mit"},
+        "siblings": [{"rfilename": n, "size": sz, "lfs": {"size": sz, "sha256": f"{i + 1}" * 64}} for i, (n, sz) in enumerate(tiny)]
+                    + [{"rfilename": "README.md", "size": 100}],
+    }
+    FakeHub.errors = {
+        FAKE_BUSY: (429, [("ratelimit", '"api";r=0;t=30')]),
+        FAKE_LOCKED: (401, [("x-error-code", "GatedRepo")]),
+    }
+    def summary(repo, downloads, gated):
+        return {"id": repo, "downloads": downloads, "likes": 1, "gated": gated, "tags": ["gguf", "conversational"],
+                "lastModified": "2026-05-06T07:08:09.000Z", "pipeline_tag": "text-generation"}
+
+    FakeHub.search = [summary(FAKE_TINY, 4321, False), summary(FAKE_BUSY, 99, False), summary(FAKE_LOCKED, 98, "manual")]
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(tls[0]), str(tls[1]))
+    server = ThreadingHTTPServer(("127.0.0.1", free_port()), FakeHub)
+    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"https://127.0.0.1:{server.server_address[1]}"
+
+
 @probe("compare-models")
 def p_compare_models(c, notes):
-    """Model comparison (0.0.5 item 4): the Models dialog's Compare tab. Empty state and
-    Suggested models from the catalog; a suggestion becomes a column whose rows are the
-    questions of the specification, each answer with its source; an installed file joins
-    from Installed (WP2's button, checked when present); "Compare at" re-checks the fit at
-    the chosen size; Show model card asks before opening; Remove; the list outlives closing
-    the dialog; at four models the suggestions go. Hugging Face columns are not driven here:
-    the app's Hugging Face client only talks https, so the harness cannot serve a fake one
-    (the unit tests cover those columns, their problems and the file choice)."""
+    """Model comparison (0.0.6 item 4) with the real catalog (WP4c) and the real facts
+    (WP4a's catalog_list and compare_facts): the Models dialog's Compare tab.
+
+    Offline (the Hugging Face mirror pointed at a closed port): the empty state, Suggested
+    models (the best four first), a catalog model's column with the catalog's own facts
+    checked against catalog/models.json and the offline words; an installed file (the test
+    model) from Installed with its header's facts and a fit; "Compare at" re-checking the fit.
+
+    Online through a local stand-in for Hugging Face (see FakeHub): Try again fills the
+    catalog column's missing facts; a Browse result added without a file gets the largest
+    file that fits, Change picks another; Show model card asks first; a repository page
+    shows its card as text and adds the file picked there; at four models the suggestions
+    go and Add to comparison is disabled with its reason; a rate-limited and a gated
+    repository say so; Remove; the list outlives closing the dialog."""
     s = c.s
+    catalog = json.loads((ROOT / "catalog" / "models.json").read_text())["models"]
     suggestions = s.invoke("catalog_list", {"ctx": None})
     names = [e["catalog"]["name"] for e in suggestions]
     notes.append(f"catalog_list: {len(names)} entries")
-    assert len(names) >= 2, suggestions
+    assert len(names) >= 5, suggestions
+    first = catalog[suggestions[0]["catalog"]["id"]]
+    assert first["name"] == names[0]
 
     def open_compare():
         s.click_button("Models")
@@ -3072,29 +3303,74 @@ def p_compare_models(c, notes):
         s.click_button("Compare")
         s.wait_text("Compare at", 10)
 
+    def settle(what="facts"):
+        s.wait_for(lambda: compare_settled(s), 60, what)
+
+    def set_ctx(value):
+        s.execute(
+            """
+            const el = document.getElementById('compare-ctx');
+            Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(el, arguments[0]);
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            """, value)
+
+    def answer(question, column):
+        row = compare_row(s, question)
+        assert row is not None and len(row) > column, (question, row)
+        return row[column]
+
     link = None
     model_id = None
+    hub = None
+    closed = free_port()  # nothing listens here: every Hugging Face request fails at once
+    s.invoke("set_hf_endpoint", {"endpoint": f"https://127.0.0.1:{closed}"})
     try:
+        # ---- Offline: the catalog's own facts ----
         open_compare()
         s.wait_text("Nothing to compare yet. Choose Add to comparison on a model in Browse or Installed.", 10)
         s.wait_text("Suggested models", 15)
         s.wait_text(names[0], 15)
+        offered = s.execute("return [...document.querySelectorAll('button')].filter(b => (b.getAttribute('aria-label') || '').startsWith('Add to comparison: ')).length;")
+        assert offered == 4, offered
+        s.wait_text(f"Show {len(names) - 4} more suggested models", 5)
         s.click_button(f"Add to comparison: {names[0]}")
         s.wait_for(lambda: compare_columns(s) == 1, 15, "one column")
-        s.wait_for(lambda: "Getting the facts" not in s.page_text(), 30, "facts")
+        settle()
         text = s.page_text()
         missing = [q for q in COMPARE_QUESTIONS if q not in text]
         assert not missing, missing
-        assert "From the publisher's model card" in text or "From the app's model list" in text, text[-800:]
-        assert "Estimate for this computer at " in text, text[-800:]
         assert "Nothing to compare yet" not in text
+        head = compare_heads(s)[0]
+        assert names[0] in head and COMPARE_OFFLINE in head and "Try again" in head, head
+        assert "Show model card" in head, head
+        good = answer("What is it good at?", 0)
+        assert first["summary"][:120] in good and "From the publisher's model card" in good, good
+        assert answer("Who made it?", 0) == f"{first['publisher']}\nFrom the publisher's model card", answer("Who made it?", 0)
+        size = answer("How big is it?", 0)
+        assert size.startswith(words_parameters(first["parameters"])), (size, first["parameters"])
+        assert size.endswith("From the publisher's model card"), size
+        if first.get("activeParameters"):  # a mixture of experts
+            assert f"using {words_parameters(first['activeParameters'])} at a time" in size, size
+        assert answer("Will it fit on this computer?", 0) == "Not known"
+        assert answer("Longest conversation it was made for", 0) == "Not known"
+        assert answer("Downloads on Hugging Face", 0) == "Not known"
+        for question, cap in (("Can it use tools?", "tools"), ("Can it read images?", "vision"),
+                              ("Does it think before answering?", "thinking")):
+            want = ("Yes" if cap in first["capabilities"] else "No") + "\nFrom the app's model list"
+            assert answer(question, 0) == want, (question, answer(question, 0))
+        source_repo = "/".join(first["source"].split("huggingface.co/", 1)[1].split("/")[:2])
+        assert answer("Made from", 0) == f"{source_repo}\nFrom the app's model list", answer("Made from", 0)
+        if first["license"]["spdx"] == "apache-2.0":
+            assert answer("License", 0) == "Apache 2.0\nFrom the app's model list", answer("License", 0)
+        released = answer("Released or last updated", 0)
+        assert released == (f"Released {words_date(first['released'])}\nFrom the publisher's model card"
+                            if first.get("released") else "Not known"), released
+        assert "No tests on this computer yet." in answer("Your test results", 0)
         # The added suggestion is no longer suggested.
         assert not s.execute("return !!document.querySelector(`button[aria-label=\"Add to comparison: ${arguments[0]}\"]`);", names[0])
+        assert "(1 chosen)" in s.page_text()
 
-        s.click_button(f"Add to comparison: {names[1]}")
-        s.wait_for(lambda: compare_columns(s) == 2, 15, "two columns")
-        assert "(2 chosen)" in s.page_text()
-
+        # ---- An installed file: its own header's facts ----
         gguf = any_gguf()
         if gguf is None:
             notes.append("no model file found: the installed column was not tried")
@@ -3106,69 +3382,160 @@ def p_compare_models(c, notes):
             model_id = m["id"]
             s.click_button("Installed")
             s.wait_text("compare-local.gguf", 15)
-            if s.execute("return [...document.querySelectorAll('button')].some(b => (b.innerText || '').includes('Add to comparison'));"):
-                s.click_button("Add to comparison")
-                s.click_button("Compare")
-                s.wait_for(lambda: compare_columns(s) == 3, 15, "installed column")
-                s.wait_for(lambda: "Getting the facts" not in s.page_text(), 30, "facts")
-                assert "compare-local.gguf" in s.page_text()
-                assert "On this computer" in s.page_text()
-            else:
-                notes.append("Installed rows have no Add to comparison yet (WP2's button): runs at integration")
-                s.click_button("Compare")
-                s.wait_text("Compare at", 10)
+            s.click_button("Add to comparison: compare-local.gguf")  # WP2's button on the Installed row
+            s.click_button("Compare")
+            s.wait_for(lambda: compare_columns(s) == 2, 15, "installed column")
+            settle()
+            head = compare_heads(s)[1]
+            assert "compare-local.gguf" in head and "On this computer" in head, head
+            quant = m["summary"].get("quantization")
+            if quant == "Q8_0":
+                assert "Q8_0: large file, almost the original quality" in head, head
+            ctx_len = m["summary"]["contextLength"]
+            assert answer("Longest conversation it was made for", 1) == f"{words_tokens(ctx_len)}\nFrom the model file"
+            fit = answer("Will it fit on this computer?", 1)
+            assert "Estimate for this computer at " in fit and ("Fits" in fit or "Too large" in fit), fit
+            assert answer("How big is it?", 1).endswith("From the model file"), answer("How big is it?", 1)
+            assert answer("Can it use tools?", 1) == ("Yes" if m["summary"]["templateTools"] else "No") + "\nFrom the model file"
+            assert answer("Download size", 1).endswith("On this computer")
+            notes.append("installed column: " + " | ".join(compare_row(s, "How big is it?")[1:2] + [fit.splitlines()[0]]))
 
-        s.execute(
-            """
-            const el = document.getElementById('compare-ctx');
-            Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(el, '32768');
-            el.dispatchEvent(new Event('change', {bubbles: true}));
-            """
-        )
-        s.wait_text("Estimate for this computer at 32,768 tokens, about 24,000 words", 20)
-        tab = s.execute("return document.querySelector('[role=tab][aria-selected=true]')?.innerText || '';")
+        set_ctx("32768")
+        if gguf is not None:
+            s.wait_text("Estimate for this computer at 32,768 tokens, about 24,000 words", 30)
+        settle()
+        tab = s.execute("return document.querySelector('[role=tablist][aria-label=\"Model sections\"] [role=tab][aria-selected=true]')?.innerText || '';")
         assert tab.startswith("Compare"), tab
-        # Two painted frames, so the screenshot shows this state on a busy machine.
         s.execute_async("const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));")
-        s.screenshot(str(OUT / "compare-models.png"))
+        s.screenshot(str(OUT / "compare-models-offline.png"))
 
-        # A model card opens only after the destination-confirm dialog.
-        if s.execute("return [...document.querySelectorAll('thead button')].some(b => b.innerText === 'Show model card');"):
-            s.click_button("Show model card")
+        # A model card opens only after the destination-confirm dialog (the catalog
+        # column's is the publisher's card).
+        compare_click(s, 0, "Show model card")
+        s.wait_text("Open this link?", 10)
+        assert first["source"] in s.page_text(), first["source"]
+        s.click_button("Cancel")
+        s.wait_for(lambda: "Open this link?" not in s.page_text(), 10, "link dialog closed")
+
+        # ---- Online through the stand-in ----
+        started = fake_hub_start(catalog, gguf) if gguf is not None else None
+        if started is None:
+            notes.append("no certificate for the Hugging Face stand-in (openssl missing or PROBES left it out): "
+                         "Hugging Face columns not driven")
+        else:
+            hub, base = started
+            s.invoke("set_hf_endpoint", {"endpoint": base})
+            check = s.invoke("compare_facts", {"items": [{"repo": FAKE_TINY, "file": "Tiny-Chat-Q4_K_M.gguf"}], "ctx": 8192})[0]
+            if check["problem"] is not None or check["hub"] is None:
+                notes.append(f"the app does not reach the stand-in ({check['problem']}): Hugging Face columns not driven")
+                hub.shutdown()
+                hub = None
+        if hub is not None:
+            compare_click(s, 0, "Try again")
+            s.wait_for(lambda: COMPARE_OFFLINE not in compare_heads(s)[0], 30, "the catalog column online")
+            settle()
+            assert answer("Downloads on Hugging Face", 0) == "12,345 in the last 30 days, 89 likes\nFrom Hugging Face"
+            fit = answer("Will it fit on this computer?", 0)
+            assert "Estimate for this computer at 32,768 tokens, about 24,000 words" in fit, fit
+            assert answer("Longest conversation it was made for", 0).endswith("From the model file")
+            # The catalog's source still names what it is made from, not the uploader.
+            assert answer("Made from", 0) == f"{source_repo}\nFrom the app's model list"
+            assert any(r.startswith(f"GET /api/models/{first['repo']}/revision/{first['revision']}") for r in FakeHub.requests), FakeHub.requests
+
+            # A Browse result: added without a file; the Compare tab picks one.
+            s.click_button("Browse")
+            s.wait_text(FAKE_TINY, 20)
+            s.click_button(f"Add to comparison: {FAKE_TINY}")
+            s.click_button("Compare")
+            s.wait_for(lambda: compare_columns(s) == 3, 15, "a Hugging Face column")
+            settle()
+            head = compare_heads(s)[2]
+            assert FAKE_TINY in head and "Q4_K_M: smaller file, good quality" in head, head
+            assert "Picked for you: the largest file that fits." in head, head
+            assert answer("What is it good at?", 2) == "The uploader lists: writes text, made for chat.\nThe uploader lists"
+            assert answer("Who made it?", 2) == "e2e-uploader uploaded it to Hugging Face.\nFrom Hugging Face"
+            assert answer("Languages", 2) == "English and French\nThe uploader lists"
+            assert answer("Made from", 2) == "e2e-lab/Tiny-Chat\nThe uploader lists"
+            assert answer("License", 2) == "MIT\nThe uploader lists"
+            assert answer("Released or last updated", 2) == "Last updated May 6, 2026\nFrom Hugging Face"
+            assert answer("Downloads on Hugging Face", 2) == "4,321 in the last 30 days, 7 likes\nFrom Hugging Face"
+            assert answer("Download size", 2) == "600 MB\nFrom Hugging Face"
+            # Change: the repository's files with their fit at this size.
+            compare_click(s, 2, "Change")
+            s.wait_text("Q8_0: large file, almost the original quality · 48.0 GB · Too large", 10)
+            s.click_button("Q2_K: very small file")
+            s.wait_for(lambda: "Q2_K: very small file, noticeably lower quality" in compare_heads(s)[2], 10, "the picked file")
+            settle()
+            assert "Picked for you" not in compare_heads(s)[2]
+            assert answer("Download size", 2) == "400 MB\nFrom Hugging Face"
+            compare_click(s, 2, "Show model card")
             s.wait_text("Open this link?", 10)
-            assert "huggingface.co" in s.page_text()
+            assert f"{base}/{FAKE_TINY}" in s.page_text()
             s.click_button("Cancel")
             s.wait_for(lambda: "Open this link?" not in s.page_text(), 10, "link dialog closed")
-        else:
-            notes.append("no column has a model card link (catalog entries without a source)")
+
+            # A repository page: its card as text, and the file picked there.
+            s.click_button("Browse")
+            s.wait_text(FAKE_TINY, 20)
+            s.click_button(FAKE_TINY)
+            s.wait_text("Back to results", 15)
+            s.wait_text("Q8_0", 20)
+            s.click_button("Show model card")
+            card = s.execute("return document.querySelector('pre')?.innerText || '';")
+            assert '<b>bold</b> <img src=x onerror="alert(1)">' in card and "safe[U+202E]txt.exe" in card, card
+            assert "\u202e" not in s.page_text()
+            assert not s.execute("return !!document.querySelector('pre b, pre img');")
+            s.click_button("Add to comparison: Q8_0")
+            s.click_button("Compare")
+            s.wait_for(lambda: compare_columns(s) == 4, 15, "four columns")
+            settle()
+            head = compare_heads(s)[3]
+            assert "Q8_0: large file, almost the original quality" in head and "Picked for you" not in head, head
+            assert "Too large" in answer("Will it fit on this computer?", 3)
+            # Four: no suggestions, and Add to comparison is disabled with its reason.
+            s.wait_for(lambda: "Suggested models" not in s.page_text(), 10, "suggestions gone at four")
+            s.execute_async("const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));")
+            s.screenshot(str(OUT / "compare-models.png"))
+            s.click_button("Browse")  # the tab opens on the results again
+            s.wait_text(FAKE_BUSY, 20)
+            assert COMPARE_FULL in s.page_text()
+            state = s.execute("const b = document.querySelector(`button[aria-label=\"Add to comparison: ${arguments[0]}\"]`);"
+                              "return b ? [b.disabled, b.title] : null;", FAKE_BUSY)
+            assert state == [True, COMPARE_FULL], state
+
+            # A rate limit and a gated repository, each in its own words.
+            s.click_button("Compare")
+            s.execute(f"document.querySelectorAll('{COMPARE_TABLE} thead th')[4].querySelector('button[aria-label^=\"Remove \"]').click();")
+            s.wait_for(lambda: compare_columns(s) == 3, 10, "a column removed")
+            for repo, words in ((FAKE_BUSY, COMPARE_BUSY), (FAKE_LOCKED, COMPARE_GATED)):
+                s.click_button("Browse")
+                s.wait_text(repo, 20)
+                s.click_button(f"Add to comparison: {repo}")
+                s.click_button("Compare")
+                s.wait_for(lambda: compare_columns(s) == 4, 15, f"{repo} column")
+                s.wait_for(lambda: words in compare_heads(s)[3], 30, f"{repo}: its problem")
+                assert answer("What is it good at?", 3) == "Not known"
+                s.execute(f"document.querySelectorAll('{COMPARE_TABLE} thead th')[4].querySelector('button[aria-label^=\"Remove \"]').click();")
+                s.wait_for(lambda: compare_columns(s) == 3, 10, "a column removed")
+            notes.append(f"stand-in requests: {len(FakeHub.requests)}")
 
         n = compare_columns(s)
-        s.execute(
-            "[...document.querySelectorAll('thead button')].find(b => /^Remove .+ from comparison$/.test(b.getAttribute('aria-label') || '')).click();")
+        s.execute(f"document.querySelectorAll('{COMPARE_TABLE} thead th')[1].querySelector('button[aria-label^=\"Remove \"]').click();")
         s.wait_for(lambda: compare_columns(s) == n - 1, 10, "a column removed")
-
         s.click_button("Close models")
         s.wait_for(lambda: "Compare at" not in s.page_text(), 10, "dialog closed")
         open_compare()
         s.wait_for(lambda: compare_columns(s) == n - 1, 15, "the comparison kept after closing")
-
-        if len(names) >= 4:
-            for name in names:
-                if compare_columns(s) >= 4:
-                    break
-                if s.execute("return !!document.querySelector(`button[aria-label=\"Add to comparison: ${arguments[0]}\"]`);", name):
-                    s.click_button(f"Add to comparison: {name}")
-                    s.wait_for(lambda: "Getting the facts" not in s.page_text(), 30, "facts")
-            s.wait_for(lambda: compare_columns(s) == 4, 15, "four columns")
-            s.wait_for(lambda: "Suggested models" not in s.page_text(), 10, "suggestions gone at four")
-        else:
-            notes.append(f"only {len(names)} catalog entries: four columns are covered by the unit tests")
         s.click_button("Close models")
     finally:
+        s.invoke("set_hf_endpoint", {"endpoint": None})
+        if hub is not None:
+            hub.shutdown()
         if model_id is not None:
             s.invoke("delete_model", {"id": model_id, "deleteFiles": False})
         if link is not None:
             link.unlink(missing_ok=True)
+
 
 @probe("chat-memory")
 def p_chat_memory(c, notes):
@@ -4706,6 +5073,7 @@ def main() -> int:
     env.update(HOME=str(home), XDG_DATA_HOME=str(home / "data"), XDG_CONFIG_HOME=str(home / "config"),
                XDG_CACHE_HOME=str(home / "cache"), APP_DEV_LLAMA_DIR=LLAMA_DIR, RUST_LOG="info")
     env["PATH"] = str(c.fakebin) + os.pathsep + env.get("PATH", "")
+    env.update(compare_hub_env())  # 0.0.6 compare-models: trust its local Hugging Face stand-in
     fake_port = free_port()
     fake = ThreadingHTTPServer(("127.0.0.1", fake_port), Fake)
     threading.Thread(target=fake.serve_forever, daemon=True).start()

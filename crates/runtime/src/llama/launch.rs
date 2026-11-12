@@ -3,7 +3,9 @@
 //! Every default the pinned build would otherwise apply is overridden explicitly: port
 //! 9931, auto-fitted context, four slots, the 8 GB prompt cache, the Web UI, CORS for any
 //! origin and downloads from the network. The model's own file name is never the API's
-//! model id: `-a` reports the fixed [`MODEL_ALIAS`] instead.
+//! model id: `-a` reports the fixed [`MODEL_ALIAS`] instead. The server never starts a
+//! program of its own: `--video-ffmpeg-dir` names a folder that does not exist
+//! ([`NO_FFMPEG_DIR`]), so it cannot find `ffmpeg` on `PATH`.
 //!
 //! The 0.0.6 load settings are typed fields with a fixed set of words each (0.0.6 D4):
 //! [`LaunchConfig::gpu`], [`LaunchConfig::save_memory`] and
@@ -154,6 +156,26 @@ impl LaunchConfig {
             ..Self::default()
         }
     }
+
+    /// The `--device` word: the probed device, or `none` for the processor, for an empty
+    /// name and for [`GpuUse::Off`].
+    fn device_arg(&self) -> &str {
+        match self.gpu {
+            GpuUse::Off => "none",
+            GpuUse::All | GpuUse::Fit => self
+                .device
+                .as_deref()
+                .filter(|d| !d.is_empty())
+                .unwrap_or("none"),
+        }
+    }
+
+    /// Whether the command line names a device (`--device` is not `none`), so a graphics
+    /// card can get part of the work. The supervisor decides its retries and step-downs by
+    /// this, not by the backend's label.
+    pub fn uses_device(&self) -> bool {
+        self.device_arg() != "none"
+    }
 }
 
 /// What `Debug` prints instead of a secret.
@@ -183,6 +205,24 @@ impl std::fmt::Debug for LaunchConfig {
 /// value plus a scale per 32 values, 34 bytes where f16 takes 64.
 pub const SAVE_MEMORY_CACHE_TYPE: &str = "q8_0";
 
+/// The folder passed to `--video-ffmpeg-dir`: one that never exists, so llama-server never
+/// starts `ffprobe` or `ffmpeg`.
+///
+/// The pinned build's media helper (`tools/mtmd/mtmd-helper.cpp`) hands video, and every
+/// image its own decoder cannot read (WebP, or any undecodable bytes sent as an image), to
+/// `ffprobe` and `ffmpeg` through `subprocess_create` with PATH search, unless this option
+/// names a folder: then it runs `<folder>/ffprobe` (`.exe` on Windows) and nothing else.
+/// Such a process would bypass `spawn.rs` (ARCHITECTURE.md 7.3) and feed outside programs
+/// whatever a request carries. A relative path with a folder part is resolved in the
+/// server's working directory, the backend's runtime folder, and is never looked up on
+/// `PATH` by the system calls it uses on Unix and Windows; the runtime folder holds no such
+/// folder, so the start fails and the request gets an error. Checked against the pinned
+/// `libmtmd` with a fake `ffprobe` on `PATH`: started without the option, not with it.
+///
+/// So the in-app chat cannot send WebP images to the model either; they fail the same way
+/// on every computer, where today they work only when ffmpeg happens to be installed.
+pub const NO_FFMPEG_DIR: &str = "no-ffmpeg";
+
 /// The load mode with Keep the model in memory on (`-lm`).
 pub const KEEP_IN_MEMORY_LOAD_MODE: &str = "mmap+mlock";
 
@@ -193,7 +233,8 @@ const MAX_ALIAS_LEN: usize = 64;
 ///
 /// ```text
 /// --host 127.0.0.1 --port P --no-webui --no-slots --offline --jinja --cors-origins none
-/// --no-context-shift -a harnessui-local -m M [--mmproj X] -c C -np 1
+/// --no-context-shift --video-ffmpeg-dir no-ffmpeg -a harnessui-local -m M [--mmproj X]
+/// -c C -np 1
 /// --device D (-ngl all --fit off | --fit on | -ngl 0 --fit off)
 /// [-fa on -ctk q8_0 -ctv q8_0] [-lm mmap+mlock] --cache-ram R [--reasoning-budget B]
 /// ```
@@ -218,6 +259,8 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
         "--cors-origins",
         CORS_ORIGINS_NONE,
         "--no-context-shift",
+        "--video-ffmpeg-dir",
+        NO_FFMPEG_DIR,
         "-a",
         alias_arg(&cfg.alias),
         "-m",
@@ -230,14 +273,7 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
         args.push("--mmproj".to_owned());
         args.push(mmproj.to_string_lossy().into_owned());
     }
-    let device = match cfg.gpu {
-        GpuUse::Off => "none",
-        GpuUse::All | GpuUse::Fit => cfg
-            .device
-            .as_deref()
-            .filter(|d| !d.is_empty())
-            .unwrap_or("none"),
-    };
+    let device = cfg.device_arg();
     args.extend([
         "-c".to_owned(),
         cfg.ctx.to_string(),
@@ -408,6 +444,8 @@ mod tests {
                 "--cors-origins",
                 "none",
                 "--no-context-shift",
+                "--video-ffmpeg-dir",
+                "no-ffmpeg",
                 "-a",
                 "harnessui-local",
                 "-m",
@@ -522,6 +560,8 @@ mod tests {
                 "--cors-origins",
                 "none",
                 "--no-context-shift",
+                "--video-ffmpeg-dir",
+                "no-ffmpeg",
                 "-a",
                 "harnessui-local",
                 "-m",
@@ -567,7 +607,7 @@ mod tests {
                     let joined = build_args(&cfg).join(" ");
                     for fixed in [
                         "--host 127.0.0.1 --port 40123 --no-webui --no-slots --offline --jinja",
-                        "--cors-origins none --no-context-shift",
+                        "--cors-origins none --no-context-shift --video-ffmpeg-dir no-ffmpeg",
                         "-a harnessui-local",
                         "-c 8192 -np 1 --device",
                         "--cache-ram 512",
@@ -622,6 +662,8 @@ mod tests {
                                     "--cors-origins",
                                     "none",
                                     "--no-context-shift",
+                                    "--video-ffmpeg-dir",
+                                    "no-ffmpeg",
                                     "-a",
                                     "harnessui-local",
                                     "-m",
@@ -649,9 +691,11 @@ mod tests {
                                 }
                                 let args = build_args(&cfg);
                                 assert_eq!(args, want, "{cfg:?}");
+                                assert_eq!(cfg.uses_device(), shown != "none", "{cfg:?}");
                                 for flag in [
                                     "--host",
                                     "--port",
+                                    "--video-ffmpeg-dir",
                                     "-a",
                                     "-m",
                                     "-c",
@@ -732,6 +776,31 @@ mod tests {
             build_args(&config()).iter().filter(|a| *a == "-a").count(),
             1
         );
+    }
+
+    /// The pinned build decodes video, and any image its own decoder cannot read (WebP
+    /// included), by starting `ffprobe` and `ffmpeg`, which it looks for on `PATH` unless
+    /// `--video-ffmpeg-dir` names a folder. It always names one that does not exist, as a
+    /// relative path (resolved in the runtime folder, the working directory), so those
+    /// programs never start outside `spawn.rs`.
+    #[test]
+    fn llama_server_never_looks_for_ffmpeg_on_the_path() {
+        for gpu in [GpuUse::All, GpuUse::Fit, GpuUse::Off] {
+            let args = build_args(&LaunchConfig {
+                gpu,
+                mmproj: Some(PathBuf::from("/models/mmproj.gguf")),
+                ..config()
+            });
+            let at = args
+                .iter()
+                .position(|a| a == "--video-ffmpeg-dir")
+                .expect("--video-ffmpeg-dir");
+            assert_eq!(args[at + 1], NO_FFMPEG_DIR);
+        }
+        assert_eq!(NO_FFMPEG_DIR, "no-ffmpeg");
+        let dir = std::path::Path::new(NO_FFMPEG_DIR);
+        assert!(dir.is_relative());
+        assert_eq!(dir.components().count(), 1, "one plain folder name");
     }
 
     #[test]

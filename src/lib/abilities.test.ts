@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   GOOD_AT_KEYS,
@@ -9,6 +11,7 @@ import {
   goodAtSentence,
   goodAtWords,
   languageWords,
+  licenseWords,
   parameterWords,
   pipelineWords,
   quantFromFile,
@@ -143,5 +146,30 @@ describe("capabilities and languages", () => {
     expect(languageWords(["en", "fr"])).toEqual(["English", "French"]);
     expect(languageWords(["multilingual", "en", "en"])).toEqual(["Many languages", "English"]);
     expect(languageWords(["not a language", "zz-qq-1234567"])).toEqual([]);
+  });
+});
+
+describe("licenses", () => {
+  it("names common license ids and keeps anything else as it is written", () => {
+    expect(licenseWords("apache-2.0")).toBe("Apache 2.0");
+    expect(licenseWords("MIT")).toBe("MIT");
+    expect(licenseWords(" cc-by-nc-4.0 ")).toBe("Creative Commons Attribution-NonCommercial 4.0 (no commercial use)");
+    expect(licenseWords("other")).toBe("Another license (read the model card)");
+    expect(licenseWords("some-family-license")).toBe("some-family-license");
+    // Object keys are not license names.
+    expect(licenseWords("constructor")).toBe("constructor");
+    expect(licenseWords("__proto__")).toBe("__proto__");
+  });
+});
+
+describe("the tags the backend keeps", () => {
+  it("has a phrase for exactly the tags the models crate keeps (KNOWN_TAGS)", () => {
+    // Uploader tags reach the screen only when crates/models/src/hf.rs keeps them; a tag
+    // kept there without a phrase here would never be shown, one here only would be dead.
+    const source = readFileSync(resolve(process.cwd(), "crates/models/src/hf.rs"), "utf8");
+    const block = /pub const KNOWN_TAGS: \[&str; \d+\] = \[([^\]]*)\]/.exec(source)?.[1] ?? "";
+    const kept = [...block.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    expect(kept.length).toBeGreaterThan(10);
+    expect([...kept].sort()).toEqual(Object.keys(TAG_WORDS).sort());
   });
 });

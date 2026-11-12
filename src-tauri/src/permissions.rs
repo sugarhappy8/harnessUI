@@ -138,6 +138,10 @@ fn forbidden_folders(app: &AppHandle) -> Vec<PathBuf> {
         key_stores: key_stores(app),
     }
     .forbidden()
+    .into_iter()
+    // Debug builds only: the HARNESS_REVERSE_ROOT folder of a fake rea pack (item5 WP9a).
+    .chain(reverse::layout::extra_forbidden())
+    .collect()
 }
 
 /// Whether approving `path` would let tools reach `forbidden`: it is inside it, or holds it.

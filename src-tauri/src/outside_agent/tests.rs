@@ -691,6 +691,74 @@ async fn a_link_inside_an_approved_folder_is_refused_wherever_it_leads() {
     assert!(!bin.join("args.txt").exists(), "it ran");
 }
 
+/// A folder link inside an approved folder counts where it stands too: the `PATH` folder
+/// itself, or a folder above it, can be a link the project controls that leads outside
+/// (review of 0.0.6, round 2).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_folder_link_inside_an_approved_folder_is_refused_wherever_it_leads() {
+    let project = temp("dirlink-project");
+    let approved = vec![project.display().to_string()];
+    let inside = |found: &SavedApp| matches!(&found.problem, Some(Problem::InsideApprovedFolder { folder, .. }) if *folder == project.display().to_string());
+    // The PATH folder is the link: project/bin -> outside, which holds `codex`.
+    let outside = temp("dirlink-outside");
+    fake(&outside, "codex", CODEX_OK);
+    let bin = project.join("bin");
+    std::os::unix::fs::symlink(&outside, &bin).unwrap();
+    let found = find_app(CodingApp::Codex, Some(bin.as_os_str()), None, &approved);
+    assert!(inside(&found), "{found:?}");
+    assert!(!found.usable());
+    // A folder above the PATH folder is the link: project/tools -> outside2, PATH entry
+    // project/tools/bin.
+    let outside2 = temp("dirlink-outside2");
+    std::fs::create_dir_all(outside2.join("bin")).unwrap();
+    fake(&outside2.join("bin"), "codex", CODEX_OK);
+    std::os::unix::fs::symlink(&outside2, project.join("tools")).unwrap();
+    let tools_bin = project.join("tools").join("bin");
+    let found = find_app(
+        CodingApp::Codex,
+        Some(tools_bin.as_os_str()),
+        None,
+        &approved,
+    );
+    assert!(inside(&found), "{found:?}");
+    // A link with a relative target counts the same way: project/rel -> ../<outside2>.
+    let relative = Path::new("..").join(outside2.file_name().unwrap());
+    std::os::unix::fs::symlink(&relative, project.join("rel")).unwrap();
+    let rel_bin = project.join("rel").join("bin");
+    let found = find_app(CodingApp::Codex, Some(rel_bin.as_os_str()), None, &approved);
+    assert!(inside(&found), "{found:?}");
+    // Found while the folder was not approved; the chat approves it later: refused before
+    // the run, in every mode.
+    for path in [&bin, &tools_bin] {
+        let s = server_for(path, base_env());
+        assert_eq!(s.tools().len(), 1);
+        let action = describe(&s, CODEX_TOOL, json!({"task": "hello"}), &chat(&project)).await;
+        let why = action
+            .hard_limit
+            .clone()
+            .filter(|w| w.contains("inside a folder you approved"))
+            .unwrap_or_else(|| panic!("not refused: {:?}", action.hard_limit));
+        for (allow_all, full_access) in [(false, false), (true, false), (true, true)] {
+            assert_eq!(
+                policy::evaluate(
+                    &action,
+                    &turn_in(allow_all, full_access, false, false),
+                    &BTreeSet::new()
+                ),
+                policy::Decision::Denied {
+                    reason: why.clone()
+                }
+            );
+        }
+    }
+    // The same program reached by a path outside the approved folder is accepted.
+    let found = find_app(CodingApp::Codex, Some(outside.as_os_str()), None, &approved);
+    assert_eq!(found.problem, None, "{found:?}");
+    assert!(!outside.join("args.txt").exists(), "it ran");
+    assert!(!outside2.join("bin").join("args.txt").exists(), "it ran");
+}
+
 /// When the approved folder holds the home folder, installing the app "in its usual place"
 /// cannot help (its usual places are in the home folder): the message says to approve a
 /// narrower folder instead.

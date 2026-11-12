@@ -8,8 +8,9 @@
 //! what the processor can show: Save memory allocates a q8_0 memory, Keep the model in
 //! memory starts (and locks the model where the system allows it), As much as fits starts
 //! with `--fit on` and keeps the explicit context, the alias is the model id in every API
-//! while `/props` still names the launched file, and a failure Save memory may cause is
-//! retried once without it. What a graphics card does with them is on the owner checklist.
+//! while `/props` still names the launched file, a model that refuses Save memory is
+//! retried once without it, and a plain lack of memory without a graphics card in use is
+//! not retried at all. What a graphics card does with them is on the owner checklist.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -718,25 +719,253 @@ async fn the_alias_is_the_model_id_in_every_api() {
     assert_eq!(ready["id"], MODEL_ALIAS, "{ready}");
 }
 
-/// A context far too large for any computer fails to allocate, through real llama-server
-/// processes and the real supervisor: on a graphics backend with Save memory on, it retries
-/// once without it on the same backend, then steps down to the processor, each with a typed
-/// event, and reports the failure. On the processor nothing is retried without Save memory
-/// (it can always do it, so the failure is memory, and turning it off needs more).
+/// Writes a tiny llama-architecture GGUF model whose attention heads are 80 values wide (two
+/// heads of a 160-wide layer, one layer, a byte-level vocabulary of 259 tokens, all weights
+/// zero, about 700 KB) to `path`.
 ///
-/// The Linux build has no graphics backend, so the "graphics" backend is the same
-/// processor build labelled Vulkan with no device (`--device none`): the supervisor decides
-/// by the label, while the processes, their log and its classification are the pinned
-/// build's. Linux only, and only while the kernel refuses impossible allocations
+/// Families with that head size exist; the pinned build refuses Save memory for them on
+/// every backend, because a q8_0 block of 32 values does not divide 80 ("K cache type q8_0
+/// with block size 32 does not divide n_embd_head_k=80"), and loads them without it.
+fn write_head_size_80_model(path: &Path) {
+    const EMBD: u64 = 160;
+    const FF: u64 = 64;
+    fn text(out: &mut Vec<u8>, s: &str) {
+        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+    // GGUF value types.
+    const U32: u32 = 4;
+    const I32: u32 = 5;
+    const F32: u32 = 6;
+    const STRING: u32 = 8;
+    const ARRAY: u32 = 9;
+    let mut kvs: Vec<Vec<u8>> = Vec::new();
+    let mut kv = |key: &str, kind: u32, value: Vec<u8>| {
+        let mut out = Vec::new();
+        text(&mut out, key);
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&value);
+        kvs.push(out);
+    };
+    let string = |s: &str| {
+        let mut out = Vec::new();
+        text(&mut out, s);
+        out
+    };
+    let u32_value = |n: u32| n.to_le_bytes().to_vec();
+    let array = |kind: u32, items: Vec<Vec<u8>>| {
+        let mut out = kind.to_le_bytes().to_vec();
+        out.extend_from_slice(&(items.len() as u64).to_le_bytes());
+        out.extend(items.into_iter().flatten());
+        out
+    };
+    kv("general.architecture", STRING, string("llama"));
+    kv("llama.context_length", U32, u32_value(2048));
+    kv("llama.embedding_length", U32, u32_value(EMBD as u32));
+    kv("llama.block_count", U32, u32_value(1));
+    kv("llama.feed_forward_length", U32, u32_value(FF as u32));
+    kv("llama.attention.head_count", U32, u32_value(2));
+    kv("llama.attention.head_count_kv", U32, u32_value(2));
+    kv(
+        "llama.attention.layer_norm_rms_epsilon",
+        F32,
+        1e-5_f32.to_le_bytes().to_vec(),
+    );
+    let tokens: Vec<String> = ["<unk>", "<s>", "</s>"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain((0..=255_u8).map(|b| format!("<0x{b:02X}>")))
+        .collect();
+    // Unknown, control, control, then byte tokens.
+    let types: Vec<i32> = [2, 3, 3].into_iter().chain([6; 256]).collect();
+    let vocab = tokens.len() as u64;
+    kv("tokenizer.ggml.model", STRING, string("llama"));
+    kv(
+        "tokenizer.ggml.tokens",
+        ARRAY,
+        array(STRING, tokens.iter().map(|t| string(t)).collect()),
+    );
+    kv(
+        "tokenizer.ggml.scores",
+        ARRAY,
+        array(
+            F32,
+            tokens
+                .iter()
+                .map(|_| 0_f32.to_le_bytes().to_vec())
+                .collect(),
+        ),
+    );
+    kv(
+        "tokenizer.ggml.token_type",
+        ARRAY,
+        array(
+            I32,
+            types.iter().map(|t| t.to_le_bytes().to_vec()).collect(),
+        ),
+    );
+    kv("tokenizer.ggml.unknown_token_id", U32, u32_value(0));
+    kv("tokenizer.ggml.bos_token_id", U32, u32_value(1));
+    kv("tokenizer.ggml.eos_token_id", U32, u32_value(2));
+
+    // (name, dimensions with the fastest first, value of every element), all f32.
+    let mut tensors: Vec<(String, Vec<u64>, f32)> = vec![
+        ("token_embd.weight".into(), vec![EMBD, vocab], 0.0),
+        ("output_norm.weight".into(), vec![EMBD], 1.0),
+    ];
+    for (name, dims, value) in [
+        ("attn_norm", vec![EMBD], 1.0),
+        ("attn_q", vec![EMBD, EMBD], 0.0),
+        ("attn_k", vec![EMBD, EMBD], 0.0),
+        ("attn_v", vec![EMBD, EMBD], 0.0),
+        ("attn_output", vec![EMBD, EMBD], 0.0),
+        ("ffn_norm", vec![EMBD], 1.0),
+        ("ffn_gate", vec![EMBD, FF], 0.0),
+        ("ffn_down", vec![FF, EMBD], 0.0),
+        ("ffn_up", vec![EMBD, FF], 0.0),
+    ] {
+        tensors.push((format!("blk.0.{name}.weight"), dims, value));
+    }
+    const ALIGN: usize = 32;
+    let pad = |buf: &mut Vec<u8>| buf.resize(buf.len().div_ceil(ALIGN) * ALIGN, 0);
+    let (mut infos, mut data) = (Vec::new(), Vec::new());
+    for (name, dims, value) in &tensors {
+        pad(&mut data);
+        text(&mut infos, name);
+        infos.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+        for dim in dims {
+            infos.extend_from_slice(&dim.to_le_bytes());
+        }
+        infos.extend_from_slice(&0_u32.to_le_bytes()); // GGML_TYPE_F32
+        infos.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        let count: u64 = dims.iter().product();
+        for _ in 0..count {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    let mut file = b"GGUF".to_vec();
+    file.extend_from_slice(&3_u32.to_le_bytes());
+    file.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+    file.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+    file.extend(kvs.into_iter().flatten());
+    file.extend_from_slice(&infos);
+    pad(&mut file);
+    file.extend_from_slice(&data);
+    std::fs::write(path, file).expect("write the test model");
+}
+
+/// The lifecycle states and typed stages, in the order the app receives them.
+fn states_and_stages(events: &[ServerEvent]) -> Vec<&ServerEvent> {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ServerEvent::State(_) | ServerEvent::Stage(_) | ServerEvent::SteppedDown { .. }
+            )
+        })
+        .collect()
+}
+
+/// A model that refuses Save memory (0.0.6 D2c), through real llama-server processes and
+/// the real supervisor on the processor: the first start fails with the pinned build's
+/// refusal line, the supervisor retries once without Save memory on the same backend with
+/// a typed event, and the model loads. This is the processor's only retry without Save
+/// memory; it is decided by the log, not by the backend.
+///
+/// The event order is what the app gets for every retry on the same backend: the failed
+/// attempt's `Failed` first, then the stage, then the new attempt's `Starting` and `Ready`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_that_refuses_save_memory_is_retried_once_without_it() {
+    use runtime::Supervisor;
+    use runtime::llama::server::Candidate;
+
+    let Some((bin, _)) = env_paths("a_model_that_refuses_save_memory_is_retried_once_without_it")
+    else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let model = dir.path().join("head80.gguf");
+    write_head_size_80_model(&model);
+    let cpu = backend(&bin, BackendKind::Cpu);
+    let (tx, mut rx) = unbounded_channel();
+    let mut supervisor = Supervisor::local(
+        vec![Candidate {
+            backend: cpu.clone(),
+            device: None,
+            hip_visible_devices: None,
+        }],
+        tx,
+    );
+    let spec = StartSpec {
+        backend: cpu,
+        launch: LaunchConfig {
+            save_memory: true,
+            ..launch(model.clone())
+        },
+        load_timeout: LOAD_TIMEOUT,
+    };
+    let (server, running) = match supervisor.start(spec).await {
+        Ok(started) => started,
+        Err(error) => panic!(
+            "did not load without Save memory: {error}\n{}",
+            error.stderr_tail().join("\n")
+        ),
+    };
+    assert!(!running.launch.save_memory, "the load runs without it");
+    assert_eq!(running.backend.kind, BackendKind::Cpu);
+    assert_eq!(server.props().n_ctx, 2048);
+    server.stop().await;
+
+    let events = drain(&mut rx);
+    let logged = |needle: &str| {
+        events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::Log(line) if line.contains(needle)))
+    };
+    assert!(
+        logged("does not divide n_embd_head_k=80"),
+        "the pinned build's refusal line"
+    );
+    let states: Vec<&ServerEvent> = states_and_stages(&events)
+        .into_iter()
+        .take_while(|e| **e != ServerEvent::State(ServerState::Stopping))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            &ServerEvent::State(ServerState::Starting),
+            &ServerEvent::State(ServerState::Failed(LoadFailure::ContextTooLarge)),
+            &ServerEvent::Stage(LoadStage::RetryingWithoutSaveMemory {
+                backend: BackendKind::Cpu
+            }),
+            &ServerEvent::State(ServerState::Starting),
+            &ServerEvent::State(ServerState::Ready),
+        ]
+    );
+}
+
+/// A context far too large for any computer fails to allocate, through real llama-server
+/// processes and the real supervisor. Without a graphics card in use that is a plain lack
+/// of memory: no retry without Save memory (it would need more), no step-down (the
+/// processor build would repeat the same load), one start and the failure. That holds on
+/// the processor and on a graphics backend with Don't use it, so the backend's label
+/// changes nothing; on this Linux build the "graphics" backend is the same processor build
+/// labelled Vulkan, which with Don't use it runs as `--device none`, exactly as on a real
+/// one. What a real graphics card does is covered by the supervisor's unit tests and the
+/// owner checklist.
+///
+/// Linux only, and only while the kernel refuses impossible allocations
 /// (`vm.overcommit_memory` is not 1): elsewhere the allocation of several terabytes might
 /// be granted lazily and then touched.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failure_save_memory_may_cause_is_retried_once_without_it() {
+async fn a_plain_memory_failure_without_a_graphics_card_is_not_retried() {
     use runtime::Supervisor;
     use runtime::llama::server::Candidate;
 
-    let Some((bin, gguf)) = env_paths("a_failure_save_memory_may_cause_is_retried_once_without_it")
+    let Some((bin, gguf)) =
+        env_paths("a_plain_memory_failure_without_a_graphics_card_is_not_retried")
     else {
         return;
     };
@@ -748,77 +977,54 @@ async fn a_failure_save_memory_may_cause_is_retried_once_without_it() {
     let cpu = backend(&bin, BackendKind::Cpu);
     let mut graphics = cpu.clone();
     graphics.kind = BackendKind::Vulkan;
-    let candidate = |backend: &Backend| Candidate {
+    let candidate = |backend: &Backend, device: Option<&str>| Candidate {
         backend: backend.clone(),
-        device: None,
+        device: device.map(str::to_owned),
         hip_visible_devices: None,
     };
-    let too_large = |backend: Backend, gpu: GpuUse| StartSpec {
-        backend,
-        launch: LaunchConfig {
-            ctx: 50_000_128,
-            gpu,
-            save_memory: true,
-            ..launch(gguf.clone())
-        },
-        load_timeout: LOAD_TIMEOUT,
-    };
-    /// The stages and step-downs, in order.
-    fn changes(events: &[ServerEvent]) -> Vec<&ServerEvent> {
-        events
-            .iter()
-            .filter(|e| matches!(e, ServerEvent::Stage(_) | ServerEvent::SteppedDown { .. }))
-            .collect()
-    }
-    let starts = |events: &[ServerEvent]| {
-        events
-            .iter()
-            .filter(|e| **e == ServerEvent::State(ServerState::Starting))
-            .count()
-    };
-
-    // A graphics backend: Save memory off, then the processor.
-    let (tx, mut rx) = unbounded_channel();
-    let mut supervisor = Supervisor::local(vec![candidate(&graphics), candidate(&cpu)], tx);
-    let error = supervisor
-        .start(too_large(graphics.clone(), GpuUse::All))
-        .await
-        .expect_err("cannot allocate");
-    assert_eq!(
-        error.failure(),
-        LoadFailure::ContextTooLarge,
-        "{}",
-        error.stderr_tail().join("\n")
-    );
-    let events = drain(&mut rx);
-    assert_eq!(
-        changes(&events),
-        vec![
-            &ServerEvent::Stage(LoadStage::RetryingWithoutSaveMemory {
-                backend: BackendKind::Vulkan
-            }),
-            &ServerEvent::SteppedDown {
-                from: BackendKind::Vulkan,
-                to: BackendKind::Cpu,
-                reason: LoadFailure::ContextTooLarge,
+    for (first, device, candidates) in [
+        (cpu.clone(), None, vec![candidate(&cpu, None)]),
+        (
+            graphics.clone(),
+            Some("Vulkan0"),
+            vec![candidate(&graphics, Some("Vulkan0")), candidate(&cpu, None)],
+        ),
+    ] {
+        let kind = first.kind;
+        let (tx, mut rx) = unbounded_channel();
+        let mut supervisor = Supervisor::local(candidates, tx);
+        let spec = StartSpec {
+            backend: first,
+            launch: LaunchConfig {
+                ctx: 50_000_128,
+                gpu: GpuUse::Off,
+                device: device.map(str::to_owned),
+                save_memory: true,
+                ..launch(gguf.clone())
             },
-        ]
-    );
-    assert_eq!(
-        starts(&events),
-        3,
-        "with Save memory, without it, then on the processor"
-    );
-
-    // The processor alone: one start, no retry.
-    let (tx, mut rx) = unbounded_channel();
-    let mut supervisor = Supervisor::local(vec![candidate(&cpu)], tx);
-    let error = supervisor
-        .start(too_large(cpu, GpuUse::Off))
-        .await
-        .expect_err("cannot allocate");
-    assert_eq!(error.failure(), LoadFailure::ContextTooLarge);
-    let events = drain(&mut rx);
-    assert!(changes(&events).is_empty(), "{events:?}");
-    assert_eq!(starts(&events), 1);
+            load_timeout: LOAD_TIMEOUT,
+        };
+        assert!(
+            build_args(&spec.launch)
+                .windows(2)
+                .any(|w| w == ["--device", "none"]),
+            "Don't use it names no device"
+        );
+        let error = supervisor.start(spec).await.expect_err("cannot allocate");
+        assert_eq!(
+            error.failure(),
+            LoadFailure::ContextTooLarge,
+            "{kind}: {}",
+            error.stderr_tail().join("\n")
+        );
+        let events = drain(&mut rx);
+        assert_eq!(
+            states_and_stages(&events),
+            vec![
+                &ServerEvent::State(ServerState::Starting),
+                &ServerEvent::State(ServerState::Failed(LoadFailure::ContextTooLarge)),
+            ],
+            "{kind}: one start, no retry, no step-down"
+        );
+    }
 }

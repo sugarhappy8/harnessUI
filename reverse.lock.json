@@ -1,0 +1,564 @@
+{
+  "schema": 2,
+  "comment": "Pinned downloads for Settings -> Reverse engineering (item5-spec.md R1). Written by scripts/pin_reverse.py and compiled into the app (crates/reverse). Each archive is checked against its size and SHA-256 before it is unpacked. Not part of the installer.",
+  "families": "direct,enhanced,native,artifact,managed,session,electron,application",
+  "disabled_ghidra_analyzers": {
+    "windows-x86_64": "PDB Universal",
+    "linux-x86_64": "PDB Universal"
+  },
+  "parts": [
+    {
+      "name": "rea",
+      "component": "rea",
+      "version": "6.9.0",
+      "minimum_version": "6.9.0",
+      "dir": "rea-6.9.0",
+      "license_name": "MIT",
+      "license_url": "https://github.com/morluto/rea/blob/main/LICENSE",
+      "hosts": [
+        "registry.npmjs.org"
+      ],
+      "entry": "scripts/rea.mjs",
+      "accepted_rea_versions": [
+        {
+          "version": "6.9.0",
+          "schema_fixture": "rea-6.9.0-catalog.json"
+        }
+      ],
+      "builds": [
+        {
+          "platform": "windows-x86_64",
+          "upstream_asset": "rea-agents-6.9.0.tgz",
+          "file": {
+            "name": "rea-agents-6.9.0.tgz",
+            "url": "https://registry.npmjs.org/rea-agents/-/rea-agents-6.9.0.tgz",
+            "size": 41851672,
+            "sha256": "322338a1505e2557702a16012e7d46abdb5729641d98938662762dfbfb79262a"
+          },
+          "strip_prefix": "package/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "scripts/rea.mjs",
+              "exec": false,
+              "size": 12508
+            },
+            {
+              "path": "package.json",
+              "exec": false,
+              "size": 28883
+            },
+            {
+              "path": "native/windows/build/rea-windows-x64.node",
+              "exec": false,
+              "size": 930723
+            }
+          ],
+          "max_path_chars": 101,
+          "entries": 10585,
+          "unpacked_bytes": 189641205,
+          "verified_by": [
+            "npm-integrity",
+            "npm-provenance:morluto/rea@d74549e495c58eb4a560279fd9f05508401ea0a0",
+            "npm-audit-signatures"
+          ]
+        },
+        {
+          "platform": "macos-aarch64",
+          "upstream_asset": "rea-agents-6.9.0.tgz",
+          "file": {
+            "name": "rea-agents-6.9.0.tgz",
+            "url": "https://registry.npmjs.org/rea-agents/-/rea-agents-6.9.0.tgz",
+            "size": 41851672,
+            "sha256": "322338a1505e2557702a16012e7d46abdb5729641d98938662762dfbfb79262a"
+          },
+          "strip_prefix": "package/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "scripts/rea.mjs",
+              "exec": false,
+              "size": 12508
+            },
+            {
+              "path": "package.json",
+              "exec": false,
+              "size": 28883
+            },
+            {
+              "path": "native/windows/build/rea-windows-x64.node",
+              "exec": false,
+              "size": 930723
+            }
+          ],
+          "max_path_chars": 101,
+          "entries": 10585,
+          "unpacked_bytes": 189641205,
+          "verified_by": [
+            "npm-integrity",
+            "npm-provenance:morluto/rea@d74549e495c58eb4a560279fd9f05508401ea0a0",
+            "npm-audit-signatures"
+          ]
+        },
+        {
+          "platform": "macos-x86_64",
+          "upstream_asset": "rea-agents-6.9.0.tgz",
+          "file": {
+            "name": "rea-agents-6.9.0.tgz",
+            "url": "https://registry.npmjs.org/rea-agents/-/rea-agents-6.9.0.tgz",
+            "size": 41851672,
+            "sha256": "322338a1505e2557702a16012e7d46abdb5729641d98938662762dfbfb79262a"
+          },
+          "strip_prefix": "package/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "scripts/rea.mjs",
+              "exec": false,
+              "size": 12508
+            },
+            {
+              "path": "package.json",
+              "exec": false,
+              "size": 28883
+            },
+            {
+              "path": "native/windows/build/rea-windows-x64.node",
+              "exec": false,
+              "size": 930723
+            }
+          ],
+          "max_path_chars": 101,
+          "entries": 10585,
+          "unpacked_bytes": 189641205,
+          "verified_by": [
+            "npm-integrity",
+            "npm-provenance:morluto/rea@d74549e495c58eb4a560279fd9f05508401ea0a0",
+            "npm-audit-signatures"
+          ]
+        },
+        {
+          "platform": "linux-x86_64",
+          "upstream_asset": "rea-agents-6.9.0.tgz",
+          "file": {
+            "name": "rea-agents-6.9.0.tgz",
+            "url": "https://registry.npmjs.org/rea-agents/-/rea-agents-6.9.0.tgz",
+            "size": 41851672,
+            "sha256": "322338a1505e2557702a16012e7d46abdb5729641d98938662762dfbfb79262a"
+          },
+          "strip_prefix": "package/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "scripts/rea.mjs",
+              "exec": false,
+              "size": 12508
+            },
+            {
+              "path": "package.json",
+              "exec": false,
+              "size": 28883
+            },
+            {
+              "path": "native/windows/build/rea-windows-x64.node",
+              "exec": false,
+              "size": 930723
+            }
+          ],
+          "max_path_chars": 101,
+          "entries": 10585,
+          "unpacked_bytes": 189641205,
+          "verified_by": [
+            "npm-integrity",
+            "npm-provenance:morluto/rea@d74549e495c58eb4a560279fd9f05508401ea0a0",
+            "npm-audit-signatures"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "node",
+      "component": "rea",
+      "version": "24.22.3",
+      "minimum_version": "24.22.1",
+      "dir": "node-24.22.3",
+      "license_name": "MIT",
+      "license_url": "https://github.com/nodejs/node/blob/main/LICENSE",
+      "hosts": [
+        "nodejs.org"
+      ],
+      "builds": [
+        {
+          "platform": "windows-x86_64",
+          "upstream_asset": "node-v24.22.3-win-x64.zip",
+          "file": {
+            "name": "node-v24.22.3-win-x64.zip",
+            "url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-win-x64.zip",
+            "size": 37762649,
+            "sha256": "e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f"
+          },
+          "strip_prefix": "node-v24.22.3-win-x64/",
+          "keep": [
+            "node.exe",
+            "LICENSE"
+          ],
+          "programs": [
+            {
+              "path": "node.exe",
+              "exec": true,
+              "size": 93944648
+            }
+          ],
+          "max_path_chars": 8,
+          "entries": 2459,
+          "unpacked_bytes": 94105203,
+          "verified_by": [
+            "gpg:nodejs-release-keys"
+          ]
+        },
+        {
+          "platform": "macos-aarch64",
+          "upstream_asset": "node-v24.22.3-darwin-arm64.tar.gz",
+          "file": {
+            "name": "node-v24.22.3-darwin-arm64.tar.gz",
+            "url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-darwin-arm64.tar.gz",
+            "size": 53084299,
+            "sha256": "ff6e17d4874b76d272212b908cc020d6e815fba5a6c7eaaa06add725840307fd"
+          },
+          "strip_prefix": "node-v24.22.3-darwin-arm64/",
+          "keep": [
+            "bin/node",
+            "LICENSE"
+          ],
+          "programs": [
+            {
+              "path": "bin/node",
+              "exec": true,
+              "size": 122586000
+            }
+          ],
+          "max_path_chars": 8,
+          "entries": 5888,
+          "unpacked_bytes": 122743609,
+          "verified_by": [
+            "gpg:nodejs-release-keys"
+          ]
+        },
+        {
+          "platform": "macos-x86_64",
+          "upstream_asset": "node-v24.22.3-darwin-x64.tar.gz",
+          "file": {
+            "name": "node-v24.22.3-darwin-x64.tar.gz",
+            "url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-darwin-x64.tar.gz",
+            "size": 54395976,
+            "sha256": "977614af0504c81045e7fd85596dbca0e5f951b96681516dadafedcca8c447f7"
+          },
+          "strip_prefix": "node-v24.22.3-darwin-x64/",
+          "keep": [
+            "bin/node",
+            "LICENSE"
+          ],
+          "programs": [
+            {
+              "path": "bin/node",
+              "exec": true,
+              "size": 125755312
+            }
+          ],
+          "max_path_chars": 8,
+          "entries": 5888,
+          "unpacked_bytes": 125912921,
+          "verified_by": [
+            "gpg:nodejs-release-keys"
+          ]
+        },
+        {
+          "platform": "linux-x86_64",
+          "upstream_asset": "node-v24.22.3-linux-x64.tar.gz",
+          "file": {
+            "name": "node-v24.22.3-linux-x64.tar.gz",
+            "url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.gz",
+            "size": 58330843,
+            "sha256": "061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2"
+          },
+          "strip_prefix": "node-v24.22.3-linux-x64/",
+          "keep": [
+            "bin/node",
+            "LICENSE"
+          ],
+          "programs": [
+            {
+              "path": "bin/node",
+              "exec": true,
+              "size": 126891984
+            }
+          ],
+          "max_path_chars": 8,
+          "entries": 5888,
+          "unpacked_bytes": 127049593,
+          "verified_by": [
+            "gpg:nodejs-release-keys"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "kuna",
+      "component": "kuna",
+      "version": "1.990",
+      "minimum_version": "1.990",
+      "dir": "kuna-1.990",
+      "license_name": "Apache-2.0",
+      "license_url": "https://github.com/Noelo-Lab/kuna/blob/main/LICENSE",
+      "hosts": [
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com"
+      ],
+      "builds": [
+        {
+          "platform": "macos-aarch64",
+          "upstream_asset": "kuna-v1.990-macos-arm64.tar.gz",
+          "file": {
+            "name": "kuna-v1.990-macos-arm64.tar.gz",
+            "url": "https://github.com/Noelo-Lab/kuna/releases/download/v1.990/kuna-v1.990-macos-arm64.tar.gz",
+            "size": 24190662,
+            "sha256": "f1469757ef329542951640439198afe836e1ead90e3bf3d544b10e27d4e6ed3e"
+          },
+          "strip_prefix": "kuna-v1.990-macos-arm64/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "kuna",
+              "exec": true,
+              "size": 48256896
+            }
+          ],
+          "max_path_chars": 7,
+          "entries": 4,
+          "unpacked_bytes": 48270846,
+          "verified_by": [
+            "first-download-only"
+          ]
+        },
+        {
+          "platform": "macos-x86_64",
+          "upstream_asset": "kuna-v1.990-macos-x86_64.tar.gz",
+          "file": {
+            "name": "kuna-v1.990-macos-x86_64.tar.gz",
+            "url": "https://github.com/Noelo-Lab/kuna/releases/download/v1.990/kuna-v1.990-macos-x86_64.tar.gz",
+            "size": 25048455,
+            "sha256": "58886b210d42dc3f40fff202b979cbf8bef7ddc663447d09f52c97ccdd1fc1d1"
+          },
+          "strip_prefix": "kuna-v1.990-macos-x86_64/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "kuna",
+              "exec": true,
+              "size": 50595544
+            }
+          ],
+          "max_path_chars": 7,
+          "entries": 4,
+          "unpacked_bytes": 50609494,
+          "verified_by": [
+            "first-download-only"
+          ]
+        },
+        {
+          "platform": "linux-x86_64",
+          "upstream_asset": "kuna-v1.990-linux-x86_64.tar.gz",
+          "file": {
+            "name": "kuna-v1.990-linux-x86_64.tar.gz",
+            "url": "https://github.com/Noelo-Lab/kuna/releases/download/v1.990/kuna-v1.990-linux-x86_64.tar.gz",
+            "size": 25364394,
+            "sha256": "4860603084da39dcdebeb9155116a886f8294003af54cecdb6a687529f0b5f54"
+          },
+          "strip_prefix": "kuna-v1.990-linux-x86_64/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "kuna",
+              "exec": true,
+              "size": 54127888
+            }
+          ],
+          "max_path_chars": 7,
+          "entries": 4,
+          "unpacked_bytes": 54141838,
+          "verified_by": [
+            "first-download-only"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ghidra",
+      "component": "ghidra",
+      "version": "12.1.4",
+      "minimum_version": "12.1",
+      "dir": "ghidra-12.1.4",
+      "license_name": "Apache-2.0",
+      "license_url": "https://github.com/NationalSecurityAgency/ghidra/blob/master/LICENSE",
+      "hosts": [
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com"
+      ],
+      "builds": [
+        {
+          "platform": "windows-x86_64",
+          "upstream_asset": "ghidra_12.1.4_PUBLIC_20260921.zip",
+          "file": {
+            "name": "ghidra_12.1.4_PUBLIC_20260921.zip",
+            "url": "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip",
+            "size": 569649598,
+            "sha256": "ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db"
+          },
+          "strip_prefix": "ghidra_12.1.4_PUBLIC/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "support/analyzeHeadless.bat",
+              "exec": false,
+              "size": 2930
+            },
+            {
+              "path": "Ghidra/Features/Decompiler/os/win_x86_64/decompile.exe",
+              "exec": false,
+              "size": 2557440
+            },
+            {
+              "path": "Ghidra/application.properties",
+              "exec": false,
+              "size": 659
+            }
+          ],
+          "max_path_chars": 128,
+          "entries": 6695,
+          "unpacked_bytes": 905891804,
+          "verified_by": [
+            "first-download-only"
+          ]
+        },
+        {
+          "platform": "linux-x86_64",
+          "upstream_asset": "ghidra_12.1.4_PUBLIC_20260921.zip",
+          "file": {
+            "name": "ghidra_12.1.4_PUBLIC_20260921.zip",
+            "url": "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip",
+            "size": 569649598,
+            "sha256": "ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db"
+          },
+          "strip_prefix": "ghidra_12.1.4_PUBLIC/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "support/analyzeHeadless",
+              "exec": true,
+              "size": 2388
+            },
+            {
+              "path": "Ghidra/Features/Decompiler/os/linux_x86_64/decompile",
+              "exec": true,
+              "size": 3434376
+            },
+            {
+              "path": "Ghidra/application.properties",
+              "exec": false,
+              "size": 659
+            }
+          ],
+          "max_path_chars": 128,
+          "entries": 6695,
+          "unpacked_bytes": 905891804,
+          "verified_by": [
+            "first-download-only"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "java",
+      "component": "ghidra",
+      "version": "21.0.13+9",
+      "minimum_version": "21",
+      "dir": "java-21.0.13+9",
+      "license_name": "GPL-2.0 WITH Classpath-exception-2.0",
+      "license_url": "https://openjdk.org/legal/gplv2+ce.html",
+      "hosts": [
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com"
+      ],
+      "vendor": "Eclipse Temurin",
+      "builds": [
+        {
+          "platform": "windows-x86_64",
+          "upstream_asset": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.13_9.zip",
+          "file": {
+            "name": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.13_9.zip",
+            "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_x64_windows_hotspot_21.0.13_9.zip",
+            "size": 205421281,
+            "sha256": "a4dbaa05fca4bd89d84584e58c459bd732efebb1722af80ab13c6516832004f9"
+          },
+          "strip_prefix": "jdk-21.0.13+9/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "bin/java.exe",
+              "exec": false,
+              "size": 50296
+            },
+            {
+              "path": "bin/javac.exe",
+              "exec": false,
+              "size": 24704
+            }
+          ],
+          "max_path_chars": 65,
+          "entries": 577,
+          "unpacked_bytes": 344399576,
+          "java_home": "",
+          "verified_by": [
+            "gpg:adoptium",
+            "adoptium-api-checksum"
+          ]
+        },
+        {
+          "platform": "linux-x86_64",
+          "upstream_asset": "OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz",
+          "file": {
+            "name": "OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz",
+            "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz",
+            "size": 207858352,
+            "sha256": "d7f5d5cf865a2902b70ff549b97586a7d3f234e016f041ab447ea740c7d66d1c"
+          },
+          "strip_prefix": "jdk-21.0.13+9/",
+          "keep": "all",
+          "programs": [
+            {
+              "path": "bin/java",
+              "exec": true,
+              "size": 12328
+            },
+            {
+              "path": "bin/javac",
+              "exec": true,
+              "size": 12424
+            }
+          ],
+          "max_path_chars": 65,
+          "entries": 542,
+          "unpacked_bytes": 361757417,
+          "java_home": "",
+          "verified_by": [
+            "gpg:adoptium",
+            "adoptium-api-checksum"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -11,6 +11,8 @@ members = [
     "crates/computer",
     "crates/browser",
     "crates/search",
+    "crates/reverse",
+    "crates/usage",
     "src-tauri",
 ]
 
@@ -34,6 +36,8 @@ agent = { path = "crates/agent" }
 computer = { path = "crates/computer" }
 browser = { path = "crates/browser" }
 search = { path = "crates/search" }
+reverse = { path = "crates/reverse" }
+usage = { path = "crates/usage" }
 
 # Shell. Pinned to the 2.x line: a 3.0 alpha is published and `cargo search` shows it.
 tauri = { version = "2.12", features = [] }

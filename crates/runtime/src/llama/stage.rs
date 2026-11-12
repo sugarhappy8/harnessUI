@@ -41,6 +41,8 @@ pub enum LoadStage {
     },
     /// Trying again on the same backend with Save memory off, after a failure with it
     /// on that it can cause (0.0.6 D2c). Sent by the supervisor as [`ServerEvent::Stage`].
+    /// With `backend` the processor it always means the model itself refused Save memory
+    /// (its log said so); on a graphics backend it may be the model or the card.
     RetryingWithoutSaveMemory {
         /// The backend being retried.
         backend: BackendKind,

@@ -704,7 +704,10 @@ async fn an_installed_split_model_needs_more_than_its_first_file() {
         .with_listing(&split_listing(MOE_REPO, SHA_MOE_1, SHA_MOE_2))
         .with_head(MOE_REPO, summary(&moe_bytes()));
     let f = facts_for(&hub, &k, repo_item(MOE_REPO, MOE_FIRST), CTX).await;
-    assert_eq!(f.installed_path.as_deref(), Some(from_catalog.path.as_str()));
+    assert_eq!(
+        f.installed_path.as_deref(),
+        Some(from_catalog.path.as_str())
+    );
     assert_eq!(f.catalog.map(|c| c.id).as_deref(), Some("sample-moe-q4km"));
 }
 

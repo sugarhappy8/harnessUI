@@ -1485,7 +1485,9 @@ mod tests {
         }
 
         // The same text as the rules, on edge cases and on many made-up strings.
-        let alphabet = ['a', ' ', '\n', '\t', 'é', '\u{202E}', '\u{200B}', '…', '\u{7}', '中'];
+        let alphabet = [
+            'a', ' ', '\n', '\t', 'é', '\u{202E}', '\u{200B}', '…', '\u{7}', '中',
+        ];
         let mut cases: Vec<String> = vec![
             String::new(),
             "   ".into(),
@@ -1501,10 +1503,14 @@ mod tests {
         let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
         for _ in 0..3000 {
             let mut s = String::new();
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let len = (seed >> 33) % 40;
             for _ in 0..len {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 s.push(alphabet[((seed >> 33) % alphabet.len() as u64) as usize]);
             }
             cases.push(s);

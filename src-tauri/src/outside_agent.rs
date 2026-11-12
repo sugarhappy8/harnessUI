@@ -552,14 +552,85 @@ fn inside_any(path: &str, folders: &[String]) -> Option<String> {
         .map(|r| r.canonical.to_string())
 }
 
-/// The folders a found program stands in before it reaches the file that runs: the folder
-/// of the found path and of every link it leads through, each with the links in its own
-/// path followed. A link counts where it stands, not only where it leads: a project could
-/// otherwise put a link `codex` -> `/bin/sh` on `PATH`.
+/// How many links [`standing_folders`] follows, as the system does.
+const MAX_LINKS: usize = 40;
+
+/// The folders a found program stands in before it reaches the file that runs. A link
+/// counts where it stands, not only where it leads: a project could otherwise put a link
+/// `codex` -> `/bin/sh` on `PATH`, or make the `PATH` folder itself (or a folder above
+/// it) a link that leads outside.
+///
+/// The path is followed one part at a time, as the system follows it: every link on the
+/// way, file or folder, at any part of the path or of a link's target, adds the folder it
+/// stands in (a real folder, with no link in its path). The folder of the found path and
+/// of every link it leads through, each with the links in its own path followed, are
+/// added too.
 fn standing_folders(found: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut current = found.to_path_buf();
-    for _ in 0..40 {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::path::Component;
+    fn add(p: PathBuf, out: &mut Vec<PathBuf>) {
+        let p = dunce::simplified(&p).to_path_buf();
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    /// Puts the parts of `path` in front of what is left to follow; an absolute path
+    /// starts again from its root.
+    fn push_parts(path: &Path, todo: &mut VecDeque<OsString>, resolved: &mut PathBuf) {
+        let mut root = PathBuf::new();
+        let mut parts = Vec::new();
+        for part in path.components() {
+            match part {
+                Component::Prefix(_) | Component::RootDir => root.push(part.as_os_str()),
+                other => parts.push(other.as_os_str().to_os_string()),
+            }
+        }
+        if !root.as_os_str().is_empty() {
+            *resolved = root;
+        }
+        for part in parts.into_iter().rev() {
+            todo.push_front(part);
+        }
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    let found = if found.is_absolute() {
+        found.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(dir) => dir.join(found),
+            Err(_) => found.to_path_buf(),
+        }
+    };
+    // Every part, every link where it stands.
+    let mut todo = VecDeque::new();
+    let mut resolved = PathBuf::new();
+    push_parts(&found, &mut todo, &mut resolved);
+    let mut links = 0;
+    while let Some(part) = todo.pop_front() {
+        if part == "." {
+            continue;
+        }
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        let here = resolved.join(&part);
+        match std::fs::read_link(&here) {
+            Ok(target) => {
+                add(resolved.clone(), &mut out);
+                links += 1;
+                if links > MAX_LINKS {
+                    break;
+                }
+                push_parts(&target, &mut todo, &mut resolved);
+            }
+            Err(_) => resolved = here,
+        }
+    }
+    // The folder of the found path and of every link it leads through.
+    let mut current = found;
+    for _ in 0..MAX_LINKS {
         let (Some(parent), Some(name)) = (current.parent(), current.file_name()) else {
             break;
         };
@@ -567,7 +638,7 @@ fn standing_folders(found: &Path) -> Vec<PathBuf> {
             break;
         };
         let here = dir.join(name);
-        out.push(dir.clone());
+        add(dir.clone(), &mut out);
         match std::fs::read_link(&here) {
             Ok(target) if target.is_absolute() => current = target,
             Ok(target) => current = dir.join(target),

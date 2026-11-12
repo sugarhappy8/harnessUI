@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager, State};
+use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
     BackendDto, DiagnosticsReportDto, LocalModelSettings, ModelBusy, ModelOptionDto,
@@ -13,7 +14,7 @@ use crate::dto::{
 use crate::error::{AppError, AppResult};
 use crate::load_settings::{self as load, ModelLoadInfo, ModelLoadSettings, Plan};
 use crate::settings;
-use crate::state::AppState;
+use crate::state::{AppState, BusyKind};
 
 #[tauri::command]
 pub async fn runtime_status(state: State<'_, AppState>) -> AppResult<RuntimeStatusDto> {
@@ -78,6 +79,11 @@ async fn run_load(state: &AppState, model: PathBuf, plan: &Plan) -> AppResult<()
         .load(model, plan.resolved.clone(), plan.footprint())
         .await?;
     state.runtime.set_thinking(plan.thinking());
+    // Settings saved while the model loaded could not mark it then (only a ready model is
+    // compared): compare what this load used with the settings as saved now.
+    if plan.saved {
+        refresh_settings_changed(state).await;
+    }
     let checker = state.runtime.clone();
     tauri::async_runtime::spawn(async move { checker.speed_check().await });
     Ok(())
@@ -417,21 +423,23 @@ fn full_environment(names: impl Iterator<Item = String>) -> runtime::EnvSpec {
     env
 }
 
+/// The keys the generic `set_setting` may write: plain UI preferences only. Anything with
+/// a policy meaning has its own command (ARCHITECTURE.md 13.5); model settings (the
+/// defaults for all models and each model's own) are never on it (D12).
+const SETTABLE_KEYS: &[&str] = &[
+    "theme",
+    settings::DEFAULT_SYSTEM_PROMPT,
+    settings::REMOTE_CONTEXT_LENGTH,
+    settings::STEPS_PER_TURN,
+];
+
 #[tauri::command]
 pub async fn set_setting(
     state: State<'_, AppState>,
     key: String,
     value: serde_json::Value,
 ) -> AppResult<()> {
-    // Only plain UI preferences go through this generic command; anything with a
-    // policy meaning has its own command (ARCHITECTURE.md 13.5).
-    const ALLOWED: &[&str] = &[
-        "theme",
-        settings::DEFAULT_SYSTEM_PROMPT,
-        settings::REMOTE_CONTEXT_LENGTH,
-        settings::STEPS_PER_TURN,
-    ];
-    if !ALLOWED.contains(&key.as_str()) {
+    if !SETTABLE_KEYS.contains(&key.as_str()) {
         return Err(AppError::bad_request(
             "That setting cannot be changed this way.",
         ));
@@ -560,7 +568,16 @@ pub async fn run_diagnostics(
             .before_change(&state.model_busy, false)
             .await?;
         let previous = state.runtime.status();
+        // Until what was there is back, the check is a model check (D3): a change of what
+        // is loaded asks first, then waits for the check or stops it.
+        let stop = CancellationToken::new();
+        let check = state
+            .runtime
+            .hold(&state.model_busy, BusyKind::ModelCheck, stop.clone());
         for (b, p) in backends.iter().filter(|(_, p)| p.error.is_none()) {
+            if stop.is_cancelled() {
+                break;
+            }
             let kind = crate::runtime_manager::kind_name(b.kind).to_string();
             let settings = diagnostic_load(
                 &kind,
@@ -572,6 +589,7 @@ pub async fn run_diagnostics(
                 .load(PathBuf::from(&path), settings, load::Footprint::default())
                 .await
             {
+                Ok(()) if stop.is_cancelled() => break,
                 Ok(()) => match crate::diagnostics::time_generation(&state).await {
                     Ok(line) => {
                         let _ = writeln!(report, "  {kind}: {line}");
@@ -590,17 +608,33 @@ pub async fn run_diagnostics(
                 }
             }
         }
-        state.runtime.unload().await;
-        // The model loaded before comes back as a load resolves it: with its projector,
-        // its own settings, whether it can think, and the speed check.
-        if let Some(model) = previous.model_path {
-            let plan = load::plan(&state, &model, None).await;
-            let _ = tokio::time::timeout(
-                Duration::from_secs(600),
-                run_load(&state, PathBuf::from(model), &plan),
-            )
-            .await;
+        let stopped = stop.is_cancelled();
+        if stopped {
+            let _ = writeln!(
+                report,
+                "  stopped: what is loaded was changed during the check"
+            );
         }
+        match after_check(&previous, stopped) {
+            AfterCheck::LeaveIt => {}
+            // The model loaded before comes back as a load resolves it: with its projector,
+            // its own settings, whether it can think, and the speed check.
+            AfterCheck::Load(model) => {
+                state.runtime.stop_server().await;
+                let plan = load::plan(&state, &model, None).await;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(600),
+                    run_load(&state, PathBuf::from(model), &plan),
+                )
+                .await;
+            }
+            AfterCheck::Unloaded(path) => {
+                state.runtime.stop_server().await;
+                state.runtime.set_unloaded_path(path);
+            }
+        }
+        // A change that waited for the check goes ahead now.
+        drop(check);
     }
     let saved_to = app.path().app_log_dir().ok().and_then(|dir| {
         std::fs::create_dir_all(&dir).ok()?;
@@ -615,6 +649,31 @@ pub async fn run_diagnostics(
         text: report,
         saved_to,
     })
+}
+
+/// What the backend check puts back when it ends.
+#[derive(Debug, PartialEq, Eq)]
+enum AfterCheck {
+    /// The model loaded before (or whose load had failed), loaded again as a load
+    /// resolves it.
+    Load(String),
+    /// Nothing was loaded: nothing is, and "Unloaded to free memory · Load" is as it was.
+    Unloaded(Option<String>),
+    /// A change of what is loaded stopped the check (Stop and restart): it decides what is
+    /// loaded, so the check leaves it alone.
+    LeaveIt,
+}
+
+/// What the backend check puts back, from the status before it and whether a change
+/// stopped it.
+fn after_check(previous: &RuntimeStatusDto, stopped: bool) -> AfterCheck {
+    if stopped {
+        return AfterCheck::LeaveIt;
+    }
+    match &previous.model_path {
+        Some(model) => AfterCheck::Load(model.clone()),
+        None => AfterCheck::Unloaded(previous.unloaded_path.clone()),
+    }
 }
 
 /// One timed load of the backend check: 4,096 tokens on `backend`, the whole model on the
@@ -636,6 +695,77 @@ fn diagnostic_load(backend: &str, device: Option<String>) -> load::ResolvedLoad 
 
 #[cfg(test)]
 mod tests {
+    /// D12: no tool, in any approval mode, reaches model settings through the generic
+    /// setting command: neither the defaults for all models nor any model's own key is on
+    /// its list (only their own validated commands write them).
+    #[test]
+    fn the_generic_setting_command_never_reaches_model_settings() {
+        use crate::load_settings::{KEY_PREFIX, settings_key};
+        assert_eq!(
+            super::SETTABLE_KEYS,
+            [
+                "theme",
+                crate::settings::DEFAULT_SYSTEM_PROMPT,
+                crate::settings::REMOTE_CONTEXT_LENGTH,
+                crate::settings::STEPS_PER_TURN,
+            ],
+            "the list changed: model settings must stay off it"
+        );
+        for key in [
+            crate::settings::LOCAL_MODEL.to_string(),
+            settings_key("model.gguf", 4_920_000_000),
+        ] {
+            assert!(!super::SETTABLE_KEYS.contains(&key.as_str()), "{key}");
+        }
+        assert!(
+            super::SETTABLE_KEYS
+                .iter()
+                .all(|k| !k.starts_with(KEY_PREFIX) && *k != crate::settings::LOCAL_MODEL)
+        );
+    }
+
+    /// What the backend check puts back when it ends: the model that was loaded (also one
+    /// whose load had failed), or with nothing loaded "Unloaded to free memory · Load" as it
+    /// was; nothing when a change of what is loaded stopped the check (Stop and restart),
+    /// since that change decides what is loaded now.
+    #[test]
+    fn the_backend_check_puts_back_what_was_there() {
+        use super::{AfterCheck, after_check};
+        use crate::dto::{RuntimeStateDto, RuntimeStatusDto};
+        let loaded = RuntimeStatusDto {
+            state: RuntimeStateDto::Ready,
+            model_path: Some("/m/a.gguf".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            after_check(&loaded, false),
+            AfterCheck::Load("/m/a.gguf".into())
+        );
+        let failed = RuntimeStatusDto {
+            state: RuntimeStateDto::Failed,
+            ..loaded.clone()
+        };
+        assert_eq!(
+            after_check(&failed, false),
+            AfterCheck::Load("/m/a.gguf".into())
+        );
+        let unloaded = RuntimeStatusDto {
+            unloaded_path: Some("/m/a.gguf".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            after_check(&unloaded, false),
+            AfterCheck::Unloaded(Some("/m/a.gguf".into()))
+        );
+        assert_eq!(
+            after_check(&RuntimeStatusDto::default(), false),
+            AfterCheck::Unloaded(None)
+        );
+        for before in [loaded, failed, unloaded, RuntimeStatusDto::default()] {
+            assert_eq!(after_check(&before, true), AfterCheck::LeaveIt);
+        }
+    }
+
     /// The backend check loads with fixed settings on the backend it checks.
     #[test]
     fn the_backend_check_loads_with_fixed_settings() {

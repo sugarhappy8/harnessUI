@@ -6,20 +6,27 @@
 //!   crash limit is reached, before any step-down, each at most once per load (a process
 //!   that could not be created, a load timeout or an unusable `/props` reply changes no
 //!   setting):
-//!   1. **Save memory off** ([`LoadStage::RetryingWithoutSaveMemory`]) when it was on, the
-//!      backend is a graphics one and the failure is one it can cause
-//!      ([`LoadFailure::save_memory_may_be_the_cause`]): a device or driver without flash
-//!      attention for a q8_0 memory fails the context or crashes (0.0.6 D2c). It stays off
-//!      for the rest of the load. The processor can always do it, so a failure there is
-//!      never retried without it (that would need twice the memory and blame the card).
+//!   1. **Save memory off** ([`LoadStage::RetryingWithoutSaveMemory`]) when it was on and
+//!      either the log shows the model refusing it ([`save_memory_refused`]: a q8_0 block
+//!      that does not divide the head size, a model without flash attention; on any
+//!      backend, the processor included), or a graphics card is in use and the failure
+//!      is one it can cause ([`LoadFailure::save_memory_may_be_the_cause`], 0.0.6 D2c). It
+//!      stays off for the rest of the load. Without a card in use, a plain failure is
+//!      never retried without it: that would need twice the memory and blame the card.
 //!   2. **As much as fits** ([`LoadStage::RetryingWithLessGpu`]) when a graphics card ran
 //!      out of memory ([`LoadFailure::is_out_of_memory`]) with All of it ([`GpuUse::All`]).
 //! - **Stepping down:** when a GPU backend still fails, and a lower backend passed its
 //!   probe, try the next one down (ROCm or CUDA → Vulkan → CPU) and report
 //!   [`ServerEvent::SteppedDown`]. The processor runs with [`GpuUse::Off`]; another
 //!   graphics backend keeps the card choice reached so far. The chain is finite and every
-//!   retry happens once, so this ends.
+//!   retry happens once, so this ends. Without a card in use, running out of memory does
+//!   not step down: the processor build would repeat the same load.
 //! - **Port taken:** pick a new port, up to [`RestartPolicy::port_retries`] times.
+//!
+//! "A graphics card in use" means what the command line does, not the backend's label: a
+//! graphics backend with a device and a card choice other than Don't use it
+//! ([`LaunchConfig::uses_device`](crate::llama::launch::LaunchConfig::uses_device)).
+//! Don't use it on Vulkan runs on the processor (`--device none`) and is treated so.
 //!
 //! So a graphics card that runs out of memory goes: Save memory off (if it was on and the
 //! context failed), then As much as fits, then the processor. A failure to allocate the
@@ -39,7 +46,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{RunningServer, ServerEvent, ServerState, StartError, StartSpec, start};
 use crate::llama::backend::{Backend, BackendKind};
-use crate::llama::failure::{LoadFailure, classify};
+use crate::llama::failure::{LoadFailure, classify, save_memory_refused};
 use crate::llama::launch::{GpuUse, free_loopback_port};
 use crate::llama::stage::LoadStage;
 
@@ -168,6 +175,15 @@ pub fn step_down(kind: BackendKind, available: &[Backend]) -> Option<Backend> {
     })
 }
 
+/// Whether a graphics card does part of the work of `spec`: a graphics backend whose
+/// command line names a device ([`LaunchConfig::uses_device`]). Don't use it, or no device,
+/// runs on the processor whatever the backend's label.
+///
+/// [`LaunchConfig::uses_device`]: crate::llama::launch::LaunchConfig::uses_device
+fn uses_graphics_card(spec: &StartSpec) -> bool {
+    spec.backend.kind != BackendKind::Cpu && spec.launch.uses_device()
+}
+
 /// Runs one model with the restart, step-down and new-port policy.
 #[derive(Debug)]
 pub struct Supervisor<S: Starter> {
@@ -235,7 +251,7 @@ impl<S: Starter> Supervisor<S> {
             // an unusable `/props` reply are unknown failures too, but turning a setting
             // down for them would blame it wrongly (and repeat a whole load timeout).
             if matches!(error, StartError::Exited { .. })
-                && let Some(retry) = self.retry_spec(&spec, &failure)
+                && let Some(retry) = self.retry_spec(&spec, &failure, error.stderr_tail())
             {
                 spec = retry;
                 port_attempts = 0;
@@ -300,7 +316,9 @@ impl<S: Starter> Supervisor<S> {
                     max: self.policy.max_restarts,
                 });
                 spec.clone()
-            } else if let Some(retry) = self.retry_spec(&spec, &reason) {
+            } else if let Some(retry) = self.retry_spec(&spec, &reason, &[]) {
+                // No log lines: this server became ready, so its context was made and the
+                // model did not refuse Save memory; only a card in use retries here.
                 self.crashes.clear();
                 retry
             } else if let Some(lower) = self.step_down_spec(&spec, &reason) {
@@ -340,27 +358,30 @@ impl<S: Starter> Supervisor<S> {
         (count <= self.policy.max_restarts).then_some(count)
     }
 
-    /// The spec for the next retry on the same backend after `reason`, and the event that
-    /// tells the user; `None` when no retry applies (see the module documentation).
+    /// The spec for the next retry on the same backend after `reason` (with the failed
+    /// load's last log lines), and the event that tells the user; `None` when no retry
+    /// applies (see the module documentation).
     ///
     /// Each retry turns a setting down for the rest of the load, so it can happen only once:
     /// Save memory is then off, and the card is then at As much as fits.
-    fn retry_spec(&self, spec: &StartSpec, reason: &LoadFailure) -> Option<StartSpec> {
+    fn retry_spec(
+        &self,
+        spec: &StartSpec,
+        reason: &LoadFailure,
+        stderr_tail: &[String],
+    ) -> Option<StartSpec> {
         let backend = spec.backend.kind;
+        let card = uses_graphics_card(spec);
         let mut next = spec.clone();
-        // The processor can always do Save memory, so it is retried only on a graphics
-        // backend, where a device or driver may lack flash attention for a q8_0 memory.
+        // The model refusing Save memory is retried on any backend. Otherwise only a card
+        // in use is: a device or driver may lack what a q8_0 memory needs, while on the
+        // processor a plain failure is a lack of memory, which turning it off makes worse.
         let stage = if spec.launch.save_memory
-            && backend != BackendKind::Cpu
-            && reason.save_memory_may_be_the_cause()
+            && (save_memory_refused(stderr_tail) || (card && reason.save_memory_may_be_the_cause()))
         {
             next.launch.save_memory = false;
             LoadStage::RetryingWithoutSaveMemory { backend }
-        } else if reason.is_out_of_memory()
-            && backend != BackendKind::Cpu
-            && spec.launch.gpu == GpuUse::All
-            && spec.launch.device.as_deref().is_some_and(|d| !d.is_empty())
-        {
+        } else if card && spec.launch.gpu == GpuUse::All && reason.is_out_of_memory() {
             next.launch.gpu = GpuUse::Fit;
             LoadStage::RetryingWithLessGpu { backend }
         } else {
@@ -372,7 +393,15 @@ impl<S: Starter> Supervisor<S> {
     }
 
     /// The spec for the next backend down, and the event that tells the user.
+    ///
+    /// Without a graphics card in use the load already runs on the processor, so the
+    /// processor build would repeat it: for running out of memory that cannot help, and
+    /// its note would say the graphics card ran out of memory. A failure of the backend
+    /// itself (a crash, a missing library) still steps down.
     fn step_down_spec(&self, spec: &StartSpec, reason: &LoadFailure) -> Option<StartSpec> {
+        if !uses_graphics_card(spec) && reason.is_out_of_memory() {
+            return None;
+        }
         let backends: Vec<Backend> = self.candidates.iter().map(|c| c.backend.clone()).collect();
         let lower = step_down(spec.backend.kind, &backends)?;
         let candidate = self.candidates.iter().find(|c| c.backend == lower)?;
@@ -425,6 +454,8 @@ mod tests {
     enum Script {
         /// Fails to load with this reason.
         Fail(LoadFailure),
+        /// Fails to load with this reason and these last lines of its log.
+        FailLog(LoadFailure, Vec<String>),
         /// Becomes ready, then exits after this long (`None`: runs until stopped).
         Run(Option<Duration>),
         /// Becomes ready, then crashes after this long with this reason in its log.
@@ -475,6 +506,11 @@ mod tests {
                     failure,
                     exit_code: Some(1),
                     stderr_tail: vec!["boom".into()],
+                }),
+                Script::FailLog(failure, stderr_tail) => Err(StartError::Exited {
+                    failure,
+                    exit_code: Some(1),
+                    stderr_tail,
                 }),
                 Script::Run(exit_after) => Ok(FakeServer {
                     exit_after,
@@ -1075,13 +1111,13 @@ mod tests {
         assert!(drain(&mut rx).is_empty());
     }
 
-    /// The processor can always do Save memory (flash attention and a q8_0 memory), so a
-    /// failure there is not one Save memory causes: no retry without it, which would need
-    /// twice the memory for the conversation and tell the user that Save memory does not
-    /// work with their graphics card. Neither when the load started on the processor, nor
-    /// after a step-down to it with Save memory still on, nor when it keeps crashing there.
+    /// On the processor, a failure whose log does not show the model refusing Save memory
+    /// is a lack of memory: no retry without it, which would need twice the memory for the
+    /// conversation and tell the user that Save memory does not work with their graphics
+    /// card. Neither when the load started on the processor, nor after a step-down to it
+    /// with Save memory still on, nor when it keeps crashing there.
     #[tokio::test(start_paused = true)]
-    async fn save_memory_is_never_retried_on_the_processor() {
+    async fn a_plain_failure_on_the_processor_keeps_save_memory() {
         for failure in [LoadFailure::ContextTooLarge, LoadFailure::Unknown] {
             let (mut sup, log, mut rx) = supervisor(
                 vec![Script::Fail(failure.clone())],
@@ -1140,6 +1176,193 @@ mod tests {
             .await;
         assert_eq!(exit, SupervisorExit::Failed(LoadFailure::Unknown));
         assert!(attempts(&log).iter().all(|a| a.2), "Save memory stays on");
+        assert!(
+            !drain(&mut rx)
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Stage(_))),
+            "no retry without Save memory"
+        );
+    }
+
+    /// What the pinned build logs when the model itself cannot take Save memory's settings,
+    /// whatever the backend (llama.cpp's `llama_init_from_model`): a q8_0 block that does
+    /// not divide the attention head size, and a model that cannot use flash attention.
+    fn refusal(line: &str) -> Vec<String> {
+        vec![
+            "I llama_context: constructing llama_context".to_owned(),
+            format!("E llama_init_from_model: {line}"),
+            "E common_init_result: failed to create context with model 'm.gguf'".to_owned(),
+            "E srv    load_model: failed to load model, 'm.gguf'".to_owned(),
+        ]
+    }
+
+    const REFUSALS: [&str; 4] = [
+        "K cache type q8_0 with block size 32 does not divide n_embd_head_k=80",
+        "V cache type q8_0 with block size 32 does not divide n_embd_head_v=80",
+        "quantized V cache requires flash_attn to be enabled",
+        "failed to initialize the context: quantized V cache was requested, but this requires Flash Attention",
+    ];
+
+    /// The model refuses Save memory (0.0.6 D2c): retried once without it on the same
+    /// backend, on the processor too, where nothing else could make it load. A plain
+    /// memory failure there still keeps it on (see the test above).
+    #[tokio::test(start_paused = true)]
+    async fn a_model_that_refuses_save_memory_is_retried_without_it_on_any_backend() {
+        for line in REFUSALS {
+            for (kind, device, gpu) in [
+                (BackendKind::Cpu, None, GpuUse::Off),
+                (BackendKind::Vulkan, Some("Vulkan0"), GpuUse::Off),
+                (BackendKind::Vulkan, Some("Vulkan0"), GpuUse::All),
+            ] {
+                let script = vec![
+                    Script::FailLog(LoadFailure::ContextTooLarge, refusal(line)),
+                    Script::Run(None),
+                ];
+                let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+                let (_server, running) = sup
+                    .start(spec_with(kind, device, gpu, true))
+                    .await
+                    .expect("starts without Save memory");
+                assert_eq!(
+                    (
+                        running.backend.kind,
+                        running.launch.gpu,
+                        running.launch.save_memory
+                    ),
+                    (kind, gpu, false),
+                    "{line}"
+                );
+                assert_eq!(
+                    attempts(&log),
+                    vec![(kind, gpu, true), (kind, gpu, false)],
+                    "{line}"
+                );
+                assert_eq!(drain(&mut rx), vec![without_save_memory(kind)], "{line}");
+            }
+        }
+
+        // Only once: the same lines again without Save memory change nothing more.
+        let script = vec![
+            Script::FailLog(LoadFailure::ContextTooLarge, refusal(REFUSALS[0])),
+            Script::FailLog(LoadFailure::ContextTooLarge, refusal(REFUSALS[0])),
+        ];
+        let (mut sup, log, mut rx) = supervisor(script, vec![candidate(BackendKind::Cpu, None)]);
+        sup.start(spec_with(BackendKind::Cpu, None, GpuUse::Off, true))
+            .await
+            .expect_err("fails");
+        assert_eq!(attempts(&log).len(), 2);
+        assert_eq!(drain(&mut rx), vec![without_save_memory(BackendKind::Cpu)]);
+
+        // Not a refusal: the flash attention warning alone, and Save memory already off.
+        for (lines, save_memory) in [
+            (
+                vec![
+                    "W llama_init_from_model: flash_attn is not compatible with Grok - forcing off"
+                        .to_owned(),
+                ],
+                true,
+            ),
+            (refusal(REFUSALS[0]), false),
+        ] {
+            let script = vec![Script::FailLog(LoadFailure::ContextTooLarge, lines)];
+            let (mut sup, log, mut rx) =
+                supervisor(script, vec![candidate(BackendKind::Cpu, None)]);
+            sup.start(spec_with(BackendKind::Cpu, None, GpuUse::Off, save_memory))
+                .await
+                .expect_err("fails");
+            assert_eq!(attempts(&log).len(), 1);
+            assert!(drain(&mut rx).is_empty());
+        }
+    }
+
+    /// "Don't use it" on a graphics backend runs everything on the processor
+    /// (`--device none`), like a graphics backend with no device: the backend's label does
+    /// not make a graphics card. So a plain failure is not retried without Save memory
+    /// (no note that it does not work with the graphics card), and running out of memory
+    /// does not step down to the processor build, which would repeat the same load and
+    /// say the graphics card ran out of memory. A failure of the backend itself (a crash,
+    /// a missing library) still steps down, since the processor build differs there.
+    #[tokio::test(start_paused = true)]
+    async fn without_a_graphics_card_in_use_the_label_changes_nothing() {
+        for (device, gpu) in [
+            (Some("Vulkan0"), GpuUse::Off),
+            (None, GpuUse::All),
+            (Some(""), GpuUse::Fit),
+        ] {
+            for failure in [LoadFailure::ContextTooLarge, LoadFailure::OutOfMemory] {
+                let (mut sup, log, mut rx) = supervisor(
+                    vec![Script::Fail(failure.clone()), Script::Run(None)],
+                    gpu_cpu(),
+                );
+                let error = sup
+                    .start(spec_with(BackendKind::Vulkan, device, gpu, true))
+                    .await
+                    .expect_err("does not fit");
+                assert_eq!(error.failure(), failure);
+                assert_eq!(
+                    attempts(&log),
+                    vec![(BackendKind::Vulkan, gpu, true)],
+                    "{device:?} {gpu:?} {failure:?}"
+                );
+                assert!(drain(&mut rx).is_empty(), "{device:?} {gpu:?} {failure:?}");
+            }
+
+            for failure in [LoadFailure::Unknown, LoadFailure::MissingRuntimeDll] {
+                let (mut sup, log, mut rx) = supervisor(
+                    vec![Script::Fail(failure.clone()), Script::Run(None)],
+                    gpu_cpu(),
+                );
+                sup.start(spec_with(BackendKind::Vulkan, device, gpu, true))
+                    .await
+                    .expect("starts on the processor build");
+                assert_eq!(
+                    attempts(&log),
+                    vec![
+                        (BackendKind::Vulkan, gpu, true),
+                        (BackendKind::Cpu, GpuUse::Off, true),
+                    ],
+                    "{device:?} {gpu:?} {failure:?}"
+                );
+                assert_eq!(
+                    drain(&mut rx),
+                    vec![ServerEvent::SteppedDown {
+                        from: BackendKind::Vulkan,
+                        to: BackendKind::Cpu,
+                        reason: failure,
+                    }]
+                );
+            }
+        }
+
+        // Crashing repeatedly with Don't use it and Save memory: the restarts, then the
+        // processor build with Save memory still on, never "without Save memory".
+        let crash = Script::Run(Some(Duration::from_secs(1)));
+        let script = vec![
+            crash.clone(),
+            crash.clone(),
+            crash.clone(),
+            crash,
+            Script::Run(None),
+        ];
+        let (sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let cancel = CancellationToken::new();
+        let stopper = cancel.clone();
+        let exit = sup
+            .run(
+                spec_with(BackendKind::Vulkan, Some("Vulkan0"), GpuUse::Off, true),
+                cancel,
+                move |_, spec| {
+                    if spec.backend.kind == BackendKind::Cpu {
+                        stopper.cancel();
+                    }
+                },
+            )
+            .await;
+        assert_eq!(exit, SupervisorExit::Stopped);
+        let tries = attempts(&log);
+        assert_eq!(tries.len(), 5);
+        assert!(tries.iter().all(|t| t.2), "Save memory stays on: {tries:?}");
+        assert_eq!(tries[4], (BackendKind::Cpu, GpuUse::Off, true));
         assert!(
             !drain(&mut rx)
                 .iter()
@@ -1212,23 +1435,27 @@ mod tests {
         );
         assert_eq!(drain(&mut rx).len(), 1, "only the step-down");
 
-        // Don't use it: the processor already does the work; step down.
+        // Don't use it: the processor already does all the work, so the processor build
+        // would repeat the same load. Running out of memory is the answer.
         let script = vec![Script::Fail(LoadFailure::OutOfMemory), Script::Run(None)];
-        let (mut sup, log, _rx) = supervisor(script, gpu_cpu());
-        sup.start(spec_with(
-            BackendKind::Vulkan,
-            Some("Vulkan0"),
-            GpuUse::Off,
-            false,
-        ))
-        .await
-        .expect("starts");
+        let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let error = sup
+            .start(spec_with(
+                BackendKind::Vulkan,
+                Some("Vulkan0"),
+                GpuUse::Off,
+                false,
+            ))
+            .await
+            .expect_err("does not fit");
+        assert_eq!(error.failure(), LoadFailure::OutOfMemory);
         assert_eq!(
             attempts(&log),
-            vec![
-                (BackendKind::Vulkan, GpuUse::Off, false),
-                (BackendKind::Cpu, GpuUse::Off, false),
-            ]
+            vec![(BackendKind::Vulkan, GpuUse::Off, false)]
+        );
+        assert!(
+            drain(&mut rx).is_empty(),
+            "no note blames the graphics card"
         );
 
         // The processor: nothing to put on a card, nothing below it.

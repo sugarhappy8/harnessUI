@@ -2,14 +2,19 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, Check, Download, ExternalLink, Lock } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo, RepoView, VariantView } from "../../lib/types";
+import { licenseWords } from "../../lib/abilities";
 import { formatBytes, formatParams } from "../../lib/format";
+import { tokensWithWords } from "../../lib/words";
 import { toErrorInfo } from "../../store/app";
 import { COMPARE_FULL, COMPARE_LIMIT, useAddToComparison, useCompare } from "../../store/compare";
 import { ErrorBanner } from "../ErrorBanner";
 import { FitBadge } from "../FitBadge";
 import { SafeLink } from "../Markdown";
 import { Badge } from "./Badge";
-import { AddToComparison } from "./Compare";
+import { AddToComparison, Outside, shown } from "./Compare";
+
+/** The most of a model card shown (the backend reads at most 256 KB of it). */
+const CARD_CHARS = 262_144;
 
 /**
  * Add to comparison for one file of the repository (the file picked on this page). The
@@ -29,7 +34,7 @@ function CompareVariant(props: { view: RepoView; variant: VariantView }) {
         compare.add();
       }}
       onRemove={compare.remove}
-      name={props.variant.label}
+      name={shown(props.variant.label, 80)}
     />
   );
 }
@@ -75,13 +80,21 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
           <h3 className="truncate text-base font-semibold">{props.repoId}</h3>
           {view && (
             <div className="mt-1 flex flex-wrap gap-1">
-              {view.architecture && <Badge>{view.architecture}</Badge>}
+              {view.architecture && (
+                <Badge>
+                  <Outside text={view.architecture} cap={60} />
+                </Badge>
+              )}
               {formatParams(view.parameters) && <Badge>{formatParams(view.parameters)}</Badge>}
-              {view.contextLength && <Badge>{(view.contextLength / 1024).toFixed(0)}k context</Badge>}
+              {view.contextLength && <Badge>remembers up to {tokensWithWords(view.contextLength)}</Badge>}
               {view.templateTools && <Badge>tools</Badge>}
               {view.templateThinking && <Badge>thinking</Badge>}
               {view.projector && <Badge>vision</Badge>}
-              {view.license && <Badge>{view.license}</Badge>}
+              {view.license && (
+                <Badge>
+                  <Outside text={licenseWords(view.license)} cap={60} />
+                </Badge>
+              )}
               {view.gated !== "no" && (
                 <Badge title="You need a Hugging Face token and must accept the terms on the model page">
                   <Lock size={10} className="mr-0.5 inline" aria-hidden /> gated
@@ -98,7 +111,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
       </div>
       {view?.architectureSupported === false && (
         <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
-          The llama.cpp build in this app does not know the “{view.architecture}” architecture, so
+          The llama.cpp build in this app does not know the “<Outside text={view.architecture ?? ""} cap={60} />” architecture, so
           these files would not load. Pick a different model.
         </p>
       )}
@@ -112,7 +125,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
             </label>
           )}
           <p className="text-xs text-fg-muted">
-            Memory estimates assume a context of {view.fitContext.toLocaleString()} tokens.
+            Memory estimates assume the model remembers {tokensWithWords(view.fitContext)}.
           </p>
           {compareFull && <p className="text-xs text-fg-muted">{COMPARE_FULL}</p>}
           <ul className="space-y-2">
@@ -120,7 +133,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
               <li key={v.label} className="flex items-center gap-3 rounded-md border border-border px-3 py-2 text-sm">
                 <div className="min-w-0 flex-1">
                   <p className="font-medium">
-                    {v.label}
+                    <Outside text={v.label} cap={80} />
                     <span className="ml-2 text-xs font-normal text-fg-muted">
                       {formatBytes(v.totalSize)}
                       {v.files.length > 1 ? ` · ${v.files.length} parts` : ""}
@@ -154,7 +167,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
           </ul>
           {view.incomplete.length > 0 && (
             <p className="text-xs text-fg-muted">
-              Not shown because parts are missing: {view.incomplete.join(", ")}
+              Not shown because parts are missing: <Outside text={view.incomplete.join(", ")} cap={600} />
             </p>
           )}
           {view.card && (
@@ -164,7 +177,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
               </button>
               {showCard && (
                 <pre className="mt-2 max-h-64 overflow-auto rounded-md bg-bg-muted p-3 text-xs whitespace-pre-wrap">
-                  {view.card}
+                  {shown(view.card, CARD_CHARS, true)}
                 </pre>
               )}
             </div>

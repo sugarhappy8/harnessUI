@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Lock, Search } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo, HubSort, RepoSummary } from "../../lib/types";
+import { licenseWords } from "../../lib/abilities";
 import { formatCount } from "../../lib/format";
 import { toErrorInfo } from "../../store/app";
 import { COMPARE_FULL, COMPARE_LIMIT, useCompare, useRepoInComparison } from "../../store/compare";
 import { ErrorBanner } from "../ErrorBanner";
 import { Badge } from "./Badge";
-import { AddToComparison } from "./Compare";
+import { AddToComparison, Outside } from "./Compare";
 import { RepoDetail } from "./RepoDetail";
 
 /** One search result: opens the repository; Add to comparison puts it in without a file. */
@@ -23,7 +24,11 @@ function ResultRow(props: { repo: RepoSummary; onOpen: () => void }) {
       >
         <span className="min-w-0 flex-1 truncate">{r.id}</span>
         {r.gated !== "no" && <Lock size={12} className="text-fg-muted" aria-label="gated" />}
-        {r.license && <Badge>{r.license}</Badge>}
+        {r.license && (
+          <Badge>
+            <Outside text={licenseWords(r.license)} cap={60} />
+          </Badge>
+        )}
         <span className="w-16 text-right text-xs text-fg-muted" title="Downloads">
           {formatCount(r.downloads)}
         </span>
