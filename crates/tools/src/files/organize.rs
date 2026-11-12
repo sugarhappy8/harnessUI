@@ -646,7 +646,10 @@ mod tests {
                 progress: None,
             };
             let out = fs.call(tool, &a, &action, ctx).await;
-            assert!(out.is_error && out.joined_text() == ONLY_IN_FULL_ACCESS, "{tool}");
+            assert!(
+                out.is_error && out.joined_text() == ONLY_IN_FULL_ACCESS,
+                "{tool}"
+            );
         }
         assert!(!s.root.join("new").exists());
         assert!(s.root.join("old").is_dir());

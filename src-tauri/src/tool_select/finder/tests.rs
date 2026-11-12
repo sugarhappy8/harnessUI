@@ -947,7 +947,7 @@ fn the_answer_names_groups_that_are_off_without_listing_their_tools() {
         text,
         "No tool that is on in this chat matches \"commit\".\n\
          Git tools are off in this chat; the user can turn them on in the Tools panel.\n\
-         On in this chat: Files (6 tools), Terminal (1 tool). Search again with a word for what you want to do.\n\
+         On in this chat: Files (9 tools), Terminal (1 tool). Search again with a word for what you want to do.\n\
          Also off in this chat: Browser."
     );
     assert!(
