@@ -222,6 +222,33 @@ def new_chat(c, tools=None):
     return chat["id"]
 
 
+def choose_mode(s, current, label):
+    """The chat header's approval menu (0.0.5): opens it from the button that shows the
+    current mode, then picks a mode by its name."""
+    s.click_button(current)
+    el = s.wait_for(lambda: s.execute(
+        """
+        const l = arguments[0];
+        return [...document.querySelectorAll('[role=menuitemradio]')]
+          .find(e => (e.innerText || '').trim().startsWith(l)) || null;
+        """, label) or False, 10, f"the menu item {label!r}")
+    s.click(next(iter(el.values())))
+    time.sleep(0.4)
+
+
+def settings_radio(s, label):
+    """A choice in Settings: the radio (in the open dialog) whose text starts with `label`."""
+    el = s.wait_for(lambda: s.execute(
+        """
+        const l = arguments[0];
+        const d = document.querySelector('[role=dialog][data-state=open]') || document;
+        return [...d.querySelectorAll('[role=radio]')]
+          .find(e => (e.innerText || '').trim().startsWith(l)) || null;
+        """, label) or False, 10, f"the choice {label!r}")
+    s.click(next(iter(el.values())))
+    time.sleep(0.4)
+
+
 def messages(s, chat_id):
     return s.invoke("get_chat", {"chatId": chat_id})["messages"]
 
@@ -1125,8 +1152,8 @@ def p_allow_all(c, notes):
                 assert "cannot be changed this way" in str(e), e
         assert s.invoke("get_allow_all_default") is False and mode() is False
 
-        # 2. The header button asks first, listing what still asks.
-        s.click_button("Ask first")
+        # 2. The header menu: Allow all asks first, listing what still asks.
+        choose_mode(s, "Ask first", "Allow all")
         s.wait_text("Allow all in this chat?", 10)
         dialog = s.execute(
             "const d = document.querySelector('[role=alertdialog][data-state=open]'); return d ? d.innerText : null;")
@@ -1137,7 +1164,7 @@ def p_allow_all(c, notes):
         assert mode() is False, "opening the confirmation switched the mode"
         click_in_confirmation("Cancel")
         assert mode() is False, "Cancel switched the mode"
-        s.click_button("Ask first")
+        choose_mode(s, "Ask first", "Allow all")
         s.wait_text("Allow all in this chat?", 10)
         click_in_confirmation("Allow all in this chat")
         s.wait_for(mode, 10, "the chat in Allow all")
@@ -1177,8 +1204,8 @@ def p_allow_all(c, notes):
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
         time.sleep(0.4)
 
-        # 5. Switching back takes one click, and a write asks again.
-        s.click_button("Allow all")
+        # 5. Switching back needs no confirmation, and a write asks again.
+        choose_mode(s, "Allow all", "Ask first")
         s.wait_for(lambda: mode() is False, 10, "the chat back in Ask mode")
         assert "Allow all in this chat?" not in s.page_text(), "switching back asked for confirmation"
         Fake.queue.append(call("write_file", {"path": str(b), "content": "three\n"}))
@@ -1211,15 +1238,15 @@ def p_allow_all(c, notes):
         s.invoke("set_approval_mode", {"chatId": chat, "allowAll": False})
         s.click_button("Settings")
         s.click_button("Permissions")
-        s.wait_text("Allow all in every chat", 10)
-        s.execute("document.querySelector('input[role=switch]').click();")
+        s.wait_text("Every chat starts in", 10)
+        settings_radio(s, "Allow all")
         s.wait_text("Allow all in every chat?", 10)
         assert s.invoke("get_allow_all_default") is False
         click_in_confirmation("Allow all in every chat")
         s.wait_for(lambda: s.invoke("get_allow_all_default") is True, 10, "the default switched on")
         assert mode() is True, "an open chat did not follow the default"
         assert s.invoke("get_setting", {"key": "allowAllDefault"}) is True
-        s.execute("document.querySelector('input[role=switch]').click();")
+        settings_radio(s, "Ask first")
         s.wait_for(lambda: s.invoke("get_allow_all_default") is False, 10, "the default switched off")
         assert mode() is False, "switching the default off left a chat in Allow all"
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
@@ -1292,18 +1319,6 @@ def p_full_access(c, notes):
         return s.execute(
             "return !!document.querySelector('button[aria-label=\"' + arguments[0] + '\"]');", label)
 
-    def choose(current, label):
-        # The chat header's mode menu: open it, then pick a mode.
-        s.click_button(current)
-        el = s.wait_for(lambda: s.execute(
-            """
-            const l = arguments[0];
-            return [...document.querySelectorAll('[role=menuitemradio]')]
-              .find(e => (e.innerText || '').trim().startsWith(l)) || null;
-            """, label) or False, 10, f"the menu item {label!r}")
-        s.click(next(iter(el.values())))
-        time.sleep(0.4)
-
     def mode():
         return s.invoke("get_chat_approval_mode", {"chatId": chat})
 
@@ -1330,7 +1345,7 @@ def p_full_access(c, notes):
 
         # 1. The header menu: Full access asks first with a plain warning; Cancel changes nothing.
         s.wait_for(lambda: header("Ask first"), 10, "the Ask first button")
-        choose("Ask first", "Full access")
+        choose_mode(s, "Ask first", "Full access")
         s.wait_text("Full access in this chat?", 10)
         dialog = s.execute(
             "const d = document.querySelector('[role=alertdialog][data-state=open]'); return d ? d.innerText : null;")
@@ -1341,7 +1356,7 @@ def p_full_access(c, notes):
         assert mode() == "ask", "opening the confirmation switched the mode"
         click_in_confirmation("Cancel")
         assert mode() == "ask", "Cancel switched the mode"
-        choose("Ask first", "Full access")
+        choose_mode(s, "Ask first", "Full access")
         s.wait_text("Full access in this chat?", 10)
         click_in_confirmation("Turn on Full access")
         s.wait_for(lambda: mode() == "fullAccess", 10, "the chat in Full access")
@@ -1382,9 +1397,11 @@ def p_full_access(c, notes):
         no_card_until_done()
         assert c.db.exists() and home.exists()
         rows = audit()
-        assert any(r["tool"] == "read_file" and r["decision"] == "denied" and str(c.db) in json.dumps(r["arguments"])
+        # Hard limits are recorded as refused by policy: no card, in every mode.
+        assert any(r["tool"] == "read_file" and r["decision"] == "refused_by_policy" and str(c.db) in json.dumps(r["arguments"])
                    for r in rows), rows[:4]
-        assert any(r["tool"] == "delete_folder" and r["decision"] == "denied" for r in rows), rows[:4]
+        assert any(r["tool"] == "delete_folder" and r["decision"] == "refused_by_policy" and "app's own folders" in (r.get("note") or "")
+                   for r in rows), rows[:4]
         listing = [m for m in messages(s, chat) if m["role"] == "tool"][-1]
         text = json.dumps(listing)
         assert "not reachable" in text and "app.db" not in text, text[:2000]
@@ -1397,7 +1414,7 @@ def p_full_access(c, notes):
         time.sleep(0.4)
 
         # 4. Back to Ask first: one click, no confirmation, and a write asks again.
-        choose("Full access", "Ask first")
+        choose_mode(s, "Full access", "Ask first")
         s.wait_for(lambda: mode() == "ask", 10, "the chat back in Ask first")
         assert "Full access in this chat?" not in s.page_text()
         Fake.queue.append(call("write_file", {"path": str(outside / "after.txt"), "content": "x"}))
@@ -1413,8 +1430,8 @@ def p_full_access(c, notes):
         # 5. Settings: the mode every chat starts in, saved, with the same confirmation.
         s.click_button("Settings")
         s.click_button("Permissions")
-        s.wait_text("Approvals", 10)
-        s.click_button("Full access")
+        s.wait_text("Every chat starts in", 10)
+        settings_radio(s, "Full access")
         s.wait_text("Full access in every chat?", 10)
         assert s.invoke("get_default_approval_mode") == "ask"
         click_in_confirmation("Turn on Full access")
@@ -1422,7 +1439,7 @@ def p_full_access(c, notes):
         assert mode() == "fullAccess", "an open chat did not follow the default"
         assert s.invoke("get_setting", {"key": "approvalModeDefault"}) == "fullAccess"
         assert s.invoke("get_setting", {"key": "allowAllDefault"}) is True
-        s.click_button("Ask first")
+        settings_radio(s, "Ask first")
         s.wait_for(lambda: s.invoke("get_default_approval_mode") == "ask", 10, "the default back in Ask first")
         assert mode() == "ask", "switching the default back left a chat in Full access"
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
