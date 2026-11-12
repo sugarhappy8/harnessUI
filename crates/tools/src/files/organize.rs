@@ -898,9 +898,10 @@ mod tests {
         let s = setup();
         let fs = FilesServer::default();
         let pipe = s.root.join("pipe");
-        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
-        if !made.is_ok_and(|st| st.success()) {
-            return; // no mkfifo here
+        let path = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path; mkfifo only creates the pipe.
+        if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
+            return; // no pipes here
         }
         std::fs::write(s.root.join("plain.txt"), "needle\n").unwrap();
         for (tool, a) in [
