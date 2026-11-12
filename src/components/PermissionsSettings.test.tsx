@@ -25,9 +25,10 @@ const { APPROVAL_MODES, CONFIRM_INPUT_DELAY_MS, FULL_ACCESS_RISKS, STILL_ASKS } 
 const { useApprovalMode } = await import("../lib/approvalMode");
 
 const radio = (label: string) => screen.getByRole("radio", { name: new RegExp(`^${label}`) });
+// `hidden`: an open confirmation hides the rest of the page from the accessibility tree.
 const checked = () =>
-  within(screen.getByRole("radiogroup", { name: "Every chat starts in" }))
-    .getAllByRole("radio")
+  within(screen.getByRole("radiogroup", { name: "Every chat starts in", hidden: true }))
+    .getAllByRole("radio", { hidden: true })
     .filter((r) => r.getAttribute("aria-checked") === "true")
     .map((r) => r.textContent);
 
