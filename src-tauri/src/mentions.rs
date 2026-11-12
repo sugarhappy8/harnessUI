@@ -422,7 +422,10 @@ mod tests {
         }
         assert!(only_main_window(crate::MAIN_WINDOW).is_ok());
         for label in ["overlay", "indicator", "artifact", ""] {
-            assert_eq!(only_main_window(label).expect_err(label).code, "bad_request");
+            assert_eq!(
+                only_main_window(label).expect_err(label).code,
+                "bad_request"
+            );
         }
     }
 

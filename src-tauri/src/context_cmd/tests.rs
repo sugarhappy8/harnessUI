@@ -90,7 +90,13 @@ fn chat_input(n_ctx: u32) -> TurnInput {
     let mut answer = HistoryMessage::assistant("The word is heron.");
     answer.id = Some(4);
     let mut input = TurnInput::new(
-        vec![first, call, result, answer, HistoryMessage::user(NEXT_MESSAGE)],
+        vec![
+            first,
+            call,
+            result,
+            answer,
+            HistoryMessage::user(NEXT_MESSAGE),
+        ],
         caps,
         RequestTemplate {
             model: "fake-model".into(),
@@ -147,19 +153,35 @@ async fn the_view_has_every_section_in_order_with_the_exact_text() {
     assert_eq!(section("skills").detail, "None");
     let tools = section("tools");
     assert!(
-        tools.detail.starts_with("2 shown: read_file, list_dir. 3 more are on but not shown"),
+        tools
+            .detail
+            .starts_with("2 shown: read_file, list_dir. 3 more are on but not shown"),
         "{}",
         tools.detail
     );
     assert!(tools.text.contains("\"read_file\"") && tools.text.contains("The list_dir tool."));
     assert_eq!(tools.tokens, Some(p.tool_tokens));
     let kept = section("kept");
-    assert!(kept.text.contains("[tool] read_file") || kept.text.contains("[tool]"), "{}", kept.text);
-    assert!(kept.text.contains("<b>file text</b>"), "shown as text, as sent");
+    assert!(
+        kept.text.contains("[tool] read_file") || kept.text.contains("[tool]"),
+        "{}",
+        kept.text
+    );
+    assert!(
+        kept.text.contains("<b>file text</b>"),
+        "shown as text, as sent"
+    );
     assert!(kept.text.contains(NEXT_MESSAGE) && kept.text.contains("Task: tidy the notes."));
-    assert_eq!(section("task").detail, "The task state is sent with the next message.");
+    assert_eq!(
+        section("task").detail,
+        "The task state is sent with the next message."
+    );
     assert_eq!(section("attachments").detail, "1 file: notes.txt");
-    assert!(section("attachments").text.contains("the secret word is heron"));
+    assert!(
+        section("attachments")
+            .text
+            .contains("the secret word is heron")
+    );
     // The system blocks are the system message, in order.
     let system_message = p.request.messages[0].content.as_ref().unwrap().text();
     for id in ["system", "pinned", "preamble"] {
@@ -171,7 +193,11 @@ async fn the_view_has_every_section_in_order_with_the_exact_text() {
     assert_eq!(totals.pinned.used, p.pinned_tokens);
     assert!(totals.tools.is_some());
     assert!(v.refusal.is_none());
-    assert!(v.next_drop.starts_with("Nothing is left out now."), "{}", v.next_drop);
+    assert!(
+        v.next_drop.starts_with("Nothing is left out now."),
+        "{}",
+        v.next_drop
+    );
     assert!(v.next_drop.contains("1 tool call"), "{}", v.next_drop);
     assert!(v.notes[0].starts_with(NEXT_MESSAGE));
 }
@@ -215,7 +241,8 @@ async fn what_goes_next_and_refusals_come_from_the_loop() {
     let p = preview(input).await;
     let v = view(&inspected(&p, Ok(model_line(true, 4_096))));
     assert!(
-        v.next_drop.starts_with("Results of tool calls in earlier messages are already shortened"),
+        v.next_drop
+            .starts_with("Results of tool calls in earlier messages are already shortened"),
         "{}",
         v.next_drop
     );
@@ -225,7 +252,10 @@ async fn what_goes_next_and_refusals_come_from_the_loop() {
     let p = preview(input).await;
     let v = view(&inspected(&p, Ok(model_line(true, 4_096))));
     let refusal = v.refusal.expect("refused");
-    assert!(refusal.starts_with("Your 20 pinned instructions need about "), "{refusal}");
+    assert!(
+        refusal.starts_with("Your 20 pinned instructions need about "),
+        "{refusal}"
+    );
 }
 
 #[test]
@@ -303,7 +333,9 @@ fn the_preview_mode_of_the_assembly_changes_nothing() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/turns.rs"),
     )
     .unwrap();
-    let start = source.find("pub(crate) async fn assemble(").expect("assemble");
+    let start = source
+        .find("pub(crate) async fn assemble(")
+        .expect("assemble");
     let end = start + source[start..].find("\n}\n").expect("end of assemble");
     let body = &source[start..end];
     // Each call that records something sits in an `if turn` branch.
@@ -315,13 +347,18 @@ fn the_preview_mode_of_the_assembly_changes_nothing() {
         "skills_srv.set_terminal_enabled(",
         "crate::task::begin_turn(",
     ] {
-        let at = body.find(call).unwrap_or_else(|| panic!("{call} is not in the assembly"));
+        let at = body
+            .find(call)
+            .unwrap_or_else(|| panic!("{call} is not in the assembly"));
         let guard = body[..at].rfind("if turn {").expect("a guard");
         let between = &body[guard..at];
         let opened = between.matches('{').count();
         let closed = between.matches('}').count();
         assert!(opened > closed, "{call} is not inside `if turn`");
-        assert!(!between.contains("} else {"), "{call} is in the else branch");
+        assert!(
+            !between.contains("} else {"),
+            "{call} is in the else branch"
+        );
     }
     for twin in [
         "crate::tool_select::preview_for_turn(",

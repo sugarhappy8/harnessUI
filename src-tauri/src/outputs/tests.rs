@@ -86,8 +86,8 @@ async fn a_shortened_result_is_stored_and_the_model_is_told_how_to_read_more() {
     assert!(out.full_text.is_none(), "the card shows what the model saw");
     assert_eq!(
         out.ui,
-        Some(json!({"command": "x"})),
-        "the note is taken out"
+        Some(json!({"command": "x", SAVED_KEY: id})),
+        "the note is taken out, and the saved output named"
     );
     assert!(!out.is_error);
     let stored = store

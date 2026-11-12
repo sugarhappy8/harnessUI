@@ -133,6 +133,7 @@ begin_artifact_check
 finish_artifact_check
 artifact_canary
 get_tool_output
+tool_output_for_call
 list_pins
 add_pin
 edit_pin

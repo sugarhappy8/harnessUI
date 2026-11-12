@@ -680,6 +680,41 @@ fn rule3_a_command_that_hides_what_it_runs_still_asks() {
 
 /// Lead's addition: a delete or publish word handed to another program as an argument of
 /// its own, where the parser can tell.
+/// An interpreter called with no file reads its code from standard input, so the line is
+/// unread. Asking for the version or the help, or (Node.js) running the test files it
+/// finds, takes no code and is read like any other plain command.
+#[test]
+fn an_interpreter_that_takes_no_code_is_a_plain_command() {
+    for line in [
+        "node --test",
+        "node --test --test-reporter=spec",
+        "nodejs --test",
+        "node --version",
+        "python3 --version",
+        "bash --version",
+        "python3 --help",
+    ] {
+        let found = facts(SH, line);
+        assert!(!found.opaque, "{line}");
+        assert!(!found.network, "{line}");
+        assert!(found.keep_asking.is_none(), "{line}");
+    }
+    // Anything else next to those flags, and no flags at all, stay unread.
+    for line in [
+        "node",
+        "python3",
+        "bash",
+        "node --test -e 1",
+        "node --test --inspect",
+        "node --experimental-vm-modules",
+        "python3 -i",
+        "bash -s",
+        "python3 --version -",
+    ] {
+        assert!(facts(SH, line).opaque, "{line}");
+    }
+}
+
 #[test]
 fn a_delete_word_passed_to_another_program_still_asks() {
     let rows: &[(Shell, &str)] = &[

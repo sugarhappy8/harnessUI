@@ -104,6 +104,8 @@ pub async fn after_call(
 /// (and its "Full output" button). The tool's note is always taken out of `ui`.
 pub async fn record(store: &Store, chat_id: i64, call_id: &str, tool: &str, out: &mut ToolOutput) {
     let note = Shown::take(&mut out.ui);
+    // Which output a call saved is the app's to say, never a tool's or a server's.
+    take_key(&mut out.ui, SAVED_KEY);
     // A part of a stored output is not stored again.
     if tool == TOOL_NAME {
         return;
@@ -141,6 +143,12 @@ pub async fn record(store: &Store, chat_id: i64, call_id: &str, tool: &str, out:
         .or_else(|| Shown::next_range(shown + 1, shown, total))
         .unwrap_or((1, total.clamp(1, MAX_NEXT_LINES)));
     let line = shortened_line(info.id, shown, info.lines, next);
+    let mut ui = match out.ui.take() {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    ui.insert(SAVED_KEY.into(), json!(info.id));
+    out.ui = Some(Value::Object(ui));
     match out.content.iter_mut().rev().find_map(|c| match c {
         Content::Text { text } => Some(text),
         _ => None,
@@ -153,6 +161,30 @@ pub async fn record(store: &Store, chat_id: i64, call_id: &str, tool: &str, out:
         }
         None => out.content.push(Content::Text { text: line }),
     }
+}
+
+/// The key in `ToolOutput::ui` under which the app names the output a call saved. Set only
+/// by [`record`], which drops any value a tool put there.
+pub const SAVED_KEY: &str = "savedOutput";
+
+/// Removes `key` from a result's `ui` object; a `ui` left empty becomes `None`.
+fn take_key(ui: &mut Option<Value>, key: &str) {
+    if let Some(Value::Object(map)) = ui.as_mut() {
+        map.remove(key);
+        if map.is_empty() {
+            *ui = None;
+        }
+    }
+}
+
+/// The output the app saved for one call of the chat, if it saved one. Call ids are
+/// unique within a chat (the agent loop makes them so); a helper's calls have none.
+pub async fn saved_for_call(store: &Store, chat: ChatId, call_id: &str) -> Option<i64> {
+    if call_id.is_empty() {
+        return None;
+    }
+    let list = store.list_tool_outputs(chat).await.ok()?;
+    list.iter().find(|o| o.call_id == call_id).map(|o| o.id)
 }
 
 // ---- The `outputs` server ---------------------------------------------------------------
@@ -496,6 +528,23 @@ pub struct ToolOutputDto {
     pub lines: u64,
     pub bytes: u64,
     pub text: String,
+}
+
+/// The saved output of one of the chat's tool calls, if the app saved one: what the tool
+/// card shows "Full output" for (never read from the result's text).
+#[tauri::command]
+pub async fn tool_output_for_call(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    chat_id: i64,
+    call_id: String,
+) -> AppResult<Option<i64>> {
+    if window.label() != crate::MAIN_WINDOW {
+        return Err(AppError::bad_request(
+            "Only the main window shows tool output.",
+        ));
+    }
+    Ok(saved_for_call(&state.store, ChatId(chat_id), &call_id).await)
 }
 
 /// The whole text of one of the chat's saved outputs. Another chat's id is "not found".

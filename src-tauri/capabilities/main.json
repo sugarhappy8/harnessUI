@@ -159,6 +159,7 @@
     "allow-finish-artifact-check",
     "allow-artifact-canary",
     "allow-get-tool-output",
+    "allow-tool-output-for-call",
     "allow-minimize-main-window",
     "allow-list-pins",
     "allow-add-pin",

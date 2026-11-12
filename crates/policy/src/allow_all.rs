@@ -217,6 +217,25 @@ fn code_flags(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether an interpreter called with flags only, and these flags, runs no code handed to
+/// it: it prints its version or its help, or (Node.js) runs the test files it finds, which
+/// is running files like any `npm test`. Every flag must be one of these; anything else
+/// keeps the line unread.
+fn takes_no_code(name: &str, args: &[String]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+    let informs = args
+        .iter()
+        .all(|a| matches!(a.as_str(), "--version" | "--help"));
+    let node_tests = matches!(name, "node" | "nodejs")
+        && args.iter().any(|a| a == "--test")
+        && args
+            .iter()
+            .all(|a| a == "--test" || a.starts_with("--test-"));
+    informs || node_tests
+}
+
 /// What was found in one command line.
 #[derive(Default)]
 struct Found {
@@ -389,8 +408,9 @@ fn simple(command: &SimpleCommand, found: &mut Found) {
         let bundled = args.iter().any(|a| {
             a.starts_with('-') && !a.starts_with("--") && a.contains(|c| letters.contains(c))
         });
-        // No file to run: the code comes from standard input (`… | sh`).
-        let no_file = !args.iter().any(|a| !a.starts_with('-'));
+        // No file to run: the code comes from standard input (`… | sh`), unless the
+        // flags ask for something that takes no code at all.
+        let no_file = !args.iter().any(|a| !a.starts_with('-')) && !takes_no_code(name, &args);
         if bundled || no_file {
             found.opaque = true;
         }

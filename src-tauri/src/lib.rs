@@ -233,6 +233,7 @@ pub fn run() {
             artifacts::finish_artifact_check,
             artifacts::artifact_canary,
             outputs::get_tool_output,
+            outputs::tool_output_for_call,
             pinned::list_pins,
             pinned::add_pin,
             pinned::edit_pin,

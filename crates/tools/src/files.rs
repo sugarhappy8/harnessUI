@@ -760,9 +760,7 @@ impl BuiltinServer for FilesServer {
                             Some(sha256_hex(&bytes)),
                         )
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        (String::new(), 0, None)
-                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), 0, None),
                     Err(e) => {
                         return Described::Invalid(format!(
                             "could not read {shown}: {}",
@@ -1039,9 +1037,9 @@ impl BuiltinServer for FilesServer {
                         Err(why) => return ToolOutput::error(why),
                     };
                     let Ok(current) = std::str::from_utf8(&bytes) else {
-                        return ToolOutput::error(not_utf8_message(
-                            &policy::sanitize::visible(&path.display().to_string()),
-                        ));
+                        return ToolOutput::error(not_utf8_message(&policy::sanitize::visible(
+                            &path.display().to_string(),
+                        )));
                     };
                     let current = current.to_string();
                     // The same text and the same arguments gave a plan for the preview.
@@ -2245,10 +2243,23 @@ mod tests {
         let (_dir, root) = tree(&[("one.txt", &"y".repeat(5000))]);
         let mut c = chat(&root);
         c.result_cap_tokens = 500;
-        let (_, out) = run(&FilesServer::default(), &c, "read_file", json!({"path": "one.txt"})).await.unwrap();
+        let (_, out) = run(
+            &FilesServer::default(),
+            &c,
+            "read_file",
+            json!({"path": "one.txt"}),
+        )
+        .await
+        .unwrap();
         let mut ui = out.ui.clone();
         let note = crate::shorten::Shown::take(&mut ui).expect("a note for the app");
-        assert_eq!(note, crate::shorten::Shown { lines: 0, next: Some((1, 3)) });
+        assert_eq!(
+            note,
+            crate::shorten::Shown {
+                lines: 0,
+                next: Some((1, 3))
+            }
+        );
     }
 
     /// The read that explains a failed edit reaches no further into a file than read_file.
@@ -2261,7 +2272,14 @@ mod tests {
         let c = chat(&root);
         let fs = FilesServer::default();
         let file = shown(&root.join("long.txt"));
-        let (action, out) = run(&fs, &c, "edit_file", json!({"path": "long.txt", "old_text": "target = 1", "new_text": "x"})).await.unwrap();
+        let (action, out) = run(
+            &fs,
+            &c,
+            "edit_file",
+            json!({"path": "long.txt", "old_text": "target = 1", "new_text": "x"}),
+        )
+        .await
+        .unwrap();
         assert!(action.read_only && out.is_error, "{out:?}");
         assert_eq!(
             out.joined_text(),
@@ -2271,7 +2289,14 @@ mod tests {
             )
         );
         // The edit itself, named exactly, still works on a file this large.
-        let (_, out) = run(&fs, &c, "edit_file", json!({"path": "long.txt", "old_text": "target = 1", "new_text": "x", "occurrence": 2})).await.unwrap();
+        let (_, out) = run(
+            &fs,
+            &c,
+            "edit_file",
+            json!({"path": "long.txt", "old_text": "target = 1", "new_text": "x", "occurrence": 2}),
+        )
+        .await
+        .unwrap();
         assert!(!out.is_error, "{out:?}");
     }
 

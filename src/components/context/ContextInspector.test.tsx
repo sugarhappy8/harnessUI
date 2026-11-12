@@ -10,7 +10,7 @@ const apiMock = vi.hoisted(() => ({
   onToolServersChanged: vi.fn<(h: () => void) => Promise<() => void>>(),
 }));
 vi.mock("./api", () => apiMock);
-const clipboard = vi.hoisted(() => ({ writeText: vi.fn(async (_text: string) => undefined) }));
+const clipboard = vi.hoisted(() => ({ writeText: vi.fn<(text: string) => Promise<void>>(async () => undefined) }));
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => clipboard);
 
 const { ContextInspector, copyAllText, DRAWN_CHARS } = await import("./ContextInspector");
@@ -120,16 +120,19 @@ describe("ContextInspector", () => {
   });
 
   it("copies the whole text with Copy all", async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     await show(view());
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /Copy all/ }));
     });
-    const copied = clipboard.writeText.mock.calls[0]?.[0] ?? (await navigator.clipboard?.readText?.());
     const text = copyAllText(view());
     expect(text).toContain("You are a careful assistant.");
     expect(text).toContain("1. Answer in German.");
     expect(text).toContain("=== Tool definitions (about 300 tokens)");
-    if (copied !== undefined) expect(copied).toBe(text);
+    expect(writeText).toHaveBeenCalledWith(text);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /Copied/ })).toBeTruthy();
   });
 
   it("says plainly when there are no numbers, and shows a refusal", async () => {

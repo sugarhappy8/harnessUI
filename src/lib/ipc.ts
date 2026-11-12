@@ -352,6 +352,9 @@ export interface SavedToolOutput {
 }
 export const getToolOutput = (chatId: number, id: number) =>
   invoke<SavedToolOutput>("get_tool_output", { chatId, id });
+/** The output the app saved for one tool call of the chat, if any. */
+export const toolOutputForCall = (chatId: number, callId: string) =>
+  invoke<number | null>("tool_output_for_call", { chatId, callId });
 
 // Tested settings per model, and coding benchmarks (0.0.4, src-tauri/src/evals/).
 export const getModelProfile = (modelRef: string) =>

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { getToolOutput, isTauri, minimizeMainWindow, type SavedToolOutput } from "../lib/ipc";
+import { useEffect, useState } from "react";
+import { getToolOutput, isTauri, minimizeMainWindow, toolOutputForCall, type SavedToolOutput } from "../lib/ipc";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useApp } from "../store/app";
 import { TOOL_CARD_EXTRAS } from "./toolcards";
@@ -67,17 +67,35 @@ const STATUS_TEXT: Record<string, string> = {
   refused: "Not allowed",
 };
 
-/** The line the app appends to a shortened result (src-tauri/src/outputs.rs, `shortened_line`). */
-const SHORTENED_LINE =
-  /^\[Shortened: \d+ of \d+ lines shown\. Full output is saved as output #(\d+)\. Read more with read_output .*\]$/;
-
-/** The saved output a result names on its last line, if it ends with the "Shortened" line. */
-export function savedOutputId(text: string): number | null {
+/**
+ * Whether a result ends like one the app shortened (src-tauri/src/outputs.rs,
+ * `shortened_line`). Anyone can write such a line (a file's last line, a server's
+ * result), so this only decides whether to ask the app; which output, if any, comes from
+ * the app's own record of the call.
+ */
+export function looksShortened(text: string): boolean {
   const lines = text.trimEnd().split("\n");
-  const match = SHORTENED_LINE.exec(lines[lines.length - 1] ?? "");
-  if (!match) return null;
-  const id = Number(match[1]);
-  return Number.isSafeInteger(id) ? id : null;
+  return (lines[lines.length - 1] ?? "").startsWith("[Shortened: ");
+}
+
+/** The output the app saved for this call of the chat on screen, or null. */
+function useSavedOutput(callId: string, text: string, finished: boolean): number | null {
+  const chatId = useApp((s) => s.activeChatId);
+  const ask = finished && chatId !== null && callId !== "" && looksShortened(text);
+  const [found, setFound] = useState<{ key: string; id: number | null } | null>(null);
+  const key = `${chatId}:${callId}`;
+  useEffect(() => {
+    if (!ask || chatId === null) return;
+    let live = true;
+    toolOutputForCall(chatId, callId).then(
+      (id) => live && setFound({ key, id }),
+      () => live && setFound({ key, id: null }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [ask, chatId, callId, key]);
+  return ask && found?.key === key ? found.id : null;
 }
 
 type FullOutputState =
@@ -186,7 +204,7 @@ export function ToolCallCard(props: { call: ToolCallView }) {
   const shown = all ? result : result.slice(0, RESULT_PREVIEW_CHARS);
   // The name is the model's: only a card of its own, never something every object has.
   const extra = Object.hasOwn(TOOL_CARD_EXTRAS, c.name) ? (TOOL_CARD_EXTRAS[c.name]?.(c) ?? null) : null;
-  const savedId = c.status === "running" ? null : savedOutputId(c.text);
+  const savedId = useSavedOutput(c.callId, c.text, c.status !== "running" && c.status !== "waiting");
   const helperNow =
     c.name === SUBAGENT_TOOL && (c.status === "running" || c.status === "waiting") ? lastLine(c.progress ?? "") : "";
   return (

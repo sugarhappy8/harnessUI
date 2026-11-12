@@ -95,6 +95,11 @@ pub struct VariantResult {
 /// The settings variants for a model: always the model's defaults and a low temperature;
 /// thinking off as well when the model can think.
 pub fn variants(can_think: bool) -> Vec<(String, Settings)> {
+    // TODO(0.0.5): add a variant that switches how tool calls are read (native calls versus
+    // calls the model writes as text, with the tools described in the prompt) and save it
+    // in the profile. The agent loop has no such mode yet and the bundled llama-server has
+    // no request option for it, so today the check only records how calls arrived
+    // (`ProbeResult::arrival`).
     let mut out = vec![("Default".to_owned(), Settings::default())];
     if can_think {
         out.push((

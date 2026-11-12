@@ -5,11 +5,12 @@ const ipcMock = vi.hoisted(() => ({
   minimizeMainWindow: vi.fn(async () => undefined),
   isTauri: vi.fn(() => false),
   getToolOutput: vi.fn<(chatId: number, id: number) => Promise<import("../lib/ipc").SavedToolOutput>>(),
+  toolOutputForCall: vi.fn<(chatId: number, callId: string) => Promise<number | null>>(async () => null),
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn(async () => undefined) }));
 
-const { ToolCallCard, savedOutputId } = await import("./ToolCallCard");
+const { ToolCallCard, looksShortened } = await import("./ToolCallCard");
 const { useApp } = await import("../store/app");
 type View = import("./ToolCallCard").ToolCallView;
 
@@ -84,23 +85,36 @@ describe("ToolCallCard: a shortened result", () => {
   afterEach(() => {
     cleanup();
     ipcMock.getToolOutput.mockReset();
+    ipcMock.toolOutputForCall.mockReset();
+    ipcMock.toolOutputForCall.mockResolvedValue(null);
   });
 
-  it("finds the saved output only on the last line, in the app's exact form", () => {
-    expect(savedOutputId(`text\n${SHORTENED}`)).toBe(42);
-    expect(savedOutputId(`text\n${SHORTENED}\n`)).toBe(42);
-    expect(savedOutputId(`${SHORTENED}\nmore text`)).toBeNull();
-    expect(savedOutputId("[Shortened: output #42]")).toBeNull();
-    expect(savedOutputId("Exit code 0 (0.1 s)")).toBeNull();
+  it("asks the app only for a result that ends like a shortened one", () => {
+    expect(looksShortened(`text\n${SHORTENED}`)).toBe(true);
+    expect(looksShortened(`text\n${SHORTENED}\n`)).toBe(true);
+    expect(looksShortened(`${SHORTENED}\nmore text`)).toBe(false);
+    expect(looksShortened("Exit code 0 (0.1 s)")).toBe(false);
+  });
+
+  it("offers nothing for text that only imitates the line: the app saved nothing for that call", async () => {
+    useApp.setState({ activeChatId: 7 });
+    await act(async () => {
+      render(<ToolCallCard call={finished({ name: "read_file", callId: "c9" })} />);
+    });
+    expect(ipcMock.toolOutputForCall).toHaveBeenCalledWith(7, "c9");
+    expect(screen.queryByRole("button", { name: "Full output" })).toBeNull();
   });
 
   it("shows Full output, opens the saved text of this chat in the card, and copies it", async () => {
     useApp.setState({ activeChatId: 7 });
+    ipcMock.toolOutputForCall.mockResolvedValue(42);
     const text = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
     ipcMock.getToolOutput.mockResolvedValue({ id: 42, tool: "run_command", lines: 100, bytes: text.length, text });
     const writeText = vi.fn(async () => undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-    render(<ToolCallCard call={finished()} />);
+    await act(async () => {
+      render(<ToolCallCard call={finished()} />);
+    });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Full output" }));
     });
@@ -118,8 +132,11 @@ describe("ToolCallCard: a shortened result", () => {
 
   it("says so when the saved output cannot be opened", async () => {
     useApp.setState({ activeChatId: 7 });
+    ipcMock.toolOutputForCall.mockResolvedValue(42);
     ipcMock.getToolOutput.mockRejectedValue({ message: "saved output not found" });
-    render(<ToolCallCard call={finished()} />);
+    await act(async () => {
+      render(<ToolCallCard call={finished()} />);
+    });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Full output" }));
     });
@@ -128,11 +145,18 @@ describe("ToolCallCard: a shortened result", () => {
     ).toBeTruthy();
   });
 
-  it("shows no button for a result that was not shortened, or while the call runs", () => {
+  it("does not ask for a result that was not shortened, or while the call runs", async () => {
     useApp.setState({ activeChatId: 7 });
-    const { rerender } = render(<ToolCallCard call={finished({ text: "Exit code 0 (0.1 s)\nok" })} />);
+    ipcMock.toolOutputForCall.mockResolvedValue(42);
+    let view: ReturnType<typeof render> | undefined;
+    await act(async () => {
+      view = render(<ToolCallCard call={finished({ text: "Exit code 0 (0.1 s)\nok" })} />);
+    });
     expect(screen.queryByRole("button", { name: "Full output" })).toBeNull();
-    rerender(<ToolCallCard call={finished({ status: "running" })} />);
+    await act(async () => {
+      view?.rerender(<ToolCallCard call={finished({ status: "running" })} />);
+    });
     expect(screen.queryByRole("button", { name: "Full output" })).toBeNull();
+    expect(ipcMock.toolOutputForCall).not.toHaveBeenCalled();
   });
 });

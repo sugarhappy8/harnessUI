@@ -430,7 +430,9 @@ async fn a_helpers_request_carries_the_chats_pins() {
 #[test]
 fn pinning_a_message_takes_its_id_and_tells_the_window() {
     let source = read(&manifest().join("src").join("pinned.rs"));
-    let start = source.find("pub async fn pin_message(").expect("the command");
+    let start = source
+        .find("pub async fn pin_message(")
+        .expect("the command");
     let end = start + source[start..].find("\n}\n").expect("its end");
     let body = &source[start..end];
     let params = &body[..body.find(") -> AppResult").expect("signature")];

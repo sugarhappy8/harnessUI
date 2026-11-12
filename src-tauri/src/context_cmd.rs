@@ -196,10 +196,7 @@ pub async fn inspect_context(
     let task_status = crate::task::note_status_for_turn(&state, chat_id).await;
     let mut input = assembled.input;
     let task_note = input.app_notes.first().cloned();
-    let placeholder = !input
-        .history
-        .last()
-        .is_some_and(|m| m.role == Role::User);
+    let placeholder = !input.history.last().is_some_and(|m| m.role == Role::User);
     if placeholder {
         input.history.push(HistoryMessage::user(NEXT_MESSAGE));
     }
@@ -274,7 +271,10 @@ fn messages_text(request: &agent::ChatRequest) -> String {
                 }
                 let images = content.images().count();
                 if images > 0 {
-                    out.push_str(&format!("\n({images} image{})", if images == 1 { "" } else { "s" }));
+                    out.push_str(&format!(
+                        "\n({images} image{})",
+                        if images == 1 { "" } else { "s" }
+                    ));
                 }
             }
             for call in m.tool_calls.iter().flatten() {
@@ -423,7 +423,15 @@ pub fn view(inspected: &Inspected) -> ContextView {
         .system_blocks
         .iter()
         .find(|b| b.kind == SystemBlockKind::Pinned)
-        .map(|b| b.text.lines().filter(|l| l.split_once(". ").is_some_and(|(n, _)| n.parse::<u32>().is_ok())).count())
+        .map(|b| {
+            b.text
+                .lines()
+                .filter(|l| {
+                    l.split_once(". ")
+                        .is_some_and(|(n, _)| n.parse::<u32>().is_ok())
+                })
+                .count()
+        })
         .unwrap_or(0);
     system(
         "pinned",
@@ -548,16 +556,13 @@ pub fn view(inspected: &Inspected) -> ContextView {
     sections.push(Section {
         id: "task",
         title: "Task note",
-        detail: inspected
-            .task_status
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                if note.is_empty() {
-                    "None".to_owned()
-                } else {
-                    "Sent with the next message".to_owned()
-                }
-            }),
+        detail: inspected.task_status.map(str::to_owned).unwrap_or_else(|| {
+            if note.is_empty() {
+                "None".to_owned()
+            } else {
+                "Sent with the next message".to_owned()
+            }
+        }),
         tokens: tokens(agent::estimate_tokens(note)),
         text: note.to_owned(),
     });
@@ -586,7 +591,12 @@ pub fn view(inspected: &Inspected) -> ContextView {
                     .join(", ")
             )
         },
-        tokens: tokens(attachments.iter().map(|(_, t)| agent::estimate_tokens(t)).sum()),
+        tokens: tokens(
+            attachments
+                .iter()
+                .map(|(_, t)| agent::estimate_tokens(t))
+                .sum(),
+        ),
         text: attachments
             .iter()
             .map(|(name, text)| format!("[{name}]\n{text}"))

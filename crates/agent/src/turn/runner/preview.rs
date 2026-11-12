@@ -84,10 +84,9 @@ impl Turn<'_> {
     }
 
     async fn overhead_or_estimate(&self, system: String, with_tools: bool) -> u32 {
-        match self.fixed_overhead_of(system, with_tools).await {
-            Ok(count) => count,
-            Err(_) => 0,
-        }
+        self.fixed_overhead_of(system, with_tools)
+            .await
+            .unwrap_or_default()
     }
 
     /// The blocks of the system message, each rendered alone by the same code.
