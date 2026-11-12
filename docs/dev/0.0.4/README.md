@@ -228,5 +228,5 @@ Two findings from the stopped work, both kept in the finished code:
 
 Commits: work-in-progress commits on this branch carry `[skip ci]` in the message so CI
 does not run on unfinished states; the commit that completes a step must not. The
-version in `tauri.conf.json`, `Cargo.toml` and `package.json` is raised to 0.0.4 by
-whoever completes the release, together with `CHANGELOG.md`.
+version in `tauri.conf.json`, `Cargo.toml`, `package.json` and `package-lock.json` was
+raised to 0.0.4 with the commit that completed step 3.
