@@ -59,6 +59,7 @@ fn launch(model: PathBuf) -> LaunchConfig {
         port: free_loopback_port().expect("free port"),
         api_key: random_api_key(),
         hip_visible_devices: None,
+        ..LaunchConfig::default()
     }
 }
 

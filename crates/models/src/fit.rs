@@ -48,8 +48,9 @@ impl Target {
     }
 }
 
-/// What the estimate is made of.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// What the estimate is made of. `Default` lets callers write `..Default::default()`, so
+/// fields added later (0.0.5 WP1b) need no change at existing call sites.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FitInput {
     /// Sum of the model's file sizes.

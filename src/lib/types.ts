@@ -175,6 +175,16 @@ export interface RuntimeStatus {
   offloadedLayers: number | null;
   totalLayers: number | null;
   error: ErrorInfo | null;
+  /** 0.0.5: where the load is, typed (plain words in words.ts). `stage` keeps the old text. */
+  loadStage: LoadStage | null;
+  /** 0.0.5: what this load had to change to start (step-downs, retries), in order. */
+  adjustments: LoadStage[];
+  /** 0.0.5: why the loaded context is its size, for the ready line. Null until WP1b fills it. */
+  ctxSource: ContextSource | null;
+  /** 0.0.5: the loaded copy uses older settings than the saved ones. */
+  settingsChanged: boolean;
+  /** 0.0.5: a reload waits for the model to be free ("Restarts when the reply ends · Cancel"). */
+  reloadWaiting: boolean;
 }
 
 export interface DeviceInfo {
@@ -211,10 +221,22 @@ export interface ModelOption {
   contextLength: number | null;
 }
 
+/**
+ * The defaults for all models (src-tauri/src/dto.rs). The 0.0.5 fields are always sent by
+ * the backend; a value without them (the 0.0.4 shape) is still accepted by the commands.
+ */
 export interface LocalModelSettings {
   ctx: number;
   backend: string | null;
   device: string | null;
+  /** 0.0.5: "How much it can remember" is Automatic. */
+  contextAuto: boolean;
+  gpu: GpuUse;
+  saveMemory: boolean;
+  keepInMemory: boolean;
+  thinkingLimit: ThinkingLimit;
+  /** Response only: show the one-time upgrade note with this size (D2). Never stored. */
+  upgradeNote?: number;
 }
 
 /** Events streamed while an agent turn runs (src-tauri/src/turns.rs). */
@@ -675,4 +697,274 @@ export interface GitInfo {
   notice: string | null;
   tokenHosts: string[];
   identity: GitIdentity;
+}
+
+// ---- 0.0.5 shared contracts (WP0). Rust: src-tauri/src/load_settings.rs, dto.rs,
+// share/mod.rs, crates/runtime/src/llama/stage.rs. -------------------------------------
+
+/** A llama.cpp backend, as the runtime names it. */
+export type BackendKind = "cpu" | "vulkan" | "cuda" | "rocm" | "metal";
+
+/** Why a load failed (crates/runtime/src/llama/failure.rs). */
+export type LoadFailure =
+  | { code: "out_of_memory" }
+  | { code: "invalid_device"; device: string }
+  | { code: "missing_runtime_dll" }
+  | { code: "port_in_use" }
+  | { code: "model_file_invalid" }
+  | { code: "context_too_large" }
+  | { code: "unknown" };
+
+/** One step of loading a model, or a transition between attempts. */
+export type LoadStage =
+  | { kind: "starting" }
+  | { kind: "readingModel" }
+  | { kind: "readingImageReader" }
+  | { kind: "loading" }
+  | { kind: "restarting"; attempt: number; max: number }
+  | { kind: "retryingWithoutSaveMemory"; backend: BackendKind }
+  | { kind: "retryingWithLessGpu"; backend: BackendKind }
+  | { kind: "steppingDown"; from: BackendKind; to: BackendKind; reason: LoadFailure };
+
+/** "Use the graphics card": All of it, As much as fits, Don't use it. */
+export type GpuUse = "all" | "fit" | "off";
+/** "How long it may think"; `noLimit` is shown as "Default". */
+export type ThinkingLimit = "noLimit" | "short" | "medium" | "long";
+
+/** One model's "How much it can remember": same as default, Automatic, or a size. */
+export type ContextChoice = "default" | "auto" | { fixed: number };
+/** A context choice after the defaults: Automatic or a size. */
+export type ContextSize = "auto" | { fixed: number };
+export type GpuChoice = "default" | GpuUse;
+/** An on/off setting of one model (Save memory, Keep the model in memory). */
+export type Toggle = "default" | "on" | "off";
+/** "Which graphics card": `named` holds the probe's device name (never shown). */
+export type DeviceChoice = "default" | "auto" | { named: string };
+export type ThinkingChoice = "default" | ThinkingLimit;
+
+/** One model's overrides; every field "default" means "Same as default (…)". */
+export interface ModelLoadSettings {
+  context: ContextChoice;
+  gpu: GpuChoice;
+  saveMemory: Toggle;
+  keepInMemory: Toggle;
+  device: DeviceChoice;
+  thinkingLimit: ThinkingChoice;
+}
+
+/** Why the loaded context is the size it is (the ready line's reason). */
+export type ContextSource = "automatic" | "modelSetting" | "defaultSetting" | "trainedLimit";
+
+/** What a load uses after overrides, defaults, projector, trained-length cap and Automatic. */
+export interface ResolvedLoad {
+  /** Tokens to launch with (Automatic's number when `ctxChoice` is "auto"). */
+  ctx: number;
+  ctxChoice: ContextSize;
+  ctxSource: ContextSource;
+  gpu: GpuUse;
+  saveMemory: boolean;
+  keepInMemory: boolean;
+  thinkingLimit: ThinkingLimit;
+  backend: string | null;
+  device: string | null;
+  mmproj: string | null;
+}
+
+export interface ContextOption {
+  choice: ContextSize;
+  /** Tokens it means now (Automatic's number for "auto"; 0 when nothing fits). */
+  tokens: number;
+  fit: Verdict;
+}
+
+export interface GpuOption {
+  gpu: GpuUse;
+  fit: Verdict;
+}
+
+/** A device for "Which graphics card"; label it from description and memory, never `name`. */
+export interface DeviceOption {
+  name: string;
+  description: string;
+  totalMib: number;
+  freeMib: number;
+  recommended: boolean;
+}
+
+/** Everything the model settings panel shows about one model file (`model_load_info`). */
+export interface ModelLoadInfo {
+  path: string;
+  fileName: string;
+  sizeBytes: number;
+  trainedCtx: number | null;
+  thinking: boolean;
+  vision: boolean;
+  overrides: ModelLoadSettings;
+  defaults: LocalModelSettings;
+  resolved: ResolvedLoad;
+  fit: Verdict | null;
+  /** Not even the shortest memory fits ("Too large for this computer…"). */
+  tooLarge: boolean;
+  /** Automatic first, then sizes up to the trained length. */
+  contextOptions: ContextOption[];
+  /** In the order all, fit, off. */
+  gpuOptions: GpuOption[];
+  devices: DeviceOption[];
+  loaded: boolean;
+  olderSettingsLoaded: boolean;
+  /** Automatic's number for the current load, when loaded with Automatic. */
+  autoCtx: number | null;
+}
+
+/** What is using the local model now (D3). */
+export interface ModelBusy {
+  chatTurns: number;
+  modelChecks: number;
+  otherApps: number;
+}
+
+/** One model to compare: exactly one of these shapes. */
+export type CompareItem = { catalogId: string } | { repo: string; file: string } | { installedPath: string };
+
+export interface LicenseFacts {
+  name: string;
+  url: string | null;
+}
+
+/** From the signed catalog ("From the publisher's model card"); exact matches only. */
+export interface CatalogFacts {
+  id: string;
+  name: string;
+  /** Verbatim quote, at most two sentences. */
+  summary: string | null;
+  /** The publisher's model card URL. */
+  source: string | null;
+  /** Keys: chat, writing, coding, reasoning, math, tools, images, long-documents, languages, speed. */
+  goodAt: string[];
+  publisher: string | null;
+  parameters: number | null;
+  activeParameters: number | null;
+  languages: string[];
+  released: string | null;
+  capabilities: string[];
+  license: LicenseFacts | null;
+}
+
+/** Shown only under "The uploader says this is made from <base model>. That model's publisher says:". */
+export interface BaseModelFacts {
+  baseModel: string;
+  catalog: CatalogFacts;
+}
+
+/** What the Hugging Face uploader lists (sanitised, capped). */
+export interface HubFacts {
+  repo: string;
+  author: string | null;
+  pipelineTag: string | null;
+  baseModel: string | null;
+  languages: string[];
+  license: LicenseFacts | null;
+  tags: string[];
+  downloads: number | null;
+  likes: number | null;
+  lastModified: string | null;
+  gated: boolean;
+  cardUrl: string;
+}
+
+/** From the GGUF header. */
+export interface FileFacts {
+  architecture: string | null;
+  parameters: number | null;
+  contextLength: number | null;
+  tools: boolean;
+  thinking: boolean;
+  vision: boolean;
+  moe: boolean;
+  quantization: string | null;
+}
+
+export type YourResultKind = "modelCheck" | "benchmark";
+
+/** One of the user's own results with this file ("Your results"). */
+export interface YourResult {
+  kind: YourResultKind;
+  /** Profile key or benchmark run id. */
+  id: string;
+  /** Milliseconds since 1970. */
+  at: number;
+  backend: string | null;
+  passed: number;
+  total: number;
+}
+
+export type CompareProblem = "offline" | "rateLimited" | "gated" | "notFound" | "failed";
+
+/** Everything known about one model to compare (`compare_facts`). */
+export interface CompareFacts {
+  item: CompareItem;
+  title: string;
+  file: string | null;
+  quant: string | null;
+  sizeBytes: number | null;
+  installedPath: string | null;
+  /** The context the fit was checked at. */
+  ctx: number;
+  fit: FitResult | null;
+  catalog: CatalogFacts | null;
+  baseCatalog: BaseModelFacts | null;
+  hub: HubFacts | null;
+  fileFacts: FileFacts | null;
+  results: YourResult[];
+  problem: CompareProblem | null;
+}
+
+/** One catalog entry for Suggested models (`catalog_list`). */
+export interface CatalogListEntry {
+  catalog: CatalogFacts;
+  repo: string;
+  file: string;
+  quant: string;
+  sizeBytes: number;
+  fit: FitResult | null;
+  installedPath: string | null;
+  results: YourResult[];
+}
+
+/** The Other apps page (`share_status`). */
+export interface ShareStatus {
+  enabled: boolean;
+  /** Null until sharing is first switched on. */
+  port: number | null;
+  listening: boolean;
+  error: string | null;
+  refused: number;
+  inUse: boolean;
+  modelCtx: number | null;
+}
+
+export type ShareApp = "claudeCode" | "codex" | "claudeApp";
+export type SetupSystem = "windows" | "mac" | "any";
+
+export interface SetupStep {
+  text: string;
+  /** Text for a Copy button. */
+  code: string | null;
+  /** Full path of the file this step edits. */
+  file: string | null;
+}
+
+export interface SetupWay {
+  title: string;
+  system: SetupSystem;
+  steps: SetupStep[];
+}
+
+/** The setup card for one app (`share_setup`). */
+export interface ShareSetup {
+  app: ShareApp;
+  title: string;
+  notTried: boolean;
+  ways: SetupWay[];
+  notes: string[];
 }

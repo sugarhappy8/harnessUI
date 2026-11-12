@@ -31,6 +31,27 @@ pub const API_KEY_ENV: &str = "LLAMA_API_KEY";
 /// Environment variable that restricts which GPUs the HIP runtime sees (ROCm only).
 pub const HIP_VISIBLE_DEVICES_ENV: &str = "HIP_VISIBLE_DEVICES";
 
+/// The model name the server reports through its API (`-a`): always this fixed word, so an
+/// API response never shows the model file's path. [`LaunchConfig::alias`] holds it.
+pub const MODEL_ALIAS: &str = "harnessui-local";
+
+/// How much of the model goes on the graphics card ("Use the graphics card", 0.0.5 D4).
+///
+/// WP1a turns it into arguments: `All` is `-ngl all`, `Fit` leaves `-ngl` out and passes
+/// `--fit on`, `Off` is `-ngl 0`. Until then [`build_args`] reads [`LaunchConfig::gpu_layers`]
+/// only, and callers set both fields to the same choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GpuUse {
+    /// Every layer on the graphics card. The default, and the behaviour of 0.0.4.
+    #[default]
+    All,
+    /// As much as fits; the rest runs on the processor.
+    Fit,
+    /// None: the processor only.
+    Off,
+}
+
 /// How many layers to offload to the GPU (`-ngl`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", content = "layers", rename_all = "snake_case")]
@@ -79,6 +100,64 @@ pub struct LaunchConfig {
     pub api_key: String,
     /// `HIP_VISIBLE_DEVICES` for ROCm, so the HIP runtime never sees the integrated GPU.
     pub hip_visible_devices: Option<String>,
+    /// How much of the model goes on the graphics card. Not an argument yet (WP1a):
+    /// [`gpu_layers`](Self::gpu_layers) still decides `-ngl`.
+    #[serde(default)]
+    pub gpu: GpuUse,
+    /// Save memory: flash attention and a q8_0 conversation memory (`-fa on -ctk q8_0
+    /// -ctv q8_0`). Not an argument yet (WP1a).
+    #[serde(default)]
+    pub save_memory: bool,
+    /// Keep the model in memory (`-lm mmap+mlock`). Not an argument yet (WP1a).
+    #[serde(default)]
+    pub keep_in_memory: bool,
+    /// The model id the API reports (`-a`); always [`MODEL_ALIAS`]. Not an argument yet
+    /// (WP1a).
+    #[serde(default = "default_alias")]
+    pub alias: String,
+}
+
+fn default_alias() -> String {
+    MODEL_ALIAS.to_owned()
+}
+
+impl Default for LaunchConfig {
+    /// The app's fixed choices (`-ngl all`, a 512 MiB prompt cache, no thinking budget,
+    /// the fixed alias) with no model, port or key. Port 0 and an empty key are refused by
+    /// [`super::server::start`], so a config must get them from [`LaunchConfig::new`] or
+    /// struct update syntax.
+    fn default() -> Self {
+        Self {
+            model: PathBuf::new(),
+            mmproj: None,
+            ctx: 8192,
+            device: None,
+            gpu_layers: GpuLayers::All,
+            cache_ram_mib: 512,
+            reasoning_budget: None,
+            port: 0,
+            api_key: String::new(),
+            hip_visible_devices: None,
+            gpu: GpuUse::All,
+            save_memory: false,
+            keep_in_memory: false,
+            alias: default_alias(),
+        }
+    }
+}
+
+impl LaunchConfig {
+    /// A launch of `model` with `ctx` tokens of context on `port` with `api_key`, and the
+    /// defaults of [`LaunchConfig::default`] for everything else (CPU device, every layer).
+    pub fn new(model: PathBuf, ctx: u32, port: u16, api_key: String) -> Self {
+        Self {
+            model,
+            ctx,
+            port,
+            api_key,
+            ..Self::default()
+        }
+    }
 }
 
 /// What `Debug` prints instead of a secret.
@@ -97,6 +176,10 @@ impl std::fmt::Debug for LaunchConfig {
             .field("port", &self.port)
             .field("api_key", &REDACTED)
             .field("hip_visible_devices", &self.hip_visible_devices)
+            .field("gpu", &self.gpu)
+            .field("save_memory", &self.save_memory)
+            .field("keep_in_memory", &self.keep_in_memory)
+            .field("alias", &self.alias)
             .finish()
     }
 }
@@ -213,7 +296,56 @@ mod tests {
             port: 40123,
             api_key: "k".into(),
             hip_visible_devices: None,
+            ..LaunchConfig::default()
         }
+    }
+
+    /// The defaults are the app's fixed choices; the alias is the fixed model id.
+    #[test]
+    fn defaults_and_constructor() {
+        let d = LaunchConfig::default();
+        assert_eq!(d.gpu_layers, GpuLayers::All);
+        assert_eq!(d.gpu, GpuUse::All);
+        assert_eq!(d.cache_ram_mib, 512);
+        assert_eq!(d.reasoning_budget, None);
+        assert!(!d.save_memory && !d.keep_in_memory);
+        assert_eq!(d.alias, "harnessui-local");
+        assert_eq!(d.alias, MODEL_ALIAS);
+        let n = LaunchConfig::new(PathBuf::from("/m.gguf"), 4096, 40000, "key".into());
+        assert_eq!(n.model, PathBuf::from("/m.gguf"));
+        assert_eq!((n.ctx, n.port, n.api_key.as_str()), (4096, 40000, "key"));
+        assert_eq!(n.alias, MODEL_ALIAS);
+        assert_eq!(n.device, None);
+    }
+
+    /// WP0 adds the 0.0.5 fields without turning them into arguments: whatever they hold,
+    /// the command line is the one of 0.0.4 (WP1a changes this test when it adds them).
+    #[test]
+    fn new_fields_are_not_arguments_yet() {
+        let changed = LaunchConfig {
+            gpu: GpuUse::Fit,
+            save_memory: true,
+            keep_in_memory: true,
+            alias: "other".into(),
+            ..config()
+        };
+        assert_eq!(build_args(&changed), build_args(&config()));
+    }
+
+    /// A config saved before 0.0.5 still reads, with the new fields at their defaults.
+    #[test]
+    fn old_json_reads_with_defaults() {
+        let mut v = serde_json::to_value(config()).expect("json");
+        let obj = v.as_object_mut().expect("object");
+        for key in ["gpu", "save_memory", "keep_in_memory", "alias"] {
+            assert!(obj.remove(key).is_some(), "{key}");
+        }
+        let back: LaunchConfig = serde_json::from_value(v).expect("reads");
+        assert_eq!(back, config());
+        assert_eq!(
+            serde_json::to_value(GpuUse::Fit).expect("json"),
+            serde_json::json!("fit")
+        );
     }
 
     #[test]

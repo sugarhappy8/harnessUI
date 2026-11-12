@@ -458,6 +458,7 @@ mod tests {
                 port: 41000,
                 api_key: "k".into(),
                 hip_visible_devices: (kind == BackendKind::Rocm).then(|| "1".to_owned()),
+                ..LaunchConfig::default()
             },
             load_timeout: Duration::from_secs(60),
         }

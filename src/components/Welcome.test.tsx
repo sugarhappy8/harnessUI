@@ -27,6 +27,11 @@ const ready: RuntimeStatus = {
   offloadedLayers: null,
   totalLayers: null,
   error: null,
+  loadStage: null,
+  adjustments: [],
+  ctxSource: null,
+  settingsChanged: false,
+  reloadWaiting: false,
 };
 
 describe("the welcome screen", () => {

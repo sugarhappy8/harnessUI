@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use runtime::llama::server::{Candidate, Supervisor, SupervisorExit};
 use runtime::{
-    Backend, BackendKind, Device, GpuLayers, LaunchConfig, LoadFailure, ProbeResult, RuntimeLayout,
-    ServerEvent, ServerState, StartSpec,
+    Backend, BackendKind, Device, GpuLayers, GpuUse, LaunchConfig, LoadFailure, LoadStage,
+    ProbeResult, RuntimeLayout, ServerEvent, ServerState, StartSpec,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, oneshot};
@@ -384,6 +384,7 @@ impl RuntimeManager {
                 ),
                 model_path: Some(model.display().to_string()),
                 model_name: Some(model_name.clone()),
+                load_stage: Some(LoadStage::Starting),
                 ..Default::default()
             };
         });
@@ -395,21 +396,20 @@ impl RuntimeManager {
             .as_ref()
             .map(PathBuf::from)
             .filter(|p| p.is_file());
+        let cpu = first.backend.kind == BackendKind::Cpu;
+        // `gpu` says the same as `gpu_layers` until WP1a builds `-ngl` from it (and WP1b
+        // sets it from the model's resolved settings).
         let launch = LaunchConfig {
-            model: model.clone(),
             mmproj,
-            ctx: settings.ctx,
             device: first.device.clone(),
-            gpu_layers: if first.backend.kind == BackendKind::Cpu {
+            gpu_layers: if cpu {
                 GpuLayers::Count(0)
             } else {
                 GpuLayers::All
             },
-            cache_ram_mib: 512,
-            reasoning_budget: None,
-            port,
-            api_key: runtime::random_api_key(),
+            gpu: if cpu { GpuUse::Off } else { GpuUse::All },
             hip_visible_devices: first.hip_visible_devices.clone(),
+            ..LaunchConfig::new(model.clone(), settings.ctx, port, runtime::random_api_key())
         };
         let spec = StartSpec {
             backend: first.backend.clone(),
@@ -465,6 +465,7 @@ impl RuntimeManager {
                         s.preserve_reasoning = props.chat_template_caps.supports_preserve_reasoning;
                         s.vision = props.modalities.vision;
                         s.error = None;
+                        s.load_stage = None;
                     });
                     if let Ok(mut slot) = ready_tx.lock()
                         && let Some(tx) = slot.take()
@@ -557,6 +558,9 @@ impl RuntimeManager {
     fn on_event(&self, event: ServerEvent) {
         match event {
             ServerEvent::Progress { stage, value } => self.update(|s| {
+                if let Some(name) = &stage {
+                    s.load_stage = Some(LoadStage::from_llama_stage(name));
+                }
                 if stage.is_some() {
                     s.stage = stage;
                 }
@@ -583,11 +587,17 @@ impl RuntimeManager {
                 self.update(|s| {
                     s.state = RuntimeStateDto::Starting;
                     s.stage = Some(format!("Restarting after a crash ({attempt} of {max})"));
+                    s.load_stage = Some(LoadStage::Restarting { attempt, max });
                     s.progress = None;
                 });
             }
             ServerEvent::SteppedDown { from, to, reason } => {
                 tracing::warn!(%from, %to, ?reason, "stepping down to another backend");
+                let stage = LoadStage::SteppingDown {
+                    from,
+                    to,
+                    reason: reason.clone(),
+                };
                 self.update(|s| {
                     s.state = RuntimeStateDto::Starting;
                     s.backend = Some(kind_name(to).to_string());
@@ -597,8 +607,23 @@ impl RuntimeManager {
                         reason.user_message(),
                         kind_name(to)
                     ));
+                    s.adjustments.push(stage.clone());
+                    s.load_stage = Some(stage);
                 });
             }
+            // A typed transition with no event of its own (WP1a's retries): shown as the
+            // current stage, and kept as an adjustment of this load.
+            ServerEvent::Stage(stage) => self.update(|s| {
+                if matches!(
+                    stage,
+                    LoadStage::RetryingWithoutSaveMemory { .. }
+                        | LoadStage::RetryingWithLessGpu { .. }
+                        | LoadStage::SteppingDown { .. }
+                ) {
+                    s.adjustments.push(stage.clone());
+                }
+                s.load_stage = Some(stage);
+            }),
             ServerEvent::State(ServerState::Failed(failure)) => {
                 let err = load_error(&failure, self.tail_text());
                 self.update(|s| {

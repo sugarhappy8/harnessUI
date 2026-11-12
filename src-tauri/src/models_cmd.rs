@@ -7,9 +7,11 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 
 use crate::dto::{
-    BackendDto, DiagnosticsReportDto, LocalModelSettings, ModelOptionDto, RuntimeStatusDto,
+    BackendDto, DiagnosticsReportDto, LocalModelSettings, ModelBusy, ModelOptionDto,
+    RuntimeStatusDto,
 };
 use crate::error::{AppError, AppResult};
+use crate::load_settings::{ModelLoadInfo, ModelLoadSettings};
 use crate::settings;
 use crate::state::AppState;
 
@@ -26,12 +28,21 @@ pub async fn list_backends(
     Ok(state.runtime.backend_dtos(reprobe).await)
 }
 
+/// Loads a local model. `settings` absent (0.0.5) means the model's own saved settings;
+/// the 0.0.4 shape `{ctx, backend, device}` still works.
 #[tauri::command]
 pub async fn load_local_model(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
-    mut settings: LocalModelSettings,
+    settings: Option<LocalModelSettings>,
 ) -> AppResult<()> {
+    // TODO(WP1b): resolve the model's saved settings (load_settings) when absent; for now
+    // the defaults for all models, which is what every caller passed before.
+    let mut settings = match settings {
+        Some(s) => s,
+        None => settings::local_model_settings(&app).await,
+    };
     let model = PathBuf::from(&path);
     if model
         .extension()
@@ -94,6 +105,86 @@ pub async fn load_local_model(
 pub async fn unload_model(state: State<'_, AppState>) -> AppResult<()> {
     state.runtime.unload().await;
     Ok(())
+}
+
+// ---- 0.0.5 per-model load settings and reload (WP1b) --------------------------------
+// TODO(WP1b): the commands below are WP0 stubs. They return fixed sample data
+// (`load_settings::sample_info`) and change nothing; `model_busy` already reports the real
+// counter.
+
+/// Everything the settings panel shows about one model file.
+#[tauri::command]
+pub async fn model_load_info(
+    window: tauri::WebviewWindow,
+    _state: State<'_, AppState>,
+    path: String,
+) -> AppResult<ModelLoadInfo> {
+    crate::commands::only_main_window(window.label())?;
+    Ok(crate::load_settings::sample_info(&path))
+}
+
+/// Saves one model's overrides (validated against the fixed lists and the trained length)
+/// and returns the model's info with them. Stub: saves nothing, echoes the overrides.
+#[tauri::command]
+pub async fn set_model_load_settings(
+    window: tauri::WebviewWindow,
+    _state: State<'_, AppState>,
+    path: String,
+    overrides: ModelLoadSettings,
+) -> AppResult<ModelLoadInfo> {
+    crate::commands::only_main_window(window.label())?;
+    let mut info = crate::load_settings::sample_info(&path);
+    info.overrides = overrides;
+    Ok(info)
+}
+
+/// "Reset to defaults": deletes the model's overrides and returns its info. Stub: deletes
+/// nothing.
+#[tauri::command]
+pub async fn reset_model_load_settings(
+    window: tauri::WebviewWindow,
+    _state: State<'_, AppState>,
+    path: String,
+) -> AppResult<ModelLoadInfo> {
+    crate::commands::only_main_window(window.label())?;
+    Ok(crate::load_settings::sample_info(&path))
+}
+
+/// Restarts the loaded model with its current resolved settings (Reload, Apply and
+/// restart). `force` restarts even when nothing changed (and retries the chosen backend
+/// after a step-down); `when_idle` waits until nothing uses the model, cancellable with
+/// `cancel_pending_reload`. Stub: does nothing.
+#[tauri::command]
+pub async fn reload_local_model(
+    window: tauri::WebviewWindow,
+    _state: State<'_, AppState>,
+    force: bool,
+    when_idle: bool,
+) -> AppResult<()> {
+    crate::commands::only_main_window(window.label())?;
+    let _ = (force, when_idle);
+    Ok(())
+}
+
+/// Cancels a reload that waits for the model to be free ("Restarts when the reply ends ·
+/// Cancel"). Nothing waiting is not an error. Stub: does nothing.
+#[tauri::command]
+pub async fn cancel_pending_reload(
+    window: tauri::WebviewWindow,
+    _state: State<'_, AppState>,
+) -> AppResult<()> {
+    crate::commands::only_main_window(window.label())?;
+    Ok(())
+}
+
+/// What is using the model now, for the question of D3.
+#[tauri::command]
+pub async fn model_busy(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> AppResult<ModelBusy> {
+    crate::commands::only_main_window(window.label())?;
+    Ok(state.model_busy.snapshot())
 }
 
 #[tauri::command]
@@ -326,6 +417,7 @@ pub async fn run_diagnostics(
                 backend: Some(kind.clone()),
                 device: runtime::pick_device(&p.devices).map(|d| d.name.clone()),
                 mmproj: None,
+                ..LocalModelSettings::default()
             };
             match state
                 .runtime

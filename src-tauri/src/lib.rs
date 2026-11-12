@@ -21,6 +21,7 @@ mod git_cmd;
 mod gpu;
 mod hotkey;
 mod hub;
+mod load_settings;
 mod load_tracker;
 mod logging;
 mod mcp_cmd;
@@ -36,6 +37,7 @@ mod providers;
 mod runtime_manager;
 mod search_cmd;
 mod settings;
+mod share;
 mod skills_cmd;
 mod state;
 mod subagent;
@@ -254,6 +256,20 @@ pub fn run() {
             evals::commands::start_benchmark,
             evals::commands::list_bench_runs,
             evals::commands::get_bench_run,
+            models_cmd::model_load_info,
+            models_cmd::set_model_load_settings,
+            models_cmd::reset_model_load_settings,
+            models_cmd::reload_local_model,
+            models_cmd::cancel_pending_reload,
+            models_cmd::model_busy,
+            hub::catalog_list,
+            hub::compare_facts,
+            share::share_status,
+            share::set_share_enabled,
+            share::set_share_port,
+            share::reveal_share_key,
+            share::new_share_key,
+            share::share_setup,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -314,6 +330,7 @@ pub fn run() {
                 host: host.clone(),
                 skills,
                 grants: Default::default(),
+                model_busy: Default::default(),
             });
             app.manage(turns::PendingApprovals::default());
             // "Allow all in every chat", if the user switched it on (a saved setting).

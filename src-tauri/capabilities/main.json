@@ -182,6 +182,20 @@
     "allow-search-mentions",
     "allow-resolve-mentions",
     "allow-pin-message",
-    "allow-inspect-context"
+    "allow-inspect-context",
+    "allow-model-load-info",
+    "allow-set-model-load-settings",
+    "allow-reset-model-load-settings",
+    "allow-reload-local-model",
+    "allow-cancel-pending-reload",
+    "allow-model-busy",
+    "allow-catalog-list",
+    "allow-compare-facts",
+    "allow-share-status",
+    "allow-set-share-enabled",
+    "allow-set-share-port",
+    "allow-reveal-share-key",
+    "allow-new-share-key",
+    "allow-share-setup"
   ]
 }
