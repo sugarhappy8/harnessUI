@@ -180,11 +180,19 @@ impl TerminalServer {
         .0
     }
 
+    /// The shell and its arguments for `command`. For Windows PowerShell the script around
+    /// the command: UTF-8 output, no progress records (they reach a redirected stderr as
+    /// CLIXML), and the exit code. `$?` is false when the last program wrote to its error
+    /// stream, even if it succeeded: Windows PowerShell turns each such line into an error
+    /// record (`NativeCommandError`). So a failure is the program's own exit code when it set
+    /// one, and only an error of PowerShell's own otherwise (0.0.5: before, a program that
+    /// printed a warning, such as Node's ExperimentalWarning or npm's notices, was reported as
+    /// failed with exit code 1).
     fn command_line(&self, command: &str) -> (PathBuf, Vec<String>) {
         match &self.config.shell {
             TerminalShell::PowerShell { program } => {
                 let script = format!(
-                    "$ErrorActionPreference='Continue'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8\n{command}\n$__ok=$?; $__code=$LASTEXITCODE; if (-not $__ok) {{ if ($__code) {{ exit $__code }} else {{ exit 1 }} }} else {{ exit 0 }}"
+                    "$ErrorActionPreference='Continue'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8\n{command}\n$__ok=$?; $__code=$LASTEXITCODE; if (-not $__ok) {{ if ($__code) {{ exit $__code }} elseif ($Error.Count -gt 0 -and \"$($Error[0].FullyQualifiedErrorId)\" -like 'NativeCommandError*') {{ exit 0 }} else {{ exit 1 }} }} else {{ exit 0 }}"
                 );
                 let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
                 let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
@@ -234,9 +242,122 @@ fn says_not_found(code: Option<i32>, output: &str) -> bool {
         || output.contains("is not recognized as")
 }
 
+/// Windows PowerShell started with `-EncodedCommand` writes its error, warning and progress
+/// streams to stderr as CLIXML (`#< CLIXML` and `<Objs …>` blocks) when stderr is not a
+/// console. Left as it is, that buries a command's real output and error messages under XML
+/// (seen by the owner in 0.0.4: commands looked as if they did not run). This keeps the text
+/// of the error, warning, verbose, debug and information records and drops the rest
+/// (progress). Text without such blocks is returned unchanged; a block cut at either end
+/// (the kept end of a long stream) is handled too.
+fn decode_clixml(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("</Objs>") && !text.contains("<Objs ") && !text.contains("#< CLIXML") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let plain = |t: &str| {
+        t.replace("#< CLIXML\r\n", "")
+            .replace("#< CLIXML\n", "")
+            .replace("#< CLIXML", "")
+    };
+    let mut out = String::new();
+    let mut rest = text;
+    loop {
+        let start = rest.find("<Objs ");
+        let orphan_end = rest.find("</Objs>");
+        match (start, orphan_end) {
+            // The end of a block whose start was cut off.
+            (s, Some(e)) if s.is_none_or(|s| e < s) => {
+                out.push_str(&clixml_streams(&rest[..e]));
+                rest = &rest[e + "</Objs>".len()..];
+            }
+            (Some(s), _) => {
+                out.push_str(&plain(&rest[..s]));
+                let block = &rest[s..];
+                match block.find("</Objs>") {
+                    Some(e) => {
+                        out.push_str(&clixml_streams(&block[..e]));
+                        rest = &block[e + "</Objs>".len()..];
+                    }
+                    None => {
+                        out.push_str(&clixml_streams(block));
+                        break;
+                    }
+                }
+            }
+            (None, _) => {
+                out.push_str(&plain(rest));
+                break;
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// The text of the stream records (`<S S="Error">…</S>` and the like) in a CLIXML block.
+fn clixml_streams(block: &str) -> String {
+    const KEPT: &[&str] = &["error", "warning", "verbose", "debug", "information"];
+    let mut out = String::new();
+    let mut rest = block;
+    while let Some(i) = rest.find("<S S=\"") {
+        let after = &rest[i + "<S S=\"".len()..];
+        let Some(q) = after.find('"') else { break };
+        let kind = after[..q].to_ascii_lowercase();
+        let Some(gt) = after[q..].find('>') else {
+            break;
+        };
+        let body = &after[q + gt + 1..];
+        let Some(end) = body.find("</S>") else {
+            if KEPT.contains(&kind.as_str()) {
+                out.push_str(&clixml_text(body));
+            }
+            break;
+        };
+        if KEPT.contains(&kind.as_str()) {
+            out.push_str(&clixml_text(&body[..end]));
+        }
+        rest = &body[end + "</S>".len()..];
+    }
+    out
+}
+
+/// Undoes CLIXML's escapes: XML entities and `_xHHHH_` characters (`_x000D__x000A_` is a
+/// line break).
+fn clixml_text(t: &str) -> String {
+    let t = t
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&");
+    let mut out = String::with_capacity(t.len());
+    let mut rest = t.as_str();
+    while let Some(i) = rest.find("_x") {
+        out.push_str(&rest[..i]);
+        let code = rest.get(i + 2..i + 6);
+        let closes = rest.get(i + 6..i + 7) == Some("_");
+        match code
+            .filter(|_| closes)
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .and_then(char::from_u32)
+        {
+            Some('\r') => rest = &rest[i + 7..],
+            Some(c) => {
+                out.push(c);
+                rest = &rest[i + 7..];
+            }
+            None => {
+                out.push_str("_x");
+                rest = &rest[i + 2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The last lines of a command's error stream, from the bytes kept of its end.
 fn last_lines(tail: &[u8], cut_at_start: bool) -> String {
-    let text = String::from_utf8_lossy(tail);
+    let raw = String::from_utf8_lossy(tail);
+    let text = decode_clixml(&raw);
     let mut lines: Vec<&str> = text.lines().collect();
     // The kept bytes may start in the middle of a line.
     if cut_at_start && lines.len() > 1 {
@@ -772,7 +893,7 @@ impl BuiltinServer for TerminalServer {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             if let Some(p) = &progress {
-                                p(String::from_utf8_lossy(&buf[..n]).into_owned());
+                                p(decode_clixml(&String::from_utf8_lossy(&buf[..n])).into_owned());
                             }
                             if is_stderr && let Ok(mut end) = stderr_end.lock() {
                                 end.0.extend_from_slice(&buf[..n]);
@@ -809,7 +930,7 @@ impl BuiltinServer for TerminalServer {
             let _ = tokio::time::timeout(Duration::from_secs(2), r).await;
         }
         let bytes = output.lock().map(|o| o.clone()).unwrap_or_default();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let text = decode_clixml(&String::from_utf8_lossy(&bytes)).into_owned();
         let header = match &outcome {
             Ok(Ok(status)) => match status.code() {
                 Some(code) => format!(
@@ -1200,6 +1321,34 @@ mod tests {
         }
     }
 
+    /// What Windows PowerShell writes to a redirected stderr (seen on the owner's computer):
+    /// the error text survives, the progress records and the XML go.
+    #[test]
+    fn powershell_clixml_on_stderr_becomes_plain_text() {
+        let raw = "Building...\r\n#< CLIXML\r\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\"><Obj S=\"progress\" RefId=\"0\"><TN RefId=\"0\"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N=\"SourceId\">1</I64><PR N=\"Record\"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><S S=\"Error\">npm ERR! Missing script: &quot;build:cached&quot;_x000D__x000A_</S><S S=\"Error\">npm ERR! A &lt;b&gt; &amp; c_x000D__x000A_</S></Objs>\r\ndone\r\n";
+        let text = decode_clixml(raw);
+        assert!(
+            !text.contains("<Objs") && !text.contains("CLIXML") && !text.contains("Preparing"),
+            "{text}"
+        );
+        assert!(text.contains("Building..."), "{text}");
+        assert!(
+            text.contains("npm ERR! Missing script: \"build:cached\"\n"),
+            "{text}"
+        );
+        assert!(text.contains("npm ERR! A <b> & c\n"), "{text}");
+        assert!(text.contains("done"), "{text}");
+        // The kept end of a long stream starts inside a block.
+        let cut = "x000A_</S><S S=\"Error\">the last error_x000D__x000A_</S></Objs>";
+        assert_eq!(decode_clixml(cut), "the last error\n");
+        // Ordinary output is left alone, also text that merely mentions _x.
+        assert_eq!(decode_clixml("plain _x01 text\n"), "plain _x01 text\n");
+        assert!(matches!(
+            decode_clixml("plain"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
     #[test]
     fn globs_match_like_a_shell_or_more() {
         assert!(wildcard("io.github.*", "io.github.someone.app"));
@@ -1558,5 +1707,106 @@ mod encoding_tests {
         assert!(script.contains("OutputEncoding"));
         assert!(args.contains(&"-EncodedCommand".to_string()));
         assert!(args.contains(&"-NoProfile".to_string()));
+    }
+}
+
+/// Real Windows PowerShell (CI runs these on Windows): what a program writes to its error
+/// stream is shown as text, and it fails the command only through its exit code.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    async fn run(command: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let program = PathBuf::from(system_root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        let base: BTreeMap<String, String> = std::env::vars()
+            .filter(|(k, _)| {
+                [
+                    "PATH",
+                    "SYSTEMROOT",
+                    "WINDIR",
+                    "COMSPEC",
+                    "PATHEXT",
+                    "TEMP",
+                    "TMP",
+                    "USERPROFILE",
+                ]
+                .contains(&k.to_uppercase().as_str())
+            })
+            .collect();
+        let s = TerminalServer::new(TerminalConfig {
+            shell: TerminalShell::PowerShell { program },
+            base_env: base,
+            pass_through: vec![],
+        });
+        let c = ChatContext {
+            chat_id: 1,
+            approved_folders: vec![root.display().to_string()],
+            working_folder: None,
+            forbidden_folders: vec![],
+            skill_folders: vec![],
+            skill_roots: vec![],
+            result_cap_tokens: 4000,
+            full_access: true,
+        };
+        let args = json!({ "command": command });
+        let args = args.as_object().unwrap();
+        let Described::Action(action) = s.describe("run_command", args, &c).await else {
+            panic!("not described");
+        };
+        let out = s
+            .call(
+                "run_command",
+                args,
+                &action,
+                CallContext {
+                    chat: c,
+                    cancel: CancellationToken::new(),
+                    progress: None,
+                },
+            )
+            .await;
+        out.joined_text()
+    }
+
+    #[tokio::test]
+    async fn a_program_that_writes_to_stderr_and_succeeds_is_not_a_failure() {
+        let text = run("cmd /c \"echo a-warning 1>&2\"").await;
+        assert!(text.starts_with("Exit code 0"), "{text}");
+        assert!(text.contains("a-warning"), "{text}");
+        assert!(
+            !text.contains("<Objs") && !text.contains("CLIXML"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_program_keeps_its_exit_code_and_its_message_is_readable() {
+        let text = run("cmd /c \"echo it-broke 1>&2 & exit 3\"").await;
+        assert!(text.starts_with("Exit code 3"), "{text}");
+        assert!(text.contains("it-broke"), "{text}");
+        assert!(
+            !text.contains("<Objs") && !text.contains("CLIXML"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_of_powershell_itself_still_fails() {
+        let text = run("Get-Item C:\\surely\\not\\here-12345").await;
+        assert!(text.starts_with("Exit code 1"), "{text}");
+        assert!(!text.contains("<Objs"), "{text}");
+        let text = run("Write-Output fine").await;
+        assert!(
+            text.starts_with("Exit code 0") && text.contains("fine"),
+            "{text}"
+        );
     }
 }

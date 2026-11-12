@@ -1,6 +1,6 @@
 # 0.0.6 plan
 
-These are the four things the owner asked for after 0.0.4. Work on them started as "0.0.5"
+These are the things the owner asked for after 0.0.4 (four at first, a fifth added later). Work on them started as "0.0.5"
 and was paused on 2026-11-12, when the owner chose to ship **Full access** as 0.0.5 first.
 They are now the plan for 0.0.6.
 
@@ -10,6 +10,7 @@ They are now the plan for 0.0.6.
    (The owner chose both directions: other apps may use the model loaded here, and the local
    model may hand a task to Claude Code or Codex.)
 4. Add model comparisons for models so users can compare different models and what their good at from the download huggingface thing we have
+5. (Added 2026-11-12, while 0.0.5 was being finished.) "i wanna install https://github.com/morluto/rea as a main feature in it but with a free decompiler. maybe lets keep that for version 0.0.6." Not designed yet: the first step is to read that repository (what it does, its license, what it needs), pick a free decompiler that fits (its license must allow shipping it with the app), and write the spec like the others.
 
 ## What already exists
 - **Design:** `spec.md` (revision 2, with "Amendments after WP0"), the map of the code it is

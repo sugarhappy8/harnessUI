@@ -16,6 +16,9 @@ The owner asked for the app to "stop asking me to allow everything", named *Full
 - The file tools leave devices, pipes and sockets alone; reading one could hang or never end. A search skips `/proc`, `/sys` and `/dev`.
 - The folders where the system keeps saved keys, and on macOS the whole app bundle, are among the folders tools never reach.
 
+### Fixed
+- **On Windows, commands that worked were reported as failed, and their output was buried in XML.** Windows PowerShell turns every line a program writes to its error stream (a warning from Node or npm, for example) into an error record, which made the app report exit code 1 although the program succeeded, and it writes those records and its progress messages as CLIXML (`<Objs Version="1.1.0.1" …>`). A command now fails only through the program's own exit code or an error of PowerShell itself, progress messages are switched off, and any CLIXML left is turned back into plain text, so the real error message is what the model and you see. Found by the owner on their PC; tests run real Windows PowerShell on CI.
+
 ## 0.0.4 (2026-11-12)
 
 The owner asked for thirteen things in 0.0.4 and split the work into three steps. Step 1 brought an Allow all button, artifacts beside the chat, web search with sources, and a short tool list per task. Steps 2 and 3 brought helpful tool errors and manageable tool output, a visible and resumable task, file and symbol mentions, pinned instructions and a context inspector, tested settings per model, and coding benchmarks. All of it is built and was reviewed; the developers' reports and the two independent reviews are in `docs/dev/0.0.4/`. *Settings → General* now also shows which build it is.
