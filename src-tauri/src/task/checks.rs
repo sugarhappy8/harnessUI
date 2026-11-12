@@ -363,7 +363,9 @@ const TARGET_RUNNERS: &[(&str, bool)] = &[
 /// Words that are a check as a Maven phase but would be too wide as a general word.
 const MAVEN_PHASES: &[&str] = &["package", "install"];
 
-const INTERPRETERS: &[&str] = &["python", "python3", "py", "node", "ruby", "php", "deno", "bun"];
+const INTERPRETERS: &[&str] = &[
+    "python", "python3", "py", "node", "ruby", "php", "deno", "bun",
+];
 
 const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "pwsh", "powershell", "cmd"];
 

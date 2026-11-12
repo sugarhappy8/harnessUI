@@ -8,8 +8,8 @@
 //! after such content entered the chat is shown without its scripts until the user says
 //! otherwise (`protocol::running`).
 //!
-//! "Entered the chat" is decided here, by the app, from what tools ran: nothing the model
-//! writes can clear it.
+//! "Entered the chat" is decided here, by the app, from what tools ran and what the user
+//! attached: nothing the model writes can clear it.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -57,8 +57,10 @@ impl Outside {
     }
 }
 
-/// Whether a chat's history holds the result of a tool that brought in outside content.
-/// A call that did not run has no result text and counts for nothing.
+/// Whether a chat's history holds content from outside the conversation: the result of a
+/// tool that brought some in, a file the user attached or mentioned, or a picture. What
+/// the user and the model wrote themselves is the conversation. A call that did not run
+/// has no result text and counts for nothing.
 pub fn in_history(history: &[HistoryMessage]) -> bool {
     history
         .iter()
@@ -67,7 +69,11 @@ pub fn in_history(history: &[HistoryMessage]) -> bool {
             Part::ToolResult(r) => {
                 !is_own_data_tool(&r.name) && (!r.text.is_empty() || !r.images.is_empty())
             }
-            _ => false,
+            // The text of an attached or mentioned file is somebody else's text.
+            Part::Attachment { text, .. } => !text.is_empty(),
+            // A picture can carry written instructions for a model that reads pictures.
+            Part::Image { .. } => true,
+            Part::Text(_) | Part::ToolCalls(_) => false,
         })
 }
 
@@ -164,6 +170,25 @@ mod tests {
         }
         // A call that did not run brought nothing in.
         assert!(!in_history(&[result("read_file", "")]));
+        // A file the user attached or mentioned is outside content, and so is a picture.
+        let with = |part: Part| HistoryMessage {
+            role: Role::User,
+            parts: vec![Part::Text("make a page from this".into()), part],
+            reasoning: None,
+            id: None,
+        };
+        assert!(in_history(&[with(Part::Attachment {
+            name: "notes.txt".into(),
+            text: "notes".into(),
+        })]));
+        assert!(!in_history(&[with(Part::Attachment {
+            name: "empty.txt".into(),
+            text: String::new(),
+        })]));
+        assert!(in_history(&[with(Part::Image {
+            mime: "image/png".into(),
+            data_base64: "AAAA".into(),
+        })]));
         // One such result anywhere in the history is enough.
         assert!(in_history(&[
             said(Role::User, "read notes.txt"),

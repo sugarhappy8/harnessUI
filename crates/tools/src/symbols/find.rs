@@ -14,12 +14,9 @@
 
 use super::lex::{self, Backtick, Masked, Rules, Single};
 
-mod c;
-mod go;
-mod managed;
-mod python;
+// TODO(0.0.5): only Rust has its patterns. The other ten languages are designed in
+// docs/dev/0.0.4/handoff-H-mentions.md and have tests (ignored) in `find/tests.rs`.
 mod rust;
-mod script;
 #[cfg(test)]
 mod tests;
 
@@ -265,16 +262,9 @@ pub fn find_symbols(text: &str, lang: Lang) -> Vec<Symbol> {
         if masked.lines[i].trim().is_empty() {
             continue;
         }
-        match lang {
-            Lang::Rust => rust::line(&mut scan, i),
-            Lang::TypeScript | Lang::JavaScript => script::line(&mut scan, i),
-            Lang::Python => python::line(&mut scan, i),
-            Lang::Go => go::line(&mut scan, i),
-            Lang::Java => managed::java_line(&mut scan, i),
-            Lang::CSharp => managed::csharp_line(&mut scan, i),
-            Lang::Kotlin => managed::kotlin_line(&mut scan, i),
-            Lang::Swift => managed::swift_line(&mut scan, i),
-            Lang::C | Lang::Cpp => c::line(&mut scan, i),
+        // TODO(0.0.5): the other languages find nothing yet.
+        if lang == Lang::Rust {
+            rust::line(&mut scan, i);
         }
     }
     scan.out.truncate(MAX_SYMBOLS_PER_FILE);

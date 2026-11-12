@@ -296,15 +296,23 @@ mod tests {
 
     #[test]
     fn text_is_cleaned_and_capped() {
-        assert_eq!(clean("  two\n\nlines\tand   spaces ", 100), "two lines and spaces");
+        assert_eq!(
+            clean("  two\n\nlines\tand   spaces ", 100),
+            "two lines and spaces"
+        );
         assert_eq!(clean("a\u{2028}b\u{00A0}c", 100), "a b c");
-        assert_eq!(clean("evil\u{202E}txt\u{7}", 100), "evil\\u{202E}txt\\u{0007}");
+        assert_eq!(
+            clean("evil\u{202E}txt\u{7}", 100),
+            "evil\\u{202E}txt\\u{0007}"
+        );
         assert_eq!(clean("abcdefghij", 5), "abcd…");
         assert_eq!(clean("日本語のテキスト", 4), "日本語…");
         assert_eq!(clean("", 5), "");
 
         let long = "x".repeat(1000);
-        let many_steps: Vec<Value> = (0..40).map(|i| json!({"text": format!("step {i}")})).collect();
+        let many_steps: Vec<Value> = (0..40)
+            .map(|i| json!({"text": format!("step {i}")}))
+            .collect();
         let many_constraints: Vec<Value> = (0..20).map(|i| json!(format!("rule {i}"))).collect();
         let u = update(json!({
             "goal": long,
@@ -344,7 +352,11 @@ mod tests {
         // Notes: the newest are kept.
         let mut slot = None;
         for i in 0..MAX_NOTES + 5 {
-            apply_model(&mut slot, update(json!({"note": format!("note {i}")})), i as i64);
+            apply_model(
+                &mut slot,
+                update(json!({"note": format!("note {i}")})),
+                i as i64,
+            );
         }
         let notes = slot.expect("task").state.notes;
         assert_eq!(notes.len(), MAX_NOTES);
@@ -361,7 +373,10 @@ mod tests {
             (json!({"steps": "one, two"}), "steps"),
             (json!({"steps": ["one"]}), "steps"),
             (json!({"steps": [{"status": "done"}]}), "text"),
-            (json!({"steps": [{"text": "a", "status": "finished"}]}), "todo, doing or done"),
+            (
+                json!({"steps": [{"text": "a", "status": "finished"}]}),
+                "todo, doing or done",
+            ),
             (json!({"next_action": ["x"]}), "next_action"),
             (json!({"status": "paused"}), "active or done"),
             (json!({"status": true}), "active or done"),
@@ -435,7 +450,11 @@ mod tests {
             // The rest of the call is applied.
             assert_eq!(after.state.next_action, "Carry on");
             assert_eq!(applied.notices.len(), 1, "{:?}", applied.notices);
-            assert!(applied.notices[0].contains("paused"), "{:?}", applied.notices);
+            assert!(
+                applied.notices[0].contains("paused"),
+                "{:?}",
+                applied.notices
+            );
         }
         // Without a status in the call there is nothing to say.
         let mut slot = Some(task.clone());
@@ -458,7 +477,11 @@ mod tests {
         assert_eq!(after.status, TaskStatus::Done);
         assert_eq!(after.state.changed_files.len(), 1);
         assert_eq!(applied.notices.len(), 1, "{:?}", applied.notices);
-        assert!(applied.notices[0].contains("marked"), "{:?}", applied.notices);
+        assert!(
+            applied.notices[0].contains("marked"),
+            "{:?}",
+            applied.notices
+        );
     }
 
     #[test]
@@ -485,7 +508,10 @@ mod tests {
         let task = slot.expect("task");
         assert_eq!(task.status, TaskStatus::Active);
         assert_eq!(task.state.goal, "Write the release notes");
-        assert_eq!(texts(&task.state.steps), [("Read the log", StepStatus::Todo)]);
+        assert_eq!(
+            texts(&task.state.steps),
+            [("Read the log", StepStatus::Todo)]
+        );
         assert_eq!(task.state.constraints, ["Keep the tests green"]);
         assert_eq!(task.state.user.constraints, ["Keep the tests green"]);
         assert!(!task.state.user.goal);
@@ -801,7 +827,10 @@ mod tests {
         assert_eq!((task.status, task.updated_at), (TaskStatus::Active, 50));
 
         // The facts are untouched by all of it.
-        assert_eq!(task.state.changed_files, task_with_facts().state.changed_files);
+        assert_eq!(
+            task.state.changed_files,
+            task_with_facts().state.changed_files
+        );
         assert_eq!(task.state.checks, task_with_facts().state.checks);
     }
 
@@ -874,9 +903,19 @@ mod tests {
         for fill in [
             (|s: &mut TaskState| s.goal = "g".into()) as fn(&mut TaskState),
             |s| s.constraints.push("c".into()),
-            |s| s.steps.push(TaskStep { text: "s".into(), status: StepStatus::Todo }),
+            |s| {
+                s.steps.push(TaskStep {
+                    text: "s".into(),
+                    status: StepStatus::Todo,
+                })
+            },
             |s| s.next_action = "n".into(),
-            |s| s.notes.push(TaskNote { text: "n".into(), at: 1 }),
+            |s| {
+                s.notes.push(TaskNote {
+                    text: "n".into(),
+                    at: 1,
+                })
+            },
         ] {
             let mut with = state.clone();
             fill(&mut with);

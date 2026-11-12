@@ -158,6 +158,12 @@
     "allow-begin-artifact-check",
     "allow-finish-artifact-check",
     "allow-artifact-canary",
-    "allow-minimize-main-window"
+    "allow-minimize-main-window",
+    "allow-list-pins",
+    "allow-add-pin",
+    "allow-edit-pin",
+    "allow-remove-pin",
+    "allow-move-pin",
+    "allow-set-pin-scope"
   ]
 }

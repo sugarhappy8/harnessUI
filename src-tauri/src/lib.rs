@@ -15,6 +15,7 @@ mod diagnostics;
 mod downloads;
 mod dto;
 mod error;
+mod evals;
 mod git_cmd;
 mod gpu;
 mod hotkey;
@@ -28,6 +29,7 @@ mod outputs;
 mod overlay;
 mod packs_cmd;
 mod permissions;
+mod pinned;
 mod providers;
 mod runtime_manager;
 mod search_cmd;
@@ -226,6 +228,12 @@ pub fn run() {
             artifacts::begin_artifact_check,
             artifacts::finish_artifact_check,
             artifacts::artifact_canary,
+            pinned::list_pins,
+            pinned::add_pin,
+            pinned::edit_pin,
+            pinned::remove_pin,
+            pinned::move_pin,
+            pinned::set_pin_scope,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

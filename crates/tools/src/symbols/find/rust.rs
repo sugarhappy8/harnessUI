@@ -55,7 +55,7 @@ pub(super) fn line(s: &mut Scan<'_>, i: usize) {
             }
             let ext = s.extent(i, c.pos, false);
             match s.member_of(i) {
-                Some(owner) => s.add(name, SymbolKind::Method, Some(&owner), i, &ext),
+                Some(owner) => s.add(name, SymbolKind::Method, Some(&*owner), i, &ext),
                 None => s.add(name, SymbolKind::Function, None, i, &ext),
             }
         }

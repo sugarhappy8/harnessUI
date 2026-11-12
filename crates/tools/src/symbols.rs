@@ -8,8 +8,12 @@
 //! - [`resolve`] turns a chosen mention into the text the model gets. It reads the file
 //!   through the path sandbox, exactly as `read_file` does.
 
+// TODO(0.0.5): unfinished. The finder has the engine and Rust only; `index` and `resolve`
+// are empty. The helpers the other languages need are written and not yet used.
+#[allow(dead_code)]
 mod find;
 pub mod index;
+#[allow(dead_code)]
 mod lex;
 pub mod resolve;
 

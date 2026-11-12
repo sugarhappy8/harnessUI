@@ -22,7 +22,7 @@
 //!   prompt: `turns::run` sets them before it copies the turn's input for helpers.
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -91,7 +91,7 @@ fn only_main_window(label: &str) -> AppResult<()> {
         Ok(())
     } else {
         Err(AppError::bad_request(
-            "Only the main window can change pinned instructions.",
+            "Only the main window can read or change pinned instructions.",
         ))
     }
 }
@@ -114,20 +114,30 @@ fn tell_window(app: &AppHandle, chat_id: Option<i64>) {
 }
 
 /// The pinned instructions a turn in this chat carries, in order: those for every chat,
-/// then the chat's own. If the database cannot be read here the turn goes on without them
-/// and the failure is logged; the reads `turns::run` makes before this one fail first in
-/// that case.
-pub async fn for_turn(state: &AppState, chat_id: store::ChatId) -> Vec<String> {
-    texts(&state.store, chat_id).await
+/// then the chat's own.
+///
+/// Fails closed: if the database cannot be read, the turn does not start (nothing has been
+/// sent yet), rather than going on without instructions the user relies on. The turn's
+/// end-of-turn clean-up (`computer_cmd::end_turn`) is done here on that path, because the
+/// caller returns at once.
+pub async fn for_turn(app: &AppHandle, chat_id: store::ChatId) -> AppResult<Vec<String>> {
+    let state = app.state::<AppState>();
+    let pins = texts(&state.store, chat_id).await;
+    if pins.is_err() {
+        crate::computer_cmd::end_turn(app);
+    }
+    pins
 }
 
-async fn texts(store: &store::Store, chat_id: store::ChatId) -> Vec<String> {
+async fn texts(store: &store::Store, chat_id: store::ChatId) -> AppResult<Vec<String>> {
     match store.pins_for_chat(chat_id).await {
-        Ok(pins) => pins.into_iter().map(|pin| pin.text).collect(),
-        Err(e) => {
-            tracing::error!(chat_id = chat_id.0, "could not read the pinned instructions: {e}");
-            Vec::new()
-        }
+        Ok(pins) => Ok(pins.into_iter().map(|pin| pin.text).collect()),
+        Err(e) => Err(AppError::new(
+            "pinned_unreadable",
+            "The app could not read this chat's pinned instructions, so nothing was sent.",
+            "Try again. If it keeps happening, restart the app.",
+            e.to_string(),
+        )),
     }
 }
 
@@ -144,7 +154,12 @@ pub fn next_step(local: bool) -> &'static str {
 
 /// The pins that apply to a chat.
 #[tauri::command]
-pub async fn list_pins(state: State<'_, AppState>, chat_id: i64) -> AppResult<PinsDto> {
+pub async fn list_pins(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    chat_id: i64,
+) -> AppResult<PinsDto> {
+    only_main_window(window.label())?;
     listing(&state.store, chat_id).await
 }
 

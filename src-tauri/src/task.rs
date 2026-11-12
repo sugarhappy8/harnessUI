@@ -83,12 +83,7 @@ pub fn fact_of(action: &policy::Action, out: &ToolOutput, now: i64) -> Option<Fa
 /// Records a fact in the chat's task, creating the record when the chat has none: the
 /// Task tab shows changed files and checks also when the model never wrote a goal.
 /// Returns whether the stored task differs.
-pub async fn record(
-    store: &Store,
-    chat_id: i64,
-    fact: Fact,
-    now: i64,
-) -> Result<bool, StoreError> {
+pub async fn record(store: &Store, chat_id: i64, fact: Fact, now: i64) -> Result<bool, StoreError> {
     let _ = (store, chat_id, fact, now);
     Ok(false)
 }
@@ -127,8 +122,19 @@ pub async fn note_for_turn(state: &AppState, chat_id: i64) -> Option<String> {
 }
 
 async fn note_in(store: &Store, chat_id: i64) -> Option<String> {
-    let _ = (store, chat_id);
-    None
+    note_from(store.get_task(ChatId(chat_id)).await)
+}
+
+/// The note for a task as it was read. A task that cannot be read sends no note: the
+/// Task tab says so and offers to clear it.
+fn note_from(loaded: Result<Option<Task>, StoreError>) -> Option<String> {
+    match loaded {
+        Ok(task) => task.as_ref().and_then(note::for_turn),
+        Err(e) => {
+            tracing::debug!("the task note was left out: {e}");
+            None
+        }
+    }
 }
 
 /// For `turns::run`: the task note for the turn that starts now (exactly what
@@ -146,8 +152,27 @@ pub async fn begin_turn(app: &AppHandle, chat_id: i64) -> Option<String> {
 
 /// The note, and whether the stored task changed.
 async fn start_turn(store: &Store, chat_id: i64) -> (Option<String>, bool) {
-    let _ = (store, chat_id);
-    (None, false)
+    let result = store
+        .change_task(ChatId(chat_id), |slot| {
+            // The same renderer as `note_in`, over the same record, before it changes.
+            let note = slot.as_ref().and_then(note::for_turn);
+            let before = slot.clone();
+            edits::turn_started(slot);
+            (note, *slot != before)
+        })
+        .await;
+    turn_start_from(result.map(|(_, r)| r))
+}
+
+/// The note and whether the record changed; nothing at all when the task cannot be read.
+fn turn_start_from(result: Result<(Option<String>, bool), StoreError>) -> (Option<String>, bool) {
+    match result {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("the task note was left out: {e}");
+            (None, false)
+        }
+    }
 }
 
 // ---- The Task tab ---------------------------------------------------------------------------
@@ -249,7 +274,9 @@ fn only_main_window(label: &str) -> AppResult<()> {
     if label == crate::MAIN_WINDOW {
         Ok(())
     } else {
-        Err(AppError::bad_request("Only the main window shows the task."))
+        Err(AppError::bad_request(
+            "Only the main window shows the task.",
+        ))
     }
 }
 

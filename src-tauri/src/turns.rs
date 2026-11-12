@@ -1739,6 +1739,7 @@ pub async fn run(
         })
         .collect();
     let sanitizer = agent::prompt::Sanitizer::for_endpoint(&req.client).await;
+    input.pinned = crate::pinned::for_turn(app, chat_id).await?; // [0.0.4 pinned]
     if subagents_on {
         // A helper gets the same system prompt, preamble and skills, the same model and
         // request settings, and none of the chat: no history and no summary.
@@ -1869,6 +1870,7 @@ fn failure_next_step(code: &str, local: bool) -> &'static str {
         ("unauthorized", _) => "Check the API key in Settings → Endpoints, then regenerate.",
         ("output_limit", _) => "Ask for a shorter answer, or regenerate.",
         ("no_answer", _) => "Regenerate, or try a different model.",
+        ("pinned_do_not_fit", _) => crate::pinned::next_step(local), // [0.0.4 pinned]
         (_, true) => "Check that the model is still running, then regenerate.",
         (_, false) => {
             "Check that the server is running and its address in Settings → Endpoints is right, then regenerate."

@@ -89,7 +89,11 @@ fn a_file_call_that_succeeded_is_a_changed_file() {
             json!({"canonical": path, "root": 0, "exists": false, "wasSymlink": false, "expectedSha256": null}),
             FileChange::Created,
         ),
-        ("write_file", payload(json!({"expectedSha256": "ab12"})), FileChange::Edited),
+        (
+            "write_file",
+            payload(json!({"expectedSha256": "ab12"})),
+            FileChange::Edited,
+        ),
         // Without the hash field, whether the path existed decides.
         (
             "write_file",
@@ -97,8 +101,16 @@ fn a_file_call_that_succeeded_is_a_changed_file() {
             FileChange::Created,
         ),
         ("write_file", payload(json!({})), FileChange::Edited),
-        ("edit_file", payload(json!({"expectedSha256": "ab12"})), FileChange::Edited),
-        ("delete_file", payload(json!({"expectedSha256": "ab12"})), FileChange::Deleted),
+        (
+            "edit_file",
+            payload(json!({"expectedSha256": "ab12"})),
+            FileChange::Edited,
+        ),
+        (
+            "delete_file",
+            payload(json!({"expectedSha256": "ab12"})),
+            FileChange::Deleted,
+        ),
     ];
     for (tool, payload, kind) in table {
         let a = file_action(tool, payload.clone());
@@ -120,7 +132,8 @@ fn a_file_call_that_succeeded_is_a_changed_file() {
 
 #[test]
 fn other_calls_are_not_changed_files() {
-    let payload = json!({"canonical": "/work/a.rs", "root": 0, "exists": true, "wasSymlink": false});
+    let payload =
+        json!({"canonical": "/work/a.rs", "root": 0, "exists": true, "wasSymlink": false});
     let read = policy::Scope::FileRead {
         folder: "/work".into(),
     };
@@ -138,16 +151,48 @@ fn other_calls_are_not_changed_files() {
         action("files", "search_files", read, payload.clone()),
         // An external server's tool of the same name is not the app's file tool.
         action("files", "write_file", external.clone(), payload.clone()),
-        action("files", "files__write_file", external, json!({"kind": "external", "originalTool": "write_file", "args": "{}"})),
+        action(
+            "files",
+            "files__write_file",
+            external,
+            json!({"kind": "external", "originalTool": "write_file", "args": "{}"}),
+        ),
         action("notes", "write_file", write.clone(), payload.clone()),
         // No checked path, no fact.
         action("files", "write_file", write.clone(), Value::Null),
-        action("files", "write_file", write.clone(), json!({"canonical": 12})),
-        action("files", "write_file", write.clone(), json!({"canonical": "  "})),
+        action(
+            "files",
+            "write_file",
+            write.clone(),
+            json!({"canonical": 12}),
+        ),
+        action(
+            "files",
+            "write_file",
+            write.clone(),
+            json!({"canonical": "  "}),
+        ),
         // Other tools.
-        action("git", "git_commit", policy::Scope::GitWrite { repo: "/work".into() }, payload.clone()),
-        action("task", "update_task", policy::Scope::AppData, json!({"canonical": "/work/a.rs"})),
-        action("artifacts", "create_artifact", policy::Scope::AppData, Value::Null),
+        action(
+            "git",
+            "git_commit",
+            policy::Scope::GitWrite {
+                repo: "/work".into(),
+            },
+            payload.clone(),
+        ),
+        action(
+            "task",
+            "update_task",
+            policy::Scope::AppData,
+            json!({"canonical": "/work/a.rs"}),
+        ),
+        action(
+            "artifacts",
+            "create_artifact",
+            policy::Scope::AppData,
+            Value::Null,
+        ),
     ] {
         assert_eq!(fact_of(&a, &text("ok"), 5), None, "{} {}", a.server, a.tool);
     }
@@ -172,7 +217,9 @@ fn a_check_command_is_a_check_and_its_result_says_how_it_went() {
     );
     let broke = fact_of(
         &command_action("cd app && cargo clippy -- -D warnings"),
-        &failed("Exit code 101 (9.0 s)\nerror: could not compile `app` (lib) due to 2 previous errors"),
+        &failed(
+            "Exit code 101 (9.0 s)\nerror: could not compile `app` (lib) due to 2 previous errors",
+        ),
         78,
     );
     let Some(Fact::Check(check)) = broke else {
@@ -188,24 +235,48 @@ fn a_check_command_is_a_check_and_its_result_says_how_it_went() {
         "Stopped by the user",
         "worded in some new way",
     ] {
-        let Some(Fact::Check(check)) = fact_of(&command_action("cargo test"), &failed(said), 79) else {
+        let Some(Fact::Check(check)) = fact_of(&command_action("cargo test"), &failed(said), 79)
+        else {
             panic!("not a check");
         };
         assert!(!check.passed && check.exit_code.is_none(), "{said}");
     }
 
     // Other commands are not checks, also when they succeed or fail.
-    for command in ["ls -la", "git status", "npm install", "echo \"npm test\"", "npm test | tail -5"] {
-        assert_eq!(fact_of(&command_action(command), &text("Exit code 0 (0.1 s)\n"), 80), None, "{command}");
-        assert_eq!(fact_of(&command_action(command), &failed("Exit code 1 (0.1 s)\n"), 80), None, "{command}");
+    for command in [
+        "ls -la",
+        "git status",
+        "npm install",
+        "echo \"npm test\"",
+        "npm test | tail -5",
+    ] {
+        assert_eq!(
+            fact_of(&command_action(command), &text("Exit code 0 (0.1 s)\n"), 80),
+            None,
+            "{command}"
+        );
+        assert_eq!(
+            fact_of(
+                &command_action(command),
+                &failed("Exit code 1 (0.1 s)\n"),
+                80
+            ),
+            None,
+            "{command}"
+        );
     }
 
     // The command line is kept as one cleaned line of bounded length.
     let long = format!("npm   test --\t{}\u{202E}", "x".repeat(1000));
-    let Some(Fact::Check(check)) = fact_of(&command_action(&long), &text("Exit code 0 (1 s)"), 81) else {
+    let Some(Fact::Check(check)) = fact_of(&command_action(&long), &text("Exit code 0 (1 s)"), 81)
+    else {
         panic!("not a check");
     };
-    assert!(check.command.starts_with("npm test -- xxx"), "{}", check.command);
+    assert!(
+        check.command.starts_with("npm test -- xxx"),
+        "{}",
+        check.command
+    );
     assert_eq!(check.command.chars().count(), COMMAND_CHARS);
 
     // Not the terminal's tool, or no command in the approved action.
@@ -224,14 +295,24 @@ async fn facts_are_recorded_and_start_the_record_when_there_is_none() {
         path: path.into(),
         kind,
     };
-    assert!(record(&store, chat, file("/work/a.rs", FileChange::Created), 10).await.expect("record"));
-    let task = store.get_task(ChatId(chat)).await.expect("get").expect("created");
+    assert!(
+        record(&store, chat, file("/work/a.rs", FileChange::Created), 10)
+            .await
+            .expect("record")
+    );
+    let task = store
+        .get_task(ChatId(chat))
+        .await
+        .expect("get")
+        .expect("created");
     assert_eq!((task.status, task.updated_at), (TaskStatus::Active, 10));
     assert_eq!(task.state.changed_files.len(), 1);
     assert_eq!(task.state.goal, "");
 
     // Created, then edited, is still a new file; a check is listed once with its latest result.
-    record(&store, chat, file("/work/a.rs", FileChange::Edited), 11).await.expect("record");
+    record(&store, chat, file("/work/a.rs", FileChange::Edited), 11)
+        .await
+        .expect("record");
     let check = |passed: bool, at: i64| {
         Fact::Check(TaskCheck {
             command: "npm test".into(),
@@ -241,9 +322,17 @@ async fn facts_are_recorded_and_start_the_record_when_there_is_none() {
             exit_code: Some(i32::from(!passed)),
         })
     };
-    record(&store, chat, check(false, 12), 12).await.expect("record");
-    record(&store, chat, check(true, 13), 13).await.expect("record");
-    let task = store.get_task(ChatId(chat)).await.expect("get").expect("task");
+    record(&store, chat, check(false, 12), 12)
+        .await
+        .expect("record");
+    record(&store, chat, check(true, 13), 13)
+        .await
+        .expect("record");
+    let task = store
+        .get_task(ChatId(chat))
+        .await
+        .expect("get")
+        .expect("task");
     assert_eq!(task.state.changed_files.len(), 1);
     assert_eq!(task.state.changed_files[0].kind, FileChange::Created);
     assert_eq!(task.state.checks.len(), 1);
@@ -251,8 +340,14 @@ async fn facts_are_recorded_and_start_the_record_when_there_is_none() {
     assert_eq!(task.updated_at, 13);
 
     // Created and deleted again: as if nothing happened to it.
-    record(&store, chat, file("/work/a.rs", FileChange::Deleted), 14).await.expect("record");
-    let task = store.get_task(ChatId(chat)).await.expect("get").expect("task");
+    record(&store, chat, file("/work/a.rs", FileChange::Deleted), 14)
+        .await
+        .expect("record");
+    let task = store
+        .get_task(ChatId(chat))
+        .await
+        .expect("get")
+        .expect("task");
     assert!(task.state.changed_files.is_empty());
 
     // What the model and the user wrote is untouched by facts, also on a done task.
@@ -265,9 +360,18 @@ async fn facts_are_recorded_and_start_the_record_when_there_is_none() {
         })
         .await
         .expect("change");
-    record(&store, chat, file("/work/b.rs", FileChange::Edited), 15).await.expect("record");
-    let task = store.get_task(ChatId(chat)).await.expect("get").expect("task");
-    assert_eq!((task.state.goal.as_str(), task.state.user.goal, task.status), ("g", true, TaskStatus::Done));
+    record(&store, chat, file("/work/b.rs", FileChange::Edited), 15)
+        .await
+        .expect("record");
+    let task = store
+        .get_task(ChatId(chat))
+        .await
+        .expect("get")
+        .expect("task");
+    assert_eq!(
+        (task.state.goal.as_str(), task.state.user.goal, task.status),
+        ("g", true, TaskStatus::Done)
+    );
     assert_eq!(task.state.changed_files.len(), 1);
 
     // A chat that is gone: an error for the caller to drop, and nothing is left behind.
@@ -279,7 +383,11 @@ async fn facts_are_recorded_and_start_the_record_when_there_is_none() {
 
 /// A folder of its own under the system's temporary folder.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("harness-task-{name}-{}-{}", std::process::id(), now_ms()));
+    let dir = std::env::temp_dir().join(format!(
+        "harness-task-{name}-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
     std::fs::create_dir_all(&dir).expect("create");
     dir.canonicalize().expect("canonical")
 }
@@ -335,10 +443,22 @@ async fn the_file_tools_calls_are_read_as_changed_files() {
 
     let mut at = 0;
     for (tool, args) in [
-        ("write_file", json!({"path": "new.txt", "content": "hello\n"})),
-        ("edit_file", json!({"path": "new.txt", "old_text": "hello", "new_text": "hello there"})),
-        ("edit_file", json!({"path": "old.txt", "old_text": "two", "new_text": "2"})),
-        ("write_file", json!({"path": "old.txt", "content": "all new\n"})),
+        (
+            "write_file",
+            json!({"path": "new.txt", "content": "hello\n"}),
+        ),
+        (
+            "edit_file",
+            json!({"path": "new.txt", "old_text": "hello", "new_text": "hello there"}),
+        ),
+        (
+            "edit_file",
+            json!({"path": "old.txt", "old_text": "two", "new_text": "2"}),
+        ),
+        (
+            "write_file",
+            json!({"path": "old.txt", "content": "all new\n"}),
+        ),
         ("delete_file", json!({"path": "gone.txt"})),
         // Reading changes nothing.
         ("read_file", json!({"path": "old.txt"})),
@@ -351,7 +471,11 @@ async fn the_file_tools_calls_are_read_as_changed_files() {
             record(&store, chat_id, fact, at).await.expect("record");
         }
     }
-    let task = store.get_task(ChatId(chat_id)).await.expect("get").expect("a task");
+    let task = store
+        .get_task(ChatId(chat_id))
+        .await
+        .expect("get")
+        .expect("a task");
     let listed: Vec<(String, FileChange)> = task
         .state
         .changed_files
@@ -403,16 +527,33 @@ async fn the_terminals_calls_are_read_as_checks() {
     std::fs::write(dir.join("run-tests.sh"), "echo \"3 passed\"\nexit 0\n").expect("script");
     std::fs::write(dir.join("lint.sh"), "echo \"2 problems\" >&2\nexit 3\n").expect("script");
 
-    let (action, out) = run_tool(&terminal, &chat, "run_command", json!({"command": "sh ./run-tests.sh"})).await;
+    let (action, out) = run_tool(
+        &terminal,
+        &chat,
+        "run_command",
+        json!({"command": "sh ./run-tests.sh"}),
+    )
+    .await;
     let Some(Fact::Check(check)) = fact_of(&action, &out, 1) else {
         panic!("not a check: {}", out.joined_text());
     };
     assert_eq!(
-        (check.command.as_str(), check.passed, check.exit_code, check.summary.as_str()),
+        (
+            check.command.as_str(),
+            check.passed,
+            check.exit_code,
+            check.summary.as_str()
+        ),
         ("sh ./run-tests.sh", true, Some(0), "3 passed")
     );
 
-    let (action, out) = run_tool(&terminal, &chat, "run_command", json!({"command": "sh ./lint.sh"})).await;
+    let (action, out) = run_tool(
+        &terminal,
+        &chat,
+        "run_command",
+        json!({"command": "sh ./lint.sh"}),
+    )
+    .await;
     let Some(Fact::Check(check)) = fact_of(&action, &out, 2) else {
         panic!("not a check: {}", out.joined_text());
     };
@@ -487,19 +628,33 @@ async fn a_turn_starts_with_the_task_note_and_records_that_it_was_sent() {
     // What the Context inspector would show is what the turn gets.
     let preview = note_in(&store, chat).await.expect("a note");
     let stored_before = store.get_task(ChatId(chat)).await.expect("get");
-    assert_eq!(stored_before.as_ref().map(|t| t.status), Some(TaskStatus::Paused), "reading the note changes nothing");
+    assert_eq!(
+        stored_before.as_ref().map(|t| t.status),
+        Some(TaskStatus::Paused),
+        "reading the note changes nothing"
+    );
     let (note, stored) = start_turn(&store, chat).await;
     assert_eq!(note.as_deref(), Some(preview.as_str()));
     assert!(stored);
     assert!(preview.starts_with(note::HEADER));
     assert!(preview.contains("- status: active"), "{preview}");
     assert!(preview.contains("- since you last saw this, the user: paused this task and has now resumed it; changed the goal"), "{preview}");
-    assert!(preview.contains("- goal (the user wrote it): \"Put the switch in the header\""), "{preview}");
-    assert!(preview.contains("- changed files (in \"/work/src\"): edited \"Settings.tsx\""), "{preview}");
+    assert!(
+        preview.contains("- goal (the user wrote it): \"Put the switch in the header\""),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("- changed files (in \"/work/src\"): edited \"Settings.tsx\""),
+        "{preview}"
+    );
 
     // The turn is the work going on: the task is active, the marks are spent, and the
     // time of the last change did not move.
-    let task = store.get_task(ChatId(chat)).await.expect("get").expect("task");
+    let task = store
+        .get_task(ChatId(chat))
+        .await
+        .expect("get")
+        .expect("task");
     assert_eq!(task.status, TaskStatus::Active);
     assert!(task.state.user.changed.is_empty() && !task.state.user.paused);
     assert!(task.state.user.goal);
@@ -510,14 +665,22 @@ async fn a_turn_starts_with_the_task_note_and_records_that_it_was_sent() {
     let note = note.expect("a note");
     assert!(!stored);
     assert!(!note.contains("since you last saw this"), "{note}");
-    assert!(note.contains("- goal (the user wrote it): \"Put the switch in the header\""), "{note}");
+    assert!(
+        note.contains("- goal (the user wrote it): \"Put the switch in the header\""),
+        "{note}"
+    );
     assert!(note::cost(&format!("[App note] {note}")) <= note::NOTE_TOKENS);
 
     // A done task sends nothing; one the user marked done says so once.
-    user_status(&store, chat, TaskStatus::Done, 20).await.expect("done");
+    user_status(&store, chat, TaskStatus::Done, 20)
+        .await
+        .expect("done");
     let (note, stored) = start_turn(&store, chat).await;
     assert!(stored);
-    assert!(note.expect("a note").contains("- status: done (the user marked this task done)"));
+    assert!(
+        note.expect("a note")
+            .contains("- status: done (the user marked this task done)")
+    );
     assert_eq!(start_turn(&store, chat).await, (None, false));
     assert_eq!(note_in(&store, chat).await, None);
 }
@@ -551,29 +714,30 @@ async fn a_record_of_facts_only_sends_no_note() {
     .await
     .expect("edit");
     let note = note_in(&store, chat).await.expect("a note");
-    assert!(note.contains("- goal (the user wrote it): \"Tidy up\""), "{note}");
+    assert!(
+        note.contains("- goal (the user wrote it): \"Tidy up\""),
+        "{note}"
+    );
     assert!(note.contains("edited \"a.rs\""), "{note}");
 }
 
-#[tokio::test]
-async fn a_task_that_cannot_be_read_sends_no_note_and_can_be_cleared() {
-    let (store, chat) = store_with_chat().await;
-    let id = ChatId(chat);
-    store
-        .call(move |c| {
-            c.execute(
-                "INSERT INTO tasks (chat_id, state, status, updated_at) VALUES (?1, '{\"goal\": 12}', 'active', 1)",
-                [id],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("write");
-    assert_eq!(note_in(&store, chat).await, None);
-    assert_eq!(start_turn(&store, chat).await, (None, false));
-    let e = store.get_task(id).await.expect_err("unreadable");
-    assert_eq!(store_error(e).code, "task_unreadable");
-    assert!(store.delete_task(id).await.expect("clear"));
+/// A saved state that cannot be read is `StoreError::Json` from the store (its own test,
+/// `a_state_with_other_fields_still_loads`, writes one and deletes it again). The app
+/// crate cannot write such a row, so the error is built here the way the store builds it.
+#[test]
+fn a_task_that_cannot_be_read_sends_no_note_and_can_be_cleared() {
+    let unreadable = || {
+        StoreError::Json(
+            serde_json::from_str::<store::TaskState>(r#"{"goal": 12}"#).expect_err("wrong shape"),
+        )
+    };
+    // No note, and the turn start stores nothing.
+    assert_eq!(note_from(Err(unreadable())), None);
+    assert_eq!(turn_start_from(Err(unreadable())), (None, false));
+    // The tab is told what happened and what to do: Clear task, which deletes the row
+    // without reading it (`Store::delete_task`).
+    let e = store_error(unreadable());
+    assert_eq!(e.code, "task_unreadable");
 }
 
 // ---- The Task tab ---------------------------------------------------------------------------------
@@ -582,8 +746,18 @@ async fn a_task_that_cannot_be_read_sends_no_note_and_can_be_cleared() {
 async fn the_users_commands_change_the_stored_task() {
     let (store, chat) = store_with_chat().await;
     // Nothing to pause, and an empty edit starts nothing.
-    assert_eq!(user_status(&store, chat, TaskStatus::Paused, 1).await.expect("pause"), (None, false));
-    assert_eq!(user_edit(&store, chat, edits::UserEdit::default(), 1).await.expect("edit"), (None, false));
+    assert_eq!(
+        user_status(&store, chat, TaskStatus::Paused, 1)
+            .await
+            .expect("pause"),
+        (None, false)
+    );
+    assert_eq!(
+        user_edit(&store, chat, edits::UserEdit::default(), 1)
+            .await
+            .expect("edit"),
+        (None, false)
+    );
 
     let (task, stored) = user_edit(
         &store,
@@ -602,14 +776,23 @@ async fn the_users_commands_change_the_stored_task() {
     .expect("edit");
     assert!(stored);
     let task = task.expect("created");
-    assert_eq!((task.chat_id, task.status, task.updated_at), (ChatId(chat), TaskStatus::Active, 2));
+    assert_eq!(
+        (task.chat_id, task.status, task.updated_at),
+        (ChatId(chat), TaskStatus::Active, 2)
+    );
 
-    let (task, stored) = user_status(&store, chat, TaskStatus::Paused, 3).await.expect("pause");
+    let (task, stored) = user_status(&store, chat, TaskStatus::Paused, 3)
+        .await
+        .expect("pause");
     assert!(stored);
     assert_eq!(task.expect("task").status, TaskStatus::Paused);
-    let (_, stored) = user_status(&store, chat, TaskStatus::Paused, 4).await.expect("pause again");
+    let (_, stored) = user_status(&store, chat, TaskStatus::Paused, 4)
+        .await
+        .expect("pause again");
     assert!(!stored);
-    let (task, _) = user_status(&store, chat, TaskStatus::Active, 5).await.expect("resume");
+    let (task, _) = user_status(&store, chat, TaskStatus::Active, 5)
+        .await
+        .expect("resume");
     assert_eq!(task.expect("task").status, TaskStatus::Active);
 
     // A chat that does not exist.
@@ -639,7 +822,8 @@ fn the_tab_gets_the_task_with_who_wrote_what_and_the_newest_first() {
         steps: vec!["Add the switch".into()],
         ..UserMarks::default()
     };
-    task.state.record_file("/work/src/evil\u{202E}txt.exe", FileChange::Created, 12);
+    task.state
+        .record_file("/work/src/evil\u{202E}txt.exe", FileChange::Created, 12);
     task.state.files_not_listed = 3;
     task.state.record_check(TaskCheck {
         command: "npm test".into(),
@@ -666,7 +850,10 @@ fn the_tab_gets_the_task_with_who_wrote_what_and_the_newest_first() {
         },
     ];
     let dto = TaskDto::from(task);
-    assert_eq!((dto.chat_id, dto.status, dto.updated_at), (7, TaskStatus::Paused, 10));
+    assert_eq!(
+        (dto.chat_id, dto.status, dto.updated_at),
+        (7, TaskStatus::Paused, 10)
+    );
     assert!(dto.goal_by_user && !dto.next_action_by_user);
     assert_eq!(
         dto.constraints,
@@ -682,7 +869,10 @@ fn the_tab_gets_the_task_with_who_wrote_what_and_the_newest_first() {
         ]
     );
     assert_eq!(
-        dto.steps.iter().map(|s| (s.text.as_str(), s.status, s.by_user)).collect::<Vec<_>>(),
+        dto.steps
+            .iter()
+            .map(|s| (s.text.as_str(), s.status, s.by_user))
+            .collect::<Vec<_>>(),
         vec![
             ("Read the settings page", StepStatus::Done, false),
             ("Add the switch", StepStatus::Doing, true)
@@ -700,17 +890,29 @@ fn the_tab_gets_the_task_with_who_wrote_what_and_the_newest_first() {
             .iter()
             .map(|c| (c.command.as_str(), c.passed, c.finished, c.exit_code))
             .collect::<Vec<_>>(),
-        vec![("cargo build", false, false, None), ("npm test", true, true, Some(0))]
+        vec![
+            ("cargo build", false, false, None),
+            ("npm test", true, true, Some(0))
+        ]
     );
     assert_eq!(dto.checks[1].summary, "12 passed");
-    assert_eq!(dto.notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(), ["second", "first"]);
+    assert_eq!(
+        dto.notes
+            .iter()
+            .map(|n| n.text.as_str())
+            .collect::<Vec<_>>(),
+        ["second", "first"]
+    );
 
     // As the window receives it.
     let sent = serde_json::to_value(&dto).expect("json");
     assert_eq!(sent["chatId"], 7);
     assert_eq!(sent["status"], "paused");
     assert_eq!(sent["goalByUser"], true);
-    assert_eq!(sent["steps"][1], json!({"text": "Add the switch", "status": "doing", "byUser": true}));
+    assert_eq!(
+        sent["steps"][1],
+        json!({"text": "Add the switch", "status": "doing", "byUser": true})
+    );
     assert_eq!(sent["changedFiles"][1]["kind"], "edited");
     assert_eq!(sent["checks"][0]["exitCode"], Value::Null);
     assert_eq!(sent["filesNotListed"], 3);
@@ -738,7 +940,8 @@ fn the_windows_edit_has_four_fields_and_no_others() {
     assert_eq!(edit.goal.as_deref(), Some("g"));
     assert_eq!(edit.next_action.as_deref(), Some("n"));
     assert_eq!(edit.steps.as_ref().map(Vec::len), Some(2));
-    let partial: edits::UserEdit = serde_json::from_value(json!({"nextAction": "n"})).expect("an edit");
+    let partial: edits::UserEdit =
+        serde_json::from_value(json!({"nextAction": "n"})).expect("an edit");
     assert_eq!((partial.goal, partial.steps), (None, None));
     for forged in [
         json!({"changedFiles": []}),
@@ -747,7 +950,10 @@ fn the_windows_edit_has_four_fields_and_no_others() {
         json!({"user": {"goal": true}}),
         json!({"goal": "g", "changed_files": [{"path": "/x", "kind": "edited", "at": 1}]}),
     ] {
-        assert!(serde_json::from_value::<edits::UserEdit>(forged.clone()).is_err(), "{forged}");
+        assert!(
+            serde_json::from_value::<edits::UserEdit>(forged.clone()).is_err(),
+            "{forged}"
+        );
     }
 }
 
@@ -776,7 +982,14 @@ async fn the_task_is_written_tracked_corrected_and_resumed() {
         "write_file",
         json!({"canonical": "/work/src/Switch.tsx", "root": 0, "exists": false, "wasSymlink": false, "expectedSha256": null}),
     );
-    record(&store, chat, fact_of(&wrote, &text("ok"), 110).expect("a fact"), 110).await.expect("record");
+    record(
+        &store,
+        chat,
+        fact_of(&wrote, &text("ok"), 110).expect("a fact"),
+        110,
+    )
+    .await
+    .expect("record");
     let ran = command_action("npm test");
     let out = ToolOutput {
         content: vec![Content::Text {
@@ -786,17 +999,24 @@ async fn the_task_is_written_tracked_corrected_and_resumed() {
         full_text: None,
         ui: None,
     };
-    record(&store, chat, fact_of(&ran, &out, 120).expect("a fact"), 120).await.expect("record");
+    record(&store, chat, fact_of(&ran, &out, 120).expect("a fact"), 120)
+        .await
+        .expect("record");
 
     // The first turn after that gets it all. (Turns start here; the note is not stored.)
     let (note, _) = start_turn(&store, chat).await;
     let note = note.expect("a note");
     assert!(note.contains("created \"Switch.tsx\""), "{note}");
     assert!(note.contains("failed \"npm test\" (exit code 1)"), "{note}");
-    assert!(!note.contains("FAIL src") && !note.contains("1 failed"), "{note}");
+    assert!(
+        !note.contains("FAIL src") && !note.contains("1 failed"),
+        "{note}"
+    );
 
     // The user pauses, corrects the goal, and resumes.
-    user_status(&store, chat, TaskStatus::Paused, 130).await.expect("pause");
+    user_status(&store, chat, TaskStatus::Paused, 130)
+        .await
+        .expect("pause");
     user_edit(
         &store,
         chat,
@@ -808,13 +1028,24 @@ async fn the_task_is_written_tracked_corrected_and_resumed() {
     )
     .await
     .expect("edit");
-    user_status(&store, chat, TaskStatus::Active, 150).await.expect("resume");
+    user_status(&store, chat, TaskStatus::Active, 150)
+        .await
+        .expect("resume");
     let (note, stored) = start_turn(&store, chat).await;
     let note = note.expect("a note");
     assert!(stored);
     assert!(note.contains("- status: active"), "{note}");
-    assert!(note.contains("the user: paused this task and has now resumed it; changed the goal"), "{note}");
-    assert!(note.contains("- goal (the user wrote it): \"Put the switch in the header\""), "{note}");
-    assert!(note.contains("- next action: \"Read the settings page\""), "{note}");
+    assert!(
+        note.contains("the user: paused this task and has now resumed it; changed the goal"),
+        "{note}"
+    );
+    assert!(
+        note.contains("- goal (the user wrote it): \"Put the switch in the header\""),
+        "{note}"
+    );
+    assert!(
+        note.contains("- next action: \"Read the settings page\""),
+        "{note}"
+    );
     assert!(note::cost(&format!("[App note] {note}")) <= note::NOTE_TOKENS);
 }

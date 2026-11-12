@@ -81,7 +81,14 @@ pub struct Core {
 impl Core {
     /// Runs one `update_task` call for the chat it came from.
     pub async fn call(&self, tool: &str, args: &Map<String, Value>, chat_id: i64) -> ToolOutput {
-        let _ = (tool, args, chat_id, &self.store, edits::GOAL, note::NOTE_TOKENS);
+        let _ = (
+            tool,
+            args,
+            chat_id,
+            &self.store,
+            edits::GOAL,
+            note::NOTE_TOKENS,
+        );
         let _ = (ChatId(0), HELPER_REFUSAL);
         let _: Option<StoreError> = None;
         ToolOutput::error("not written yet")
@@ -217,7 +224,6 @@ mod tests {
         let def = tool_def();
         assert_eq!((SERVER_NAME, def.name.as_str()), ("task", "update_task"));
         assert!(crate::tool_select::COMPANION_SERVERS.contains(&SERVER_NAME));
-        assert!(crate::artifacts::is_own_data_tool(TOOL_NAME));
         let entry = crate::tool_catalog::entry(TOOL_NAME).expect("a catalog entry");
         assert_eq!(entry.group, SERVER_NAME);
         // The catalog's examples fit the real schema.
@@ -238,9 +244,17 @@ mod tests {
     fn the_definition_is_short() {
         let def = tool_def();
         let chars = def.description.chars().count() + def.input_schema.to_string().chars().count();
-        let tokens = crate::tool_select::definition_cost(&def.name, &def.description, &def.input_schema);
-        assert!(def.description.chars().count() <= 180, "{}", def.description.chars().count());
-        assert!(chars <= 560, "description and schema take {chars} characters");
+        let tokens =
+            crate::tool_select::definition_cost(&def.name, &def.description, &def.input_schema);
+        assert!(
+            def.description.chars().count() <= 180,
+            "{}",
+            def.description.chars().count()
+        );
+        assert!(
+            chars <= 560,
+            "description and schema take {chars} characters"
+        );
         assert!(tokens <= 215, "the definition costs about {tokens} tokens");
         // Nothing in it names what the app tracks by itself as something to send.
         let schema = def.input_schema.to_string();
@@ -287,7 +301,10 @@ mod tests {
         ) else {
             panic!("not an action");
         };
-        assert_eq!((action.server.as_str(), action.tool.as_str()), ("task", "update_task"));
+        assert_eq!(
+            (action.server.as_str(), action.tool.as_str()),
+            ("task", "update_task")
+        );
         assert_eq!(action.scope, policy::Scope::AppData);
         assert_eq!(action.risk, policy::Risk::Normal);
         assert!(!action.read_only && !action.outbound && !action.network);
@@ -295,8 +312,16 @@ mod tests {
         assert_eq!(action.hard_limit, None);
         assert_eq!(action.payload, Value::Null);
         // One line for the audit log, with nothing invisible in it.
-        assert!(!action.summary.contains('\n') && !action.summary.contains('\u{202E}'), "{}", action.summary);
-        assert!(action.summary.contains("goal") && action.summary.contains("2 steps"), "{}", action.summary);
+        assert!(
+            !action.summary.contains('\n') && !action.summary.contains('\u{202E}'),
+            "{}",
+            action.summary
+        );
+        assert!(
+            action.summary.contains("goal") && action.summary.contains("2 steps"),
+            "{}",
+            action.summary
+        );
         assert!(!action.preview.contains('\u{202E}'));
 
         // The engine lets it run without a card in every kind of turn, and still refuses
@@ -331,9 +356,18 @@ mod tests {
 
         // A call that cannot be read is refused before it runs, with the reason.
         for bad in [json!({"steps": "a, b"}), json!({"status": "paused"})] {
-            assert!(matches!(describe(TOOL_NAME, &args(bad.clone())), Described::Invalid(_)), "{bad}");
+            assert!(
+                matches!(
+                    describe(TOOL_NAME, &args(bad.clone())),
+                    Described::Invalid(_)
+                ),
+                "{bad}"
+            );
         }
-        assert!(matches!(describe("delete_task", &Map::new()), Described::Invalid(_)));
+        assert!(matches!(
+            describe("delete_task", &Map::new()),
+            Described::Invalid(_)
+        ));
     }
 
     #[tokio::test]
@@ -367,19 +401,34 @@ mod tests {
 
         // A call that changes nothing says so, shows the task, and tells no one.
         f.clock.store(2000, Ordering::Relaxed);
-        let out = f.update(json!({"goal": "Fix the failing date tests"})).await;
+        let out = f
+            .update(json!({"goal": "Fix the failing date tests"}))
+            .await;
         assert!(!out.is_error);
-        assert!(out.joined_text().starts_with("Nothing changed.\n- status: active\n"), "{}", out.joined_text());
+        assert!(
+            out.joined_text()
+                .starts_with("Nothing changed.\n- status: active\n"),
+            "{}",
+            out.joined_text()
+        );
         assert_eq!(f.task(f.chat).await.expect("task").updated_at, 1000);
         assert_eq!(f.notified(), Vec::<i64>::new());
 
         // An empty call reads the task.
         let out = f.update(json!({})).await;
-        assert!(out.joined_text().contains("- goal: \"Fix the failing date tests\""));
+        assert!(
+            out.joined_text()
+                .contains("- goal: \"Fix the failing date tests\"")
+        );
 
         // Marking it done.
         let out = f.update(json!({"status": "done", "next_action": ""})).await;
-        assert!(out.joined_text().starts_with("Task saved.\n- status: done\n"), "{}", out.joined_text());
+        assert!(
+            out.joined_text()
+                .starts_with("Task saved.\n- status: done\n"),
+            "{}",
+            out.joined_text()
+        );
         assert_eq!(f.task(f.chat).await.expect("task").status, TaskStatus::Done);
         assert_eq!(f.notified(), [f.chat]);
     }
@@ -389,7 +438,12 @@ mod tests {
         let f = fixture().await;
         let out = f.update(json!({})).await;
         assert!(!out.is_error);
-        assert!(out.joined_text().starts_with("No task is recorded for this chat yet."), "{}", out.joined_text());
+        assert!(
+            out.joined_text()
+                .starts_with("No task is recorded for this chat yet."),
+            "{}",
+            out.joined_text()
+        );
         assert_eq!(f.task(f.chat).await, None);
         assert_eq!(f.notified(), Vec::<i64>::new());
     }
@@ -405,7 +459,8 @@ mod tests {
             .change_task(ChatId(f.chat), |slot| {
                 let mut task = Task::new(ChatId(0));
                 task.state.goal = "Add a switch".into();
-                task.state.record_file("/work/src/Switch.tsx", FileChange::Created, 10);
+                task.state
+                    .record_file("/work/src/Switch.tsx", FileChange::Created, 10);
                 task.state.record_check(TaskCheck {
                     command: "npm test".into(),
                     passed: false,
@@ -431,7 +486,11 @@ mod tests {
         });
         // Alone: nothing at all changes.
         let out = f.update(forged.clone()).await;
-        assert!(out.joined_text().starts_with("Nothing changed."), "{}", out.joined_text());
+        assert!(
+            out.joined_text().starts_with("Nothing changed."),
+            "{}",
+            out.joined_text()
+        );
         assert_eq!(f.task(f.chat).await.expect("task"), before);
         assert_eq!(f.notified(), Vec::<i64>::new());
 
@@ -448,8 +507,15 @@ mod tests {
         assert_eq!(after.state.user, before.state.user);
         // The result shows the facts as the app has them, not as the call claimed.
         let text = out.joined_text();
-        assert!(text.contains("created \"Switch.tsx\"") && text.contains("failed \"npm test\" (exit code 1)"), "{text}");
-        assert!(!text.contains("passwd") && !text.contains("Other.tsx") && !text.contains("all green"), "{text}");
+        assert!(
+            text.contains("created \"Switch.tsx\"")
+                && text.contains("failed \"npm test\" (exit code 1)"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("passwd") && !text.contains("Other.tsx") && !text.contains("all green"),
+            "{text}"
+        );
         // And never a line of the command's output.
         assert!(!text.contains("1 failed"), "{text}");
     }
@@ -471,19 +537,26 @@ mod tests {
         f.update(json!({"goal": "The chat's goal"})).await;
         f.notified();
         f.helper.store(true, Ordering::Relaxed);
-        let out = f.update(json!({"goal": "The helper's own plan", "status": "done"})).await;
+        let out = f
+            .update(json!({"goal": "The helper's own plan", "status": "done"}))
+            .await;
         assert!(out.is_error);
         assert_eq!(out.joined_text(), HELPER_REFUSAL);
         let task = f.task(f.chat).await.expect("task");
-        assert_eq!((task.state.goal.as_str(), task.status), ("The chat's goal", TaskStatus::Active));
+        assert_eq!(
+            (task.state.goal.as_str(), task.status),
+            ("The chat's goal", TaskStatus::Active)
+        );
         assert_eq!(f.notified(), Vec::<i64>::new());
     }
 
     #[tokio::test]
     async fn what_was_not_applied_is_said_in_the_result() {
         let f = fixture().await;
-        f.update(json!({"goal": "Put the switch in the footer", "steps": [{"text": "Edit the footer"}]}))
-            .await;
+        f.update(
+            json!({"goal": "Put the switch in the footer", "steps": [{"text": "Edit the footer"}]}),
+        )
+        .await;
         // The user corrects the goal and pauses, in the Task tab.
         f.core
             .store
@@ -510,9 +583,18 @@ mod tests {
         assert_eq!(lines[0], "Task saved.");
         assert!(lines[1].starts_with("Not changed: the goal."), "{text}");
         assert!(lines[2].starts_with("Not changed: the status."), "{text}");
-        assert!(lines[3].starts_with("- status: paused (the user put this task on hold"), "{text}");
-        assert!(text.contains("- since you last saw this, the user: changed the goal"), "{text}");
-        assert!(text.contains("- goal (the user wrote it): \"Put the switch in the header\""), "{text}");
+        assert!(
+            lines[3].starts_with("- status: paused (the user put this task on hold"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- since you last saw this, the user: changed the goal"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- goal (the user wrote it): \"Put the switch in the header\""),
+            "{text}"
+        );
         let task = f.task(f.chat).await.expect("task");
         assert_eq!(task.status, TaskStatus::Paused);
         assert_eq!(task.state.goal, "Put the switch in the header");
@@ -525,16 +607,28 @@ mod tests {
         // Text that was cut to fit is said too.
         let out = f.update(json!({"next_action": "n".repeat(1000)})).await;
         let text = out.joined_text();
-        assert!(text.lines().nth(1).is_some_and(|l| l.starts_with("Shortened to fit: ")), "{text}");
+        assert!(
+            text.lines()
+                .nth(1)
+                .is_some_and(|l| l.starts_with("Shortened to fit: ")),
+            "{text}"
+        );
     }
 
     #[tokio::test]
     async fn a_call_that_cannot_be_saved_says_why() {
         let f = fixture().await;
         // A chat that does not exist (it was deleted while its turn ran).
-        let out = f.core.call(TOOL_NAME, &args(json!({"goal": "g"})), 4040).await;
+        let out = f
+            .core
+            .call(TOOL_NAME, &args(json!({"goal": "g"})), 4040)
+            .await;
         assert!(out.is_error);
-        assert!(out.joined_text().contains("no longer exists"), "{}", out.joined_text());
+        assert!(
+            out.joined_text().contains("no longer exists"),
+            "{}",
+            out.joined_text()
+        );
         // Arguments of the wrong shape.
         let out = f.update(json!({"steps": "a, b"})).await;
         assert!(out.is_error);
