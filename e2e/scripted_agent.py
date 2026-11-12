@@ -2640,10 +2640,159 @@ def p_capability_check(c, notes):
             pass
 
 
+@probe("context-inspector")
+def p_context_inspector(c, notes):
+    """The context inspector (0.0.4): with a pin, a task, a mention and tools on, the Context
+    tab lists what the next request contains; Copy all has the system prompt and the pin;
+    looking changes nothing; the request then sent is what the tab showed; a user message
+    is pinned with its Pin action, and only the user's own message can be."""
+    s = c.s
+    aside = 'aside[aria-label="Workbench"]'
+    pin_text = "Answer in German."
+    tools = [t for t in ["read_file", "list_dir", "update_task"] if t in c.all_tools]
+    chat = new_chat(c, tools=tools)
+    s.invoke("rename_chat", {"chatId": chat, "title": "Inspector"})
+    s.invoke("add_pin", {"chatId": chat, "text": pin_text, "everyChat": False})
+    notes_file = c.work / "inspector-notes.txt"
+    notes_file.write_text("the meeting is on Tuesday\n")
+
+    # A first turn with a mention: the model records a task.
+    Fake.queue.append({"tool_calls": [{"name": "update_task", "arguments": {
+        "goal": "Plan the meeting", "steps": [{"text": "Read the notes", "status": "done"}],
+        "next_action": "Write the agenda"}}]})
+    Fake.queue.append({"content": "The task is recorded."})
+    sent = s.execute_async(
+        """
+        const [chatId, path, done] = arguments;
+        const cb = window.__TAURI_INTERNALS__.transformCallback(() => {});
+        window.__TAURI_INTERNALS__.invoke('send_message', {chatId, text: 'Plan the meeting from my notes', parentId: null,
+            mentions: [{path}], onEvent: '__CHANNEL__:' + cb})
+          .then(() => done({ok: true}))
+          .catch(e => done({ok: false, error: e}));
+        """, chat, str(notes_file))
+    assert sent.get("ok"), sent
+    # The user changes the next action, so the next turn carries the task note.
+    s.invoke("edit_task", {"chatId": chat, "edit": {"nextAction": "Write the agenda for Tuesday"}})
+
+    s.execute("window.location.reload();")
+    time.sleep(1.5)
+    s.wait_for(lambda: "Inspector" in s.page_text(), 20, "sidebar after reload")
+    s.execute(HOOK)
+    s.execute("[...document.querySelectorAll('nav[aria-label=\"Chat history\"] button')].find(b => b.innerText.includes('Inspector')).click();")
+    time.sleep(0.8)
+    s.click_button("Panel")
+    s.wait_for(lambda: s.execute(f"return !!document.querySelector('{aside}');"), 10, "the panel")
+    s.execute(f"[...document.querySelectorAll('{aside} [role=tab]')].find(b => b.innerText.includes('Context')).click();")
+    s.wait_for(lambda: s.execute(f"return document.querySelectorAll('{aside} [data-section]').length;") == 11, 15, "the sections")
+
+    def detail(section):
+        return s.execute(f"const e = document.querySelector('{aside} [data-section=\"{section}\"] [data-section-detail]'); return e ? e.innerText : null;")
+
+    titles = s.execute(f"return [...document.querySelectorAll('{aside} [data-section] button .font-medium')].map(e => e.innerText);")
+    assert titles == ["System prompt", "Pinned instructions", "Tool instructions", "Skills list", "Loaded skills",
+                      "Tool definitions", "Summary of earlier messages", "Messages kept", "Messages left out",
+                      "Task note", "Attachments"], titles
+    assert detail("pinned") == "1 pin", detail("pinned")
+    tools_line = detail("tools")
+    notes.append("tools: " + tools_line)
+    assert "read_file" in tools_line, tools_line
+    task_line = detail("task")
+    notes.append("task: " + task_line)
+    assert task_line and task_line != "None", task_line
+    assert "inspector-notes.txt" in detail("attachments"), detail("attachments")
+    totals = s.execute(f"const e = document.querySelector('{aside} [data-inspector-totals]'); return e ? e.innerText : null;")
+    assert totals and "of 32,768 tokens" in totals, totals
+    # The pin's text, when its row is opened.
+    s.execute(f"document.querySelector('{aside} [data-section=\"pinned\"] button').click();")
+    time.sleep(0.3)
+    assert pin_text in s.execute(f"return document.querySelector('{aside} [data-section=\"pinned\"]').innerText;")
+    s.screenshot(str(OUT / "context-inspector.png"))
+
+    # Copy all: what goes to the clipboard has the system prompt and the pin.
+    s.execute("""
+        window.__copied = null;
+        const internals = window.__TAURI_INTERNALS__;
+        const original = internals.invoke.bind(internals);
+        internals.invoke = (cmd, args, options) => {
+          if (String(cmd).includes('clipboard')) window.__copied = JSON.stringify(args);
+          return original(cmd, args, options);
+        };
+    """)
+    s.execute(f"[...document.querySelectorAll('{aside} button')].find(b => b.innerText.trim() === 'Copy all').click();")
+    s.wait_for(lambda: s.execute("return window.__copied;"), 10, "the copied text")
+    copied = s.execute("return window.__copied;")
+    view = s.invoke("inspect_context", {"chatId": chat})
+    system_prompt = next(x for x in view["sections"] if x["id"] == "system")["text"]
+    assert system_prompt and json.dumps(system_prompt)[1:-1] in copied, (system_prompt, copied[:300])
+    assert pin_text in copied, copied[:600]
+    # No key and no address in what the tab gets.
+    for secret in ("sk-test", "127.0.0.1"):
+        assert secret not in json.dumps(view) and secret not in copied, secret
+
+    # Looking changes nothing: the database and the chat's remembered tools stay as they were.
+    def snapshot():
+        con = sqlite3.connect(c.db)
+        try:
+            rows = {}
+            for table, where in [("tasks", "chat_id = ?"), ("chats", "id = ?"), ("tool_outputs", "chat_id = ?"),
+                                 ("audit_log", "chat_id = ?"), ("pinned_instructions", "chat_id = ?"),
+                                 ("messages", "chat_id = ?")]:
+                try:
+                    rows[table] = con.execute(f"SELECT * FROM {table} WHERE {where} ORDER BY rowid", (chat,)).fetchall()
+                except sqlite3.OperationalError as e:
+                    rows[table] = str(e)
+            rows["audit_all"] = con.execute("SELECT count(*) FROM audit_log").fetchone()
+            return rows
+        finally:
+            con.close()
+    before = snapshot()
+    first = s.invoke("inspect_context", {"chatId": chat})
+    second = s.invoke("inspect_context", {"chatId": chat})
+    assert snapshot() == before, "looking at the context changed the database"
+    assert first == second == view, "two looks gave different answers"
+
+    # The request the next turn sends is what the tab showed just before.
+    Fake.requests.clear()
+    Fake.queue.append({"content": "Here is the agenda."})
+    send(s, "and now the agenda please")
+    wait_idle(s)
+    assert Fake.requests, "nothing was sent"
+    req = Fake.requests[0]
+    blocks = [x["text"] for x in view["sections"] if x["id"] in ("system", "pinned", "preamble", "skills", "loadedSkills", "summary") and x["text"]]
+    assert req["messages"][0]["content"] == "\n\n".join(blocks), (req["messages"][0]["content"][:400], blocks)
+    shown_tools = [json.loads(chunk) for chunk in next(x for x in view["sections"] if x["id"] == "tools")["text"].split("\n\n") if chunk]
+    assert [t["function"]["name"] for t in req.get("tools", [])] == [t["function"]["name"] for t in shown_tools], tools_line
+    assert req.get("tools", []) == shown_tools, "the tool definitions differ"
+    task_note = next(x for x in view["sections"] if x["id"] == "task")["text"]
+    last_user = [m for m in req["messages"] if m["role"] == "user"][-1]
+    last_text = last_user["content"] if isinstance(last_user["content"], str) else json.dumps(last_user["content"])
+    assert task_note and task_note.splitlines()[0] in last_text, (task_note[:200], last_text[-400:])
+    kept = next(x for x in view["sections"] if x["id"] == "kept")["text"]
+    for m in req["messages"][1:-1]:
+        content = m.get("content")
+        text = content if isinstance(content, str) else "\n".join(p.get("text", "") for p in (content or []) if isinstance(p, dict))
+        assert text in kept, ("a sent message was not shown", text[:200])
+
+    # The Pin action on the user's own message: it appears in the list through the event.
+    first_user = [m for m in messages(s, chat) if m["role"] == "user"][0]
+    s.execute("document.querySelector(arguments[0]).click();", f'button[data-pin-message="{first_user["id"]}"]')
+    s.wait_for(lambda: "Plan the meeting from my notes" in s.execute(f"return document.querySelector('{aside}').innerText;"), 10, "the pinned message listed")
+    pins = [p["text"] for p in s.invoke("list_pins", {"chatId": chat})["pins"]]
+    assert pins == [pin_text, "Plan the meeting from my notes"], pins
+    # Only the user's own message: the model's is refused.
+    answer = [m for m in messages(s, chat) if m["role"] == "assistant"][-1]
+    try:
+        s.invoke("pin_message", {"chatId": chat, "messageId": answer["id"]})
+        raise AssertionError("the model's message was pinned")
+    except WebDriverError as e:
+        assert "Only a message you wrote in this chat can be pinned." in str(e), e
+    s.click_button("Panel")
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
           p_tool_selection, p_artifacts, p_search, p_pinned,
-          p_tool_errors_output, p_task_state, p_mentions, p_capability_check]
+          p_tool_errors_output, p_task_state, p_mentions, p_capability_check, p_context_inspector]
 
 
 def main() -> int:
