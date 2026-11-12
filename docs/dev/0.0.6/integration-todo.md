@@ -19,3 +19,8 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   WP6 also fixed a classifier-wide bug: a backslash before CR LF let `echo \<CR><LF>rm -rf x`
   read as one `echo` command (a grant for echo covered it; Allow all ran it); any carriage
   return in a POSIX line now makes the line complex. Document in ARCHITECTURE 13.3.
+- **Item 4 (WP4a, WP4b, WP4c) done**, no open findings. WP4a saw the `compare-models` e2e
+  scenario fail twice in three runs (a race in its final add loop, which checked buttons
+  once without waiting); re-run it several times at integration and confirm WP4b's fix.
+  WP4c's table of quotes (in its report, journal of wf_da155c8a-e67) goes to the owner for
+  review before release.

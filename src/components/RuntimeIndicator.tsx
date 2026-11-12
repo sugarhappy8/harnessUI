@@ -291,9 +291,11 @@ function Status() {
               <span aria-hidden>·</span>Used by another app
             </span>
           )}
-          <span className="flex items-center gap-1.5">
-            <span aria-hidden>·</span>
-            <button type="button" onClick={settings} className="underline hover:text-fg">
+          {/* A pointer shortcut for the menu's Model settings…, which the keyboard and
+              screen readers use (this one may sit on the clipped row). */}
+          <span className="flex items-center gap-1.5" aria-hidden>
+            <span>·</span>
+            <button type="button" tabIndex={-1} onClick={settings} className="underline hover:text-fg">
               Change
             </button>
           </span>

@@ -674,6 +674,142 @@ fn a_after_a_run_word_of_any_program() {
     }
 }
 
+/// (a) After a run word, an option of the program's own that takes no value (`--frozen`,
+/// `--no-project`, `--verbose`) does not hide the program that follows it, nor does an
+/// option with a value before the run word (`uv --directory . run claude`); only the value
+/// of an option known to take a label (`--model claude`, `--name codex`) is left out, and
+/// the value of any other option counts (`tb run --agent claude-code`) (review of 0.0.6,
+/// round 3).
+#[test]
+fn a_after_a_run_word_past_options_of_its_own() {
+    for line in [
+        "uv run --no-project claude -p 'fix it'",
+        "uv run --no-project claude -p '…'",
+        "uv run --frozen claude",
+        "conda run --no-capture-output claude",
+        "bundle exec --keep-file-descriptors claude",
+        "poetry run --verbose claude",
+        "pixi run --frozen claude",
+        "devbox run --pure claude",
+        "mise exec --yes claude",
+        "uv --directory . run claude",
+        "uv --directory . --cache-dir /tmp/c --python 3.12 run claude -p x",
+        "uv run --frozen --no-sync --isolated codex exec x",
+        "docker run --rm --init img claude -p x",
+        "pixi run --frozen --environment dev claude -p x",
+        "poetry run --verbose python app.py; poetry run --quiet claude",
+        "tb run --agent claude-code -t x",
+        "sometool run --provider codex",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "poetry run --verbose python app.py --model claude",
+        "uv run --frozen python app.py --model codex",
+        "docker run --name claude img cargo test",
+        "uv --directory . run pytest",
+        "cargo run --release -- --name codex",
+        "gdb --args ./app --model codex",
+        "conda run --name claude python x.py",
+    ] {
+        assert_not_seen(SH, line);
+    }
+}
+
+/// (a) A pattern in the place of the program that a wrapper or a run word runs, after the
+/// wrapper's own values (`timeout 9`, `nice -n 5`, `sudo -u me`) or after the run word
+/// (`uv run c*`), is read as any pattern the shell can expand to an assistant's name, as
+/// in the program's own place: one fixed letter is enough (`~/.local/bin/c*`). Where the
+/// word before may have been an option's value, at least one letter must be fixed, so
+/// `tests/*` stays an argument (review of 0.0.6, round 3).
+#[test]
+fn a_a_pattern_in_the_program_place_after_a_wrapper_or_run_word() {
+    for line in [
+        "timeout 9 ~/.local/bin/c* -p x",
+        "nice -n 5 ~/.local/bin/c* -p x",
+        "uv run ~/.local/bin/c* -p x",
+        "uv run c* -p x",
+        "timeout 9s c* -p x",
+        "sudo -u me ~/.local/bin/c* -p x",
+        "env -i PATH=/usr/bin c* -p x",
+        "runuser -u me -- c* -p x",
+        "timeout 9 pixi run c* -p x",
+        "nice -n 5 uv run ~/.local/bin/c* -p x",
+        "uv run --frozen c* -p x",
+        "uv run --with rich ~/.local/bin/c* -p x",
+        "conda run -n env c* -p x",
+        "nvm exec 20 c* -p x",
+        "kubectl exec pod -- c* -p x",
+        "mise exec -- ~/.local/bin/c* -p x",
+        "docker run --rm -it img c* -p x",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "timeout 5 ls *",
+        "nice -n 5 ls *",
+        "sudo -u me ls *",
+        "nohup tar czf a.tgz *",
+        "uv run pytest tests/*",
+        "uv run --frozen pytest tests/*",
+        "conda run -n env python *.py",
+        "nvm exec 20 node *",
+        "kubectl exec pod -- ls *",
+        "timeout 9 bundle exec rake *",
+    ] {
+        assert_not_seen(SH, line);
+    }
+}
+
+/// Reading a line many ways stays linear in parentheses and backticks: a line of 16 KB or
+/// 64 KB full of `(` or `` ` `` that never close nearby, or of locators that never close,
+/// is read in bounded time, and comes out ordinary or past the limit of work (review of
+/// 0.0.6, round 3). What is timed is this rule ([`find`]) on what the classifier made of
+/// the line. The limits are generous for slow runners; a debug build takes a small part of
+/// them.
+#[test]
+fn parentheses_and_backticks_stay_linear() {
+    let lines = |size: usize| {
+        [
+            format!("{})", "a(".repeat(size / 2)),
+            format!("echo {}", "(a".repeat(size / 2)),
+            format!("{}`", "a`b".repeat(size / 3)),
+            format!("echo `{}", "a `x ".repeat(size / 5)),
+            format!("{}claude)", "$(which ".repeat(size / 8)),
+            "(which (".repeat(size / 8),
+            "& (gcm ".repeat(size / 7),
+            format!("{} -p x", "$(".repeat(size / 2)),
+        ]
+    };
+    for (size, limit) in [(16 * 1024, 5), (64 * 1024, 15)] {
+        for line in lines(size) {
+            assert!(line.len() >= size - 8, "{}", line.len());
+            for shell in [SH, PS] {
+                let parsed = parse(shell, &line);
+                let started = std::time::Instant::now();
+                let found = find(&line, &parsed);
+                let took = started.elapsed();
+                assert!(
+                    took < std::time::Duration::from_secs(limit),
+                    "{shell:?}, {} bytes starting {:?}: {took:?}",
+                    line.len(),
+                    &line[..24]
+                );
+                if let Some(why) = found
+                    && why != TOO_MUCH
+                {
+                    // Only a line that names an assistant may be seen for it.
+                    assert!(
+                        line.contains("claude"),
+                        "{shell:?} {:?}: {why}",
+                        &line[..24]
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// (b) A package runner handed an assistant's package, in every form a runner takes it.
 #[test]
 fn b_a_package_runner_handed_an_assistant() {

@@ -1034,6 +1034,24 @@ describe("OtherApps: setup cards", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("keeps the chosen Windows or Mac tab when the card is made again, and for the other apps", async () => {
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    await click(within(screen.getByRole("region", { name: "Set up Claude Code" })).getByRole("tab", { name: "Mac" }));
+    // A new key: the card is made again (with the new key) and still shows the Mac steps.
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    expect(ipcMock.shareSetup).toHaveBeenCalledTimes(2);
+    const again = screen.getByRole("region", { name: "Set up Claude Code" });
+    expect(within(again).getByRole("tab", { name: "Mac" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(again).getByText("Open Terminal and paste these lines.")).toBeTruthy();
+    // Codex opens on the Mac tab too.
+    await click(screen.getByRole("button", { name: "Codex" }));
+    const codex = screen.getByRole("region", { name: "Set up Codex" });
+    expect(within(codex).getByRole("tab", { name: "Mac" }).getAttribute("aria-selected")).toBe("true");
+  });
+
   it("remembers each app's copied setup on its own", async () => {
     vi.useFakeTimers();
     statusNow = ON({ modelCtx: 32_768 });

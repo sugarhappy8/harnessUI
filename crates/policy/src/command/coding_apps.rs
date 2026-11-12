@@ -34,6 +34,7 @@
 //! and with its escapes taken away too (the POSIX shell runs `cod\ex` as `codex`), each
 //! with two lines joined by a backslash read as one and with braces expanded. Reading a
 //! line many ways has a limit of work; a line beyond it counts as starting an assistant.
+//! A locator's command longer than [`MAX_LOCATOR_SPAN`] is not read.
 //!
 //! Known limits: this reads names. A copy of one of these programs under another name, or
 //! a link to it (`ln -s "$(which claude)" helper; ./helper -p …`), is not seen, nor is code
@@ -238,6 +239,13 @@ const LONG_RUN_FLAGS: &[&str] = &[
 /// '…'`, `xterm -e claude`): only the next word counts, since these letters mean other
 /// things to other programs.
 const SHORT_RUN_FLAGS: &[&str] = &["-c", "-e", "-x"];
+
+/// Long options known to take the next word as their value whatever the program, a label
+/// and not a program (`--model claude`, `--name codex`): after a run word, that word is
+/// not read as a program. Any other long option may take no value
+/// (`uv run --frozen claude`) or may name the assistant a harness runs
+/// (`tb run --agent claude-code`), so the word after it is read.
+const LONG_VALUE_FLAGS: &[&str] = &["--model", "--name"];
 
 /// Programs whose `run` or `--` means something else: npm runs a project's scripts (its
 /// programs run through `npm exec`, rule (b)), and git's `--` comes before file names.
@@ -748,14 +756,23 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
         // Any program that runs what follows a word such as `run`, `exec` or `--`.
         return after_a_run_word(program, name, args, depth);
     }
-    if wraps
-        && let Some(found) = words(args)
+    if wraps {
+        // An assistant named among its words, or a pattern in the place of the program it
+        // runs (`timeout 9 ~/.local/bin/c*`).
+        let mut place = ProgramPlace::new();
+        let found = words(args)
             .into_iter()
             .find(|w| is_assistant(w) || names_package_path(w))
-    {
-        return Some(format!(
-            "{program} runs {found}, a coding assistant that works online with your account"
-        ));
+            .or_else(|| {
+                args.iter()
+                    .map(String::as_str)
+                    .find(|a| place.next(a).is_some_and(|fixed| names_assistant(a, fixed)))
+            });
+        if let Some(found) = found {
+            return Some(format!(
+                "{program} runs {found}, a coding assistant that works online with your account"
+            ));
+        }
     }
     // A command handed over as one argument (`sh -c "…"`, `cmd /c "…"`), read on its own.
     for arg in args.iter().filter(|a| a.contains(char::is_whitespace)) {
@@ -772,12 +789,15 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
     {
         return Some(why);
     }
-    // The program a wrapper runs, in the place after its own options and settings
-    // (`env nix run nixpkgs#claude-code`, `sudo kubectl exec pod -- codex`).
-    let program_at = args
-        .iter()
-        .position(|a| !a.starts_with('-') && !a.contains('='))
-        .filter(|_| wraps);
+    // The program a wrapper runs, in the place after its own options, settings and numbers
+    // (`env nix run nixpkgs#claude-code`, `sudo kubectl exec pod -- codex`,
+    // `timeout 9 pixi run …`).
+    let program_at = wraps
+        .then(|| {
+            let mut place = ProgramPlace::new();
+            args.iter().position(|a| place.next(a).is_some())
+        })
+        .flatten();
     if let Some(at) = program_at
         && let Some(why) = command(&args[at], &args[at + 1..], depth + 1)
     {
@@ -803,16 +823,24 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
 /// Why a program that runs what follows one of its words (`uv run claude`, `bundle exec
 /// codex`, `kubectl exec pod -- claude`, `docker run img claude`, `nix develop -c claude`)
 /// starts a coding assistant, if it does. The word is one of [`RUN_WORDS`] among its first
-/// three plain words, or one of [`LONG_RUN_FLAGS`] anywhere; from there on, every plain
-/// word that names an assistant (or its package, or holds a command line that starts one)
-/// counts, except the value of a long option (`--model claude`). After one of
-/// [`SHORT_RUN_FLAGS`] only the next word counts. Programs that only read are left out.
+/// three plain words (the value of a long option before it not counted:
+/// `uv --directory . run`), or one of [`LONG_RUN_FLAGS`] anywhere; from there on, every
+/// plain word that names an assistant (or its package, or holds a command line that starts
+/// one) counts, except the value of an option known to take one ([`LONG_VALUE_FLAGS`]:
+/// `--model claude`); any other option may take no value (`uv run --frozen claude`). A
+/// pattern in the program's place counts as in the place of a wrapper's program
+/// ([`ProgramPlace`]: `uv run c*`). After one of [`SHORT_RUN_FLAGS`] only the next word
+/// counts. Programs that only read are left out.
 fn after_a_run_word(program: &str, name: &str, args: &[String], depth: usize) -> Option<String> {
     if OWN_RUN_WORDS.contains(&name) || READ_ONLY.contains(&name) {
         return None;
     }
-    let runs = |word: &str| -> Option<String> {
-        if is_assistant(word) || names_assistant_package(word) {
+    // `fixed`: where the word may be the program, how many letters a pattern in it must fix.
+    let runs = |word: &str, fixed: Option<usize>| -> Option<String> {
+        if is_assistant(word)
+            || fixed.is_some_and(|fixed| names_assistant(word, fixed))
+            || names_assistant_package(word)
+        {
             let found = word.trim();
             return Some(format!(
                 "{program} runs {found}, a coding assistant that works online with your account"
@@ -825,52 +853,135 @@ fn after_a_run_word(program: &str, name: &str, args: &[String], depth: usize) ->
     };
     let mut plain = 0;
     let mut started = false;
+    // Whether the word before was a long option that may take this word as its value.
     let mut skip_value = false;
+    let mut place = ProgramPlace::new();
     for (i, arg) in args.iter().enumerate() {
         let lower = arg.to_lowercase();
         if SHORT_RUN_FLAGS.contains(&lower.as_str()) {
-            if let Some(why) = args.get(i + 1).and_then(|next| runs(next)) {
+            if let Some(why) = args.get(i + 1).and_then(|next| runs(next, None)) {
                 return Some(why);
             }
             skip_value = false;
+            place.next(arg);
             continue;
         }
         if let Some((flag, _)) = lower.split_once('=')
             && LONG_RUN_FLAGS.contains(&flag)
         {
-            if let Some(why) = runs(&arg[flag.len() + 1..]) {
+            let value = &arg[flag.len() + 1..];
+            if let Some(why) = runs(value, Some(0)) {
                 return Some(why);
             }
             started = true;
             skip_value = false;
+            // The value is the program: what follows are its arguments.
+            place = ProgramPlace::new();
+            place.next(value);
             continue;
         }
         if LONG_RUN_FLAGS.contains(&lower.as_str()) {
             started = true;
             skip_value = false;
-            continue;
-        }
-        if arg.starts_with("--") {
-            skip_value = !arg.contains('=');
+            place = ProgramPlace::new();
             continue;
         }
         if arg.starts_with('-') {
-            skip_value = false;
+            // Before the run word, any long option may take the next word as its value;
+            // after it, only one known to take one does.
+            skip_value = arg.starts_with("--")
+                && !arg.contains('=')
+                && (!started || LONG_VALUE_FLAGS.contains(&lower.as_str()));
+            place.next(arg);
             continue;
         }
-        plain += 1;
+        let value = std::mem::take(&mut skip_value);
         if !started {
-            started = plain <= 3 && RUN_WORDS.contains(&lower.as_str());
+            plain += usize::from(!value);
+            if plain <= 3 && RUN_WORDS.contains(&lower.as_str()) {
+                started = true;
+                place = ProgramPlace::new();
+            }
             continue;
         }
-        if std::mem::take(&mut skip_value) {
+        if value {
+            place.value();
             continue;
         }
-        if let Some(why) = runs(arg) {
+        let fixed = place.next(arg);
+        if let Some(why) = runs(arg, fixed) {
             return Some(why);
         }
     }
     None
+}
+
+/// Where the program that a wrapper or a run word runs stands among the words after it,
+/// read one word at a time: the first plain word past options, settings (`FOO=1`) and
+/// numbers (`timeout 9`, `nice -n 5`). A word right after an option may be the option's
+/// value, so the word after it may be the program too; such places are less sure.
+struct ProgramPlace {
+    /// Whether no word so far may have been the program.
+    sure: bool,
+    /// Whether the word before was an option that may take the next word as its value.
+    after_option: bool,
+    /// Whether the program's place is behind.
+    passed: bool,
+}
+
+impl ProgramPlace {
+    fn new() -> Self {
+        Self {
+            sure: true,
+            after_option: false,
+            passed: false,
+        }
+    }
+
+    /// For the next word: whether it may be the program and, if so, how many letters a
+    /// pattern in it must fix to name an assistant: none in a sure place (as in the
+    /// program's own place), one where the word before may have been an option's value
+    /// (so `tests/*` there stays an argument).
+    fn next(&mut self, word: &str) -> Option<usize> {
+        if self.passed {
+            return None;
+        }
+        if word.starts_with('-') {
+            self.after_option = !word.contains('=');
+            return None;
+        }
+        if word.contains('=') || is_number(word) {
+            self.after_option = false;
+            return None;
+        }
+        let maybe_value = std::mem::take(&mut self.after_option);
+        let fixed = usize::from(!self.sure || maybe_value);
+        if maybe_value {
+            self.sure = false;
+        } else {
+            self.passed = true;
+        }
+        Some(fixed)
+    }
+
+    /// The next word is the value of the option before it.
+    fn value(&mut self) {
+        self.after_option = false;
+    }
+}
+
+/// Whether a word is a number, a duration, a mask or a list of them (`9`, `9s`, `1.5m`,
+/// `+5`, `0-3`, `0x3`): a wrapper's own value, not a program.
+fn is_number(word: &str) -> bool {
+    let word = word.strip_prefix('+').unwrap_or(word);
+    if let Some(hex) = word.strip_prefix("0x") {
+        return !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    let word = word.strip_suffix(['s', 'm', 'h', 'd']).unwrap_or(word);
+    word.starts_with(|c: char| c.is_ascii_digit())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | ':' | '-'))
 }
 
 /// Whether a command runs the commands it reads on standard input: a shell handed no
@@ -1005,10 +1116,18 @@ fn quoted_strings(code: &str) -> Vec<String> {
     out
 }
 
+/// How far after a `(` or a backtick its end is looked for when a locator's command may
+/// be inside: such a command is short (`$(which claude)`, `(Get-Command claude).Source`).
+/// A longer one is not read (known limit); the bound keeps each `(` cheap.
+const MAX_LOCATOR_SPAN: usize = 1024;
+
 /// A command substitution that only finds a coding assistant (`$(which claude)`,
 /// `` `command -v codex` ``, `(Get-Command claude)`) replaced by the name it finds, so the
 /// name stands where the program is run: `$(which claude) -p x` reads as `claude -p x`.
-fn resolve_locators(text: &str) -> String {
+/// Only a substitution whose first word is a locator's and that ends within
+/// [`MAX_LOCATOR_SPAN`] is read, and the text that takes counts against the limit of work:
+/// `None` past it.
+fn resolve_locators(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     // Whether the command being read has a word before the current point.
@@ -1027,9 +1146,6 @@ fn resolve_locators(text: &str) -> String {
         let paren = rest[open..].starts_with('(');
         let close = if paren { ')' } else { '`' };
         let after_open = &rest[open + 1..];
-        let Some(end) = after_open.find(close) else {
-            break;
-        };
         let head = &rest[..open];
         let word_before = after(has_word, head.strip_suffix('$').unwrap_or(head));
         // PowerShell's `( … )` gives a value: `&` or `.` in front of it runs it, and as an
@@ -1037,18 +1153,29 @@ fn resolve_locators(text: &str) -> String {
         // (Get-Command claude).Source`). In the program's own place it is only a value.
         let runs =
             !paren || head.ends_with('$') || head.trim_end().ends_with(['&', '.']) || word_before;
-        let words = shell_words(&after_open[..end]);
-        let found = match words.split_first() {
-            Some((first, more)) if runs && LOCATORS.contains(&program_name(first).as_str()) => {
-                more.iter().find(|w| !w.starts_with('-') && is_assistant(w))
+        let mut found = None;
+        let window = cut(after_open, MAX_LOCATOR_SPAN);
+        if runs && may_be_locator(window) {
+            let end = window.find(close);
+            if too_much(end.map_or(window.len(), |end| 2 * end + 1)) {
+                return None;
             }
-            _ => None,
-        };
+            if let Some(end) = end {
+                let words = shell_words(&after_open[..end]);
+                found = match words.split_first() {
+                    Some((first, more)) if LOCATORS.contains(&program_name(first).as_str()) => more
+                        .iter()
+                        .find(|w| !w.starts_with('-') && is_assistant(w))
+                        .map(|name| (name.clone(), end)),
+                    _ => None,
+                };
+            }
+        }
         match found {
-            Some(name) => {
+            Some((name, end)) => {
                 out.push_str(head.strip_suffix('$').unwrap_or(head));
                 out.push(' ');
-                out.push_str(name);
+                out.push_str(&name);
                 out.push(' ');
                 has_word = true;
                 rest = &after_open[end + 1..];
@@ -1061,7 +1188,37 @@ fn resolve_locators(text: &str) -> String {
         }
     }
     out.push_str(rest);
-    out
+    Some(out)
+}
+
+/// At most the first `max` bytes of a text, cut at a character's start.
+fn cut(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// Whether the command at the start of `text` (just after a `(` or backtick) may be a
+/// locator's: its first word, quoted or up to white space or the next `(`, `)` or
+/// backtick, names one. Cheap, so that a line of many `(` is read in linear time: the
+/// first words of two of them do not overlap, except quoted ones, which end at the next
+/// quote.
+fn may_be_locator(text: &str) -> bool {
+    let text = text.trim_start();
+    let first = match text.chars().next() {
+        Some(quote @ ('\'' | '"')) => text[1..].split(quote).next().unwrap_or_default(),
+        _ => text
+            .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '`'))
+            .next()
+            .unwrap_or_default(),
+    };
+    let name: String = first
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '^'))
+        .collect();
+    LOCATORS.contains(&program_name(&name).as_str())
 }
 
 /// The words a word gives once the shell expands its braces (`{claude,}` gives `claude`,
@@ -1280,7 +1437,9 @@ fn in_text(line: &str, depth: usize) -> Option<String> {
             }
         }
         for text in [base, unquoted, unescaped] {
-            let located = resolve_locators(&text);
+            let Some(located) = resolve_locators(&text) else {
+                return Some(TOO_MUCH.into());
+            };
             let expanded = expand_braces(&located);
             for reading in [located, expanded] {
                 if !readings.contains(&reading) {

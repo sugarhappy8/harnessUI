@@ -143,7 +143,10 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     await show(status());
     expect(text()).toContain("Remembers about 24,000 words (Automatic)");
     expect(text()).not.toMatch(/vulkan|Vulkan0|context/);
-    await click(screen.getByRole("button", { name: "Change" }));
+    // A pointer shortcut (the keyboard and screen readers use the menu's Model settings…).
+    const change = screen.getByRole("button", { name: "Change", hidden: true });
+    expect(change.tabIndex).toBe(-1);
+    await click(change);
     expect((opened.mock.calls[0]?.[0] as CustomEvent).detail).toBe("/models/a.gguf");
     window.removeEventListener("app:open-model-settings", opened);
   });

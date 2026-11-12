@@ -5,13 +5,14 @@
 // restart (the first reply after it is slower).
 //
 // No React here: questions are shown by a `QuestionHost` (ModelSettings.tsx) that is on
-// screen with the chat or the first-run screen. Callers pass the runtime status; the app
-// store is imported only at call time (`reloadModel`), so the store can use these
-// functions without an import cycle.
+// screen with the chat or the first-run screen. Callers pass the runtime status. The app
+// store imports this module and this module reads the store only inside `reloadModel`
+// (never while the modules load), so the two can import each other.
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
 import type { RuntimeStatus } from "../lib/types";
 import { busyQuestion, TOO_LARGE_QUESTION, type WaitingChange } from "../lib/words";
+import { useApp } from "./app";
 
 // ---- Questions -------------------------------------------------------------------------
 
@@ -196,7 +197,6 @@ export async function reloadModel(
   // Whether the model really restarts (it goes through "starting"): without `force` the
   // backend restarts nothing when the loaded copy already uses the settings, and then the
   // header must not say the next reply is slower.
-  const { useApp } = await import("./app");
   let restarted = false;
   const unsubscribe = useApp.subscribe((s) => {
     if (s.runtime?.state === "starting") restarted = true;

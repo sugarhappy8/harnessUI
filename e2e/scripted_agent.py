@@ -3405,7 +3405,7 @@ def p_compare_models(c, notes):
 
         # "Compare at": the default option names the defaults' size (Automatic on a fresh
         # profile: 32,768 tokens); a different size checks the fit again at that size.
-        default_ctx = s.invoke("compare_facts", {"items": [{"catalogId": first["id"]}], "ctx": None})[0]["ctx"]
+        default_ctx = s.invoke("compare_facts", {"items": [{"catalogId": suggestions[0]["catalog"]["id"]}], "ctx": None})[0]["ctx"]
         default_option = lambda: s.execute("return document.getElementById('compare-ctx').options[0].textContent;")
         s.wait_for(lambda: default_option() == f"Same as your default ({words_tokens(default_ctx)})", 15,
                    f"the default option at {default_ctx}")
@@ -3867,6 +3867,18 @@ def p_model_settings(c, notes):
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
         time.sleep(0.5)
 
+    def click_button_when_ready(label):
+        # A dialog that just closed can still cover the page for a moment on a busy computer.
+        deadline = time.time() + 5
+        while True:
+            try:
+                s.click_button(label)
+                return
+            except WebDriverError as e:
+                if "not interactable" not in str(e) or time.time() > deadline:
+                    raise
+                time.sleep(0.3)
+
     def click_css(css, what, timeout=15):
         el = s.wait_for(lambda: s.execute("return document.querySelector(arguments[0]);", css) or False, timeout, what)
         try:
@@ -4052,10 +4064,13 @@ def p_model_settings(c, notes):
         notes.append("integration: the saved settings read back from model_load_info (WP1b)")
     escape()
     assert "Settings for this model" not in s.page_text(), "the panel did not close"
+    # The panel opened from a menu item: once it closes, the page takes clicks again.
+    s.wait_for(lambda: s.execute("return getComputedStyle(document.body).pointerEvents !== 'none' &&"
+                                 " !document.querySelector('[role=dialog]');"), 10, "the page takes clicks again")
 
     # The panel from the Installed row's gear.
-    s.click_button("Models")
-    s.click_button("Installed")
+    click_button_when_ready("Models")
+    click_button_when_ready("Installed")
     click_css(f'button[aria-label="Settings for this model: {name}"]', "the Installed gear")
     s.wait_text("Settings for this model", 10)
     s.wait_text("How much of the chat the model can see at once.", 60)
@@ -4069,11 +4084,9 @@ def p_model_settings(c, notes):
 
     # Apply and restart with the saved size (needs WP1b's resolver and reload).
     if real:
-        # "· Change" when the header has room for it, else the menu's Model settings….
-        change = s.execute(
-            "const b = [...document.querySelectorAll('main header button')].find(x => x.innerText.trim() === 'Change');"
-            " return !!b && b.getBoundingClientRect().width > 0;")
-        if change:
+        # "· Change" when the header has room for it (else it wraps onto the line's clipped
+        # second row), else the menu's Model settings….
+        if header_geometry()["change"]:
             click_in_header("Change")
         else:
             s.click_button("Model menu")
@@ -4094,15 +4107,20 @@ def p_model_settings(c, notes):
 
     # A short reply, so the chat has messages (the context meter shows) and the note about
     # the first reply after a restart is gone: the header at several widths.
+    # Without thinking, so the short reply ends quickly on a busy computer; on again after.
+    s.invoke("set_chat_thinking", {"chatId": chat["id"], "on": False})
     send(s, "Say hi in one word.")
     try:
-        wait_idle(s, 120)
+        wait_idle(s, 180)
+        s.wait_for(lambda: " tokens" in header(), 10, "the context meter")
     except WebDriverError:
-        notes.append("the short reply was still being written after 120 s; ended with Stop")
+        notes.append("the short reply was still being written after 180 s; ended with Stop")
         s.click_button("Stop")
         wait_idle(s, 60)
     s.wait_for(lambda: "The first reply after a restart takes longer" not in header(), 10, "the restart note gone")
+    notes.append("context meter shown: " + str(" tokens" in header()))
     header_with_messages()
+    s.invoke("set_chat_thinking", {"chatId": chat["id"], "on": True})
 
     # D3 while the model writes a reply: Cancel, then Restart when it ends.
     for attempt in range(2):
@@ -4770,9 +4788,13 @@ def p_other_apps(c, notes):
         assert tabs == ["Windows"], tabs
         text = page()
         assert "Windows PowerShell" in text and "Open Terminal" not in text, text[-800:]
-        assert f"http://127.0.0.1:{port}" in text and key in text, text[-800:]
+        assert f"http://127.0.0.1:{port}" in text, text[-800:]
         assert "$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = '8192'" in text, text[-800:]
         assert "This stores the key as plain text in that app's settings." in text
+        # Leaving the page (the Audit log) dropped the key: the card shows dots until Show key.
+        assert key not in text and hidden_key in text, text[-800:]
+        press("Show key")
+        s.wait_for(lambda: page().count(key) >= 2 and hidden_key not in page(), 10, "the key in the card")
         # Hide key hides it in the card too (dots); Show key shows it there again.
         press("Hide key")
         s.wait_for(lambda: key not in page() and hidden_key in page(), 5, "the key hidden in the card")

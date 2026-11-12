@@ -190,6 +190,8 @@ export function OtherApps() {
   const [card, setCard] = useState<(Made & { setup: ShareSetup }) | null>(null);
   const [cardError, setCardError] = useState<(Made & { error: ErrorInfo }) | null>(null);
   const [copied, setCopied] = useState<CopiedSetups>(readCopied);
+  // Windows or Mac, for every card: kept when a card is made again (new key, port or size).
+  const [tab, setTab] = useState<Tab>(() => (isAppleComputer() ? "mac" : "windows"));
   // The loaded model's settings, for the context warning's fit mark.
   const [loadInfo, setLoadInfo] = useState<{ path: string; info: ModelLoadInfo } | null>(null);
   // The loaded model's own settings panel, opened over this page (inside the settings window,
@@ -731,7 +733,14 @@ export function OtherApps() {
             {shownCardError && <ErrorBanner error={shownCardError} onDismiss={() => setCardError(null)} />}
             {app && !shownCard && !shownCardError && <p className="text-xs text-fg-muted">Getting the setup…</p>}
             {shownCard && (
-              <SetupCard key={shownCard.app} setup={shownCard.setup} keyShown={key !== null} onCopied={setupCopied} />
+              <SetupCard
+                key={shownCard.app}
+                setup={shownCard.setup}
+                tab={tab}
+                onTab={setTab}
+                keyShown={key !== null}
+                onCopied={setupCopied}
+              />
             )}
           </section>
         </>
@@ -776,13 +785,21 @@ function MemoryChoice(props: { info: ModelLoadInfo; disabled: boolean; onUse: ()
 }
 
 /**
- * One app's setup: Windows and Mac tabs (when the ways differ), steps with Copy buttons, and
- * the notes. The key shows as dots unless `keyShown`; Copy copies the backend's text as it is.
+ * One app's setup: Windows and Mac tabs (when the ways differ; the choice is the page's),
+ * steps with Copy buttons, and the notes. The key shows as dots unless `keyShown`; Copy
+ * copies the backend's text as it is.
  */
-function SetupCard(props: { setup: ShareSetup; keyShown: boolean; onCopied: () => void }) {
+function SetupCard(props: {
+  setup: ShareSetup;
+  tab: Tab;
+  onTab: (tab: Tab) => void;
+  keyShown: boolean;
+  onCopied: () => void;
+}) {
   const { setup } = props;
   const tabs = (["windows", "mac"] as const).filter((t) => setup.ways.some((w) => w.system === t));
-  const [chosen, setChosen] = useState<Tab>(isAppleComputer() ? "mac" : "windows");
+  const chosen = props.tab;
+  const setChosen = props.onTab;
   const tab: Tab | null = tabs.includes(chosen) ? chosen : (tabs[0] ?? null);
   const ways = setup.ways.filter((w) => w.system === "any" || tab === null || w.system === tab);
 
