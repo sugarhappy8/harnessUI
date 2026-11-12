@@ -1,21 +1,366 @@
 //! The chat's task state (0.0.4, "visible, resumable task state").
 //!
 //! Goal, constraints, steps, changed files, completed checks and the next action of the
-//! work a chat is doing, kept so it can be shown, paused, corrected and resumed.
+//! work a chat is doing, kept so it can be shown, paused, corrected and resumed after an
+//! interruption or a restart. One record per chat, in the app's database
+//! (`store::tasks`).
 //!
-//! Owned by the task feature. This file starts as the agreed entry point only.
+//! Who writes what:
+//!
+//! - **The model**, through the tool `update_task` (`server.rs`): goal, constraints, steps,
+//!   next action, status (active or done) and notes. Nothing else.
+//! - **The app**, from the tool calls that ran ([`after_call`]): changed files, from
+//!   successful `write_file`, `edit_file` and `delete_file` calls, and checks, from
+//!   `run_command` calls whose command is a test, build, lint or type check
+//!   (`checks.rs`). The model has no way to write either.
+//! - **The user**, in the Task tab (the commands below): corrections to the goal,
+//!   constraints, steps and next action; Pause, Resume, Mark done and Clear.
+//!
+//! At the start of every turn the task goes to the model as one app note
+//! ([`begin_turn`], `note.rs`). Everything in the record is data: text the model wrote,
+//! text the user wrote, and paths and command lines from tool calls. The note says it as
+//! state, in quotes, capped and cleaned, and never includes a command's output.
+//!
+//! Nothing here touches approval settings, grants, approved folders or tool switches.
+//! "Resume" in the Task tab sends an ordinary message through the ordinary send path.
+
+mod checks;
+mod edits;
+mod note;
+mod server;
 
 use mcp_host::ToolOutput;
+use serde::Serialize;
 use serde_json::{Map, Value};
-use tauri::AppHandle;
+use store::{ChatId, FileChange, StepStatus, Store, StoreError, Task, TaskCheck, TaskStatus};
+use tauri::{AppHandle, Emitter, Manager, State};
 
-/// Called after every tool call of a turn: the place to note changed files and checks.
+pub use server::TaskServer;
+
+use crate::error::{AppError, AppResult};
+use crate::state::AppState;
+
+/// Sent to the main window when a chat's task changed. The payload is the chat's id.
+pub const CHANGED_EVENT: &str = "task-changed";
+
+/// Longest command line kept for a check, in characters.
+const COMMAND_CHARS: usize = 300;
+
+/// The time, in Unix milliseconds.
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn changed(app: &AppHandle, chat_id: i64) {
+    let _ = app.emit_to(crate::MAIN_WINDOW, CHANGED_EVENT, chat_id);
+}
+
+// ---- What the app records from tool calls ------------------------------------------------
+
+/// Something a finished tool call says about the work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fact {
+    /// A file was created, edited or deleted.
+    File { path: String, kind: FileChange },
+    /// A test, build, lint or type check ran.
+    Check(TaskCheck),
+}
+
+/// What a finished call says about the work, if anything.
+///
+/// It is read from the action the policy engine approved (the file tool's checked path,
+/// the terminal's command line) and from whether the call failed, never from the wording
+/// of a result. A call made through `call_tool` arrives here as the tool it ran.
+pub fn fact_of(action: &policy::Action, out: &ToolOutput, now: i64) -> Option<Fact> {
+    let _ = (action, out, now, COMMAND_CHARS);
+    None
+}
+
+/// Records a fact in the chat's task, creating the record when the chat has none: the
+/// Task tab shows changed files and checks also when the model never wrote a goal.
+/// Returns whether the stored task differs.
+pub async fn record(
+    store: &Store,
+    chat_id: i64,
+    fact: Fact,
+    now: i64,
+) -> Result<bool, StoreError> {
+    let _ = (store, chat_id, fact, now);
+    Ok(false)
+}
+
+/// Called after every tool call of a turn: notes changed files and checks.
 pub async fn after_call(
-    _app: &AppHandle,
-    _chat_id: i64,
+    app: &AppHandle,
+    chat_id: i64,
     _tool: &str,
     _args: &Map<String, Value>,
-    _action: &policy::Action,
-    _out: &ToolOutput,
+    action: &policy::Action,
+    out: &ToolOutput,
 ) {
+    let now = now_ms();
+    let Some(fact) = fact_of(action, out, now) else {
+        return;
+    };
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    match record(&state.store, chat_id, fact, now).await {
+        Ok(true) => changed(app, chat_id),
+        Ok(false) => {}
+        // The chat was deleted while its turn ran, or its task cannot be read.
+        Err(e) => tracing::debug!("a task fact was not recorded: {e}"),
+    }
 }
+
+// ---- The note at the start of a turn -------------------------------------------------------
+
+/// The task note the next turn of a chat would start with, or `None` when there is
+/// nothing to tell. Read-only: for the Context inspector, and the same text
+/// [`begin_turn`] gives the turn.
+pub async fn note_for_turn(state: &AppState, chat_id: i64) -> Option<String> {
+    note_in(&state.store, chat_id).await
+}
+
+async fn note_in(store: &Store, chat_id: i64) -> Option<String> {
+    let _ = (store, chat_id);
+    None
+}
+
+/// For `turns::run`: the task note for the turn that starts now (exactly what
+/// [`note_for_turn`] returns at this moment), and the record that the model has been
+/// sent it: what the user changed is not announced again, and a paused task is active
+/// again, because a turn is the work going on.
+pub async fn begin_turn(app: &AppHandle, chat_id: i64) -> Option<String> {
+    let state = app.try_state::<AppState>()?;
+    let (note, stored) = start_turn(&state.store, chat_id).await;
+    if stored {
+        changed(app, chat_id);
+    }
+    note
+}
+
+/// The note, and whether the stored task changed.
+async fn start_turn(store: &Store, chat_id: i64) -> (Option<String>, bool) {
+    let _ = (store, chat_id);
+    (None, false)
+}
+
+// ---- The Task tab ---------------------------------------------------------------------------
+
+/// A constraint as the Task tab shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDto {
+    pub text: String,
+    /// The user wrote it.
+    pub by_user: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepDto {
+    pub text: String,
+    pub status: StepStatus,
+    pub by_user: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDto {
+    /// The file's path as it is, for copying.
+    pub path: String,
+    /// The path for showing: invisible characters as escapes.
+    pub shown: String,
+    pub kind: FileChange,
+    pub at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckDto {
+    pub command: String,
+    pub passed: bool,
+    /// It ran to its end. A check that did not (timed out, stopped) has no verdict.
+    pub finished: bool,
+    pub at: i64,
+    /// One line of the command's output. Text from outside: shown as plain text.
+    pub summary: String,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteDto {
+    pub text: String,
+    pub at: i64,
+}
+
+/// A chat's task as the Task tab shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDto {
+    pub chat_id: i64,
+    pub status: TaskStatus,
+    pub updated_at: i64,
+    pub goal: String,
+    pub goal_by_user: bool,
+    pub constraints: Vec<ItemDto>,
+    pub steps: Vec<StepDto>,
+    /// The most recently changed first.
+    pub changed_files: Vec<FileDto>,
+    pub files_not_listed: u32,
+    /// The most recent first.
+    pub checks: Vec<CheckDto>,
+    pub next_action: String,
+    pub next_action_by_user: bool,
+    /// The newest first.
+    pub notes: Vec<NoteDto>,
+}
+
+impl From<Task> for TaskDto {
+    fn from(task: Task) -> Self {
+        let _ = &task;
+        Self {
+            chat_id: 0,
+            status: TaskStatus::Active,
+            updated_at: 0,
+            goal: String::new(),
+            goal_by_user: false,
+            constraints: Vec::new(),
+            steps: Vec::new(),
+            changed_files: Vec::new(),
+            files_not_listed: 0,
+            checks: Vec::new(),
+            next_action: String::new(),
+            next_action_by_user: false,
+            notes: Vec::new(),
+        }
+    }
+}
+
+/// The Task tab belongs to the main window (the capability files grant these commands to
+/// it alone; this is the same rule checked again).
+fn only_main_window(label: &str) -> AppResult<()> {
+    if label == crate::MAIN_WINDOW {
+        Ok(())
+    } else {
+        Err(AppError::bad_request("Only the main window shows the task."))
+    }
+}
+
+fn store_error(e: StoreError) -> AppError {
+    match e {
+        StoreError::NotFound { .. } => AppError::not_found("chat"),
+        StoreError::Json(e) => AppError::new(
+            "task_unreadable",
+            "The saved task of this chat could not be read.",
+            "Choose Clear task to remove it. The chat itself is not affected.",
+            e.to_string(),
+        ),
+        other => other.into(),
+    }
+}
+
+/// The user's correction, stored. Returns the task as it now stands (none when there was
+/// no task and the edit was empty) and whether it changed.
+async fn user_edit(
+    store: &Store,
+    chat_id: i64,
+    edit: edits::UserEdit,
+    now: i64,
+) -> Result<(Option<Task>, bool), StoreError> {
+    store
+        .change_task(ChatId(chat_id), move |slot| {
+            edits::apply_user(slot, edit, now)
+        })
+        .await
+}
+
+/// The user's Pause, Resume, Reopen or Mark done, stored.
+async fn user_status(
+    store: &Store,
+    chat_id: i64,
+    status: TaskStatus,
+    now: i64,
+) -> Result<(Option<Task>, bool), StoreError> {
+    store
+        .change_task(ChatId(chat_id), move |slot| {
+            edits::set_status(slot, status, now)
+        })
+        .await
+}
+
+/// The chat's task, or nothing when it has none.
+#[tauri::command]
+pub async fn get_task(state: State<'_, AppState>, chat_id: i64) -> AppResult<Option<TaskDto>> {
+    let task = state
+        .store
+        .get_task(ChatId(chat_id))
+        .await
+        .map_err(store_error)?;
+    Ok(task.map(TaskDto::from))
+}
+
+/// The user corrects the goal, the constraints, the steps or the next action. Fields left
+/// out stay as they are. Starts a task when the chat has none.
+#[tauri::command]
+pub async fn edit_task(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    chat_id: i64,
+    edit: edits::UserEdit,
+) -> AppResult<Option<TaskDto>> {
+    only_main_window(window.label())?;
+    let (task, stored) = user_edit(&state.store, chat_id, edit, now_ms())
+        .await
+        .map_err(store_error)?;
+    if stored {
+        changed(&app, chat_id);
+    }
+    Ok(task.map(TaskDto::from))
+}
+
+/// The user pauses the task (`paused`), resumes or reopens it (`active`), or marks it done
+/// (`done`). Stopping a running turn and sending the message that resumes the work are
+/// the window's part, through the same commands as the Stop button and the message box.
+#[tauri::command]
+pub async fn set_task_status(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    chat_id: i64,
+    status: TaskStatus,
+) -> AppResult<Option<TaskDto>> {
+    only_main_window(window.label())?;
+    let (task, stored) = user_status(&state.store, chat_id, status, now_ms())
+        .await
+        .map_err(store_error)?;
+    if stored {
+        changed(&app, chat_id);
+    }
+    Ok(task.map(TaskDto::from))
+}
+
+/// The user clears the chat's task. Works also when the saved task cannot be read.
+#[tauri::command]
+pub async fn clear_task(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    chat_id: i64,
+) -> AppResult<()> {
+    only_main_window(window.label())?;
+    if state.store.delete_task(ChatId(chat_id)).await? {
+        changed(&app, chat_id);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

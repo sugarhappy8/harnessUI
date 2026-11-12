@@ -23,6 +23,13 @@
 //! Clone, pull and commit never write inside a skill folder (`ChatContext::skill_roots`):
 //! skills are added only through the skills UI (9.3, 10).
 //!
+//! A failure says what to do next (app 0.0.4): [`advice`] reads what git said (git runs
+//! with `LC_ALL=C`, so in English) or what the built-in library said, and adds one short
+//! paragraph: not a repository, nothing to commit, merge conflicts with the files, a
+//! sign-in the remote refused (credentials are the user's to set up), no branch checked
+//! out. A long output is shown as its first and last lines, and the whole text goes to
+//! the app, which stores it for `read_output`.
+//!
 //! When git is not installed (`GitConfig::git` is `None`) the same seven tools run on
 //! libgit2 instead (`git_fallback`, `git_worker`), with the same actions and scopes:
 //! local work in-process, network work (clone, the fetch of pull, push) in a worker
@@ -45,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 use crate::git_fallback::{self, RemoteRefusal, display_url, hide_credentials, mask_userinfo};
 use crate::git_worker::{self, Job, WorkerCommand};
 pub use crate::git_worker::{WORKER_FLAG, worker_main};
+use crate::shorten;
 use crate::skill_guard::{self, Reach};
 
 /// Output kept at most.
@@ -620,7 +628,9 @@ impl GitServer {
             )
             .await?;
         if code != 0 {
-            return Err(format!("the remote {remote} does not exist"));
+            return Err(format!(
+                "the remote {remote} does not exist in this repository. git remote -v (run_command) lists the remotes"
+            ));
         }
         let urls: Vec<&str> = out
             .lines()
@@ -760,7 +770,7 @@ impl BuiltinServer for GitServer {
                     .unwrap_or(true)
             {
                 return Described::Invalid(format!(
-                    "{} already exists and is not empty",
+                    "{} already exists and is not empty, so nothing can be cloned into it. Pass a destination that does not exist yet, or an empty folder.",
                     checked.canonical
                 ));
             }
@@ -781,11 +791,14 @@ impl BuiltinServer for GitServer {
             .or_else(|| chat.working_folder.clone())
             .or_else(|| chat.approved_folders.first().cloned());
         let Some(folder) = folder else {
-            return Self::deny(tool, "No folder is approved for this chat.".into());
+            return Self::deny(
+                tool,
+                "No folder is approved for this chat, so there is no repository to work on. The user can approve a folder in the Tools panel.".into(),
+            );
         };
         let root = match self.repo_root(chat, &folder).await {
             Ok(r) => r,
-            Err(e) => return Self::deny(tool, e),
+            Err(e) => return Self::deny(tool, with_advice(tool, e)),
         };
         if let Err(why) = self.skill_check(tool, &root, chat) {
             return Self::deny(tool, why);
@@ -932,8 +945,14 @@ impl BuiltinServer for GitServer {
         };
         if self.fallback() {
             return match self.call_fallback(tool, args, action, &ctx).await {
-                Ok(text) => sized_output(0, shown(text), &ctx),
-                Err(e) => ToolOutput::error(shown(e)),
+                Ok(text) => {
+                    let text = shown(text);
+                    let note = (tool == "git_status")
+                        .then(|| status_note(&text))
+                        .flatten();
+                    sized_output(tool, 0, text, note, &ctx)
+                }
+                Err(e) => ToolOutput::error(with_advice(tool, shown(e))),
             };
         }
         let p = &action.payload;
@@ -948,6 +967,8 @@ impl BuiltinServer for GitServer {
             let cancel = cancel.clone();
             async move { self.run(&cwd, &a, &cancel, timeout).await }
         };
+        // The repository the call works in (none for a clone).
+        let mut repo: Option<PathBuf> = None;
         let result = match tool {
             "git_clone" => {
                 let (Some(url), Some(dest)) = (
@@ -985,6 +1006,7 @@ impl BuiltinServer for GitServer {
                         "internal error: the approved action has no repository",
                     );
                 };
+                repo = Some(root.clone());
                 // Re-check what was approved immediately before running.
                 if let Err(e) = self.check_repo_config(&root.display().to_string()).await {
                     return ToolOutput::error(e);
@@ -1125,38 +1147,193 @@ impl BuiltinServer for GitServer {
             }
         };
         match result {
-            Ok((code, text)) => sized_output(code, shown(text), &ctx),
-            Err(e) => ToolOutput::error(shown(e)),
+            Ok((code, text)) => {
+                let text = shown(text);
+                let note = if code == 0 {
+                    (tool == "git_status")
+                        .then(|| status_note(&text))
+                        .flatten()
+                } else if mentions_conflicts(&text)
+                    && let Some(root) = &repo
+                {
+                    // Which files: git's message does not always say.
+                    let files = self.unmerged_files(root).await;
+                    (!files.is_empty()).then(|| conflict_note(&files))
+                } else {
+                    None
+                };
+                sized_output(tool, code, text, note, &ctx)
+            }
+            Err(e) => ToolOutput::error(with_advice(tool, shown(e))),
         }
     }
 }
 
-/// A tool result sized to the per-result cap, with the full text kept for the card.
-fn sized_output(code: i32, text: String, ctx: &CallContext) -> ToolOutput {
-    let budget = ctx.chat.result_cap_tokens.max(500) * 3;
-    let body = if text.trim().is_empty() {
+/// Conflicted files named in one message at most.
+const MAX_CONFLICTS_LISTED: usize = 10;
+
+/// How to resolve conflicts, after the sentence that says where they are.
+const RESOLVE: &str = "In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit.";
+
+/// What to do about a failure, from what git (or the built-in library) said. One short
+/// paragraph the model can act on, or `None` for a failure nothing useful is known about.
+/// Nothing from `text` is repeated in it.
+fn advice(tool: &str, text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    let said = if has(&["not a git repository", "not inside a git repository"])
+        && !has(&["does not appear to be a git repository"])
+    {
+        "Pass a folder inside a repository as repo. A new repository is made with git init (run_command) or git_clone.".to_string()
+    } else if has(&[
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "terminal prompts disabled",
+        "invalid username or password",
+        "permission denied (publickey",
+        "needs a sign-in",
+        "asked for a sign-in",
+        "asked for a kind of sign-in",
+    ]) {
+        "The remote did not accept the sign-in. Credentials are the user's to set up (a credential helper, an access token or an SSH key); this app does not type passwords. Tell the user, and do not try again until they have.".to_string()
+    } else if has(&["unmerged files", "unresolved conflict", "conflict (", "fix conflicts", "unmerged paths"]) {
+        format!("There are merge conflicts. {RESOLVE} git_status lists the files.")
+    } else if has(&["nothing to commit", "nothing added to commit", "no changes added to commit"]) {
+        "Nothing was committed: there are no changes to commit. That is fine if the work was committed before; git_status shows the state.".to_string()
+    } else if has(&["not currently on a branch", "head is detached", "head detached"]) {
+        format!(
+            "No branch is checked out (HEAD is detached), so {tool} has no branch to work on. Ask the user which branch to use; git switch (run_command) checks one out."
+        )
+    } else if has(&["no upstream branch", "no tracking information"]) {
+        "The branch has no upstream on the remote yet. git_push and git_pull work on a branch that has one; the first push of a new branch is git push --set-upstream (run_command).".to_string()
+    } else if has(&["not possible to fast-forward"]) {
+        "The branch and its upstream have both changed, so it cannot be fast-forwarded. git_pull does nothing else: merging or rebasing is for the user to decide.".to_string()
+    } else if has(&["[rejected]", "non-fast-forward", "fetch first"]) {
+        "The remote has commits this branch does not have. Pull first (git_pull), then push again.".to_string()
+    } else if has(&["would be overwritten by"]) {
+        "Changes in the working tree are in the way. Commit them with git_commit first, then pull again.".to_string()
+    } else if has(&["pathspec"]) && has(&["did not match"]) {
+        "A path matches no file. Paths are relative to the repository's root folder; git_status lists the changed files.".to_string()
+    } else if has(&["please tell me who you are", "author identity unknown", "committer identity unknown"]) {
+        "Git does not know the author's name and e-mail. The user enters them in Settings, Git.".to_string()
+    } else if has(&[
+        "could not resolve host",
+        "could not read from remote repository",
+        "does not appear to be a git repository",
+        "repository not found",
+        "failed to connect",
+        "connection timed out",
+    ]) {
+        "The remote could not be reached. Check the URL and the network connection.".to_string()
+    } else {
+        return None;
+    };
+    Some(said)
+}
+
+/// `message`, then the advice for it when there is some.
+fn with_advice(tool: &str, message: String) -> String {
+    match advice(tool, &message) {
+        Some(more) => {
+            let message = message.trim_end();
+            let stop = if message.ends_with(['.', '!', '?', ')', ']']) {
+                ""
+            } else {
+                "."
+            };
+            format!("{message}{stop} {more}")
+        }
+        None => message,
+    }
+}
+
+/// Whether a failed command's output is about unresolved conflicts.
+fn mentions_conflicts(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ["unmerged files", "unresolved conflict", "conflict (", "fix conflicts", "unmerged paths"]
+        .iter()
+        .any(|n| lower.contains(n))
+}
+
+/// The files a status listing (`XY path`, as `git status --porcelain=v1` prints it) marks
+/// as in conflict.
+fn conflicted_in_status(status: &str) -> Vec<String> {
+    status
+        .lines()
+        .filter_map(|line| {
+            let (xy, path) = (line.get(..2)?, line.get(3..)?);
+            matches!(xy, "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU").then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// "Merge conflicts in N files: a, b." and how to resolve them. File names are data: each
+/// is shown on one line with invisible characters made visible.
+fn conflict_note(files: &[String]) -> String {
+    let shown: Vec<String> = files
+        .iter()
+        .take(MAX_CONFLICTS_LISTED)
+        .map(|f| policy::sanitize::one_line(f, 200))
+        .collect();
+    let more = match files.len().saturating_sub(shown.len()) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    format!(
+        "Merge conflicts in {} file{}: {}{more}. {RESOLVE}",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        shown.join(", ")
+    )
+}
+
+/// What a status listing needs said about it: conflicts, and a detached HEAD.
+fn status_note(status: &str) -> Option<String> {
+    let conflicts = conflicted_in_status(status);
+    if !conflicts.is_empty() {
+        return Some(conflict_note(&conflicts));
+    }
+    status
+        .lines()
+        .next()
+        .is_some_and(|first| first.starts_with("## HEAD (no branch)"))
+        .then(|| {
+            "No branch is checked out (HEAD is detached): a commit made now belongs to no branch. Ask the user which branch to use; git switch (run_command) checks one out.".to_string()
+        })
+}
+
+/// A tool result sized to the per-result cap, with the whole text kept for the app when
+/// it is longer. `note` is what the tool adds about the output; a failure with no note
+/// gets the advice for what git said.
+fn sized_output(
+    tool: &str,
+    code: i32,
+    text: String,
+    note: Option<String>,
+    ctx: &CallContext,
+) -> ToolOutput {
+    let budget = shorten::budget_bytes(ctx.chat.result_cap_tokens);
+    let mut body = if text.trim().is_empty() {
         "(no output)".to_string()
     } else {
         text
     };
-    let full = format!("exit code {code}\n{body}");
-    let shown = if full.len() > budget {
-        let mut cut = budget;
-        while !full.is_char_boundary(cut) {
-            cut -= 1;
+    let note = note.or_else(|| (code != 0).then(|| advice(tool, &body)).flatten());
+    if let Some(note) = note {
+        if !body.ends_with('\n') {
+            body.push('\n');
         }
-        format!(
-            "{}\n[... output cut to fit; {} characters omitted ...]",
-            &full[..cut],
-            full.len() - cut
-        )
-    } else {
-        full.clone()
-    };
-    ToolOutput {
-        is_error: code != 0,
-        full_text: (shown.len() < full.len()).then_some(full),
-        ..ToolOutput::text(shown)
+        body.push_str(&format!("[{note}]"));
+    }
+    let full = format!("exit code {code}\n{body}");
+    // A diff or a log is read from the top: most of the room goes to the first lines.
+    match shorten::head_and_tail(&full, budget, 75) {
+        Some(view) => shorten::shortened(view, full, code != 0, None),
+        None => ToolOutput {
+            is_error: code != 0,
+            ..ToolOutput::text(full)
+        },
     }
 }
 
@@ -1165,6 +1342,25 @@ fn payload_str<'a>(p: &'a Value, k: &str) -> Option<&'a str> {
 }
 
 impl GitServer {
+    /// The files with unresolved conflicts in a repository (system git). Empty when they
+    /// cannot be listed.
+    async fn unmerged_files(&self, root: &Path) -> Vec<String> {
+        let cancel = CancellationToken::new();
+        let args: Vec<String> = ["diff", "--name-only", "--diff-filter=U", "--no-ext-diff", "--"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        match self.run(root, &args, &cancel, Duration::from_secs(20)).await {
+            Ok((0, out)) => out
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Starts the worker for one network job.
     async fn run_worker(
         &self,
@@ -1437,6 +1633,197 @@ mod tests {
         std::fs::write(root.join("a.txt"), "two\n").unwrap();
         let (_, out) = go(&s, &c, "git_diff", json!({})).await.unwrap();
         assert!(out.joined_text().contains("+two"));
+    }
+
+    const SAY_CREDENTIALS: &str = "The remote did not accept the sign-in. Credentials are the user's to set up (a credential helper, an access token or an SSH key); this app does not type passwords. Tell the user, and do not try again until they have.";
+
+    /// What each failure tells the model to do next, from git's own words.
+    #[test]
+    fn failures_say_what_to_do_next() {
+        let said = |tool: &str, text: &str| advice(tool, text);
+        // Not a repository.
+        assert_eq!(
+            said("git_status", "fatal: not a git repository (or any of the parent directories): .git").as_deref(),
+            Some("Pass a folder inside a repository as repo. A new repository is made with git init (run_command) or git_clone.")
+        );
+        assert_eq!(
+            said("git_log", "/w/notes is not inside a git repository"),
+            said("git_status", "fatal: not a git repository"),
+        );
+        // Nothing to commit.
+        assert_eq!(
+            said("git_commit", "On branch main\nnothing to commit, working tree clean").as_deref(),
+            Some("Nothing was committed: there are no changes to commit. That is fine if the work was committed before; git_status shows the state.")
+        );
+        // Sign-in, in git's several wordings and the built-in library's.
+        for text in [
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "remote: Invalid username or password.\nfatal: Authentication failed for 'https://example.com/r.git/'",
+            "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+            "github.com needs a sign-in. Add an access token for github.com in the app's Git settings, then try again",
+        ] {
+            assert_eq!(said("git_push", text).as_deref(), Some(SAY_CREDENTIALS), "{text}");
+        }
+        // No branch.
+        assert_eq!(
+            said("git_pull", "fatal: You are not currently on a branch.").as_deref(),
+            Some("No branch is checked out (HEAD is detached), so git_pull has no branch to work on. Ask the user which branch to use; git switch (run_command) checks one out.")
+        );
+        assert_eq!(
+            said("git_push", "HEAD is detached (no branch is checked out); check out a branch first"),
+            Some("No branch is checked out (HEAD is detached), so git_push has no branch to work on. Ask the user which branch to use; git switch (run_command) checks one out.".to_string())
+        );
+        // Conflicts, when the files are not known.
+        assert_eq!(
+            said("git_commit", "error: Committing is not possible because you have unmerged files.").as_deref(),
+            Some("There are merge conflicts. In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit. git_status lists the files.")
+        );
+        // The rest of what comes up.
+        assert_eq!(
+            said("git_pull", "fatal: Not possible to fast-forward, aborting.").as_deref(),
+            Some("The branch and its upstream have both changed, so it cannot be fast-forwarded. git_pull does nothing else: merging or rebasing is for the user to decide.")
+        );
+        assert_eq!(
+            said("git_push", " ! [rejected]        main -> main (fetch first)").as_deref(),
+            Some("The remote has commits this branch does not have. Pull first (git_pull), then push again.")
+        );
+        assert_eq!(
+            said("git_push", "fatal: The current branch topic has no upstream branch.").as_deref(),
+            Some("The branch has no upstream on the remote yet. git_push and git_pull work on a branch that has one; the first push of a new branch is git push --set-upstream (run_command).")
+        );
+        assert_eq!(
+            said("git_pull", "error: Your local changes to the following files would be overwritten by merge:\n\ta.txt").as_deref(),
+            Some("Changes in the working tree are in the way. Commit them with git_commit first, then pull again.")
+        );
+        assert_eq!(
+            said("git_commit", "fatal: pathspec 'nope.txt' did not match any files").as_deref(),
+            Some("A path matches no file. Paths are relative to the repository's root folder; git_status lists the changed files.")
+        );
+        assert_eq!(
+            said("git_commit", "Author identity unknown\n\n*** Please tell me who you are.").as_deref(),
+            Some("Git does not know the author's name and e-mail. The user enters them in Settings, Git.")
+        );
+        assert_eq!(
+            said("git_clone", "fatal: unable to access 'https://nowhere.example/r.git/': Could not resolve host: nowhere.example").as_deref(),
+            Some("The remote could not be reached. Check the URL and the network connection.")
+        );
+        assert_eq!(said("git_diff", "fatal: something nobody has seen before"), None);
+    }
+
+    #[test]
+    fn a_status_listing_names_conflicts_and_a_detached_head() {
+        let status = "## main...origin/main [ahead 1]\nUU src/a.rs\nAA b.txt\n M c.txt\nDU gone.txt\n?? new.txt\nUD \"with space.txt\"";
+        assert_eq!(
+            conflicted_in_status(status),
+            ["src/a.rs", "b.txt", "gone.txt", "\"with space.txt\""]
+        );
+        assert_eq!(
+            status_note(status).as_deref(),
+            Some("Merge conflicts in 4 files: src/a.rs, b.txt, gone.txt, \"with space.txt\". In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit.")
+        );
+        assert_eq!(
+            status_note("## main\nUU only.txt").as_deref(),
+            Some("Merge conflicts in 1 file: only.txt. In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit.")
+        );
+        assert_eq!(
+            status_note("## HEAD (no branch)\n M a.txt").as_deref(),
+            Some("No branch is checked out (HEAD is detached): a commit made now belongs to no branch. Ask the user which branch to use; git switch (run_command) checks one out.")
+        );
+        assert_eq!(status_note("## main\n M a.txt\n?? b.txt"), None);
+        // Many files: the first ten, and how many more.
+        let many: String = (0..14).map(|i| format!("UU f{i}.txt\n")).collect();
+        let note = status_note(&format!("## main\n{many}")).expect("a note");
+        assert!(note.starts_with("Merge conflicts in 14 files: f0.txt, "), "{note}");
+        assert!(note.contains("f9.txt and 4 more. In each file"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_is_not_a_repository_says_what_to_pass() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        for tool in ["git_status", "git_commit"] {
+            let why = go(&s, &chat(&root), tool, json!({"message": "m"}))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                why,
+                format!("{} is not inside a git repository. Pass a folder inside a repository as repo. A new repository is made with git init (run_command) or git_clone.", root.display())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nothing_to_commit_conflicts_and_a_detached_head_are_explained() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        init_repo(&s, &root).await;
+        let c = chat(&root);
+        let git = |args: &[&str]| {
+            let s = s.clone();
+            let root = root.clone();
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            async move {
+                let cancel = CancellationToken::new();
+                s.run(&root, &args, &cancel, Duration::from_secs(20)).await.unwrap()
+            }
+        };
+        std::fs::write(root.join("a.txt"), "base\n").unwrap();
+        let (_, out) = go(&s, &c, "git_commit", json!({"message": "base"})).await.unwrap();
+        assert!(!out.is_error, "{}", out.joined_text());
+
+        // Nothing to commit.
+        let (_, out) = go(&s, &c, "git_commit", json!({"message": "again"})).await.unwrap();
+        let text = out.joined_text();
+        assert!(out.is_error && text.starts_with("exit code 1\n"), "{text}");
+        assert!(
+            text.ends_with("\n[Nothing was committed: there are no changes to commit. That is fine if the work was committed before; git_status shows the state.]"),
+            "{text}"
+        );
+
+        // Two branches change the same line: the merge stops with a conflict.
+        git(&["checkout", "-q", "-b", "other"]).await;
+        std::fs::write(root.join("a.txt"), "theirs\n").unwrap();
+        git(&["commit", "-q", "-a", "-m", "theirs"]).await;
+        git(&["checkout", "-q", "main"]).await;
+        std::fs::write(root.join("a.txt"), "ours\n").unwrap();
+        git(&["commit", "-q", "-a", "-m", "ours"]).await;
+        let (code, _) = git(&["merge", "other"]).await;
+        assert_ne!(code, 0, "the merge was expected to stop");
+        let (_, out) = go(&s, &c, "git_status", json!({})).await.unwrap();
+        let text = out.joined_text();
+        assert!(!out.is_error && text.contains("\nUU a.txt"), "{text}");
+        assert!(
+            text.ends_with("\n[Merge conflicts in 1 file: a.txt. In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit.]"),
+            "{text}"
+        );
+        // A commit of another path is refused by git while a.txt is unresolved.
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        let (_, out) = go(&s, &c, "git_commit", json!({"message": "b", "paths": ["b.txt"]})).await.unwrap();
+        let text = out.joined_text();
+        assert!(out.is_error, "{text}");
+        assert!(
+            text.ends_with("\n[Merge conflicts in 1 file: a.txt. In each file, replace the parts between <<<<<<< and >>>>>>> with the wanted text, then commit with git_commit.]"),
+            "{text}"
+        );
+        git(&["merge", "--abort"]).await;
+
+        // No branch checked out.
+        git(&["checkout", "-q", "--detach"]).await;
+        let (_, out) = go(&s, &c, "git_status", json!({})).await.unwrap();
+        let text = out.joined_text();
+        assert!(
+            text.ends_with("\n[No branch is checked out (HEAD is detached): a commit made now belongs to no branch. Ask the user which branch to use; git switch (run_command) checks one out.]"),
+            "{text}"
+        );
+        let (_, out) = go(&s, &c, "git_pull", json!({})).await.unwrap();
+        let text = out.joined_text();
+        assert!(out.is_error, "{text}");
+        assert!(
+            text.ends_with("\n[No branch is checked out (HEAD is detached), so git_pull has no branch to work on. Ask the user which branch to use; git switch (run_command) checks one out.]"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
