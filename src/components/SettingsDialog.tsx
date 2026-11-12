@@ -25,6 +25,8 @@ import { BrowserSettings } from "./BrowserSettings";
 import { ComputerSettings } from "./ComputerSettings";
 import { GitSettings } from "./GitSettings";
 import { SearchSettings } from "./SearchSettings";
+import { Benchmarks } from "./evals/Benchmarks";
+import { ModelCheck } from "./evals/ModelCheck";
 import type { ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -917,7 +919,7 @@ export function SettingsDialog(props: {
             </Tabs.List>
             <div className="min-w-0 flex-1 overflow-y-auto p-5">
               <Tabs.Content value="general"><General /></Tabs.Content>
-              <Tabs.Content value="runtime"><Runtime /></Tabs.Content>
+              <Tabs.Content value="runtime"><Runtime /><ModelCheck /></Tabs.Content>
               <Tabs.Content value="endpoints"><Endpoints /></Tabs.Content>
               <Tabs.Content value="huggingface"><HuggingFace /></Tabs.Content>
               <Tabs.Content value="mcp"><McpSettings /></Tabs.Content>
@@ -928,7 +930,7 @@ export function SettingsDialog(props: {
               <Tabs.Content value="search"><SearchSettings /></Tabs.Content>
               <Tabs.Content value="permissions"><PermissionsSettings /></Tabs.Content>
               <Tabs.Content value="audit"><AuditLogView /></Tabs.Content>
-              <Tabs.Content value="diagnostics"><Diagnostics /></Tabs.Content>
+              <Tabs.Content value="diagnostics"><Diagnostics /><Benchmarks /></Tabs.Content>
             </div>
           </Tabs.Root>
         </Dialog.Content>

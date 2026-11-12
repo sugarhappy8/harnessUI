@@ -156,10 +156,6 @@ impl Record {
             _ => Arrival::Mixed,
         }
     }
-
-    pub fn completed(&self) -> bool {
-        self.status == "completed"
-    }
 }
 
 /// The system prompt of a run.

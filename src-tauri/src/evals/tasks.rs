@@ -24,8 +24,11 @@ macro_rules! task {
     };
 }
 
+/// A task's name and its files as `(path inside the task folder, content)`.
+pub type TaskFiles = (&'static str, &'static [(&'static str, &'static [u8])]);
+
 /// Every shipped file of every task, embedded when the app is built.
-pub static SHIPPED: &[(&str, &[(&str, &[u8])])] = &[
+pub static SHIPPED: &[TaskFiles] = &[
     task!(
         "py-fix-failing-test",
         [
@@ -105,7 +108,7 @@ pub static SHIPPED: &[(&str, &[(&str, &[u8])])] = &[
 /// A correct solution and, for some tasks, a plausible wrong one: files written over the
 /// fixture by the scripted model in tests. Not part of the app.
 #[cfg(test)]
-pub static ANSWERS: &[(&str, &[(&str, &[u8])])] = &[
+pub static ANSWERS: &[TaskFiles] = &[
     task!(
         "py-fix-failing-test",
         ["solution/stats.py", "wrong/test_stats.py",]
@@ -231,7 +234,7 @@ impl Task {
     }
 }
 
-fn under<'a>(files: &[(&'a str, &'static [u8])], folder: &str) -> Vec<(String, &'static [u8])> {
+fn under(files: &[(&str, &'static [u8])], folder: &str) -> Vec<(String, &'static [u8])> {
     files
         .iter()
         .filter_map(|(path, content)| {

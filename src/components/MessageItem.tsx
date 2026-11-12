@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check } from "lucide-react";
+import { AtSign, ChevronLeft, ChevronRight, Copy, FileText, Pencil, RotateCcw, Check } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { MessageDto } from "../lib/types";
 import { Markdown } from "./Markdown";
@@ -129,6 +129,24 @@ export const MessageItem = memo(function MessageItem(props: Props) {
                   </span>
                 ))}
               </div>
+            )}
+            {(m.mentions ?? []).length > 0 && (
+              <ul aria-label="Mentions" className="flex flex-wrap justify-end gap-1">
+                {(m.mentions ?? []).map((mention) => (
+                  <li
+                    key={mention.attachmentId}
+                    className="flex items-center gap-1 rounded-md border border-border bg-bg-subtle px-2 py-0.5 font-mono text-xs"
+                    title={
+                      mention.kind === "file"
+                        ? `${mention.path}${mention.truncated ? " (first part sent)" : ""}`
+                        : `${mention.kind}, lines ${mention.startLine}-${mention.endLine} of ${mention.path}`
+                    }
+                  >
+                    <AtSign size={11} className="text-accent" aria-hidden />
+                    {mention.label}
+                  </li>
+                ))}
+              </ul>
             )}
             {m.text && (
               <div className="chat-text rounded-2xl rounded-br-md border border-accent/20 bg-accent/10 px-3.5 py-2 whitespace-pre-wrap">

@@ -29,6 +29,9 @@ import type {
   DiagnosticsReport,
   DiskUsage,
   DocumentInput,
+  MentionCheck,
+  MentionInput,
+  MentionSearch,
   DownloadGroup,
   FirstRunInfo,
   HardwareInfo,
@@ -86,6 +89,8 @@ export interface SendOptions {
   parentId: number | null;
   images?: ImageInput[];
   documents?: DocumentInput[];
+  /** Mentions chosen in the picker. */
+  mentions?: MentionInput[];
 }
 
 export function sendMessage(opts: SendOptions, onEvent: (e: TurnStreamEvent) => void) {
@@ -105,6 +110,12 @@ export function regenerate(
 }
 
 export const stopGeneration = () => invoke<void>("stop_generation");
+
+// Mentions
+export const searchMentions = (chatId: number | null, query: string, limit?: number) =>
+  invoke<MentionSearch>("search_mentions", { chatId, query, limit });
+export const resolveMentions = (chatId: number, mentions: MentionInput[]) =>
+  invoke<MentionCheck[]>("resolve_mentions", { chatId, mentions });
 
 // Models and runtime
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
@@ -338,3 +349,24 @@ export interface SavedToolOutput {
 }
 export const getToolOutput = (chatId: number, id: number) =>
   invoke<SavedToolOutput>("get_tool_output", { chatId, id });
+
+// Tested settings per model, and coding benchmarks (0.0.4, src-tauri/src/evals/).
+export const getModelProfile = (modelRef: string) =>
+  invoke<import("../components/evals/types").ProfileView>("get_model_profile", { modelRef });
+export const forgetModelProfile = (key: string) => invoke<boolean>("forget_model_profile", { key });
+export const startCapabilityCheck = (modelRef: string) =>
+  invoke<import("../components/evals/types").ModelProfile>("start_capability_check", { modelRef });
+export const cancelEval = () => invoke<boolean>("cancel_eval");
+export const listBenchTasks = () =>
+  invoke<import("../components/evals/types").BenchTaskInfo[]>("list_bench_tasks");
+export const startBenchmark = (modelRef: string) =>
+  invoke<import("../components/evals/types").BenchRun>("start_benchmark", { modelRef });
+export const listBenchRuns = () =>
+  invoke<import("../components/evals/types").BenchSummary[]>("list_bench_runs");
+export const getBenchRun = (id: string) =>
+  invoke<import("../components/evals/types").BenchRun>("get_bench_run", { id });
+export function onEvalProgress(
+  handler: (p: import("../components/evals/types").EvalProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<import("../components/evals/types").EvalProgress>("eval-progress", (e) => handler(e.payload));
+}

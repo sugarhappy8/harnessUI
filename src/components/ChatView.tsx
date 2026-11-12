@@ -362,7 +362,8 @@ export function ChatView() {
       <Composer
         busy={busy}
         disabledReason={disabledReason}
-        onSend={(t, images, documents) => void send(t, undefined, images, documents)}
+        chatId={detail?.chat.id ?? null}
+        onSend={(t, images, documents, mentions) => void send(t, undefined, images, documents, mentions)}
         onStop={() => void stop()}
       />
       <SystemPromptDialog

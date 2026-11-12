@@ -56,7 +56,9 @@ pub fn shortened_line(id: i64, shown: usize, total: u64, next: (usize, usize)) -
     )
 }
 
-/// The output id named by a result's last line, when it is the [`shortened_line`].
+/// The output id named by a result's last line, when it is the [`shortened_line`] (the
+/// rule the tool card follows in `ToolCallCard.tsx`, kept here to test the line against).
+#[cfg(test)]
 pub fn shortened_id(text: &str) -> Option<i64> {
     let last = text.trim_end().lines().last()?;
     let rest = last.strip_prefix("[Shortened: ")?;

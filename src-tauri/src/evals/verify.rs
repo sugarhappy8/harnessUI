@@ -69,11 +69,6 @@ impl Toolchains {
         let path = self.get(toolchain)?;
         Some(path.file_stem()?.to_string_lossy().into_owned())
     }
-
-    /// The `PATH` for the run's terminal and for verification.
-    pub fn path(&self) -> Option<&str> {
-        self.path.as_deref()
-    }
 }
 
 /// One check's outcome.

@@ -2232,7 +2232,7 @@ def p_tool_errors_output(c, notes):
         s.invoke("get_tool_output", {"chatId": other, "id": oid})
         raise AssertionError("another chat read the saved output")
     except WebDriverError as e:
-        assert "not found" in str(e), e
+        assert '"code": "not_found"' in str(e), e
     s.invoke("delete_chat", {"chatId": other})
 
     # 4. read_output with grep: the matching lines, with no card.
@@ -2377,10 +2377,94 @@ def p_task_state(c, notes):
     s.click_button("Panel")
 
 
+@probe("mentions")
+def p_mentions(c, notes):
+    """Typing @ lists files and definitions of the approved folders; a chosen definition is
+    sent to the model with its path and lines; a path outside the folders is refused."""
+    s = c.s
+    folder = c.work / "mentions"
+    folder.mkdir(exist_ok=True)
+    (folder / "notes.txt").write_text("the secret word is heron\n")
+    calc = folder / "calc.py"
+    calc.write_text("def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return a - b\n")
+    chat = new_chat(c)
+    s.invoke("set_chat_working_folder", {"chatId": chat, "path": str(folder)})
+    s.execute("window.location.reload();")
+    time.sleep(1.5)
+    s.execute(HOOK)
+    s.execute(
+        """
+        const a = [...document.querySelectorAll('nav[aria-label="Chat history"] button')].find(b => b.innerText.includes('New chat'));
+        a && a.click();
+        """
+    )
+    time.sleep(0.6)
+    # The picker lists the definition, as a name with its file and line.
+    box = s.find("textarea")
+    s.type(box, "What does @add")
+    option_text = "return [...document.querySelectorAll('[role=listbox] [role=option]')].map(o => o.innerText).join(' | ');"
+    s.wait_for(lambda: "add" in (s.execute(option_text) or ""), 20, "the add definition in the picker")
+    shown = s.execute(option_text)
+    notes.append("picker: " + shown.replace("\n", " "))
+    assert "calc.py:1" in shown and "function" in shown, shown
+    s.screenshot(str(OUT / "mentions-picker.png"))
+    # Enter chooses it: the mention goes into the text and a chip appears under the box.
+    s.type(box, "\ue007")
+    s.wait_for(lambda: "@calc.py#add" in s.execute("return document.querySelector('textarea').value;"), 10, "the mention in the text")
+    s.type(box, "do?")
+    chips = s.execute("const l = document.querySelector('ul[aria-label=\"Mentions\"]'); return l ? l.innerText : '';")
+    assert "calc.py#add" in chips, chips
+    Fake.queue.append({"content": "It adds two numbers."})
+    Fake.requests.clear()
+    s.type(box, "\ue007")
+    wait_idle(s)
+    assert Fake.requests, "nothing reached the endpoint"
+    whole = json.dumps(Fake.requests[0].get("messages", []))
+    assert f"File: {calc}, lines 1-2 (function add)" in whole, whole[-1500:]
+    assert "def add(a, b):" in whole and "return a + b" in whole, whole[-1500:]
+    assert "return a - b" not in whole, "more than the definition was sent"
+    # Inside the untrusted-data markers, as an attachment.
+    assert 'tool=\\"attachment\\"' in whole, whole[-1500:]
+    # Stored with the message: a chip again after a reload.
+    user = [m for m in messages(s, chat) if m["role"] == "user"][-1]
+    assert [m["label"] for m in user["mentions"]] == ["calc.py#add"], user["mentions"]
+    assert user["documents"] == [], user["documents"]
+    s.execute("window.location.reload();")
+    time.sleep(1.5)
+    s.execute(HOOK)
+    s.execute(
+        """
+        const a = [...document.querySelectorAll('nav[aria-label="Chat history"] button')].find(b => b.innerText.includes('What does'));
+        a && a.click();
+        """
+    )
+    s.wait_for(lambda: "calc.py#add" in s.page_text(), 15, "the chip on the sent message after a reload")
+    # Outside the approved folders: refused by the command, never listed by the search.
+    outside = str(c.other / "only-in-other.txt")
+    checks = s.invoke("resolve_mentions", {"chatId": chat, "mentions": [{"path": outside}, {"path": "../../other/only-in-other.txt"}]})
+    notes.append("refused: " + " | ".join(str(x.get("error")) for x in checks))
+    assert all("outside the approved folders" in (x.get("error") or "") for x in checks), checks
+    found = s.invoke("search_mentions", {"chatId": chat, "query": "only-in-other", "limit": 20})
+    assert found["hits"] == [], found
+    sent = s.execute_async(
+        """
+        const [chatId, path, done] = arguments;
+        const cb = window.__TAURI_INTERNALS__.transformCallback(() => {});
+        window.__TAURI_INTERNALS__.invoke('send_message', {chatId, text: 'read it', parentId: null,
+            mentions: [{path}], onEvent: '__CHANNEL__:' + cb})
+          .then(() => done({ok: true}))
+          .catch(e => done({ok: false, error: e}));
+        """,
+        chat,
+        outside,
+    )
+    assert not sent.get("ok") and "outside the approved folders" in json.dumps(sent.get("error")), sent
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
           p_tool_selection, p_artifacts, p_search, p_pinned,
-          p_tool_errors_output, p_task_state]
+          p_tool_errors_output, p_task_state, p_mentions]
 
 
 def main() -> int:

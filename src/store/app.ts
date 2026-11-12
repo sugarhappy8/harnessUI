@@ -9,6 +9,7 @@ import type {
   ErrorInfo,
   DocumentInput,
   ImageInput,
+  MentionInput,
   ModelOption,
   RuntimeStatus,
 } from "../lib/types";
@@ -85,7 +86,13 @@ interface AppState {
   newChat: () => Promise<void>;
   renameChat: (chatId: number, title: string) => Promise<void>;
   deleteChat: (chatId: number) => Promise<void>;
-  send: (text: string, parentId?: number | null, images?: ImageInput[], documents?: DocumentInput[]) => Promise<void>;
+  send: (
+    text: string,
+    parentId?: number | null,
+    images?: ImageInput[],
+    documents?: DocumentInput[],
+    mentions?: MentionInput[],
+  ) => Promise<void>;
   regenerate: (assistantMessageId: number) => Promise<void>;
   stop: () => Promise<void>;
   switchBranch: (messageId: number) => Promise<void>;
@@ -320,7 +327,7 @@ export const useApp = create<AppState>((set, get) => {
       await get().refreshChats();
     },
 
-    send: async (text, parentId, images, documents) => {
+    send: async (text, parentId, images, documents, mentions) => {
       let chatId = get().activeChatId;
       if (chatId === null) {
         await get().newChat();
@@ -331,7 +338,7 @@ export const useApp = create<AppState>((set, get) => {
       set({ generation: newGeneration(chatId), turnNotes: null, error: null });
       const id = chatId;
       try {
-        await ipc.sendMessage({ chatId: id, text, parentId: parent, images, documents }, (e) =>
+        await ipc.sendMessage({ chatId: id, text, parentId: parent, images, documents, mentions }, (e) =>
           onStreamEvent(id, e),
         );
       } catch (err) {

@@ -53,6 +53,7 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    #[cfg(test)]
     pub fn runs(&self) -> bool {
         matches!(self, Verdict::Run)
     }

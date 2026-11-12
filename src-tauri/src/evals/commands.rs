@@ -290,6 +290,8 @@ pub struct ProfileView {
     pub reason: Option<String>,
     /// The model and backend, as named in the table.
     pub label: Option<String>,
+    /// The settings key of its profile, for "Forget".
+    pub key: Option<String>,
     pub profile: Option<Profile>,
 }
 
@@ -308,6 +310,7 @@ pub async fn get_model_profile(
                 "This model's endpoint is not set up.".into()
             }),
             label: None,
+            key: None,
             profile: None,
         });
     };
@@ -315,6 +318,7 @@ pub async fn get_model_profile(
         available: true,
         reason: None,
         label: Some(identity.label()),
+        key: Some(identity.key()),
         profile: profile::load(&state.store, &identity).await,
     })
 }
