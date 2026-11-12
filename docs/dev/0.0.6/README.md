@@ -79,9 +79,9 @@ This branch got the work back by reverting a0177eb on top of 0.0.5 (commit 71310
 use `claude/0.0.5-paused` for anything any more; it is kept only as a record.
 
 ## How to pick it up
-1. Keep this branch up to date with 0.0.5: merge `claude/zealous-brown-d3vmfb` (0.0.5's
-   branch, pull request 4) while 0.0.5 is not merged, and `main` once it is. Ordinary merges
-   are fine now.
+1. Keep this branch up to date by merging `main`. 0.0.5 (pull request 4) was merged into
+   `main` as 4189a3a and released as v0.0.5; its branch `claude/zealous-brown-d3vmfb` is
+   gone. `main` was merged into this branch on 2026-11-12 (no file changes).
 2. Update `spec.md` for 0.0.6:
    - approval modes are three (Ask first, Allow all, Full access); see ARCHITECTURE.md 13.3
      "Full access (0.0.5)" and `docs/dev/0.0.5/full-access-review.md`;

@@ -61,6 +61,8 @@ one starts from this file and `README.md`.
   /root/.claude/projects/-home-user-harnessUI/<session>/workflows/scripts/; packages'
   notes are the runs' args. The developers never commit; an hourly check commits
   work in progress with [skip ci].
+- 18:10 UTC: 0.0.5 merged into `main` (4189a3a, released as v0.0.5); `main` merged into this
+  branch (no file changes). From now on merge `main`, not the 0.0.5 branch.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
