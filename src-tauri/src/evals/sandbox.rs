@@ -15,7 +15,7 @@
 //! | A file action whose resolved path, or a command whose working folder, is not inside the run's folder | blocked |
 //! | A command that names a place outside the run's folder, goes up out of it with `..`, or uses a variable or `~` (the app cannot tell where those point) | blocked |
 //! | A command that installs or downloads software (`pip`, `npm install`, `npx`, …) | blocked |
-//! | `node --test` alone (with only `--test-…` flags): the classifier marks an interpreter without a file as unreadable, but the test runner reads no code from standard input | read as a plain command, then judged by the rows above |
+//! | Benchmarks: a command line that is not made only of the allowed commands ([`COMMANDS_ALLOWED`]: the task's interpreter running a script file of the folder, `-m unittest` / `-m pytest`, `node --test`, and `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `diff`, `pwd`, `echo` and their Windows counterparts), joined by `|`, `&&`, `||` or `;`, with literal words only: no wildcard, redirection, background `&` or here-document | blocked |
 //! | Everything else: reads, writes and edits inside the folder, plain commands | runs |
 //!
 //! Every call reaches this rule through the tool's own describer and
@@ -111,6 +111,20 @@ impl Rules {
     /// Decides one described call. `recovered` is true for a call read from the reply's
     /// text.
     pub fn judge(&self, action: &Action, recovered: bool) -> Verdict {
+        match self.decide(action, recovered) {
+            // A refused command says what this run does run, so the model can go on.
+            Verdict::Blocked(why)
+                if self.terminal
+                    && action.server == "terminal"
+                    && !why.contains(COMMANDS_ALLOWED) =>
+            {
+                Verdict::Blocked(format!("{}. {COMMANDS_ALLOWED}", why.trim_end_matches('.')))
+            }
+            verdict => verdict,
+        }
+    }
+
+    fn decide(&self, action: &Action, recovered: bool) -> Verdict {
         // 1. Only the run's own tools.
         if !self.offers(&action.server, &action.tool) {
             return Verdict::Blocked(if action.tool == "delete_file" {
@@ -119,28 +133,6 @@ impl Rules {
                 format!("the tool {} is not part of this run", action.tool)
             });
         }
-        // `node --test` alone: the classifier reads an interpreter without a file as one
-        // that takes its code from standard input and so cannot be read (`network`). The
-        // test runner takes no code from standard input; it runs the test files it finds
-        // in the working folder. Only this exact form is read as a plain command.
-        let corrected;
-        let action = if action.server == "terminal"
-            && action.network
-            && action.keep_asking.is_none()
-            && action
-                .payload
-                .get("command")
-                .and_then(Value::as_str)
-                .is_some_and(|line| self.is_node_test_runner(line))
-        {
-            corrected = Action {
-                network: false,
-                ..action.clone()
-            };
-            &corrected
-        } else {
-            action
-        };
         // 2. The policy engine, in Allow all, with the turn treated as holding untrusted
         //    content from its first call. Whatever it would not allow by itself is refused.
         let turn = TurnContext {
@@ -196,6 +188,9 @@ impl Rules {
         if !inside(cwd) {
             return Verdict::Blocked("commands run only inside the folder of this run".into());
         }
+        if let Err(why) = self.only_allowed_commands(command, cwd, &sandbox) {
+            return Verdict::Blocked(why);
+        }
         if let Err(why) = self.command_stays_inside(command, cwd, &sandbox) {
             return Verdict::Blocked(why);
         }
@@ -205,21 +200,79 @@ impl Rules {
         Verdict::Run
     }
 
-    /// A line that is exactly one plain `node --test` command: `node` (or `nodejs`) and
-    /// nothing but `--test` and `--test-…` flags.
-    fn is_node_test_runner(&self, line: &str) -> bool {
-        let Parsed::Plain(commands) = policy::command::parse(self.shell, line) else {
-            return false;
+    /// The benchmark terminal's allow-list. The line must break down, with the strict
+    /// parser, into simple commands of literal words, each one of [`COMMANDS_ALLOWED`].
+    /// The strict parser already refuses redirections, here-documents, background `&`,
+    /// variables, substitutions and unquoted wildcards; a quoted wildcard is refused here.
+    fn only_allowed_commands(
+        &self,
+        line: &str,
+        cwd: &str,
+        sandbox: &PathSandbox,
+    ) -> Result<(), String> {
+        let refuse = |what: String| Err(format!("{what}. {COMMANDS_ALLOWED}"));
+        let commands = match policy::command::parse(self.shell, line) {
+            Parsed::Plain(commands) => commands,
+            Parsed::Complex { reason } => return refuse(reason),
         };
-        let [command] = commands.as_slice() else {
-            return false;
+        let inside_with = |word: &str, endings: &[&str]| {
+            let lower = word.to_ascii_lowercase();
+            endings.iter().any(|e| lower.ends_with(e))
+                && sandbox.check(word, Some(cwd), &RealFs).is_ok()
         };
-        matches!(program_name(&command.program).as_str(), "node" | "nodejs")
-            && command.args.iter().any(|a| a == "--test")
-            && command
+        for command in &commands {
+            let program = &command.program;
+            if program.contains(['/', '\\']) {
+                return refuse(format!("{program} is run by its path"));
+            }
+            if let Some(word) = command
                 .args
                 .iter()
-                .all(|a| a == "--test" || a.starts_with("--test-"))
+                .chain(std::iter::once(program))
+                .find(|w| w.contains(['*', '?', '[']))
+            {
+                return refuse(format!("{word} has a wildcard"));
+            }
+            let name = program_name(program);
+            let args = &command.args;
+            let ok = match name.as_str() {
+                "python3" | "python" | "py" => {
+                    // Leading interpreter switches that run nothing.
+                    let rest: Vec<&String> = args
+                        .iter()
+                        .skip_while(|a| matches!(a.as_str(), "-B" | "-u"))
+                        .collect();
+                    match rest.as_slice() {
+                        [m, module, ..] if m.as_str() == "-m" => {
+                            matches!(module.as_str(), "unittest" | "pytest")
+                        }
+                        [file, ..] => inside_with(file, &[".py"]),
+                        [] => false,
+                    }
+                }
+                "node" | "nodejs" => {
+                    let scripts = [".js", ".cjs", ".mjs"];
+                    if args.iter().any(|a| a == "--test") {
+                        args.iter().all(|a| {
+                            if a.starts_with('-') {
+                                a == "--test" || a.starts_with("--test-")
+                            } else {
+                                inside_with(a, &scripts)
+                            }
+                        })
+                    } else {
+                        args.first().is_some_and(|file| inside_with(file, &scripts))
+                    }
+                }
+                _ => LOOKING.contains(&name.as_str()),
+            };
+            if !ok {
+                return refuse(format!(
+                    "{program} is not one of the commands this run allows"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The simple commands of a line, each as its words. A line the classifier can break
@@ -370,6 +423,30 @@ impl Rules {
         None
     }
 }
+
+/// What the benchmark terminal runs, said to the model up front and in every refusal.
+pub const COMMANDS_ALLOWED: &str = "In this run the terminal runs only the task's tests and scripts and commands that look at files: python3 (or python) with a .py file of the project folder, python3 -m unittest, python3 -m pytest, node with a .js file, node --test, and ls, cat, head, tail, wc, grep, diff, pwd and echo, joined with |, && or ; and written without wildcards or redirections.";
+
+/// The commands that only look at files (and their Windows and PowerShell names).
+const LOOKING: &[&str] = &[
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "grep",
+    "diff",
+    "pwd",
+    "echo",
+    "dir",
+    "type",
+    "findstr",
+    "get-childitem",
+    "get-content",
+    "select-string",
+    "get-location",
+    "write-output",
+];
 
 /// `%NAME%`, the way cmd writes a variable.
 fn percent_var(piece: &str) -> bool {

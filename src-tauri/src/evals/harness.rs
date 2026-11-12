@@ -172,6 +172,7 @@ pub async fn run(
 ) -> Record {
     let started = Instant::now();
     let folder = workspace.display();
+    let has_terminal = spec.terminal.is_some();
     let rules = Rules::new(
         folder.clone(),
         spec.forbidden.clone(),
@@ -214,7 +215,11 @@ pub async fn run(
         model.caps,
         template,
     );
-    input.system_prompt = SYSTEM_PROMPT.into();
+    input.system_prompt = if has_terminal {
+        format!("{SYSTEM_PROMPT} {}", super::sandbox::COMMANDS_ALLOWED)
+    } else {
+        SYSTEM_PROMPT.into()
+    };
     input.step_cap = spec.step_cap;
     input.thinking = !spec.settings.thinking_off;
     input.preamble = Some(agent::prompt::Preamble {

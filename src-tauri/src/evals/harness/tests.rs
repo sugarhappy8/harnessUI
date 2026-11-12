@@ -293,12 +293,12 @@ async fn a_benchmark_run_has_the_terminal_under_the_rule() {
         return;
     }
     let ws = Workspace::create().unwrap();
-    ws.write_files([("hello.py", b"print('hello from the run')\n".as_slice())])
+    ws.write_files([("hello.py", b"open('out.txt', 'w').write('hello from the run\\n')\n".as_slice())])
         .unwrap();
     let endpoint = Endpoint::playing(vec![
         call(
             "run_command",
-            json!({"command": "python3 hello.py > out.txt"}),
+            json!({"command": "python3 hello.py"}),
         ),
         call("run_command", json!({"command": "rm hello.py"})),
         call(

@@ -680,6 +680,57 @@ fn rule3_a_command_that_hides_what_it_runs_still_asks() {
 
 /// Lead's addition: a delete or publish word handed to another program as an argument of
 /// its own, where the parser can tell.
+/// A program told to run another command in a language or an option of its own builds
+/// that command where this line cannot be read, so it hides what it runs: it keeps
+/// asking, also when the words of a delete are put together from pieces.
+#[test]
+fn rule3_a_program_told_to_run_a_command_of_its_own_still_asks() {
+    for line in [
+        "awk 'BEGIN{system(\"r\" \"m -rf build\")}'",
+        "awk 'BEGIN{system(\"id\")}'",
+        "awk '{print | \"sh\"}' notes.txt",
+        "sed '1e touch marker' notes.txt",
+        "sed -n 's/x/y/e' notes.txt",
+        "sed -i 's/^/r/;s/$/m x/e' notes.txt",
+        "tar -cf x.tar notes.txt --checkpoint=1 --checkpoint-action=exec=id",
+        "tar -xf x.tar --to-command=sh",
+        "zip -r a.zip . -T -TT 'id #'",
+        "vim -c ':!id' notes.txt",
+        "busybox awk 'BEGIN{system(\"id\")}'",
+    ] {
+        let found = facts(SH, line);
+        if line.starts_with("busybox") {
+            // A program that runs another program: unread, like every wrapper.
+            assert!(found.opaque, "{line}");
+            continue;
+        }
+        assert_eq!(
+            found.keep_asking.as_ref().map(|(kind, _)| *kind),
+            Some(KeepAsking::Hidden),
+            "{line}: {found:?}"
+        );
+        assert_still_asks(&command_action(SH, line), line);
+    }
+    // The same programs doing their ordinary work are plain commands.
+    for line in [
+        "awk '{print $1}' notes.txt",
+        "awk -F, '{print $2}' data.csv",
+        "sed -n '1,5p' example.txt",
+        "sed 's/hello/there/' example.txt",
+        "sed -E 's/(a)/\\1/' example.txt",
+        "tar -czf x.tar.gz src",
+        "tar -xzf x.tar.gz",
+        "zip -r a.zip src",
+    ] {
+        let found = facts(SH, line);
+        assert!(found.keep_asking.is_none(), "{line}: {found:?}");
+        assert!(!found.opaque, "{line}");
+    }
+    // A small web server listens on the network.
+    assert!(facts(SH, "python3 -m http.server 8765").network);
+    assert!(!facts(SH, "python3 -m unittest").network);
+}
+
 /// An interpreter called with no file reads its code from standard input, so the line is
 /// unread. Asking for the version or the help, or (Node.js) running the test files it
 /// finds, takes no code and is read like any other plain command.

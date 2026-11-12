@@ -74,6 +74,8 @@ const MORE_SYSTEM: &[&str] = &["netsh", "set-mppreference", "set-executionpolicy
 /// are not here: `npx vitest run` is a plain test run, and what they are handed is read
 /// like any other program's arguments (`npx rimraf dist` asks).
 const MORE_WRAPPERS: &[&str] = &[
+    "busybox",
+    "toybox",
     "forfiles",
     "wsl",
     "invoke-item",
@@ -236,6 +238,17 @@ fn takes_no_code(name: &str, args: &[String]) -> bool {
     informs || node_tests
 }
 
+/// Whether an interpreter is started as a small web server (`python -m http.server`,
+/// `php -S`).
+fn serves_files(name: &str, args: &[String]) -> bool {
+    let python = name == "py" || name.starts_with("python") || name.starts_with("pypy");
+    (python
+        && args
+            .windows(2)
+            .any(|w| w[0] == "-m" && matches!(w[1].as_str(), "http.server" | "simplehttpserver")))
+        || (name.starts_with("php") && args.iter().any(|a| a == "-s"))
+}
+
 /// What was found in one command line.
 #[derive(Default)]
 struct Found {
@@ -393,6 +406,20 @@ fn simple(command: &SimpleCommand, found: &mut Found) {
     if WRAPPERS.contains(&name) || MORE_WRAPPERS.contains(&name) {
         found.opaque = true;
         return;
+    }
+    // A program told, in a small language or an option of its own, to run a command. The
+    // words of that command can be put together inside it, so no reading of this line
+    // shows them: it hides what it runs.
+    if own_command::runs_one(name, &command.args) {
+        found.opaque = true;
+        found.note(KeepAsking::Hidden, || {
+            format!("{program} is told to run another command, which this line does not show")
+        });
+        return;
+    }
+    // A web server started from the command line listens on the network.
+    if serves_files(name, &args) {
+        found.network = true;
     }
     let inline_flag = INLINE.iter().any(|(interp, flags)| {
         (name == *interp
@@ -1279,6 +1306,8 @@ pub fn web_label(label: &str) -> Option<KeepAsking> {
 pub fn external(destructive_hint: Option<bool>, user_always_ask: bool) -> Option<KeepAsking> {
     (user_always_ask || destructive_hint == Some(true)).then_some(KeepAsking::MarkedDestructive)
 }
+
+mod own_command;
 
 #[cfg(test)]
 mod tests;

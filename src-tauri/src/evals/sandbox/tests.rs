@@ -371,20 +371,50 @@ async fn installing_software_is_blocked() {
 #[tokio::test]
 async fn ordinary_commands_run() {
     let run = Run::new(true);
+    std::fs::write(run.work.join("test.js"), "").unwrap();
+    std::fs::write(run.work.join("a.test.js"), "").unwrap();
     for line in [
         "python3 -m unittest -q",
-        "python3 -m unittest discover -s src -p 'test_*.py'",
+        "python3 -m unittest discover -s src",
+        "python3 -B -m unittest -v",
         "python3 src/main.py",
-        "python3 -m pytest -q src",
+        "python3 src/main.py --verbose 3",
+        "python -m pytest -q src",
         "node test.js",
+        "node test.js extra words",
         "node --test",
-        "npm test",
-        "npm run build",
+        "node --test a.test.js",
+        "node --test --test-reporter=spec",
         "ls",
         "ls -la src",
         "cat notes.txt",
         "cat notes.txt | head -n 1",
         "grep -rn two .",
+        "grep -n two notes.txt src/main.py",
+        "wc -l notes.txt && tail -n 1 notes.txt",
+        "diff notes.txt notes.txt; echo done",
+        "pwd",
+        "echo done",
+        // Two allowed commands: the test runner reads no code from standard input.
+        "cat notes.txt | node --test",
+    ] {
+        let verdict = run.command(line).await;
+        assert_eq!(verdict, Verdict::Run, "{line}");
+    }
+    let absolute = format!("cat {}", run.work.join("notes.txt").display());
+    assert_eq!(run.command(&absolute).await, Verdict::Run, "{absolute}");
+}
+
+/// Ordinary commands of coding work that are not on the benchmark allow-list are refused,
+/// and the refusal says what may run.
+#[cfg(unix)]
+#[tokio::test]
+async fn commands_off_the_allow_list_are_blocked_with_the_list() {
+    let run = Run::new(true);
+    for line in [
+        "python3 -m unittest discover -s src -p 'test_*.py'",
+        "npm test",
+        "npm run build",
         "python3 -m unittest -q 2>&1",
         "python3 src/main.py > out.txt",
         "python3 src/main.py > out.txt 2>&1",
@@ -394,13 +424,139 @@ async fn ordinary_commands_run() {
         "mv notes.txt renamed.txt",
         "git status",
         "git diff",
-        "echo done",
+        "python3",
+        "node",
+        "python3 notes.txt",
+        "node notes.txt",
     ] {
-        let verdict = run.command(line).await;
-        assert_eq!(verdict, Verdict::Run, "{line}");
+        match run.command(line).await {
+            Verdict::Run => panic!("{line} would have run"),
+            Verdict::Blocked(why) => {
+                assert!(why.contains(COMMANDS_ALLOWED), "{line}: {why}");
+            }
+        }
     }
-    let absolute = format!("cat {}", run.work.join("notes.txt").display());
-    assert_eq!(run.command(&absolute).await, Verdict::Run, "{absolute}");
+}
+
+/// Every command line of the review's findings 1b, 1c and 6 (with the outside folder's
+/// real path) is refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_review_escapes_are_blocked() {
+    let run = Run::new(true);
+    let out = run.outside.display().to_string();
+    let lines = [
+        format!("sed -n '1w {out}/sed_w.txt' notes.txt"),
+        format!("sed -n 1w{out}/sed_w.txt notes.txt"),
+        format!("sed '1e touch {out}/sed_e.txt' notes.txt"),
+        format!("awk 'BEGIN{{print 1 > \"{out}/awk.txt\"}}'"),
+        "awk 'BEGIN{system(\"id\")}'".to_owned(),
+        "tar -cf x.tar notes.txt --checkpoint=1 --checkpoint-action=exec=id".to_owned(),
+        "zip -r a.zip . -T -TT 'id #'".to_owned(),
+        "vim -c ':!id' notes.txt".to_owned(),
+        "ln -s .*. up".to_owned(),
+        "ln -s '.*.' up".to_owned(),
+        "ls u*/".to_owned(),
+        "ls 'u*/'".to_owned(),
+        "cat li*/secret.txt".to_owned(),
+        "cat 'li*/secret.txt'".to_owned(),
+        "cp notes.txt u*/outside/".to_owned(),
+        "mv notes.txt li*".to_owned(),
+        "python3 x.py &".to_owned(),
+        "python3 -m http.server 8765".to_owned(),
+    ];
+    for line in &lines {
+        assert!(!run.command(line).await.runs(), "{line} would have run");
+    }
+    assert!(std::fs::read_dir(&run.outside).unwrap().count() == 1);
+}
+
+/// Look-alikes of the allowed commands are refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn look_alikes_are_blocked() {
+    let run = Run::new(true);
+    std::fs::write(run.work.join("x.sh"), "ls\n").unwrap();
+    std::fs::write(run.work.join("x.py"), "").unwrap();
+    for line in [
+        "cat notes*",
+        "cat 'notes?.txt'",
+        "cat [n]otes.txt",
+        "grep -r secret ..",
+        "grep -r secret ../outside",
+        "python3 -m http.server",
+        "python3 -m pip list",
+        "python3 -m venv env",
+        "python3 -c 'print(1)'",
+        "python3 -u -c 'print(1)'",
+        "python3 -I x.py",
+        "node -e 'console.log(1)'",
+        "node -p 1",
+        "node --require ./x.js x.js",
+        "node --test --eval 1",
+        "sed -n 1p notes.txt",
+        "awk '{print}' notes.txt",
+        "tar -cf a.tar notes.txt",
+        "cp notes.txt copy.txt",
+        "mv notes.txt moved.txt",
+        "ln notes.txt hard.txt",
+        "make",
+        "sh x.sh",
+        "bash x.sh",
+        "./x.sh",
+        "src/main.py",
+        "git log",
+        "env",
+        "printf hi",
+        "touch x",
+        "find . -name x",
+        "cat notes.txt | sh",
+        "cat notes.txt | python3",
+        "cat notes.txt > copy.txt",
+        "cat < notes.txt",
+        "cat <<EOF\nx\nEOF",
+    ] {
+        assert!(!run.command(line).await.runs(), "{line} would have run");
+    }
+}
+
+/// The commands each shipped task's prompt asks for run, with the task's own files.
+#[cfg(unix)]
+#[tokio::test]
+async fn every_shipped_task_command_runs() {
+    let run = Run::new(true);
+    for task in crate::evals::tasks::all() {
+        for (path, content) in &task.files {
+            let target = run.work.join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, content).unwrap();
+        }
+        let prompt = task
+            .spec
+            .prompt
+            .replace("{python}", "python3")
+            .replace("{node}", "node");
+        let commands: Vec<&str> = prompt
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|c| c.starts_with("python3 ") || c.starts_with("node "))
+            .collect();
+        assert_eq!(
+            commands.is_empty(),
+            task.spec.needs.is_none(),
+            "{}",
+            task.name
+        );
+        for line in commands {
+            assert_eq!(
+                run.command(line).await,
+                Verdict::Run,
+                "{}: {line}",
+                task.name
+            );
+        }
+    }
 }
 
 /// The capability check has the file tools only: a command is refused there.
@@ -569,37 +725,6 @@ async fn nothing_is_asked_and_nothing_is_allowed_by_asking() {
         assert!(matches!(answer, Approval::Deny { .. }), "{answer:?}");
     }
     assert_eq!(nobody.asked(), 2);
-}
-
-/// `node --test` runs (the test runner reads no code from standard input), and only that
-/// exact form is read as a plain command: anything added to it is judged as before.
-#[cfg(unix)]
-#[tokio::test]
-async fn the_node_test_runner_runs_and_nothing_rides_along() {
-    let run = Run::new(true);
-    for line in [
-        "node --test",
-        "node --test --test-reporter=spec",
-        "node test.js",
-        "node --test test.js",
-    ] {
-        assert_eq!(run.command(line).await, Verdict::Run, "{line}");
-    }
-    for line in [
-        "node",
-        "node --eval 1",
-        "node --test --eval 'require(1)'",
-        "node --test -e 1",
-        "node --test -p 1",
-        "cat notes.txt | node --test",
-        "node --test < notes.txt",
-        "node --test && curl https://example.com",
-        "node --test; rm notes.txt",
-        "node --test --test-reporter-destination=/tmp/harness-eval-leak.txt",
-        "sh -c 'node --test'",
-    ] {
-        assert!(!run.command(line).await.runs(), "{line} would have run");
-    }
 }
 
 /// A failing edit whose explanation needs the file's text is described as a read-only
