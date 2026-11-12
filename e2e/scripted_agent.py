@@ -2374,6 +2374,10 @@ def p_task_state(c, notes):
     whole = json.dumps(req.get("messages", []))
     assert whole.count("Task state, from the app") == 1, whole.count("Task state, from the app")
     s.wait_for(lambda: status() == "active", 10, "the active status")
+    # A change made elsewhere reaches the open tab through the change event.
+    s.invoke("edit_task", {"chatId": chat, "edit": {"nextAction": "Check the footer too"}})
+    s.wait_for(lambda: "Check the footer too" in tab_text(), 10, "the tab refreshed by the event")
+    assert "written by you" in tab_text()
     s.click_button("Panel")
 
 
@@ -2388,6 +2392,11 @@ def p_mentions(c, notes):
     calc = folder / "calc.py"
     calc.write_text("def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return a - b\n")
     chat = new_chat(c)
+    # Approved for this chat (the picker is native), and its working folder.
+    con = sqlite3.connect(c.db)
+    con.execute("INSERT INTO approved_folders(path, chat_id, created_at) VALUES (?, ?, ?)", (str(folder), chat, int(time.time() * 1000)))
+    con.commit()
+    con.close()
     s.invoke("set_chat_working_folder", {"chatId": chat, "path": str(folder)})
     s.execute("window.location.reload();")
     time.sleep(1.5)
@@ -2461,10 +2470,177 @@ def p_mentions(c, notes):
     assert not sent.get("ok") and "outside the approved folders" in json.dumps(sent.get("error")), sent
 
 
+@probe("capability-check")
+def p_capability_check(c, notes):
+    """Tested settings per model (0.0.4): "Check this model" in Settings runs three probes
+    under two settings against the scripted endpoint, which does the probes right only at
+    a low temperature. The results table shows, the best settings are saved as the model's
+    profile (not writable through set_setting), a chat turn uses them, the audit log has
+    the check's rows, the temporary folders are gone, and Forget removes the profile."""
+    import re
+    s = c.s
+    temp = pathlib.Path(tempfile.gettempdir())
+
+    def runs_left():
+        return sorted(p.name for p in temp.glob("harness-run-*")) + sorted(p.name for p in temp.glob("harness-verify-*"))
+
+    before = runs_left()
+
+    def text_of(m):
+        content = m.get("content")
+        if isinstance(content, list):
+            return " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+        return str(content or "")
+
+    class Probes:
+        """Computes each reply from the request it answers."""
+
+        def __bool__(self):
+            return True
+
+        def clear(self):
+            pass
+
+        def pop(self, _):
+            req = Fake.requests[-1]
+            msgs = req.get("messages", [])
+            task = next((text_of(m) for m in msgs if m.get("role") == "user"), "")
+            results = [text_of(m) for m in msgs if m.get("role") == "tool"]
+            cool = abs((req.get("temperature") or 1.0) - 0.2) < 1e-6
+            if "note.txt" in task:
+                if not results:
+                    return {"tool_calls": [{"name": "read_file", "arguments": {"path": "note.txt"}}]}
+                word = re.search(r"The code word is (\w+)", results[-1])
+                return {"content": word.group(1) if (word and cool) else "pelican"}
+            if "settings.txt" in task:
+                if not results:
+                    new = "color = green" if cool else "color = red"
+                    return {"tool_calls": [{"name": "edit_file", "arguments": {"path": "settings.txt", "old_text": "color = blue", "new_text": new}}]}
+                return {"content": "Changed."}
+            if "limits.txt" in task:
+                if not results:
+                    return {"tool_calls": [{"name": "edit_file", "arguments": {"path": "limits.txt", "old_text": "limit = 10", "new_text": "limit = 20"}}]}
+                if len(results) == 1 and cool:
+                    return {"tool_calls": [{"name": "edit_file", "arguments": {"path": "limits.txt", "old_text": "[server]\nlimit = 10", "new_text": "[server]\nlimit = 20"}}]}
+                return {"content": "Changed."}
+            return {"content": "ok"}
+
+    def view():
+        return s.invoke("get_model_profile", {"modelRef": c.model_ref})
+
+    try:
+        assert view()["profile"] is None, "a profile exists before any check"
+        Fake.queue = Probes()
+        Fake.requests.clear()
+        s.click_button("Settings")
+        s.click_button("Local models")
+        time.sleep(0.6)
+        s.click_button("Check this model")
+        s.wait_for(lambda: "Start the check" in s.page_text(), 10, "the confirmation")
+        page = s.page_text()
+        assert "temporary folder" in page and "Nothing is asked while it runs" in page, page[-800:]
+        time.sleep(0.9)
+        s.click_button("Start the check")
+        s.wait_for(lambda: "(chosen)" in s.page_text(), 180, "the results table")
+        time.sleep(0.8)
+        s.screenshot(str(OUT / "capability-check.png"))
+        table = s.execute("const t = document.querySelector('table[aria-label=\"Check results\"]'); return t ? t.innerText : null;")
+        notes.append("table: " + str(table).replace("\n", " | "))
+        assert table and "Temperature 0.2 (chosen)" in table, table
+        assert "passed" in table and "failed" in table and "native" in table, table
+        # Six probe runs (two settings, three probes), all through the scripted endpoint.
+        temps = sorted({r.get("temperature") for r in Fake.requests}, key=str)
+        assert temps == [0.2, None] or temps == [None, 0.2], temps
+        saved = view()
+        profile = saved["profile"]
+        assert profile and profile["chosen"] == "Temperature 0.2", saved
+        assert profile["defaults"] == {"temperature": 0.2}, profile["defaults"]
+        key = saved["key"]
+        assert key.startswith("modelProfile:"), key
+        assert s.invoke("get_setting", {"key": key})["chosen"] == "Temperature 0.2"
+        try:
+            s.invoke("set_setting", {"key": key, "value": {"chosen": "x"}})
+            raise AssertionError("set_setting wrote a model profile")
+        except WebDriverError as e:
+            assert "cannot be changed this way" in str(e), e
+        # The check's own audit row, decided by the user, and its calls under it; no chat.
+        rows = s.invoke("list_audit", {"filter": {"limit": 200}})
+        run_rows = [r for r in rows if r["server"] == "evals" and r["tool"] == "capability_check"]
+        assert len(run_rows) == 1, run_rows
+        run_id = run_rows[0]["id"]
+        calls = [r for r in rows if r.get("parent_audit_id", r.get("parentAuditId")) == run_id]
+        assert len(calls) >= 6, len(calls)
+        assert all(r.get("chat_id", r.get("chatId")) is None for r in calls + run_rows)
+        assert all(r["preview"].startswith("Model check: ") for r in calls), calls[0]["preview"]
+        notes.append(f"audit: 1 run row, {len(calls)} call rows")
+        # The temporary folders are gone.
+        assert runs_left() == before, (before, runs_left())
+        # A chat with this model now asks for the tested temperature.
+        Fake.queue = []
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.4)
+        chat = new_chat(c)
+        Fake.requests.clear()
+        Fake.queue.append({"content": "Hello."})
+        send(s, "hello")
+        wait_idle(s)
+        assert Fake.requests and Fake.requests[-1].get("temperature") == 0.2, Fake.requests[-1].get("temperature")
+        # Forget: the table goes, and the next turn uses the model's own settings again.
+        s.click_button("Settings")
+        s.click_button("Local models")
+        s.wait_for(lambda: "Forget these settings" in s.page_text(), 10, "the saved results")
+        time.sleep(0.8)
+        s.screenshot(str(OUT / "capability-check-saved.png"))
+        s.click_button("Forget these settings")
+        s.wait_for(lambda: "(chosen)" not in s.page_text(), 10, "the table is gone")
+        assert view()["profile"] is None
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.4)
+        Fake.requests.clear()
+        Fake.queue.append({"content": "Hello again."})
+        send(s, "again")
+        wait_idle(s)
+        assert "temperature" not in Fake.requests[-1], Fake.requests[-1].get("temperature")
+        assert messages(s, chat)[-1]["text"] == "Hello again."
+        # A benchmark from Settings, Diagnostics: the scripted model does none of the work,
+        # so no task passes; the run is saved on this computer and shown as a table.
+        tasks = s.invoke("list_bench_tasks", {})
+        assert len(tasks) >= 10, tasks
+        s.click_button("Settings")
+        s.click_button("Diagnostics")
+        time.sleep(0.6)
+        s.click_button("Run the benchmark")
+        s.wait_for(lambda: "Start the benchmark" in s.page_text(), 10, "the benchmark confirmation")
+        page = s.page_text()
+        assert "commands that delete, go online or cannot be understood are refused" in page, page[-800:]
+        time.sleep(0.9)
+        s.click_button("Start the benchmark")
+        s.wait_for(lambda: s.execute("return document.querySelector('table[aria-label=\"Benchmark results\"]') !== null;"), 300, "the benchmark table")
+        bench = s.execute("return document.querySelector('table[aria-label=\"Benchmark results\"]').innerText;")
+        notes.append("bench total: " + bench.strip().splitlines()[-1])
+        assert f"0 of " in bench and "completed" in bench, bench
+        runs = s.invoke("list_bench_runs", {})
+        assert len(runs) == 1 and runs[0]["totals"]["completed"] == 0, runs
+        run = s.invoke("get_bench_run", {"id": runs[0]["id"]})
+        assert len(run["tasks"]) == len(tasks)
+        assert all(t["status"] in ("failed", "skipped") for t in run["tasks"]), [t["status"] for t in run["tasks"]]
+        saved = list((c.db.parent / "benchmarks").glob("*.json"))
+        assert len(saved) == 1, saved
+        assert runs_left() == before, (before, runs_left())
+        bench_rows = [r for r in s.invoke("list_audit", {"filter": {"limit": 500}}) if r["server"] == "evals" and r["tool"] == "benchmark"]
+        assert len(bench_rows) == 1 and bench_rows[0]["result_status"] == "ok", bench_rows
+    finally:
+        Fake.queue = []
+        try:
+            s.invoke("cancel_eval", {})
+        except Exception:  # noqa: BLE001
+            pass
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
           p_tool_selection, p_artifacts, p_search, p_pinned,
-          p_tool_errors_output, p_task_state, p_mentions]
+          p_tool_errors_output, p_task_state, p_mentions, p_capability_check]
 
 
 def main() -> int:
