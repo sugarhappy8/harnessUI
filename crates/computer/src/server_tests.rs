@@ -94,6 +94,7 @@ fn chat() -> ChatContext {
     ChatContext {
         chat_id: CHAT,
         result_cap_tokens: 2000,
+        full_access: false,
         ..Default::default()
     }
 }

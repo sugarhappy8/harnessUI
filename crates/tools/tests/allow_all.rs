@@ -23,6 +23,7 @@ fn chat(dir: &Path) -> ChatContext {
         chat_id: 1,
         approved_folders: vec![dir.display().to_string()],
         result_cap_tokens: 2000,
+        full_access: false,
         ..Default::default()
     }
 }

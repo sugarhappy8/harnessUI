@@ -452,6 +452,7 @@ fn chat_in(dir: &std::path::Path) -> ChatContext {
         approved_folders: vec![dir.display().to_string()],
         working_folder: Some(dir.display().to_string()),
         result_cap_tokens: 2000,
+        full_access: false,
         ..ChatContext::default()
     }
 }

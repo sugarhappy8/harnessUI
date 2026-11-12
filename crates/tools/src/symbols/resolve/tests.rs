@@ -36,6 +36,7 @@ fn chat(s: &Setup) -> ChatContext {
         approved_folders: vec![s.root.display().to_string()],
         working_folder: Some(s.root.display().to_string()),
         result_cap_tokens: 2000,
+        full_access: false,
         ..Default::default()
     }
 }

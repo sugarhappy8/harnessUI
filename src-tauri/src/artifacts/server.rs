@@ -754,6 +754,7 @@ mod tests {
             chat: ChatContext {
                 chat_id: chat,
                 result_cap_tokens: 2000,
+                full_access: false,
                 ..ChatContext::default()
             },
             cancel: CancellationToken::new(),

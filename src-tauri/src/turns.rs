@@ -643,7 +643,9 @@ impl PolicyGate for AppPolicy {
                 .subagent_recovered
                 .store(recovered, Ordering::Relaxed);
         }
-        // [0.0.4 allow all] the chat's approval mode goes into the turn context here.
+        // The chat's approval mode goes into the turn context here (Allow all, 0.0.4; Full
+        // access, 0.0.5).
+        let mode = crate::approvals::for_decision(self.chat_id, untrusted_in_turn);
         let turn = policy::TurnContext {
             // Only enabled tools are offered; a call to anything else never gets here.
             tool_enabled: true,
@@ -653,7 +655,8 @@ impl PolicyGate for AppPolicy {
             // Read on every decision, like the grants below: a switch of the chat's mode
             // reaches a turn that is already running, and a helper's gate (built for the
             // same chat) is in the same mode.
-            allow_all: crate::approvals::for_decision(self.chat_id, untrusted_in_turn),
+            allow_all: mode == crate::approvals::ApprovalMode::AllowAll,
+            full_access: mode == crate::approvals::ApprovalMode::FullAccess,
         };
         let grants = self.grants.of_chat(self.chat_id);
         policy::evaluate(action, &turn, &grants)
@@ -679,6 +682,9 @@ struct AppTools {
     hidden: Vec<mcp_host::RegisteredTool>,
     /// Shared with the policy gate and the sink: the id of the call in progress.
     shared: Arc<TurnShared>,
+    /// [0.0.5 full access] What the tools reach while the chat is in Full access
+    /// (`approvals::whole_computer`).
+    whole_computer: Vec<String>,
 }
 
 /// What a helper takes over from the turn that starts it (see `subagent.rs`).
@@ -767,6 +773,7 @@ impl AppTools {
                 .cloned()
                 .collect(),
             shared: Arc::default(),
+            whole_computer: self.whole_computer.clone(),
         };
         let ready_host = self.host.clone();
         let policy = AppPolicy::for_chat(
@@ -818,6 +825,18 @@ impl AppTools {
         crate::subagent::run(helper, args, cancel).await
     }
 
+    /// The chat's tool context for a call made now. [0.0.5 full access] In Full access the
+    /// tools reach the whole computer; the mode is read for every call, so switching it off
+    /// narrows the folders again at once, in a turn that is running too.
+    fn chat_now(&self) -> ChatContext {
+        let mut chat = self.chat.clone();
+        chat.result_cap_tokens = self.result_cap.load(Ordering::Relaxed);
+        if crate::approvals::modes().full_access(chat.chat_id) {
+            crate::approvals::widen(&mut chat, &self.whole_computer);
+        }
+        chat
+    }
+
     /// [0.0.4 tool selection] This turn's tools as `find_tools` and `call_tool` see them:
     /// what the model has in its list, and what is on in the chat but kept back.
     fn routing(&self) -> crate::tool_select::finder::Routing<'_> {
@@ -843,8 +862,7 @@ impl ToolHost for AppTools {
         self.host.llama_schema(name)
     }
     async fn describe(&self, name: &str, args: &Map<String, Value>) -> Described {
-        let mut chat = self.chat.clone();
-        chat.result_cap_tokens = self.result_cap.load(Ordering::Relaxed);
+        let chat = self.chat_now();
         // [0.0.4 tool selection] A `call_tool` call is described as the tool it names, by
         // that tool's own describer and with the user's switches for that tool, so the
         // gate, the approval card and the audit row see the real action. Every other call
@@ -898,8 +916,7 @@ impl ToolHost for AppTools {
             Some(target) => (target.name.as_str(), &target.args),
             None => (name, args),
         };
-        let mut chat = self.chat.clone();
-        chat.result_cap_tokens = self.result_cap.load(Ordering::Relaxed);
+        let chat = self.chat_now();
         let chat_id = chat.chat_id;
         let mut out = self
             .host
@@ -1089,6 +1106,13 @@ fn decision_name(d: &CallDecision) -> (&'static str, store::AuditDecision, Optio
             store::AuditDecision::AllowedByMode,
             None,
         ),
+        // [0.0.5 full access] nothing asks; the audit table's list of decisions is not
+        // changed (no migration), so the row says "by mode" and its note names the mode.
+        CallDecision::AllowedByFullAccess => (
+            "allowed by Full access",
+            store::AuditDecision::AllowedByMode,
+            Some(crate::approvals::FULL_ACCESS_NOTE.to_string()),
+        ),
         CallDecision::Denied { note } => ("denied", store::AuditDecision::Denied, note.clone()),
         CallDecision::Cancelled => ("cancelled", store::AuditDecision::Cancelled, None),
         CallDecision::Refused { reason } => (
@@ -1141,6 +1165,7 @@ pub(crate) fn audit_entry(
         decided_by: match decision {
             CallDecision::AllowedByGrant
             | CallDecision::AllowedByMode
+            | CallDecision::AllowedByFullAccess
             | CallDecision::Refused { .. }
             | CallDecision::NotEvaluated => "policy".into(),
             CallDecision::Cancelled => "stop".into(),
@@ -1609,7 +1634,14 @@ pub(crate) async fn assemble(
     if turn {
         crate::computer_cmd::prepare_turn(app, chat_id.0, &req.model_ref).await;
     }
-    let enabled = crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
+    let mut enabled =
+        crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
+    // [0.0.5 full access] The tools that create, move and delete folders are offered only
+    // while the chat is in Full access (they refuse to run otherwise).
+    let full_access = crate::approvals::modes().full_access(chat_id.0);
+    if !full_access {
+        enabled.retain(|t| !crate::approvals::only_in_full_access(t));
+    }
     // [0.0.4 tool selection] Of the tools that are on in the chat, the ones shown to the
     // model this turn. The rest stay reachable through `find_tools` and `call_tool`.
     let (mut enabled, hidden) = if turn {
@@ -1666,7 +1698,22 @@ pub(crate) async fn assemble(
         .or(default_prompt)
         .unwrap_or_else(|| "You are a helpful assistant.".into());
     input.preamble = Some(agent::prompt::Preamble {
-        approved_folders: folders.clone(),
+        // [0.0.5 full access] The chat's own folders, then the whole computer.
+        approved_folders: if full_access {
+            let mut chat = ChatContext {
+                approved_folders: folders.clone(),
+                ..ChatContext::default()
+            };
+            let home = app.path().home_dir().ok();
+            crate::approvals::widen(
+                &mut chat,
+                &crate::approvals::whole_computer(home.as_deref()),
+            );
+            chat.approved_folders
+        } else {
+            folders.clone()
+        },
+        full_access,
         os: if cfg!(windows) {
             "Windows".into()
         } else {
@@ -1770,6 +1817,7 @@ pub async fn run(
             roots
         },
         result_cap_tokens: 2000,
+        full_access: false,
     };
     let result_cap = Arc::new(AtomicUsize::new(2000));
     let shared = Arc::new(TurnShared::default());
@@ -1792,6 +1840,7 @@ pub async fn run(
         app: app.clone(),
         hidden,
         shared: shared.clone(),
+        whole_computer: crate::approvals::whole_computer(app.path().home_dir().ok().as_deref()),
     };
     let ready_host = host.clone();
     let policy = AppPolicy::for_chat(
@@ -2282,6 +2331,23 @@ mod tests {
             policy::Decision::Refused { .. }
         ));
 
+        // Full access (0.0.5): nothing asks, also a delete after untrusted content, in the
+        // turn and in its helper; another chat is untouched.
+        modes.set_chat_mode(CHAT, crate::approvals::ApprovalMode::FullAccess);
+        for g in [&gate, &helper] {
+            for (tool, action) in [("write_file", &write), ("delete_file", &delete)] {
+                assert_eq!(
+                    g.decide(tool, action, true, true),
+                    policy::Decision::AllowedByFullAccess
+                );
+            }
+        }
+        assert!(asks(other.decide("delete_file", &delete, false, false)));
+        assert!(matches!(
+            not_ready.decide("write_file", &write, false, false),
+            policy::Decision::Refused { .. }
+        ));
+
         // Switched back: the turn's next call asks again, and so does its helper's.
         modes.set_chat(CHAT, false);
         for g in [&gate, &helper] {
@@ -2324,6 +2390,22 @@ mod tests {
         assert_eq!(entry.decided_by, "policy");
         assert_eq!(entry.tool, "write_file");
         assert_eq!(entry.note, None);
+        // [0.0.5 full access] the same decision in the table, with a note naming the mode.
+        let (label, entry) = audit_entry(
+            7,
+            Value::Object(call.arguments.clone()),
+            &result,
+            &CallDecision::AllowedByFullAccess,
+            Some(&action),
+            12,
+        );
+        assert_eq!(label, "allowed by Full access");
+        assert_eq!(entry.decision, store::AuditDecision::AllowedByMode);
+        assert_eq!(entry.decided_by, "policy");
+        assert_eq!(
+            entry.note.as_deref(),
+            Some(crate::approvals::FULL_ACCESS_NOTE)
+        );
         // The app's own data is still recorded as needing no approval, whatever the mode.
         let (label, entry) = audit_entry(
             7,

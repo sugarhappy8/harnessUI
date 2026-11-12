@@ -230,6 +230,7 @@ pub async fn run(
             skill_folders: Vec::new(),
             skill_roots: Vec::new(),
             result_cap_tokens: 2000,
+            full_access: false,
         },
         result_cap: result_cap.clone(),
     };
@@ -267,6 +268,7 @@ pub async fn run(
             "Linux".into()
         },
         path_separator: if cfg!(windows) { "\\" } else { "/" }.into(),
+        full_access: false,
     });
 
     // Stop, or the time limit, whichever comes first.

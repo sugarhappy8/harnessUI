@@ -64,6 +64,7 @@ impl Turn {
                 approved_folders: vec![folder.clone()],
                 working_folder: Some(folder),
                 result_cap_tokens: 2000,
+                full_access: false,
                 ..Default::default()
             },
             dir,

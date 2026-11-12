@@ -141,10 +141,15 @@ impl Rules {
             recovered_from_text: recovered,
             untrusted_in_turn: true,
             allow_all: true,
+            full_access: false,
         };
         let no_grants = std::collections::BTreeSet::new();
         match policy::evaluate(action, &turn, &no_grants) {
             Decision::AllowedByMode => {}
+            // The harness never runs in Full access (its turn context sets it off).
+            Decision::AllowedByFullAccess => {
+                return Verdict::Blocked("Full access is never used in a model check".into());
+            }
             Decision::Refused { reason } | Decision::Denied { reason } => {
                 return Verdict::Blocked(reason);
             }

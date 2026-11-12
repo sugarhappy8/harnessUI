@@ -49,6 +49,7 @@ impl Run {
             skill_folders: Vec::new(),
             skill_roots: Vec::new(),
             result_cap_tokens: 2000,
+            full_access: false,
         }
     }
 

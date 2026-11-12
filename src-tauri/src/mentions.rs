@@ -154,6 +154,7 @@ async fn context_for(
         skill_folders: Vec::new(),
         skill_roots,
         result_cap_tokens: 2000,
+        full_access: false,
     })
 }
 

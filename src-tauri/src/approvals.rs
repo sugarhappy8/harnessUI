@@ -1,91 +1,166 @@
-//! Approval modes (0.0.4): *Ask first*, or *Allow all*.
+//! Approval modes: *Ask first* (0.0.1), *Allow all* (0.0.4) and *Full access* (0.0.5).
 //!
-//! A chat is in one of two modes. *Ask* is the behaviour of ARCHITECTURE.md 13.3. In
+//! A chat is in one of three modes. *Ask* is the behaviour of ARCHITECTURE.md 13.3. In
 //! *Allow all* the policy engine answers the approval card itself, except for the actions
 //! that keep asking (deleting, destroying, sensitive places, paying or publishing,
 //! protected applications, tools marked destructive, commands that hide what they run)
 //! and for actions that can send data out once untrusted content has entered the turn
-//! (`policy::evaluate`, D9).
+//! (`policy::evaluate`, D9). In *Full access* nothing asks: every action that passes the
+//! hard limits runs, and the file tools reach the whole computer except the app's own
+//! folders (`turns::assemble`). The owner chose this on 2026-11-12: "run absolutely
+//! everything; only the app's own database and saved keys stay protected".
 //!
 //! What must hold:
 //!
-//! - Only the user changes a mode: the two `set_…` commands below, which are granted to
-//!   the main window alone and check that it is the caller. No tool reaches this module,
+//! - Only the user changes a mode: the `set_…` commands below, which are granted to the
+//!   main window alone and check that it is the caller. No tool reaches this module,
 //!   nothing the model writes is read here, and the generic `set_setting` command refuses
-//!   the key of the default ([`ALLOW_ALL_DEFAULT`] is not on its list).
+//!   the keys of the default (neither [`APPROVAL_MODE_DEFAULT`] nor [`ALLOW_ALL_DEFAULT`]
+//!   is on its list).
 //! - A chat's own mode lives in memory, like grants (D12): it ends when the app quits or
-//!   the user switches it off. Only "Allow all in every chat" is a saved setting.
+//!   the user switches it. Only the mode every chat starts in is a saved setting.
 //! - The policy gate reads the mode on every decision ([`for_decision`]), so a switch
 //!   reaches a turn that is already running, in both directions. A helper started by
 //!   `run_subagent` is decided by a gate built for the same chat, so it is in the same
 //!   mode as the chat.
-//! - Hard limits are checked before the mode (`policy::evaluate` steps 1 and 2): a path
-//!   outside the approved folders or a blocked address stays a denial.
+//! - Hard limits are checked before the mode (`policy::evaluate` steps 1 and 2): the app's
+//!   own folders stay out of reach in every mode.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, OnceLock};
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-/// The saved setting behind "Allow all in every chat" (a JSON boolean, off when absent).
-/// Changed only by [`set_allow_all_default`].
+/// The saved mode every chat starts in (a JSON string: "ask", "allowAll", "fullAccess").
+/// Changed only by [`set_default_approval_mode`] and [`set_allow_all_default`].
+pub const APPROVAL_MODE_DEFAULT: &str = "approvalModeDefault";
+
+/// The 0.0.4 setting behind "Allow all in every chat" (a JSON boolean). Read when
+/// [`APPROVAL_MODE_DEFAULT`] is absent, and still written (true unless the default is Ask) so
+/// that going back to 0.0.4 keeps the closest mode it knows.
 pub const ALLOW_ALL_DEFAULT: &str = "allowAllDefault";
 
-/// Which chats are in Allow all.
+/// The note on an audit row of an action that ran because the chat was in Full access. The
+/// audit table's list of decisions is not changed for it (no migration): the row's decision
+/// is `allowed_by_mode` and this note names the mode.
+pub const FULL_ACCESS_NOTE: &str = "Full access";
+
+/// How a chat's tool calls are approved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalMode {
+    /// Every action asks first (ARCHITECTURE.md 13.3).
+    #[default]
+    Ask,
+    /// The engine answers the card, except for actions that keep asking (0.0.4).
+    AllowAll,
+    /// Nothing asks; the file tools reach the whole computer except the app's own folders
+    /// (0.0.5).
+    FullAccess,
+}
+
+/// Which mode each chat is in.
 #[derive(Default)]
 pub struct ApprovalModes(Mutex<Inner>);
 
 #[derive(Default)]
 struct Inner {
-    /// "Allow all in every chat": every chat is in Allow all unless switched back by hand.
-    default_on: bool,
+    /// The mode every chat starts in, unless switched by hand.
+    default: ApprovalMode,
     /// Chats the user switched by hand during this run.
-    chats: HashMap<i64, bool>,
+    chats: HashMap<i64, ApprovalMode>,
     /// Whether untrusted content had entered the turn when the chat's latest call was
     /// decided (for navigations the browser holds while that call runs).
     untrusted: HashMap<i64, bool>,
 }
 
 impl ApprovalModes {
-    /// Whether `chat` is in Allow all. A state that cannot be read counts as Ask.
-    pub fn allow_all(&self, chat: i64) -> bool {
+    /// The chat's mode. A state that cannot be read counts as Ask.
+    pub fn mode(&self, chat: i64) -> ApprovalMode {
         self.0
             .lock()
-            .map(|m| m.chats.get(&chat).copied().unwrap_or(m.default_on))
-            .unwrap_or(false)
+            .map(|m| m.chats.get(&chat).copied().unwrap_or(m.default))
+            .unwrap_or(ApprovalMode::Ask)
+    }
+
+    /// Whether `chat` is in Allow all (exactly; Full access is not Allow all).
+    #[cfg(test)]
+    pub fn allow_all(&self, chat: i64) -> bool {
+        self.mode(chat) == ApprovalMode::AllowAll
+    }
+
+    /// Whether `chat` is in Full access.
+    pub fn full_access(&self, chat: i64) -> bool {
+        self.mode(chat) == ApprovalMode::FullAccess
     }
 
     /// Switches one chat. Its choice is kept until the app quits, the user switches it
-    /// again, or "Allow all in every chat" is switched off.
-    pub fn set_chat(&self, chat: i64, allow_all: bool) {
+    /// again, or the mode every chat starts in changes.
+    pub fn set_chat_mode(&self, chat: i64, mode: ApprovalMode) {
         if let Ok(mut m) = self.0.lock() {
-            if allow_all == m.default_on {
+            if mode == m.default {
                 // The same as the default: nothing to remember.
                 m.chats.remove(&chat);
             } else {
-                m.chats.insert(chat, allow_all);
+                m.chats.insert(chat, mode);
             }
         }
     }
 
-    /// Whether "Allow all in every chat" is on.
-    pub fn default_on(&self) -> bool {
-        self.0.lock().map(|m| m.default_on).unwrap_or(false)
+    /// The 0.0.4 switch of one chat: Allow all or Ask.
+    pub fn set_chat(&self, chat: i64, allow_all: bool) {
+        self.set_chat_mode(
+            chat,
+            if allow_all {
+                ApprovalMode::AllowAll
+            } else {
+                ApprovalMode::Ask
+            },
+        );
     }
 
-    /// Switches "Allow all in every chat". Switching it off puts every chat back to
-    /// asking, also the ones switched on by hand: off means nothing runs unasked.
-    pub fn set_default(&self, on: bool) {
+    /// The mode every chat starts in.
+    pub fn default_mode(&self) -> ApprovalMode {
+        self.0
+            .lock()
+            .map(|m| m.default)
+            .unwrap_or(ApprovalMode::Ask)
+    }
+
+    /// Whether every chat starts in a mode other than Ask (the 0.0.4 "Allow all in every
+    /// chat" switch, read by older callers).
+    pub fn default_on(&self) -> bool {
+        self.default_mode() != ApprovalMode::Ask
+    }
+
+    /// Changes the mode every chat starts in. Every chat follows the new default again,
+    /// also the ones switched by hand: after switching the default back to Ask, nothing runs
+    /// unasked anywhere.
+    pub fn set_default_mode(&self, mode: ApprovalMode) {
         if let Ok(mut m) = self.0.lock() {
-            m.default_on = on;
-            if !on {
+            if m.default != mode {
+                m.chats.clear();
+            }
+            m.default = mode;
+            if mode == ApprovalMode::Ask {
                 m.chats.clear();
             }
         }
+    }
+
+    /// The 0.0.4 switch of the default: Allow all or Ask.
+    #[cfg(test)]
+    pub fn set_default(&self, on: bool) {
+        self.set_default_mode(if on {
+            ApprovalMode::AllowAll
+        } else {
+            ApprovalMode::Ask
+        });
     }
 
     /// Notes whether untrusted content had entered the turn at the decision being made.
@@ -129,32 +204,37 @@ fn tell_window(chat_id: Option<i64>) {
 }
 
 /// Puts a chat back to asking first. For "Forget everything I allowed in this chat": what
-/// the user allowed there includes Allow all.
+/// the user allowed there includes Allow all and Full access.
 pub fn ask_first(chat_id: i64) {
-    modes().set_chat(chat_id, false);
+    modes().set_chat_mode(chat_id, ApprovalMode::Ask);
     tell_window(Some(chat_id));
 }
 
 /// For the policy gate, on every decision: notes whether untrusted content is in the turn
-/// and says whether the chat is in Allow all right now.
-pub fn for_decision(chat_id: i64, untrusted_in_turn: bool) -> bool {
+/// and says which mode the chat is in right now.
+pub fn for_decision(chat_id: i64, untrusted_in_turn: bool) -> ApprovalMode {
     let modes = modes();
     modes.note_decision(chat_id, untrusted_in_turn);
-    modes.allow_all(chat_id)
+    modes.mode(chat_id)
 }
 
 /// Whether a navigation the browser holds is let through without a card (13.3, "Approvals
-/// raised during a call"). Only in Allow all, and only what
+/// raised during a call"). In Full access, always. In Allow all, only what
 /// [`browser::HeldNavigation::released_in_allow_all`] says: a page moving its tab to
-/// another site during a call, while no untrusted content had entered the turn. A held
-/// submission, a background send and anything held outside a call keep their card.
+/// another site during a call, while no untrusted content had entered the turn. Otherwise
+/// a held submission, a background send and anything held outside a call keep their card.
 fn releases(modes: &ApprovalModes, chat_id: i64, held: &browser::HeldNavigation) -> bool {
-    modes.allow_all(chat_id)
-        && held.released_in_allow_all(modes.untrusted_at_last_decision(chat_id))
+    match modes.mode(chat_id) {
+        ApprovalMode::FullAccess => true,
+        ApprovalMode::AllowAll => {
+            held.released_in_allow_all(modes.untrusted_at_last_decision(chat_id))
+        }
+        ApprovalMode::Ask => false,
+    }
 }
 
-/// For the browser's approver: `true` when the held navigation is let through by Allow
-/// all. The decision gets its own audit row, like the answers to such cards do.
+/// For the browser's approver: `true` when the held navigation is let through by the
+/// chat's mode. The decision gets its own audit row, like the answers to such cards do.
 pub async fn release_held_navigation(
     app: &AppHandle,
     chat_id: i64,
@@ -163,6 +243,7 @@ pub async fn release_held_navigation(
     if !releases(modes(), chat_id, held) {
         return false;
     }
+    let full = modes().full_access(chat_id);
     let mut entry = store::AuditEntry {
         ts: None,
         chat_id: Some(store::ChatId(chat_id)),
@@ -176,7 +257,7 @@ pub async fn release_held_navigation(
         risk: "alwaysAsk".into(),
         decision: store::AuditDecision::AllowedByMode,
         decided_by: "policy".into(),
-        note: None,
+        note: full.then(|| FULL_ACCESS_NOTE.to_string()),
         parent_audit_id: None,
         result: None,
     };
@@ -190,16 +271,32 @@ pub async fn release_held_navigation(
     true
 }
 
-/// Reads the saved "Allow all in every chat" setting into `modes` (at start).
+/// Reads the saved default into `modes` (at start). A missing or unreadable value is Ask;
+/// a 0.0.4 "Allow all in every chat" is Allow all.
 async fn load_default_into(store: &store::Store, modes: &ApprovalModes) {
-    let on: bool = store
-        .get_setting(ALLOW_ALL_DEFAULT)
+    let saved: Option<ApprovalMode> = store
+        .get_setting(APPROVAL_MODE_DEFAULT)
         .await
         .ok()
-        .flatten()
-        .unwrap_or(false);
-    if on {
-        modes.set_default(true);
+        .flatten();
+    let mode = match saved {
+        Some(mode) => mode,
+        None => {
+            let allow_all: bool = store
+                .get_setting(ALLOW_ALL_DEFAULT)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            if allow_all {
+                ApprovalMode::AllowAll
+            } else {
+                ApprovalMode::Ask
+            }
+        }
+    };
+    if mode != ApprovalMode::Ask {
+        modes.set_default_mode(mode);
     }
 }
 
@@ -208,16 +305,28 @@ pub fn load_default(app: &AppHandle) {
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
     tauri::async_runtime::block_on(load_default_into(&state.store, modes()));
-    if modes().default_on() {
-        tracing::info!("every chat starts in Allow all (saved setting)");
+    match modes().default_mode() {
+        ApprovalMode::Ask => {}
+        ApprovalMode::AllowAll => tracing::info!("every chat starts in Allow all (saved setting)"),
+        ApprovalMode::FullAccess => {
+            tracing::warn!("every chat starts in Full access (saved setting)")
+        }
     }
 }
 
-/// Saves "Allow all in every chat" and applies it. Saved first: if that fails, nothing
-/// changes.
-async fn save_default(store: &store::Store, modes: &ApprovalModes, on: bool) -> AppResult<()> {
-    store.set_setting(ALLOW_ALL_DEFAULT, &json!(on)).await?;
-    modes.set_default(on);
+/// Saves the default and applies it. Saved first: if that fails, nothing changes.
+async fn save_default(
+    store: &store::Store,
+    modes: &ApprovalModes,
+    mode: ApprovalMode,
+) -> AppResult<()> {
+    store
+        .set_setting(APPROVAL_MODE_DEFAULT, &json!(mode))
+        .await?;
+    store
+        .set_setting(ALLOW_ALL_DEFAULT, &json!(mode != ApprovalMode::Ask))
+        .await?;
+    modes.set_default_mode(mode);
     Ok(())
 }
 
@@ -233,21 +342,7 @@ fn only_main_window(label: &str) -> AppResult<()> {
     }
 }
 
-/// Whether the chat is in Allow all.
-#[tauri::command]
-pub fn get_approval_mode(chat_id: i64) -> bool {
-    modes().allow_all(chat_id)
-}
-
-/// Switches one chat between Ask first and Allow all. Returns the mode it is in now.
-#[tauri::command]
-pub async fn set_approval_mode(
-    window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
-    chat_id: i64,
-    allow_all: bool,
-) -> AppResult<bool> {
-    only_main_window(window.label())?;
+async fn chat_exists(state: &AppState, chat_id: i64) -> AppResult<()> {
     if state
         .store
         .get_chat(store::ChatId(chat_id))
@@ -256,19 +351,62 @@ pub async fn set_approval_mode(
     {
         return Err(AppError::bad_request("That chat no longer exists."));
     }
+    Ok(())
+}
+
+/// Whether the chat runs anything without asking first (Allow all or Full access). Kept for
+/// 0.0.4 callers; the window reads [`get_chat_approval_mode`].
+#[tauri::command]
+pub fn get_approval_mode(chat_id: i64) -> bool {
+    modes().mode(chat_id) != ApprovalMode::Ask
+}
+
+/// Switches one chat between Ask first and Allow all (the 0.0.4 command). Returns whether
+/// it is in a mode other than Ask now.
+#[tauri::command]
+pub async fn set_approval_mode(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    chat_id: i64,
+    allow_all: bool,
+) -> AppResult<bool> {
+    only_main_window(window.label())?;
+    chat_exists(&state, chat_id).await?;
     modes().set_chat(chat_id, allow_all);
     tracing::info!(chat_id, allow_all, "approval mode changed by the user");
     tell_window(Some(chat_id));
-    Ok(modes().allow_all(chat_id))
+    Ok(modes().mode(chat_id) != ApprovalMode::Ask)
 }
 
-/// Whether every chat starts in Allow all.
+/// The chat's approval mode.
+#[tauri::command]
+pub fn get_chat_approval_mode(chat_id: i64) -> ApprovalMode {
+    modes().mode(chat_id)
+}
+
+/// Switches one chat to a mode. Returns the mode it is in now.
+#[tauri::command]
+pub async fn set_chat_approval_mode(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    chat_id: i64,
+    mode: ApprovalMode,
+) -> AppResult<ApprovalMode> {
+    only_main_window(window.label())?;
+    chat_exists(&state, chat_id).await?;
+    modes().set_chat_mode(chat_id, mode);
+    tracing::info!(chat_id, ?mode, "approval mode changed by the user");
+    tell_window(Some(chat_id));
+    Ok(modes().mode(chat_id))
+}
+
+/// Whether every chat starts in a mode other than Ask (the 0.0.4 command).
 #[tauri::command]
 pub fn get_allow_all_default() -> bool {
     modes().default_on()
 }
 
-/// Switches "Allow all in every chat".
+/// Switches "Allow all in every chat" (the 0.0.4 command): Allow all or Ask.
 #[tauri::command]
 pub async fn set_allow_all_default(
     window: tauri::WebviewWindow,
@@ -276,10 +414,76 @@ pub async fn set_allow_all_default(
     on: bool,
 ) -> AppResult<()> {
     only_main_window(window.label())?;
-    save_default(&state.store, modes(), on).await?;
+    let mode = if on {
+        ApprovalMode::AllowAll
+    } else {
+        ApprovalMode::Ask
+    };
+    save_default(&state.store, modes(), mode).await?;
     tracing::info!(on, "\"Allow all in every chat\" changed by the user");
     tell_window(None);
     Ok(())
+}
+
+/// The mode every chat starts in.
+#[tauri::command]
+pub fn get_default_approval_mode() -> ApprovalMode {
+    modes().default_mode()
+}
+
+/// Changes the mode every chat starts in, saved across restarts.
+#[tauri::command]
+pub async fn set_default_approval_mode(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    mode: ApprovalMode,
+) -> AppResult<()> {
+    only_main_window(window.label())?;
+    save_default(&state.store, modes(), mode).await?;
+    tracing::info!(?mode, "the mode every chat starts in changed by the user");
+    tell_window(None);
+    Ok(())
+}
+
+// ---- The whole computer, in Full access ---------------------------------------------
+
+/// The folders the file and terminal tools reach in Full access: the home folder first
+/// (relative paths resolve against it when the chat has no folder of its own), then the top
+/// of every drive. The app's own folders stay forbidden (`ChatContext::forbidden_folders`
+/// is not changed).
+pub fn whole_computer(home: Option<&std::path::Path>) -> Vec<String> {
+    let mut out: Vec<String> = home.map(|h| h.display().to_string()).into_iter().collect();
+    #[cfg(windows)]
+    for letter in b'A'..=b'Z' {
+        let root = format!("{}:\\", letter as char);
+        if std::path::Path::new(&root).is_dir() {
+            out.push(root);
+        }
+    }
+    #[cfg(not(windows))]
+    out.push("/".into());
+    out
+}
+
+/// The tool context of a chat that is in Full access right now: its own folders first (so
+/// a path inside one keeps that folder for its grants and card), then the whole computer,
+/// and the home folder as the working folder when the chat has none.
+pub fn widen(chat: &mut mcp_host::ChatContext, whole: &[String]) {
+    chat.full_access = true;
+    for f in whole {
+        if !chat.approved_folders.contains(f) {
+            chat.approved_folders.push(f.clone());
+        }
+    }
+    if chat.working_folder.is_none() {
+        chat.working_folder = whole.first().cloned();
+    }
+}
+
+/// Whether a tool is offered only in Full access (`make_folder`, `move_path`,
+/// `delete_folder` of the built-in files server).
+pub fn only_in_full_access(tool: &mcp_host::RegisteredTool) -> bool {
+    tool.server == "files" && tools::files::organize::is_tool(&tool.original)
 }
 
 #[cfg(test)]
@@ -342,7 +546,9 @@ mod tests {
         assert!(!modes.default_on(), "off unless the user switched it on");
 
         modes.set_chat(5, true);
-        save_default(&store, &modes, true).await.unwrap();
+        save_default(&store, &modes, ApprovalMode::AllowAll)
+            .await
+            .unwrap();
         assert!(modes.default_on());
         let saved: Option<bool> = store.get_setting(ALLOW_ALL_DEFAULT).await.unwrap();
         assert_eq!(saved, Some(true));
@@ -353,7 +559,9 @@ mod tests {
         assert!(after_restart.default_on());
         assert!(after_restart.0.lock().unwrap().chats.is_empty());
 
-        save_default(&store, &after_restart, false).await.unwrap();
+        save_default(&store, &after_restart, ApprovalMode::Ask)
+            .await
+            .unwrap();
         let fresh = ApprovalModes::default();
         fresh.set_chat(5, true);
         load_default_into(&store, &fresh).await;
@@ -398,6 +606,125 @@ mod tests {
         assert!(!releases(&modes, 3, &leaves), "chat 3 is in Ask");
     }
 
+    /// The three modes, as the window sends and reads them.
+    #[test]
+    fn the_modes_are_named_as_the_window_names_them() {
+        for (mode, name) in [
+            (ApprovalMode::Ask, "ask"),
+            (ApprovalMode::AllowAll, "allowAll"),
+            (ApprovalMode::FullAccess, "fullAccess"),
+        ] {
+            assert_eq!(json!(mode), json!(name));
+            assert_eq!(
+                serde_json::from_value::<ApprovalMode>(json!(name)).unwrap(),
+                mode
+            );
+        }
+        assert!(serde_json::from_value::<ApprovalMode>(json!("full_access")).is_err());
+        assert!(serde_json::from_value::<ApprovalMode>(json!(true)).is_err());
+    }
+
+    /// Full access is a mode of its own: a chat in it is not "in Allow all", a default of
+    /// Full access reaches every chat, and changing the default ends every chat's own
+    /// choice.
+    #[test]
+    fn full_access_is_a_third_mode_with_the_same_rules() {
+        let modes = ApprovalModes::default();
+        modes.set_chat_mode(1, ApprovalMode::FullAccess);
+        assert!(modes.full_access(1) && !modes.allow_all(1));
+        assert_eq!(modes.mode(2), ApprovalMode::Ask);
+        // The 0.0.4 switch turns a Full access chat into an Allow all one, or back to Ask.
+        modes.set_chat(1, true);
+        assert_eq!(modes.mode(1), ApprovalMode::AllowAll);
+        modes.set_chat(1, false);
+        assert_eq!(modes.mode(1), ApprovalMode::Ask);
+
+        modes.set_chat_mode(3, ApprovalMode::AllowAll);
+        modes.set_default_mode(ApprovalMode::FullAccess);
+        for chat in [1, 3, 999] {
+            assert!(modes.full_access(chat), "chat {chat}");
+        }
+        assert!(modes.default_on());
+        modes.set_chat_mode(3, ApprovalMode::Ask);
+        assert_eq!(modes.mode(3), ApprovalMode::Ask);
+        modes.set_default_mode(ApprovalMode::AllowAll);
+        assert_eq!(
+            modes.mode(3),
+            ApprovalMode::AllowAll,
+            "a new default reaches it"
+        );
+        modes.set_chat_mode(4, ApprovalMode::FullAccess);
+        modes.set_default_mode(ApprovalMode::Ask);
+        for chat in [1, 3, 4, 999] {
+            assert_eq!(modes.mode(chat), ApprovalMode::Ask, "chat {chat}");
+        }
+    }
+
+    /// The saved default: the 0.0.5 key wins; without it the 0.0.4 key is read; both are
+    /// written, the old one as "anything but Ask"; an unreadable value is Ask.
+    #[tokio::test]
+    async fn the_saved_default_reads_the_old_setting_and_writes_both() {
+        let store = store::Store::open_in_memory().unwrap();
+        store
+            .set_setting(ALLOW_ALL_DEFAULT, &json!(true))
+            .await
+            .unwrap();
+        let modes = ApprovalModes::default();
+        load_default_into(&store, &modes).await;
+        assert_eq!(modes.default_mode(), ApprovalMode::AllowAll, "from 0.0.4");
+
+        save_default(&store, &modes, ApprovalMode::FullAccess)
+            .await
+            .unwrap();
+        let saved: Option<String> = store.get_setting(APPROVAL_MODE_DEFAULT).await.unwrap();
+        assert_eq!(saved.as_deref(), Some("fullAccess"));
+        let old: Option<bool> = store.get_setting(ALLOW_ALL_DEFAULT).await.unwrap();
+        assert_eq!(old, Some(true));
+        let after_restart = ApprovalModes::default();
+        load_default_into(&store, &after_restart).await;
+        assert_eq!(after_restart.default_mode(), ApprovalMode::FullAccess);
+
+        save_default(&store, &after_restart, ApprovalMode::Ask)
+            .await
+            .unwrap();
+        let old: Option<bool> = store.get_setting(ALLOW_ALL_DEFAULT).await.unwrap();
+        assert_eq!(old, Some(false));
+
+        // Something that is not a mode counts as Ask, whatever the old key says.
+        store
+            .set_setting(APPROVAL_MODE_DEFAULT, &json!("everything"))
+            .await
+            .unwrap();
+        store
+            .set_setting(ALLOW_ALL_DEFAULT, &json!(false))
+            .await
+            .unwrap();
+        let odd = ApprovalModes::default();
+        load_default_into(&store, &odd).await;
+        assert_eq!(odd.default_mode(), ApprovalMode::Ask);
+    }
+
+    /// In Full access every held navigation is let through: a submission, a move after
+    /// untrusted content, and one held outside a call.
+    #[test]
+    fn full_access_releases_every_held_navigation() {
+        let url = url::Url::parse("https://other.example/").unwrap();
+        let held = |kind, tool: Option<&str>| {
+            browser::HeldNavigation::new(kind, "GET", &url, None, true, tool)
+        };
+        let modes = ApprovalModes::default();
+        modes.set_chat_mode(1, ApprovalMode::FullAccess);
+        modes.note_decision(1, true);
+        for h in [
+            held(browser::HoldKind::LeavesSite, Some("browser_navigate")),
+            held(browser::HoldKind::Submission, Some("browser_click")),
+            held(browser::HoldKind::LeavesSite, None),
+        ] {
+            assert!(releases(&modes, 1, &h));
+            assert!(!releases(&modes, 2, &h), "chat 2 is in Ask");
+        }
+    }
+
     /// The generic `set_setting` command takes a fixed list of plain preferences. The
     /// default mode must never be on it: it has its own command, which only the user's
     /// click in the main window reaches.
@@ -410,6 +737,8 @@ mod tests {
         let list = &source[start..start + source[start..].find("];").expect("its end")];
         assert!(list.contains("\"theme\""), "this is the list: {list}");
         assert!(!list.contains(ALLOW_ALL_DEFAULT), "{list}");
+        assert!(!list.contains(APPROVAL_MODE_DEFAULT), "{list}");
+        assert!(!list.to_lowercase().contains("fullaccess"), "{list}");
         assert!(!list.to_lowercase().contains("allow_all"), "{list}");
         assert!(!list.contains("approvals::"), "{list}");
     }
@@ -428,11 +757,62 @@ mod tests {
         assert!(modes().allow_all(OTHER), "another chat is not touched");
         modes().set_chat(OTHER, false);
 
+        // Full access ends the same way.
+        modes().set_chat_mode(CHAT, ApprovalMode::FullAccess);
+        ask_first(CHAT);
+        assert_eq!(modes().mode(CHAT), ApprovalMode::Ask);
+
         // With "Allow all in every chat" on, the chat still goes back to asking.
         let all = ApprovalModes::default();
         all.set_default(true);
         all.set_chat(1, false);
         assert!(!all.allow_all(1) && all.allow_all(2));
+    }
+
+    /// Full access reaches the whole computer: the chat's own folders keep their place, the
+    /// home folder becomes the working folder when there is none, and the app's own
+    /// folders stay forbidden.
+    #[test]
+    fn full_access_widens_the_folders_but_keeps_the_app_folders_forbidden() {
+        let home = std::env::temp_dir();
+        let whole = whole_computer(Some(&home));
+        assert_eq!(whole[0], home.display().to_string());
+        assert!(whole.len() >= 2, "a drive: {whole:?}");
+        #[cfg(not(windows))]
+        assert_eq!(whole[1], "/");
+        #[cfg(windows)]
+        assert!(
+            whole[1..]
+                .iter()
+                .all(|r| r.len() == 3 && r.ends_with(":\\")),
+            "{whole:?}"
+        );
+
+        let mut chat = mcp_host::ChatContext {
+            chat_id: 1,
+            approved_folders: vec!["/work".into()],
+            working_folder: None,
+            forbidden_folders: vec!["/app-data".into()],
+            skill_folders: vec![],
+            skill_roots: vec!["/app-data/skills".into()],
+            result_cap_tokens: 2000,
+            full_access: false,
+        };
+        let before = chat.clone();
+        widen(&mut chat, &whole);
+        assert!(chat.full_access);
+        assert_eq!(chat.approved_folders[0], "/work");
+        assert_eq!(&chat.approved_folders[1..], &whole[..]);
+        assert_eq!(chat.working_folder.as_deref(), Some(whole[0].as_str()));
+        assert_eq!(chat.forbidden_folders, before.forbidden_folders);
+        assert_eq!(chat.skill_roots, before.skill_roots);
+        // A chat with its own working folder keeps it.
+        let mut own = mcp_host::ChatContext {
+            working_folder: Some("/work".into()),
+            ..before
+        };
+        widen(&mut own, &whole);
+        assert_eq!(own.working_folder.as_deref(), Some("/work"));
     }
 
     #[test]

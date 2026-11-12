@@ -732,6 +732,7 @@ mod tests {
             skill_folders: vec![],
             skill_roots: vec![],
             result_cap_tokens: 2000,
+            full_access: false,
         }
     }
 

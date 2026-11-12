@@ -159,6 +159,9 @@ pub struct TurnContext {
     /// The chat is in Allow all (0.0.4): the engine answers the card itself, except for
     /// actions that keep asking. `false` is Ask mode, the behaviour of steps 3 to 7.
     pub allow_all: bool,
+    /// The chat is in Full access (0.0.5): nothing asks. Only steps 1 and 2 (a tool that is
+    /// off or not ready, and hard limits such as the app's own folders) still hold.
+    pub full_access: bool,
 }
 
 /// The buttons a card offers.
@@ -195,6 +198,8 @@ pub enum Decision {
     AllowedByGrant,
     /// The chat is in Allow all and nothing about the action keeps asking (0.0.4).
     AllowedByMode,
+    /// The chat is in Full access (0.0.5): nothing asks.
+    AllowedByFullAccess,
     /// Steps 3, 4, 5, 7.
     Ask { card: CardKind, reason: AskReason },
 }
@@ -222,6 +227,7 @@ impl Grants for std::collections::BTreeSet<Scope> {
 }
 
 /// The evaluation order of ARCHITECTURE.md 13.3. Steps 1 and 2 hold in every mode. In
+/// Full access ([`TurnContext::full_access`]) everything after them is allowed. In
 /// Allow all ([`TurnContext::allow_all`]) steps 3 to 7 are replaced: an action that keeps
 /// asking ([`Action::keep_asking`]) asks with Allow once / Deny, an action that can send
 /// data out ([`Action::network`]) asks once untrusted content is in the turn, and
@@ -243,6 +249,10 @@ pub fn evaluate(action: &Action, turn: &TurnContext, grants: &dyn Grants) -> Dec
         return Decision::Denied {
             reason: reason.clone(),
         };
+    }
+    // Full access (0.0.5): the user chose that nothing asks. Hard limits still hold.
+    if turn.full_access {
+        return Decision::AllowedByFullAccess;
     }
     // Skills never prompt (D11), but only after the checks above.
     // The app's own data for the chat never prompts either (0.0.4).
@@ -741,6 +751,88 @@ mod tests {
 
     /// The new facts have serde defaults: an action stored or sent without them reads as
     /// "nothing keeps asking, nothing leaves the machine".
+    /// Full access (0.0.5): every kind of action that asks in the other modes is allowed,
+    /// whatever entered the turn and however the call was written. A tool that is off or not
+    /// ready, and a hard limit, still stop it.
+    #[test]
+    fn full_access_asks_nothing_but_keeps_the_hard_limits() {
+        let full = |untrusted: bool, recovered: bool| TurnContext {
+            recovered_from_text: recovered,
+            untrusted_in_turn: untrusted,
+            full_access: true,
+            ..ready()
+        };
+        let none: BTreeSet<Scope> = BTreeSet::new();
+        let kinds = [
+            None,
+            Some(KeepAsking::Delete),
+            Some(KeepAsking::Destroy),
+            Some(KeepAsking::Hidden),
+            Some(KeepAsking::Publish),
+            Some(KeepAsking::Sensitive),
+            Some(KeepAsking::ProtectedApp),
+            Some(KeepAsking::MarkedDestructive),
+        ];
+        for keep in kinds {
+            for risk in [Risk::Normal, Risk::AlwaysAsk] {
+                for (untrusted, recovered) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    let mut a = action(write_scope(), risk, false, true);
+                    a.keep_asking = keep;
+                    a.network = true;
+                    assert_eq!(
+                        evaluate(&a, &full(untrusted, recovered), &none),
+                        Decision::AllowedByFullAccess,
+                        "{keep:?} {risk:?} untrusted={untrusted} recovered={recovered}"
+                    );
+                }
+            }
+        }
+        // Full access wins over Allow all when both are set.
+        let mut both = full(true, false);
+        both.allow_all = true;
+        let mut delete = action(write_scope(), Risk::AlwaysAsk, false, false);
+        delete.keep_asking = Some(KeepAsking::Delete);
+        assert_eq!(
+            evaluate(&delete, &both, &none),
+            Decision::AllowedByFullAccess
+        );
+        // Hard limits and unavailable tools still stop it.
+        let mut limited = action(write_scope(), Risk::Normal, false, false);
+        limited.hard_limit = Some("the app's own folder".into());
+        assert_eq!(
+            evaluate(&limited, &full(false, false), &none),
+            Decision::Denied {
+                reason: "the app's own folder".into()
+            }
+        );
+        let mut off = full(false, false);
+        off.tool_enabled = false;
+        assert!(matches!(
+            evaluate(
+                &action(write_scope(), Risk::Normal, true, false),
+                &off,
+                &none
+            ),
+            Decision::Refused { .. }
+        ));
+        let mut down = full(false, false);
+        down.server_ready = false;
+        assert!(matches!(
+            evaluate(
+                &action(write_scope(), Risk::Normal, true, false),
+                &down,
+                &none
+            ),
+            Decision::Refused { .. }
+        ));
+        assert!(
+            !TurnContext::default().full_access,
+            "Full access is never the default"
+        );
+    }
+
     #[test]
     fn the_allow_all_facts_default_to_nothing() {
         let old = serde_json::json!({

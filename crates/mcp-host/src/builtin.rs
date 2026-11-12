@@ -127,6 +127,11 @@ pub struct ChatContext {
     pub skill_roots: Vec<String>,
     /// The per-result cap in tokens (8.4); tools size what the model sees to it.
     pub result_cap_tokens: usize,
+    /// The chat is in Full access (0.0.5) right now: the approved folders are the whole
+    /// computer (the app's own folders stay forbidden) and the file tools that create,
+    /// move and delete folders work. Read again for every call, so switching Full access
+    /// off reaches a turn that is running.
+    pub full_access: bool,
 }
 
 /// Progress lines streamed into the tool card while a call runs.

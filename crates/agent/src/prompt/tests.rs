@@ -151,6 +151,7 @@ fn system_message_has_marked_blocks_in_order() {
         approved_folders: vec!["C:\\Users\\me\\project".into()],
         os: "Windows".into(),
         path_separator: "\\".into(),
+        full_access: false,
     };
     let skills = vec![LoadedSkill {
         name: "pdf".into(),
@@ -637,6 +638,7 @@ fn golden_preamble() -> Preamble {
         approved_folders: vec!["/home/me/project".into()],
         os: "Linux".into(),
         path_separator: "/".into(),
+        full_access: false,
     }
 }
 
@@ -874,4 +876,45 @@ fn untrusted_text_cannot_forge_the_pinned_block() {
         &sanitizer,
     );
     assert!(!text.contains("<pinned_instructions>"), "{text}");
+}
+
+/// Full access (app 0.0.5) adds one paragraph after the folders and changes nothing else.
+#[test]
+fn full_access_adds_one_paragraph_to_the_preamble() {
+    let sanitizer = Sanitizer::generic();
+    let render = |preamble: &Preamble| {
+        system_message(
+            &SystemParts {
+                chat_prompt: "Be brief.",
+                preamble: Some(preamble),
+                ..SystemParts::default()
+            },
+            &sanitizer,
+        )
+    };
+    let off = golden_preamble();
+    let on = Preamble {
+        approved_folders: vec!["/home/me".into(), "/".into()],
+        full_access: true,
+        ..golden_preamble()
+    };
+    let off_text = render(&off);
+    let on_text = render(&on);
+    assert!(!off_text.contains("Full access"), "{off_text}");
+    assert!(
+        on_text.contains("Folders you may work in:\n- /home/me\n- /\nFull access is on:"),
+        "{on_text}"
+    );
+    assert!(on_text.contains("Only the app's own folders are out of reach."));
+    assert!(on_text.contains("do not go to the trash"));
+    // Without the paragraph and the folders, the two are the same.
+    let paragraph_end = on_text.find("Tool results arrive").unwrap();
+    let paragraph_start = on_text.find("Full access is on:").unwrap();
+    let stripped = format!(
+        "{}{}",
+        &on_text[..paragraph_start],
+        &on_text[paragraph_end..]
+    )
+    .replace("- /home/me\n- /\n", "- /home/me/project\n");
+    assert_eq!(stripped, off_text);
 }
