@@ -6,10 +6,10 @@
 //! and command output, so it is data, never instructions: every quoted line is cut to a
 //! fixed length and made visible with `policy::sanitize`, and every list is capped.
 //!
-//! A message quotes lines of a file only when the caller says the model was already given
-//! that content ([`Known::Yes`]). Otherwise it names line numbers and the call that shows
-//! them: an edit that fails is answered before anyone approved a read, and it must not
-//! become a way to read the file.
+//! A message that quotes lines of a file is file content. It is only ever returned as a
+//! tool result, after the policy gate let the call read the file, so it reaches the model
+//! inside the markers that say "this is data" (see [`needs_file_text`]). Messages a tool
+//! gives before the gate (an app note the model trusts) carry no text of any file.
 
 use std::sync::LazyLock;
 
@@ -362,8 +362,21 @@ fn read_call(path: &str, around: Option<usize>) -> String {
     format!("read_file {args}")
 }
 
+/// Whether an edit problem can only be explained with the file's own text (the matching
+/// lines, the closest lines). Such a problem must not be answered before the gate: the
+/// tool describes it as a read of the file and explains it from `call`, inside the markers
+/// that say "this is data". The other problems are explained with numbers alone.
+pub fn needs_file_text(problem: &EditProblem) -> bool {
+    matches!(problem, EditProblem::NotFound | EditProblem::Ambiguous { .. })
+}
+
 /// The message for an edit that cannot be made: what is wrong, the candidates, and the
 /// argument or call that fixes it.
+///
+/// For [`EditProblem::Ambiguous`] and [`EditProblem::NotFound`] it quotes lines of the
+/// file (each cut and made visible), so it is file content: it may only be returned as a
+/// tool result, after the gate let the call read the file ([`needs_file_text`]). The other
+/// problems name line numbers only. `ctx.known` adds the reminder to read the file first.
 pub fn edit_problem_message(problem: &EditProblem, ctx: &EditContext<'_>) -> String {
     let shown = policy::sanitize::visible(ctx.path);
     let quoted = |lines: &[usize]| -> String {
@@ -383,32 +396,13 @@ pub fn edit_problem_message(problem: &EditProblem, ctx: &EditContext<'_>) -> Str
         }
         out.join("\n")
     };
-    let unread = |what: &str| match ctx.known {
-        Known::Stale => format!(
-            "{what} are not shown because the file has changed since it was read in this chat; read_file shows them."
-        ),
-        _ => format!(
-            "{what} are not shown because this file has not been read in this chat; read_file shows them."
-        ),
-    };
     match problem {
         EditProblem::Ambiguous { lines } => {
             let n = lines.len();
-            let fix = format!(
-                "Send the call again with one of these: occurrence (1 to {n}, counted from the top) to change one match; replace_all: true to change all {n}; or more of the surrounding lines in old_text, so that it matches only once."
-            );
-            if ctx.known == Known::Yes {
-                format!(
-                    "old_text was found {n} times in {shown}, so it is not clear which one to change. Matches:\n{}\n{fix}",
-                    quoted(lines)
-                )
-            } else {
-                format!(
-                    "old_text was found {n} times in {shown} (at lines {}), so it is not clear which one to change. {fix} {}",
-                    number_list(lines, MAX_MATCHES_LISTED),
-                    unread("The matching lines")
-                )
-            }
+            format!(
+                "old_text was found {n} times in {shown}, so it is not clear which one to change. Matches:\n{}\nSend the call again with one of these: occurrence (1 to {n}, counted from the top) to change one match; replace_all: true to change all {n}; or more of the surrounding lines in old_text, so that it matches only once.",
+                quoted(lines)
+            )
         }
         EditProblem::OutOfRange { asked, lines } => {
             let n = lines.len();
@@ -448,42 +442,33 @@ pub fn edit_problem_message(problem: &EditProblem, ctx: &EditContext<'_>) -> Str
                 None => {}
             }
             let closest = closest_lines(ctx.current, ctx.old_text, MAX_CLOSEST);
-            let numbers: Vec<usize> = closest.iter().map(|(n, _)| *n).collect();
             const COPY: &str =
                 "copy the text to replace exactly as it is in the file, including indentation";
-            const WRONG_FILE: &str =
-                " Nothing in the file looks like it: check that this is the right file.";
-            match ctx.known {
-                Known::Yes if closest.is_empty() => text.push_str(WRONG_FILE),
-                Known::Yes => {
-                    text.push_str(" Closest lines in the file:\n");
-                    for (n, line) in &closest {
-                        text.push_str(&format!("line {n}: {}\n", quote_line(line)));
-                    }
-                    text.push_str("Then ");
-                    text.push_str(COPY);
-                    text.push('.');
+            if closest.is_empty() {
+                text.push_str(" Nothing in the file looks like it: check that this is the right file.");
+            } else {
+                text.push_str(" Closest lines in the file:\n");
+                for (n, line) in &closest {
+                    text.push_str(&format!("line {n}: {}\n", quote_line(line)));
                 }
-                known => {
-                    if closest.is_empty() {
-                        text.push_str(WRONG_FILE);
-                    } else {
-                        text.push_str(&format!(
-                            " The closest line{} {}.",
-                            if numbers.len() == 1 { " is" } else { "s are" },
-                            number_list(&numbers, MAX_CLOSEST)
-                        ));
-                    }
-                    let call = read_call(ctx.path, numbers.first().copied());
-                    text.push_str(&if known == Known::Stale {
-                        format!(
-                            " The file has changed since it was read in this chat: call {call} again, then {COPY}."
-                        )
-                    } else {
-                        format!(
-                            " This file has not been read in this chat: call {call} first, then {COPY}."
-                        )
-                    });
+            }
+            let call = read_call(ctx.path, closest.first().map(|(n, _)| *n));
+            let reminder = match ctx.known {
+                Known::Yes => None,
+                Known::Stale => Some((
+                    "The file has changed since it was read in this chat",
+                    "again",
+                )),
+                Known::No => Some(("This file has not been read in this chat", "first")),
+            };
+            match (reminder, closest.is_empty()) {
+                (None, true) => {}
+                (None, false) => text.push_str(&format!("Then {COPY}.")),
+                (Some((why, when)), false) => {
+                    text.push_str(&format!("{why}: call {call} {when}, then {COPY}."));
+                }
+                (Some((why, when)), true) => {
+                    text.push_str(&format!(" {why}: call {call} {when} to see what is in it."));
                 }
             }
             text
@@ -731,39 +716,60 @@ mod tests {
         );
     }
 
-    /// Before the model has read the file, the message names lines but quotes nothing.
+    /// The messages that quote the file are the ones that need its text; the others name
+    /// numbers only, so they may be answered before the gate.
     #[test]
-    fn an_unread_file_is_never_quoted() {
-        let old = "let total = price * qty;";
-        let problem = EditProblem::Ambiguous { lines: vec![2, 7] };
-        let unread = edit_problem_message(&problem, &ctx(FILE, old, Known::No));
-        assert_eq!(
-            unread,
-            "old_text was found 2 times in /w/calc.rs (at lines 2 and 7), so it is not clear which one to change. Send the call again with one of these: occurrence (1 to 2, counted from the top) to change one match; replace_all: true to change all 2; or more of the surrounding lines in old_text, so that it matches only once. The matching lines are not shown because this file has not been read in this chat; read_file shows them."
-        );
-        let stale = edit_problem_message(&problem, &ctx(FILE, old, Known::Stale));
-        assert!(
-            stale.ends_with("The matching lines are not shown because the file has changed since it was read in this chat; read_file shows them."),
-            "{stale}"
-        );
-        // Not found: line numbers and the call that shows them, no text of the file.
-        let missing = "let rate = 0.25;";
-        for known in [Known::No, Known::Stale] {
-            let message = edit_problem_message(&EditProblem::NotFound, &ctx(FILE, missing, known));
-            for line in FILE.lines().filter(|l| l.trim().len() > 3) {
-                assert!(
-                    !message.contains(line.trim()),
-                    "{known:?} quoted {line:?}: {message}"
-                );
+    fn only_not_found_and_ambiguous_need_the_file_text() {
+        assert!(needs_file_text(&EditProblem::NotFound));
+        assert!(needs_file_text(&EditProblem::Ambiguous { lines: vec![2, 7] }));
+        assert!(!needs_file_text(&EditProblem::NoChange));
+        assert!(!needs_file_text(&EditProblem::OutOfRange {
+            asked: 3,
+            lines: vec![2, 7]
+        }));
+        // And those two really carry no line of the file, whatever was read.
+        for known in [Known::Yes, Known::Stale, Known::No] {
+            for problem in [
+                EditProblem::NoChange,
+                EditProblem::OutOfRange {
+                    asked: 3,
+                    lines: vec![2, 7],
+                },
+            ] {
+                let message = edit_problem_message(&problem, &ctx(FILE, "let total = price * qty;", known));
+                for line in FILE.lines().filter(|l| l.trim().len() > 3) {
+                    assert!(!message.contains(line.trim()), "{problem:?} quoted {line:?}: {message}");
+                }
             }
         }
+    }
+
+    /// The matches are listed whether or not the file was read; text that is not found
+    /// gets the closest lines and, for a file not read (or changed) since, the read to make.
+    #[test]
+    fn a_file_not_read_yet_gets_a_reminder_to_read_it() {
+        let old = "let total = price * qty;";
+        let problem = EditProblem::Ambiguous { lines: vec![2, 7] };
+        let read = edit_problem_message(&problem, &ctx(FILE, old, Known::Yes));
+        for known in [Known::No, Known::Stale] {
+            assert_eq!(edit_problem_message(&problem, &ctx(FILE, old, known)), read);
+        }
+        let missing = "let rate = 0.25;";
         assert_eq!(
             edit_problem_message(&EditProblem::NotFound, &ctx(FILE, missing, Known::No)),
-            "old_text was not found in /w/calc.rs. The closest line is 8. This file has not been read in this chat: call read_file {\"limit\":20,\"offset\":3,\"path\":\"/w/calc.rs\"} first, then copy the text to replace exactly as it is in the file, including indentation."
+            "old_text was not found in /w/calc.rs. Closest lines in the file:\n\
+             line 8: \tlet rate = 0.2;\n\
+             This file has not been read in this chat: call read_file {\"limit\":20,\"offset\":3,\"path\":\"/w/calc.rs\"} first, then copy the text to replace exactly as it is in the file, including indentation."
         );
         assert_eq!(
             edit_problem_message(&EditProblem::NotFound, &ctx(FILE, missing, Known::Stale)),
-            "old_text was not found in /w/calc.rs. The closest line is 8. The file has changed since it was read in this chat: call read_file {\"limit\":20,\"offset\":3,\"path\":\"/w/calc.rs\"} again, then copy the text to replace exactly as it is in the file, including indentation."
+            "old_text was not found in /w/calc.rs. Closest lines in the file:\n\
+             line 8: \tlet rate = 0.2;\n\
+             The file has changed since it was read in this chat: call read_file {\"limit\":20,\"offset\":3,\"path\":\"/w/calc.rs\"} again, then copy the text to replace exactly as it is in the file, including indentation."
+        );
+        assert_eq!(
+            edit_problem_message(&EditProblem::NotFound, &ctx(FILE, "import os, sys, json", Known::No)),
+            "old_text was not found in /w/calc.rs. Nothing in the file looks like it: check that this is the right file. This file has not been read in this chat: call read_file {\"path\":\"/w/calc.rs\"} first to see what is in it."
         );
     }
 
@@ -787,13 +793,14 @@ mod tests {
         );
         assert!(message.contains("\n(and 4 more)\n"), "{message}");
         assert!(message.contains("occurrence (1 to 14"), "{message}");
-        let unread = edit_problem_message(
-            &EditProblem::Ambiguous { lines },
+        // An occurrence out of range names the lines by number, also capped.
+        let out_of_range = edit_problem_message(
+            &EditProblem::OutOfRange { asked: 20, lines },
             &ctx(&text, "x = 1", Known::No),
         );
         assert!(
-            unread.contains("(at lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 4 more)"),
-            "{unread}"
+            out_of_range.contains("(at lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 4 more)"),
+            "{out_of_range}"
         );
     }
 
@@ -889,9 +896,11 @@ mod tests {
             near_miss(FILE, "FN TAX()"),
             Some(NearMiss::Case { line: 6 })
         );
-        assert!(
-            edit_problem_message(&EditProblem::NotFound, &ctx(FILE, "FN TAX()", Known::No))
-                .starts_with("old_text was not found in /w/calc.rs. The text at line 6 is the same apart from upper and lower case. The closest line is 6.")
+        assert_eq!(
+            edit_problem_message(&EditProblem::NotFound, &ctx(FILE, "FN TAX()", Known::Yes)),
+            "old_text was not found in /w/calc.rs. The text at line 6 is the same apart from upper and lower case. Closest lines in the file:\n\
+             line 6: fn tax() {\n\
+             Then copy the text to replace exactly as it is in the file, including indentation."
         );
         // Line endings, either way round.
         let crlf = FILE.replace('\n', "\r\n");
