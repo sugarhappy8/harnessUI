@@ -68,6 +68,12 @@ one starts from this file and `README.md`.
   review; WP7 developed (its developer returned early, so the fix stage must finish its
   checks) and reviewed; WP4c developed, reviewed, in fixing; items 5 and 6 designed
   (`item5-spec.md`, `item6-spec.md`) and critiqued, being revised.
+- 19:45 UTC: items 5 and 6 designed (`item5-spec.md` WP9a-WP9h, `item6-spec.md` WP10a-WP10e),
+  owner's answers recorded at the top of each (item 5: Ghidra on Windows, Kuna only on Mac so
+  no WP9f, Install button for Apple's tools, off in new chats; item 6: 1A 2A 3A). Run
+  wf_a08f0014-543 (script v006-packages-v2.js): group 1 WP9a + WP10c, group 2 WP9b, WP9c,
+  WP9g, WP9d, WP9h, group 3 WP9e. Still to start: WP10a, WP10b (after WP1a/WP1b are done),
+  then WP10d, WP10e.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
