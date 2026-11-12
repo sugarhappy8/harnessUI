@@ -62,7 +62,7 @@ fn only_main_window(label: &str) -> AppResult<()> {
         Ok(())
     } else {
         Err(AppError::bad_request(
-            "Only the main window can start or stop a check.",
+            "Only the main window can use the model check and the benchmarks.",
         ))
     }
 }
@@ -312,9 +312,11 @@ pub struct ProfileView {
 /// The saved profile of a model, and whether it can be checked now.
 #[tauri::command]
 pub async fn get_model_profile(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     model_ref: String,
 ) -> AppResult<ProfileView> {
+    only_main_window(window.label())?;
     let Some(identity) = profile::identity_for(&state, &model_ref).await else {
         return Ok(ProfileView {
             available: false,
@@ -482,7 +484,8 @@ pub struct TaskInfo {
 
 /// The benchmark tasks, and which of them can run on this computer.
 #[tauri::command]
-pub async fn list_bench_tasks() -> AppResult<Vec<TaskInfo>> {
+pub async fn list_bench_tasks(window: tauri::WebviewWindow) -> AppResult<Vec<TaskInfo>> {
+    only_main_window(window.label())?;
     let (_, path) = terminal_and_path();
     let toolchains = Toolchains::detect(path).await;
     Ok(tasks::all()
@@ -595,7 +598,11 @@ pub async fn start_benchmark(
 
 /// The saved benchmark runs, newest first.
 #[tauri::command]
-pub async fn list_bench_runs(app: AppHandle) -> AppResult<Vec<BenchSummary>> {
+pub async fn list_bench_runs(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+) -> AppResult<Vec<BenchSummary>> {
+    only_main_window(window.label())?;
     let dir = bench_dir(&app)?;
     Ok(tokio::task::spawn_blocking(move || bench::list(&dir))
         .await
@@ -604,7 +611,12 @@ pub async fn list_bench_runs(app: AppHandle) -> AppResult<Vec<BenchSummary>> {
 
 /// One saved benchmark run.
 #[tauri::command]
-pub async fn get_bench_run(app: AppHandle, id: String) -> AppResult<BenchRun> {
+pub async fn get_bench_run(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    id: String,
+) -> AppResult<BenchRun> {
+    only_main_window(window.label())?;
     if !bench::valid_id(&id) {
         return Err(AppError::bad_request("That is not a saved benchmark run."));
     }
@@ -656,6 +668,26 @@ mod tests {
             backend: "cpu".into(),
         };
         assert_eq!(where_it_goes(&local), "The model runs on this computer.");
+    }
+
+    /// Every command of this file checks the calling window first.
+    #[test]
+    fn every_command_checks_the_window_first() {
+        let source = include_str!("commands.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap()];
+        let mut seen = 0;
+        for part in source.split("#[tauri::command]").skip(1) {
+            seen += 1;
+            let body_start = part.find(") -> ").expect("a signature");
+            let body = &part[body_start..];
+            let first_statement = body[body.find('{').unwrap() + 1..].trim_start();
+            assert!(
+                first_statement.starts_with("only_main_window(window.label())?;"),
+                "{}",
+                &part[..part.find('(').unwrap()]
+            );
+        }
+        assert_eq!(seen, 8);
     }
 
     #[test]
