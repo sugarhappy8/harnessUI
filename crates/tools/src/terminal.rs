@@ -1761,6 +1761,11 @@ mod windows_tests {
         let Described::Action(action) = s.describe("run_command", args, &c).await else {
             panic!("not described");
         };
+        assert!(
+            action.hard_limit.is_none(),
+            "refused: {:?}",
+            action.hard_limit
+        );
         let out = s
             .call(
                 "run_command",
@@ -1800,7 +1805,8 @@ mod windows_tests {
 
     #[tokio::test]
     async fn an_error_of_powershell_itself_still_fails() {
-        let text = run("Get-Item C:\\surely\\not\\here-12345").await;
+        let text = run("Write-Error \"it-went-wrong\"").await;
+        assert!(text.contains("it-went-wrong"), "{text}");
         assert!(text.starts_with("Exit code 1"), "{text}");
         assert!(!text.contains("<Objs"), "{text}");
         let text = run("Write-Output fine").await;
