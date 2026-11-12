@@ -516,7 +516,12 @@ async fn user_status(
 
 /// The chat's task, or nothing when it has none.
 #[tauri::command]
-pub async fn get_task(state: State<'_, AppState>, chat_id: i64) -> AppResult<Option<TaskDto>> {
+pub async fn get_task(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    chat_id: i64,
+) -> AppResult<Option<TaskDto>> {
+    only_main_window(window.label())?;
     let task = state
         .store
         .get_task(ChatId(chat_id))
