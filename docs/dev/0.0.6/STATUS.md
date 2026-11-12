@@ -30,7 +30,8 @@ one starts from this file and `README.md`.
 
 ## 2026-11-12, the 0.0.6 session's first check
 - This container: `npm ci`, lint, typecheck, vitest (416 in 50 files), build, spawn check,
-  notices, `cargo fmt --check`, clippy `-D warnings`: all pass. (A fresh container needs the
+  notices, `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace` (1,923 passed,
+  0 failed, 6 ignored): all pass. End-to-end suites not run yet. (A fresh container needs the
   Tauri system libraries from `ci.yml` and `rustup toolchain install 1.99` first.)
 - Where each package stands (read against spec Part 3, not yet reviewed):
   WP1a ~95% (the optional `llama-fit-params` step not built); WP1b ~90%; WP2 ~90% (fit marks
