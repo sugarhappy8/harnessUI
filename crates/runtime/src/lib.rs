@@ -33,7 +33,8 @@ pub use llama::devices::{
 };
 pub use llama::failure::{LoadFailure, classify};
 pub use llama::launch::{
-    GpuLayers, LaunchConfig, build_args, build_env, free_loopback_port, random_api_key,
+    GpuLayers, GpuUse, LaunchConfig, MODEL_ALIAS, build_args, build_env, free_loopback_port,
+    random_api_key,
 };
 pub use llama::lock::{LlamaLock, PackFile, PackSpec};
 pub use llama::props::{Modalities, Props, TemplateCaps};
@@ -42,6 +43,7 @@ pub use llama::server::{
     Candidate, RunningServer, ServerEvent, ServerState, StartError, StartSpec, Supervisor,
     SupervisorExit, start, step_down,
 };
+pub use llama::stage::LoadStage;
 pub use reaper::{ReaperClient, reaper_main};
 pub use registry::{ChildRegistry, process_alive};
 pub use spawn::{

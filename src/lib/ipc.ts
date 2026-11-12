@@ -9,7 +9,10 @@ import type {
   AuditRow,
   HotkeyStatus,
   BackendInfo,
+  CatalogListEntry,
   Chat,
+  CompareFacts,
+  CompareItem,
   ChatDetail,
   TurnStreamEvent,
   ToolDto,
@@ -39,6 +42,9 @@ import type {
   ImageInput,
   InstalledModel,
   LocalModelSettings,
+  ModelBusy,
+  ModelLoadInfo,
+  ModelLoadSettings,
   ModelOption,
   PackInfo,
   PackProgress,
@@ -47,6 +53,9 @@ import type {
   RepoView,
   RuntimeStatus,
   SearchPage,
+  ShareApp,
+  ShareSetup,
+  ShareStatus,
 } from "./types";
 
 export interface AppInfo {
@@ -121,19 +130,35 @@ export const resolveMentions = (chatId: number, mentions: MentionInput[]) =>
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
 export const listBackends = (reprobe: boolean) => invoke<BackendInfo[]>("list_backends", { reprobe });
 /**
- * Loads a local model and resolves when it is ready. Resolves to `false` when another
- * model was picked meanwhile: that load replaced this one, which is not an error.
+ * Runs a change of what is loaded. Resolves to `false` when it was replaced or cancelled
+ * before it happened (error code `load_replaced`), which is not an error.
  */
-export async function loadLocalModel(path: string, settings: LocalModelSettings): Promise<boolean> {
+async function unlessReplaced(change: Promise<void>): Promise<boolean> {
   try {
-    await invoke<void>("load_local_model", { path, settings });
+    await change;
     return true;
   } catch (err) {
     if (err && typeof err === "object" && (err as { code?: unknown }).code === "load_replaced") return false;
     throw err;
   }
 }
-export const unloadModel = () => invoke<void>("unload_model");
+/**
+ * Loads a local model and resolves when it is ready. Resolves to `false` when another
+ * model was picked meanwhile: that load replaced this one, which is not an error.
+ * Without `settings` (0.0.5) the model loads with its own saved settings. `whenIdle`
+ * (0.0.5, D3): wait until nothing uses the model ("Restart when it ends"; `false` when
+ * the wait is cancelled); without it, load now and stop whatever uses the model.
+ */
+export const loadLocalModel = (path: string, settings?: LocalModelSettings | null, whenIdle?: boolean) =>
+  unlessReplaced(
+    invoke<void>("load_local_model", { path, settings: settings ?? null, whenIdle: whenIdle ?? null }),
+  );
+/**
+ * Unloads the model. `whenIdle` as for `loadLocalModel`; resolves to `false` when a
+ * waiting unload was cancelled or replaced.
+ */
+export const unloadModel = (whenIdle?: boolean) =>
+  unlessReplaced(invoke<void>("unload_model", { whenIdle: whenIdle ?? null }));
 export const listModelOptions = () => invoke<ModelOption[]>("list_model_options");
 export const getLocalModelSettings = () =>
   invoke<LocalModelSettings>("get_local_model_settings");
@@ -142,6 +167,25 @@ export const setLocalModelSettings = (settings: LocalModelSettings) =>
 export const runDiagnostics = (modelPath: string | null) =>
   invoke<DiagnosticsReport>("run_diagnostics", { modelPath });
 export const openLogsFolder = () => invoke<void>("open_logs_folder");
+
+// 0.0.5: one model's load settings, reload and what is using the model (WP1b; stubs
+// return fixed sample data until it lands).
+export const modelLoadInfo = (path: string) => invoke<ModelLoadInfo>("model_load_info", { path });
+export const setModelLoadSettings = (path: string, overrides: ModelLoadSettings) =>
+  invoke<ModelLoadInfo>("set_model_load_settings", { path, overrides });
+/** "Reset to defaults": forgets the model's own settings. */
+export const resetModelLoadSettings = (path: string) =>
+  invoke<ModelLoadInfo>("reset_model_load_settings", { path });
+/**
+ * Restarts the loaded model with its current settings (Reload, Apply and restart). `force`
+ * restarts even when nothing changed; `whenIdle` waits until nothing uses the model.
+ * Resolves to `false` when a waiting reload was cancelled or replaced.
+ */
+export const reloadLocalModel = (force: boolean, whenIdle: boolean) =>
+  unlessReplaced(invoke<void>("reload_local_model", { force, whenIdle }));
+/** Cancels the reload, load or unload that waits for the model to be free. */
+export const cancelPendingReload = () => invoke<void>("cancel_pending_reload");
+export const modelBusy = () => invoke<ModelBusy>("model_busy");
 
 export function onRuntimeStatus(handler: (s: RuntimeStatus) => void): Promise<UnlistenFn> {
   return listen<RuntimeStatus>("runtime-status", (e) => handler(e.payload));
@@ -194,6 +238,12 @@ export const deleteModel = (id: number, deleteFiles: boolean) =>
 export const diskUsage = () => invoke<DiskUsage>("disk_usage");
 export const setModelsDir = (path: string) => invoke<void>("set_models_dir", { path });
 export const hardwareInfo = () => invoke<HardwareInfo>("hardware_info");
+
+// 0.0.5 comparison (WP4a; stubs return fixed sample data until it lands). `ctx` null
+// means the defaults' context.
+export const catalogList = (ctx: number | null) => invoke<CatalogListEntry[]>("catalog_list", { ctx });
+export const compareFacts = (items: CompareItem[], ctx: number | null) =>
+  invoke<CompareFacts[]>("compare_facts", { items, ctx });
 
 export const firstRunInfo = () => invoke<FirstRunInfo>("first_run_info");
 export const completeFirstRun = () => invoke<void>("complete_first_run");
@@ -315,6 +365,16 @@ export const loadedSkills = (chatId: number) => invoke<string[]>("loaded_skills"
 export const unloadSkill = (chatId: number, name: string) => invoke<void>("unload_skill", { chatId, name });
 export const setChatThinking = (chatId: number, on: boolean) => invoke<void>("set_chat_thinking", { chatId, on });
 
+// 0.0.5 Other apps use the loaded model (WP5a; stubs return fixed sample data and change
+// nothing until it lands).
+export const shareStatus = () => invoke<ShareStatus>("share_status");
+export const setShareEnabled = (on: boolean) => invoke<ShareStatus>("set_share_enabled", { on });
+export const setSharePort = (port: number) => invoke<ShareStatus>("set_share_port", { port });
+/** The sharing key, shown only on request. */
+export const revealShareKey = () => invoke<string>("reveal_share_key");
+export const newShareKey = () => invoke<ShareStatus>("new_share_key");
+export const shareSetup = (app: ShareApp) => invoke<ShareSetup>("share_setup", { app });
+
 // Updates
 export const updateStatus = () => invoke<UpdateStatus>("update_status");
 export const setUpdateAutoCheck = (on: boolean) => invoke<void>("set_update_auto_check", { on });
@@ -388,3 +448,9 @@ export function onEvalProgress(
 ): Promise<UnlistenFn> {
   return listen<import("../components/evals/types").EvalProgress>("eval-progress", (e) => handler(e.payload));
 }
+
+// 0.0.5 Coding apps (direction B, experimental): what the Tools panel shows, and looking
+// for Claude Code and Codex when the user turns the group on (the files are located,
+// never run).
+export const codingAppsStatus = () => invoke<import("./types").CodingAppsStatus>("coding_apps_status");
+export const findCodingApps = () => invoke<import("./types").CodingAppsStatus>("find_coding_apps");

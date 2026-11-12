@@ -282,7 +282,7 @@ pub async fn hub_repo(
     let classified = models::classify(&detail.files);
     let fit_context = ctx
         .unwrap_or(u64::from(
-            crate::settings::local_model_settings(&app).await.ctx,
+            crate::load_settings::browse_fit_ctx(&state).await,
         ))
         .max(512);
 
@@ -304,6 +304,9 @@ pub async fn hub_repo(
     let mut variants = Vec::new();
     for v in &classified.variants {
         let fit = summary.as_ref().map(|s| {
+            // Every field is set today; the update keeps this call site unchanged when
+            // fields are added (0.0.5 WP1b).
+            #[allow(clippy::needless_update)]
             let input = FitInput {
                 weights_bytes: v.total_size,
                 projector_bytes: projector.as_ref().map_or(0, |p| p.size),
@@ -313,6 +316,7 @@ pub async fn hub_repo(
                 max_ctx: s
                     .context_length
                     .or(detail.gguf.as_ref().and_then(|g| g.context_length)),
+                ..Default::default()
             };
             models::check(&input, &target)
         });
@@ -1064,9 +1068,205 @@ pub async fn refresh_catalog(app: AppHandle, state: State<'_, AppState>) -> AppR
     Ok(catalog.sequence)
 }
 
+// ---- Comparison (0.0.5 item 4) ---------------------------------------------------
+// TODO(WP4a): `catalog_list` and `compare_facts` are WP0 stubs returning fixed sample
+// data (no network, no store reads). The sample names are made up on purpose: no model
+// name appears in code.
+
+fn sample_fit(ctx: u32, verdict: models::Verdict) -> models::FitResult {
+    models::FitResult {
+        verdict,
+        needed_bytes: 4_400_000_000,
+        available_bytes: 15_200_000_000,
+        suggested_ctx: None,
+        partial_offload: false,
+        sentence: format!(
+            "Sample: needs about 4.4 GB at {ctx} tokens; your GPU has 15.2 GB free. Fits."
+        ),
+    }
+}
+
+fn sample_catalog_facts(id: &str, name: &str) -> crate::dto::CatalogFacts {
+    crate::dto::CatalogFacts {
+        id: id.to_string(),
+        name: name.to_string(),
+        summary: Some("Sample summary quoted from a model card.".into()),
+        source: Some("https://huggingface.co/example/sample".into()),
+        good_at: vec!["chat".into(), "coding".into()],
+        publisher: Some("Example publisher".into()),
+        parameters: Some(4_000_000_000),
+        active_parameters: None,
+        languages: vec!["en".into()],
+        released: Some("2026-01".into()),
+        capabilities: vec!["tools".into(), "thinking".into()],
+        license: Some(crate::dto::LicenseFacts {
+            name: "apache-2.0".into(),
+            url: None,
+        }),
+    }
+}
+
+/// The catalog's entries for Suggested models, each with one fit verdict at `ctx`
+/// (`None`: the defaults' context), installed state and the user's results.
+#[tauri::command]
+pub async fn catalog_list(
+    window: tauri::WebviewWindow,
+    _state: State<'_, AppState>,
+    ctx: Option<u32>,
+) -> AppResult<Vec<crate::dto::CatalogListEntry>> {
+    crate::commands::only_main_window(window.label())?;
+    let ctx = ctx.unwrap_or(8192);
+    let entry = |id: &str, name: &str, verdict| crate::dto::CatalogListEntry {
+        catalog: sample_catalog_facts(id, name),
+        repo: format!("example/{id}-GGUF"),
+        file: format!("{id}-Q4_K_M.gguf"),
+        quant: "Q4_K_M".into(),
+        size_bytes: 2_700_000_000,
+        fit: Some(sample_fit(ctx, verdict)),
+        installed_path: None,
+        results: Vec::new(),
+    };
+    Ok(vec![
+        entry("sample-small", "Sample small model", models::Verdict::Green),
+        entry(
+            "sample-large",
+            "Sample large model",
+            models::Verdict::Yellow,
+        ),
+    ])
+}
+
+/// Facts for each model to compare, in the order given, with one fit verdict per item at
+/// `ctx` (`None`: the defaults' context). Never fetches more than the one repository of a
+/// Hugging Face item.
+#[tauri::command]
+pub async fn compare_facts(
+    window: tauri::WebviewWindow,
+    _state: State<'_, AppState>,
+    items: Vec<crate::dto::CompareItem>,
+    ctx: Option<u32>,
+) -> AppResult<Vec<crate::dto::CompareFacts>> {
+    crate::commands::only_main_window(window.label())?;
+    let ctx = ctx.unwrap_or(8192);
+    Ok(items
+        .into_iter()
+        .map(|item| sample_facts(item, ctx))
+        .collect())
+}
+
+fn sample_facts(item: crate::dto::CompareItem, ctx: u32) -> crate::dto::CompareFacts {
+    use crate::dto::{CompareFacts, CompareItem, FileFacts, HubFacts};
+    let file_facts = FileFacts {
+        architecture: Some("sample".into()),
+        parameters: Some(4_000_000_000),
+        context_length: Some(32_768),
+        tools: true,
+        thinking: true,
+        vision: false,
+        moe: false,
+        quantization: Some("Q4_K_M".into()),
+        expert_count: None,
+        expert_used_count: None,
+        active_parameters: None,
+    };
+    let base = CompareFacts {
+        item: item.clone(),
+        title: String::new(),
+        file: None,
+        quant: Some("Q4_K_M".into()),
+        size_bytes: Some(2_700_000_000),
+        installed_path: None,
+        ctx,
+        fit: Some(sample_fit(ctx, models::Verdict::Green)),
+        catalog: None,
+        base_catalog: None,
+        hub: None,
+        file_facts: Some(file_facts),
+        results: Vec::new(),
+        problem: None,
+    };
+    match item {
+        CompareItem::Catalog { catalog_id } => CompareFacts {
+            title: "Sample catalog model".into(),
+            file: Some(format!("{catalog_id}-Q4_K_M.gguf")),
+            catalog: Some(sample_catalog_facts(&catalog_id, "Sample catalog model")),
+            ..base
+        },
+        CompareItem::Repo { repo, file } => CompareFacts {
+            title: repo.clone(),
+            file: Some(file),
+            hub: Some(HubFacts {
+                card_url: format!("https://huggingface.co/{repo}"),
+                repo,
+                author: Some("example".into()),
+                pipeline_tag: Some("text-generation".into()),
+                base_model: None,
+                languages: vec!["en".into()],
+                license: None,
+                tags: vec!["gguf".into()],
+                downloads: Some(1234),
+                likes: Some(5),
+                last_modified: Some("2026-01-01T00:00:00Z".into()),
+                gated: false,
+            }),
+            ..base
+        },
+        CompareItem::Installed { installed_path } => CompareFacts {
+            title: std::path::Path::new(&installed_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| installed_path.clone()),
+            file: None,
+            installed_path: Some(installed_path),
+            ..base
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compare_samples_echo_the_item_and_the_context() {
+        use crate::dto::CompareItem;
+        let items = [
+            CompareItem::Catalog {
+                catalog_id: "sample-small".into(),
+            },
+            CompareItem::Repo {
+                repo: "owner/name".into(),
+                file: "f.gguf".into(),
+            },
+            CompareItem::Installed {
+                installed_path: "/models/x.gguf".into(),
+            },
+        ];
+        for item in items {
+            let facts = sample_facts(item.clone(), 16_384);
+            assert_eq!(facts.item, item);
+            assert_eq!(facts.ctx, 16_384);
+            let v = serde_json::to_value(&facts).unwrap();
+            for key in [
+                "item",
+                "title",
+                "file",
+                "quant",
+                "sizeBytes",
+                "installedPath",
+                "ctx",
+                "fit",
+                "catalog",
+                "baseCatalog",
+                "hub",
+                "fileFacts",
+                "results",
+                "problem",
+            ] {
+                assert!(v.get(key).is_some(), "{key} missing: {v}");
+            }
+        }
+    }
 
     /// The first-run screen reads `intelMac` to say "Intel Mac: models run on the
     /// processor" instead of "No supported GPU found".

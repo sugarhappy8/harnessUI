@@ -55,6 +55,9 @@ pub fn provider_models_key(provider_id: store::ProviderId) -> String {
     format!("providerModels:{}", provider_id.0)
 }
 
+/// 0.0.5: without the upgrade rule; loads read `load_settings::read_defaults` instead.
+/// No caller is left; the lead may remove it.
+#[allow(dead_code, reason = "0.0.5 WP1b: no callers left")]
 pub async fn local_model_settings(app: &AppHandle) -> LocalModelSettings {
     let state = app.state::<AppState>();
     state

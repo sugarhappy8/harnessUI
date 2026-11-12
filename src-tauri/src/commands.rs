@@ -35,8 +35,29 @@ pub fn app_info(app: tauri::AppHandle) -> AppInfo {
     }
 }
 
+/// Refuses a call that does not come from the main window. The capability files grant app
+/// commands to the main window alone; 0.0.5's commands check the label again where they
+/// run, like their neighbours (approvals, outputs).
+pub fn only_main_window(label: &str) -> crate::error::AppResult<()> {
+    if label == crate::MAIN_WINDOW {
+        Ok(())
+    } else {
+        Err(crate::error::AppError::bad_request(
+            "Only the main window can do this.",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_main_window_passes() {
+        assert!(super::only_main_window(crate::MAIN_WINDOW).is_ok());
+        for other in ["overlay", "indicator", "", "Main", "main "] {
+            assert!(super::only_main_window(other).is_err(), "{other:?}");
+        }
+    }
+
     /// `Object.prototype` is frozen in every page of the app, by the page's first import
     /// (`src/lib/freeze.ts`), and not by Tauri's setting, which on Windows would freeze it
     /// in the preview frames of artifacts too, where the diagram library cannot start

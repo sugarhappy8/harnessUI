@@ -759,7 +759,7 @@ impl AppTools {
             enabled: self
                 .enabled
                 .iter()
-                .filter(|t| !crate::subagent::is_tool(t))
+                .filter(|t| crate::subagent::offered_to_helper(t))
                 .cloned()
                 .collect(),
             chat: self.chat.clone(),
@@ -772,7 +772,7 @@ impl AppTools {
             hidden: self
                 .hidden
                 .iter()
-                .filter(|t| !crate::subagent::is_tool(t))
+                .filter(|t| crate::subagent::offered_to_helper(t))
                 .cloned()
                 .collect(),
             shared: Arc::default(),
@@ -1610,6 +1610,23 @@ pub(crate) struct Assembled {
     pub hidden: Vec<mcp_host::RegisteredTool>,
     /// The chat's approved folders.
     pub folders: Vec<String>,
+    /// [0.0.5 memory] Notes for the user when the turn starts: documents of the message it
+    /// answers that were cut to fit the context. Empty in a preview.
+    pub notes: Vec<String>,
+}
+
+/// [0.0.5 memory] What the user is told about the documents of `message` that were cut to
+/// fit the context when it was sent (`attachments::save_documents`).
+fn cut_document_notes(message: Option<&store::Message>) -> Vec<String> {
+    message
+        .filter(|m| m.role == store::Role::User)
+        .map(|m| {
+            crate::attachments::document_cuts(&m.content)
+                .into_iter()
+                .map(|(name, cut)| crate::attachments::cut_note(&name, cut))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Builds what a turn in this chat sends: the one place both a real turn ([`run`]) and the
@@ -1697,6 +1714,11 @@ pub(crate) async fn assemble(
     let chat_prefs: ChatTools =
         serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
     input.thinking = !chat_prefs.thinking_off;
+    // [0.0.5] "How long it may think": the local model's own choice, else the defaults for
+    // all models; a limit on each request, read again for every turn.
+    if let Some(path) = req.model_ref.strip_prefix("local:") {
+        input.thinking_limit = crate::load_settings::thinking_for(&state, path).await;
+    }
     crate::evals::profile::apply_to_turn(&state, &req.model_ref, &chat_prefs, &mut input).await; // [0.0.4 profile]
     input.system_prompt = req
         .chat
@@ -1761,6 +1783,11 @@ pub(crate) async fn assemble(
         shown: enabled,
         hidden,
         folders,
+        notes: if turn {
+            cut_document_notes(path.last())
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -1780,6 +1807,7 @@ pub async fn run(
         shown: enabled,
         hidden,
         folders,
+        notes: start_notes,
     } = assemble(app, &req, Assembly::Turn).await?;
 
     let host = state.host.clone();
@@ -1909,6 +1937,9 @@ pub async fn run(
     let _ = channel.send(TurnStreamEvent::Started {
         user_message_id: req.user_message_id.map(|m| m.0),
     });
+    for text in start_notes {
+        let _ = channel.send(TurnStreamEvent::Note { text }); // [0.0.5 memory]
+    }
     let deps = agent::turn::TurnDeps {
         client: &req.client,
         tools: &tools,
@@ -2003,14 +2034,16 @@ pub async fn run(
 /// the app does not run a remote endpoint or choose its context size.
 fn failure_next_step(code: &str, local: bool) -> &'static str {
     match (code, local) {
+        // [0.0.5 memory] How much a local model remembers is set in its Model settings,
+        // which the chat offers as a button under these errors.
         ("tools_do_not_fit", true) => {
-            "Switch off some tools for this chat, or load the model with a larger context."
+            "Switch off some tools for this chat, or choose Model settings to let this model remember more."
         }
         ("tools_do_not_fit", false) => {
             "Switch off some tools for this chat. If the server's model has a larger context, set it in Settings → Endpoints."
         }
         ("context_full" | "context_overflow", true) => {
-            "Start a new chat, or load the model with a larger context."
+            "Start a new chat, or choose Model settings to let this model remember more."
         }
         ("context_full" | "context_overflow", false) => {
             "Start a new chat. If the server's model has a larger context, set it in Settings → Endpoints."
@@ -2120,15 +2153,16 @@ mod tests {
             key.contains("Settings → Endpoints") && key.contains("key"),
             "{key}"
         );
-        // A remote endpoint's context is a setting; a local model is loaded with one.
+        // A remote endpoint's context is a setting; a local model remembers what its Model
+        // settings say (0.0.5: the chat shows a Model settings button under these errors).
         for code in ["tools_do_not_fit", "context_full", "context_overflow"] {
             let local = failure_next_step(code, true);
             let remote = failure_next_step(code, false);
             assert!(
-                local.contains("load the model with a larger context"),
+                local.contains("choose Model settings to let this model remember more"),
                 "{code}: {local}"
             );
-            assert!(!remote.contains("load the model"), "{code}: {remote}");
+            assert!(!remote.contains("Model settings"), "{code}: {remote}");
             assert!(remote.contains("Settings → Endpoints"), "{code}: {remote}");
         }
         // The app does not run a remote server, so it cannot say "still running".
@@ -2558,5 +2592,70 @@ mod tests {
         for r in [Role::System, Role::User, Role::Assistant, Role::Tool] {
             assert_eq!(role_of(store_role(r)), r);
         }
+    }
+
+    /// [0.0.5] "How long it may think" is read in the shared assembly (so the Context tab
+    /// shows the request a turn sends), for a local model only, from its load settings,
+    /// before its tested settings are applied; a helper's input is a copy of the turn's.
+    /// (The assembly needs the running app, so this reads its source.)
+    #[test]
+    fn the_thinking_limit_is_read_for_every_turn_of_a_local_model() {
+        let source = include_str!("turns.rs").replace("\r\n", "\n");
+        let start = source
+            .find("pub(crate) async fn assemble(")
+            .expect("assemble");
+        let end = start + source[start..].find("\n}\n").expect("end of assemble");
+        let body = &source[start..end];
+        let at = body
+            .find("input.thinking_limit = crate::load_settings::thinking_for(&state, path).await;")
+            .expect("the limit is filled in the assembly");
+        let guard = body[..at]
+            .rfind("if let Some(path) = req.model_ref.strip_prefix(\"local:\") {")
+            .expect("for a local model");
+        assert!(!body[guard..at].contains('}'), "outside the local branch");
+        let profile = body
+            .find("crate::evals::profile::apply_to_turn(")
+            .expect("tested settings");
+        assert!(at < profile, "read after the tested settings");
+        let run = source.find("pub async fn run(").expect("run");
+        let run = &source[run..run + source[run..].find("\n}\n").expect("end of run")];
+        assert!(run.contains("let mut helper_input = input.clone();"));
+    }
+
+    /// [0.0.5 memory] A turn that answers a message with a document cut to fit tells the
+    /// user so when it starts; a message whose documents fit, or one from the model, does not.
+    #[test]
+    fn a_turn_tells_the_user_which_documents_were_cut() {
+        let message = |role, content| store::Message {
+            id: store::MessageId(4),
+            chat_id: store::ChatId(1),
+            parent_id: None,
+            role,
+            content,
+            reasoning: None,
+            status: store::MessageStatus::Complete,
+            model_ref: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            tokens_per_second: None,
+            error: None,
+            search_text: String::new(),
+            created_at: 0,
+        };
+        let cut = json!([
+            {"type": "text", "text": "summarise this"},
+            {"type": "document", "attachment_id": 9, "name": "minutes.txt", "cut": {"kept": 4_914, "total": 49_140}}
+        ]);
+        let notes = cut_document_notes(Some(&message(store::Role::User, cut.clone())));
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].starts_with("Only the first part of minutes.txt was sent (about 10%)"),
+            "{}",
+            notes[0]
+        );
+        let whole = json!([{"type": "document", "attachment_id": 9, "name": "minutes.txt"}]);
+        assert!(cut_document_notes(Some(&message(store::Role::User, whole))).is_empty());
+        assert!(cut_document_notes(Some(&message(store::Role::Assistant, cut))).is_empty());
+        assert!(cut_document_notes(None).is_empty());
     }
 }

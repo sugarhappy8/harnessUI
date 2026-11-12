@@ -2339,6 +2339,7 @@ click Download in Settings, after their licenses are shown.
 | http-body | 1.1.0 | MIT |
 | http-body-util | 0.1.5 | MIT |
 | httparse | 1.10.1 | MIT OR Apache-2.0 |
+| httpdate | 1.0.3 | MIT OR Apache-2.0 |
 | hybrid-array | 0.4.15 | MIT OR Apache-2.0 |
 | hyper | 1.12.0 | MIT |
 | hyper-rustls | 0.27.10 | Apache-2.0 OR ISC OR MIT |
@@ -2928,7 +2929,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-Used by: aes 0.8.4, ahash 0.8.12, atomic-waker 1.1.2, base64 0.21.7, base64 0.22.1, base64 0.23.1, bit-set 0.8.0, bit-vec 0.8.0, bitflags 2.13.2, block-buffer 0.10.4, block-buffer 0.12.1, block-padding 0.3.3, bs58 0.5.1, bstr 1.13.1, bumpalo 3.20.3, bytemuck 1.25.2, bytemuck_derive 1.12.1, camino 1.2.6, cbc 0.1.2, cff-parser 0.2.0, cfg-if 1.0.5, chacha20 0.10.2, cipher 0.4.4, const-oid 0.10.2, core-foundation 0.10.1, core-foundation 0.9.4, core-foundation-sys 0.8.7, core-graphics 0.25.0, core-graphics-types 0.2.0, core_detect 1.0.0, cpufeatures 0.2.17, cpufeatures 0.3.1, crossbeam-channel 0.5.17, crossbeam-utils 0.8.23, crypto-common 0.1.7, crypto-common 0.2.2, digest 0.10.7, digest 0.11.3, displaydoc 0.2.7, embed_plist 1.2.2, encoding_rs 0.8.44, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.14, euclid 0.20.14, fastrand 2.5.0, filetime 0.2.29, flate2 1.1.11, fnv 1.0.7, form_urlencoded 1.2.2, fraction 0.17.0, git2 0.21.0, glob 0.3.4, global-hotkey 0.8.0, hashbrown 0.12.3, hashbrown 0.17.1, hashlink 0.12.2, heck 0.5.0, html5ever 0.39.0, httparse 1.10.1, hybrid-array 0.4.15, hyper-rustls 0.27.10, hyper-tls 0.6.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 1.9.3, indexmap 2.14.2, inout 0.1.4, keyboard-types 0.7.0, keyboard-types 0.8.3, lazy_static 1.5.1, libgit2-sys 0.18.8+1.9.7, libz-sys 1.1.33, lock_api 0.4.14, log 0.4.35, markup5ever 0.39.0, md-5 0.10.6, mime 0.3.18, muda 0.20.0, multiversion_no_op 1.0.0, nohash-hasher 0.2.0, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, once_cell 1.21.4, parking_lot 0.12.5, parking_lot_core 0.9.12, percent-encoding 2.3.2, png 0.18.1, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, rustix 1.1.6, rustls 0.23.46, rustls-platform-verifier 0.7.1, scopeguard 1.2.0, security-framework 3.7.0, security-framework-sys 2.17.0, serde_with 3.24.0, serde_with_macros 3.24.0, serialize-to-javascript 0.1.2, serialize-to-javascript-impl 0.1.2, servo_arc 0.4.3, sha1 0.11.0, sha2 0.10.9, sha2 0.11.1, signal-hook-registry 1.4.8, similar 3.2.1, siphasher 1.0.4, smallvec 1.16.5, socket2 0.6.5, sse-stream 0.2.6, stable_deref_trait 1.2.1, string_cache 0.9.0, symlink 0.1.0, system-configuration 0.7.0, system-configuration-sys 0.6.0, tar 0.4.46, tempfile 3.27.0, tendril 0.5.1, thread_local 1.1.10, tinyvec 1.13.3, tray-icon 0.25.1, ttf-parser 0.25.1, tungstenite 0.30.0, unicode-bidi 0.3.18, unicode-normalization 0.1.26, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-width 0.2.3, url 2.5.8, utf8_iter 1.1.0, utf_types 1.0.0, uuid 1.29.2, web_atoms 0.2.6, weezl 0.1.12, window-vibrancy 0.8.1, wry 0.57.2, xattr 1.7.0, zeroize 1.9.1, zeroize_derive 1.5.0, zune-core 0.5.3, zune-jpeg 0.5.15
+Used by: aes 0.8.4, ahash 0.8.12, atomic-waker 1.1.2, base64 0.21.7, base64 0.22.1, base64 0.23.1, bit-set 0.8.0, bit-vec 0.8.0, bitflags 2.13.2, block-buffer 0.10.4, block-buffer 0.12.1, block-padding 0.3.3, bs58 0.5.1, bstr 1.13.1, bumpalo 3.20.3, bytemuck 1.25.2, bytemuck_derive 1.12.1, camino 1.2.6, cbc 0.1.2, cff-parser 0.2.0, cfg-if 1.0.5, chacha20 0.10.2, cipher 0.4.4, const-oid 0.10.2, core-foundation 0.10.1, core-foundation 0.9.4, core-foundation-sys 0.8.7, core-graphics 0.25.0, core-graphics-types 0.2.0, core_detect 1.0.0, cpufeatures 0.2.17, cpufeatures 0.3.1, crossbeam-channel 0.5.17, crossbeam-utils 0.8.23, crypto-common 0.1.7, crypto-common 0.2.2, digest 0.10.7, digest 0.11.3, displaydoc 0.2.7, embed_plist 1.2.2, encoding_rs 0.8.44, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.14, euclid 0.20.14, fastrand 2.5.0, filetime 0.2.29, flate2 1.1.11, fnv 1.0.7, form_urlencoded 1.2.2, fraction 0.17.0, git2 0.21.0, glob 0.3.4, global-hotkey 0.8.0, hashbrown 0.12.3, hashbrown 0.17.1, hashlink 0.12.2, heck 0.5.0, html5ever 0.39.0, httparse 1.10.1, httpdate 1.0.3, hybrid-array 0.4.15, hyper-rustls 0.27.10, hyper-tls 0.6.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 1.9.3, indexmap 2.14.2, inout 0.1.4, keyboard-types 0.7.0, keyboard-types 0.8.3, lazy_static 1.5.1, libgit2-sys 0.18.8+1.9.7, libz-sys 1.1.33, lock_api 0.4.14, log 0.4.35, markup5ever 0.39.0, md-5 0.10.6, mime 0.3.18, muda 0.20.0, multiversion_no_op 1.0.0, nohash-hasher 0.2.0, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, once_cell 1.21.4, parking_lot 0.12.5, parking_lot_core 0.9.12, percent-encoding 2.3.2, png 0.18.1, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, rustix 1.1.6, rustls 0.23.46, rustls-platform-verifier 0.7.1, scopeguard 1.2.0, security-framework 3.7.0, security-framework-sys 2.17.0, serde_with 3.24.0, serde_with_macros 3.24.0, serialize-to-javascript 0.1.2, serialize-to-javascript-impl 0.1.2, servo_arc 0.4.3, sha1 0.11.0, sha2 0.10.9, sha2 0.11.1, signal-hook-registry 1.4.8, similar 3.2.1, siphasher 1.0.4, smallvec 1.16.5, socket2 0.6.5, sse-stream 0.2.6, stable_deref_trait 1.2.1, string_cache 0.9.0, symlink 0.1.0, system-configuration 0.7.0, system-configuration-sys 0.6.0, tar 0.4.46, tempfile 3.27.0, tendril 0.5.1, thread_local 1.1.10, tinyvec 1.13.3, tray-icon 0.25.1, ttf-parser 0.25.1, tungstenite 0.30.0, unicode-bidi 0.3.18, unicode-normalization 0.1.26, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-width 0.2.3, url 2.5.8, utf8_iter 1.1.0, utf_types 1.0.0, uuid 1.29.2, web_atoms 0.2.6, weezl 0.1.12, window-vibrancy 0.8.1, wry 0.57.2, xattr 1.7.0, zeroize 1.9.1, zeroize_derive 1.5.0, zune-core 0.5.3, zune-jpeg 0.5.15
 
 ```text
 Apache License
@@ -8924,6 +8925,30 @@ Used by: httparse 1.10.1
 
 ```text
 Copyright (c) 2015-2025 Sean McArthur
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+Used by: httpdate 1.0.3
+
+```text
+Copyright (c) 2016 Pyfisch
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

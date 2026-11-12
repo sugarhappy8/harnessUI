@@ -2,7 +2,13 @@
 //!
 //! Every default the pinned build would otherwise apply is overridden explicitly: port
 //! 9931, auto-fitted context, four slots, the 8 GB prompt cache, the Web UI, CORS for any
-//! origin and downloads from the network.
+//! origin and downloads from the network. The model's own file name is never the API's
+//! model id: `-a` reports the fixed [`MODEL_ALIAS`] instead.
+//!
+//! The 0.0.5 load settings are typed fields with a fixed set of words each (0.0.5 D4):
+//! [`LaunchConfig::gpu`], [`LaunchConfig::save_memory`] and
+//! [`LaunchConfig::keep_in_memory`]. Nothing a user or a model types reaches the command
+//! line.
 
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
@@ -30,6 +36,34 @@ pub const API_KEY_ENV: &str = "LLAMA_API_KEY";
 
 /// Environment variable that restricts which GPUs the HIP runtime sees (ROCm only).
 pub const HIP_VISIBLE_DEVICES_ENV: &str = "HIP_VISIBLE_DEVICES";
+
+/// The model name the server reports through its API (`-a`): always this fixed word, so an
+/// API response never shows the model file's path. [`LaunchConfig::alias`] holds it.
+pub const MODEL_ALIAS: &str = "harnessui-local";
+
+/// How much of the model goes on the graphics card ("Use the graphics card", 0.0.5 D4).
+///
+/// The arguments ([`build_args`]):
+/// - `All`: `-ngl all --fit off`. Every layer on the device; llama.cpp's own fitting is off,
+///   so a model that does not fit fails instead of being changed silently (the supervisor
+///   then retries with `Fit`, see [`super::server::Supervisor`]).
+/// - `Fit`: no `-ngl` and `--fit on`. llama.cpp measures free device memory and puts as
+///   many layers as fit on the device, the rest on the processor. `-c` stays explicit, so
+///   only the layers change.
+/// - `Off`: `--device none -ngl 0 --fit off`. Nothing on the graphics card, and no device
+///   at all, so llama.cpp does not offload the processor's work to it either
+///   (`--op-offload`), whatever [`LaunchConfig::device`] holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GpuUse {
+    /// Every layer on the graphics card. The default, and the behaviour of 0.0.4.
+    #[default]
+    All,
+    /// As much as fits; the rest runs on the processor.
+    Fit,
+    /// None: the processor only.
+    Off,
+}
 
 /// How many layers to offload to the GPU (`-ngl`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +101,9 @@ pub struct LaunchConfig {
     pub ctx: u32,
     /// Device name from the probe (`Vulkan0`, `ROCm0`, `MTL0`); `None` means CPU (`none`).
     pub device: Option<String>,
-    /// GPU layers (`-ngl`).
+    /// GPU layers. **No longer an argument** since 0.0.5: [`gpu`](Self::gpu) decides
+    /// `-ngl`. Kept so existing callers and saved configs still compile and read.
+    /// TODO(0.0.6): remove it and [`GpuLayers`] once the app stops setting it.
     pub gpu_layers: GpuLayers,
     /// Host prompt cache in MiB (`--cache-ram`).
     pub cache_ram_mib: u32,
@@ -79,6 +115,65 @@ pub struct LaunchConfig {
     pub api_key: String,
     /// `HIP_VISIBLE_DEVICES` for ROCm, so the HIP runtime never sees the integrated GPU.
     pub hip_visible_devices: Option<String>,
+    /// How much of the model goes on the graphics card (`-ngl`, `--fit`; see [`GpuUse`]).
+    #[serde(default)]
+    pub gpu: GpuUse,
+    /// Save memory: flash attention and a q8_0 conversation memory (`-fa on -ctk q8_0
+    /// -ctv q8_0`), half the size of the default f16 one. Off adds nothing, so llama.cpp's
+    /// defaults (flash attention when supported, f16) apply as in 0.0.4.
+    #[serde(default)]
+    pub save_memory: bool,
+    /// Keep the model in memory (`-lm mmap+mlock`). Off adds nothing (llama.cpp's `auto`,
+    /// as in 0.0.4).
+    #[serde(default)]
+    pub keep_in_memory: bool,
+    /// The model id the API reports (`-a`): [`MODEL_ALIAS`]. Only one plain word reaches
+    /// the command line; anything else is replaced by [`MODEL_ALIAS`] (see [`build_args`]).
+    #[serde(default = "default_alias")]
+    pub alias: String,
+}
+
+fn default_alias() -> String {
+    MODEL_ALIAS.to_owned()
+}
+
+impl Default for LaunchConfig {
+    /// The app's fixed choices (`-ngl all`, a 512 MiB prompt cache, no thinking budget,
+    /// the fixed alias) with no model, port or key. Port 0 and an empty key are refused by
+    /// [`super::server::start`], so a config must get them from [`LaunchConfig::new`] or
+    /// struct update syntax.
+    fn default() -> Self {
+        Self {
+            model: PathBuf::new(),
+            mmproj: None,
+            ctx: 8192,
+            device: None,
+            gpu_layers: GpuLayers::All,
+            cache_ram_mib: 512,
+            reasoning_budget: None,
+            port: 0,
+            api_key: String::new(),
+            hip_visible_devices: None,
+            gpu: GpuUse::All,
+            save_memory: false,
+            keep_in_memory: false,
+            alias: default_alias(),
+        }
+    }
+}
+
+impl LaunchConfig {
+    /// A launch of `model` with `ctx` tokens of context on `port` with `api_key`, and the
+    /// defaults of [`LaunchConfig::default`] for everything else (CPU device, every layer).
+    pub fn new(model: PathBuf, ctx: u32, port: u16, api_key: String) -> Self {
+        Self {
+            model,
+            ctx,
+            port,
+            api_key,
+            ..Self::default()
+        }
+    }
 }
 
 /// What `Debug` prints instead of a secret.
@@ -97,20 +192,38 @@ impl std::fmt::Debug for LaunchConfig {
             .field("port", &self.port)
             .field("api_key", &REDACTED)
             .field("hip_visible_devices", &self.hip_visible_devices)
+            .field("gpu", &self.gpu)
+            .field("save_memory", &self.save_memory)
+            .field("keep_in_memory", &self.keep_in_memory)
+            .field("alias", &self.alias)
             .finish()
     }
 }
+
+/// The conversation memory's number type with Save memory on (`-ctk`, `-ctv`): 8 bits per
+/// value plus a scale per 32 values, 34 bytes where f16 takes 64.
+pub const SAVE_MEMORY_CACHE_TYPE: &str = "q8_0";
+
+/// The load mode with Keep the model in memory on (`-lm`).
+pub const KEEP_IN_MEMORY_LOAD_MODE: &str = "mmap+mlock";
+
+/// Longest alias passed to `-a`.
+const MAX_ALIAS_LEN: usize = 64;
 
 /// The exact argument list for `cfg`:
 ///
 /// ```text
 /// --host 127.0.0.1 --port P --no-webui --no-slots --offline --jinja --cors-origins none
-/// --no-context-shift -m M [--mmproj X] -c C -np 1 --device D -ngl auto|all|N
-/// --cache-ram R [--reasoning-budget B]
+/// --no-context-shift -a harnessui-local -m M [--mmproj X] -c C -np 1
+/// --device D (-ngl all --fit off | --fit on | -ngl 0 --fit off)
+/// [-fa on -ctk q8_0 -ctv q8_0] [-lm mmap+mlock] --cache-ram R [--reasoning-budget B]
 /// ```
 ///
-/// Paths are converted lossily; [`super::server::start`] refuses paths that are not valid
-/// Unicode before it gets here.
+/// `D` is the device, or `none` for the processor and for [`GpuUse::Off`]. Every word is
+/// fixed except the paths, the numbers, the device name from the probe and the alias, which
+/// is used only when it is one plain word (otherwise [`MODEL_ALIAS`]). Paths are converted
+/// lossily; [`super::server::start`] refuses paths that are not valid Unicode before it
+/// gets here.
 pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
     let port = cfg.port.to_string();
     let model = cfg.model.to_string_lossy();
@@ -126,6 +239,8 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
         "--cors-origins",
         CORS_ORIGINS_NONE,
         "--no-context-shift",
+        "-a",
+        alias_arg(&cfg.alias),
         "-m",
         model.as_ref(),
     ]
@@ -136,11 +251,14 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
         args.push("--mmproj".to_owned());
         args.push(mmproj.to_string_lossy().into_owned());
     }
-    let device = cfg
-        .device
-        .as_deref()
-        .filter(|d| !d.is_empty())
-        .unwrap_or("none");
+    let device = match cfg.gpu {
+        GpuUse::Off => "none",
+        GpuUse::All | GpuUse::Fit => cfg
+            .device
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .unwrap_or("none"),
+    };
     args.extend([
         "-c".to_owned(),
         cfg.ctx.to_string(),
@@ -148,16 +266,52 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
         "1".to_owned(),
         "--device".to_owned(),
         device.to_owned(),
-        "-ngl".to_owned(),
-        cfg.gpu_layers.as_arg(),
-        "--cache-ram".to_owned(),
-        cfg.cache_ram_mib.to_string(),
     ]);
+    let gpu: &[&str] = match cfg.gpu {
+        GpuUse::All => &["-ngl", "all", "--fit", "off"],
+        GpuUse::Fit => &["--fit", "on"],
+        GpuUse::Off => &["-ngl", "0", "--fit", "off"],
+    };
+    args.extend(gpu.iter().map(|s| (*s).to_owned()));
+    if cfg.save_memory {
+        args.extend(
+            [
+                "-fa",
+                "on",
+                "-ctk",
+                SAVE_MEMORY_CACHE_TYPE,
+                "-ctv",
+                SAVE_MEMORY_CACHE_TYPE,
+            ]
+            .map(str::to_owned),
+        );
+    }
+    if cfg.keep_in_memory {
+        args.extend(["-lm", KEEP_IN_MEMORY_LOAD_MODE].map(str::to_owned));
+    }
+    args.extend(["--cache-ram".to_owned(), cfg.cache_ram_mib.to_string()]);
     if let Some(budget) = cfg.reasoning_budget {
         args.push("--reasoning-budget".to_owned());
         args.push(budget.to_string());
     }
     args
+}
+
+/// The `-a` value: `alias` when it is one plain word (lower-case ASCII letters, digits,
+/// `-`, `_` and `.`, starting with a letter or digit, at most [`MAX_ALIAS_LEN`]
+/// characters), otherwise [`MODEL_ALIAS`]. llama-server splits the value at commas into
+/// several names and reports it in every response, so only a predictable word goes there.
+fn alias_arg(alias: &str) -> &str {
+    let plain = !alias.is_empty()
+        && alias.len() <= MAX_ALIAS_LEN
+        && alias
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && alias.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')
+        });
+    if plain { alias } else { MODEL_ALIAS }
 }
 
 /// The environment for `cfg`: the platform allowlist, the API key, managed-child mode and,
@@ -213,9 +367,59 @@ mod tests {
             port: 40123,
             api_key: "k".into(),
             hip_visible_devices: None,
+            ..LaunchConfig::default()
         }
     }
 
+    /// The defaults are the app's fixed choices; the alias is the fixed model id.
+    #[test]
+    fn defaults_and_constructor() {
+        let d = LaunchConfig::default();
+        assert_eq!(d.gpu_layers, GpuLayers::All);
+        assert_eq!(d.gpu, GpuUse::All);
+        assert_eq!(d.cache_ram_mib, 512);
+        assert_eq!(d.reasoning_budget, None);
+        assert!(!d.save_memory && !d.keep_in_memory);
+        assert_eq!(d.alias, "harnessui-local");
+        assert_eq!(d.alias, MODEL_ALIAS);
+        let n = LaunchConfig::new(PathBuf::from("/m.gguf"), 4096, 40000, "key".into());
+        assert_eq!(n.model, PathBuf::from("/m.gguf"));
+        assert_eq!((n.ctx, n.port, n.api_key.as_str()), (4096, 40000, "key"));
+        assert_eq!(n.alias, MODEL_ALIAS);
+        assert_eq!(n.device, None);
+    }
+
+    /// `gpu_layers` is no longer an argument: [`LaunchConfig::gpu`] decides `-ngl`.
+    #[test]
+    fn gpu_layers_is_not_an_argument_any_more() {
+        for layers in [GpuLayers::Auto, GpuLayers::All, GpuLayers::Count(7)] {
+            let cfg = LaunchConfig {
+                gpu_layers: layers,
+                ..config()
+            };
+            assert_eq!(build_args(&cfg), build_args(&config()), "{layers:?}");
+        }
+    }
+
+    /// A config saved before 0.0.5 still reads, with the new fields at their defaults.
+    #[test]
+    fn old_json_reads_with_defaults() {
+        let mut v = serde_json::to_value(config()).expect("json");
+        let obj = v.as_object_mut().expect("object");
+        for key in ["gpu", "save_memory", "keep_in_memory", "alias"] {
+            assert!(obj.remove(key).is_some(), "{key}");
+        }
+        let back: LaunchConfig = serde_json::from_value(v).expect("reads");
+        assert_eq!(back, config());
+        assert_eq!(
+            serde_json::to_value(GpuUse::Fit).expect("json"),
+            serde_json::json!("fit")
+        );
+    }
+
+    /// Every argument of the default launch: every layer on the graphics card, nothing
+    /// else changed from 0.0.4, the fixed alias, and `--fit off` so llama.cpp never
+    /// second-guesses the explicit choices.
     #[test]
     fn args_are_exact() {
         assert_eq!(
@@ -232,6 +436,8 @@ mod tests {
                 "--cors-origins",
                 "none",
                 "--no-context-shift",
+                "-a",
+                "harnessui-local",
                 "-m",
                 "/models/m.gguf",
                 "-c",
@@ -241,11 +447,166 @@ mod tests {
                 "--device",
                 "Vulkan0",
                 "-ngl",
-                "auto",
+                "all",
+                "--fit",
+                "off",
                 "--cache-ram",
                 "512",
             ]
         );
+    }
+
+    /// The arguments between `--device` and `--cache-ram`, where the 0.0.5 choices go.
+    fn choice_args(cfg: &LaunchConfig) -> Vec<String> {
+        let args = build_args(cfg);
+        let from = args.iter().position(|a| a == "--device").expect("--device");
+        let to = args
+            .iter()
+            .position(|a| a == "--cache-ram")
+            .expect("--cache-ram");
+        args[from..to].to_vec()
+    }
+
+    /// Use the graphics card: All of it, As much as fits, Don't use it.
+    #[test]
+    fn args_are_exact_for_every_gpu_choice() {
+        let all = LaunchConfig {
+            gpu: GpuUse::All,
+            ..config()
+        };
+        assert_eq!(
+            choice_args(&all),
+            ["--device", "Vulkan0", "-ngl", "all", "--fit", "off"]
+        );
+        // As much as fits: no -ngl at all, so llama.cpp's fitting decides it.
+        let fit = LaunchConfig {
+            gpu: GpuUse::Fit,
+            ..config()
+        };
+        assert_eq!(choice_args(&fit), ["--device", "Vulkan0", "--fit", "on"]);
+        assert!(!build_args(&fit).iter().any(|a| a == "-ngl"));
+        // Don't use it: nothing on the graphics card, and no graphics card at all, so
+        // llama.cpp does not move work there behind the user's back.
+        let off = LaunchConfig {
+            gpu: GpuUse::Off,
+            ..config()
+        };
+        assert_eq!(
+            choice_args(&off),
+            ["--device", "none", "-ngl", "0", "--fit", "off"]
+        );
+    }
+
+    /// Save memory and Keep the model in memory, alone and together.
+    #[test]
+    fn args_are_exact_for_save_memory_and_keep_in_memory() {
+        let save = LaunchConfig {
+            save_memory: true,
+            ..config()
+        };
+        assert_eq!(
+            choice_args(&save),
+            [
+                "--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-fa", "on", "-ctk", "q8_0",
+                "-ctv", "q8_0"
+            ]
+        );
+        let keep = LaunchConfig {
+            keep_in_memory: true,
+            ..config()
+        };
+        assert_eq!(
+            choice_args(&keep),
+            [
+                "--device",
+                "Vulkan0",
+                "-ngl",
+                "all",
+                "--fit",
+                "off",
+                "-lm",
+                "mmap+mlock"
+            ]
+        );
+        let both = LaunchConfig {
+            gpu: GpuUse::Fit,
+            save_memory: true,
+            keep_in_memory: true,
+            mmproj: Some(PathBuf::from("/models/mmproj.gguf")),
+            reasoning_budget: Some(0),
+            ..config()
+        };
+        assert_eq!(
+            build_args(&both),
+            vec![
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "40123",
+                "--no-webui",
+                "--no-slots",
+                "--offline",
+                "--jinja",
+                "--cors-origins",
+                "none",
+                "--no-context-shift",
+                "-a",
+                "harnessui-local",
+                "-m",
+                "/models/m.gguf",
+                "--mmproj",
+                "/models/mmproj.gguf",
+                "-c",
+                "8192",
+                "-np",
+                "1",
+                "--device",
+                "Vulkan0",
+                "--fit",
+                "on",
+                "-fa",
+                "on",
+                "-ctk",
+                "q8_0",
+                "-ctv",
+                "q8_0",
+                "-lm",
+                "mmap+mlock",
+                "--cache-ram",
+                "512",
+                "--reasoning-budget",
+                "0",
+            ]
+        );
+    }
+
+    /// Whatever the choices, the fixed protections stay and the context stays explicit.
+    #[test]
+    fn every_choice_keeps_the_fixed_arguments() {
+        for gpu in [GpuUse::All, GpuUse::Fit, GpuUse::Off] {
+            for save_memory in [false, true] {
+                for keep_in_memory in [false, true] {
+                    let cfg = LaunchConfig {
+                        gpu,
+                        save_memory,
+                        keep_in_memory,
+                        ..config()
+                    };
+                    let joined = build_args(&cfg).join(" ");
+                    for fixed in [
+                        "--host 127.0.0.1 --port 40123 --no-webui --no-slots --offline --jinja",
+                        "--cors-origins none --no-context-shift",
+                        "-a harnessui-local",
+                        "-c 8192 -np 1 --device",
+                        "--cache-ram 512",
+                    ] {
+                        assert!(joined.contains(fixed), "{fixed} missing from {joined}");
+                    }
+                    assert_eq!(joined.contains("-fa on"), save_memory, "{joined}");
+                    assert_eq!(joined.contains("mmap+mlock"), keep_in_memory, "{joined}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -253,24 +614,57 @@ mod tests {
         let cfg = LaunchConfig {
             mmproj: Some(PathBuf::from("/models/mmproj.gguf")),
             device: None,
-            gpu_layers: GpuLayers::Count(12),
             reasoning_budget: Some(0),
             ..config()
         };
         let args = build_args(&cfg);
         let joined = args.join(" ");
         assert!(joined.contains("-m /models/m.gguf --mmproj /models/mmproj.gguf -c 8192"));
-        assert!(joined.contains("--device none -ngl 12"));
+        assert!(joined.contains("--device none -ngl all --fit off"));
         assert!(joined.ends_with("--cache-ram 512 --reasoning-budget 0"));
         let empty_device = LaunchConfig {
             device: Some(String::new()),
-            gpu_layers: GpuLayers::All,
             ..config()
         };
         assert!(
             build_args(&empty_device)
                 .join(" ")
                 .contains("--device none -ngl all")
+        );
+    }
+
+    /// The alias goes on the command line only as one plain word; anything else (a comma
+    /// would make several names, a leading dash looks like a flag) falls back to the fixed
+    /// word.
+    #[test]
+    fn the_alias_is_one_plain_word() {
+        let alias_of = |alias: &str| {
+            let args = build_args(&LaunchConfig {
+                alias: alias.to_owned(),
+                ..config()
+            });
+            let at = args.iter().position(|a| a == "-a").expect("-a");
+            args[at + 1].clone()
+        };
+        assert_eq!(alias_of("harnessui-local"), "harnessui-local");
+        assert_eq!(alias_of("other.name_2"), "other.name_2");
+        for odd in [
+            "",
+            "two,names",
+            "-flag",
+            "with space",
+            "Upper",
+            "line\nbreak",
+            "../path",
+            "a/b",
+            "\u{202e}rtl",
+            &"x".repeat(65),
+        ] {
+            assert_eq!(alias_of(odd), MODEL_ALIAS, "{odd:?}");
+        }
+        assert_eq!(
+            build_args(&config()).iter().filter(|a| *a == "-a").count(),
+            1
         );
     }
 

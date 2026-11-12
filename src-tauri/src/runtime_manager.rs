@@ -10,16 +10,18 @@ use std::time::Duration;
 
 use runtime::llama::server::{Candidate, Supervisor, SupervisorExit};
 use runtime::{
-    Backend, BackendKind, Device, GpuLayers, LaunchConfig, LoadFailure, ProbeResult, RuntimeLayout,
-    ServerEvent, ServerState, StartSpec,
+    Backend, BackendKind, Device, GpuLayers, GpuUse, LaunchConfig, LoadFailure, LoadStage,
+    ProbeResult, RuntimeLayout, ServerEvent, ServerState, StartSpec,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::dto::{BackendDto, DeviceDto, LocalModelSettings, RuntimeStateDto, RuntimeStatusDto};
+use crate::dto::{BackendDto, DeviceDto, RuntimeStateDto, RuntimeStatusDto};
 use crate::error::{AppError, AppResult};
-use crate::load_tracker::{LoadTicket, LoadTracker};
+use crate::load_settings::{Footprint, Freed, ResolvedLoad};
+use crate::load_tracker::{ChangeGate, LoadTicket, LoadTracker};
+use crate::state::{AppState, BusyCounter, BusyGuard, BusyKind};
 
 /// stderr lines kept for error details.
 const TAIL_LINES: usize = 80;
@@ -48,6 +50,20 @@ struct Session {
     task: tokio::task::JoinHandle<SupervisorExit>,
 }
 
+/// The model being loaded or loaded, as it was resolved (0.0.5 D2b): what the "already
+/// loaded" check and the "older settings" flag compare, and what Automatic counts as free
+/// when a load replaces it.
+#[derive(Clone, Debug)]
+struct Loaded {
+    path: PathBuf,
+    resolved: ResolvedLoad,
+    footprint: Footprint,
+}
+
+/// How long "Stop and restart" waits for a stopped reply or model check to wind down
+/// before the server stops anyway.
+const STOP_WAIT: Duration = Duration::from_secs(10);
+
 pub struct RuntimeManager {
     app: AppHandle,
     layout: RuntimeLayout,
@@ -60,6 +76,14 @@ pub struct RuntimeManager {
     /// Held while a load replaces the previous server and starts its own, so that two
     /// loads never do that at the same time. Not held while the model loads.
     load_setup: Mutex<()>,
+    /// The model being loaded or loaded, as resolved.
+    current: StdMutex<Option<Loaded>>,
+    /// The model on a graphics device while the backends were last probed: (backend,
+    /// device, estimated bytes). Its memory was not free then, but is for the next load.
+    probed_with: StdMutex<Option<(String, String, u64)>>,
+    /// The change that waits for the model to be free, and the users "Stop and restart"
+    /// stops (D3).
+    gate: Arc<ChangeGate>,
 }
 
 impl RuntimeManager {
@@ -74,6 +98,9 @@ impl RuntimeManager {
             tail: StdMutex::new(VecDeque::new()),
             loads: LoadTracker::default(),
             load_setup: Mutex::new(()),
+            current: StdMutex::new(None),
+            probed_with: StdMutex::new(None),
+            gate: Arc::new(ChangeGate::default()),
         }
     }
 
@@ -165,6 +192,8 @@ impl RuntimeManager {
         if !reprobe && let Some(found) = cache.as_ref() {
             return found.clone();
         }
+        // The model that is loaded now takes memory the probe will not report as free.
+        let loaded_on = self.loaded_on_device();
         let mut out = Vec::new();
         for backend in runtime::discover(&self.layout) {
             // 45 s: the first start of a new binary on macOS waits for the system's
@@ -179,7 +208,113 @@ impl RuntimeManager {
             out.push((backend, probe));
         }
         *cache = Some(out.clone());
+        if let Ok(mut p) = self.probed_with.lock() {
+            *p = loaded_on;
+        }
         out
+    }
+
+    /// The loaded (or loading) model's graphics device and estimated size, when it runs on
+    /// one.
+    fn loaded_on_device(&self) -> Option<(String, String, u64)> {
+        let status = self.status();
+        if !matches!(
+            status.state,
+            RuntimeStateDto::Ready | RuntimeStateDto::Starting
+        ) {
+            return None;
+        }
+        let backend = status.backend.filter(|b| b != "cpu")?;
+        let device = status.device?;
+        let needed = self.current.lock().ok()?.as_ref()?.footprint.needed;
+        Some((backend, device, needed))
+    }
+
+    /// Memory a load would free by replacing the loaded model (D2b), for Automatic.
+    pub fn freed_memory(&self) -> Freed {
+        let gpu = self.probed_with.lock().ok().and_then(|p| p.clone());
+        let status = self.status();
+        let on_cpu = status.backend.as_deref() == Some("cpu")
+            && matches!(
+                status.state,
+                RuntimeStateDto::Ready | RuntimeStateDto::Starting
+            );
+        let ram_bytes = if on_cpu {
+            self.current
+                .lock()
+                .ok()
+                .and_then(|c| c.as_ref().map(|l| l.footprint.anon))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        Freed { gpu, ram_bytes }
+    }
+
+    /// What the loaded copy of `path` was started with, when `path` is the loaded model.
+    pub fn loaded_choices(&self, path: &str) -> Option<ResolvedLoad> {
+        let status = self.status();
+        if status.state != RuntimeStateDto::Ready || status.model_path.as_deref() != Some(path) {
+            return None;
+        }
+        let current = self.current.lock().ok()?;
+        current
+            .as_ref()
+            .filter(|l| l.path.display().to_string() == path)
+            .map(|l| l.resolved.clone())
+    }
+
+    /// "Settings changed. Restart the model to use them." (D3).
+    pub fn set_settings_changed(&self, changed: bool) {
+        if self.status().settings_changed != changed {
+            self.update(|s| s.settings_changed = changed);
+        }
+    }
+
+    /// Before a load, unload or reload (D3): cancels the change that waits; then with
+    /// `when_idle` waits until nothing uses the model (`reload_waiting` on meanwhile;
+    /// `Ok(true)`), else stops the chat turns and model checks that use it first
+    /// (`Ok(false)`). A wait that a newer change or Cancel ends is `load_replaced`.
+    pub async fn before_change(&self, busy: &BusyCounter, when_idle: bool) -> AppResult<bool> {
+        self.gate
+            .before_change(busy, when_idle, STOP_WAIT, |waiting| {
+                self.update(|s| s.reload_waiting = waiting);
+            })
+            .await
+            .map_err(|_| wait_cancelled_error())
+    }
+
+    /// Cancels the change that waits for the model to be free, if one does.
+    pub fn cancel_waiting(&self) {
+        if self.gate.cancel_waiting() {
+            self.update(|s| s.reload_waiting = false);
+        }
+    }
+
+    /// Counts one user of the local model (D3) until the returned guard is dropped;
+    /// "Stop and restart" stops it with `stop`.
+    pub fn hold(
+        &self,
+        busy: &Arc<BusyCounter>,
+        kind: BusyKind,
+        stop: CancellationToken,
+    ) -> ModelUse {
+        let id = self.gate.add_user(stop);
+        ModelUse {
+            _busy: busy.hold(kind),
+            gate: Arc::clone(&self.gate),
+            id,
+        }
+    }
+
+    /// "Unload to free memory": unloads, and remembers which model it was for
+    /// "Unloaded to free memory · Load".
+    pub async fn unload_by_user(&self) {
+        let path = self.status().model_path;
+        self.unload().await;
+        if let Some(path) = path {
+            self.update(|s| s.unloaded_path = Some(path));
+        }
     }
 
     pub async fn backend_dtos(&self, reprobe: bool) -> Vec<BackendDto> {
@@ -280,10 +415,7 @@ impl RuntimeManager {
     }
 
     /// The first candidate: the user's backend choice, or Auto.
-    async fn choose(
-        &self,
-        settings: &LocalModelSettings,
-    ) -> AppResult<(Candidate, Vec<Candidate>)> {
+    async fn choose(&self, settings: &ResolvedLoad) -> AppResult<(Candidate, Vec<Candidate>)> {
         let found = self.backends(false).await;
         if found.is_empty() {
             return Err(AppError::new(
@@ -339,12 +471,14 @@ impl RuntimeManager {
             .unwrap_or_default()
     }
 
-    /// Loads `model` (and its projector), replacing any model already loaded. Returns
-    /// when the model is ready or has failed on every backend it may step down to.
+    /// Loads `model` (and its projector) as `settings` resolved it, replacing any model
+    /// already loaded. Returns when the model is ready or has failed on every backend it
+    /// may step down to. `footprint` is what it will take, for the next Automatic.
     pub async fn load(
         self: Arc<Self>,
         model: PathBuf,
-        settings: LocalModelSettings,
+        settings: ResolvedLoad,
+        footprint: Footprint,
     ) -> AppResult<()> {
         if !model.is_file() {
             return Err(AppError::new(
@@ -367,6 +501,13 @@ impl RuntimeManager {
         let seq = ticket.seq;
         self.unload().await;
         let (first, candidates) = self.choose(&settings).await?;
+        if let Ok(mut c) = self.current.lock() {
+            *c = Some(Loaded {
+                path: model.clone(),
+                resolved: settings.clone(),
+                footprint,
+            });
+        }
         let model_name = model
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -384,6 +525,8 @@ impl RuntimeManager {
                 ),
                 model_path: Some(model.display().to_string()),
                 model_name: Some(model_name.clone()),
+                load_stage: Some(LoadStage::Starting),
+                ctx_source: Some(settings.ctx_source),
                 ..Default::default()
             };
         });
@@ -395,22 +538,14 @@ impl RuntimeManager {
             .as_ref()
             .map(PathBuf::from)
             .filter(|p| p.is_file());
-        let launch = LaunchConfig {
-            model: model.clone(),
+        let launch = launch_config(
+            &settings,
+            &first,
+            model.clone(),
             mmproj,
-            ctx: settings.ctx,
-            device: first.device.clone(),
-            gpu_layers: if first.backend.kind == BackendKind::Cpu {
-                GpuLayers::Count(0)
-            } else {
-                GpuLayers::All
-            },
-            cache_ram_mib: 512,
-            reasoning_budget: None,
             port,
-            api_key: runtime::random_api_key(),
-            hip_visible_devices: first.hip_visible_devices.clone(),
-        };
+            runtime::random_api_key(),
+        );
         let spec = StartSpec {
             backend: first.backend.clone(),
             launch,
@@ -465,6 +600,7 @@ impl RuntimeManager {
                         s.preserve_reasoning = props.chat_template_caps.supports_preserve_reasoning;
                         s.vision = props.modalities.vision;
                         s.error = None;
+                        s.load_stage = None;
                     });
                     if let Ok(mut slot) = ready_tx.lock()
                         && let Some(tx) = slot.take()
@@ -520,21 +656,13 @@ impl RuntimeManager {
             // used to be reported as "Loading was cancelled".
             Err(why) => loader_stopped_error(why, self.tail_text()),
         };
-        self.update(|s| {
-            s.state = RuntimeStateDto::Failed;
-            s.progress = None;
-            s.error = Some(err.clone());
-        });
+        self.update(|s| mark_failed(s, err.clone()));
         Err(err)
     }
 
-    /// When `model` is already being loaded with the same settings: waits for that load
+    /// When `model` is already being loaded with the same choices: waits for that load
     /// and returns how it ended. `None` when no such load is in progress.
-    pub async fn join_load(
-        &self,
-        model: &Path,
-        settings: &LocalModelSettings,
-    ) -> Option<AppResult<()>> {
+    pub async fn join_load(&self, model: &Path, settings: &ResolvedLoad) -> Option<AppResult<()>> {
         let seq = self.loads.same_in_progress(model, settings)?;
         Some(self.wait_for_load(seq, model).await)
     }
@@ -557,6 +685,9 @@ impl RuntimeManager {
     fn on_event(&self, event: ServerEvent) {
         match event {
             ServerEvent::Progress { stage, value } => self.update(|s| {
+                if let Some(name) = &stage {
+                    s.load_stage = Some(LoadStage::from_llama_stage(name));
+                }
                 if stage.is_some() {
                     s.stage = stage;
                 }
@@ -583,11 +714,17 @@ impl RuntimeManager {
                 self.update(|s| {
                     s.state = RuntimeStateDto::Starting;
                     s.stage = Some(format!("Restarting after a crash ({attempt} of {max})"));
+                    s.load_stage = Some(LoadStage::Restarting { attempt, max });
                     s.progress = None;
                 });
             }
             ServerEvent::SteppedDown { from, to, reason } => {
                 tracing::warn!(%from, %to, ?reason, "stepping down to another backend");
+                let stage = LoadStage::SteppingDown {
+                    from,
+                    to,
+                    reason: reason.clone(),
+                };
                 self.update(|s| {
                     s.state = RuntimeStateDto::Starting;
                     s.backend = Some(kind_name(to).to_string());
@@ -597,15 +734,26 @@ impl RuntimeManager {
                         reason.user_message(),
                         kind_name(to)
                     ));
+                    s.adjustments.push(stage.clone());
+                    s.load_stage = Some(stage);
                 });
             }
+            // A typed transition with no event of its own (WP1a's retries): shown as the
+            // current stage, and kept as an adjustment of this load.
+            ServerEvent::Stage(stage) => self.update(|s| {
+                if matches!(
+                    stage,
+                    LoadStage::RetryingWithoutSaveMemory { .. }
+                        | LoadStage::RetryingWithLessGpu { .. }
+                        | LoadStage::SteppingDown { .. }
+                ) {
+                    s.adjustments.push(stage.clone());
+                }
+                s.load_stage = Some(stage);
+            }),
             ServerEvent::State(ServerState::Failed(failure)) => {
                 let err = load_error(&failure, self.tail_text());
-                self.update(|s| {
-                    s.state = RuntimeStateDto::Failed;
-                    s.progress = None;
-                    s.error = Some(err);
-                });
+                self.update(|s| mark_failed(s, err));
             }
             ServerEvent::State(_) | ServerEvent::Exited { .. } => {}
         }
@@ -622,6 +770,9 @@ impl RuntimeManager {
         if let Ok(mut e) = self.endpoint.lock() {
             *e = None;
         }
+        if let Ok(mut c) = self.current.lock() {
+            *c = None;
+        }
         self.update(|s| *s = RuntimeStatusDto::default());
     }
 
@@ -635,6 +786,90 @@ impl RuntimeManager {
     }
 }
 
+/// One user of the local model (a chat turn, a model check): counted in the busy counter
+/// while it lives, and stopped by "Stop and restart" (D3).
+pub struct ModelUse {
+    _busy: BusyGuard,
+    gate: Arc<ChangeGate>,
+    id: u64,
+}
+
+impl Drop for ModelUse {
+    fn drop(&mut self) {
+        self.gate.remove_user(self.id);
+    }
+}
+
+/// For the one line where a chat turn or a model check starts (D3): while it uses the
+/// local model (`model_ref` starts with `local:`) it is counted as busy, and "Stop and
+/// restart" stops it with `stop`. `None` for a model of an endpoint.
+pub fn use_local_model(
+    state: &AppState,
+    model_ref: &str,
+    kind: BusyKind,
+    stop: &CancellationToken,
+) -> Option<ModelUse> {
+    model_ref
+        .starts_with("local:")
+        .then(|| state.runtime.hold(&state.model_busy, kind, stop.clone()))
+}
+
+/// The launch of `model` on candidate `first` as `settings` resolved it: the context,
+/// "Use the graphics card" (always off on the processor), Save memory and Keep in memory.
+/// `gpu_layers` says the same as `gpu` for builds whose arguments still read it.
+fn launch_config(
+    settings: &ResolvedLoad,
+    first: &Candidate,
+    model: PathBuf,
+    mmproj: Option<PathBuf>,
+    port: u16,
+    api_key: String,
+) -> LaunchConfig {
+    let gpu = if first.backend.kind == BackendKind::Cpu {
+        GpuUse::Off
+    } else {
+        settings.gpu
+    };
+    LaunchConfig {
+        mmproj,
+        device: first.device.clone(),
+        gpu_layers: match gpu {
+            GpuUse::All => GpuLayers::All,
+            GpuUse::Fit => GpuLayers::Auto,
+            GpuUse::Off => GpuLayers::Count(0),
+        },
+        gpu,
+        save_memory: settings.save_memory,
+        keep_in_memory: settings.keep_in_memory,
+        hip_visible_devices: first.hip_visible_devices.clone(),
+        ..LaunchConfig::new(model, settings.ctx, port, api_key)
+    }
+}
+
+/// The backend a load would start on: the user's choice (`backend`), or Auto's pick.
+/// `None` when it cannot start anywhere.
+pub(crate) fn planned_backend(
+    found: &[(Backend, ProbeResult)],
+    backend: Option<&str>,
+    device: Option<&str>,
+) -> Option<BackendKind> {
+    let candidates = RuntimeManager::candidates(found, device);
+    match backend {
+        Some(choice) => explicit_choice(&candidates, choice),
+        None => auto_choice(&candidates),
+    }
+    .map(|c| c.backend.kind)
+}
+
+/// Marks the status as a failed load. The stage is cleared, as on Ready; the adjustments
+/// stay, since they explain the failure.
+fn mark_failed(s: &mut RuntimeStatusDto, err: AppError) {
+    s.state = RuntimeStateDto::Failed;
+    s.progress = None;
+    s.load_stage = None;
+    s.error = Some(err);
+}
+
 /// The code of the error a load ends with when a newer load replaced it. The UI shows
 /// nothing for it.
 pub const LOAD_REPLACED: &str = "load_replaced";
@@ -644,6 +879,17 @@ fn replaced_error() -> AppError {
         LOAD_REPLACED,
         "Another model was picked while this one was loading.",
         "Nothing to do: the model picked last is the one being loaded.",
+        String::new(),
+    )
+}
+
+/// A change that waited for the model to be free was cancelled (a newer change, or
+/// Cancel). Same code as a replaced load: the UI shows nothing for it.
+fn wait_cancelled_error() -> AppError {
+    AppError::new(
+        LOAD_REPLACED,
+        "The change was cancelled before the model was free.",
+        "Nothing to do.",
         String::new(),
     )
 }
@@ -1058,5 +1304,111 @@ mod tests {
                 "{os} {arch}"
             );
         }
+    }
+
+    fn resolved(gpu: GpuUse, save_memory: bool, keep_in_memory: bool) -> ResolvedLoad {
+        ResolvedLoad {
+            ctx: 24_576,
+            ctx_choice: crate::load_settings::ContextSize::Auto,
+            ctx_source: crate::load_settings::ContextSource::Automatic,
+            gpu,
+            save_memory,
+            keep_in_memory,
+            thinking_limit: crate::load_settings::ThinkingLimit::Short,
+            backend: None,
+            device: None,
+            mmproj: None,
+        }
+    }
+
+    /// The resolved settings reach the launch: the context Automatic produced, the GPU
+    /// choice (always off on the processor), Save memory and Keep in memory.
+    #[test]
+    fn the_launch_carries_the_resolved_settings() {
+        let found = vec![
+            usable(
+                BackendKind::Vulkan,
+                vec![device("Vulkan0", "AMD Radeon RX 9070 XT", 16304)],
+            ),
+            usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
+        ];
+        let candidates = RuntimeManager::candidates(&found, None);
+        let (vulkan, cpu) = (&candidates[0], &candidates[1]);
+        let model = PathBuf::from("/m/model.gguf");
+        let launch = |r: &ResolvedLoad, c: &Candidate| {
+            launch_config(r, c, model.clone(), None, 4242, "key".into())
+        };
+        for (gpu, layers) in [
+            (GpuUse::All, GpuLayers::All),
+            (GpuUse::Fit, GpuLayers::Auto),
+            (GpuUse::Off, GpuLayers::Count(0)),
+        ] {
+            let l = launch(&resolved(gpu, true, true), vulkan);
+            assert_eq!((l.gpu, l.gpu_layers), (gpu, layers));
+            assert_eq!(l.ctx, 24_576);
+            assert!(l.save_memory && l.keep_in_memory);
+            assert_eq!(l.device.as_deref(), Some("Vulkan0"));
+            assert_eq!(l.alias, runtime::MODEL_ALIAS);
+            assert_eq!((l.port, l.api_key.as_str()), (4242, "key"));
+        }
+        // The processor: never the graphics card, whatever the choice.
+        let l = launch(&resolved(GpuUse::All, false, false), cpu);
+        assert_eq!((l.gpu, l.gpu_layers), (GpuUse::Off, GpuLayers::Count(0)));
+        assert_eq!(l.device, None);
+        assert!(!l.save_memory && !l.keep_in_memory);
+    }
+
+    /// Where Automatic sizes for: the user's backend, else Auto's pick.
+    #[test]
+    fn the_planned_backend_is_the_choice_or_autos_pick() {
+        let found = vec![
+            usable(
+                BackendKind::Vulkan,
+                vec![device("Vulkan0", "AMD Radeon RX 9070 XT", 16304)],
+            ),
+            usable(
+                BackendKind::Cuda,
+                vec![device("CUDA0", "NVIDIA GeForce RTX 4070", 12000)],
+            ),
+            usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
+        ];
+        assert_eq!(
+            planned_backend(&found, None, None),
+            Some(BackendKind::Vulkan)
+        );
+        assert_eq!(
+            planned_backend(&found, Some("cuda"), None),
+            Some(BackendKind::Cuda)
+        );
+        assert_eq!(
+            planned_backend(&found, Some("cpu"), None),
+            Some(BackendKind::Cpu)
+        );
+        assert_eq!(planned_backend(&found, Some("rocm"), None), None);
+        assert_eq!(planned_backend(&[], None, None), None);
+    }
+
+    /// A failed load shows no stage any more (a stale "Reading the model" would look like a
+    /// load in progress); the adjustments stay, since they explain the failure.
+    #[test]
+    fn a_failed_load_clears_its_stage_and_keeps_its_adjustments() {
+        let step = LoadStage::SteppingDown {
+            from: BackendKind::Vulkan,
+            to: BackendKind::Cpu,
+            reason: LoadFailure::OutOfMemory,
+        };
+        let mut s = RuntimeStatusDto {
+            state: RuntimeStateDto::Starting,
+            progress: Some(0.4),
+            load_stage: Some(LoadStage::ReadingModel),
+            adjustments: vec![step.clone()],
+            ..Default::default()
+        };
+        mark_failed(&mut s, AppError::internal("sample"));
+        assert_eq!(s.state, RuntimeStateDto::Failed);
+        assert_eq!(s.progress, None);
+        assert_eq!(s.load_stage, None);
+        assert_eq!(s.adjustments, vec![step]);
+        assert!(s.error.is_some());
     }
 }

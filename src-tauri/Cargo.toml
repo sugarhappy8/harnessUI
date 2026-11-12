@@ -52,6 +52,16 @@ dunce = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
+# 0.0.5 sharing proxy (share/proxy.rs): a small HTTP/1 server on a loopback port that
+# checks, rebuilds and forwards other apps' requests. hyper, hyper-util and http-body-util
+# are already in the lock through reqwest; the server feature adds only httpdate.
+hyper = { version = "1.12", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+http-body-util = { version = "0.1.5", features = ["channel"] }
+http = { workspace = true }
+bytes = { workspace = true }
+# 0.0.5 setup text for Codex (share/setup_text.rs) is written with the TOML serialiser.
+toml = { workspace = true, features = ["display"] }
 
 [target.'cfg(windows)'.dependencies]
 # Reading the Windows build number (ROCm needs Windows 11 25H2); same major as Tauri.

@@ -1,6 +1,7 @@
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
+import { askBeforeChange, isLoadedNow, runChange } from "./modelChange";
 import type {
   ApprovalRequest,
   ChatDetail,
@@ -99,8 +100,12 @@ interface AppState {
   setRuntime: (s: RuntimeStatus) => void;
   refreshModelOptions: () => Promise<void>;
   setChatModel: (modelRef: string | null) => Promise<void>;
-  /** Makes a model the open chat's (or a new chat's) and loads it when it is local. */
-  pickModel: (modelRef: string) => Promise<void>;
+  /**
+   * Makes a model the open chat's (or a new chat's) and loads it when it is local, with the
+   * model's own saved settings. Asks first when the loaded model is busy (0.0.5 D3); a
+   * Cancel changes nothing. `onChatSet` runs once the chat has the model, before the load.
+   */
+  pickModel: (modelRef: string, opts?: { onChatSet?: () => void }) => Promise<void>;
   /** Asks for a .gguf file and picks it. */
   openModelFile: () => Promise<void>;
   setSystemPrompt: (prompt: string | null) => Promise<void>;
@@ -108,6 +113,34 @@ interface AppState {
   addApproval: (r: ApprovalRequest) => void;
   removeApproval: (id: string) => void;
   decideApproval: (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) => Promise<void>;
+}
+
+/** [0.0.5 memory] What the chat says when a reply had to make room, by the stage of the
+ *  agent loop's `Compacted` event (1: earlier tool results, 2: a summary of earlier
+ *  messages, written or rewritten shorter, 3: this reply's own older steps). */
+export function compactionNote(stage: number): string {
+  switch (stage) {
+    case 1:
+      return "Older tool results were shortened to make room.";
+    case 2:
+      return "Earlier messages were summarised to make room.";
+    case 3:
+      return "Older steps of this reply were shortened to make room.";
+    default:
+      return "Earlier parts of this chat were shortened to make room.";
+  }
+}
+
+/** [0.0.5 memory] The loop's notes while it writes a summary and when it could not
+ *  (`agent::turn::SUMMARISING_NOTE`, `SUMMARY_FAILED_NOTE`). */
+const SUMMARISING_NOTE = "Summarising earlier messages to make room.";
+const SUMMARY_FAILED_NOTE =
+  "Could not summarise earlier messages. The reply goes on, but this chat may run out of room soon.";
+
+/** [0.0.5 memory] `notes` without the newest "Summarising…" note: what happened takes its place. */
+function withoutSummarising(notes: string[]): string[] {
+  const at = notes.lastIndexOf(SUMMARISING_NOTE);
+  return at < 0 ? notes : [...notes.slice(0, at), ...notes.slice(at + 1)];
 }
 
 /** Turns anything thrown by `invoke` into the four-part error the UI shows. */
@@ -232,14 +265,22 @@ export const useApp = create<AppState>((set, get) => {
         }));
         return;
       case "note":
-        updateGen(chatId, (g) => ({ ...g, notes: [...g.notes, e.text] }));
-        return;
-      case "compacted":
         updateGen(chatId, (g) => ({
           ...g,
-          notes: [...g.notes, "Earlier messages were summarised to make room in the context."],
+          // [0.0.5 memory] A summary that failed replaces the note shown while it was written.
+          notes: [...(e.text === SUMMARY_FAILED_NOTE ? withoutSummarising(g.notes) : g.notes), e.text],
         }));
         return;
+      case "compacted": {
+        // [0.0.5 memory] What the loop did, once per kind (a stage can run several times); a
+        // summary written replaces the note shown while it was written.
+        const note = compactionNote(e.stage);
+        updateGen(chatId, (g) => {
+          const notes = e.stage === 2 ? withoutSummarising(g.notes) : g.notes;
+          return { ...g, notes: notes.includes(note) ? notes : [...notes, note] };
+        });
+        return;
+      }
       case "finished":
         if (e.message && e.status !== "error") {
           set({
@@ -389,14 +430,34 @@ export const useApp = create<AppState>((set, get) => {
       await get().openChat(chatId);
     },
 
-    pickModel: async (modelRef) => {
+    pickModel: async (modelRef, opts) => {
       try {
-        await get().setChatModel(modelRef);
-        if (modelRef.startsWith("local:")) {
-          const settings = await ipc.getLocalModelSettings();
-          await ipc.loadLocalModel(modelRef.slice(6), settings);
-          await get().refreshModelOptions();
+        const path = modelRef.startsWith("local:") ? modelRef.slice(6) : null;
+        const runtime = get().runtime;
+        // An endpoint, or the local model already loaded (or loading): nothing to load. Its
+        // changed settings wait for Apply and restart (D3).
+        if (path === null || isLoadedNow(runtime, path)) {
+          await get().setChatModel(modelRef);
+          opts?.onChatSet?.();
+          return;
         }
+        const answer = await askBeforeChange(runtime);
+        if (answer === null) return;
+        const chatId = get().activeChatId;
+        const open = get().detail;
+        const before = chatId !== null && open?.chat.id === chatId ? open.chat.modelRef : null;
+        await get().setChatModel(modelRef);
+        opts?.onChatSet?.();
+        const done = await runChange("switch", answer.whenIdle, () => ipc.loadLocalModel(path, null, answer.whenIdle));
+        // A waiting switch that was cancelled changes nothing: the chat goes back to the model
+        // that is still loaded, unless a newer pick has changed it since.
+        const now = get().detail;
+        const unchanged = now?.chat.id === chatId && now.chat.modelRef === modelRef;
+        if (!done && answer.whenIdle && chatId !== null && before !== null && unchanged) {
+          await ipc.setChatModel(chatId, before);
+          await get().openChat(chatId);
+        }
+        await get().refreshModelOptions();
       } catch (err) {
         set({ error: toErrorInfo(err) });
       }

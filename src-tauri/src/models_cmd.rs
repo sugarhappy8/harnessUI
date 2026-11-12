@@ -7,9 +7,11 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 
 use crate::dto::{
-    BackendDto, DiagnosticsReportDto, LocalModelSettings, ModelOptionDto, RuntimeStatusDto,
+    BackendDto, DiagnosticsReportDto, LocalModelSettings, ModelBusy, ModelOptionDto,
+    RuntimeStatusDto,
 };
 use crate::error::{AppError, AppResult};
+use crate::load_settings::{self as load, ModelLoadInfo, ModelLoadSettings, Plan};
 use crate::settings;
 use crate::state::AppState;
 
@@ -26,13 +28,9 @@ pub async fn list_backends(
     Ok(state.runtime.backend_dtos(reprobe).await)
 }
 
-#[tauri::command]
-pub async fn load_local_model(
-    state: State<'_, AppState>,
-    path: String,
-    mut settings: LocalModelSettings,
-) -> AppResult<()> {
-    let model = PathBuf::from(&path);
+/// A local model file the user picked: a `.gguf` file.
+fn gguf_path(path: &str) -> AppResult<PathBuf> {
+    let model = PathBuf::from(path);
     if model
         .extension()
         .and_then(|e| e.to_str())
@@ -42,63 +40,264 @@ pub async fn load_local_model(
     {
         return Err(AppError::bad_request("Pick a .gguf model file."));
     }
-    settings::remember_local_model(&state, &path).await;
-    settings.mmproj = crate::hub::projector_for(&state, &path).await;
-    // Never ask for more context than the model was trained for (read from its header).
-    let header_path = model.clone();
-    let summary = tokio::task::spawn_blocking(move || {
-        models::read_file(&header_path)
-            .ok()
-            .map(|h| models::ModelSummary::from_header(&h))
-    })
-    .await
-    .ok()
-    .flatten();
-    let thinking = summary.as_ref().is_some_and(|s| s.template_thinking);
-    let trained = summary.and_then(|s| s.context_length);
-    if let Some(max) = trained.and_then(|t| u32::try_from(t).ok())
-        && settings.ctx > max
-    {
-        tracing::info!(
-            requested = settings.ctx,
-            trained = max,
-            "context capped at the model's trained length"
-        );
-        settings.ctx = max;
+    Ok(model)
+}
+
+/// A model file that must be there (the settings panel's commands).
+fn existing_model(path: &str) -> AppResult<PathBuf> {
+    let model = gguf_path(path)?;
+    if !model.is_file() {
+        return Err(AppError::new(
+            "model_missing",
+            "The model file could not be found.",
+            "Pick the file again; it may have been moved or deleted.",
+            path.to_string(),
+        ));
     }
-    // Picking the model that is already loaded with the same context is a no-op.
-    let current = state.runtime.status();
-    if current.state == crate::dto::RuntimeStateDto::Ready
-        && current.model_path.as_deref() == Some(path.as_str())
-        && current.n_ctx == Some(settings.ctx)
-        && settings
-            .backend
-            .as_deref()
-            .is_none_or(|b| current.backend.as_deref() == Some(b))
-    {
-        return Ok(());
-    }
-    // The same model picked again while it loads: wait for that load, do not restart it.
-    if let Some(result) = state.runtime.join_load(&model, &settings).await {
-        return result;
-    }
-    let runtime = state.runtime.clone();
-    runtime.load(model, settings).await?;
-    state.runtime.set_thinking(thinking);
+    Ok(model)
+}
+
+/// Starts the load of `plan` and, once the model is ready, records whether it can think
+/// and starts the speed check.
+async fn run_load(state: &AppState, model: PathBuf, plan: &Plan) -> AppResult<()> {
+    state
+        .runtime
+        .clone()
+        .load(model, plan.resolved.clone(), plan.footprint())
+        .await?;
+    state.runtime.set_thinking(plan.thinking());
     let checker = state.runtime.clone();
     tauri::async_runtime::spawn(async move { checker.speed_check().await });
     Ok(())
 }
 
+/// After any settings change: whether the loaded model runs with older settings than the
+/// saved ones ("Settings changed. Restart the model to use them.").
+async fn refresh_settings_changed(state: &AppState) {
+    let Some(path) = state.runtime.status().model_path else {
+        return;
+    };
+    let Some(loaded) = state.runtime.loaded_choices(&path) else {
+        return;
+    };
+    let now = load::plan(state, &path, None).await;
+    state
+        .runtime
+        .set_settings_changed(!loaded.same_launch(&now.resolved));
+}
+
+/// Loads a local model. `settings` absent (0.0.5) means the model's own saved settings
+/// (the resolver: its overrides, the defaults for all models, the projector, the trained
+/// length, Automatic); the 0.0.4 shape `{ctx, backend, device}` still works and is used as
+/// given. Picking the loaded model again with the same choices is a no-op; picking the
+/// model being loaded with the same choices joins that load. `when_idle` (D3): `true`
+/// waits until nothing uses the model (cancellable, ending with `load_replaced`); absent
+/// or `false` loads now and stops the reply or model check that uses the model first.
 #[tauri::command]
-pub async fn unload_model(state: State<'_, AppState>) -> AppResult<()> {
-    state.runtime.unload().await;
+pub async fn load_local_model(
+    state: State<'_, AppState>,
+    path: String,
+    settings: Option<LocalModelSettings>,
+    when_idle: Option<bool>,
+) -> AppResult<()> {
+    let model = gguf_path(&path)?;
+    settings::remember_local_model(&state, &path).await;
+    let plan = load::plan(&state, &path, settings.clone()).await;
+    // A newer load cancels a change that waits, even when nothing needs to change.
+    if state
+        .runtime
+        .loaded_choices(&path)
+        .is_some_and(|loaded| loaded.same_launch(&plan.resolved))
+    {
+        state.runtime.cancel_waiting();
+        return Ok(());
+    }
+    if let Some(result) = state.runtime.join_load(&model, &plan.resolved).await {
+        state.runtime.cancel_waiting();
+        return result;
+    }
+    let waited = state
+        .runtime
+        .before_change(&state.model_busy, when_idle.unwrap_or(false))
+        .await?;
+    // After a wait the settings may have changed meanwhile: use them as they are now.
+    let plan = if waited {
+        load::plan(&state, &path, settings).await
+    } else {
+        plan
+    };
+    run_load(&state, model, &plan).await
+}
+
+/// Unloads the model ("Unload to free memory"), and remembers it in `unloaded_path` for
+/// "Unloaded to free memory · Load". `when_idle` (D3) as for `load_local_model`.
+#[tauri::command]
+pub async fn unload_model(state: State<'_, AppState>, when_idle: Option<bool>) -> AppResult<()> {
+    state
+        .runtime
+        .before_change(&state.model_busy, when_idle.unwrap_or(false))
+        .await?;
+    state.runtime.unload_by_user().await;
     Ok(())
 }
 
+// ---- 0.0.5 per-model load settings and reload (WP1b) --------------------------------
+
+/// Everything the settings panel shows about one model file.
 #[tauri::command]
-pub async fn get_local_model_settings(app: AppHandle) -> AppResult<LocalModelSettings> {
-    Ok(settings::local_model_settings(&app).await)
+pub async fn model_load_info(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<ModelLoadInfo> {
+    crate::commands::only_main_window(window.label())?;
+    existing_model(&path)?;
+    info_for(&state, &path).await
+}
+
+/// The panel's facts for `path` as saved now.
+async fn info_for(state: &AppState, path: &str) -> AppResult<ModelLoadInfo> {
+    let plan = load::plan(state, path, None).await;
+    let facts = plan.facts.as_ref().ok_or_else(|| {
+        AppError::new(
+            "model_missing",
+            "The model file could not be found.",
+            "Pick the file again; it may have been moved or deleted.",
+            path.to_string(),
+        )
+    })?;
+    let loaded = state.runtime.loaded_choices(path);
+    Ok(load::build_info(
+        path,
+        facts,
+        plan.overrides.clone(),
+        plan.defaults.clone(),
+        plan.resolved.clone(),
+        &plan.machine,
+        loaded.as_ref(),
+    ))
+}
+
+/// Saves one model's overrides (validated against the fixed lists, the trained length and
+/// this computer's graphics cards) and returns the model's info with them. All "Same as
+/// default" deletes the saved overrides. Nothing restarts: a loaded model shows
+/// "Settings changed" until Apply and restart.
+#[tauri::command]
+pub async fn set_model_load_settings(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    path: String,
+    overrides: ModelLoadSettings,
+) -> AppResult<ModelLoadInfo> {
+    crate::commands::only_main_window(window.label())?;
+    existing_model(&path)?;
+    let plan = load::plan(&state, &path, None).await;
+    let Some(facts) = plan.facts.as_ref() else {
+        return Err(AppError::not_found("model file"));
+    };
+    // The device list is the backend's, which these overrides do not change.
+    load::validate(&overrides, facts.trained_ctx(), &plan.machine)
+        .map_err(AppError::bad_request)?;
+    load::save_overrides(&state.store, &facts.file_name, facts.size_bytes, &overrides).await?;
+    refresh_settings_changed(&state).await;
+    info_for(&state, &path).await
+}
+
+/// "Reset to defaults": deletes the model's overrides and returns its info.
+#[tauri::command]
+pub async fn reset_model_load_settings(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<ModelLoadInfo> {
+    crate::commands::only_main_window(window.label())?;
+    let model = existing_model(&path)?;
+    if let Some((name, size)) = load::file_identity(&model) {
+        load::save_overrides(&state.store, &name, size, &ModelLoadSettings::default()).await?;
+    }
+    refresh_settings_changed(&state).await;
+    info_for(&state, &path).await
+}
+
+/// Restarts the loaded model with its current resolved settings (Reload, Apply and
+/// restart); also the model whose load failed. `force`: restart even when the loaded copy
+/// already uses the current settings (Reload; it also retries the chosen backend after a
+/// step-down); without it, nothing happens when nothing changed. `when_idle`: wait until
+/// nothing uses the model (the busy counter is zero), with `reload_waiting` set on the
+/// status, cancellable with `cancel_pending_reload`; without it, restart now: the reply or
+/// model check that uses the model is stopped first (D3 "Stop and restart").
+///
+/// The same `when_idle` rules apply to `load_local_model` and `unload_model`. At most one
+/// change waits at a time: a newer load, unload or reload (waiting or not) cancels the one
+/// that waits. The call returns when the change is over; a wait that was cancelled ends
+/// with the error code `load_replaced` (the UI shows nothing for it) and changes nothing.
+#[tauri::command]
+pub async fn reload_local_model(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    force: bool,
+    when_idle: bool,
+) -> AppResult<()> {
+    crate::commands::only_main_window(window.label())?;
+    let Some(path) = state.runtime.status().model_path else {
+        return Err(AppError::new(
+            "model_not_loaded",
+            "No model is loaded.",
+            "Pick a model from the list at the top of a chat.",
+            String::new(),
+        ));
+    };
+    let model = PathBuf::from(&path);
+    let plan = load::plan(&state, &path, None).await;
+    if !force
+        && state
+            .runtime
+            .loaded_choices(&path)
+            .is_some_and(|loaded| loaded.same_launch(&plan.resolved))
+    {
+        state.runtime.cancel_waiting();
+        return Ok(());
+    }
+    let waited = state
+        .runtime
+        .before_change(&state.model_busy, when_idle)
+        .await?;
+    let plan = if waited {
+        load::plan(&state, &path, None).await
+    } else {
+        plan
+    };
+    run_load(&state, model, &plan).await
+}
+
+/// Cancels the change that waits for the model to be free ("Restarts when the reply ends
+/// · Cancel"): a reload, a load of another model or an unload called with `when_idle`. The
+/// waiting call then ends with `load_replaced`. Nothing waiting is not an error.
+#[tauri::command]
+pub async fn cancel_pending_reload(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    crate::commands::only_main_window(window.label())?;
+    state.runtime.cancel_waiting();
+    Ok(())
+}
+
+/// What is using the model now, for the question of D3.
+#[tauri::command]
+pub async fn model_busy(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> AppResult<ModelBusy> {
+    crate::commands::only_main_window(window.label())?;
+    Ok(state.model_busy.snapshot())
+}
+
+/// The defaults for all models, with Automatic for a fresh install and the 0.0.4 default
+/// (D2), and the one-time upgrade note on the first start after the update.
+#[tauri::command]
+pub async fn get_local_model_settings(state: State<'_, AppState>) -> AppResult<LocalModelSettings> {
+    Ok(load::settings_page_defaults(&state.store).await)
 }
 
 #[tauri::command]
@@ -107,6 +306,8 @@ pub async fn set_local_model_settings(
     mut settings: LocalModelSettings,
 ) -> AppResult<()> {
     settings.mmproj = None;
+    // A response-only field (the one-time upgrade note); never stored.
+    settings.upgrade_note = None;
     if !(512..=1_048_576).contains(&settings.ctx) {
         return Err(AppError::bad_request(
             "The context size must be between 512 and 1,048,576 tokens.",
@@ -116,6 +317,7 @@ pub async fn set_local_model_settings(
         .store
         .set_setting(settings::LOCAL_MODEL, &settings)
         .await?;
+    refresh_settings_changed(&state).await;
     Ok(())
 }
 
@@ -318,19 +520,23 @@ pub async fn run_diagnostics(
     }
     if let Some(path) = model_path.filter(|p| std::path::Path::new(p).is_file()) {
         let _ = writeln!(report, "\ntimed generation with {path}");
+        // The check replaces the loaded model: a reply or model check using it stops
+        // first, and a change waiting for the model is cancelled.
+        state
+            .runtime
+            .before_change(&state.model_busy, false)
+            .await?;
         let previous = state.runtime.status();
         for (b, p) in backends.iter().filter(|(_, p)| p.error.is_none()) {
             let kind = crate::runtime_manager::kind_name(b.kind).to_string();
-            let settings = LocalModelSettings {
-                ctx: 4096,
-                backend: Some(kind.clone()),
-                device: runtime::pick_device(&p.devices).map(|d| d.name.clone()),
-                mmproj: None,
-            };
+            let settings = diagnostic_load(
+                &kind,
+                runtime::pick_device(&p.devices).map(|d| d.name.clone()),
+            );
             match state
                 .runtime
                 .clone()
-                .load(PathBuf::from(&path), settings)
+                .load(PathBuf::from(&path), settings, load::Footprint::default())
                 .await
             {
                 Ok(()) => match crate::diagnostics::time_generation(&state).await {
@@ -352,11 +558,13 @@ pub async fn run_diagnostics(
             }
         }
         state.runtime.unload().await;
+        // The model loaded before comes back as a load resolves it: with its projector,
+        // its own settings, whether it can think, and the speed check.
         if let Some(model) = previous.model_path {
-            let s = settings::local_model_settings(&app).await;
+            let plan = load::plan(&state, &model, None).await;
             let _ = tokio::time::timeout(
                 Duration::from_secs(600),
-                state.runtime.clone().load(PathBuf::from(model), s),
+                run_load(&state, PathBuf::from(model), &plan),
             )
             .await;
         }
@@ -376,8 +584,36 @@ pub async fn run_diagnostics(
     })
 }
 
+/// One timed load of the backend check: 4,096 tokens on `backend`, the whole model on the
+/// graphics card, no projector.
+fn diagnostic_load(backend: &str, device: Option<String>) -> load::ResolvedLoad {
+    load::ResolvedLoad {
+        ctx: 4096,
+        ctx_choice: load::ContextSize::Fixed(4096),
+        ctx_source: load::ContextSource::ModelSetting,
+        gpu: load::GpuUse::All,
+        save_memory: false,
+        keep_in_memory: false,
+        thinking_limit: load::ThinkingLimit::NoLimit,
+        backend: Some(backend.to_string()),
+        device,
+        mmproj: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// The backend check loads with fixed settings on the backend it checks.
+    #[test]
+    fn the_backend_check_loads_with_fixed_settings() {
+        let r = super::diagnostic_load("vulkan", Some("Vulkan1".into()));
+        assert_eq!(r.ctx, 4096);
+        assert_eq!(r.ctx_choice, crate::load_settings::ContextSize::Fixed(4096));
+        assert_eq!(r.backend.as_deref(), Some("vulkan"));
+        assert_eq!(r.device.as_deref(), Some("Vulkan1"));
+        assert!(r.mmproj.is_none() && !r.save_memory && !r.keep_in_memory);
+    }
+
     #[test]
     fn the_diagnostic_environment_leaves_out_steering_and_secret_variables() {
         let names = [

@@ -4,6 +4,7 @@ import { AlertDialog } from "radix-ui";
 import { useApp } from "../store/app";
 import { APP_NAME } from "../lib/app";
 import { dayGroup } from "../lib/format";
+import { backendWords } from "../lib/words";
 import { BrandMark } from "./Brand";
 
 /** What is loaded right now, at the bottom of the list. Opens the model manager. */
@@ -11,7 +12,9 @@ function RuntimeChip(props: { onOpenModels: () => void }) {
   const runtime = useApp((s) => s.runtime);
   const state = runtime?.state;
   const loaded = state === "ready" || state === "starting";
-  const where = [runtime?.backend, runtime?.device].filter(Boolean).join(" · ");
+  // Plain words (D4): "Graphics card (Vulkan)", never "vulkan · Vulkan0".
+  const where = runtime?.backend ? backendWords(runtime.backend) : "";
+  const unloaded = state === "stopped" && runtime?.unloadedPath ? runtime.unloadedPath.split(/[\\/]/).pop() : null;
   return (
     <button
       type="button"
@@ -40,14 +43,16 @@ function RuntimeChip(props: { onOpenModels: () => void }) {
             ? (runtime?.modelName ?? "Local model")
             : state === "failed"
               ? "The model did not load"
-              : "No model loaded"}
+              : (unloaded ?? "No model loaded")}
         </span>
         <span className="block truncate text-[11px] text-fg-muted">
           {state === "ready"
-            ? where || "ready"
+            ? where || "Ready"
             : state === "starting"
-              ? "loading…"
-              : "runs on this computer"}
+              ? "Loading…"
+              : unloaded
+                ? "Unloaded to free memory"
+                : "Runs on this computer"}
         </span>
       </span>
     </button>

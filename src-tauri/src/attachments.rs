@@ -124,8 +124,118 @@ pub async fn save_images(
 
 /// Largest text or PDF document accepted.
 pub const MAX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
-/// Text kept from one document before the prompt builder trims it to the budget.
+/// Text kept from one document at most, whatever the context (a last guard for storage:
+/// [`document_cap_chars`] is smaller for every context the app accepts).
 const MAX_DOCUMENT_TEXT: usize = 2 * 1024 * 1024;
+
+/// [0.0.5 memory] Characters per token when sizing a document to the context: the app's
+/// cautious estimate (`agent::estimate`), as for mentions.
+const CHARS_PER_TOKEN: usize = 3;
+/// [0.0.5 memory] The fewest characters a document keeps, however small the context.
+const MIN_DOCUMENT_CHARS: usize = 600;
+/// [0.0.5 memory] Room kept in a cut document for the note about what was left out.
+const CUT_NOTE_ROOM: usize = 320;
+
+/// [0.0.5 memory] The characters each attached file of one message may keep with a context
+/// of `n_ctx` tokens, when `shared_by` files (its documents and mentions together) are
+/// attached: a fifth of the context each, and 40% of it shared by them all, the rule mentions
+/// are cut by (`tools::symbols::resolve::cap_chars`, which also caps one mention at 8,000
+/// tokens, and shares only among the mentions: a message with both documents and mentions
+/// can carry more than 40%; TODO(0.0.6): count documents in the mentions' share too).
+/// The current message is never summarised, so a document larger than this would stop the
+/// chat with "too long" instead.
+pub fn document_cap_chars(n_ctx: usize, shared_by: usize) -> usize {
+    let shared_by = shared_by.max(1);
+    let tokens = (n_ctx / 5).min(n_ctx * 2 / 5 / shared_by);
+    (tokens * CHARS_PER_TOKEN).max(MIN_DOCUMENT_CHARS)
+}
+
+/// [0.0.5 memory] What was left out of an attached document cut to fit the context; stored
+/// with its part of the message (`"cut"`), so a turn can tell the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentCut {
+    /// Characters of the file's text sent to the model.
+    pub kept: usize,
+    /// Characters of the file's text in all.
+    pub total: usize,
+}
+
+/// [0.0.5 memory] `text` cut to at most `cap` characters, note included: the start of the
+/// file, ending at a line end when one is near, then a note for the model saying how much
+/// was left out and that the file tools can read more (with the line to start from, for a
+/// text file; a PDF's text cannot be read by line). `None` when the whole text fits.
+pub fn cut_document(text: &str, cap: usize, pdf: bool) -> (String, Option<DocumentCut>) {
+    let total = text.chars().count();
+    if total <= cap {
+        return (text.to_owned(), None);
+    }
+    let room = cap.saturating_sub(CUT_NOTE_ROOM).max(1);
+    // The byte where the `room`-th character starts.
+    let mut end = text.char_indices().nth(room).map_or(text.len(), |(i, _)| i);
+    // End at a line end in the last fifth of what is kept, so no line is cut in half.
+    if let Some(nl) = text[..end].rfind('\n')
+        && text[..nl].chars().count() >= room * 4 / 5
+    {
+        end = nl + 1;
+    }
+    let kept_text = &text[..end];
+    let kept = kept_text.chars().count();
+    let left = agent::context::group_digits((total - kept) as u64);
+    let all = agent::context::group_digits(total as u64);
+    let note = if pdf {
+        format!(
+            "[The rest of this file's text was left out to fit what the model can remember: \
+             {left} of {all} characters. Tell the user if you need a part that is missing.]"
+        )
+    } else {
+        let first = kept_text.matches('\n').count() + 1;
+        let lines = text.lines().count().max(first);
+        format!(
+            "[The rest of this file was left out to fit what the model can remember: lines \
+             {first}-{lines}, {left} of {all} characters. If the file is in an approved \
+             folder, the file tools can read more: call read_file with its path and \
+             offset={first}.]"
+        )
+    };
+    let mut out = kept_text.to_owned();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&note);
+    (out, Some(DocumentCut { kept, total }))
+}
+
+/// [0.0.5 memory] What the user is told when a turn sends a document that was cut to fit
+/// (plain words; the model's own note is in the document's text).
+pub fn cut_note(name: &str, cut: DocumentCut) -> String {
+    let percent = (cut.kept * 100 / cut.total.max(1)).clamp(1, 99);
+    format!(
+        "Only the first part of {name} was sent (about {percent}%), because the whole file is \
+         more than the model can remember at once. If the file is in one of this chat's \
+         folders, the model can read the rest itself."
+    )
+}
+
+/// [0.0.5 memory] The documents of a stored message that were cut to fit, with what was
+/// left out: (file name, cut).
+pub fn document_cuts(content: &serde_json::Value) -> Vec<(String, DocumentCut)> {
+    content
+        .as_array()
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("document"))
+                .filter(|p| p.get("mention").is_none())
+                .filter_map(|p| {
+                    let cut = serde_json::from_value::<DocumentCut>(p.get("cut")?.clone()).ok()?;
+                    let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("document");
+                    Some((name.to_owned(), cut))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// A text or PDF file sent from the composer.
 #[derive(Debug, Clone, Deserialize)]
@@ -155,11 +265,18 @@ impl Utf8Cut for Result<&str, std::str::Utf8Error> {
 }
 
 /// Extracts and stores documents; returns content parts for the message.
+///
+/// [0.0.5 memory] Each document's text is cut to its share of a context of `n_ctx` tokens
+/// ([`document_cap_chars`], shared by the `shared_by` documents and mentions of the
+/// message) with a note for the model ([`cut_document`]); what was left out is kept in the
+/// part as `"cut"` ([`DocumentCut`]).
 pub async fn save_documents(
     app: &AppHandle,
     state: &AppState,
     chat_id: store::ChatId,
     docs: &[DocumentInput],
+    n_ctx: usize,
+    shared_by: usize,
 ) -> AppResult<Vec<serde_json::Value>> {
     if docs.len() > MAX_IMAGES {
         return Err(AppError::bad_request(format!(
@@ -223,7 +340,8 @@ pub async fn save_documents(
                 doc.file_name
             )));
         };
-        let mut text = text;
+        // [0.0.5 memory] Its share of the context, with a note on what was left out.
+        let (mut text, cut) = cut_document(&text, document_cap_chars(n_ctx, shared_by), is_pdf);
         if text.len() > MAX_DOCUMENT_TEXT {
             let mut cut = MAX_DOCUMENT_TEXT;
             while !text.is_char_boundary(cut) {
@@ -249,7 +367,12 @@ pub async fn save_documents(
                 extracted_text: Some(text),
             })
             .await?;
-        parts.push(serde_json::json!({ "type": "document", "attachment_id": id.0, "name": name }));
+        let mut part =
+            serde_json::json!({ "type": "document", "attachment_id": id.0, "name": name });
+        if let Some(cut) = cut {
+            part["cut"] = serde_json::json!(cut);
+        }
+        parts.push(part);
     }
     Ok(parts)
 }
@@ -400,5 +523,122 @@ mod tests {
         ]);
         assert_eq!(image_ids(&c), vec![7, 9]);
         assert!(image_ids(&serde_json::json!("plain")).is_empty());
+    }
+
+    /// [0.0.5 memory] A document's share: a fifth of the context, 40% shared by the files
+    /// of the message, never below the floor; no 8,000-token ceiling as for one mention.
+    #[test]
+    fn a_document_gets_its_share_of_the_context() {
+        assert_eq!(document_cap_chars(8_192, 1), 1_638 * 3);
+        assert_eq!(document_cap_chars(8_192, 2), 1_638 * 3);
+        assert_eq!(document_cap_chars(8_192, 4), 819 * 3);
+        assert_eq!(document_cap_chars(4_096, 1), 819 * 3);
+        assert_eq!(document_cap_chars(4_096, 0), 819 * 3);
+        assert_eq!(document_cap_chars(200_000, 1), 40_000 * 3);
+        assert_eq!(document_cap_chars(100, 8), 600);
+        // Every context the app accepts keeps the share under the storage guard.
+        assert!(document_cap_chars(1_048_576, 1) < MAX_DOCUMENT_TEXT);
+        // A share is what the turn can carry: with the reply kept free and tools at their
+        // 40%, a document still fits under the point where room is made.
+        for n_ctx in [4_096u32, 8_192, 32_768] {
+            let budget = agent::ContextBudget::new(n_ctx, 0);
+            let tools = budget.budget * agent::context::TOOLS_FIT_PERCENT / 100;
+            let document = u32::try_from(document_cap_chars(n_ctx as usize, 1) / 3).unwrap();
+            assert!(tools + document <= budget.trigger, "{n_ctx}");
+        }
+    }
+
+    fn numbered_lines(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("line {i} of the report\n"))
+            .collect()
+    }
+
+    /// [0.0.5 memory] A document larger than its share is cut at a line end, with a note
+    /// that says which lines and how much were left out and where the file tools can go on;
+    /// a document that fits is sent whole.
+    #[test]
+    fn a_long_document_is_cut_with_a_note() {
+        let short = numbered_lines(10);
+        assert_eq!(cut_document(&short, 4_000, false), (short.clone(), None));
+
+        let text = numbered_lines(1_000);
+        let total = text.chars().count();
+        let (out, cut) = cut_document(&text, 2_457, false);
+        let cut = cut.expect("cut");
+        assert!(out.chars().count() <= 2_457, "{}", out.chars().count());
+        assert_eq!(cut.total, total);
+        assert!(text.starts_with(&out[..cut.kept]));
+        // Whole lines only.
+        assert!(out[..cut.kept].ends_with('\n'));
+        let first = out[..cut.kept].matches('\n').count() + 1;
+        let note = &out[cut.kept..];
+        assert!(
+            note.starts_with("[The rest of this file was left out"),
+            "{note}"
+        );
+        assert!(note.contains(&format!("lines {first}-1000")), "{note}");
+        assert!(
+            note.contains(&format!(
+                "{} of {} characters",
+                agent::context::group_digits((total - cut.kept) as u64),
+                agent::context::group_digits(total as u64)
+            )),
+            "{note}"
+        );
+        assert!(note.contains(&format!("offset={first}")), "{note}");
+        assert!(note.trim_end().ends_with(".]"), "{note}");
+
+        // A PDF's text has no lines to read on from.
+        let (out, cut) = cut_document(&text, 2_457, true);
+        assert!(cut.is_some());
+        assert!(out.contains("this file's text was left out"), "{out}");
+        assert!(!out.contains("offset="), "{out}");
+    }
+
+    /// [0.0.5 memory] One long line (or text with no line breaks) is cut inside the line,
+    /// never inside a character, and the note still fits in the share.
+    #[test]
+    fn a_document_without_line_ends_is_cut_between_characters() {
+        let text = "é".repeat(5_000);
+        let (out, cut) = cut_document(&text, 600, false);
+        let cut = cut.expect("cut");
+        assert!(out.chars().count() <= 600, "{}", out.chars().count());
+        assert_eq!(cut.total, 5_000);
+        assert!(cut.kept >= 200, "{}", cut.kept);
+        assert!(out.contains("lines 1-1"), "{out}");
+    }
+
+    /// [0.0.5 memory] What the user is told about a cut document, read back from the
+    /// stored message; mentions (cut by their own rule) and whole documents say nothing.
+    #[test]
+    fn the_user_is_told_which_documents_were_cut() {
+        let content = serde_json::json!([
+            {"type": "text", "text": "read these"},
+            {"type": "document", "attachment_id": 1, "name": "report.txt", "cut": {"kept": 2_400, "total": 10_000}},
+            {"type": "document", "attachment_id": 2, "name": "short.txt"},
+            {"type": "document", "attachment_id": 3, "name": "src/a.rs", "mention": {"path": "/w/src/a.rs"}, "cut": {"kept": 1, "total": 2}}
+        ]);
+        let cuts = document_cuts(&content);
+        assert_eq!(
+            cuts,
+            vec![(
+                "report.txt".to_owned(),
+                DocumentCut {
+                    kept: 2_400,
+                    total: 10_000
+                }
+            )]
+        );
+        assert_eq!(
+            cut_note(&cuts[0].0, cuts[0].1),
+            "Only the first part of report.txt was sent (about 24%), because the whole file is \
+             more than the model can remember at once. If the file is in one of this chat's \
+             folders, the model can read the rest itself."
+        );
+        assert!(document_cuts(&serde_json::json!("plain")).is_empty());
+        // A stored part round-trips the cut as the save path writes it.
+        let part = serde_json::json!({"cut": DocumentCut { kept: 5, total: 9 }});
+        assert_eq!(part["cut"], serde_json::json!({"kept": 5, "total": 9}));
     }
 }

@@ -60,6 +60,7 @@ use crate::history::{CallRecord, HistoryMessage, ResultRecord};
 use crate::parse::ToolInfo;
 use crate::prompt::{LoadedSkill, Preamble, Sanitizer};
 use crate::stream::{Timings, Usage};
+use crate::thinking::ThinkingLimit;
 
 /// The default number of model calls in one turn.
 pub const DEFAULT_STEP_CAP: u32 = 25;
@@ -73,6 +74,49 @@ pub const LOOP_WARNING_AT: u32 = 3;
 pub const LOOP_STOP_AT: u32 = 5;
 /// The message when the model gives no answer twice.
 pub const NO_ANSWER_MESSAGE: &str = "The model returned no answer";
+/// The note ([`TurnEvent::AppNote`]) when a summary of earlier messages could not be written
+/// (the request did not fit, the model returned nothing, or the server failed). Reported once
+/// per turn; the turn goes on with the other stages.
+pub const SUMMARY_FAILED_NOTE: &str = "Could not summarise earlier messages. The reply goes on, \
+                                       but this chat may run out of room soon.";
+/// The note ([`TurnEvent::AppNote`]) while the model writes a summary of earlier messages.
+pub const SUMMARISING_NOTE: &str = "Summarising earlier messages to make room.";
+
+/// The stages that make room in a request (ARCHITECTURE.md 8.4), in the order the loop tries
+/// them. [`TurnEvent::Compacted`] carries the stage as its number
+/// ([`CompactionStage::number`]), so the app can say what happened in plain words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CompactionStage {
+    /// 1: the results of tool calls in earlier turns became one-line notes.
+    ShortenEarlierResults,
+    /// 2: the oldest earlier messages were replaced by a summary the model wrote, or the
+    /// summary that stands for them was rewritten shorter to fit a smaller context.
+    SummariseEarlier,
+    /// 3: older tool results of the turn itself became one-line notes.
+    ShortenTurnResults,
+}
+
+impl CompactionStage {
+    /// The stage's number in [`TurnEvent::Compacted`] and [`TurnPreview::applied`].
+    pub const fn number(self) -> u8 {
+        match self {
+            Self::ShortenEarlierResults => 1,
+            Self::SummariseEarlier => 2,
+            Self::ShortenTurnResults => 3,
+        }
+    }
+
+    /// The stage with this number, if there is one.
+    pub const fn from_number(number: u8) -> Option<Self> {
+        match number {
+            1 => Some(Self::ShortenEarlierResults),
+            2 => Some(Self::SummariseEarlier),
+            3 => Some(Self::ShortenTurnResults),
+            _ => None,
+        }
+    }
+}
 
 /// The tools of the chat, as the loop needs them. Implemented by the app over the MCP host.
 #[async_trait]
@@ -264,7 +308,9 @@ pub enum TurnEvent {
         /// Time from the start of processing to the result.
         duration_ms: u64,
     },
-    /// A note for the UI (and the log), not for the model.
+    /// A note for the UI (and the log), not for the model. A summary that could not be
+    /// written (stage 2) is reported this way, with [`SUMMARY_FAILED_NOTE`]; the turn goes on
+    /// with the other stages.
     AppNote {
         /// The note.
         text: String,
@@ -276,12 +322,14 @@ pub enum TurnEvent {
         /// llama-server's timings, when sent.
         timings: Option<Timings>,
     },
-    /// The context was compacted.
+    /// The context was compacted: one event per stage applied, each naming its stage.
     Compacted {
-        /// 1: earlier results stubbed; 2: earlier turns summarised; 3: this turn's results
-        /// stubbed.
+        /// The [`CompactionStage`], by its number ([`CompactionStage::from_number`]):
+        /// 1: earlier results stubbed; 2: earlier turns summarised, or the summary that
+        /// stands for them rewritten shorter for a smaller context (then `covered_ids` is
+        /// what it covered before); 3: this turn's results stubbed.
         stage: u8,
-        /// The new summary (stage 2).
+        /// The new summary (stage 2, always set): store it in place of the earlier one.
         summary: Option<String>,
         /// Ids of every stored message the summary now covers (stage 2).
         covered_ids: Vec<i64>,
@@ -382,6 +430,11 @@ pub struct TurnInput {
     pub template: RequestTemplate,
     /// Whether thinking is on (ignored when the model cannot think).
     pub thinking: bool,
+    /// How long the model may think in one request (0.0.5, "How long it may think"): each
+    /// request with thinking on gets a budget of min(the choice's tokens, half its output
+    /// limit) ([`ThinkingLimit::budget`]); llama-server only. The app fills it from the
+    /// model's load settings; [`ThinkingLimit::NoLimit`] keeps half the output limit.
+    pub thinking_limit: ThinkingLimit,
     /// App notes for the start of the turn (for example the side effects of a replaced turn).
     pub app_notes: Vec<String>,
     /// The token calibrator for this model (remote endpoints).
@@ -403,6 +456,7 @@ impl TurnInput {
             step_cap: DEFAULT_STEP_CAP,
             template,
             thinking: true,
+            thinking_limit: ThinkingLimit::NoLimit,
             app_notes: Vec::new(),
             calibrator: TokenCalibrator::new(),
         }
@@ -479,7 +533,9 @@ pub struct TurnOutcome {
     pub messages: Vec<HistoryMessage>,
     /// Token totals.
     pub usage: UsageTotals,
-    /// The compaction summary after the turn (new or unchanged).
+    /// The compaction summary after the turn (new or unchanged). When a summary too long for
+    /// this context could not be rewritten, the one the turn used: cut to fit, and not
+    /// reported as a new summary.
     pub summary: Option<CompactionSummary>,
     /// The context numbers used.
     pub budget: Option<ContextBudget>,
@@ -531,8 +587,9 @@ pub enum NextCompaction {
     },
     /// Stage 2: the oldest earlier messages are replaced by a summary the model writes.
     SummariseEarlier {
-        /// How many of the oldest messages the loop would choose (while everything fits,
-        /// the oldest whole turn: the least a summary replaces).
+        /// How many of the oldest messages the loop's next summary would replace, chosen by
+        /// the loop's own code (while everything fits, the oldest whole turn: the least a
+        /// summary replaces).
         messages: usize,
     },
     /// Stage 3: older tool results of the turn itself become one-line notes.
@@ -581,7 +638,12 @@ pub struct TurnPreview {
     pub kept: Vec<(HistoryMessage, u32)>,
     /// Stored messages replaced by the summary of earlier messages, with their estimates.
     pub left_out: Vec<(HistoryMessage, u32)>,
-    /// Stages this request already needs that the preview can apply (stage 1).
+    /// Stages this request already needs that the preview can apply, by number
+    /// ([`CompactionStage`]): 1 when the results of earlier tool calls are shortened, as the
+    /// turn does; 2 when the stored summary is too long for this context: the turn first has
+    /// the model rewrite it shorter, which a preview never asks for, so the preview cuts it
+    /// to that length instead (the summary block, the counts and the fit checks use the cut
+    /// text, which is what the turn falls back to when the model cannot rewrite it).
     pub applied: Vec<u8>,
     /// The request is over the compaction trigger even so: [`TurnPreview::next`] happens
     /// before it is sent.
@@ -701,5 +763,33 @@ mod tests {
         })
         .unwrap();
         assert_eq!(status["kind"], "failed");
+    }
+
+    #[test]
+    fn compaction_stages_have_fixed_numbers() {
+        for (stage, number) in [
+            (CompactionStage::ShortenEarlierResults, 1),
+            (CompactionStage::SummariseEarlier, 2),
+            (CompactionStage::ShortenTurnResults, 3),
+        ] {
+            assert_eq!(stage.number(), number);
+            assert_eq!(CompactionStage::from_number(number), Some(stage));
+        }
+        assert_eq!(CompactionStage::from_number(0), None);
+        assert_eq!(CompactionStage::from_number(4), None);
+        let event = TurnEvent::Compacted {
+            stage: CompactionStage::ShortenTurnResults.number(),
+            summary: None,
+            covered_ids: Vec::new(),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["type"], "compacted");
+        assert_eq!(value["stage"], 3);
+    }
+
+    #[test]
+    fn a_new_turn_has_no_thinking_limit() {
+        let input = TurnInput::new(Vec::new(), ModelCaps::default(), RequestTemplate::default());
+        assert_eq!(input.thinking_limit, ThinkingLimit::NoLimit);
     }
 }

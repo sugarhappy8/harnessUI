@@ -21,6 +21,11 @@
 //! 3. [`stub_results`] over this turn's own results, oldest first, keeping the user's message
 //!    and the latest call and result.
 //!
+//! A summary is cut to [`ContextBudget::summary_max_chars`]. One written when the model had a
+//! larger context can be longer than a smaller context allows; before the turn measures
+//! anything it is folded again under the smaller cap ([`fold_instruction`]), or, when the
+//! model cannot do that, cut to it ([`cut_summary`]).
+//!
 //! A stubbed call keeps its name and arguments (long string values shortened) and its result
 //! becomes a note with the status, the size and "call again to re-read"; a call and its
 //! result are always replaced together. Independently, only the newest
@@ -132,6 +137,55 @@ impl ContextBudget {
     pub fn summary_max_tokens(&self) -> u32 {
         (self.reply_reserve / 2).clamp(128, 1_024)
     }
+
+    /// The most characters a summary may keep in this context: [`SUMMARY_CHARS_PER_TOKEN`]
+    /// per token of [`ContextBudget::summary_max_tokens`]. A summary written for a larger
+    /// context can be longer; the loop folds it again before it is sent here.
+    pub fn summary_max_chars(&self) -> usize {
+        usize::try_from(self.summary_max_tokens())
+            .unwrap_or(usize::MAX)
+            .saturating_mul(SUMMARY_CHARS_PER_TOKEN)
+    }
+}
+
+/// Characters a summary may keep per token of its cap (summaries are cut to this length).
+pub const SUMMARY_CHARS_PER_TOKEN: usize = 4;
+
+/// A summary cut to `max_chars` characters: its head and its tail (the headings that start
+/// and end it), with a note where text was left out. Unchanged when it already fits. Used
+/// when the summary of earlier messages is too long for a smaller context and the model
+/// could not rewrite it shorter, so the turn can still go on.
+pub fn cut_summary(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let max_tokens = u32::try_from(max_chars / SUMMARY_CHARS_PER_TOKEN.max(1)).unwrap_or(u32::MAX);
+    #[allow(clippy::cast_precision_loss)]
+    let chars_per_token = SUMMARY_CHARS_PER_TOKEN as f64;
+    truncate_head_tail(text, max_tokens, chars_per_token)
+        .map_or_else(|| text.to_owned(), |cut| cut.text)
+}
+
+/// About how many words fit in `tokens` tokens: three quarters of them, rounded down to a
+/// whole thousand from 1,000 words up, else to a whole hundred (the app's one rule, as
+/// `aboutWords` in the webview).
+pub fn about_words(tokens: u32) -> u64 {
+    let words = u64::from(tokens) * 3 / 4;
+    if words >= 1_000 {
+        words / 1_000 * 1_000
+    } else {
+        words / 100 * 100
+    }
+}
+
+/// A token count with words, as the app writes them: "8,192 tokens, about 6,000 words".
+pub fn tokens_with_words(tokens: u32) -> String {
+    format!(
+        "{} tokens, about {} words",
+        group_digits(u64::from(tokens)),
+        group_digits(about_words(tokens))
+    )
 }
 
 /// The "tools do not fit" refusal, with the numbers for the message
@@ -535,6 +589,21 @@ pub fn summary_instruction(max_words: u32, has_previous_summary: bool) -> String
     )
 }
 
+/// The instruction that folds the summary of earlier messages again, shorter, when it was
+/// written for a larger context than the model has now (stage 2 with nothing new to
+/// summarise). The request carries the system message, which holds the old summary.
+pub fn fold_instruction(max_words: u32) -> String {
+    format!(
+        "[App note] The summary of earlier messages in the system message is too long for the \
+         model's context now. Rewrite it more briefly for an assistant who will continue the \
+         conversation. Use exactly these headings:\n\
+         Goal:\nDecisions:\nWork done:\nWhat is left:\nExact paths and identifiers:\n\
+         Keep exact file paths, commands, error messages, names and identifiers. Use at most \
+         {max_words} words. Do not continue the task and do not call tools; reply with the \
+         summary only."
+    )
+}
+
 /// A baseline (3 characters per token) estimate of a request's prompt tokens: message text,
 /// tool calls, images and tool schemas, plus a few tokens of template markup per message.
 pub fn estimate_request(request: &ChatRequest) -> u32 {
@@ -861,6 +930,61 @@ mod tests {
         assert!(text.contains("300 words"));
         assert!(text.contains("earlier summary"));
         assert!(!summary_instruction(300, false).contains("earlier summary"));
+    }
+
+    #[test]
+    fn the_fold_instruction_rewrites_the_summary_with_the_same_headings() {
+        let text = fold_instruction(341);
+        assert!(text.starts_with("[App note] The summary of earlier messages"));
+        for heading in [
+            "Goal:",
+            "Decisions:",
+            "Work done:",
+            "What is left:",
+            "Exact paths and identifiers:",
+        ] {
+            assert!(text.contains(heading));
+        }
+        assert!(text.contains("at most 341 words"));
+        assert!(text.contains("do not call tools"));
+    }
+
+    #[test]
+    fn the_summary_cap_in_characters_follows_the_context() {
+        // Four characters per token of the summary cap: 1,024 tokens from 8k up, 512 at 4k,
+        // 256 at 2k.
+        assert_eq!(ContextBudget::new(32_768, 0).summary_max_chars(), 4_096);
+        assert_eq!(ContextBudget::new(8_192, 0).summary_max_chars(), 4_096);
+        assert_eq!(ContextBudget::new(4_096, 0).summary_max_chars(), 2_048);
+        assert_eq!(ContextBudget::new(2_048, 0).summary_max_chars(), 1_024);
+    }
+
+    #[test]
+    fn a_summary_is_cut_to_its_head_and_tail() {
+        let summary = format!(
+            "Goal: fix the build.\n{}Exact paths and identifiers: /p/src/main.rs",
+            "Work done: a step.\n".repeat(300)
+        );
+        let cut = cut_summary(&summary, 2_048);
+        assert!(cut.chars().count() <= 2_048, "{}", cut.chars().count());
+        assert!(cut.starts_with("Goal: fix the build.\n"));
+        assert!(cut.ends_with("Exact paths and identifiers: /p/src/main.rs"));
+        assert!(cut.contains("omitted ...]"));
+        // A summary that fits stays as it is (trimmed).
+        assert_eq!(cut_summary("  Goal: x  ", 2_048), "Goal: x");
+        assert_eq!(cut_summary(&summary, summary.chars().count()), summary);
+    }
+
+    #[test]
+    fn token_counts_come_with_words() {
+        assert_eq!(tokens_with_words(8_192), "8,192 tokens, about 6,000 words");
+        assert_eq!(
+            tokens_with_words(32_768),
+            "32,768 tokens, about 24,000 words"
+        );
+        assert_eq!(tokens_with_words(4_096), "4,096 tokens, about 3,000 words");
+        assert_eq!(tokens_with_words(600), "600 tokens, about 400 words");
+        assert_eq!(about_words(0), 0);
     }
 
     #[test]

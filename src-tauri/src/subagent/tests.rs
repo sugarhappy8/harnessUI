@@ -1196,3 +1196,132 @@ fn a_helper_is_in_its_chats_approval_mode() {
     crate::approvals::modes().set_chat(CHAT, false);
     assert!(asks(fresh.decide("write_file", &write, false, false)));
 }
+
+// ---- coding apps (0.0.5) -------------------------------------------------------------------
+
+/// A chat with the Coding apps group on: its two tools are among the chat's.
+struct WithCodingApps(Arc<Tools>);
+
+fn coding_action(tool: &str) -> policy::Action {
+    policy::Action {
+        server: crate::outside_agent::SERVER_NAME.into(),
+        tool: tool.into(),
+        summary: "Ask".into(),
+        preview: "Ask".into(),
+        scope: policy::Scope::CodingApp {
+            app: "codex".into(),
+            folder: "/work".into(),
+        },
+        risk: policy::Risk::AlwaysAsk,
+        read_only: false,
+        outbound: true,
+        keep_asking: Some(policy::KeepAsking::Publish),
+        network: true,
+        hard_limit: None,
+        payload: Value::Null,
+    }
+}
+
+#[async_trait]
+impl ToolHost for WithCodingApps {
+    fn tools(&self) -> Vec<ToolInfo> {
+        let mut tools = self.0.tools();
+        tools.push(plain_tool(crate::outside_agent::CLAUDE_TOOL));
+        tools.push(plain_tool(crate::outside_agent::CODEX_TOOL));
+        tools
+    }
+    fn validate(&self, _: &str, _: &Value) -> Result<(), Vec<String>> {
+        Ok(())
+    }
+    fn llama_schema(&self, _: &str) -> Option<Value> {
+        Some(json!({}))
+    }
+    async fn describe(&self, name: &str, args: &Map<String, Value>) -> Described {
+        if crate::outside_agent::is_tool_name(name) {
+            return Described::Action(coding_action(name));
+        }
+        self.0.describe(name, args).await
+    }
+    async fn execute(
+        &self,
+        name: &str,
+        args: &Map<String, Value>,
+        action: &policy::Action,
+        cancel: CancellationToken,
+    ) -> ToolOutput {
+        self.0.execute(name, args, action, cancel).await
+    }
+}
+
+/// A helper is never offered Claude Code or Codex, and a call to either is refused by its
+/// tool host and its policy gate, also when it comes as `call_tool` described as one of
+/// them; the chat's own host and gate are never asked.
+#[tokio::test]
+async fn a_helper_never_gets_the_coding_apps() {
+    let chat_tools = Tools::new(Behaviour::Answer);
+    let host = NoNesting(Arc::new(WithCodingApps(chat_tools.clone())));
+    let names: Vec<String> = host.tools().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, ["read_file", "fetch"]);
+    let refusal = crate::outside_agent::HELPER_REFUSAL;
+    for tool in [
+        crate::outside_agent::CLAUDE_TOOL,
+        crate::outside_agent::CODEX_TOOL,
+    ] {
+        let task = args(json!({"task": "x"}));
+        assert_eq!(
+            host.validate(tool, &Value::Object(task.clone())),
+            Err(vec![refusal.to_owned()])
+        );
+        assert_eq!(host.llama_schema(tool), None);
+        assert!(matches!(
+            host.describe(tool, &task).await,
+            Described::Invalid(reason) if reason == refusal
+        ));
+        let action = coding_action(tool);
+        for name in [tool, "call_tool"] {
+            let out = host
+                .execute(name, &task, &action, CancellationToken::new())
+                .await;
+            assert!(out.is_error && out.joined_text() == refusal, "{out:?}");
+        }
+        let inner = Arc::new(Gate::default());
+        let gate = InheritedGate {
+            inner: inner.clone(),
+            inherited: Inherited::default(),
+        };
+        for name in [tool, "call_tool"] {
+            assert!(matches!(
+                gate.decide(name, &action, false, false),
+                policy::Decision::Refused { reason } if reason == refusal
+            ));
+        }
+        assert!(inner.seen().is_empty());
+    }
+    assert!(chat_tools.executed().is_empty());
+    // The list the app builds for a helper leaves them out too (`turns.rs`).
+    let registered = |server: &str, name: &str| mcp_host::RegisteredTool {
+        exposed: name.into(),
+        server: server.into(),
+        original: name.into(),
+        def: ToolDef {
+            name: name.into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+            destructive: None,
+            read_only: None,
+        },
+        fingerprint: String::new(),
+        schema_error: None,
+    };
+    let coding = crate::outside_agent::SERVER_NAME;
+    assert!(!offered_to_helper(&registered(
+        coding,
+        crate::outside_agent::CLAUDE_TOOL
+    )));
+    assert!(!offered_to_helper(&registered(
+        coding,
+        crate::outside_agent::CODEX_TOOL
+    )));
+    assert!(!offered_to_helper(&registered(SERVER_NAME, TOOL_NAME)));
+    assert!(offered_to_helper(&registered("files", "read_file")));
+}

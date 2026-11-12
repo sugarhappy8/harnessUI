@@ -44,9 +44,13 @@ const DEFAULT_TOOLS: &str = "defaultChatTools3";
 const EARLIER_DEFAULT_TOOLS: &[&str] = &["defaultChatTools", "defaultChatTools2"];
 
 /// Groups that are switched on for one chat only: the saved last choice never turns them
-/// on in a new chat. Both let the model act widely (the whole screen; helpers that work on
-/// their own), so each chat gets its own decision.
-const PER_CHAT_ONLY: &[&str] = &[computer::SERVER_NAME, crate::subagent::SERVER_NAME];
+/// on in a new chat. They let the model act widely (the whole screen; helpers that work on
+/// their own; coding apps that work online, 0.0.5), so each chat gets its own decision.
+const PER_CHAT_ONLY: &[&str] = &[
+    computer::SERVER_NAME,
+    crate::subagent::SERVER_NAME,
+    crate::outside_agent::SERVER_NAME,
+];
 
 /// Built-in servers whose tools are on in every new chat (D10; artifacts and search
 /// since 0.0.4).
@@ -993,14 +997,7 @@ async fn context_for_defaults(state: &AppState, chat: &store::Chat) -> KnownCont
         let loaded = (status.model_path.as_deref() == Some(path))
             .then_some(status.n_ctx)
             .flatten();
-        let configured = state
-            .store
-            .get_setting::<crate::dto::LocalModelSettings>(crate::settings::LOCAL_MODEL)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .ctx;
+        let configured = crate::load_settings::configured_ctx(state, path).await;
         return KnownContext::Local { loaded, configured };
     }
     if model.starts_with("remote:") {
@@ -1348,6 +1345,30 @@ mod tests {
         assert!(Selection::for_chat(Some(&own), None, true, None).on(tool, server, true));
     }
 
+    /// The Coding apps group (0.0.5) is off in a new chat, and switching it on in one chat
+    /// never carries over to the next through the last choice.
+    #[test]
+    fn coding_apps_stay_off_until_the_user_switches_them_on() {
+        let server = crate::outside_agent::SERVER_NAME;
+        for tool in [
+            crate::outside_agent::CLAUDE_TOOL,
+            crate::outside_agent::CODEX_TOOL,
+        ] {
+            for (available, context) in [(true, Some(131_072)), (false, None)] {
+                assert!(!default_on(server, available, context));
+                assert!(
+                    !Selection::for_chat(None, None, available, context).on(tool, server, true)
+                );
+            }
+            let last = names(&["read_file", tool]);
+            let new_chat = Selection::for_chat(None, Some(&last), true, Some(8192));
+            assert!(!new_chat.on(tool, server, true));
+            assert!(new_chat.on("read_file", "files", true));
+            let own = names(&[tool]);
+            assert!(Selection::for_chat(Some(&own), None, true, None).on(tool, server, true));
+        }
+    }
+
     #[test]
     fn the_context_to_decide_on() {
         // No model: nothing is known, so the browser stays off.
@@ -1377,10 +1398,21 @@ mod tests {
                 true,
             )
         };
-        // A local model with the default 8,192 setting, before it is loaded.
+        // A local model before it is loaded: the context its next load asks for (0.0.5:
+        // its own setting, else the defaults, else what Automatic picks now). A fixed
+        // 8,192, or Automatic at its cap, turns the browser on; Automatic at its floor on
+        // a computer short of memory does not.
         assert!(on(KnownContext::Local {
             loaded: None,
-            configured: crate::dto::LocalModelSettings::default().ctx,
+            configured: 8192,
+        }));
+        assert!(on(KnownContext::Local {
+            loaded: None,
+            configured: models::fit::AUTO_CAP_CTX as u32,
+        }));
+        assert!(!on(KnownContext::Local {
+            loaded: None,
+            configured: models::fit::AUTO_FLOOR_CTX as u32,
         }));
         assert!(!on(KnownContext::Local {
             loaded: None,

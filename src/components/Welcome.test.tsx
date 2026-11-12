@@ -27,6 +27,12 @@ const ready: RuntimeStatus = {
   offloadedLayers: null,
   totalLayers: null,
   error: null,
+  loadStage: null,
+  adjustments: [],
+  ctxSource: null,
+  settingsChanged: false,
+  reloadWaiting: false,
+  unloadedPath: null,
 };
 
 describe("the welcome screen", () => {
@@ -51,7 +57,8 @@ describe("the welcome screen", () => {
     useApp.setState({ runtime: ready, modelOptions: [], pickModel });
     render(<Welcome />);
     expect(screen.getByText("a.gguf")).toBeTruthy();
-    expect(screen.getByText(/Ready on vulkan · Vulkan0 · 65,536 context/)).toBeTruthy();
+    expect(screen.getByText("Ready on Graphics card (Vulkan) · Remembers about 49,000 words")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/vulkan|Vulkan0|context/);
     fireEvent.click(screen.getByRole("button", { name: "Chat with it" }));
     expect(pickModel).toHaveBeenCalledWith("local:/models/a.gguf");
   });
