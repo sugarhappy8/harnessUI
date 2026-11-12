@@ -34,7 +34,6 @@ use super::launch::{LaunchConfig, REDACTED, build_args, build_env_on};
 use super::lines::{LineReader, Tail};
 use super::props::Props;
 use super::protocol::{ChildState, LogEvent, LogInfo, parse_child_line};
-use super::stage::LoadStage;
 use crate::spawn::{self, ManagedChild, SpawnSpec, StdioMode};
 
 /// Lines of stderr kept for error reports.
@@ -129,9 +128,6 @@ pub enum ServerEvent {
         /// Why the previous backend failed.
         reason: LoadFailure,
     },
-    /// A typed stage or transition that has no event of its own (0.0.5: the retries the
-    /// supervisor adds, WP1a). The app shows it as the current [`LoadStage`].
-    Stage(LoadStage),
 }
 
 /// Why [`start`] failed. Every variant can report a classified [`LoadFailure`] and the
@@ -692,7 +688,7 @@ mod tests {
 
     use super::*;
     use crate::llama::backend::BackendSource;
-    use crate::llama::launch::GpuUse;
+    use crate::llama::launch::GpuLayers;
 
     fn launch() -> LaunchConfig {
         LaunchConfig {
@@ -700,13 +696,12 @@ mod tests {
             mmproj: None,
             ctx: 2048,
             device: None,
-            gpu: GpuUse::Off,
+            gpu_layers: GpuLayers::Auto,
             cache_ram_mib: 256,
             reasoning_budget: None,
             port: 40000,
             api_key: "key".into(),
             hip_visible_devices: None,
-            ..LaunchConfig::default()
         }
     }
 

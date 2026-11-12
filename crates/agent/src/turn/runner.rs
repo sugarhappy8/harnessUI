@@ -8,18 +8,17 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Approval, ApprovalRequest, CallDecision, CompactionStage, CompactionSummary, LOOP_STOP_AT,
-    LOOP_WARNING_AT, MAX_INVALID_CALLS_PER_TOOL, MAX_MISTAKES, NO_ANSWER_MESSAGE, SUMMARISING_NOTE,
-    SUMMARY_FAILED_NOTE, TurnDeps, TurnEvent, TurnInput, TurnOutcome, TurnStatus, UsageTotals,
+    Approval, ApprovalRequest, CallDecision, CompactionSummary, LOOP_STOP_AT, LOOP_WARNING_AT,
+    MAX_INVALID_CALLS_PER_TOOL, MAX_MISTAKES, NO_ANSWER_MESSAGE, TurnDeps, TurnEvent, TurnInput,
+    TurnOutcome, TurnStatus, UsageTotals,
 };
 use crate::client::ProviderKind;
 use crate::context::{
-    ContextBudget, KEPT_RESULT_IMAGES, PinnedDoNotFit, SUMMARY_CHARS_PER_TOKEN, ToolsDoNotFit,
-    call_groups, cut_summary, drop_old_result_images, estimate_message, estimate_request,
-    fold_instruction, group_digits, pinned_allowance, stub_results, summarisable_prefix,
-    summary_instruction, truncate_head_tail, turn_starts,
+    ContextBudget, KEPT_RESULT_IMAGES, PinnedDoNotFit, ToolsDoNotFit, call_groups,
+    drop_old_result_images, estimate_message, estimate_request, group_digits, pinned_allowance,
+    stub_results, summarisable_prefix, summary_instruction, truncate_head_tail, turn_starts,
 };
-use crate::error::{ProviderError, chat_too_long};
+use crate::error::ProviderError;
 use crate::estimate::{BASELINE_CHARS_PER_TOKEN, TokenCalibrator};
 use crate::history::{
     CallRecord, CallStatus, HistoryMessage, Part, ResultRecord, STOPPED_TEXT, UNKNOWN_TOOL_NAME,
@@ -50,16 +49,6 @@ const MAX_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_SUMMARY_ROUNDS: u32 = 4;
 /// Candidate summary requests counted before a round gives up on finding one that fits.
 const MAX_SUMMARY_FIT_TRIES: usize = 6;
-
-/// What stage 2 would do next, decided by one function for the turn and its preview.
-enum SummaryPlan {
-    /// Nothing earlier needs summarising (none left, or what stays verbatim fits).
-    Nothing,
-    /// One round: the summary request for the oldest `prefix` earlier messages.
-    Round { prefix: usize, request: ChatRequest },
-    /// Not even the oldest whole turn fits in a summary request.
-    DoesNotFit,
-}
 
 mod preview;
 
@@ -331,11 +320,6 @@ impl<'a> Turn<'a> {
                     self.withheld_tools.join(", ")
                 ),
             });
-        }
-        // A summary written when the model had a larger context is folded under this
-        // context's cap before anything is measured, so it cannot crowd out the tools.
-        if let Err(status) = self.fold_summary().await {
-            return status;
         }
         if let Err(status) = self.measure().await {
             return status;
@@ -629,15 +613,6 @@ impl<'a> Turn<'a> {
         choice: ToolChoice,
         thinking_off: bool,
     ) -> Result<(ChatRequest, u32, u32), TurnStatus> {
-        // A server that reported a smaller context than expected (`on_overflow`) can leave
-        // the summary longer than this context allows: fold it, then measure F again.
-        if self.fold_summary().await? {
-            let fixed = self.fixed_overhead(true).await?;
-            self.budget = ContextBudget::new(self.budget.n_ctx, fixed);
-            self.emit(TurnEvent::Budget {
-                budget: self.budget,
-            });
-        }
         let mut summaries = 0;
         loop {
             if self.cancel.is_cancelled() {
@@ -647,10 +622,10 @@ impl<'a> Turn<'a> {
             let mut request = self.request_for_view(&view, choice, thinking_off);
             let (count, baseline) = self.count(&request).await?;
             if count > self.budget.trigger {
-                if self.can_shorten_earlier() {
+                if !self.stub_earlier && has_results(&self.earlier[self.earlier_skip..]) {
                     self.stub_earlier = true;
                     self.emit(TurnEvent::Compacted {
-                        stage: CompactionStage::ShortenEarlierResults.number(),
+                        stage: 1,
                         summary: None,
                         covered_ids: Vec::new(),
                     });
@@ -665,14 +640,24 @@ impl<'a> Turn<'a> {
                 }
                 if self.stub_next_turn_pair() {
                     self.emit(TurnEvent::Compacted {
-                        stage: CompactionStage::ShortenTurnResults.number(),
+                        stage: 3,
                         summary: None,
                         covered_ids: Vec::new(),
                     });
                     continue;
                 }
                 if count > self.budget.budget {
-                    return Err(failed("context_full", chat_too_long(self.input.caps.local)));
+                    return Err(failed(
+                        "context_full",
+                        format!(
+                            "This conversation no longer fits the model's context window of {} \
+                             tokens, even after older tool results were shortened and earlier \
+                             messages summarised (it needs about {}). Start a new chat, raise the \
+                             context size, or turn some tools off.",
+                            group_digits(u64::from(self.budget.n_ctx)),
+                            group_digits(u64::from(count))
+                        ),
+                    ));
                 }
             }
             let max_tokens = self.budget.max_tokens(count);
@@ -683,16 +668,9 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Stage 1 can still run: earlier turns have tool results that are not stubbed yet.
-    fn can_shorten_earlier(&self) -> bool {
-        !self.stub_earlier && has_results(&self.earlier[self.earlier_skip..])
-    }
-
-    /// Gives thinking its own budget, so a reasoning model cannot spend the whole reply
-    /// allowance on thought (ARCHITECTURE.md 8.2, "Reasoning"): half the output limit, or
-    /// less when the user chose how long the model may think ([`TurnInput::thinking_limit`],
-    /// [`crate::ThinkingLimit::budget`]). llama-server only; a budget set in the request
-    /// template wins.
+    /// Gives thinking its own budget, half the output limit, so a reasoning model cannot spend
+    /// the whole reply allowance on thought (ARCHITECTURE.md 8.2, "Reasoning"). llama-server
+    /// only; a budget set in the request template wins.
     fn limit_thinking(&self, request: &mut ChatRequest, max_tokens: u32, thinking_off: bool) {
         let thinking = self.input.caps.thinking && self.input.thinking && !thinking_off;
         if thinking
@@ -702,7 +680,7 @@ impl<'a> Turn<'a> {
         {
             request.set_extra(
                 "reasoning_budget_tokens",
-                Value::from(self.input.thinking_limit.budget(max_tokens)),
+                Value::from((max_tokens / 2).max(128)),
             );
         }
     }
@@ -739,64 +717,15 @@ impl<'a> Turn<'a> {
     }
 
     /// Stage 2: summarises the oldest earlier turns with the same model. Returns whether a
-    /// summary was made. A summary that cannot be made is reported once
-    /// ([`SUMMARY_FAILED_NOTE`]) and not tried again in this turn; the loop goes on with
-    /// stage 3.
+    /// summary was made.
     async fn summarise(&mut self) -> Result<bool, TurnStatus> {
         if self.summary_failed {
             return Ok(false);
         }
-        let summary_cap = self.budget.summary_max_tokens();
-        let (prefix, request) = match self.plan_summary().await? {
-            SummaryPlan::Nothing => return Ok(false),
-            SummaryPlan::DoesNotFit => {
-                self.report_summary_failed();
-                return Ok(false);
-            }
-            SummaryPlan::Round { prefix, request } => (prefix, request),
-        };
-        let Some(text) = self.write_summary(&request, summary_cap).await? else {
-            self.report_summary_failed();
-            return Ok(false);
-        };
-        let mut covered: Vec<i64> = self
-            .summary
-            .as_ref()
-            .map(|s| s.covered_ids.clone())
-            .unwrap_or_default();
-        covered.extend(
-            self.earlier[self.earlier_skip..self.earlier_skip + prefix]
-                .iter()
-                .filter_map(|m| m.id),
-        );
-        self.earlier_skip += prefix;
-        self.summary = Some(CompactionSummary {
-            text: text.clone(),
-            covered_ids: covered.clone(),
-        });
-        self.rebuild_system();
-        self.emit(TurnEvent::Compacted {
-            stage: CompactionStage::SummariseEarlier.number(),
-            summary: Some(text),
-            covered_ids: covered,
-        });
-        // The summary is part of the fixed overhead now.
-        let fixed = self.fixed_overhead(true).await?;
-        self.budget = ContextBudget::new(self.budget.n_ctx, fixed);
-        self.emit(TurnEvent::Budget {
-            budget: self.budget,
-        });
-        Ok(true)
-    }
-
-    /// What stage 2 would summarise next, and the request for it: the turn runs it, the
-    /// preview reports it ([`super::NextCompaction::SummariseEarlier`]). The same counts as
-    /// a turn makes (exact on the local server); nothing is sent to the model.
-    async fn plan_summary(&self) -> Result<SummaryPlan, TurnStatus> {
         let cpt = self.chars_per_token();
         let mut earlier = self.earlier[self.earlier_skip..].to_vec();
         if earlier.is_empty() {
-            return Ok(SummaryPlan::Nothing);
+            return Ok(false);
         }
         if self.stub_earlier {
             stub_results(&mut earlier, |_| true, cpt);
@@ -805,7 +734,7 @@ impl<'a> Turn<'a> {
         let summary_cap = self.budget.summary_max_tokens();
         let wanted = self.summarisable(&earlier);
         if wanted == 0 {
-            return Ok(SummaryPlan::Nothing);
+            return Ok(false);
         }
         // The summary request carries the fixed overhead and the messages it summarises, so it
         // must fit the budget itself. Summarise the longest run of whole turns that does; the
@@ -831,122 +760,63 @@ impl<'a> Turn<'a> {
             tokens_before <= room
         });
         let instruction = summary_instruction(summary_cap * 2 / 3, self.summary.is_some());
+        let mut chosen = None;
         // The estimate picked the candidates; the count (exact on the local server) decides.
         for cut in cuts.into_iter().rev().take(MAX_SUMMARY_FIT_TRIES) {
             let request = self.summary_request(&earlier[..cut], &instruction, summary_cap);
             if self.count(&request).await?.0 <= self.budget.budget {
-                return Ok(SummaryPlan::Round {
-                    prefix: cut,
-                    request,
-                });
+                chosen = Some((cut, request));
+                break;
             }
         }
-        Ok(SummaryPlan::DoesNotFit)
-    }
-
-    /// Streams a summary request without showing it and returns the summary, cut to the
-    /// summary cap (`cap` tokens, four characters each); `None` when the server failed or the
-    /// model wrote nothing.
-    async fn write_summary(
-        &mut self,
-        request: &ChatRequest,
-        cap: u32,
-    ) -> Result<Option<String>, TurnStatus> {
+        let Some((prefix, request)) = chosen else {
+            // Not even the oldest turn fits in a summary request.
+            self.summary_failed = true;
+            return Ok(false);
+        };
         self.emit(TurnEvent::AppNote {
-            text: SUMMARISING_NOTE.to_owned(),
+            text: "Summarising earlier messages to make room in the context window.".to_owned(),
         });
-        let text = match self.stream(request, false).await {
+        let text = match self.stream(&request, false).await {
             Attempt::Done(reply) => strip_tool_markup(&reply.content),
             Attempt::Cancelled { .. } => return Err(TurnStatus::Stopped),
-            Attempt::Failed(_) => return Ok(None),
+            Attempt::Failed(_) => String::new(),
         };
-        let text = text.trim();
-        if text.is_empty() {
-            return Ok(None);
-        }
-        let max_chars = usize::try_from(cap)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(SUMMARY_CHARS_PER_TOKEN);
-        Ok(Some(text.chars().take(max_chars).collect()))
-    }
-
-    /// Reports, once per turn, that a summary could not be made; no more are tried in it.
-    fn report_summary_failed(&mut self) {
-        if !self.summary_failed {
+        if text.trim().is_empty() {
             self.summary_failed = true;
-            self.emit(TurnEvent::AppNote {
-                text: SUMMARY_FAILED_NOTE.to_owned(),
-            });
-        }
-    }
-
-    /// The summary of earlier messages is longer than a summary written for this context
-    /// may be: it was written when the model had a larger context.
-    pub(super) fn summary_oversized(&self) -> bool {
-        self.summary
-            .as_ref()
-            .is_some_and(|s| s.text.trim().chars().count() > self.budget.summary_max_chars())
-    }
-
-    /// Cuts an oversized summary to this context's cap (its head and tail), for this turn
-    /// only: what the turn goes on with when the model cannot rewrite it, and the preview's
-    /// stand-in for the rewrite.
-    pub(super) fn cut_oversized_summary(&mut self) {
-        let max_chars = self.budget.summary_max_chars();
-        if let Some(summary) = self.summary.as_mut() {
-            summary.text = cut_summary(&summary.text, max_chars);
-        }
-        self.rebuild_system();
-    }
-
-    /// Stage 2 for a summary that no longer fits a smaller context: the model rewrites it
-    /// under this context's cap, covering the same messages ([`TurnEvent::Compacted`] carries
-    /// the new text, so the app stores it in place of the old one). When that request cannot
-    /// fit, or the model writes nothing, the failure is reported and the summary is cut to
-    /// the cap for this turn, so the turn still goes on. Returns whether the summary changed.
-    async fn fold_summary(&mut self) -> Result<bool, TurnStatus> {
-        if !self.summary_oversized() {
             return Ok(false);
         }
-        let cap = self.budget.summary_max_tokens();
-        let mut text = None;
-        if !self.summary_failed {
-            let mut request = self.summary_request(&[], &fold_instruction(cap * 2 / 3), cap);
-            let mut fits = self.count(&request).await?.0 <= self.budget.budget;
-            if !fits && !request.tools.is_empty() {
-                // The tool list is there only so the server can reuse its cached prompt.
-                request.tools.clear();
-                request.tool_choice = None;
-                request.parallel_tool_calls = None;
-                fits = self.count(&request).await?.0 <= self.budget.budget;
-            }
-            if fits {
-                text = self.write_summary(&request, cap).await?;
-            }
-        }
-        let covered_ids = self
+        let max_chars = usize::try_from(summary_cap)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(4);
+        let text: String = text.trim().chars().take(max_chars).collect();
+        let mut covered: Vec<i64> = self
             .summary
             .as_ref()
             .map(|s| s.covered_ids.clone())
             .unwrap_or_default();
-        match text {
-            Some(text) => {
-                self.summary = Some(CompactionSummary {
-                    text: text.clone(),
-                    covered_ids: covered_ids.clone(),
-                });
-                self.rebuild_system();
-                self.emit(TurnEvent::Compacted {
-                    stage: CompactionStage::SummariseEarlier.number(),
-                    summary: Some(text),
-                    covered_ids,
-                });
-            }
-            None => {
-                self.report_summary_failed();
-                self.cut_oversized_summary();
-            }
-        }
+        covered.extend(
+            self.earlier[self.earlier_skip..self.earlier_skip + prefix]
+                .iter()
+                .filter_map(|m| m.id),
+        );
+        self.earlier_skip += prefix;
+        self.summary = Some(CompactionSummary {
+            text: text.clone(),
+            covered_ids: covered.clone(),
+        });
+        self.rebuild_system();
+        self.emit(TurnEvent::Compacted {
+            stage: 2,
+            summary: Some(text),
+            covered_ids: covered,
+        });
+        // The summary is part of the fixed overhead now.
+        let fixed = self.fixed_overhead(true).await?;
+        self.budget = ContextBudget::new(self.budget.n_ctx, fixed);
+        self.emit(TurnEvent::Budget {
+            budget: self.budget,
+        });
         Ok(true)
     }
 
@@ -1053,17 +923,9 @@ impl<'a> Turn<'a> {
                     overflow_retried = true;
                     self.on_overflow(n_prompt_tokens, n_ctx, sent);
                     self.emit(TurnEvent::AppNote {
-                        text: "The model server said the chat was too long. Making room and \
-                               trying once more."
+                        text: "The server said the request was too long; compacting and trying once more."
                             .to_owned(),
                     });
-                }
-                // Too long again after making room: the turn's own words, not the server's.
-                Attempt::Failed(ProviderError::ContextOverflow { .. }) => {
-                    return Err(failed(
-                        "context_overflow",
-                        chat_too_long(self.input.caps.local),
-                    ));
                 }
                 Attempt::Failed(ProviderError::ServerParseError(detail)) => {
                     if !wrap_up {
@@ -1115,9 +977,8 @@ impl<'a> Turn<'a> {
             self.truncation_noted = true;
             self.emit(TurnEvent::AppNote {
                 text: format!(
-                    "The server reported a prompt of {} tokens for about {} sent. It may be \
-                     leaving out older messages because its model remembers less than the app \
-                     expects.",
+                    "The server reported a prompt of {} tokens for about {} sent; it may be \
+                     dropping old messages because its context window is too small.",
                     group_digits(u64::from(usage.prompt_tokens)),
                     group_digits(u64::from(self.calibrator.calibrate(baseline)))
                 ),

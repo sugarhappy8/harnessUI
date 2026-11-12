@@ -83,25 +83,6 @@ pub enum Scope {
     /// a source fetches a page that a search of this chat listed. Unlike [`Scope::AppData`]
     /// it prompts like any other scope.
     WebSearch,
-    /// A task handed to a coding app installed on this computer (0.0.5, `ask_claude_code`
-    /// and `ask_codex`): the app (`claudeCode`, `codex`) and the working folder it runs
-    /// in. It sends the task, and what the app reads, to an online service under the
-    /// user's own account, so it asks every time (D11): no grant covers it, in any mode.
-    CodingApp {
-        app: String,
-        folder: String,
-    },
-}
-
-impl Scope {
-    /// Whether the scope is, or holds, a task for a coding app ([`Scope::CodingApp`]).
-    pub fn names_coding_app(&self) -> bool {
-        match self {
-            Scope::CodingApp { .. } => true,
-            Scope::Commands { parts } => parts.iter().any(Scope::names_coding_app),
-            _ => false,
-        }
-    }
 }
 
 /// Why an action still asks while its chat is in Allow all (0.0.4). The describer sets it;
@@ -225,10 +206,6 @@ pub trait Grants {
 
 impl Grants for std::collections::BTreeSet<Scope> {
     fn covers(&self, scope: &Scope) -> bool {
-        // A task for a coding app is never covered, even by a grant for exactly it (D11).
-        if scope.names_coding_app() {
-            return false;
-        }
         self.contains(scope)
             || match scope {
                 // A per-tool "any arguments" grant covers exact-argument calls.
@@ -265,18 +242,6 @@ pub fn evaluate(action: &Action, turn: &TurnContext, grants: &dyn Grants) -> Dec
     if let Some(reason) = &action.hard_limit {
         return Decision::Denied {
             reason: reason.clone(),
-        };
-    }
-    // A task for a coding app always asks with Allow once / Deny, in every mode and
-    // whatever the describer said (0.0.5, D11).
-    if action.scope.names_coding_app() {
-        return Decision::Ask {
-            card: CardKind::OnceOnly,
-            reason: if turn.allow_all {
-                AskReason::StillAsksInAllowAll
-            } else {
-                AskReason::AlwaysAsk
-            },
         };
     }
     // Skills never prompt (D11), but only after the checks above.
@@ -862,89 +827,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Scope::WebSearch).unwrap(),
             serde_json::json!({"type": "webSearch"})
-        );
-    }
-
-    /// A task for a coding app (0.0.5, D11) asks with Allow once / Deny in every mode,
-    /// after a grant for exactly it, with or without untrusted content, native call or
-    /// recovered from text. The engine holds to this even for an action whose describer
-    /// left out the always-ask facts. Steps 1 and 2 still come first.
-    #[test]
-    fn a_coding_app_task_always_asks_and_no_grant_covers_it() {
-        let scope = Scope::CodingApp {
-            app: "claudeCode".into(),
-            folder: "/p".into(),
-        };
-        let granted: BTreeSet<Scope> = [scope.clone()].into();
-        assert!(
-            !granted.covers(&scope),
-            "a grant for exactly it must not cover it"
-        );
-        let both = Scope::Commands {
-            parts: vec![scope.clone()],
-        };
-        assert!(!BTreeSet::from([scope.clone(), both.clone()]).covers(&both));
-        struct Everything;
-        impl Grants for Everything {
-            fn covers(&self, _: &Scope) -> bool {
-                true
-            }
-        }
-        let full = Action {
-            server: "coding_apps".into(),
-            tool: "ask_claude_code".into(),
-            keep_asking: Some(KeepAsking::Publish),
-            network: true,
-            ..action(scope.clone(), Risk::AlwaysAsk, false, true)
-        };
-        // A describer that forgot every fact: the scope alone decides.
-        let bare = action(scope.clone(), Risk::Normal, true, false);
-        for a in [&full, &bare] {
-            for (untrusted, recovered) in
-                [(false, false), (true, false), (false, true), (true, true)]
-            {
-                let ask = TurnContext {
-                    untrusted_in_turn: untrusted,
-                    recovered_from_text: recovered,
-                    ..ready()
-                };
-                assert_eq!(
-                    evaluate(a, &ask, &Everything),
-                    Decision::Ask {
-                        card: CardKind::OnceOnly,
-                        reason: AskReason::AlwaysAsk
-                    },
-                    "Ask mode, untrusted {untrusted}, recovered {recovered}"
-                );
-                let all = TurnContext {
-                    allow_all: true,
-                    ..ask
-                };
-                assert_eq!(
-                    evaluate(a, &all, &Everything),
-                    Decision::Ask {
-                        card: CardKind::OnceOnly,
-                        reason: AskReason::StillAsksInAllowAll
-                    },
-                    "Allow all, untrusted {untrusted}, recovered {recovered}"
-                );
-            }
-        }
-        let mut off = ready();
-        off.tool_enabled = false;
-        assert!(matches!(
-            evaluate(&full, &off, &Everything),
-            Decision::Refused { .. }
-        ));
-        let mut limited = full.clone();
-        limited.hard_limit = Some("the program is inside an approved folder".into());
-        assert!(matches!(
-            evaluate(&limited, &ready(), &Everything),
-            Decision::Denied { .. }
-        ));
-        assert_eq!(
-            serde_json::to_value(&scope).unwrap(),
-            serde_json::json!({"type": "codingApp", "app": "claudeCode", "folder": "/p"})
         );
     }
 

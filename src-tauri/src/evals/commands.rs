@@ -374,12 +374,6 @@ pub async fn start_capability_check(
     only_main_window(window.label())?;
     let (model, identity) = model_for(&state, &model_ref).await?;
     let (_running, cancel) = start_run()?;
-    let _busy = crate::runtime_manager::use_local_model(
-        &state,
-        &model_ref,
-        crate::state::BusyKind::ModelCheck,
-        &cancel,
-    );
     let left = super::workspace::remove_leftovers();
     if left > 0 {
         tracing::info!(left, "removed folders left by earlier runs");
@@ -526,12 +520,6 @@ pub async fn start_benchmark(
     let (model, identity) = model_for(&state, &model_ref).await?;
     let dir = bench_dir(&app)?;
     let (_running, cancel) = start_run()?;
-    let _busy = crate::runtime_manager::use_local_model(
-        &state,
-        &model_ref,
-        crate::state::BusyKind::ModelCheck,
-        &cancel,
-    );
     let left = super::workspace::remove_leftovers();
     if left > 0 {
         tracing::info!(left, "removed folders left by earlier runs");

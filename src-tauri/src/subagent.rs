@@ -11,8 +11,7 @@
 //!   `turns::AppTools::run_subagent`). Its cards and audit rows say they come from a
 //!   subagent, and its audit rows point at the `run_subagent` call's row.
 //! - A helper cannot start a helper: the tool is not offered to it, and a call to it is
-//!   refused ([`NoNesting`]). Nor can it hand a task to a coding app (0.0.5): those tools
-//!   are left out and refused the same way.
+//!   refused ([`NoNesting`]).
 //! - The helper starts where the turn is: if untrusted content already entered the turn,
 //!   or the `run_subagent` call itself was recovered from text, the helper's calls are
 //!   decided as such from its first one ([`InheritedGate`], D9 and 8.3).
@@ -65,23 +64,6 @@ pub fn is_tool(tool: &mcp_host::RegisteredTool) -> bool {
 /// Whether an action is a `run_subagent` call.
 pub fn is_action(action: &policy::Action) -> bool {
     action.server == SERVER_NAME && action.tool == TOOL_NAME
-}
-
-/// Whether a tool of the chat is offered to a helper: every one but `run_subagent` and
-/// the coding apps (0.0.5: a helper never hands a task to Claude Code or Codex).
-pub fn offered_to_helper(tool: &mcp_host::RegisteredTool) -> bool {
-    !is_tool(tool) && !crate::outside_agent::is_tool(tool)
-}
-
-/// What a helper is told for a tool it may not use, if it is one.
-fn not_for_helpers(name: &str) -> Option<&'static str> {
-    if name == TOOL_NAME {
-        Some(NESTED_REFUSAL)
-    } else if crate::outside_agent::is_tool_name(name) {
-        Some(crate::outside_agent::HELPER_REFUSAL)
-    } else {
-        None
-    }
 }
 
 /// The summary line of an approval card raised by a helper.
@@ -226,8 +208,8 @@ pub fn running_in(chat: i64) -> Option<Option<store::AuditId>> {
 
 // ---- The helper's view of the chat's tools and policy ---------------------------------
 
-/// The chat's tools without `run_subagent` and the coding apps (0.0.5): they are not
-/// offered to a helper, and a call to one is refused whatever the wrapped host would do.
+/// The chat's tools without `run_subagent`: it is not offered to a helper, and a call to
+/// it is refused whatever the wrapped host would do.
 struct NoNesting(Arc<dyn ToolHost>);
 
 #[async_trait]
@@ -236,24 +218,24 @@ impl ToolHost for NoNesting {
         self.0
             .tools()
             .into_iter()
-            .filter(|tool| not_for_helpers(&tool.name).is_none())
+            .filter(|tool| tool.name != TOOL_NAME)
             .collect()
     }
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
-        if let Some(refusal) = not_for_helpers(name) {
-            return Err(vec![refusal.to_owned()]);
+        if name == TOOL_NAME {
+            return Err(vec![NESTED_REFUSAL.to_owned()]);
         }
         self.0.validate(name, args)
     }
     fn llama_schema(&self, name: &str) -> Option<Value> {
-        if not_for_helpers(name).is_some() {
+        if name == TOOL_NAME {
             return None;
         }
         self.0.llama_schema(name)
     }
     async fn describe(&self, name: &str, args: &Map<String, Value>) -> Described {
-        if let Some(refusal) = not_for_helpers(name) {
-            return Described::Invalid(refusal.to_owned());
+        if name == TOOL_NAME {
+            return Described::Invalid(NESTED_REFUSAL.to_owned());
         }
         self.0.describe(name, args).await
     }
@@ -266,10 +248,6 @@ impl ToolHost for NoNesting {
     ) -> ToolOutput {
         if name == TOOL_NAME || is_action(action) {
             return ToolOutput::error(NESTED_REFUSAL);
-        }
-        // Also through `call_tool`, which is described as the tool it names.
-        if crate::outside_agent::is_tool_name(name) || crate::outside_agent::is_action(action) {
-            return ToolOutput::error(crate::outside_agent::HELPER_REFUSAL);
         }
         self.0.execute(name, args, action, cancel).await
     }
@@ -303,11 +281,6 @@ impl PolicyGate for InheritedGate {
         if tool == TOOL_NAME || is_action(action) {
             return policy::Decision::Refused {
                 reason: NESTED_REFUSAL.to_owned(),
-            };
-        }
-        if crate::outside_agent::is_tool_name(tool) || crate::outside_agent::is_action(action) {
-            return policy::Decision::Refused {
-                reason: crate::outside_agent::HELPER_REFUSAL.to_owned(),
             };
         }
         self.inner.decide(

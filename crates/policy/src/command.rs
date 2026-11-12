@@ -13,8 +13,6 @@ use tree_sitter::{Node, Parser};
 
 use crate::engine::KeepAsking;
 
-pub mod coding_apps;
-
 /// Which grammar to parse with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
@@ -748,11 +746,7 @@ pub fn classify(shell: Shell, line: &str) -> Verdict {
     let mode = crate::allow_all::command_facts(shell, line, &parsed);
     match &parsed {
         Parsed::Plain(cmds) => {
-            // A coding assistant (0.0.5) always asks, whatever else the line does.
-            let always_ask = mode
-                .coding_app
-                .clone()
-                .or_else(|| cmds.iter().find_map(always_ask));
+            let always_ask = cmds.iter().find_map(always_ask);
             let read_only = always_ask.is_none() && cmds.iter().all(is_read_only);
             Verdict {
                 parsed,
@@ -763,10 +757,9 @@ pub fn classify(shell: Shell, line: &str) -> Verdict {
             }
         }
         Parsed::Complex { reason } => Verdict {
-            always_ask: Some(match &mode.coding_app {
-                Some(why) => why.clone(),
-                None => format!("{reason}, so it cannot be checked and asks every time"),
-            }),
+            always_ask: Some(format!(
+                "{reason}, so it cannot be checked and asks every time"
+            )),
             parsed,
             read_only: false,
             keep_asking: mode.keep_asking,

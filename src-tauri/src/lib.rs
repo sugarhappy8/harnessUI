@@ -21,7 +21,6 @@ mod git_cmd;
 mod gpu;
 mod hotkey;
 mod hub;
-mod load_settings;
 mod load_tracker;
 mod logging;
 mod mcp_cmd;
@@ -29,7 +28,6 @@ mod mentions;
 mod models_cmd;
 mod navigation;
 mod outputs;
-mod outside_agent;
 mod overlay;
 mod packs_cmd;
 mod permissions;
@@ -38,7 +36,6 @@ mod providers;
 mod runtime_manager;
 mod search_cmd;
 mod settings;
-mod share;
 mod skills_cmd;
 mod state;
 mod subagent;
@@ -257,22 +254,6 @@ pub fn run() {
             evals::commands::start_benchmark,
             evals::commands::list_bench_runs,
             evals::commands::get_bench_run,
-            models_cmd::model_load_info,
-            models_cmd::set_model_load_settings,
-            models_cmd::reset_model_load_settings,
-            models_cmd::reload_local_model,
-            models_cmd::cancel_pending_reload,
-            models_cmd::model_busy,
-            hub::catalog_list,
-            hub::compare_facts,
-            share::share_status,
-            share::set_share_enabled,
-            share::set_share_port,
-            share::reveal_share_key,
-            share::new_share_key,
-            share::share_setup,
-            outside_agent::coding_apps_status,
-            outside_agent::find_coding_apps,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -333,20 +314,8 @@ pub fn run() {
                 host: host.clone(),
                 skills,
                 grants: Default::default(),
-                model_busy: Default::default(),
             });
             app.manage(turns::PendingApprovals::default());
-            // 0.0.5: sharing the loaded model with other apps; listens again only if the
-            // user left it on.
-            app.manage(share::Sharing::default());
-            share::start_saved(&handle);
-            // 0.0.5: the coding apps found when the user last turned that group on.
-            {
-                let handle = handle.clone();
-                tauri::async_runtime::spawn(
-                    async move { outside_agent::register_saved(&handle).await },
-                );
-            }
             // "Allow all in every chat", if the user switched it on (a saved setting).
             approvals::load_default(&handle);
             // Before the startup check below, which records what it finds here.

@@ -930,19 +930,11 @@ fn the_answer_names_groups_that_are_off_without_listing_their_tools() {
     let host = builtin_host();
     let tools = host.tools();
     let validate = |name: &str, value: &Value| host.validate(name, value);
-    // Git and the browser are off in this chat. The groups that are on only when a chat
-    // switches them on (computer, subagents, coding apps since 0.0.5) are not listed.
+    // Git and the browser are off in this chat.
     let all = listed(
         &tools,
         &["read_file"],
-        &[
-            "git",
-            "browser",
-            "computer",
-            "subagents",
-            "skills",
-            "coding_apps",
-        ],
+        &["git", "browser", "computer", "subagents", "skills"],
     );
     let off = vec!["git".to_string(), "browser".to_string()];
 

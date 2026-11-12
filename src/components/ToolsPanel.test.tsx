@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ApprovedFolder, CodingAppsStatus, ToolDto, ToolSelection } from "../lib/types";
+import type { ApprovedFolder, ToolDto, ToolSelection } from "../lib/types";
 
 // Radix positions the popover with ResizeObserver, which jsdom does not have.
 globalThis.ResizeObserver ??= class {
@@ -12,23 +12,6 @@ globalThis.ResizeObserver ??= class {
 const CHAT = 7;
 let folders: ApprovedFolder[] = [];
 let loaded: string[] = [];
-
-const NOT_CHECKED = vi.hoisted<CodingAppsStatus>(() => ({
-  checked: false,
-  apps: [
-    {
-      app: "claudeCode",
-      label: "Claude Code",
-      tool: "ask_claude_code",
-      path: null,
-      version: null,
-      usable: false,
-      problem: null,
-    },
-    { app: "codex", label: "Codex", tool: "ask_codex", path: null, version: null, usable: false, problem: null },
-  ],
-  message: null,
-}));
 
 const ipcMock = vi.hoisted(() => ({
   listChatTools: vi.fn<(chatId: number) => Promise<ToolDto[]>>(async () => []),
@@ -47,9 +30,6 @@ const ipcMock = vi.hoisted(() => ({
   getChat: vi.fn(async () => {
     throw new Error("not used");
   }),
-  // Coding apps (0.0.5): never looked for unless a test says otherwise.
-  codingAppsStatus: vi.fn<() => Promise<CodingAppsStatus>>(async () => NOT_CHECKED),
-  findCodingApps: vi.fn<() => Promise<CodingAppsStatus>>(async () => NOT_CHECKED),
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 
@@ -333,10 +313,7 @@ describe("ToolsPanel: tools chosen for each task", () => {
     const line = screen.getByText(/Always included/);
     expect(line.textContent).toContain("find_tools, call_tool, update_task");
     expect(line.closest("label")).toBeNull();
-    // The automatic-choice switch, Files, read_file and (0.0.5) the Coding apps switch:
-    // no companion has one.
-    expect(document.querySelectorAll("input[type=checkbox]").length).toBe(4);
-    expect(screen.getByRole("switch", { name: "Coding apps (experimental)" })).toBeTruthy();
+    expect(document.querySelectorAll("input[type=checkbox]").length).toBe(3);
     // Switching a group on never sends a companion as a switch.
     await act(async () => {
       fireEvent.click(screen.getByText("Files").closest("label")!.querySelector("input")!);
@@ -396,126 +373,5 @@ describe("ToolsPanel: tools chosen for each task", () => {
     await openPanel();
     const titles = [...document.querySelectorAll("section > label")].map((l) => l.textContent?.trim());
     expect(titles).toEqual(["Artifacts", "Web search"]);
-  });
-});
-
-describe("ToolsPanel: the Coding apps group (0.0.5)", () => {
-  const NOTE =
-    "Lets the model hand a task to Claude Code or Codex on this computer. They work online with your own account, and every request asks you first.";
-  const NOT_INSTALLED = "Claude Code and Codex are not installed on this computer.";
-  const FOUND: CodingAppsStatus = {
-    checked: true,
-    apps: [
-      {
-        app: "claudeCode",
-        label: "Claude Code",
-        tool: "ask_claude_code",
-        path: "/home/u/.local/share/claude/versions/2.1.322",
-        version: "2.1.322",
-        usable: true,
-        problem: null,
-      },
-      {
-        app: "codex",
-        label: "Codex",
-        tool: "ask_codex",
-        path: null,
-        version: null,
-        usable: false,
-        problem: "Codex is not installed on this computer.",
-      },
-    ],
-    message: null,
-  };
-  const groupSwitch = () => screen.getByRole("switch", { name: "Coding apps (experimental)" }) as HTMLInputElement;
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    ipcMock.listApprovedFolders.mockImplementation(async () => []);
-    ipcMock.loadedSkills.mockImplementation(async () => []);
-    ipcMock.codingAppsStatus.mockImplementation(async () => NOT_CHECKED);
-    ipcMock.findCodingApps.mockImplementation(async () => NOT_CHECKED);
-  });
-  afterEach(cleanup);
-
-  it("is named, marked experimental, explained in one line and off in a new chat", async () => {
-    ipcMock.listChatTools.mockImplementation(async () => [tool("files", "read_file", { enabledInChat: true })]);
-    await openPanel();
-    expect(ipcMock.codingAppsStatus).toHaveBeenCalled();
-    expect(groupSwitch().checked).toBe(false);
-    expect(screen.getAllByText(NOTE)).toHaveLength(1);
-    // Nothing was looked for yet, so no program is named.
-    expect(ipcMock.findCodingApps).not.toHaveBeenCalled();
-    expect(screen.queryByText("Claude Code")).toBeNull();
-    // It is not one of the ordinary groups, and it does not count as a tool that is on.
-    const titles = [...document.querySelectorAll("section > label")].map((l) => l.textContent?.trim());
-    expect(titles).toEqual(["Files"]);
-    expect(screen.getByTitle("Tools for this chat").textContent).toContain("Tools (1)");
-  });
-
-  it("looks for the programs when switched on, names each by its full path and turns its tools on", async () => {
-    let found = false;
-    ipcMock.listChatTools.mockImplementation(async () => [
-      tool("files", "read_file", { enabledInChat: true }),
-      ...(found ? [tool("coding_apps", "ask_claude_code")] : []),
-    ]);
-    ipcMock.findCodingApps.mockImplementation(async () => {
-      found = true;
-      return FOUND;
-    });
-    await openPanel();
-    await act(async () => {
-      fireEvent.click(groupSwitch());
-    });
-    expect(ipcMock.findCodingApps).toHaveBeenCalledTimes(1);
-    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT, ["read_file", "ask_claude_code"]);
-    expect(screen.getByText("/home/u/.local/share/claude/versions/2.1.322")).toBeTruthy();
-    expect(screen.getByText("Codex is not installed on this computer.")).toBeTruthy();
-    // The coding apps never show up as an ordinary group as well.
-    const titles = [...document.querySelectorAll("section > label")].map((l) => l.textContent?.trim());
-    expect(titles).toEqual(["Files"]);
-  });
-
-  it("says when neither program is installed and turns nothing on", async () => {
-    ipcMock.listChatTools.mockImplementation(async () => [tool("files", "read_file", { enabledInChat: true })]);
-    ipcMock.findCodingApps.mockImplementation(async () => ({
-      checked: true,
-      apps: FOUND.apps.map((a) => ({ ...a, path: null, version: null, usable: false, problem: `${a.label} is not installed on this computer.` })),
-      message: NOT_INSTALLED,
-    }));
-    await openPanel();
-    await act(async () => {
-      fireEvent.click(groupSwitch());
-    });
-    expect(screen.getByText(NOT_INSTALLED)).toBeTruthy();
-    expect(ipcMock.setChatTools).not.toHaveBeenCalled();
-    expect(groupSwitch().checked).toBe(false);
-  });
-
-  it("is on when its tools are on, and switching it off turns them off without looking again", async () => {
-    ipcMock.codingAppsStatus.mockImplementation(async () => FOUND);
-    ipcMock.listChatTools.mockImplementation(async () => [
-      tool("files", "read_file", { enabledInChat: true }),
-      tool("coding_apps", "ask_claude_code", { enabledInChat: true }),
-    ]);
-    await openPanel();
-    expect(groupSwitch().checked).toBe(true);
-    expect(screen.getByText("/home/u/.local/share/claude/versions/2.1.322")).toBeTruthy();
-    await act(async () => {
-      fireEvent.click(groupSwitch());
-    });
-    expect(ipcMock.findCodingApps).not.toHaveBeenCalled();
-    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT, ["read_file"]);
-  });
-
-  it("shows why a program found earlier can no longer be used", async () => {
-    const changed = "Claude Code changed on this computer after Coding apps was turned on, perhaps by an update. Turn Coding apps off and on again in the Tools panel to use it.";
-    ipcMock.codingAppsStatus.mockImplementation(async () => ({
-      ...FOUND,
-      apps: [{ ...FOUND.apps[0]!, usable: false, problem: changed }, FOUND.apps[1]!],
-    }));
-    ipcMock.listChatTools.mockImplementation(async () => [tool("coding_apps", "ask_claude_code")]);
-    await openPanel();
-    expect(screen.getByText(changed)).toBeTruthy();
   });
 });

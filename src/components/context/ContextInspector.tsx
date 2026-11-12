@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ChevronDown, ChevronRight, Copy, Eye } from "lucide-react";
 import { toErrorInfo, useApp } from "../../store/app";
-import { aboutWords } from "../../lib/words";
 import * as api from "./api";
 import type { ContextSection, ContextView } from "./types";
 
@@ -206,9 +205,8 @@ export function ContextInspector(props: { chatId: number }) {
                   About {grouped(totals.tokens)} of {grouped(totals.nCtx)} tokens
                 </span>{" "}
                 <span className="text-fg-muted">
-                  (about {grouped(aboutWords(totals.tokens))} of {grouped(aboutWords(totals.nCtx))} words;{" "}
-                  {totals.exact ? "counted by the model server" : "estimated"}; up to {grouped(totals.budget)} can be used
-                  before the reply, and older parts are shortened or summarised from {grouped(totals.trigger)})
+                  ({totals.exact ? "counted by the model server" : "estimated"}; up to {grouped(totals.budget)} can be used
+                  before the reply, and room is made from {grouped(totals.trigger)})
                 </span>
               </p>
               <Bar used={totals.tokens} of={totals.nCtx} mark={totals.trigger} />

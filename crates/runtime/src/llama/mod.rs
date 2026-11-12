@@ -13,6 +13,5 @@ pub mod lock;
 pub mod props;
 pub mod protocol;
 pub mod server;
-pub mod stage;
 
 mod lines;

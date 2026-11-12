@@ -334,37 +334,6 @@ fn latest_summary_on_path(
     Ok(best.map(|(_, s)| s))
 }
 
-/// [0.0.5 memory] The ids from the root of `chat` down to `leaf`, read without the messages.
-fn branch_ids(
-    conn: &Connection,
-    chat: ChatId,
-    leaf: MessageId,
-) -> Result<Vec<MessageId>, StoreError> {
-    ensure_message_in_chat(conn, chat, leaf)?;
-    let mut stmt = conn.prepare_cached(
-        "WITH RECURSIVE path(id, depth) AS ( \
-             SELECT ?1, 0 \
-             UNION ALL \
-             SELECT p.parent_id, path.depth + 1 FROM messages p JOIN path ON p.id = path.id \
-             WHERE p.parent_id IS NOT NULL AND path.depth < 1000000 \
-         ) \
-         SELECT m.id FROM path JOIN messages m ON m.id = path.id \
-         WHERE m.chat_id = ?2 ORDER BY path.depth DESC",
-    )?;
-    let rows = stmt.query_map(params![leaf, chat], |r| r.get(0))?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
-/// [0.0.5 memory] [`latest_summary_on_path`] for the branch that ends at `leaf`.
-fn summary_for_branch(
-    conn: &Connection,
-    chat: ChatId,
-    leaf: MessageId,
-) -> Result<Option<Summary>, StoreError> {
-    let ids = branch_ids(conn, chat, leaf)?;
-    latest_summary_on_path(conn, chat, &ids)
-}
-
 const ATTACHMENT_COLUMNS: &str = "id, chat_id, sha256, mime, file_name, size_bytes, bytes_path, \
      extracted_text, created_at";
 
@@ -468,21 +437,6 @@ impl Store {
     ) -> Result<Option<Summary>, StoreError> {
         let path = path.to_vec();
         self.call(move |c| latest_summary_on_path(c, chat_id, &path))
-            .await
-    }
-
-    /// [0.0.5 memory] The summary the model is sent for the branch that ends at `leaf`
-    /// (root first, as [`Store::latest_summary_on_path`] picks it), without reading the
-    /// branch's messages: for counting what a turn's fixed part takes before it starts.
-    ///
-    /// # Errors
-    /// `leaf` is not a message of the chat.
-    pub async fn summary_for_branch(
-        &self,
-        chat_id: ChatId,
-        leaf: MessageId,
-    ) -> Result<Option<Summary>, StoreError> {
-        self.call(move |c| summary_for_branch(c, chat_id, leaf))
             .await
     }
 
@@ -710,61 +664,6 @@ mod tests {
             .await
             .expect("best");
         assert_eq!(best.map(|s| s.id), Some(newer));
-    }
-
-    /// [0.0.5 memory] The summary of a branch, read from its last message alone, is the one
-    /// the full path gives: never one from a sibling branch, none above the first summary.
-    #[tokio::test]
-    async fn the_summary_of_a_branch_is_read_from_its_leaf() {
-        let (store, chat, root) = setup().await;
-        let a = child(&store, chat, root).await;
-        let b = child(&store, chat, a).await;
-        let c = child(&store, chat, b).await;
-        let other = child(&store, chat, root).await;
-        for (last, text) in [(a, "covers a"), (other, "other branch")] {
-            store
-                .insert_summary(NewSummary {
-                    chat_id: chat,
-                    last_message_id: last,
-                    text: text.into(),
-                })
-                .await
-                .expect("summary");
-        }
-        let text = |s: Option<Summary>| s.map(|s| s.text);
-        assert_eq!(
-            text(store.summary_for_branch(chat, c).await.expect("c")),
-            Some("covers a".to_owned())
-        );
-        assert_eq!(
-            text(store.summary_for_branch(chat, a).await.expect("a")),
-            Some("covers a".to_owned())
-        );
-        assert_eq!(
-            text(store.summary_for_branch(chat, other).await.expect("other")),
-            Some("other branch".to_owned())
-        );
-        assert_eq!(
-            text(store.summary_for_branch(chat, root).await.expect("root")),
-            None
-        );
-        // The same answer as the whole path.
-        assert_eq!(
-            store.summary_for_branch(chat, c).await.expect("c"),
-            store
-                .latest_summary_on_path(chat, &[root, a, b, c])
-                .await
-                .expect("path")
-        );
-        // A message of another chat is refused.
-        let elsewhere = store
-            .create_chat(NewChat {
-                title: "elsewhere".into(),
-                ..NewChat::default()
-            })
-            .await
-            .expect("chat");
-        assert!(store.summary_for_branch(elsewhere, c).await.is_err());
     }
 
     #[tokio::test]
