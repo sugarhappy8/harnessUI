@@ -1710,24 +1710,25 @@ fn holds_assistant<'a>(program: &str, named: &'a [Named]) -> Option<&'a str> {
 /// its program (`then`, `if`, `FOO=1`).
 fn command_words(segment: &str) -> Vec<String> {
     let mut words = shell_words(segment);
-    // Keywords and settings in front of a program are not its name.
-    while let Some(first) = words.first() {
-        let keyword = matches!(
-            first.as_str(),
-            "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "!" | "." | "time"
-        );
-        let setting = first.split_once('=').is_some_and(|(name, _)| {
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == ':')
-        });
-        if keyword || setting {
-            words.remove(0);
-        } else {
-            break;
-        }
-    }
+    // Keywords and settings in front of a program are not its name. They are counted first
+    // and dropped together, so that a line of many of them takes linear time.
+    let leading = words
+        .iter()
+        .take_while(|word| {
+            let keyword = matches!(
+                word.as_str(),
+                "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "!" | "." | "time"
+            );
+            let setting = word.split_once('=').is_some_and(|(name, _)| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == ':')
+            });
+            keyword || setting
+        })
+        .count();
+    words.drain(..leading);
     words
 }
 

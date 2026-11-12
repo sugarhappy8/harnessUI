@@ -750,7 +750,11 @@ async fn image_links_are_refused_before_forwarding() {
     let rows = h.audit_done(4).await;
     assert_eq!(rows.len(), 4, "{rows:?}");
     for row in &rows {
-        assert_eq!(row.decision, store::AuditDecision::RefusedByPolicy, "{row:?}");
+        assert_eq!(
+            row.decision,
+            store::AuditDecision::RefusedByPolicy,
+            "{row:?}"
+        );
         assert_eq!(row.result_status.as_deref(), Some("not_run"), "{row:?}");
         assert_eq!(
             row.result_summary.as_deref(),
@@ -906,6 +910,89 @@ async fn ten_thousand_unauthenticated_requests_write_no_audit_row() {
         .unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(h.audit_done(1).await.len(), 1);
+}
+
+/// Round 1: a program without the key cannot keep apps out by holding every connection
+/// slot. The oldest connection that never sent the key makes room for a new one, and a
+/// refused request closes its connection.
+#[tokio::test]
+async fn connections_without_the_key_cannot_fill_every_slot() {
+    use futures_util::StreamExt;
+    let h = Harness::new().await;
+    // A refused request: answered, then its connection is closed.
+    let mut refused = TcpStream::connect(("127.0.0.1", h.port)).await.unwrap();
+    refused
+        .write_all(
+            format!(
+                "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+                h.port
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), refused.read_to_end(&mut answer))
+        .await
+        .expect("the connection stayed open after the refusal")
+        .unwrap();
+    let answer = String::from_utf8_lossy(&answer).to_lowercase();
+    assert!(answer.starts_with("http/1.1 401"), "{answer}");
+    assert!(answer.contains("connection: close"), "{answer}");
+
+    // An app with the key is streaming an answer when every slot is taken by connections
+    // that send nothing.
+    let lines: Vec<String> = (0..8)
+        .map(|i| format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{i}\"}}}}]}}\n\n"))
+        .collect();
+    h.llama.reply(Reply::Sse(lines, Duration::from_millis(100)));
+    let streaming = h
+        .post(
+            "/v1/chat/completions",
+            &json!({"messages": [], "stream": true}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(streaming.status(), 200);
+    let mut idle = Vec::new();
+    for _ in 0..proxy::MAX_CONNECTIONS + 8 {
+        idle.push(TcpStream::connect(("127.0.0.1", h.port)).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // A new app with the key still gets in, on a new connection, at once.
+    let fresh = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        fresh
+            .get(h.url("/v1/models"))
+            .header("x-api-key", SHARE_KEY)
+            .send(),
+    )
+    .await
+    .expect("no answer")
+    .expect("the connection was refused");
+    assert_eq!(response.status(), 200);
+    // The answer being streamed was never cut: its connection had sent the key.
+    let mut body = String::new();
+    let mut stream = streaming.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        body.push_str(&String::from_utf8_lossy(
+            &chunk.expect("the stream was cut"),
+        ));
+    }
+    assert_eq!(body.matches("data: ").count(), 8, "{body}");
+    // The idle connections that made room were closed.
+    let mut closed = 0;
+    for mut conn in idle {
+        let mut byte = [0u8; 1];
+        if let Ok(Ok(0)) =
+            tokio::time::timeout(Duration::from_millis(50), conn.read(&mut byte)).await
+        {
+            closed += 1;
+        }
+    }
+    assert!(closed >= 8, "{closed}");
 }
 
 #[tokio::test]

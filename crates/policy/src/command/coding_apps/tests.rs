@@ -779,6 +779,16 @@ fn parentheses_and_backticks_stay_linear() {
             "(which (".repeat(size / 8),
             "& (gcm ".repeat(size / 7),
             format!("{} -p x", "$(".repeat(size / 2)),
+            // A locator's command is read to its end (review of 0.0.6, round 4): many
+            // locators that share one far end, nested ones, ones that never end, and one
+            // long one.
+            format!("{})", "$(which x ".repeat(size / 10)),
+            format!("{}{}", "$(echo ".repeat(size / 8), ")".repeat(size / 8)),
+            "`which x ".repeat(size / 9),
+            format!("{}`", "`echo ".repeat(size / 6)),
+            format!("{}x", "x=$(which claude ".repeat(size / 17 + 1)),
+            format!("$(which claude{}) -p x", " ".repeat(size)),
+            format!("& (gcm {})", "-a ".repeat(size / 3)),
         ]
     };
     for (size, limit) in [(16 * 1024, 5), (64 * 1024, 15)] {
@@ -805,6 +815,154 @@ fn parentheses_and_backticks_stay_linear() {
                         &line[..24]
                     );
                 }
+            }
+        }
+    }
+}
+
+/// A locator's command is read to its end however long it is: white space or options
+/// before its closing `)` or backtick (`$(which claude<1100 spaces>)`,
+/// `$(which -a -a … claude)`) do not hide the name it finds (review of 0.0.6, round 4).
+#[test]
+fn a_a_long_locator_command_is_read_to_its_end() {
+    let pad = " ".repeat(1100);
+    let options = "-a ".repeat(400);
+    for line in [
+        format!("$(which claude{pad}) -p x"),
+        format!("`which claude{pad}`"),
+        format!("`which claude{pad}` -p x"),
+        format!("\"$(command -v claude{pad})\" -p x"),
+        format!("x=$(which claude{pad}); $x"),
+        format!("$(which {options}claude)"),
+        format!("$(which {options}claude) -p x"),
+        format!("$({pad}which claude) -p x"),
+        format!("env $(which codex{pad}) exec x"),
+    ] {
+        assert!(line.len() > 1024, "{}", line.len());
+        assert_asks(SH, &line);
+    }
+    for line in [
+        format!("& (Get-Command claude{pad}) -p x"),
+        format!("& (gcm {options}codex) exec x"),
+        format!("Start-Process -FilePath (Get-Command claude{pad}).Source"),
+    ] {
+        assert_asks(PS, &line);
+    }
+    for line in [
+        format!("$(which cargo{pad}) test"),
+        format!("echo $(which claude{pad})"),
+        format!("ls -l `which claude{pad}`"),
+        format!("x=$(which claude{pad}); echo $x"),
+    ] {
+        assert_not_seen(SH, &line);
+    }
+    assert_not_seen(PS, &format!("(Get-Command claude{pad}).Source"));
+}
+
+/// After a wrapper or a run word, a pattern in the program's place counts only when it
+/// fixes a letter of an assistant's name: one whose last part is only wildcards
+/// (`./scripts/*`, `src/*`, `*`) is an argument, and after a bare `--` (or where the word
+/// before may be an option's value) the pattern must fix the first letter of the name
+/// (`kubectl exec pod -- c*`), so file patterns such as `*.exe` stay arguments (review of
+/// 0.0.6, round 4).
+#[test]
+fn a_a_pattern_that_fixes_no_letter_of_a_name_is_an_argument() {
+    for line in [
+        "kubectl exec pod -- c* -p x",
+        "kubectl exec pod -- c*",
+        "timeout 9 ~/.local/bin/c* -p x",
+        "timeout 9 ~/.local/bin/c*",
+        "mise exec -- ~/.local/bin/cl?ude -p x",
+        "sometool run -- ~/.local/bin/co* exec x",
+        "runuser -u me -- c* -p x",
+        "uv run ~/.local/bin/*laude -p x",
+        "timeout 9 ~/.local/bin/??aude -p x",
+        "uv run --frozen ~/.local/bin/c* -p x",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "pnpm test -- src/*",
+        "cargo run --release -- data/*",
+        "go run . -- *",
+        "yarn test -- *",
+        "uv run ./scripts/*",
+        "timeout 60 ./build/*",
+        "cargo test -- *",
+        "kubectl exec pod -- *",
+        "go run . -- *.exe",
+        "timeout 60 ./build/*.exe",
+        "nice -n 5 ./bin/*",
+        "sudo -u me ./bin/*",
+        "docker run --rm img ./scripts/*",
+        "uv run --frozen ./scripts/*",
+        "cpulimit -l 50 -- ./build/*",
+        "timeout 9 ~/.local/bin/??????",
+    ] {
+        assert_not_seen(SH, line);
+    }
+}
+
+/// After a run word, a wrapper or a shell in the program's place is read as a command of
+/// its own (`uv run env ~/.local/bin/c*`, `poetry run nice -n 5 ~/.local/bin/c*`), and
+/// before the run word the value of an option (`docker compose -f a.yml -f b.yml run …`)
+/// does not count among the program's first three plain words (review of 0.0.6, round 4).
+#[test]
+fn a_a_wrapper_after_a_run_word_and_option_values_before_it() {
+    for line in [
+        "uv run env ~/.local/bin/c* -p x",
+        "pixi run timeout 9 ~/.local/bin/c* -p x",
+        "poetry run nice -n 5 ~/.local/bin/c*",
+        "bundle exec sudo -u me c* -p x",
+        "uv run --frozen env FOO=1 ~/.local/bin/cl?ude -p x",
+        "docker run --rm -it img env c* -p x",
+        "nix develop -c env ~/.local/bin/c* -p x",
+        "docker compose -f a.yml -f b.yml run --rm app claude -p x",
+        "docker -H tcp://h:2375 compose -p proj -f a.yml run app claude -p x",
+        "kubectl -n ns -c ctx --context x exec -it pod -- codex exec x",
+        "docker -c ctx compose -f a.yml run app claude",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "uv run env FOO=1 pytest tests/*",
+        "pixi run timeout 9 ./build/*",
+        "poetry run nice -n 5 python app.py --model claude",
+        "uv run sh -c 'cargo test'",
+        "docker compose -f a.yml -f b.yml run --rm app cargo test",
+        "docker -H tcp://h:2375 compose -p proj -f a.yml run app pytest",
+    ] {
+        assert_not_seen(SH, line);
+    }
+}
+
+/// Keywords and settings in front of a command's program are dropped in linear time: a line
+/// of 256 KB of `if` or of `A=1` before a `(` is read in bounded time (review of 0.0.6,
+/// round 4). The limit is generous for slow runners; a debug build takes a small part of it.
+#[test]
+fn leading_keywords_and_settings_stay_linear() {
+    let size = 256 * 1024;
+    for line in [
+        format!("{}(x)", "if ".repeat(size / 3)),
+        format!("{}(x)", "A=1 ".repeat(size / 4)),
+        format!("{}claude -p x", "then ".repeat(size / 5)),
+    ] {
+        for shell in [SH, PS] {
+            let parsed = parse(shell, &line);
+            let started = std::time::Instant::now();
+            let found = find(&line, &parsed);
+            let took = started.elapsed();
+            eprintln!("PROBE {shell:?} {:?} {took:?}", &line[..6]);
+            assert!(
+                took < std::time::Duration::from_secs(3),
+                "{shell:?}, {} bytes starting {:?}: {took:?}",
+                line.len(),
+                &line[..12]
+            );
+            if let Some(why) = found
+                && why != TOO_MUCH
+            {
+                assert!(line.contains("claude"), "{shell:?} {:?}: {why}", &line[..12]);
             }
         }
     }

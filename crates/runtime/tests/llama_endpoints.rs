@@ -347,6 +347,47 @@ async fn chat_completions_contract() {
     assert!(data.iter().all(|d| d["model"] == json!(MODEL_ALIAS)));
     assert!(data.iter().any(|d| d["timings"]["predicted_n"].is_u64()));
     assert!(data.iter().any(|d| d["usage"]["prompt_tokens"].is_u64()));
+
+    // The content part types llama-server's media loader reads, where it would download a
+    // value that starts with http: exactly the ones the proxy checks (`MEDIA_KEYS` in
+    // share/proxy.rs, round 1). This model has no image or audio reader, so a media part is
+    // refused with "... input is not supported" before anything is fetched; any other type
+    // is "unsupported content[].type". A llama.cpp update that reads another type fails here.
+    let mut media = Vec::new();
+    for kind in [
+        "image_url",
+        "input_audio",
+        "input_video",
+        "video_url",
+        "audio_url",
+        "input_image",
+        "input_file",
+        "file",
+        "image",
+        "document",
+    ] {
+        let part =
+            json!({"type": kind, kind: {"url": "data:image/png;base64,AAAA", "data": "AAAA"}});
+        let (status, text) = post(
+            &server,
+            "/v1/chat/completions",
+            json!({"model": "x", "max_tokens": 1, "messages": [{"role": "user", "content": [part]}]}),
+        )
+        .await;
+        assert_ne!(status, 200, "{kind}: {text}");
+        if text.contains("input is not supported") {
+            media.push(kind);
+        } else {
+            assert!(
+                text.contains("unsupported content[].type"),
+                "{kind}: {text}"
+            );
+        }
+    }
+    assert_eq!(
+        media,
+        ["image_url", "input_audio", "input_video", "video_url"]
+    );
     server.stop().await;
 }
 

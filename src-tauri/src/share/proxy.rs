@@ -10,8 +10,11 @@
 //!   `127.0.0.1:<port>` or `localhost:<port>` (DNS rebinding), there is no `Origin` header
 //!   (web pages), and the sharing key (`x-api-key` or `Authorization: Bearer`, each at most
 //!   once) is in one of them, compared in constant time. Refused requests are counted in
-//!   memory only, never audited, and over [`REFUSALS_PER_SECOND`] they are answered with a
-//!   bare 429 and the connection is closed.
+//!   memory only, never audited, and their connection is closed; over
+//!   [`REFUSALS_PER_SECOND`] they are answered with a bare 429.
+//! - **Connection slots** ([`MAX_CONNECTIONS`]): when all are taken, the oldest connection
+//!   that never sent the key is closed to make room, so a local program without the key
+//!   cannot keep apps out by opening connections and leaving them idle.
 //! - **Exact paths only**: `POST /v1/messages`, `POST /v1/messages/count_tokens`,
 //!   `POST /v1/responses`, `POST /v1/chat/completions`, and `GET /v1/models`, which the
 //!   proxy answers itself with [`MODEL_ALIAS`]. The path is compared byte for byte, so
@@ -35,18 +38,22 @@
 //! - **One audit row per authenticated generation request** (server `other-apps`, the
 //!   path, what the caller says it is, token counts and the result; never the request
 //!   text), `count_tokens` at most once a minute. The decision is the existing
-//!   `allowed_without_prompt` (D9).
+//!   `allowed_without_prompt` (D9). A request the proxy answers itself also has its row
+//!   (round 1), result `not_run` with the reason: `refused_by_policy` when one of its rules
+//!   refused it (too large, too slow, not JSON, a link instead of inline data), else
+//!   `allowed_without_prompt` (no model loaded, still loading).
 //! - **The busy counter** ([`BusyKind::OtherApp`]) is held while a request runs (D3); the
 //!   in-app chat is never blocked by it. A caller that leaves a streamed answer unread for
 //!   [`CALLER_STALL`] is cut off, so an app that hangs cannot hold it for ever.
 //! - **The approval mode changes nothing here** (D12): the proxy is not a tool action, reads
 //!   no mode, and its switch is changed only by the user.
 
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -73,8 +80,11 @@ pub const MAX_BODY: usize = 32 * 1024 * 1024;
 pub const MAX_OUTPUT_TOKENS: u64 = 32_768;
 /// Refused requests answered normally per second; the rest get a bare 429.
 pub const REFUSALS_PER_SECOND: u32 = 20;
-/// Connections served at once; more are closed as soon as they are accepted.
-const MAX_CONNECTIONS: usize = 32;
+/// Connections served at once. When all are taken, the oldest one that never sent the
+/// sharing key is closed to make room (so a program without the key cannot keep apps out
+/// by holding every one); when every one has sent the key, a new one is closed at once.
+/// Kept well under the 256 open files a macOS app gets by default.
+pub const MAX_CONNECTIONS: usize = 64;
 /// How long a client may take to send its request line and headers.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a client may take to send its body.
@@ -558,9 +568,9 @@ fn check_media(value: &Value) -> Result<(), BadRequest> {
 fn is_inline(value: &str) -> bool {
     is_data_url(value)
         || (!value.trim().is_empty()
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b) || b.is_ascii_whitespace()))
+            && value.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || b"+/=".contains(&b) || b.is_ascii_whitespace()
+            }))
 }
 
 fn is_data_url(url: &str) -> bool {
@@ -1084,7 +1094,12 @@ impl Shared {
             Refused::Key => (StatusCode::UNAUTHORIZED, "Invalid API key."),
         };
         let code = (why == Refused::Key).then_some("invalid_api_key");
-        json_response(status, &error_body(api, status, message, code))
+        let mut response = json_response(status, &error_body(api, status, message, code));
+        // A refused caller does not keep its connection (round 1).
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+        response
     }
 }
 
@@ -1132,8 +1147,37 @@ pub fn serve(listener: TcpListener, deps: Deps) -> io::Result<Running> {
     Ok(Running { port, cancel, task })
 }
 
+/// One connection the accept loop serves, as the loop sees it.
+struct Slot {
+    /// Set once a request on it carried the sharing key.
+    keyed: Arc<AtomicBool>,
+    /// Set when it has ended.
+    done: Arc<AtomicBool>,
+    /// Ends it.
+    cancel: CancellationToken,
+}
+
+/// Makes room for one more connection: forgets the ones that ended and, when every slot is
+/// taken, closes the oldest one that never sent the sharing key. False when every slot
+/// holds a connection that sent the key (the new one is then closed).
+fn make_room(slots: &mut VecDeque<Slot>) -> bool {
+    slots.retain(|s| !s.done.load(Ordering::Relaxed));
+    if slots.len() < MAX_CONNECTIONS {
+        return true;
+    }
+    match slots.iter().position(|s| !s.keyed.load(Ordering::Relaxed)) {
+        Some(oldest) => {
+            if let Some(slot) = slots.remove(oldest) {
+                slot.cancel.cancel();
+            }
+            true
+        }
+        None => false,
+    }
+}
+
 async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, cancel: CancellationToken) {
-    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    let mut slots = VecDeque::new();
     let mut connections = tokio::task::JoinSet::new();
     loop {
         let accepted = tokio::select! {
@@ -1153,15 +1197,26 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, cancel: Cancell
         if !peer.ip().is_loopback() {
             continue;
         }
-        let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
+        if !make_room(&mut slots) {
             continue;
+        }
+        let slot = Slot {
+            keyed: Arc::new(AtomicBool::new(false)),
+            done: Arc::new(AtomicBool::new(false)),
+            cancel: cancel.child_token(),
         };
+        let (keyed, done, cancel) = (
+            Arc::clone(&slot.keyed),
+            Arc::clone(&slot.done),
+            slot.cancel.clone(),
+        );
+        slots.push_back(slot);
         let shared = Arc::clone(&shared);
-        let cancel = cancel.clone();
         connections.spawn(async move {
             let service = hyper::service::service_fn(move |req| {
                 let shared = Arc::clone(&shared);
-                async move { Ok::<_, Infallible>(handle(req, &shared).await) }
+                let keyed = Arc::clone(&keyed);
+                async move { Ok::<_, Infallible>(handle(req, &shared, &keyed).await) }
             });
             let mut builder = hyper::server::conn::http1::Builder::new();
             builder
@@ -1174,7 +1229,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, cancel: Cancell
                 _ = connection => {}
                 () = cancel.cancelled() => {}
             }
-            drop(slot);
+            done.store(true, Ordering::Relaxed);
         });
     }
     drop(listener);
@@ -1182,7 +1237,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, cancel: Cancell
     while connections.join_next().await.is_some() {}
 }
 
-async fn handle(req: Request<Incoming>, shared: &Shared) -> Response<Body> {
+async fn handle(req: Request<Incoming>, shared: &Shared, keyed: &AtomicBool) -> Response<Body> {
     let path = req.uri().path().to_owned();
     let api = Api::from_path(&path);
     let port = shared.deps.port;
@@ -1192,6 +1247,8 @@ async fn handle(req: Request<Incoming>, shared: &Shared) -> Response<Body> {
     if !key_matches(req.headers(), &shared.key()) {
         return shared.refuse(api, Refused::Key);
     }
+    // This connection is now never closed to make room for another.
+    keyed.store(true, Ordering::Relaxed);
     match route(req.method(), &path) {
         Route::Models => json_response(StatusCode::OK, &models_body()),
         Route::Api(api) => forward(req, api, shared).await,
@@ -1545,7 +1602,10 @@ fn audit_entry(
         format!("It says it is {caller}.")
     };
     let preview = if forwarded {
-        format!("Another app used the loaded model ({}). {says}", api.label())
+        format!(
+            "Another app used the loaded model ({}). {says}",
+            api.label()
+        )
     } else {
         format!(
             "Another app sent a request ({}) that was not passed to the model. {says}",

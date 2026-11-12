@@ -1144,7 +1144,12 @@ pub(crate) fn audit_entry(
     let (mut label, mut audit_decision, note) = decision_name(decision);
     // Skills and `run_subagent` never prompt (D11): record them as such, not as a grant.
     if audit_decision == store::AuditDecision::AllowedByGrant
-        && action.is_some_and(|a| matches!(a.scope, policy::Scope::Skill | policy::Scope::AppData))
+        && action.is_some_and(|a| {
+            matches!(
+                a.scope,
+                policy::Scope::Skill | policy::Scope::AppData | policy::Scope::FileAnalysisSession
+            )
+        })
     {
         audit_decision = store::AuditDecision::AllowedWithoutPrompt;
         label = "no approval needed";

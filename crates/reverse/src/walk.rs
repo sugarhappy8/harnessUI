@@ -277,7 +277,7 @@ pub fn is_network_or_device(text: &str, flavor: Flavor) -> bool {
 }
 
 /// `C:\x` for `\\?\C:\x` or `\??\C:\x` (either slash), else `None`.
-fn verbatim_drive(text: &str) -> Option<&str> {
+pub(crate) fn verbatim_drive(text: &str) -> Option<&str> {
     let rest = ["\\\\?\\", "//?/", "\\??\\"]
         .iter()
         .find_map(|p| text.strip_prefix(p))?;
@@ -344,7 +344,7 @@ fn check_link(
     // already the whole computer (`approvals::widen`), and a forbidden folder is refused
     // by the sandbox before containment is looked at.
     let checked = |path: &str| sandbox.check(path, None, fs).map_err(|_: PathError| out());
-    let by_text = checked(&target)?;
+    checked(&target)?;
     let by_system = checked(link)?;
     if !by_system.exists {
         // A dangling link: its text was checked above; nothing to look inside.
@@ -360,10 +360,7 @@ fn check_link(
             })
         }
         // Resolves to a link: the sandbox resolved it fully, so this cannot happen; refuse.
-        Some(EntryKind::Link) | None => {
-            let _ = by_text;
-            Err(out())
-        }
+        Some(EntryKind::Link) | None => Err(out()),
     }
 }
 
@@ -569,6 +566,9 @@ pub(crate) mod fake {
                         }
                         cur.components.pop();
                         let base = cur.to_string();
+                        // Windows reports absolute links in the verbatim form.
+                        let target = super::verbatim_drive(&target)
+                            .map_or(target.clone(), str::to_string);
                         let t = if super::is_absolute(&target, self.flavor) {
                             target
                         } else {

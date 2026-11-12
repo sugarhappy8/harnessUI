@@ -86,6 +86,11 @@ one starts from this file and `README.md`.
   WP9a; WP3b fixed (being checked next); WP5a reviewed; WP6 second fix round being checked.
   Disk 6.4 GB → 9.3 GB after removing finished reviewers' scratch and superseded test
   binaries in target/debug/deps.
+- 22:51 UTC check: done: WP1a? (second fix round running), WP3b, WP4a, WP4b, WP4c, WP7, WP9a,
+  WP10c. WP6: round 4 of classifier fixes (wf_5cb207f6-6b1), then known limits written down.
+  Checking fixes: WP1b, WP3a. Fixing: WP5a; WP2 and WP5b fixed, checks queued. Developing:
+  WP9b, WP9c (then WP9g, WP9d, WP9h, then WP9e). Waiting: WP8 (after WP1b/WP2), WP10a, WP10b,
+  WP10d, WP10e (after the models run).
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

@@ -4458,7 +4458,9 @@ def p_share_proxy(c, notes):
     app (the commands and the proxy; the page itself is WP5b's other-apps scenario). The
     checks before the key, the answers with no model, then the real small model (TEST_GGUF)
     through all four APIs: answers cleaned, the busy counter held while a reply streams,
-    one audit row per request without its text, the setup text, a new key, switching off."""
+    one audit row per request without its text, the setup text, a new key, switching off.
+    Round 1: audio and video links refused by the proxy; rows for the requests it answered
+    itself (no model, links)."""
     import re
     import tomllib
     s = c.s
@@ -4555,6 +4557,19 @@ def p_share_proxy(c, notes):
         link = [{"role": "user", "content": [{"type": "image", "source": {"type": "url", "url": "http://example.com/a.png"}}]}]
         status, body = share_call(port, "POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": link}, key=key)
         assert status == 400, (status, body)
+        # Round 1: audio and video given as links, in the shapes llama-server's media loader
+        # reads (it would download them), are refused by the proxy (400), never passed on (a
+        # 500 "audio input is not supported" would mean llama-server got them).
+        here = "http://169.254.169.254/latest/meta-data/"
+        for part in ({"type": "input_audio", "input_audio": {"data": here, "format": "wav"}},
+                     {"type": "input_audio", "input_audio": {"url": here, "format": "wav"}},
+                     {"type": "input_video", "input_video": {"url": here}},
+                     {"type": "input_video", "input_video": {"data": here}},
+                     {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA", "data": here}}):
+            status, body = share_call(port, "POST", "/v1/chat/completions",
+                                      {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": [part]}]},
+                                      key=key, bearer=True)
+            assert status == 400 and "sent inline" in json.loads(body)["error"]["message"], (part, status, body)
 
         # While a reply streams, the model counts as busy (D3) and the page says it is in use.
         import http.client
@@ -4578,14 +4593,27 @@ def p_share_proxy(c, notes):
         # One audit row per request, never its text; the decision is an existing one (D9).
         def rows():
             return [a for a in s.invoke("list_audit", {"filter": {"limit": 500}}) if a["server"] == "other-apps"]
-        s.wait_for(lambda: all(a["result_status"] for a in rows()) and len(rows()) >= 6, 15, "the audit rows")
-        audit = rows()
-        notes.append("audit: " + json.dumps([(a["tool"], a["decision"], a["result_status"], a["result_summary"]) for a in audit]))
+        s.wait_for(lambda: all(a["result_status"] for a in rows()) and len(rows()) >= 14, 15, "the audit rows")
+        everything = rows()
+        notes.append("audit: " + json.dumps([(a["tool"], a["decision"], a["result_status"], a["result_summary"]) for a in everything]))
+        assert len(everything) == 14, len(everything)
+        # Round 1: the requests the proxy answered itself have their rows too: no model loaded
+        # (Messages, Responses), and the six links refused by its rule (never the link itself).
+        unforwarded = [a for a in everything if a["result_status"] == "not_run"]
+        assert sorted((a["tool"], a["decision"], a["result_summary"]) for a in unforwarded) == sorted(
+            [("/v1/messages", "allowed_without_prompt", "No model was loaded."),
+             ("/v1/responses", "allowed_without_prompt", "No model was loaded."),
+             ("/v1/messages", "refused_by_policy", "Refused: an image, audio, video or file was sent as a link or a file id, not inline.")]
+            + [("/v1/chat/completions", "refused_by_policy",
+                "Refused: an image, audio, video or file was sent as a link or a file id, not inline.")] * 5), unforwarded
+        assert all("was not passed to the model" in a["preview"] for a in unforwarded), unforwarded
+        assert "example.com" not in json.dumps(unforwarded) and "169.254" not in json.dumps(unforwarded)
+        audit = [a for a in everything if a["result_status"] != "not_run"]
         tools = sorted(a["tool"] for a in audit)
         assert tools == sorted(["/v1/messages", "/v1/messages", "/v1/chat/completions", "/v1/responses",
                                 "/v1/messages/count_tokens", "/v1/chat/completions"]), tools
         assert all(a["decision"] == "allowed_without_prompt" and a["result_status"] == "ok" for a in audit), audit
-        assert secret_prompt not in json.dumps(audit)
+        assert secret_prompt not in json.dumps(everything)
         assert any("It says it is claude-cli/9.9 (e2e)." in a["preview"] for a in audit), [a["preview"] for a in audit]
         assert any("tokens in" in (a["result_summary"] or "") for a in audit), audit
 
@@ -4771,7 +4799,8 @@ def p_other_apps(c, notes):
 
         def rows():
             return [a for a in s.invoke("list_audit", {"filter": {"limit": 500}})
-                    if a["server"] == "other-apps" and "e2e-other-apps/1.0" in (a["preview"] or "")]
+                    if a["server"] == "other-apps" and "e2e-other-apps/1.0" in (a["preview"] or "")
+                    and a["result_status"] != "not_run"]
         s.wait_for(lambda: len(rows()) == 1 and rows()[0]["result_status"], 15, "the audit row")
         row = rows()[0]
         assert row["tool"] == "/v1/messages" and row["result_status"] == "ok", row

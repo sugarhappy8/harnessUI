@@ -1,31 +1,66 @@
-//! The one rea process of the app (item5-spec.md WP9b `process.rs`, R9, R12): every call
-//! holds its lock ([`ReaGuard`]), so calls run one at a time and the checks of WP9g run
-//! while nothing else can reach rea. Started on first use, stopped after 15 minutes
+//! The one rea process of the app (item5-spec.md WP9b `process.rs`, R7, R9, R12, R15): every
+//! call holds its lock ([`ReaGuard`]), so calls run one at a time and the checks of WP9g run
+//! while nothing else can reach rea. Started on first use, stopped after [`IDLE_STOP`]
 //! without a call, on [`ReaProcess::restart`] and when the app quits.
 //!
-//! TODO(0.0.6): WP9b builds this (refusals before a start: a Mac without Apple's tools, a
-//! missing, broken or not-accepted install; `reverse/tmp` emptied at each start; the idle
-//! stop; `Failed` with the masked stderr tail). This is WP9a's contract stub: the types and
-//! signatures are frozen; it starts nothing and answers with fixed sample data.
+//! - **Before a start** ([`ReaGuard::ensure_started`]), checked fresh each time: a Mac
+//!   without Apple's command line tools never starts rea (R7: its `xcrun` would open Apple's
+//!   install window); rea must be installed and usable (marker present, every program
+//!   present with its size, not blocked, at or above its minimum version and one of the
+//!   accepted rea versions), and so must the decompiler the configuration names; the program
+//!   must be the pack's `node` and the arguments exactly `[<rea>/scripts/rea.mjs, "mcp"]`,
+//!   both inside the reverse folder (R9). Then `reverse/tmp` is emptied, the folders the
+//!   environment names are created and rea is started through [`mcp_host::ManagedServer`].
+//! - **Generation:** grows at every start, so WP9g can tell that rea lost the chat's open
+//!   file (R21). A running rea whose configuration differs from the one asked for (another
+//!   decompiler) is stopped and started again, never reused.
+//! - **Stopping:** [`ReaProcess::stop`] does not wait for a call that runs: rea's standard
+//!   input is closed at once, rea gets the grace to end Kuna or Java itself, then its tree is
+//!   killed, and the call ends as [`ReverseError::Stopped`]. A start that finishes after a
+//!   stop is undone. After [`RestartReason::Quit`] nothing starts again.
+//! - **State** for the tab: `Failed` carries the stderr tail with the reverse folder masked
+//!   ([`crate::results::mask`]) and invisible characters made visible.
+//!
+//! Known limit: on macOS and Linux rea starts Kuna and Java in process groups of their own.
+//! If the app itself crashes, those can outlive it until they notice the closed pipe. Stop,
+//! the timeout, the idle stop and quitting all give rea time to end them first. On Windows
+//! the app's Job Object ends them in every case.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
-use mcp_host::{ProgressFn, ToolAllowList, ToolOutput};
+use async_trait::async_trait;
+use mcp_host::{
+    CallOutcome, HostError, Lifecycle, ManagedServer, ManagedSpec, ProgressFn, ToolAllowList,
+    ToolOutput,
+};
 use serde_json::{Map, Value};
 use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::install::Installer;
 use crate::layout::ReverseLayout;
-use crate::platform::Platform;
-use crate::{ReverseError, RunState};
+use crate::platform::{self, Platform};
+use crate::{AppleTools, Component, ReverseError, RunState};
 
 /// Stopped after this long without a call.
 pub const IDLE_STOP: Duration = Duration::from_secs(15 * 60);
 /// Grace given to rea to end Kuna or Java itself before its tree is killed.
 pub const STOP_GRACE: Duration = Duration::from_secs(3);
+/// rea's stderr log in the app's log folder ([`ReaProcess::set_log_dir`]); no user server's
+/// `mcp-server-<name>.log` can be this file.
+pub const LOG_FILE_NAME: &str = "mcp-reverse.log";
+
+/// The managed server's name in its log.
+const SERVER_NAME: &str = "reverse";
+/// Lines of the stderr tail kept for "Show details".
+const TAIL_LINES: usize = 20;
+/// Longest "Show details" text.
+const MAX_DETAILS_CHARS: usize = 8000;
 
 /// How to start rea (built by [`crate::env::run_config`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +75,25 @@ pub struct RunConfig {
     pub cwd: PathBuf,
     /// 180 s on the first start after an install or repair, 60 s after.
     pub start_timeout: Duration,
+}
+
+impl RunConfig {
+    /// The same configuration, ignoring the start limit.
+    fn same_as(&self, other: &RunConfig) -> bool {
+        self.program == other.program
+            && self.args == other.args
+            && self.env == other.env
+            && self.cwd == other.cwd
+    }
+
+    fn var(&self, name: &str) -> Option<&str> {
+        self.env
+            .set
+            .iter()
+            .rev()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 /// Why rea is restarted (each ends every chat's open file).
@@ -66,103 +120,422 @@ pub struct Started {
     pub fresh: bool,
 }
 
+/// One rea process as seen from here: a [`ManagedServer`], or a test double.
+#[async_trait]
+pub(crate) trait Rea: Send + Sync {
+    async fn start(&self) -> Result<Vec<(String, Value)>, HostError>;
+    async fn call(
+        &self,
+        allow: &ToolAllowList,
+        name: &str,
+        args: Map<String, Value>,
+        timeout: Duration,
+        cancel: &CancellationToken,
+        progress: Option<ProgressFn>,
+    ) -> Result<CallOutcome, HostError>;
+    async fn stop(&self, grace: Duration);
+    fn is_running(&self) -> bool;
+    fn ended_unexpectedly(&self) -> bool;
+    fn stderr_tail(&self) -> Vec<String>;
+    fn lifecycle(&self) -> Option<Lifecycle>;
+}
+
+#[async_trait]
+impl Rea for ManagedServer {
+    async fn start(&self) -> Result<Vec<(String, Value)>, HostError> {
+        ManagedServer::start(self).await
+    }
+    async fn call(
+        &self,
+        allow: &ToolAllowList,
+        name: &str,
+        args: Map<String, Value>,
+        timeout: Duration,
+        cancel: &CancellationToken,
+        progress: Option<ProgressFn>,
+    ) -> Result<CallOutcome, HostError> {
+        self.call_outcome(allow, name, args, timeout, cancel, progress)
+            .await
+    }
+    async fn stop(&self, grace: Duration) {
+        ManagedServer::stop(self, grace).await;
+    }
+    fn is_running(&self) -> bool {
+        ManagedServer::is_running(self)
+    }
+    fn ended_unexpectedly(&self) -> bool {
+        ManagedServer::ended_unexpectedly(self)
+    }
+    fn stderr_tail(&self) -> Vec<String> {
+        ManagedServer::stderr_tail(self)
+    }
+    fn lifecycle(&self) -> Option<Lifecycle> {
+        ManagedServer::lifecycle(self)
+    }
+}
+
+/// Makes the server for one start.
+pub(crate) type Launch = Arc<dyn Fn(ManagedSpec, Option<Lifecycle>) -> Arc<dyn Rea> + Send + Sync>;
+
+fn launch_managed() -> Launch {
+    Arc::new(|spec, lifecycle| -> Arc<dyn Rea> {
+        Arc::new(ManagedServer::new(spec).with_lifecycle(lifecycle))
+    })
+}
+
+/// The rea that runs now.
+struct Running {
+    server: Arc<dyn Rea>,
+    config: RunConfig,
+    generation: u64,
+    tools: Vec<(String, Value)>,
+}
+
 #[derive(Default)]
-struct Inner {
-    started: bool,
+struct Status {
+    running: Option<Running>,
+    /// The server being started, so a stop can cut the start short.
+    starting: Option<Arc<dyn Rea>>,
+    /// The chat whose call runs (0 when the caller did not say).
+    busy: Option<i64>,
+    /// Why the last start failed or rea crashed ("Show details").
+    failed: Option<String>,
+    last_used: Option<Instant>,
+    idle_task: Option<JoinHandle<()>>,
+    quitting: bool,
+    /// Grows at every stop: a start that finishes after one is undone.
+    stops: u64,
+    lifecycle: Option<Lifecycle>,
+}
+
+struct Shared {
+    layout: ReverseLayout,
+    platform: Platform,
+    calls: Arc<Mutex<()>>,
+    status: StdMutex<Status>,
+    generation: AtomicU64,
+    installer: StdMutex<Arc<Installer>>,
+    log_file: StdMutex<Option<PathBuf>>,
+    launch: Launch,
+    /// Where Apple's tools are looked for ("/"; tests use a fake tree).
+    apple_root: PathBuf,
+}
+
+impl Shared {
+    fn status(&self) -> std::sync::MutexGuard<'_, Status> {
+        self.status.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn installer(&self) -> Arc<Installer> {
+        self.installer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Text from rea for the tab: the reverse folder masked, invisible characters made
+    /// visible, capped.
+    fn clean(&self, text: &str) -> String {
+        let masked = crate::results::mask(text, self.layout.root());
+        let visible = policy::sanitize::visible(&masked);
+        let count = visible.chars().count();
+        if count <= MAX_DETAILS_CHARS {
+            return visible;
+        }
+        // Keep the end: the last lines say what went wrong.
+        visible.chars().skip(count - MAX_DETAILS_CHARS).collect()
+    }
+
+    fn details(&self, server: &dyn Rea) -> String {
+        let tail = server.stderr_tail();
+        let start = tail.len().saturating_sub(TAIL_LINES);
+        self.clean(&tail[start..].join("\n"))
+    }
 }
 
 /// The one rea process.
 pub struct ReaProcess {
-    layout: ReverseLayout,
-    platform: Platform,
-    inner: Arc<Mutex<Inner>>,
-    generation: AtomicU64,
+    shared: Arc<Shared>,
 }
 
 /// Exclusive use of rea for one call (and the app's own housekeeping calls with it).
 pub struct ReaGuard {
     generation: u64,
-    inner: OwnedMutexGuard<Inner>,
+    chat: Option<i64>,
+    shared: Arc<Shared>,
+    _calls: OwnedMutexGuard<()>,
 }
 
 impl ReaProcess {
     /// Nothing runs until the first call.
     pub fn new(layout: ReverseLayout, platform: Platform) -> Self {
+        Self::build(layout, platform, launch_managed(), PathBuf::from("/"))
+    }
+
+    fn build(layout: ReverseLayout, platform: Platform, launch: Launch, apple_root: PathBuf) -> Self {
         Self {
-            layout,
-            platform,
-            inner: Arc::new(Mutex::new(Inner::default())),
-            generation: AtomicU64::new(0),
+            shared: Arc::new(Shared {
+                installer: StdMutex::new(Arc::new(Installer::new(layout.clone(), platform))),
+                layout,
+                platform,
+                calls: Arc::new(Mutex::new(())),
+                status: StdMutex::new(Status::default()),
+                generation: AtomicU64::new(0),
+                log_file: StdMutex::new(None),
+                launch,
+                apple_root,
+            }),
         }
+    }
+
+    /// Checks installs with this installer instead of the app's own (a server built over a
+    /// test lock: `ReverseServer::with_installer` passes its installer here).
+    pub fn set_installer(&self, installer: Arc<Installer>) {
+        *self
+            .shared
+            .installer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = installer;
+    }
+
+    /// Writes rea's stderr to [`LOG_FILE_NAME`] in `dir` (the app's log folder) from the
+    /// next start on; `None` keeps it in memory only.
+    pub fn set_log_dir(&self, dir: Option<&Path>) {
+        *self
+            .shared
+            .log_file
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = dir.map(|d| d.join(LOG_FILE_NAME));
     }
 
     /// The folders rea runs in.
     pub fn layout(&self) -> &ReverseLayout {
-        &self.layout
+        &self.shared.layout
     }
 
     /// The platform.
     pub fn platform(&self) -> Platform {
-        self.platform
+        self.shared.platform
     }
 
     /// Waits for rea to be free and holds it.
     pub async fn lock(&self) -> ReaGuard {
-        let inner = self.inner.clone().lock_owned().await;
+        let calls = self.shared.calls.clone().lock_owned().await;
         ReaGuard {
             generation: self.generation(),
-            inner,
+            chat: None,
+            shared: self.shared.clone(),
+            _calls: calls,
         }
     }
 
     /// Grows at each start of rea.
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
+        self.shared.generation.load(Ordering::SeqCst)
+    }
+
+    /// Whether rea is starting or a call holds it (WP9d answers `busy` then, unless forced).
+    pub fn is_busy(&self) -> bool {
+        self.shared.status().starting.is_some() || self.shared.calls.try_lock().is_err()
     }
 
     /// For the tab's status line.
-    ///
-    /// TODO(0.0.6): WP9b. The stub is always stopped.
     pub fn state(&self) -> RunState {
-        RunState::Stopped
+        let s = self.shared.status();
+        if s.starting.is_some() {
+            return RunState::Starting;
+        }
+        if let Some(running) = &s.running {
+            if running.server.is_running() {
+                return match s.busy {
+                    Some(chat_id) => RunState::Busy { chat_id },
+                    None => RunState::Ready,
+                };
+            }
+            if running.server.ended_unexpectedly() {
+                return RunState::Failed {
+                    reason: self.shared.details(running.server.as_ref()),
+                };
+            }
+            // Stopped by the managed server itself after a call it did not end.
+            return RunState::Stopped;
+        }
+        match &s.failed {
+            Some(reason) => RunState::Failed {
+                reason: reason.clone(),
+            },
+            None => RunState::Stopped,
+        }
     }
 
-    /// Stops rea (it starts again on the next call).
-    ///
-    /// TODO(0.0.6): WP9b.
+    /// Stops rea (it starts again on the next call, except after [`RestartReason::Quit`]).
     pub async fn restart(&self, reason: RestartReason) {
-        let _ = reason;
+        if reason == RestartReason::Quit {
+            self.shared.status().quitting = true;
+        }
         self.stop(STOP_GRACE).await;
     }
 
-    /// Closes rea's standard input, waits up to `grace`, then ends its tree.
-    ///
-    /// TODO(0.0.6): WP9b.
+    /// Closes rea's standard input, waits up to `grace`, then ends its tree. A call that
+    /// runs ends as [`ReverseError::Stopped`]; a start that runs is cut short.
     pub async fn stop(&self, grace: Duration) {
-        let _ = grace;
-        let mut inner = self.inner.lock().await;
-        inner.started = false;
+        stop_shared(&self.shared, grace).await;
+    }
+}
+
+async fn stop_shared(shared: &Shared, grace: Duration) {
+    let (running, starting) = {
+        let mut s = shared.status();
+        s.stops += 1;
+        s.failed = None;
+        if let Some(task) = s.idle_task.take() {
+            task.abort();
+        }
+        (s.running.take(), s.starting.clone())
+    };
+    if let Some(server) = starting {
+        server.stop(grace).await;
+    }
+    if let Some(running) = running {
+        running.server.stop(grace).await;
     }
 }
 
 impl ReaGuard {
-    /// Starts rea with `config` unless it runs already.
-    ///
-    /// TODO(0.0.6): WP9b. The stub starts nothing and lists no tools.
-    pub async fn ensure_started(&mut self, config: RunConfig) -> Result<Started, ReverseError> {
-        let _ = config;
-        let fresh = !self.inner.started;
-        self.inner.started = true;
-        Ok(Started {
-            generation: self.generation + u64::from(fresh),
-            tools: Vec::new(),
-            fresh,
-        })
+    /// Says which chat the call belongs to, for the tab's "rea is working on a file…" state.
+    pub fn set_chat(&mut self, chat_id: i64) {
+        self.chat = Some(chat_id);
     }
 
-    /// Calls `name`, which must be in `allow` (refused before anything reaches rea).
-    ///
-    /// TODO(0.0.6): WP9b. The stub answers allowed names with a fixed sample result.
+    /// The generation this guard last saw (at the lock, or at its start of rea).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Starts rea with `config` unless it runs already with the same configuration. See the
+    /// module documentation for what is checked first.
+    pub async fn ensure_started(&mut self, config: RunConfig) -> Result<Started, ReverseError> {
+        let shared = self.shared.clone();
+        if shared.status().quitting {
+            return Err(ReverseError::Stopped);
+        }
+        check_before_start(&shared, &config)?;
+        let old = {
+            let mut s = shared.status();
+            if let Some(running) = &s.running
+                && running.server.is_running()
+                && running.config.same_as(&config)
+            {
+                self.generation = running.generation;
+                return Ok(Started {
+                    generation: running.generation,
+                    tools: running.tools.clone(),
+                    fresh: false,
+                });
+            }
+            if let Some(task) = s.idle_task.take() {
+                task.abort();
+            }
+            let old = s.running.take();
+            if let Some(old) = &old
+                && old.server.ended_unexpectedly()
+            {
+                s.failed = Some(shared.details(old.server.as_ref()));
+            }
+            old
+        };
+        if let Some(old) = old
+            && old.server.is_running()
+        {
+            // Another configuration (a decompiler switch that skipped restart()).
+            old.server.stop(STOP_GRACE).await;
+        }
+        let folders = crate::env::folders(&config, &shared.layout);
+        let tmp = shared.layout.tmp();
+        let prepared = tokio::task::spawn_blocking(move || prepare_folders(&tmp, &folders)).await;
+        match prepared {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(ReverseError::from(e)),
+            Err(e) => {
+                return Err(ReverseError::Io {
+                    message: e.to_string(),
+                });
+            }
+        }
+        let spec = ManagedSpec {
+            name: SERVER_NAME.into(),
+            program: config.program.clone(),
+            args: config.args.clone(),
+            env: config.env.clone(),
+            cwd: config.cwd.clone(),
+            log_file: shared
+                .log_file
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            start_timeout: config.start_timeout,
+        };
+        let (server, stops) = {
+            let mut s = shared.status();
+            let server = (shared.launch)(spec, s.lifecycle);
+            s.starting = Some(server.clone());
+            (server, s.stops)
+        };
+        let result = server.start().await;
+        // Decided under the lock, which is released before anything is awaited.
+        let after = {
+            let mut s = shared.status();
+            s.starting = None;
+            match result {
+                Ok(tools) if s.stops == stops && !s.quitting => {
+                    let generation = shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                    s.lifecycle = server.lifecycle().or(s.lifecycle);
+                    s.failed = None;
+                    s.last_used = Some(Instant::now());
+                    s.running = Some(Running {
+                        server: server.clone(),
+                        config,
+                        generation,
+                        tools: tools.clone(),
+                    });
+                    s.idle_task = Some(spawn_idle_stop(Arc::downgrade(&shared), generation));
+                    Ok(Started {
+                        generation,
+                        tools,
+                        fresh: true,
+                    })
+                }
+                // Stopped (or the app quit) while it started: undone below.
+                Ok(_) => Err(None),
+                Err(_) if s.stops != stops => Err(Some(ReverseError::Stopped)),
+                Err(error) => {
+                    let mut message = shared.clean(&error.to_string());
+                    let details = shared.details(server.as_ref());
+                    if !details.is_empty() && !message.contains(&details) {
+                        message = format!("{message}\n\n{details}");
+                    }
+                    s.failed = Some(message.clone());
+                    Err(Some(ReverseError::StartFailed { message }))
+                }
+            }
+        };
+        match after {
+            Ok(started) => {
+                self.generation = started.generation;
+                Ok(started)
+            }
+            Err(Some(error)) => Err(error),
+            Err(None) => {
+                server.stop(STOP_GRACE).await;
+                Err(ReverseError::Stopped)
+            }
+        }
+    }
+
+    /// Calls `name`, which must be in `allow` (refused before anything reaches rea). rea's
+    /// result comes back as it is (WP9g cleans it); a call stopped by `cancel` is
+    /// [`ReverseError::Cancelled`], one past its limit [`ReverseError::Timeout`], and a rea
+    /// that is not running or stops during the call [`ReverseError::Stopped`].
     pub async fn call(
         &mut self,
         allow: &ToolAllowList,
@@ -172,7 +545,6 @@ impl ReaGuard {
         cancel: &CancellationToken,
         progress: Option<ProgressFn>,
     ) -> Result<ToolOutput, ReverseError> {
-        let _ = (args, timeout, progress);
         if !allow.contains(name) {
             return Err(ReverseError::NotAllowed {
                 tool: name.to_string(),
@@ -181,13 +553,153 @@ impl ReaGuard {
         if cancel.is_cancelled() {
             return Err(ReverseError::Cancelled);
         }
-        Ok(ToolOutput::text(format!("Sample result of {name}.")))
+        let server = {
+            let mut s = self.shared.status();
+            let server = match &s.running {
+                Some(running) if running.server.is_running() => running.server.clone(),
+                _ => return Err(ReverseError::Stopped),
+            };
+            s.busy = Some(self.chat.unwrap_or(0));
+            server
+        };
+        let outcome = server
+            .call(allow, name, args, timeout, cancel, progress)
+            .await;
+        {
+            let mut s = self.shared.status();
+            s.busy = None;
+            s.last_used = Some(Instant::now());
+        }
+        match outcome {
+            Ok(CallOutcome::Done(output)) => Ok(output),
+            Ok(CallOutcome::Cancelled { .. }) => Err(ReverseError::Cancelled),
+            Ok(CallOutcome::TimedOut { .. }) => Err(ReverseError::Timeout),
+            Err(HostError::NotFound(_)) => Err(ReverseError::NotAllowed {
+                tool: name.to_string(),
+            }),
+            Err(HostError::NotReady(_)) => Err(ReverseError::Stopped),
+            Err(other) => Err(ReverseError::Protocol {
+                message: self.shared.clean(&other.to_string()),
+            }),
+        }
     }
+}
+
+impl Drop for ReaGuard {
+    fn drop(&mut self) {
+        // Holding rea counts as using it.
+        self.shared.status().last_used = Some(Instant::now());
+    }
+}
+
+/// The checks of the module documentation, before anything starts.
+fn check_before_start(shared: &Shared, config: &RunConfig) -> Result<(), ReverseError> {
+    if platform::apple_tools_at(shared.platform, &shared.apple_root) == AppleTools::Missing {
+        return Err(ReverseError::AppleToolsMissing);
+    }
+    let installer = shared.installer();
+    installer.usable(Component::Rea)?;
+    match config.var("REA_ANALYSIS_PROVIDER") {
+        Some("kuna") => {
+            installer.usable(Component::Kuna)?;
+        }
+        Some("ghidra") if config.var("GHIDRA_INSTALL_DIR").is_some() => {
+            installer.usable(Component::Ghidra)?;
+        }
+        Some("ghidra") => {}
+        // Never rea's automatic search (R10).
+        _ => {
+            return Err(ReverseError::StartFailed {
+                message: "rea's decompiler setting is missing".into(),
+            });
+        }
+    }
+    if config.program.as_os_str().is_empty() {
+        return Err(ReverseError::NotInstalled {
+            component: Component::Rea,
+        });
+    }
+    let root = shared.layout.root();
+    let in_pack = |p: &Path| p.is_absolute() && p.starts_with(root) && p.is_file();
+    let exact = config.args.len() == 2
+        && config.args[1] == "mcp"
+        && in_pack(Path::new(&config.args[0]))
+        && Path::new(&config.args[0]).ends_with(Path::new("scripts").join("rea.mjs"));
+    if !in_pack(&config.program) || !exact || !config.cwd.starts_with(root) {
+        return Err(ReverseError::Missing { part: "rea".into() });
+    }
+    Ok(())
+}
+
+/// Empties `reverse/tmp` (best effort: a file another program still holds is left) and
+/// creates the folders rea's environment names.
+fn prepare_folders(tmp: &Path, folders: &[PathBuf]) -> std::io::Result<()> {
+    // Does not follow links: a link inside is removed, not its target.
+    match std::fs::remove_dir_all(tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(error = %e, "could not empty rea's temporary folder"),
+    }
+    std::fs::create_dir_all(tmp)?;
+    for folder in folders {
+        std::fs::create_dir_all(folder)?;
+    }
+    Ok(())
+}
+
+/// Stops rea [`IDLE_STOP`] after its last use. Never during a call: it waits for the lock,
+/// and stops while holding it.
+fn spawn_idle_stop(weak: Weak<Shared>, generation: u64) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let deadline = {
+                let Some(shared) = weak.upgrade() else {
+                    return;
+                };
+                let s = shared.status();
+                match (&s.running, s.last_used) {
+                    (Some(running), Some(last)) if running.generation == generation => {
+                        last + IDLE_STOP
+                    }
+                    _ => return,
+                }
+            };
+            tokio::time::sleep_until(deadline).await;
+            let Some(shared) = weak.upgrade() else {
+                return;
+            };
+            let _calls = shared.calls.clone().lock_owned().await;
+            let running = {
+                let mut s = shared.status();
+                let current = s
+                    .running
+                    .as_ref()
+                    .is_some_and(|r| r.generation == generation);
+                if !current {
+                    return;
+                }
+                if s.last_used.is_some_and(|t| t + IDLE_STOP > Instant::now()) {
+                    continue;
+                }
+                s.idle_task = None;
+                s.running.take()
+            };
+            if let Some(running) = running {
+                running.server.stop(STOP_GRACE).await;
+            }
+            return;
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
+    use crate::Decompiler;
+    use crate::env::{Flavor, run_config};
+    use crate::lock;
 
     #[tokio::test]
     async fn the_guard_refuses_names_outside_the_allow_list() {
@@ -211,5 +723,623 @@ mod tests {
                 tool: "instrument_with_frida".into()
             }
         );
+        // An allowed name with nothing running is not sent anywhere either.
+        let e = g
+            .call(
+                &allow,
+                "open_binary",
+                Map::new(),
+                Duration::from_secs(1),
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e, ReverseError::Stopped);
+    }
+
+    /// A rea that runs nothing, records what it is asked and can crash.
+    #[derive(Default)]
+    struct FakeRea {
+        spec: StdMutex<Option<ManagedSpec>>,
+        running: AtomicBool,
+        crashed: AtomicBool,
+        fail_start: bool,
+        starts: AtomicU64,
+        calls: StdMutex<Vec<String>>,
+        stops: StdMutex<Vec<Duration>>,
+        /// Calls wait until cancelled or stopped.
+        hang: bool,
+        stopped: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl Rea for FakeRea {
+        async fn start(&self) -> Result<Vec<(String, Value)>, HostError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            if self.fail_start {
+                return Err(HostError::Connect(
+                    "the server exited with code 1 before completing the handshake".into(),
+                ));
+            }
+            self.running.store(true, Ordering::SeqCst);
+            Ok(vec![("open_binary".into(), serde_json::json!({"type": "object"}))])
+        }
+        async fn call(
+            &self,
+            allow: &ToolAllowList,
+            name: &str,
+            _args: Map<String, Value>,
+            _timeout: Duration,
+            cancel: &CancellationToken,
+            _progress: Option<ProgressFn>,
+        ) -> Result<CallOutcome, HostError> {
+            assert!(allow.contains(name));
+            if !self.running.load(Ordering::SeqCst) {
+                return Err(HostError::NotReady("stopped".into()));
+            }
+            self.calls.lock().unwrap().push(name.to_owned());
+            if self.hang {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(CallOutcome::Cancelled { stopped: false }),
+                    _ = self.stopped.notified() => return Err(HostError::NotReady("stopped".into())),
+                }
+            }
+            Ok(CallOutcome::Done(ToolOutput::text(format!("ran {name}"))))
+        }
+        async fn stop(&self, grace: Duration) {
+            self.stops.lock().unwrap().push(grace);
+            self.running.store(false, Ordering::SeqCst);
+            self.stopped.notify_waiters();
+        }
+        fn is_running(&self) -> bool {
+            self.running.load(Ordering::SeqCst) && !self.crashed.load(Ordering::SeqCst)
+        }
+        fn ended_unexpectedly(&self) -> bool {
+            self.crashed.load(Ordering::SeqCst)
+        }
+        fn stderr_tail(&self) -> Vec<String> {
+            vec![format!(
+                "Error: cannot open /data/reverse/rea-6.9.0/x\u{202E}y in {}",
+                self.spec
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|s| s.cwd.display().to_string())
+                    .unwrap_or_default()
+            )]
+        }
+        fn lifecycle(&self) -> Option<Lifecycle> {
+            Some(Lifecycle::Legacy)
+        }
+    }
+
+    /// A reverse folder with rea (and optionally Kuna) installed as the embedded lock pins
+    /// them, every launched server recorded.
+    struct Bench {
+        _dir: tempfile::TempDir,
+        layout: ReverseLayout,
+        launched: Arc<StdMutex<Vec<Arc<FakeRea>>>>,
+        process: ReaProcess,
+    }
+
+    fn write_part(root: &Path, part: &str, programs: &[&str]) {
+        let p = lock::embedded().part(part).expect("part in the lock");
+        let dir = root.join(&p.dir);
+        let mut recorded = Vec::new();
+        for rel in programs {
+            let file = dir.join(rel);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, rel.as_bytes()).unwrap();
+            recorded.push(serde_json::json!({"path": rel, "size": rel.len()}));
+        }
+        let marker = serde_json::json!({
+            "component": p.component,
+            "part": p.name,
+            "version": p.version,
+            "archiveSha256": [],
+            "programs": recorded,
+            "diskBytes": 1,
+        });
+        std::fs::write(dir.join(".complete"), marker.to_string()).unwrap();
+    }
+
+    fn bench_with(platform: Platform, kuna: bool, apple_root: PathBuf, fake: fn() -> FakeRea) -> Bench {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = ReverseLayout::new(dir.path().join("reverse"));
+        write_part(layout.root(), "rea", &["scripts/rea.mjs"]);
+        write_part(layout.root(), "node", &["bin/node"]);
+        if kuna {
+            write_part(layout.root(), "kuna", &["kuna"]);
+        }
+        let launched: Arc<StdMutex<Vec<Arc<FakeRea>>>> = Arc::default();
+        let record = launched.clone();
+        let launch: Launch = Arc::new(move |spec, _lifecycle| -> Arc<dyn Rea> {
+            let rea = Arc::new(fake());
+            *rea.spec.lock().unwrap() = Some(spec);
+            record.lock().unwrap().push(rea.clone());
+            rea
+        });
+        let process = ReaProcess::build(layout.clone(), platform, launch, apple_root);
+        process.set_installer(Arc::new(
+            Installer::new(layout.clone(), platform).with_release_rules(false),
+        ));
+        Bench {
+            _dir: dir,
+            layout,
+            launched,
+            process,
+        }
+    }
+
+    fn bench(kuna: bool) -> Bench {
+        bench_with(Platform::LinuxX64, kuna, PathBuf::from("/"), FakeRea::default)
+    }
+
+    impl Bench {
+        fn config(&self, decompiler: Option<Decompiler>) -> RunConfig {
+            let installation = self.process.shared.installer().installation();
+            run_config(&self.layout, &installation, decompiler, Flavor::Linux, false)
+        }
+        fn last(&self) -> Arc<FakeRea> {
+            self.launched.lock().unwrap().last().cloned().expect("launched")
+        }
+        fn count(&self) -> usize {
+            self.launched.lock().unwrap().len()
+        }
+    }
+
+    fn allow() -> ToolAllowList {
+        ToolAllowList::new(["open_binary", "list_procedures"])
+    }
+
+    async fn run_call(process: &ReaProcess, config: RunConfig, name: &str) -> Result<ToolOutput, ReverseError> {
+        let mut g = process.lock().await;
+        g.ensure_started(config).await?;
+        g.call(&allow(), name, Map::new(), Duration::from_secs(5), &CancellationToken::new(), None)
+            .await
+    }
+
+    #[tokio::test]
+    async fn starts_once_and_reuses_the_running_rea() {
+        let b = bench(true);
+        let config = b.config(Some(Decompiler::Kuna));
+        std::fs::create_dir_all(b.layout.tmp().join("old")).unwrap();
+        std::fs::write(b.layout.tmp().join("old/leftover"), b"x").unwrap();
+        assert_eq!(b.process.state(), RunState::Stopped);
+        let mut g = b.process.lock().await;
+        let first = g.ensure_started(config.clone()).await.unwrap();
+        assert!(first.fresh);
+        assert_eq!(first.generation, 1);
+        assert_eq!(first.tools[0].0, "open_binary");
+        let again = g.ensure_started(config.clone()).await.unwrap();
+        assert!(!again.fresh);
+        assert_eq!(again.generation, 1);
+        assert_eq!(g.generation(), 1);
+        let out = g
+            .call(&allow(), "list_procedures", Map::new(), Duration::from_secs(5), &CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(out.joined_text(), "ran list_procedures");
+        drop(g);
+        assert_eq!(b.count(), 1);
+        assert_eq!(b.process.generation(), 1);
+        assert_eq!(b.process.state(), RunState::Ready);
+        // The managed server got exactly the configuration, the log file and the limit.
+        let spec = b.last().spec.lock().unwrap().clone().unwrap();
+        assert_eq!(spec.program, config.program);
+        assert_eq!(spec.args, config.args);
+        assert_eq!(spec.env, config.env);
+        assert_eq!(spec.cwd, b.layout.work());
+        assert_eq!(spec.start_timeout, Duration::from_secs(60));
+        assert_eq!(spec.name, "reverse");
+        // reverse/tmp was emptied; the folders the environment names exist.
+        assert!(b.layout.tmp().is_dir());
+        assert!(!b.layout.tmp().join("old").exists());
+        for f in [b.layout.home(), b.layout.work(), b.layout.kuna_cache(), b.layout.home().join(".config")] {
+            assert!(f.is_dir(), "{}", f.display());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_log_goes_to_mcp_reverse_log_in_the_log_folder() {
+        let b = bench(false);
+        let logs = b.layout.root().join("logs");
+        b.process.set_log_dir(Some(&logs));
+        run_call(&b.process, b.config(None), "open_binary").await.unwrap();
+        let spec = b.last().spec.lock().unwrap().clone().unwrap();
+        assert_eq!(spec.log_file, Some(logs.join("mcp-reverse.log")));
+    }
+
+    #[tokio::test]
+    async fn restart_stops_rea_and_the_next_start_raises_the_generation() {
+        let b = bench(true);
+        run_call(&b.process, b.config(Some(Decompiler::Kuna)), "open_binary").await.unwrap();
+        let first = b.last();
+        b.process.restart(RestartReason::DecompilerChanged).await;
+        assert_eq!(*first.stops.lock().unwrap(), vec![STOP_GRACE]);
+        assert_eq!(b.process.state(), RunState::Stopped);
+        assert_eq!(b.process.generation(), 1);
+        let mut g = b.process.lock().await;
+        let s = g.ensure_started(b.config(None)).await.unwrap();
+        assert!(s.fresh);
+        assert_eq!(s.generation, 2);
+        drop(g);
+        assert_eq!(b.process.generation(), 2);
+        assert_eq!(b.count(), 2);
+    }
+
+    #[tokio::test]
+    async fn another_configuration_is_never_served_by_the_running_rea() {
+        let b = bench(true);
+        run_call(&b.process, b.config(Some(Decompiler::Kuna)), "open_binary").await.unwrap();
+        let kuna = b.last();
+        let mut g = b.process.lock().await;
+        let s = g.ensure_started(b.config(None)).await.unwrap();
+        assert!(s.fresh && s.generation == 2);
+        assert_eq!(kuna.stops.lock().unwrap().len(), 1);
+        assert!(!kuna.is_running());
+        let env = &b.last().spec.lock().unwrap().clone().unwrap().env;
+        assert!(env.set.iter().any(|(k, v)| k == "REA_ANALYSIS_PROVIDER" && v == "ghidra"));
+        assert!(!env.set.iter().any(|(k, _)| k == "REA_KUNA_COMMAND"));
+    }
+
+    #[tokio::test]
+    async fn nothing_starts_without_a_usable_rea() {
+        // Not installed at all.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = ReverseLayout::new(dir.path().join("reverse"));
+        let b = bench(false);
+        let empty = ReaProcess::build(layout.clone(), Platform::LinuxX64, b.process.shared.launch.clone(), PathBuf::from("/"));
+        empty.set_installer(Arc::new(Installer::new(layout.clone(), Platform::LinuxX64).with_release_rules(false)));
+        let installation = empty.shared.installer().installation();
+        let config = run_config(&layout, &installation, None, Flavor::Linux, false);
+        let e = empty.lock().await.ensure_started(config).await.unwrap_err();
+        assert_eq!(e, ReverseError::NotInstalled { component: Component::Rea });
+        // The marker is missing: the part counts as not there.
+        let b = bench(false);
+        let config = b.config(None);
+        let rea_dir = b.layout.part_dir(&lock::embedded().part("rea").unwrap().dir);
+        std::fs::remove_file(rea_dir.join(".complete")).unwrap();
+        let e = b.process.lock().await.ensure_started(config.clone()).await.unwrap_err();
+        assert!(matches!(e, ReverseError::Missing { .. } | ReverseError::NotInstalled { .. }), "{e:?}");
+        // Broken: a program is gone.
+        let b = bench(false);
+        let config = b.config(None);
+        std::fs::remove_file(b.layout.part_dir(&lock::embedded().part("node").unwrap().dir).join("bin/node")).unwrap();
+        let e = b.process.lock().await.ensure_started(config).await.unwrap_err();
+        assert_eq!(e, ReverseError::Missing { part: "node".into() });
+        // NeedsUpdate: only an older rea, below the lock's minimum, is on disk.
+        let b = bench(false);
+        let config = b.config(None);
+        let pinned = lock::embedded().part("rea").unwrap();
+        let old_dir = b.layout.root().join("rea-6.8.0");
+        std::fs::rename(b.layout.part_dir(&pinned.dir), &old_dir).unwrap();
+        let marker = std::fs::read_to_string(old_dir.join(".complete")).unwrap().replace("6.9.0", "6.8.0");
+        std::fs::write(old_dir.join(".complete"), marker).unwrap();
+        let e = b.process.lock().await.ensure_started(config).await.unwrap_err();
+        assert_eq!(e, ReverseError::NeedsUpdate { part: "rea".into() });
+        // A decompiler the configuration names must be usable too.
+        let b = bench(true);
+        let config = b.config(Some(Decompiler::Kuna));
+        std::fs::remove_file(b.layout.part_dir(&lock::embedded().part("kuna").unwrap().dir).join("kuna")).unwrap();
+        let e = b.process.lock().await.ensure_started(config).await.unwrap_err();
+        assert_eq!(e, ReverseError::Missing { part: "kuna".into() });
+        assert_eq!(b.count(), 0, "nothing was launched");
+    }
+
+    #[tokio::test]
+    async fn only_node_with_rea_mcp_from_the_pack_starts() {
+        let b = bench(false);
+        let good = b.config(None);
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let mut variants = Vec::new();
+        let mut c = good.clone();
+        c.program = outside.path().to_path_buf();
+        variants.push(c);
+        let mut c = good.clone();
+        c.args.push("--http".into());
+        variants.push(c);
+        let mut c = good.clone();
+        c.args[1] = "setup".into();
+        variants.push(c);
+        let mut c = good.clone();
+        c.args[0] = outside.path().to_string_lossy().into_owned();
+        variants.push(c);
+        let mut c = good.clone();
+        c.env = c.env.set("REA_ANALYSIS_PROVIDER", "auto");
+        variants.push(c);
+        for config in variants {
+            let e = b.process.lock().await.ensure_started(config.clone()).await.unwrap_err();
+            assert!(matches!(e, ReverseError::Missing { .. } | ReverseError::StartFailed { .. }), "{config:?}: {e:?}");
+        }
+        assert_eq!(b.count(), 0);
+        b.process.lock().await.ensure_started(good).await.unwrap();
+        assert_eq!(b.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_mac_without_apple_tools_never_starts_rea() {
+        let fake_root = tempfile::tempdir().unwrap();
+        let b = bench_with(Platform::MacosArm64, true, fake_root.path().to_path_buf(), FakeRea::default);
+        let installation = b.process.shared.installer().installation();
+        let config = run_config(&b.layout, &installation, Some(Decompiler::Kuna), Flavor::Macos, false);
+        let e = b.process.lock().await.ensure_started(config.clone()).await.unwrap_err();
+        assert_eq!(e, ReverseError::AppleToolsMissing);
+        assert_eq!(b.count(), 0);
+        // Checked fresh: once the tools are there, rea starts without an app restart.
+        let swiftc = fake_root.path().join("Library/Developer/CommandLineTools/usr/bin/swiftc");
+        std::fs::create_dir_all(swiftc.parent().unwrap()).unwrap();
+        std::fs::write(&swiftc, b"").unwrap();
+        b.process.lock().await.ensure_started(config).await.unwrap();
+        assert_eq!(b.count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rea_stops_after_15_minutes_without_a_call() {
+        let b = bench(false);
+        run_call(&b.process, b.config(None), "open_binary").await.unwrap();
+        let rea = b.last();
+        tokio::time::sleep(Duration::from_secs(14 * 60)).await;
+        assert!(rea.is_running());
+        // A call resets the clock.
+        run_call(&b.process, b.config(None), "list_procedures").await.unwrap();
+        tokio::time::sleep(Duration::from_secs(14 * 60)).await;
+        assert!(rea.is_running(), "stopped 14 minutes after the last call");
+        tokio::time::sleep(Duration::from_secs(2 * 60)).await;
+        assert!(!rea.is_running(), "still running 16 minutes after the last call");
+        assert_eq!(*rea.stops.lock().unwrap(), vec![STOP_GRACE]);
+        assert_eq!(b.process.state(), RunState::Stopped);
+        // The next call starts a new rea with a new generation.
+        let mut g = b.process.lock().await;
+        let s = g.ensure_started(b.config(None)).await.unwrap();
+        assert!(s.fresh && s.generation == 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_idle_stop_never_cuts_a_call_short() {
+        let b = bench_with(Platform::LinuxX64, false, PathBuf::from("/"), || FakeRea {
+            hang: true,
+            ..FakeRea::default()
+        });
+        let config = b.config(None);
+        let mut g = b.process.lock().await;
+        g.ensure_started(config).await.unwrap();
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+            trigger.cancel();
+        });
+        // A call that runs for 20 minutes holds rea; the idle stop waits for it.
+        let e = g
+            .call(&allow(), "open_binary", Map::new(), Duration::from_secs(3600), &cancel, None)
+            .await
+            .unwrap_err();
+        assert_eq!(e, ReverseError::Cancelled);
+        let rea = b.last();
+        assert!(rea.is_running());
+        assert!(rea.stops.lock().unwrap().is_empty());
+        drop(g);
+        tokio::time::sleep(Duration::from_secs(14 * 60)).await;
+        assert!(rea.is_running());
+        tokio::time::sleep(Duration::from_secs(2 * 60)).await;
+        assert!(!rea.is_running());
+    }
+
+    #[tokio::test]
+    async fn the_state_follows_rea() {
+        let b = bench_with(Platform::LinuxX64, false, PathBuf::from("/"), || FakeRea {
+            hang: true,
+            ..FakeRea::default()
+        });
+        let mut g = b.process.lock().await;
+        g.set_chat(42);
+        g.ensure_started(b.config(None)).await.unwrap();
+        let process = &b.process;
+        let cancel = CancellationToken::new();
+        let names = allow();
+        let call = g.call(&names, "open_binary", Map::new(), Duration::from_secs(60), &cancel, None);
+        let watch = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(process.state(), RunState::Busy { chat_id: 42 });
+            assert!(process.is_busy());
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::join!(call, watch);
+        assert_eq!(result.unwrap_err(), ReverseError::Cancelled);
+        assert_eq!(process.state(), RunState::Ready);
+        drop(g);
+        assert!(!process.is_busy());
+        // A crash: Failed with the tail, the reverse folder masked and hidden characters
+        // made visible.
+        b.last().crashed.store(true, Ordering::SeqCst);
+        let RunState::Failed { reason } = process.state() else {
+            panic!("{:?}", process.state())
+        };
+        assert!(reason.contains("[harnessUI's rea folder]"), "{reason}");
+        assert!(!reason.contains(&b.layout.root().display().to_string()), "{reason}");
+        assert!(!reason.contains('\u{202E}'), "{reason}");
+        // The next use starts again.
+        let mut g = b.process.lock().await;
+        assert!(g.ensure_started(b.config(None)).await.unwrap().fresh);
+        drop(g);
+        assert_eq!(process.state(), RunState::Ready);
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_is_reported_with_details_and_tried_again_next_time() {
+        let b = bench_with(Platform::LinuxX64, false, PathBuf::from("/"), || FakeRea {
+            fail_start: true,
+            ..FakeRea::default()
+        });
+        let e = b.process.lock().await.ensure_started(b.config(None)).await.unwrap_err();
+        let ReverseError::StartFailed { message } = e else { panic!("{e:?}") };
+        assert!(message.contains("before completing the handshake"), "{message}");
+        assert!(message.contains("[harnessUI's rea folder]"), "{message}");
+        assert!(matches!(b.process.state(), RunState::Failed { .. }));
+        assert_eq!(b.process.generation(), 0);
+        let _ = b.process.lock().await.ensure_started(b.config(None)).await;
+        assert_eq!(b.count(), 2, "tried again on the next use");
+    }
+
+    #[tokio::test]
+    async fn a_stop_ends_a_running_call_and_quit_prevents_new_starts() {
+        let b = bench_with(Platform::LinuxX64, false, PathBuf::from("/"), || FakeRea {
+            hang: true,
+            ..FakeRea::default()
+        });
+        let mut g = b.process.lock().await;
+        g.ensure_started(b.config(None)).await.unwrap();
+        let process = &b.process;
+        let cancel = CancellationToken::new();
+        let names = allow();
+        let call = g.call(&names, "open_binary", Map::new(), Duration::from_secs(60), &cancel, None);
+        // The stop does not wait for the lock the call holds.
+        let stop = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            process.restart(RestartReason::Quit).await;
+        };
+        let (result, ()) = tokio::join!(call, stop);
+        assert_eq!(result.unwrap_err(), ReverseError::Stopped);
+        assert_eq!(b.last().stops.lock().unwrap().clone(), vec![STOP_GRACE]);
+        let e = g.ensure_started(b.config(None)).await.unwrap_err();
+        assert_eq!(e, ReverseError::Stopped);
+        assert_eq!(b.count(), 1);
+    }
+
+    #[test]
+    fn the_futures_are_send() {
+        // `BuiltinServer::call` runs them on a multi-threaded runtime.
+        fn assert_send<T: Send>(_: &T) {}
+        let b = bench(false);
+        let lock = b.process.lock();
+        assert_send(&lock);
+        assert_send(&b.process.stop(STOP_GRACE));
+        assert_send(&b.process.restart(RestartReason::Updated));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut g = runtime.block_on(lock);
+        let cancel = CancellationToken::new();
+        let allow = allow();
+        assert_send(&g.ensure_started(b.config(None)));
+        assert_send(&g.call(&allow, "open_binary", Map::new(), Duration::from_secs(1), &cancel, None));
+        fn assert_sync<T: Send + Sync>() {}
+        assert_sync::<ReaProcess>();
+        assert_sync::<ReaGuard>();
+    }
+
+    /// The real rea, Node.js and Kuna from a cache filled by `scripts/pin_reverse.py
+    /// --download-to` (`REVERSE_PACK_CACHE`): installed through the real installer, started
+    /// through this process manager with the environment of `env.rs`. Skipped quietly
+    /// without the cache; WP9e's `tests/real_rea.rs` goes further (decompiling, network).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_the_real_rea_from_the_pack_cache() {
+        let Some(cache) = std::env::var_os("REVERSE_PACK_CACHE") else {
+            eprintln!("REVERSE_PACK_CACHE is not set; skipped");
+            return;
+        };
+        let platform = Platform::current();
+        let dir = tempfile::tempdir().unwrap();
+        let layout = ReverseLayout::new(dir.path().join("reverse"));
+        let installer = Arc::new(
+            Installer::new(layout.clone(), platform)
+                .with_fetch(Arc::new(crate::install::DirFetch::new(PathBuf::from(cache))))
+                .with_release_rules(false),
+        );
+        let with_kuna = platform::availability_with(lock::embedded(), Component::Kuna, platform, false).0;
+        let row = if with_kuna { Component::Kuna } else { Component::Rea };
+        installer
+            .download(row, &CancellationToken::new(), &|_| {})
+            .await
+            .expect("installs from the cache");
+        let process = ReaProcess::new(layout.clone(), platform);
+        process.set_installer(installer.clone());
+        process.set_log_dir(Some(&dir.path().join("logs")));
+        let decompiler = with_kuna.then_some(Decompiler::Kuna);
+        let config = run_config(&layout, &installer.installation(), decompiler, Flavor::current(), true);
+        let begun = std::time::Instant::now();
+        let mut g = process.lock().await;
+        let started = g.ensure_started(config.clone()).await.expect("rea starts");
+        eprintln!(
+            "real rea: started in {:.1} s with {} tools",
+            begun.elapsed().as_secs_f64(),
+            started.tools.len()
+        );
+        let names: Vec<&str> = started.tools.iter().map(|(n, _)| n.as_str()).collect();
+        for wanted in ["open_binary", "list_procedures", "procedure_pseudo_code", "inspect_pe_imports", "inspect_analysis_view"] {
+            assert!(names.contains(&wanted), "{wanted} missing from {names:?}");
+        }
+        // The families left out of REA_MCP_TOOL_FAMILIES are not listed.
+        for gone in ["instrument_with_frida", "adb_shell", "start_frida_session"] {
+            assert!(!names.contains(&gone), "{gone} is listed");
+        }
+        assert_eq!(process.state(), RunState::Ready);
+        let allow = ToolAllowList::new(["binary_session", "open_binary"]);
+        let out = g
+            .call(
+                &allow,
+                "binary_session",
+                serde_json::json!({"detail": "summary"}).as_object().cloned().unwrap(),
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("binary_session answers");
+        eprintln!("real rea: binary_session: {}", out.joined_text().chars().take(300).collect::<String>());
+        // Stop during an open: rea gets the grace, then it is stopped if it never answers.
+        if let Some(target) = ["/bin/ls", "/usr/bin/ls"].iter().map(Path::new).find(|p| p.is_file()) {
+            let cancel = CancellationToken::new();
+            let trigger = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                trigger.cancel();
+            });
+            let begun = std::time::Instant::now();
+            let stopped = g
+                .call(
+                    &allow,
+                    "open_binary",
+                    serde_json::json!({"path": target}).as_object().cloned().unwrap(),
+                    Duration::from_secs(900),
+                    &cancel,
+                    None,
+                )
+                .await;
+            eprintln!(
+                "real rea: Stop during open_binary -> {stopped:?} after {:.1} s; state {:?}",
+                begun.elapsed().as_secs_f64(),
+                process.state()
+            );
+            assert!(matches!(stopped, Err(ReverseError::Cancelled) | Ok(_)), "{stopped:?}");
+        }
+        drop(g);
+        // Started again (if the Stop ended it), then stopped by closing its input.
+        let mut g = process.lock().await;
+        g.ensure_started(config.clone()).await.expect("rea starts again");
+        drop(g);
+        let begun = std::time::Instant::now();
+        process.stop(STOP_GRACE).await;
+        eprintln!("real rea: stop took {:.1} s", begun.elapsed().as_secs_f64());
+        let log = std::fs::read_to_string(dir.path().join("logs").join(LOG_FILE_NAME)).unwrap_or_default();
+        let notes: Vec<&str> = log.lines().filter(|l| l.starts_with("--- ")).collect();
+        eprintln!("real rea: log notes {notes:#?}");
+        assert!(!log.is_empty(), "nothing in the log file");
+        assert_eq!(process.state(), RunState::Stopped);
+        // Everything rea wrote stays in the reverse folder: its home was used.
+        assert!(layout.home().is_dir() && layout.work().is_dir());
+    }
+
+    #[tokio::test]
+    async fn calls_take_turns() {
+        let b = bench(false);
+        let config = b.config(None);
+        let mut first = b.process.lock().await;
+        first.ensure_started(config.clone()).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_millis(100), b.process.lock()).await;
+        assert!(second.is_err(), "a second caller got rea while the first held it");
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(1), b.process.lock()).await;
+        assert!(second.is_ok());
     }
 }

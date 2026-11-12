@@ -475,11 +475,10 @@ impl ManagedServer {
     ) -> bool {
         let deadline = Instant::now() + CANCEL_GRACE;
         // Sent as a plain notification: see the module documentation.
-        let _ = json!({});
-        let notification = ClientNotification::CancelledNotification(rmcp::model::CancelledNotification::new(
-            rmcp::model::CancelledNotificationParam::new(Some(id.clone()), Some(reason.to_owned())),
+        let notification = ClientNotification::CustomNotification(CustomNotification::new(
+            "notifications/cancelled",
+            Some(json!({ "requestId": id, "reason": reason })),
         ));
-        let _ = CustomNotification::new("x", None);
         let _ = tokio::time::timeout_at(deadline, peer.send_notification(notification)).await;
         let answered = matches!(
             tokio::time::timeout_at(deadline, rx).await,
