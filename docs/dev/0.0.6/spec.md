@@ -1,6 +1,10 @@
-# 0.0.5: specification (revision 2, after three independent critiques)
+# 0.0.6: specification (revision 3)
 
-The owner's four requests (verbatim):
+Revision 2 was written for "0.0.5" after three independent critiques; the work was paused
+on 2026-11-12 and 0.0.5 shipped Full access instead. Revision 3 (this file) moves the plan to
+0.0.6, adds the third approval mode, amends D4 and D11, and adds items 5 to 8 (Part 3b).
+
+The owner's first four requests (verbatim; items 5 to 8 are in Part 3b):
 
 1. allow per model on loading context window setting and it auto compresses.
 2. More and more model loading setting and model reloading but simplify it to normal human language.
@@ -180,25 +184,48 @@ and every TODO.
   updates every pinning test and e2e line (shared files included) and lists them. Kept on
   purpose: the tab label "Local models", the loading line starting "Loading model".
 - **D8 Names of outside apps.** The 0.0.4 rule against names of AI models or assistants in
-  code, comments, tests and docs is amended for 0.0.5: the product and program names of the
+  code, comments, tests and docs is amended for 0.0.6: the product and program names of the
   outside apps the owner asked to integrate (Claude Code, the Claude app, Codex, and in the
   classifier other coding-assistant programs) may appear in the policy classifier, the
   outside-app modules, their setup text, their UI labels (Tools panel, Other apps page,
   approval cards) and their tests. Model names still never appear in code.
-- **D9 No database schema change in 0.0.5.** New data goes in the `settings` table (JSON) or
+- **D9 No database schema change in 0.0.6.** New data goes in the `settings` table (JSON) or
   existing JSON columns. Audit rows reuse existing `decision` values.
 - **D10 Direction A uses a small proxy owned by the app** on a loopback port chosen at random
   from a high range on first switch-on and then kept; llama-server stays on its random port
   with its private key.
-- **D11 Direction B always asks.** Every hand-off shows a card, in every approval mode and
-  after any grant ("Allow for this chat" never covers it).
+- **D11 Direction B asks, except in Full access** (amended for 0.0.6; the owner confirms).
+  In Ask first and Allow all every hand-off shows a card with Allow once / Deny, after any
+  grant ("Allow for this chat" never covers it), with or without untrusted content. In Full
+  access nothing asks: the owner's rule for that mode is "run absolutely everything", and
+  the terminal could start those programs anyway. Steps 1 and 2 still come first (the tool
+  group off, a program inside an approved folder, a swapped file, a working folder that is
+  not approved). As merged in `crates/policy/src/engine.rs` (Full access is checked before
+  the coding-app rule). The tool group stays off in new chats and is never offered to
+  helpers in any mode.
+- **D12 Three approval modes** (0.0.5; ARCHITECTURE.md 13.3 "Full access (0.0.5)",
+  SECURITY.md, `docs/dev/0.0.5/full-access-review.md`). Ask first; Allow all (keep-asking
+  actions and outbound actions after untrusted content still ask); Full access (nothing
+  asks; the file, terminal and git tools reach the whole computer except the app's own
+  folders and the system's key stores; a saved Full access default asks again at every
+  start). Every package that adds a tool action or a card states what it does in all three
+  modes and tests all three: `TurnContext::full_access` is the field, decision
+  `AllowedByFullAccess`, audit note `Full access`. In particular:
+  - WP6: as D11. The card text in Full access is never shown (it runs); the Tools panel
+    still shows the resolved program paths and "Experimental".
+  - WP5a: the proxy is not a tool action and is not changed by the mode; its switch is
+    changed only by the user in every mode, Full access included.
+  - Model settings, sharing switch, approved folders and modes stay out of reach of every
+    tool in every mode (`set_setting` allow-list unchanged; the app's folders are forbidden).
+  - Item 5 (Part 3b): running the decompiler is a tool action like any other; Item 7 shows
+    the mode's reach in plain words.
 
 ### Storage (settings keys; no migration)
 - `localModel` (`LocalModelSettings`, `src-tauri/src/dto.rs`), the **defaults for all
   models**. `ctx: u32` **stays**; new fields are added beside it, each `#[serde(default)]`:
   `context_auto: bool` (absent + ctx 8192 → Automatic per D2), `gpu`, `save_memory`,
-  `keep_in_memory`, `thinking_limit`. Two tests: 0.0.4 JSON read by 0.0.5, and 0.0.5 JSON
-  read by the 0.0.4 struct (extra fields ignored, backend kept). The 0.0.4 command shape
+  `keep_in_memory`, `thinking_limit`. Two tests: 0.0.4/0.0.5 JSON read by 0.0.6, and 0.0.6 JSON
+  read by the 0.0.5 struct (extra fields ignored, backend kept). The 0.0.4 command shape
   `{ctx, backend, device}` (e2e scripts) still works.
 - `modelLoad:<first 16 hex of SHA-256("local\n<file name>\n<size in bytes>")>`: one model's
   overrides (`ModelLoadSettings`). Each field uses an explicit enum with a `Default` variant
@@ -641,7 +668,9 @@ expected arguments and the task on stdin and returns its output.
 2. All other packages in parallel, against WP0's contract.
 3. Independent reviews of every package (security and correctness), then fixes.
 4. The lead integrates: runs the end-to-end steps that needed two packages (WP2 with WP1b,
-   WP5b with WP5a, WP4b with WP4a), all suites, docs, version 0.0.5.
+   WP5b with WP5a, WP4b with WP4a), all suites, docs, version 0.0.6 (`package.json`,
+   `package-lock.json`, `src-tauri/tauri.conf.json`, the workspace version in `Cargo.toml`,
+   `Cargo.lock`, CHANGELOG).
 
 **Owner checklist (things only the owner's computers can show; each package adds its own):**
 GPU choices (All of it, As much as fits, Don't use it) and the device list on the RX 9070
