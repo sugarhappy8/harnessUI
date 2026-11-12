@@ -943,7 +943,7 @@ mod tests {
             "Always cite the file and line.\n\nKeep it short."
         );
         assert_eq!(pinned.chat_id, Some(a));
-        assert_eq!(texts(&store, a).await, [pinned.text.clone()]);
+        assert_eq!(texts(&store, a).await, std::slice::from_ref(&pinned.text));
         assert!(texts(&store, b).await.is_empty());
         let not_found = |r: Result<Pin, StoreError>| {
             assert!(
