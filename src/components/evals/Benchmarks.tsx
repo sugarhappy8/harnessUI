@@ -43,6 +43,9 @@ export function RunTable(props: { run: BenchRun }) {
             <th className="py-1 pr-2 font-normal">Result</th>
             <th className="py-1 pr-2 font-normal" title="Edits that failed, and files left not parsing">Broken edits</th>
             <th className="py-1 pr-2 font-normal">Tool failures</th>
+            <th className="py-1 pr-2 font-normal" title="Commands that ran and ended with a failure, such as failing tests">
+              Failed commands
+            </th>
             <th className="py-1 pr-2 font-normal">Blocked</th>
             <th className="py-1 pr-2 font-normal">Steps</th>
             <th className="py-1 pr-2 font-normal">Tokens</th>
@@ -58,6 +61,7 @@ export function RunTable(props: { run: BenchRun }) {
               </td>
               <td className="py-1 pr-2">{r.brokenEdits}</td>
               <td className="py-1 pr-2">{r.toolFailures}</td>
+              <td className="py-1 pr-2">{r.failedCommands}</td>
               <td className="py-1 pr-2">{r.blocked}</td>
               <td className="py-1 pr-2">{r.steps}</td>
               <td className="py-1 pr-2">{(r.promptTokens + r.completionTokens).toLocaleString()}</td>
@@ -69,6 +73,7 @@ export function RunTable(props: { run: BenchRun }) {
             <td className="py-1 pr-2">{totalsWords(t)}</td>
             <td className="py-1 pr-2">{t.brokenEdits}</td>
             <td className="py-1 pr-2">{t.toolFailures}</td>
+            <td className="py-1 pr-2">{t.failedCommands}</td>
             <td className="py-1 pr-2">{t.blocked}</td>
             <td className="py-1 pr-2">{t.steps}</td>
             <td className="py-1 pr-2">{t.tokens.toLocaleString()}</td>
@@ -93,6 +98,8 @@ export function CompareTable(props: { a: BenchRun; b: BenchRun }) {
             <th className="py-1 pr-2 font-normal">Task</th>
             <th className="py-1 pr-2 font-normal">First run</th>
             <th className="py-1 pr-2 font-normal">Second run</th>
+            <th className="py-1 pr-2 font-normal">Failed commands, first</th>
+            <th className="py-1 pr-2 font-normal">Failed commands, second</th>
             <th className="py-1 pr-2 font-normal">Time, first</th>
             <th className="py-1 font-normal">Time, second</th>
           </tr>
@@ -106,6 +113,8 @@ export function CompareTable(props: { a: BenchRun; b: BenchRun }) {
                 <td className="py-1 pr-2">{(x ?? y)?.title}</td>
                 <td className={`py-1 pr-2 ${x ? STATUS_CLASS[x.status] : ""}`}>{x?.status ?? "-"}</td>
                 <td className={`py-1 pr-2 ${y ? STATUS_CLASS[y.status] : ""}`}>{y?.status ?? "-"}</td>
+                <td className="py-1 pr-2">{x ? x.failedCommands : "-"}</td>
+                <td className="py-1 pr-2">{y ? y.failedCommands : "-"}</td>
                 <td className="py-1 pr-2">{x ? seconds(x.timeMs) : "-"}</td>
                 <td className="py-1">{y ? seconds(y.timeMs) : "-"}</td>
               </tr>
@@ -115,6 +124,8 @@ export function CompareTable(props: { a: BenchRun; b: BenchRun }) {
             <td className="py-1 pr-2">Total</td>
             <td className="py-1 pr-2">{totalsWords(a.totals)}</td>
             <td className="py-1 pr-2">{totalsWords(b.totals)}</td>
+            <td className="py-1 pr-2">{a.totals.failedCommands}</td>
+            <td className="py-1 pr-2">{b.totals.failedCommands}</td>
             <td className="py-1 pr-2">{seconds(a.totals.timeMs)}</td>
             <td className="py-1">{seconds(b.totals.timeMs)}</td>
           </tr>

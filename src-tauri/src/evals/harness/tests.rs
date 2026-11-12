@@ -335,3 +335,181 @@ async fn a_benchmark_run_has_the_terminal_under_the_rule() {
     assert!(offered.contains(&"run_command".to_owned()), "{offered:?}");
     assert!(!offered.contains(&"delete_file".to_owned()), "{offered:?}");
 }
+
+fn rec(tool: &str, status: &str, blocked: bool, text: &str) -> CallRec {
+    CallRec {
+        tool: tool.into(),
+        status: status.into(),
+        blocked,
+        recovered: false,
+        detail: String::new(),
+        time_ms: 0,
+        exit_code: (tool == "run_command" && !blocked)
+            .then(|| exit_code_of(text))
+            .flatten(),
+    }
+}
+
+/// A command that ran and exited with a failure is a failed command, not a tool failure.
+/// A command that could not run or did not finish, and every other failed call, is.
+#[test]
+fn failed_commands_are_told_from_tool_failures() {
+    let cases = [
+        // (call, failed command, tool failure)
+        (
+            rec(
+                "run_command",
+                "error",
+                false,
+                "Exit code 1 (0.2 s)\nFAILED (failures=1)",
+            ),
+            true,
+            false,
+        ),
+        (
+            rec("run_command", "error", false, "Exit code 2 (0.0 s)\nusage"),
+            true,
+            false,
+        ),
+        (
+            rec("run_command", "ok", false, "Exit code 0 (0.1 s)\nOK"),
+            false,
+            false,
+        ),
+        (
+            rec(
+                "run_command",
+                "error",
+                false,
+                "Timed out after 600 s; the command was ended\n...",
+            ),
+            false,
+            true,
+        ),
+        (
+            rec(
+                "run_command",
+                "error",
+                false,
+                "The command was ended by a signal\n",
+            ),
+            false,
+            true,
+        ),
+        (
+            rec("run_command", "error", false, "Stopped by the user\n"),
+            false,
+            true,
+        ),
+        (rec("run_command", "refused", true, ""), false, false),
+        (
+            rec(
+                "run_command",
+                "error",
+                false,
+                "Exit code 127 (0.0 s)\nsh: 1: zzq: not found",
+            ),
+            false,
+            true,
+        ),
+        (
+            rec(
+                "run_command",
+                "error",
+                false,
+                "Exit code 126 (0.0 s)\npermission denied",
+            ),
+            false,
+            true,
+        ),
+        (
+            rec(
+                "run_command",
+                "error",
+                false,
+                "the working folder is not allowed",
+            ),
+            false,
+            true,
+        ),
+        (
+            rec("edit_file", "error", false, "Exit code 1 (0.0 s)"),
+            false,
+            true,
+        ),
+        (
+            rec("write_file", "error", false, "old_text was not found"),
+            false,
+            true,
+        ),
+    ];
+    for (call, failed_command, tool_failure) in cases {
+        assert_eq!(call.failed_command(), failed_command, "{call:?}");
+        assert_eq!(call.failed(), tool_failure, "{call:?}");
+    }
+    assert_eq!(exit_code_of("Exit code 1 (0.2 s)\nmore"), Some(1));
+    assert_eq!(exit_code_of("Exit code -1 (0.2 s)"), Some(-1));
+    assert_eq!(exit_code_of("Exit code 1"), None);
+    assert_eq!(exit_code_of("exit code 1 (0.2 s)"), None);
+    assert_eq!(exit_code_of("output\nExit code 1 (0.2 s)"), None);
+    let record = Record {
+        calls: cases_calls(),
+        ..Record::default()
+    };
+    assert_eq!((record.failed_commands(), record.tool_failures()), (1, 2));
+}
+
+fn cases_calls() -> Vec<CallRec> {
+    vec![
+        rec("run_command", "error", false, "Exit code 1 (0.2 s)"),
+        rec(
+            "run_command",
+            "error",
+            false,
+            "Timed out after 600 s; the command was ended",
+        ),
+        rec("edit_file", "error", false, "x"),
+        rec("run_command", "ok", false, "Exit code 0 (0.1 s)"),
+    ]
+}
+
+/// Through the real terminal: failing tests are a failed command; a program that is not
+/// there is a tool failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failing_test_run_is_a_failed_command_not_a_tool_failure() {
+    if runtime::resolve_program("python3", None).is_none() {
+        eprintln!("python3 is missing; skipped");
+        return;
+    }
+    let ws = Workspace::create().unwrap();
+    ws.write_files([
+        (
+            "fails.py",
+            b"import sys\nprint('1 test failed')\nsys.exit(1)\n".as_slice(),
+        ),
+        ("passes.py", b"print('ok')\n".as_slice()),
+    ])
+    .unwrap();
+    let endpoint = Endpoint::playing(vec![
+        call("run_command", json!({"command": "python3 fails.py"})),
+        call("run_command", json!({"command": "python3 passes.py"})),
+        call("run_command", json!({"command": "python3 missing.py"})),
+        text("Done."),
+    ])
+    .await;
+    let (audit, _) = audit_rows();
+    let record = run(
+        &model(&endpoint),
+        spec("run them", true),
+        &ws,
+        CancellationToken::new(),
+        audit,
+    )
+    .await;
+    let codes: Vec<Option<i32>> = record.calls.iter().map(|c| c.exit_code).collect();
+    assert_eq!(codes, [Some(1), Some(0), Some(2)], "{:#?}", record.calls);
+    // A missing script is Python's own exit code 2: the command ran and failed.
+    assert_eq!(record.failed_commands(), 2, "{:#?}", record.calls);
+    assert_eq!(record.tool_failures(), 0, "{:#?}", record.calls);
+}

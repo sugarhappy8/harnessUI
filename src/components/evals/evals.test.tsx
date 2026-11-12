@@ -156,6 +156,7 @@ function run(id: string, statuses: ("passed" | "failed" | "skipped")[]): BenchRu
     unparsable: [],
     brokenEdits: status === "failed" ? 1 : 0,
     toolFailures: 0,
+    failedCommands: status === "failed" ? 2 : 0,
     blocked: 0,
     steps: 3,
     promptTokens: 100,
@@ -181,6 +182,7 @@ function run(id: string, statuses: ("passed" | "failed" | "skipped")[]): BenchRu
       skipped: tasks.filter((t) => t.status === "skipped").length,
       brokenEdits: tasks.filter((t) => t.status === "failed").length,
       toolFailures: 0,
+      failedCommands: 2 * tasks.filter((t) => t.status === "failed").length,
       blocked: 0,
       steps: 3 * tasks.length,
       tokens: 110 * tasks.length,
@@ -281,5 +283,31 @@ describe("what the user is told before a run", () => {
     const dialog = screen.getByRole("alertdialog");
     expect(dialog.textContent).toContain("Nothing leaves this computer.");
     expect(ipcMock.listProviders).not.toHaveBeenCalled();
+  });
+});
+
+describe("failed commands", () => {
+  afterEach(cleanup);
+
+  it("has its own column in a run and in the comparison", () => {
+    const a = run("20261112-100000-aaaa", ["passed", "failed", "failed"]);
+    const b = run("20261112-110000-bbbb", ["passed", "passed", "failed"]);
+    const { unmount } = render(<RunTable run={a} />);
+    const table = screen.getByRole("table", { name: "Benchmark results" });
+    const headers = [...table.querySelectorAll("th")].map((th) => th.textContent);
+    const at = headers.indexOf("Failed commands");
+    expect(at).toBeGreaterThan(headers.indexOf("Tool failures"));
+    const cell = (row: number) => table.querySelectorAll("tbody tr")[row]!.querySelectorAll("td")[at]!.textContent;
+    expect([cell(0), cell(1), cell(2), cell(3)]).toEqual(["0", "2", "2", "4"]);
+    unmount();
+    render(<CompareTable a={a} b={b} />);
+    const compare = screen.getByRole("table", { name: "Benchmark comparison" });
+    const compareHeaders = [...compare.querySelectorAll("th")].map((th) => th.textContent);
+    expect(compareHeaders).toContain("Failed commands, first");
+    expect(compareHeaders).toContain("Failed commands, second");
+    const total = [...compare.querySelectorAll("tbody tr")].at(-1)!;
+    const totals = [...total.querySelectorAll("td")].map((td) => td.textContent);
+    expect(totals[compareHeaders.indexOf("Failed commands, first")]).toBe("4");
+    expect(totals[compareHeaders.indexOf("Failed commands, second")]).toBe("2");
   });
 });

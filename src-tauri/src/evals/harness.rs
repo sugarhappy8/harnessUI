@@ -78,13 +78,43 @@ pub struct CallRec {
     /// The start of the result or of the reason, for the results table.
     pub detail: String,
     pub time_ms: u64,
+    /// For `run_command`: the exit code the terminal reported on its first result line
+    /// (`Exit code N (…)`). `None` when the command did not run to its end (refused,
+    /// timed out, ended by a signal or by Stop).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+/// The exit code of a finished command, from the first line of the terminal's result:
+/// `Exit code N (<seconds> s)`. Any other first line (a timeout, a signal, Stop, a refusal)
+/// gives `None`.
+pub fn exit_code_of(text: &str) -> Option<i32> {
+    let first = text.lines().next()?;
+    let rest = first.strip_prefix("Exit code ")?;
+    let (number, after) = rest.split_once(' ')?;
+    if !after.starts_with('(') {
+        return None;
+    }
+    number.parse().ok()
 }
 
 impl CallRec {
-    /// The call ran (or was looked at by its tool) and failed. A blocked call is not a
-    /// tool failure.
+    /// A command that ran to its end and exited with a failure, such as tests that fail.
+    /// That is the terminal working, not a tool failure. Exit codes 126 and 127 are the
+    /// shell's own "cannot run" and "not found", so the command did not really run.
+    pub fn failed_command(&self) -> bool {
+        self.tool == super::sandbox::TERMINAL_TOOL
+            && self.status == CallStatus::Error.label()
+            && self
+                .exit_code
+                .is_some_and(|code| code != 0 && code != 126 && code != 127)
+    }
+
+    /// The call failed: it ran (or was looked at by its tool) and the tool reported an
+    /// error, or a command could not run or did not finish. A blocked call is not a tool
+    /// failure, and neither is a command that ran and exited with a failure.
     pub fn failed(&self) -> bool {
-        self.status == CallStatus::Error.label()
+        self.status == CallStatus::Error.label() && !self.failed_command()
     }
 }
 
@@ -133,6 +163,11 @@ impl Record {
 
     pub fn tool_failures(&self) -> u32 {
         self.calls.iter().filter(|c| c.failed()).count() as u32
+    }
+
+    /// Commands that ran to their end and exited with a failure.
+    pub fn failed_commands(&self) -> u32 {
+        self.calls.iter().filter(|c| c.failed_command()).count() as u32
     }
 
     pub fn blocked(&self) -> u32 {
@@ -435,6 +470,9 @@ impl TurnSink for Recorder {
                     recovered,
                     detail: policy::sanitize::one_line(&detail, 200),
                     time_ms: duration_ms,
+                    exit_code: (result.name == super::sandbox::TERMINAL_TOOL && !is_blocked)
+                        .then(|| exit_code_of(&result.text))
+                        .flatten(),
                 });
                 let (_, mut entry) = crate::turns::audit_entry(
                     0,

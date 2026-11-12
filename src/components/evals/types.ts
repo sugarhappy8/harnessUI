@@ -64,6 +64,8 @@ export interface TaskResult {
   unparsable: string[];
   brokenEdits: number;
   toolFailures: number;
+  /** Commands that ran and exited with a failure (failing tests): not tool failures. */
+  failedCommands: number;
   blocked: number;
   steps: number;
   promptTokens: number;
@@ -80,6 +82,7 @@ export interface BenchTotals {
   skipped: number;
   brokenEdits: number;
   toolFailures: number;
+  failedCommands: number;
   blocked: number;
   steps: number;
   tokens: number;

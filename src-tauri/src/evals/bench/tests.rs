@@ -212,6 +212,7 @@ fn totals_add_up() {
     b.status = "failed".into();
     b.tool_failures = 2;
     b.blocked = 1;
+    b.failed_commands = 3;
     let c = TaskResult::skipped(&task, "x".into());
     let t = totals(&[a, b, c]);
     assert_eq!(
@@ -223,6 +224,7 @@ fn totals_add_up() {
             skipped: 1,
             broken_edits: 2,
             tool_failures: 2,
+            failed_commands: 3,
             blocked: 1,
             steps: 6,
             tokens: 210,
@@ -362,4 +364,24 @@ async fn every_script_check_gets_an_audit_row() {
     );
     assert_eq!(verify[0].result.as_ref().unwrap().status, "failed");
     assert!(verify[0].chat_id.is_none());
+}
+
+/// A run saved before failed commands were counted still loads, with 0 for them.
+#[test]
+fn a_run_saved_before_failed_commands_loads() {
+    let dir = crate::evals::testing::TempFolder::new("bench-old");
+    let old = r#"{"id":"20261112-100000-abcd","startedAt":1,"finishedAt":2,"model":"m","modelRef":"remote:1:m",
+      "settings":{"thinkingOff":false,"temperature":null},"toolchains":[],"cancelled":false,
+      "tasks":[{"name":"t","title":"T","kind":"python","status":"failed","note":"","checks":[],"failedEdits":0,
+        "unparsable":[],"brokenEdits":0,"toolFailures":1,"blocked":0,"steps":2,"promptTokens":1,"completionTokens":1,
+        "timeMs":5,"arrival":"native","runStatus":"completed"}],
+      "totals":{"tasks":1,"ran":1,"completed":0,"skipped":0,"brokenEdits":0,"toolFailures":1,"blocked":0,"steps":2,"tokens":2,"timeMs":5}}"#;
+    std::fs::write(dir.path().join("20261112-100000-abcd.json"), old).unwrap();
+    let run = load(dir.path(), "20261112-100000-abcd").expect("an old run loads");
+    assert_eq!(run.tasks[0].failed_commands, 0);
+    assert_eq!(run.totals.failed_commands, 0);
+    assert_eq!(list(dir.path()).len(), 1);
+    let saved = serde_json::to_value(&run).unwrap();
+    assert_eq!(saved["tasks"][0]["failedCommands"], 0);
+    assert_eq!(saved["totals"]["failedCommands"], 0);
 }

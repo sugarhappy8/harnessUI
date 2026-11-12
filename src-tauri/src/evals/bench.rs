@@ -41,6 +41,9 @@ pub struct TaskResult {
     /// Failed edits plus files left not parsing.
     pub broken_edits: u32,
     pub tool_failures: u32,
+    /// Commands that ran and exited with a failure (failing tests): not tool failures.
+    #[serde(default)]
+    pub failed_commands: u32,
     pub blocked: u32,
     pub steps: u32,
     pub prompt_tokens: u64,
@@ -64,6 +67,7 @@ impl TaskResult {
             unparsable: Vec::new(),
             broken_edits: 0,
             tool_failures: 0,
+            failed_commands: 0,
             blocked: 0,
             steps: 0,
             prompt_tokens: 0,
@@ -86,6 +90,9 @@ pub struct Totals {
     pub skipped: u32,
     pub broken_edits: u32,
     pub tool_failures: u32,
+    /// Commands that ran and exited with a failure.
+    #[serde(default)]
+    pub failed_commands: u32,
     pub blocked: u32,
     pub steps: u32,
     pub tokens: u64,
@@ -108,6 +115,7 @@ pub fn totals(results: &[TaskResult]) -> Totals {
         }
         t.broken_edits += r.broken_edits;
         t.tool_failures += r.tool_failures;
+        t.failed_commands += r.failed_commands;
         t.blocked += r.blocked;
         t.steps += r.steps;
         t.tokens += r.prompt_tokens + r.completion_tokens;
@@ -210,6 +218,7 @@ pub async fn run_task(setup: &Setup<'_>, task: &Task, cancel: &CancellationToken
         unparsable: Vec::new(),
         broken_edits: 0,
         tool_failures: record.tool_failures(),
+        failed_commands: record.failed_commands(),
         blocked: record.blocked(),
         steps: record.steps,
         prompt_tokens: record.prompt_tokens,

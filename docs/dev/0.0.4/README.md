@@ -25,8 +25,8 @@ reviews of steps 2 and 3.
 | 2 | 6 | Visible, resumable task state (G) | done |
 | 2 | 11 | File and symbol mentions (H) | done |
 | 2 | 12 | Pinned instructions and a context inspector (I) | done |
-| 3 | 5 | Tested settings per model (F, first half) | done; review fixes being finished |
-| 3 | 13 | Coding benchmarks (F, second half) | done; review fixes being finished |
+| 3 | 5 | Tested settings per model (F, first half) | done |
+| 3 | 13 | Coding benchmarks (F, second half) | done |
 
 Groundwork that all steps build on is in place (see the spec's Part 2): schema version 2
 with every new table, the panel beside the chat with four tabs
@@ -119,12 +119,11 @@ Not verified, and not hidden:
 
 ## Steps 2 and 3 status
 
-**Built and tested on Linux; F's review fixes are being finished.** B, G, H and I are in
-the tree with their tests and their end-to-end scenarios pass. F (model check and
-benchmarks) is built and its scenario passes; the fixes the lead decided after the second
-review (an allow-list for the benchmark terminal, honest confirmation and audit texts,
-verification in a child process that cannot hang and is audited) are being implemented
-now. `ARCHITECTURE.md` has the result: 8.4 (saved outputs, the pins' share), 8.5, 8.6,
+**Built and tested on Linux.** B, G, H, I and F are in the tree with their tests, and
+their end-to-end scenarios pass. F's fixes after the second review are done (an
+allow-list for the benchmark terminal, honest confirmation and audit texts, verification
+by values the app compares, which cannot hang and is audited), and `e2e/m9_model_check.py`
+passed against the real 0.6B test model. `ARCHITECTURE.md` has the result: 8.4 (saved outputs, the pins' share), 8.5, 8.6,
 8.7 (task), 8.8 (pins and the inspector), 8.9 (model check and benchmarks), 9.3 (the
 `outputs` and `task` servers, mentions), 12 (tables), 13.3 (Allow all changes) and the
 security subsections 13.9 to 13.14. `CHANGELOG.md` says it for users.
@@ -146,8 +145,12 @@ Read first, per feature (later reports override earlier ones where they differ):
 - `report-I-context-inspector.md`: the inspector, `turns::assemble`, the Pin button on a
   user message.
 - `report-F-model-check-benchmarks.md`: the harness, the rule, probes, profiles, the
-  eleven tasks. Written before the second review; the lead's decisions above replace its
-  rule table and its confirmation texts.
+  eleven tasks. Written before the second review; `report-F-review-fixes.md` replaces its
+  rule table, confirmation texts and verification.
+- `report-F-review-fixes.md`: F's answers to the second review (the allow-list, the
+  texts, values compared by the app, no hang, audited verification, clean-up, window
+  checks), the real-model run, and what is still not confined. Overrides everything
+  earlier about F, including the lead's decisions where it says so.
 - `review-steps-2-3-part1.md`: independent review of B, G, H and I: two confirmed defects
   in `edit_file`, four smaller ones; all fixed.
 - `review-steps-2-3-part2-benchmarks.md`: independent review of F: the benchmark did not
@@ -165,14 +168,21 @@ What the lead changed after the reports:
    its own (`allow_all/own_command.rs`), treats `busybox`/`toybox` as wrappers, counts
    `python -m http.server` as going online, and reads `node --test`, `--version` and
    `--help` on an interpreter as plain commands.
-6. Benchmarks: the allow-list, the honest texts and the verification above.
+6. Benchmarks: the allow-list, the honest texts and the verification above, as built in
+   `report-F-review-fixes.md` (no nonce; every redirection refused, `2>&1` too; Python
+   takes only `-B` and `-u`). A command that ran and exited with a failure counts as a
+   "failed command" in its own column, not as a tool failure.
 
 Not verified, and not hidden (steps 2 and 3):
 - Windows and macOS: nothing of steps 2 and 3 has run there. Windows paths of mentions
   (labels, case-insensitive volumes, the reparse-point open) are compile-checked at most;
   the PowerShell forms of the check recogniser have unit tests only.
-- The model check and benchmarks never ran against a real model, only the scripted
-  endpoint. F's final code was still changing when these documents were written.
+- The model check and benchmarks ran against one real model only (the 0.6B test model,
+  CPU, `e2e/m9_model_check.py`): it proves the harness works with a real local server,
+  not that a small model passes the probes (error recovery never passed; the chosen
+  setting changed between runs). Benchmark code the model writes is still not confined
+  (`report-F-review-fixes.md`, "Still not confined"); the Windows and PowerShell parts of
+  the allow-list are compile-checked only.
 - The inspector's token numbers were seen only with the fake remote endpoint, not with a
   local model's exact count.
 - The mention index timings are from the unoptimised debug build; the largest tree was
@@ -182,7 +192,7 @@ Not verified, and not hidden (steps 2 and 3):
 - `update_task` marks the turn as holding untrusted content (D9), so in Ask first a granted
   command asks again after it. A turn that carries the task note makes a local server
   process the previous turn again.
-- No switchable "tool calls from text" request mode (a `TODO(0.0.5)` in F's report).
+- No switchable "tool calls from text" request mode (`TODO(0.0.5)` in `evals/probes.rs`).
 - The full end-to-end suite was not run by any one developer after the last changes; each
   ran its own scenario and a few others. `e2e/m1_chat.py` (a 0.6B model at 4,096 tokens)
   after the companion tools were added is not recorded in the reports.
