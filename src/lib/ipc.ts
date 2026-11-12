@@ -245,6 +245,12 @@ export const getDefaultApprovalMode = () => invoke<ApprovalModeName>("get_defaul
 /** Saved across restarts. Every chat follows the new default, also chats switched by hand. */
 export const setDefaultApprovalMode = (mode: ApprovalModeName) =>
   invoke<void>("set_default_approval_mode", { mode });
+/** True when the saved default is Full access and the user has not confirmed it since the
+ *  app started: until then every chat starts in Ask first. */
+export const getFullAccessDefaultPending = () => invoke<boolean>("get_full_access_default_pending");
+/** The answer to that question: true starts every chat in Full access for this run (kept
+ *  saved); false saves Ask first. */
+export const answerFullAccessDefault = (on: boolean) => invoke<void>("answer_full_access_default", { on });
 
 // Tools and MCP servers
 export const listChatTools = (chatId: number) => invoke<ToolDto[]>("list_chat_tools", { chatId });

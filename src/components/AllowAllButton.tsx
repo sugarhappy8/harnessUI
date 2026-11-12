@@ -87,7 +87,7 @@ export const FULL_ACCESS_RISKS: readonly string[] = [
 
 type Tone = "warning" | "danger";
 
-/** The shared look of the two confirmations. */
+/** The shared look of the confirmations. */
 function ConfirmDialog(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -96,6 +96,8 @@ function ConfirmDialog(props: {
   title: string;
   description: string;
   confirmLabel: string;
+  /** The label of the button that has the focus first and closes the dialog. */
+  cancelLabel?: string;
   onConfirm: () => void;
   /** Where the focus goes when the dialog closes (it has no trigger of its own). */
   returnFocus?: RefObject<HTMLElement | null>;
@@ -129,10 +131,13 @@ function ConfirmDialog(props: {
           </div>
           <ConfirmButtons
             label={props.confirmLabel}
+            cancelLabel={props.cancelLabel ?? "Cancel"}
             tone={tone}
             onConfirm={() => {
-              props.onOpenChange(false);
+              // Confirmed first, then closed: a dialog where closing is itself an answer
+              // (FullAccessStartCheck) can tell the two apart.
               props.onConfirm();
+              props.onOpenChange(false);
             }}
           />
         </AlertDialog.Content>
@@ -228,13 +233,81 @@ export function FullAccessConfirm(props: {
   );
 }
 
+/** Why the app asks again at start before every chat starts in Full access. */
+export const FULL_ACCESS_ASKS_AGAIN =
+  "Your setting says every chat starts in Full access. For your safety the app asks again each time it starts, because a program on this computer could have changed that setting.";
+
+/**
+ * Asked once when the main window starts, if the saved setting says every chat starts in
+ * Full access. The app does not apply that setting on its own: it is a row in the database
+ * that a program on this computer could have written. Until the user answers, every chat
+ * starts in Ask first. Closing the dialog or pressing Escape is the same as Ask first.
+ */
+export function FullAccessStartCheck() {
+  const [open, setOpen] = useState(false);
+  // One answer only: confirming also closes the dialog, and closing means Ask first.
+  const answered = useRef(false);
+
+  useEffect(() => {
+    let alive = true;
+    ipc
+      .getFullAccessDefaultPending()
+      .then((pending) => {
+        if (alive && pending) setOpen(true);
+      })
+      // Not known: every chat stays in Ask first, which is the safe side.
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const answer = (on: boolean) => {
+    if (answered.current) return;
+    answered.current = true;
+    setOpen(false);
+    void ipc
+      .answerFullAccessDefault(on)
+      // Settings and the hint under the message box show the mode every chat starts in now.
+      .then(() => useApprovalMode.getState().loadDefault())
+      .catch((e) => useApp.getState().showError(toErrorInfo(e)));
+  };
+
+  return (
+    <ConfirmDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) answer(false);
+      }}
+      tone="danger"
+      icon={ShieldOff}
+      title="Start every chat in Full access again?"
+      description={FULL_ACCESS_ASKS_AGAIN}
+      confirmLabel="Turn on Full access"
+      cancelLabel="Start in Ask first"
+      onConfirm={() => answer(true)}
+    >
+      <p className="mt-3 font-medium">What Full access means:</p>
+      <ul aria-label="Risks" className="mt-1 list-disc space-y-1 pl-5">
+        {FULL_ACCESS_RISKS.map((line) => (
+          <li key={line}>{line}</li>
+        ))}
+        <li>It applies to every chat until you quit the app. The app asks again the next time it starts.</li>
+      </ul>
+      <p className="mt-3 text-fg-muted">
+        Start in Ask first also changes your setting to Ask first. You can change it again in Settings.
+      </p>
+    </ConfirmDialog>
+  );
+}
+
 const CONFIRM_TONE: Record<Tone, string> = {
   warning: "border-warning/60 bg-warning/10 text-warning hover:bg-warning/20",
   danger: "border-danger/60 bg-danger/10 text-danger hover:bg-danger/20",
 };
 
 /** Cancel and confirm. Mounted with the dialog, so the delay starts when it opens. */
-function ConfirmButtons(props: { label: string; tone: Tone; onConfirm: () => void }) {
+function ConfirmButtons(props: { label: string; cancelLabel: string; tone: Tone; onConfirm: () => void }) {
   const [armed, setArmed] = useState(false);
   useEffect(() => {
     const t = window.setTimeout(() => setArmed(true), CONFIRM_INPUT_DELAY_MS);
@@ -243,7 +316,7 @@ function ConfirmButtons(props: { label: string; tone: Tone; onConfirm: () => voi
   return (
     <div className="flex shrink-0 justify-end gap-2 border-t border-border px-5 py-3">
       <AlertDialog.Cancel className="rounded-md border border-border px-3 py-1.5 hover:bg-bg-muted">
-        Cancel
+        {props.cancelLabel}
       </AlertDialog.Cancel>
       <button
         type="button"

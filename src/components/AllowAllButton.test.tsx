@@ -17,6 +17,8 @@ const ipcMock = vi.hoisted(() => ({
   setChatApprovalMode: vi.fn<(chatId: number, mode: ApprovalModeName) => Promise<ApprovalModeName>>(),
   getDefaultApprovalMode: vi.fn<() => Promise<ApprovalModeName>>(async () => "ask"),
   setDefaultApprovalMode: vi.fn(async () => undefined),
+  getFullAccessDefaultPending: vi.fn<() => Promise<boolean>>(async () => false),
+  answerFullAccessDefault: vi.fn<(on: boolean) => Promise<void>>(async () => undefined),
   onApprovalModeChanged: vi.fn(async (handler: (chatId: number | null) => void) => {
     modeChanged = handler;
     return () => undefined;
@@ -31,9 +33,11 @@ const {
   ApprovalHint,
   ApprovalModeMenu,
   CONFIRM_INPUT_DELAY_MS,
+  FULL_ACCESS_ASKS_AGAIN,
   FULL_ACCESS_RISKS,
   FULL_ACCESS_SUMMARY,
   FullAccessConfirm,
+  FullAccessStartCheck,
   LIMITS,
   NO_LONGER_ASKS,
   STILL_ASKS,
@@ -366,5 +370,121 @@ describe("ApprovalModeMenu", () => {
       expect(label).not.toContain("Allow once");
       expect(label).not.toContain("Deny");
     }
+  });
+});
+
+describe("FullAccessStartCheck", () => {
+  // What the app reports as the mode every chat starts in, before and after the answer.
+  let defaultMode: ApprovalModeName = "ask";
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    defaultMode = "ask";
+    ipcMock.getFullAccessDefaultPending.mockImplementation(async () => true);
+    ipcMock.answerFullAccessDefault.mockImplementation(async (on) => {
+      defaultMode = on ? "fullAccess" : "ask";
+    });
+    ipcMock.getDefaultApprovalMode.mockImplementation(async () => defaultMode);
+    useApprovalMode.setState({ modes: {}, defaultMode: "ask" });
+    useApp.setState({ error: null });
+  });
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  async function start() {
+    await act(async () => {
+      render(<FullAccessStartCheck />);
+    });
+  }
+
+  it("shows nothing when the app is not waiting for an answer", async () => {
+    ipcMock.getFullAccessDefaultPending.mockImplementation(async () => false);
+    await start();
+    expect(ipcMock.getFullAccessDefaultPending).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(ipcMock.answerFullAccessDefault).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing when the question cannot be read: every chat stays in Ask first", async () => {
+    ipcMock.getFullAccessDefaultPending.mockRejectedValueOnce(new Error("no app"));
+    await start();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(useApp.getState().error).toBeNull();
+  });
+
+  it("asks with the risks, Ask first focused, and turns Full access on only after the delay", async () => {
+    await start();
+    const dialog = screen.getByRole("alertdialog");
+    expect(within(dialog).getByText("Start every chat in Full access again?")).toBeTruthy();
+    expect(dialog.className).toContain("border-danger");
+    expect(dialog.textContent).toContain(FULL_ACCESS_ASKS_AGAIN);
+    expect(FULL_ACCESS_ASKS_AGAIN).toContain("a program on this computer could have changed that setting");
+    const risks = within(dialog).getByRole("list", { name: "Risks" });
+    const lines = within(risks).getAllByRole("listitem").map((li) => li.textContent ?? "");
+    expect(lines.slice(0, -1)).toEqual([...FULL_ACCESS_RISKS]);
+    expect(lines.at(-1)).toContain("asks again the next time it starts");
+    const askFirst = within(dialog).getByRole("button", { name: "Start in Ask first" });
+    expect(document.activeElement).toBe(askFirst);
+    const confirm = within(dialog).getByRole("button", { name: "Turn on Full access" });
+    expect(confirm.className).toContain("text-danger");
+    // Too soon (a double click, or a key held down): ignored.
+    fireEvent.click(confirm);
+    expect(ipcMock.answerFullAccessDefault).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+    arm();
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    // One answer: closing the dialog after confirming does not also answer Ask first.
+    expect(ipcMock.answerFullAccessDefault).toHaveBeenCalledTimes(1);
+    expect(ipcMock.answerFullAccessDefault).toHaveBeenCalledWith(true);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    // Settings and the hint read the mode every chat starts in again.
+    expect(ipcMock.getDefaultApprovalMode).toHaveBeenCalled();
+    expect(useApprovalMode.getState().defaultMode).toBe("fullAccess");
+  });
+
+  it("starts in Ask first from its button", async () => {
+    useApprovalMode.setState({ defaultMode: "fullAccess" });
+    await start();
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Start in Ask first" }));
+    });
+    expect(ipcMock.answerFullAccessDefault).toHaveBeenCalledTimes(1);
+    expect(ipcMock.answerFullAccessDefault).toHaveBeenCalledWith(false);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(useApprovalMode.getState().defaultMode).toBe("ask");
+  });
+
+  it("answers Ask first when Escape closes it", async () => {
+    await start();
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
+    });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(ipcMock.answerFullAccessDefault).toHaveBeenCalledTimes(1);
+    expect(ipcMock.answerFullAccessDefault).toHaveBeenCalledWith(false);
+  });
+
+  it("shows the error when the answer cannot be saved", async () => {
+    ipcMock.answerFullAccessDefault.mockRejectedValueOnce({
+      code: "internal",
+      message: "The setting could not be saved.",
+      nextStep: "",
+      details: "",
+    });
+    await start();
+    arm();
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Turn on Full access" }));
+    });
+    expect(ipcMock.answerFullAccessDefault).toHaveBeenCalledWith(true);
+    expect(useApp.getState().error?.message).toBe("The setting could not be saved.");
+    // Nothing was turned on in the window's mirror.
+    expect(ipcMock.getDefaultApprovalMode).not.toHaveBeenCalled();
+    expect(useApprovalMode.getState().defaultMode).toBe("ask");
   });
 });

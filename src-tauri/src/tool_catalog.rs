@@ -60,16 +60,9 @@ pub const GROUPS: &[Group] = &[
         server: "files",
         label: "Files",
         // The tools for reading and changing files are always shown; these words bring in
-        // `delete_file` and, in Full access, the tools that organise folders.
-        strong: &[
-            "delete",
-            "remove",
-            "erase",
-            "get rid of",
-            "folder",
-            "organize",
-            "organise",
-        ],
+        // `delete_file` (and, in Full access, `delete_folder`). The other folder tools come in
+        // by their own keywords.
+        strong: &["delete", "remove", "erase", "get rid of"],
         weak: &[],
     },
     Group {

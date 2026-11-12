@@ -683,8 +683,11 @@ struct AppTools {
     /// Shared with the policy gate and the sink: the id of the call in progress.
     shared: Arc<TurnShared>,
     /// [0.0.5 full access] What the tools reach while the chat is in Full access
-    /// (`approvals::whole_computer`).
-    whole_computer: Vec<String>,
+    /// (`approvals::whole_computer`), worked out the first time it is needed in the turn:
+    /// looking at every drive is not free, and a chat that is not in Full access never does.
+    whole_computer: Arc<std::sync::OnceLock<Vec<String>>>,
+    /// The home folder, for `whole_computer`.
+    home: Option<std::path::PathBuf>,
 }
 
 /// What a helper takes over from the turn that starts it (see `subagent.rs`).
@@ -774,6 +777,7 @@ impl AppTools {
                 .collect(),
             shared: Arc::default(),
             whole_computer: self.whole_computer.clone(),
+            home: self.home.clone(),
         };
         let ready_host = self.host.clone();
         let policy = AppPolicy::for_chat(
@@ -832,7 +836,10 @@ impl AppTools {
         let mut chat = self.chat.clone();
         chat.result_cap_tokens = self.result_cap.load(Ordering::Relaxed);
         if crate::approvals::modes().full_access(chat.chat_id) {
-            crate::approvals::widen(&mut chat, &self.whole_computer);
+            let whole = self
+                .whole_computer
+                .get_or_init(|| crate::approvals::whole_computer(self.home.as_deref()));
+            crate::approvals::widen(&mut chat, whole);
         }
         chat
     }
@@ -1840,7 +1847,8 @@ pub async fn run(
         app: app.clone(),
         hidden,
         shared: shared.clone(),
-        whole_computer: crate::approvals::whole_computer(app.path().home_dir().ok().as_deref()),
+        whole_computer: Arc::default(),
+        home: app.path().home_dir().ok(),
     };
     let ready_host = host.clone();
     let policy = AppPolicy::for_chat(

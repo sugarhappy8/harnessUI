@@ -1494,7 +1494,8 @@ def p_tool_selection(c, notes):
         assert len(wanted) == 14, wanted
         s.invoke("set_chat_tools", {"chatId": chat, "enabled": wanted + ["find_tools", "call_tool"]})
         tools = listing(chat)
-        companions = [n for n, t in tools.items() if t["companion"]]
+        companions = [n for n, t in tools.items() if t["companion"] and n not in folder_tools]
+        assert not any(tools[n]["enabledInChat"] for n in folder_tools), "a folder tool is on outside Full access"
         assert "find_tools" in companions and "call_tool" in companions, companions
         assert all(tools[n]["enabledInChat"] for n in companions), "a companion is off although tools are on"
         on = sorted(n for n, t in tools.items() if t["enabledInChat"] and not t["companion"])

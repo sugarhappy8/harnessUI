@@ -77,6 +77,10 @@ struct Inner {
     /// Whether untrusted content had entered the turn when the chat's latest call was
     /// decided (for navigations the browser holds while that call runs).
     untrusted: HashMap<i64, bool>,
+    /// The saved default is Full access and the user has not confirmed it in this run. Until
+    /// then every chat starts in Ask first: a saved value is a row in a database a command
+    /// can write, so it alone never turns Full access on.
+    full_access_pending: bool,
 }
 
 impl ApprovalModes {
@@ -163,6 +167,29 @@ impl ApprovalModes {
         });
     }
 
+    /// Marks the saved Full access default as waiting for the user's confirmation.
+    fn set_full_access_pending(&self, pending: bool) {
+        if let Ok(mut m) = self.0.lock() {
+            m.full_access_pending = pending;
+        }
+    }
+
+    /// Whether the saved Full access default waits for the user's confirmation.
+    pub fn full_access_pending(&self) -> bool {
+        self.0
+            .lock()
+            .map(|m| m.full_access_pending)
+            .unwrap_or(false)
+    }
+
+    /// Clears the wait and says whether there was one.
+    fn take_full_access_pending(&self) -> bool {
+        self.0
+            .lock()
+            .map(|mut m| std::mem::take(&mut m.full_access_pending))
+            .unwrap_or(false)
+    }
+
     /// Notes whether untrusted content had entered the turn at the decision being made.
     fn note_decision(&self, chat: i64, untrusted_in_turn: bool) {
         if let Ok(mut m) = self.0.lock() {
@@ -219,13 +246,16 @@ pub fn for_decision(chat_id: i64, untrusted_in_turn: bool) -> ApprovalMode {
 }
 
 /// Whether a navigation the browser holds is let through without a card (13.3, "Approvals
-/// raised during a call"). In Full access, always. In Allow all, only what
+/// raised during a call"). In Full access, any hold of the chat's own call: one from the tab
+/// the call works in or a tab it opened (`during_tool` is set only then). The browser is
+/// shared by every chat, so a hold outside a call, or from another tab, is not this chat's
+/// and keeps its card. In Allow all, only what
 /// [`browser::HeldNavigation::released_in_allow_all`] says: a page moving its tab to
 /// another site during a call, while no untrusted content had entered the turn. Otherwise
 /// a held submission, a background send and anything held outside a call keep their card.
 fn releases(modes: &ApprovalModes, chat_id: i64, held: &browser::HeldNavigation) -> bool {
     match modes.mode(chat_id) {
-        ApprovalMode::FullAccess => true,
+        ApprovalMode::FullAccess => held.during_tool.is_some(),
         ApprovalMode::AllowAll => {
             held.released_in_allow_all(modes.untrusted_at_last_decision(chat_id))
         }
@@ -271,32 +301,28 @@ pub async fn release_held_navigation(
     true
 }
 
-/// Reads the saved default into `modes` (at start). A missing or unreadable value is Ask;
-/// a 0.0.4 "Allow all in every chat" is Allow all.
+/// Reads the saved default into `modes` (at start). A missing or unreadable value is read
+/// as missing, and then the 0.0.4 "Allow all in every chat" decides (Allow all or Ask). If
+/// 0.0.4 switched that off after 0.0.5 saved a mode, off wins: the user's latest choice.
+/// A saved Full access is not applied: every chat starts in Ask first until the user
+/// confirms it in this run ([`answer_full_access_default`]).
 async fn load_default_into(store: &store::Store, modes: &ApprovalModes) {
     let saved: Option<ApprovalMode> = store
         .get_setting(APPROVAL_MODE_DEFAULT)
         .await
         .ok()
         .flatten();
-    let mode = match saved {
-        Some(mode) => mode,
-        None => {
-            let allow_all: bool = store
-                .get_setting(ALLOW_ALL_DEFAULT)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(false);
-            if allow_all {
-                ApprovalMode::AllowAll
-            } else {
-                ApprovalMode::Ask
-            }
-        }
+    let old: Option<bool> = store.get_setting(ALLOW_ALL_DEFAULT).await.ok().flatten();
+    let mode = match (saved, old) {
+        (Some(mode), Some(false)) if mode != ApprovalMode::Ask => ApprovalMode::Ask,
+        (Some(mode), _) => mode,
+        (None, Some(true)) => ApprovalMode::AllowAll,
+        (None, _) => ApprovalMode::Ask,
     };
-    if mode != ApprovalMode::Ask {
-        modes.set_default_mode(mode);
+    match mode {
+        ApprovalMode::FullAccess => modes.set_full_access_pending(true),
+        ApprovalMode::AllowAll => modes.set_default_mode(mode),
+        ApprovalMode::Ask => {}
     }
 }
 
@@ -305,12 +331,12 @@ pub fn load_default(app: &AppHandle) {
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
     tauri::async_runtime::block_on(load_default_into(&state.store, modes()));
-    match modes().default_mode() {
-        ApprovalMode::Ask => {}
-        ApprovalMode::AllowAll => tracing::info!("every chat starts in Allow all (saved setting)"),
-        ApprovalMode::FullAccess => {
-            tracing::warn!("every chat starts in Full access (saved setting)")
-        }
+    if modes().full_access_pending() {
+        tracing::warn!(
+            "the saved setting says every chat starts in Full access; waiting for the user to confirm"
+        );
+    } else if modes().default_mode() == ApprovalMode::AllowAll {
+        tracing::info!("every chat starts in Allow all (saved setting)");
     }
 }
 
@@ -327,6 +353,8 @@ async fn save_default(
         .set_setting(ALLOW_ALL_DEFAULT, &json!(mode != ApprovalMode::Ask))
         .await?;
     modes.set_default_mode(mode);
+    // The user chose the default in this run: nothing waits for a confirmation any more.
+    modes.set_full_access_pending(false);
     Ok(())
 }
 
@@ -441,6 +469,41 @@ pub async fn set_default_approval_mode(
     only_main_window(window.label())?;
     save_default(&state.store, modes(), mode).await?;
     tracing::info!(?mode, "the mode every chat starts in changed by the user");
+    tell_window(None);
+    Ok(())
+}
+
+/// Whether the saved setting says every chat starts in Full access and the user has not
+/// confirmed it since the app started. The main window then asks.
+#[tauri::command]
+pub fn get_full_access_default_pending() -> bool {
+    modes().full_access_pending()
+}
+
+/// The user's answer to that question: `on` makes every chat start in Full access for this
+/// run (and keeps it saved); otherwise every chat starts in Ask first, saved. Does nothing
+/// when no question is open.
+#[tauri::command]
+pub async fn answer_full_access_default(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    on: bool,
+) -> AppResult<()> {
+    only_main_window(window.label())?;
+    if !modes().take_full_access_pending() {
+        return Ok(());
+    }
+    let mode = if on {
+        ApprovalMode::FullAccess
+    } else {
+        ApprovalMode::Ask
+    };
+    if let Err(e) = save_default(&state.store, modes(), mode).await {
+        // Not saved: ask again rather than leave the question unanswered.
+        modes().set_full_access_pending(true);
+        return Err(e);
+    }
+    tracing::info!(on, "the saved Full access default answered by the user");
     tell_window(None);
     Ok(())
 }
@@ -680,9 +743,28 @@ mod tests {
         assert_eq!(saved.as_deref(), Some("fullAccess"));
         let old: Option<bool> = store.get_setting(ALLOW_ALL_DEFAULT).await.unwrap();
         assert_eq!(old, Some(true));
+        // A saved Full access waits for the user: every chat starts in Ask first.
         let after_restart = ApprovalModes::default();
         load_default_into(&store, &after_restart).await;
-        assert_eq!(after_restart.default_mode(), ApprovalMode::FullAccess);
+        assert_eq!(after_restart.default_mode(), ApprovalMode::Ask);
+        assert!(after_restart.full_access_pending());
+        assert_eq!(after_restart.mode(1), ApprovalMode::Ask);
+        assert!(after_restart.take_full_access_pending());
+        assert!(!after_restart.full_access_pending());
+
+        // 0.0.4 switched "Allow all in every chat" off afterwards: off wins.
+        store
+            .set_setting(ALLOW_ALL_DEFAULT, &json!(false))
+            .await
+            .unwrap();
+        let downgraded = ApprovalModes::default();
+        load_default_into(&store, &downgraded).await;
+        assert_eq!(downgraded.default_mode(), ApprovalMode::Ask);
+        assert!(!downgraded.full_access_pending());
+        store
+            .set_setting(ALLOW_ALL_DEFAULT, &json!(true))
+            .await
+            .unwrap();
 
         save_default(&store, &after_restart, ApprovalMode::Ask)
             .await
@@ -690,7 +772,7 @@ mod tests {
         let old: Option<bool> = store.get_setting(ALLOW_ALL_DEFAULT).await.unwrap();
         assert_eq!(old, Some(false));
 
-        // Something that is not a mode counts as Ask, whatever the old key says.
+        // Something that is not a mode is read as missing: the 0.0.4 setting decides.
         store
             .set_setting(APPROVAL_MODE_DEFAULT, &json!("everything"))
             .await
@@ -704,10 +786,11 @@ mod tests {
         assert_eq!(odd.default_mode(), ApprovalMode::Ask);
     }
 
-    /// In Full access every held navigation is let through: a submission, a move after
-    /// untrusted content, and one held outside a call.
+    /// In Full access every held navigation of the chat's own call is let through: a
+    /// submission, a move after untrusted content. One held outside a call (or from a tab the
+    /// call does not work in) is not the chat's: the browser is shared, so it keeps its card.
     #[test]
-    fn full_access_releases_every_held_navigation() {
+    fn full_access_releases_every_held_navigation_of_its_own_call() {
         let url = url::Url::parse("https://other.example/").unwrap();
         let held = |kind, tool: Option<&str>| {
             browser::HeldNavigation::new(kind, "GET", &url, None, true, tool)
@@ -718,10 +801,12 @@ mod tests {
         for h in [
             held(browser::HoldKind::LeavesSite, Some("browser_navigate")),
             held(browser::HoldKind::Submission, Some("browser_click")),
-            held(browser::HoldKind::LeavesSite, None),
         ] {
             assert!(releases(&modes, 1, &h));
             assert!(!releases(&modes, 2, &h), "chat 2 is in Ask");
+        }
+        for kind in [browser::HoldKind::LeavesSite, browser::HoldKind::Submission] {
+            assert!(!releases(&modes, 1, &held(kind, None)), "outside a call");
         }
     }
 

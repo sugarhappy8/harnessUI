@@ -78,14 +78,52 @@ struct AppDirs {
     /// ~/Library/Logs/<id>, outside the data folders; elsewhere it is inside local data.
     logs: Option<PathBuf>,
     install: Option<PathBuf>,
+    /// Where the system keeps saved keys (0.0.5): the app's keys are in the system
+    /// keychain, and its files are never reached by a tool, in Full access neither.
+    key_stores: Vec<PathBuf>,
 }
 
 impl AppDirs {
     fn forbidden(self) -> Vec<PathBuf> {
-        [self.local_data, self.data, self.logs, self.install]
+        // On macOS the program sits in `<name>.app/Contents/MacOS`: the whole bundle is the
+        // install folder (its resources and signature are part of the program).
+        let install = self.install.map(|i| app_bundle(&i).unwrap_or(i));
+        [self.local_data, self.data, self.logs, install]
             .into_iter()
             .flatten()
+            .chain(self.key_stores)
             .collect()
+    }
+}
+
+/// The `.app` bundle a program folder is part of, if any.
+fn app_bundle(install: &Path) -> Option<PathBuf> {
+    install
+        .ancestors()
+        .find(|a| a.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")))
+        .map(Path::to_path_buf)
+}
+
+/// The folders where the system keeps saved keys and what unlocks them.
+fn key_stores(app: &AppHandle) -> Vec<PathBuf> {
+    let home = app.path().home_dir().ok();
+    if cfg!(target_os = "macos") {
+        home.map(|h| vec![h.join("Library").join("Keychains")])
+            .unwrap_or_default()
+    } else if cfg!(windows) {
+        let mut out = Vec::new();
+        for base in [app.path().data_dir().ok(), app.path().local_data_dir().ok()]
+            .into_iter()
+            .flatten()
+        {
+            for name in ["Credentials", "Vault", "Protect"] {
+                out.push(base.join("Microsoft").join(name));
+            }
+        }
+        out
+    } else {
+        home.map(|h| vec![h.join(".local").join("share").join("keyrings")])
+            .unwrap_or_default()
     }
 }
 
@@ -97,6 +135,7 @@ fn forbidden_folders(app: &AppHandle) -> Vec<PathBuf> {
         install: std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(Path::to_path_buf)),
+        key_stores: key_stores(app),
     }
     .forbidden()
 }
@@ -386,10 +425,21 @@ mod tests {
             data: Some(home.join("Library/Application Support/app.harness")),
             logs: Some(logs.clone()),
             install: Some(PathBuf::from("/Applications/harnessUI.app/Contents/MacOS")),
+            key_stores: vec![home.join("Library/Keychains")],
         }
         .forbidden();
         assert!(forbidden.contains(&logs));
         let refused = |p: &Path| forbidden.iter().any(|f| overlaps(p, f));
+        // The whole bundle, not only the folder the program is in (0.0.5).
+        assert!(refused(&PathBuf::from(
+            "/Applications/harnessUI.app/Contents/Resources"
+        )));
+        assert!(refused(&PathBuf::from(
+            "/Applications/harnessUI.app/Contents/Info.plist"
+        )));
+        assert!(!refused(&PathBuf::from("/Applications/Other.app")));
+        // The system's key stores.
+        assert!(refused(&home.join("Library/Keychains/login.keychain-db")));
         assert!(refused(&home.join("Library/Logs")));
         assert!(refused(&logs.join("harness.2026-11-10.log")));
         assert!(refused(&home.join("Library")));

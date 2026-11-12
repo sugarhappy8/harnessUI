@@ -76,6 +76,8 @@ get_chat_approval_mode
 set_chat_approval_mode
 get_default_approval_mode
 set_default_approval_mode
+get_full_access_default_pending
+answer_full_access_default
 list_mcp_servers
 preview_mcp_config
 add_mcp_servers

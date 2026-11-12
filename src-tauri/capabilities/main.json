@@ -103,6 +103,8 @@
     "allow-set-chat-approval-mode",
     "allow-get-default-approval-mode",
     "allow-set-default-approval-mode",
+    "allow-get-full-access-default-pending",
+    "allow-answer-full-access-default",
     "allow-list-mcp-servers",
     "allow-preview-mcp-config",
     "allow-add-mcp-servers",

@@ -186,8 +186,24 @@ fn stored_lines<S: AsRef<str>>(lines: &[S]) -> usize {
     lines.iter().map(|l| shorten::pieces(l.as_ref())).sum()
 }
 
+/// Whether `path` exists and is neither a regular file nor a folder: a device, a pipe or a
+/// socket (0.0.5). Reading one can block for ever (a pipe) or never end (`/dev/zero`), and in
+/// Full access the whole computer is reachable, so the file tools leave them alone.
+fn is_special(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| !m.is_file() && !m.is_dir())
+}
+
+fn special_file_message(shown: &str) -> String {
+    format!(
+        "{shown} is not a regular file (it is a device, a pipe or a socket), so the file tools leave it alone."
+    )
+}
+
 /// Reads at most `RAW_LIMIT` bytes; returns the bytes and the file's full size.
 fn read_capped(path: &Path) -> std::io::Result<(Vec<u8>, u64)> {
+    if is_special(path) {
+        return Err(std::io::Error::other("not a regular file"));
+    }
     let f = std::fs::File::open(path)?;
     let size = f.metadata()?.len();
     let mut buf = Vec::with_capacity(size.min(RAW_LIMIT) as usize);
@@ -721,6 +737,11 @@ impl BuiltinServer for FilesServer {
             Ok(v) => v,
             Err(why) => return Self::hard_limit(tool, &path, why),
         };
+        if is_special(Path::new(&c.canonical)) {
+            return Described::Invalid(special_file_message(&policy::sanitize::visible(
+                &c.canonical,
+            )));
+        }
         if is_write(tool)
             && let Err(why) =
                 skill_guard::check(&c.canonical, &chat.skill_roots, self.flavor, Reach::Inside)
@@ -894,7 +915,7 @@ impl BuiltinServer for FilesServer {
                 let p = PathBuf::from(&c.canonical);
                 if p.is_dir() {
                     return Described::Invalid(format!(
-                        "{shown} is a folder. delete_file only deletes files; a folder is removed with a command (run_command)."
+                        "{shown} is a folder. delete_file only deletes files; a folder is removed with delete_folder (in Full access) or a command (run_command)."
                     ));
                 }
                 if p.symlink_metadata().is_err() {
@@ -1169,6 +1190,12 @@ fn app_folders(chat: &ChatContext) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The kernel's own trees on Unix (`/proc`, `/sys`, `/dev`), which a search of the whole
+/// computer never goes into: they hold no files of the user's and some never end.
+fn is_system_tree(path: &Path) -> bool {
+    cfg!(unix) && matches!(path.to_str(), Some("/proc") | Some("/sys") | Some("/dev"))
 }
 
 /// Whether `path` is one of `folders` or inside one, ignoring letter case (so it skips at
@@ -1457,12 +1484,17 @@ fn search(
         let Ok(meta) = std::fs::metadata(path) else {
             return;
         };
-        if meta.len() > MAX_SEARCH_FILE_BYTES {
+        // Only regular files, and never more than the limit even when the size reported is
+        // wrong (files under /proc say 0).
+        if !meta.is_file() || meta.len() > MAX_SEARCH_FILE_BYTES {
             return;
         }
-        let Ok(bytes) = std::fs::read(path) else {
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(path)
+            .and_then(|f| f.take(MAX_SEARCH_FILE_BYTES).read_to_end(&mut bytes));
+        if read.is_err() {
             return;
-        };
+        }
         if is_binary(&bytes) {
             return;
         }
@@ -1510,6 +1542,7 @@ fn search(
                     && name != "node_modules"
                     && name != "target"
                     && !in_app_folder(&e.path(), skip)
+                    && !is_system_tree(&e.path())
                 {
                     stack.push(e.path());
                 }
@@ -2896,7 +2929,7 @@ mod tests {
                 .await
                 .unwrap_err(),
             format!(
-                "{docs} is a folder. delete_file only deletes files; a folder is removed with a command (run_command)."
+                "{docs} is a folder. delete_file only deletes files; a folder is removed with delete_folder (in Full access) or a command (run_command)."
             )
         );
         assert!(root.join("docs/a.txt").is_file());

@@ -280,6 +280,196 @@ fn names_app_folder(command: &str, forbidden: &[String]) -> Option<String> {
     })
 }
 
+/// Programs that move, rename or change the rights of what they are given: a folder that
+/// holds the app's own folders is never handed to one (nor to a delete).
+const MOVES_OR_LOCKS: &[&str] = &[
+    "mv",
+    "move",
+    "move-item",
+    "mi",
+    "ren",
+    "rename",
+    "rename-item",
+    "rni",
+    "chmod",
+    "chown",
+    "icacls",
+    "takeown",
+    "attrib",
+    "robocopy",
+];
+
+/// Why `command` is refused when one of its words, read as a path, reaches the app's own
+/// folders (0.0.5): a path inside one of them, also through a glob (`io.github.*`), `~`, an
+/// environment variable or `..`; or, for a delete, a move or a change of rights, a path that
+/// holds one of them (`rm -rf ~`). Words are taken from the text, split at spaces and shell
+/// punctuation, so a quoted path counts too. What it cannot see: a path built from pieces or
+/// variables it does not know, and what a script or program does once it runs.
+fn reaches_app_folder(
+    command: &str,
+    cwd: &str,
+    destroys: bool,
+    forbidden: &[String],
+) -> Option<String> {
+    let folders: Vec<Vec<String>> = forbidden
+        .iter()
+        .flat_map(|f| {
+            let mut forms = vec![f.clone()];
+            if let Ok(c) = dunce::canonicalize(f) {
+                forms.push(c.display().to_string());
+            }
+            forms
+        })
+        .filter_map(|f| components(&f, None))
+        .filter(|c| c.len() > 1)
+        .collect();
+    if folders.is_empty() {
+        return None;
+    }
+    let words: Vec<String> = command
+        .split(|c: char| c.is_whitespace() || ";|&()<>{}=,`".contains(c))
+        .map(|w| w.trim_matches(|c| c == '"' || c == '\''))
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    let destroys = destroys
+        || words
+            .iter()
+            .any(|w| MOVES_OR_LOCKS.contains(&w.to_lowercase().as_str()));
+    for word in &words {
+        if word.starts_with('-') && !word.contains(['/', '\\']) {
+            continue;
+        }
+        let Some(path) = components(word, Some(cwd)) else {
+            continue;
+        };
+        for folder in &folders {
+            let n = path.len().min(folder.len());
+            let same = path[..n]
+                .iter()
+                .zip(&folder[..n])
+                .all(|(p, f)| wildcard(p, f));
+            if !same {
+                continue;
+            }
+            let inside = path.len() >= folder.len();
+            if inside || destroys {
+                return Some(if inside {
+                    "The command names a path in the app's own folders (its database, logs, program files or the system's key stores), which tools never reach. Nothing was run.".to_string()
+                } else {
+                    "The command would delete, move or lock a folder that holds the app's own folders (its database, logs, program files or the system's key stores). Nothing was run. Name the folders inside it that should change instead.".to_string()
+                });
+            }
+        }
+    }
+    None
+}
+
+/// A word as the components of an absolute path, lower-cased with `/` as separator: `~`,
+/// `$HOME`, `${VAR}`, `$env:VAR` and `%VAR%` at its start are expanded from this process's
+/// environment, a relative word is joined to `cwd`, and `.` and `..` are resolved. `None`
+/// when the word is relative and there is no `cwd`, or names a variable that is not set.
+fn components(word: &str, cwd: Option<&str>) -> Option<Vec<String>> {
+    let var = |name: &str| {
+        let name = if name.eq_ignore_ascii_case("home") && std::env::var("HOME").is_err() {
+            "USERPROFILE"
+        } else {
+            name
+        };
+        std::env::var(name).ok()
+    };
+    let (head, rest): (Option<String>, &str) = if let Some(rest) = word.strip_prefix('~') {
+        (var("HOME").or_else(|| var("USERPROFILE")), rest)
+    } else if let Some(rest) = word
+        .strip_prefix("$env:")
+        .or_else(|| word.strip_prefix("$ENV:"))
+    {
+        let end = rest.find(['/', '\\']).unwrap_or(rest.len());
+        (var(&rest[..end]), &rest[end..])
+    } else if let Some(rest) = word.strip_prefix("${") {
+        let end = rest.find('}')?;
+        (var(&rest[..end]), &rest[end + 1..])
+    } else if let Some(rest) = word.strip_prefix('$') {
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        (var(&rest[..end]), &rest[end..])
+    } else if let Some(rest) = word.strip_prefix('%') {
+        let end = rest.find('%')?;
+        (var(&rest[..end]), &rest[end + 1..])
+    } else {
+        (None, word)
+    };
+    let text = match head {
+        Some(h) => format!("{h}/{rest}"),
+        None if word.starts_with(['~', '$', '%']) => return None,
+        None => rest.to_string(),
+    };
+    let text = text.replace('\\', "/").to_lowercase();
+    let absolute = text.starts_with('/')
+        || (text.len() >= 2
+            && text.as_bytes()[1] == b':'
+            && text.as_bytes()[0].is_ascii_alphabetic());
+    let full = if absolute {
+        text
+    } else {
+        format!("{}/{text}", cwd?.replace('\\', "/").to_lowercase())
+    };
+    let mut out: Vec<String> = Vec::new();
+    for part in full.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            p => out.push(p.to_string()),
+        }
+    }
+    Some(out)
+}
+
+/// Whether the glob `pattern` (`*`, `?`, and `[...]` taken as any one character) matches the
+/// path component `name`. Both are lower case. It matches at least what a shell would, so
+/// `*` also matches a name that starts with a dot.
+fn wildcard(pattern: &str, name: &str) -> bool {
+    let mut p: Vec<char> = Vec::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            for d in chars.by_ref() {
+                if d == ']' {
+                    break;
+                }
+            }
+            p.push('?');
+        } else {
+            p.push(c);
+        }
+    }
+    let n: Vec<char> = name.chars().collect();
+    let (mut i, mut j, mut star, mut mark) = (0, 0, None, 0);
+    while j < n.len() {
+        if i < p.len() && (p[i] == '?' || p[i] == n[j]) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == '*' {
+            star = Some(i);
+            mark = j;
+            i += 1;
+        } else if let Some(s) = star {
+            i = s + 1;
+            mark += 1;
+            j = mark;
+        } else {
+            return false;
+        }
+    }
+    while i < p.len() && p[i] == '*' {
+        i += 1;
+    }
+    i == p.len()
+}
+
 fn arg_looks_like_path(a: &str) -> bool {
     !a.starts_with('-')
         && (a.contains('/') || a.contains('\\') || a.starts_with('.') || a.starts_with('~'))
@@ -400,6 +590,15 @@ impl BuiltinServer for TerminalServer {
             }
         };
         let verdict = classify(self.config.shell.grammar(), &command);
+        let destroys = matches!(
+            verdict.keep_asking,
+            Some((policy::KeepAsking::Delete | policy::KeepAsking::Destroy, _))
+        );
+        if let Some(why) =
+            reaches_app_folder(&command, &cwd.canonical, destroys, &chat.forbidden_folders)
+        {
+            return deny(why);
+        }
         let mut preview = format!(
             "$ {shown_cmd}\nin {}",
             policy::sanitize::visible(&cwd.canonical)
@@ -944,7 +1143,7 @@ mod tests {
     async fn a_command_that_names_the_app_folders_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(dir.path()).unwrap();
-        let data = root.join("io.github.someone.someapp");
+        let data = root.join(".local/share/io.github.someone.someapp");
         std::fs::create_dir_all(data.join("logs")).unwrap();
         let s = server(&[]);
         let c = ChatContext {
@@ -970,6 +1169,54 @@ mod tests {
             let a = describe(&s, &c, json!({ "command": command })).await;
             assert!(a.hard_limit.is_none(), "{command}: {:?}", a.hard_limit);
         }
+
+        // Globs, `..`, and a delete, move or lock of a folder that holds the app's folder.
+        let root_text = root.display().to_string();
+        for command in [
+            format!("sqlite3 {root_text}/.local/share/io.github.some*/app.db .dump"),
+            format!("cat {root_text}/.local/share/*/app.db"),
+            format!("rm -rf {root_text}/.local/share/io.github.someone.*"),
+            format!("rm -rf {root_text}/.local"),
+            format!("rm -rf {root_text}"),
+            "rm -rf .".to_string(),
+            "rm -rf *".to_string(),
+            format!("mv {root_text} /tmp/elsewhere"),
+            format!("chmod -R 000 {root_text}"),
+            format!("cat {root_text}/sub/../.local/share/io.github.someone.someapp/app.db"),
+        ] {
+            let a = describe(&s, &c, json!({ "command": command })).await;
+            assert!(a.hard_limit.is_some(), "{command} was let through");
+        }
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        for command in [
+            "rm -rf build".to_string(),
+            "ls *".to_string(),
+            "cat *.txt".to_string(),
+            format!("ls {root_text}"),
+            "mv build out".to_string(),
+        ] {
+            let a = describe(&s, &c, json!({ "command": command })).await;
+            assert!(a.hard_limit.is_none(), "{command}: {:?}", a.hard_limit);
+        }
+    }
+
+    #[test]
+    fn globs_match_like_a_shell_or_more() {
+        assert!(wildcard("io.github.*", "io.github.someone.app"));
+        assert!(wildcard("*", ".local"));
+        assert!(wildcard("a?c", "abc") && !wildcard("a?c", "abbc"));
+        assert!(wildcard("[ab]pp", "app") && wildcard("*.db", "app.db"));
+        assert!(!wildcard("*.log", "app.db") && !wildcard("io.x*", "io.github"));
+        assert_eq!(
+            components("/a/b/../c/./d", None).unwrap(),
+            vec!["a", "c", "d"]
+        );
+        assert_eq!(components("x/y", Some("/w")).unwrap(), vec!["w", "x", "y"]);
+        assert_eq!(
+            components("C:\\Users\\Me", None).unwrap(),
+            vec!["c:", "users", "me"]
+        );
+        assert!(components("$SURELY_NOT_SET_12345/x", Some("/w")).is_none());
     }
 
     /// The file and git tools do not write in skill folders; the terminal still runs there

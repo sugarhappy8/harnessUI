@@ -176,6 +176,8 @@ pub fn run() {
             approvals::set_chat_approval_mode,
             approvals::get_default_approval_mode,
             approvals::set_default_approval_mode,
+            approvals::get_full_access_default_pending,
+            approvals::answer_full_access_default,
             mcp_cmd::list_mcp_servers,
             mcp_cmd::preview_mcp_config,
             mcp_cmd::add_mcp_servers,

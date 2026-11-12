@@ -266,6 +266,13 @@ impl FilesServer {
         };
         let shown_from = policy::sanitize::visible(&src.canonical);
         let src_path = PathBuf::from(&src.canonical);
+        // The path is resolved through links, so moving one would move what it points to.
+        if src.was_symlink {
+            return Described::Invalid(format!(
+                "{} is a link. move_path moves real files and folders only, and would move what the link points to. Nothing was moved; a command (run_command) can move the link itself.",
+                policy::sanitize::visible(&from)
+            ));
+        }
         if src_path.symlink_metadata().is_err() {
             return Described::Invalid(format!(
                 "{shown_from} does not exist, so there is nothing to move."
@@ -353,7 +360,7 @@ impl FilesServer {
         let p = PathBuf::from(&c.canonical);
         if c.was_symlink {
             return Described::Invalid(format!(
-                "{} is a link, not a folder. delete_folder removes real folders only; delete_file removes a link to a file.",
+                "{} is a link, not a folder. delete_folder removes real folders only, so nothing was deleted; a command (run_command) can remove the link itself.",
                 policy::sanitize::visible(&path)
             ));
         }
@@ -738,6 +745,29 @@ mod tests {
         .await
         .unwrap_err();
         assert!(why.contains("does not exist"), "{why}");
+        // A link is not followed: moving it would move what it points to.
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(s.root.join("real")).unwrap();
+            std::os::unix::fs::symlink(s.root.join("real"), s.root.join("link")).unwrap();
+            let why = run(
+                &fs,
+                &s.chat,
+                "move_path",
+                json!({"from": "link", "to": "renamed"}),
+            )
+            .await
+            .unwrap_err();
+            assert!(why.contains("is a link"), "{why}");
+            assert!(s.root.join("real").is_dir() && !s.root.join("renamed").exists());
+            let why = run(&fs, &s.chat, "delete_folder", json!({"path": "link"}))
+                .await
+                .unwrap_err();
+            assert!(
+                why.contains("is a link") && !why.contains("delete_file"),
+                "{why}"
+            );
+        }
 
         // A delete says what goes with it, and is described as a delete.
         std::fs::write(s.root.join("z/b/c/f.txt"), "12345").unwrap();
@@ -858,5 +888,52 @@ mod tests {
         )
         .await);
         assert!(!text.contains("run.log"), "{text}");
+    }
+
+    /// A pipe (or a device) is never read: reading one blocks for ever or never ends. With
+    /// the whole computer reachable in Full access, a search must still finish.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipes_and_devices_are_left_alone() {
+        let s = setup();
+        let fs = FilesServer::default();
+        let pipe = s.root.join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|st| st.success()) {
+            return; // no mkfifo here
+        }
+        std::fs::write(s.root.join("plain.txt"), "needle\n").unwrap();
+        for (tool, a) in [
+            ("read_file", json!({"path": "pipe"})),
+            ("write_file", json!({"path": "pipe", "content": "x"})),
+            (
+                "edit_file",
+                json!({"path": "pipe", "old_text": "a", "new_text": "b"}),
+            ),
+            ("delete_file", json!({"path": "pipe"})),
+        ] {
+            let why = run(&fs, &s.chat, tool, a).await.unwrap_err();
+            assert!(why.contains("not a regular file"), "{tool}: {why}");
+        }
+        let search = run(
+            &fs,
+            &s.chat,
+            "search_files",
+            json!({"path": ".", "query": "needle"}),
+        );
+        let (_, text) = ok(
+            tokio::time::timeout(std::time::Duration::from_secs(10), search)
+                .await
+                .expect("the search hung on a pipe"),
+        );
+        assert!(text.contains("plain.txt"), "{text}");
+        let wide = ChatContext {
+            approved_folders: vec!["/".into()],
+            ..s.chat.clone()
+        };
+        let why = run(&fs, &wide, "read_file", json!({"path": "/dev/zero"}))
+            .await
+            .unwrap_err();
+        assert!(why.contains("not a regular file"), "{why}");
     }
 }

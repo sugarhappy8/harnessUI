@@ -939,6 +939,18 @@ async fn chat_tool_list(
     let setting = crate::tool_select::settings(state).await;
     let mut dtos: Vec<&mut ToolDto> = list.iter_mut().map(|(_, dto)| dto).collect();
     companions_follow(&mut dtos, setting.auto);
+    // [0.0.5 full access] The folder tools come with `write_file`, and only in Full access.
+    // They follow it instead of being switches of their own, so a chat whose tool list was
+    // saved before they existed has them as soon as Full access is on.
+    let write_on = list
+        .iter()
+        .any(|(_, d)| d.server == "files" && d.original == "write_file" && d.enabled_in_chat);
+    for (_, dto) in &mut list {
+        if dto.server == "files" && tools::files::organize::is_tool(&dto.original) {
+            dto.companion = true;
+            dto.enabled_in_chat = write_on && full_access;
+        }
+    }
     // Which of the offered tools the next turn shows whatever the user writes.
     let offered: Vec<crate::tool_select::Candidate> = list
         .iter()
