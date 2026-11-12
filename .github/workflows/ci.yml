@@ -79,7 +79,9 @@ jobs:
           echo "LLAMA_SERVER_BIN=$PWD/.cache/llama-linux/llama-server" >> "$GITHUB_ENV"
           echo "TEST_GGUF=$(python3 scripts/fetch_test_model.py .cache/models)" >> "$GITHUB_ENV"
       - name: Workspace tests (with llama-server contract tests)
-        run: cargo test --workspace
+        # Every crate's tests run even when one crate fails, so one run shows everything
+        # that is wrong. The step still fails.
+        run: cargo test --workspace --no-fail-fast
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
@@ -180,7 +182,9 @@ jobs:
         shell: bash
         run: echo "HARNESS_BROWSER_E2E=1" >> "$GITHUB_ENV"
       - name: Workspace tests (${{ matrix.name }}, with llama-server contract tests)
-        run: cargo test --workspace --target ${{ matrix.test-target }}
+        # Every crate's tests run even when one crate fails, so one run shows everything
+        # that is wrong on this system. The step still fails.
+        run: cargo test --workspace --no-fail-fast --target ${{ matrix.test-target }}
       - name: Build the app
         run: npx tauri build ${{ matrix.args }}
       # Every program in the bundle (the app and the two llama.cpp sidecars) must contain

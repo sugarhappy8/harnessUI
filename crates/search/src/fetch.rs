@@ -310,7 +310,7 @@ impl Fetcher {
             Accept::Page => "text/html, text/plain;q=0.9",
             Accept::Json => "application/json",
         };
-        let failed = |error: reqwest::Error| FetchError::Network(error.without_url().to_string());
+        let failed = |error: reqwest::Error| self.failure(error);
         let mut response = client
             .get(url.clone())
             .header(reqwest::header::ACCEPT, wanted)
@@ -401,6 +401,18 @@ impl Fetcher {
 
     fn timed_out(&self) -> FetchError {
         FetchError::Timeout(self.timeout.as_secs().max(1))
+    }
+
+    /// What a failed request is reported as. A request that ran out of time is a timeout
+    /// whichever of the two clocks noticed first (the HTTP client's, or the one around
+    /// the whole fetch in [`Fetcher::get`]), and it is recognised by the error's kind: its
+    /// words do not say "timed out" on every system.
+    fn failure(&self, error: reqwest::Error) -> FetchError {
+        if error.is_timeout() {
+            self.timed_out()
+        } else {
+            FetchError::Network(error.without_url().to_string())
+        }
     }
 }
 
@@ -502,6 +514,49 @@ pub fn redirect_target(from: &Url, location: &str) -> Result<Url, FetchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On macOS the HTTP client's own clock noticed a slow site before the clock around
+    /// the whole fetch did, and its error reads "error sending request" with no word
+    /// about time: the fetch was reported as a failed connection. This makes that clock
+    /// the one that fires, on every system, and checks what the error is reported as.
+    #[tokio::test]
+    async fn a_request_that_runs_out_of_time_is_a_timeout_whatever_its_words() {
+        // A site that takes the connection and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(150))
+            .build()
+            .expect("client");
+        let error = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .expect_err("no answer");
+        let fetcher = Fetcher::new("test").with_timeout(Duration::from_secs(7));
+        assert_eq!(fetcher.failure(error), FetchError::Timeout(7));
+
+        // A connection that is refused is not a timeout.
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("address").port()
+        };
+        let error = client
+            .get(format!("http://127.0.0.1:{closed}/"))
+            .send()
+            .await
+            .expect_err("nothing listens");
+        assert!(matches!(fetcher.failure(error), FetchError::Network(_)));
+    }
 
     #[test]
     fn media_types_are_read_from_the_header() {

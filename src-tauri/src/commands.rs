@@ -51,7 +51,13 @@ mod tests {
             "with freezePrototype on, Tauri freezes the prototype in preview frames on Windows"
         );
         let freeze = include_str!("../../src/lib/freeze.ts");
-        assert!(freeze.contains("\nObject.freeze(Object.prototype);\n"));
+        // By lines: a checkout on Windows may end them differently.
+        assert!(
+            freeze
+                .lines()
+                .any(|line| line == "Object.freeze(Object.prototype);"),
+            "src/lib/freeze.ts no longer freezes the prototype"
+        );
         // Every page of the app (the HTML files next to package.json) starts one module.
         for (page, entry, source, import) in [
             (
