@@ -3,7 +3,7 @@
 Kept up to date by the lead so the work can be picked up after an interruption (for example
 when the account's usage limit pauses the session).
 
-## Where things are (2026-11-12, 12:30 UTC)
+## Where things are (2026-11-12, 13:15 UTC): STOPPED BY THE OWNER
 - Design: done. `spec.md` (revision 2 plus "Amendments after WP0"), `critique.md`, `map.md`,
   `map-details.md`.
 - WP0 groundwork: done and independently checked (`report-WP0-*.md`; the contract is the
@@ -22,6 +22,10 @@ when the account's usage limit pauses the session).
   finished). 12:28 UTC: all four runs resumed with `resume: true` for every unfinished package
   (WP4b's build replays from cache; its reviews run). Resume arguments:
   `scratchpad/v005/resume-args.json`.
+- 13:15 UTC: the owner said "stop". All four runs were stopped and the hourly check was
+  deleted. The builders' partial work is committed (no package had finished its build except
+  WP4b; WP1a and WP3b were in their final checks). To continue later, follow "How to resume"
+  below with `resume: true` for every package (WP4b: its reviews and fix still to run).
 - Work in progress is committed with `[skip ci]` about every hour; the builders never commit.
 - Shared dev server for end-to-end runs: `npm run dev` on port 1420 (restart it if it is gone).
 
