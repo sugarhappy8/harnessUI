@@ -195,7 +195,7 @@ and every TODO.
 - **D10 Direction A uses a small proxy owned by the app** on a loopback port chosen at random
   from a high range on first switch-on and then kept; llama-server stays on its random port
   with its private key.
-- **D11 Direction B asks, except in Full access** (amended for 0.0.6; the owner confirms).
+- **D11 Direction B asks, except in Full access** (amended for 0.0.6; the owner confirmed it).
   In Ask first and Allow all every hand-off shows a card with Allow once / Deny, after any
   grant ("Allow for this chat" never covers it), with or without untrusted content. In Full
   access nothing asks: the owner's rule for that mode is "run absolutely everything", and
@@ -673,9 +673,20 @@ the decompiler and how it ships. Whatever is chosen: rea is an MCP server, so it
 the existing MCP client and policy gate (D12), starts as a process through `crates/runtime`,
 and its files and any decompiler or runtime it needs are listed in the notices.
 
+**The owner's answers (2026-11-12):**
+- **rea with both Kuna and Ghidra**; the owner picks which one rea uses.
+- **How it is installed:** like the ROCm pack. A tab of its own in Settings, next to "Local
+  models", where the owner may optionally install rea, Kuna and Ghidra (with the Java it
+  needs). Nothing in the installer; nothing downloaded until the owner chooses it there.
+  After that it works offline.
+- **Reach:** only files the owner points at, inside approved folders (or anywhere in Full
+  access, except the app's own folders). No attaching to running programs: rea's debugger,
+  Frida and live-process tools are not offered.
+
 ### Item 6. Usage view and finer offloading controls
-Sketch, research and open questions: `item6-usage-offloading.md`. **D4 is amended (proposed,
-the owner confirms where the line goes):** the plain controls stay the default, unchanged;
+Sketch, research and open questions: `item6-usage-offloading.md`. **D4 is amended (the owner
+chose: Fine control inside each model's settings, live usage always visible under the model
+name):** the plain controls stay the default, unchanged;
 layers on the graphics card, expert parts on the processor, conversation memory on the
 graphics card, processor threads, fast attention and the memory to leave free appear only
 under a closed **Fine control** section, each a typed value from a fixed list or range;

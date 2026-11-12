@@ -44,7 +44,11 @@ one starts from this file and `README.md`.
   it passes by skipping without a real model. Delete it or rename it on purpose.
 - Spec revision 3: three approval modes (D12), D11 as merged, D4 amendment proposed, items
   5 to 8 in Part 3b; research in `item5-rea-research.md` and `item6-usage-offloading.md`.
-- Waiting for the owner's go and answers before the long build.
+- The owner answered: keep D11 as merged; item 5 = rea with Kuna and Ghidra, installed
+  optionally from its own Settings tab like the ROCm pack, files only (no running
+  programs); item 6 = Fine control in each model's settings, live usage always visible;
+  item 4 = publisher quotes, reviewed by the owner before release.
+- Waiting for the owner's go before the long build.
 
 ## Next
 README "How to pick it up". The new session's first job: check this state, update the spec,
