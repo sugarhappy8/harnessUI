@@ -32,7 +32,7 @@ impl LoadFailure {
     /// A short plain-language explanation.
     pub fn user_message(&self) -> &'static str {
         match self {
-            Self::OutOfMemory => "This model doesn't fit in the available memory.",
+            Self::OutOfMemory => "This model needs more memory than is free.",
             Self::InvalidDevice(_) => {
                 "The selected graphics device isn't available to this backend."
             }
@@ -42,17 +42,22 @@ impl LoadFailure {
                 "The model file couldn't be read. It may be incomplete, damaged, not a GGUF model, or a kind of model this version can't run."
             }
             Self::ContextTooLarge => {
-                "The model loaded, but the chosen context length doesn't fit in memory."
+                "The model loaded, but there isn't enough memory left for how much it should remember."
             }
             Self::Unknown => "The model runner stopped while loading the model.",
         }
     }
 
     /// What the user can do about it.
+    ///
+    /// For the memory failures it names only what is left for the user: before one is
+    /// shown, the supervisor has already put less of the model on the graphics card and
+    /// tried the processor where it could (0.0.5, see
+    /// [`Supervisor`](super::server::Supervisor)).
     pub fn next_step(&self) -> &'static str {
         match self {
             Self::OutOfMemory => {
-                "Use a smaller context, run part of the model on the CPU, or pick a smaller model."
+                "Close other programs or pick a smaller download. Lowering How much it can remember in Model settings also helps."
             }
             Self::InvalidDevice(_) => {
                 "Choose another device or backend in Settings, or switch to CPU for now."
@@ -62,7 +67,9 @@ impl LoadFailure {
             }
             Self::PortInUse => "Restart the app.",
             Self::ModelFileInvalid => "Download the model again, or choose a different file.",
-            Self::ContextTooLarge => "Lower the context length and try again.",
+            Self::ContextTooLarge => {
+                "In Model settings, lower How much it can remember or turn on Save memory."
+            }
             Self::Unknown => "Copy the details and check the logs, or try the CPU backend.",
         }
     }
@@ -71,6 +78,23 @@ impl LoadFailure {
     /// down"). A broken model file or a port problem fails the same way on any backend.
     pub fn may_succeed_on_another_backend(&self) -> bool {
         !matches!(self, Self::ModelFileInvalid | Self::PortInUse)
+    }
+
+    /// Whether Save memory (flash attention with a q8_0 conversation memory) may have
+    /// caused the failure, so a retry with it off is worth one attempt (0.0.5 D2c).
+    ///
+    /// A device or driver that cannot do it shows as a failed context (llama.cpp refuses a
+    /// q8_0 memory without flash attention) or as a crash. A failure to allocate the
+    /// weights ([`LoadFailure::OutOfMemory`]) happens before the context exists, so Save
+    /// memory cannot cause it; turning it off would only need more memory.
+    pub fn save_memory_may_be_the_cause(&self) -> bool {
+        matches!(self, Self::ContextTooLarge | Self::Unknown)
+    }
+
+    /// Whether a device ran out of memory, for the weights or for the context, so putting
+    /// less of the model on the graphics card may help.
+    pub fn is_out_of_memory(&self) -> bool {
+        matches!(self, Self::OutOfMemory | Self::ContextTooLarge)
     }
 }
 
@@ -330,6 +354,60 @@ mod tests {
         assert!(!LoadFailure::ModelFileInvalid.may_succeed_on_another_backend());
         assert!(!LoadFailure::PortInUse.may_succeed_on_another_backend());
         assert!(LoadFailure::OutOfMemory.may_succeed_on_another_backend());
+    }
+
+    /// Which failures make the supervisor retry on the same backend (0.0.5 D2c and the
+    /// step-down): Save memory off for what an unsupported flash attention or q8_0 memory
+    /// looks like, less of the model on the graphics card for running out of its memory.
+    #[test]
+    fn which_failures_retry_on_the_same_backend() {
+        let table = [
+            // (failure, Save memory may be the cause, out of memory)
+            (LoadFailure::OutOfMemory, false, true),
+            (LoadFailure::ContextTooLarge, true, true),
+            (LoadFailure::Unknown, true, false),
+            (LoadFailure::InvalidDevice("Vulkan0".into()), false, false),
+            (LoadFailure::MissingRuntimeDll, false, false),
+            (LoadFailure::PortInUse, false, false),
+            (LoadFailure::ModelFileInvalid, false, false),
+        ];
+        for (failure, save_memory, memory) in table {
+            assert_eq!(
+                failure.save_memory_may_be_the_cause(),
+                save_memory,
+                "{failure:?}"
+            );
+            assert_eq!(failure.is_out_of_memory(), memory, "{failure:?}");
+        }
+    }
+
+    /// By the time an out-of-memory failure is shown, the app has already tried less of
+    /// the model on the graphics card and the processor, so the text offers only what is
+    /// left for the user, in the words of Model settings.
+    #[test]
+    fn out_of_memory_texts_match_what_the_app_does() {
+        assert_eq!(
+            LoadFailure::OutOfMemory.user_message(),
+            "This model needs more memory than is free."
+        );
+        assert_eq!(
+            LoadFailure::OutOfMemory.next_step(),
+            "Close other programs or pick a smaller download. Lowering How much it can remember in Model settings also helps."
+        );
+        assert_eq!(
+            LoadFailure::ContextTooLarge.user_message(),
+            "The model loaded, but there isn't enough memory left for how much it should remember."
+        );
+        assert_eq!(
+            LoadFailure::ContextTooLarge.next_step(),
+            "In Model settings, lower How much it can remember or turn on Save memory."
+        );
+        for failure in [LoadFailure::OutOfMemory, LoadFailure::ContextTooLarge] {
+            let text = format!("{} {}", failure.user_message(), failure.next_step());
+            for jargon in ["CPU", "processor", "part of the model", "context", "!"] {
+                assert!(!text.contains(jargon), "{jargon:?} in {text:?}");
+            }
+        }
     }
 
     #[test]

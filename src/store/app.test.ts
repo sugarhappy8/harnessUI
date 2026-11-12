@@ -204,3 +204,48 @@ describe("picking a model", () => {
     expect(ipc.createChat).not.toHaveBeenCalled();
   });
 });
+
+// [0.0.5 memory] When a reply has to make room, the chat says what was done, in plain words.
+describe("making room in a long chat", () => {
+  beforeEach(async () => {
+    useApp.setState({ activeChatId: 1, detail, generation: null, turnNotes: null, error: null, approvals: [] });
+    void useApp.getState().send("hi", null);
+    await flush();
+  });
+
+  it("names each stage once, and keeps the notes after the reply", async () => {
+    const { compactionNote } = await import("./app");
+    emit({ type: "compacted", stage: 1 });
+    emit({ type: "compacted", stage: 2 });
+    // A stage that runs again (several summaries, several steps shortened) is said once.
+    emit({ type: "compacted", stage: 2 });
+    emit({ type: "compacted", stage: 3 });
+    emit({ type: "compacted", stage: 3 });
+    const notes = [
+      "Older tool results were shortened to make room.",
+      "Earlier messages were summarised to make room.",
+      "Older steps of this reply were shortened to make room.",
+    ];
+    expect(useApp.getState().generation!.notes).toEqual(notes);
+    expect([1, 2, 3].map(compactionNote)).toEqual(notes);
+    // A stage this version does not know still says something true.
+    expect(compactionNote(9)).toBe("Earlier parts of this chat were shortened to make room.");
+    emit({ type: "finished", status: "complete", message: null });
+    await flush();
+    expect(useApp.getState().turnNotes).toEqual({ chatId: 1, notes });
+    finishSend();
+  });
+
+  it("shows a summary that failed as the loop words it, and the reply goes on", async () => {
+    const failed = "Could not summarise earlier messages. The reply goes on, but this chat may run out of room soon.";
+    emit({ type: "note", text: failed });
+    emit({ type: "content", text: "Here is the answer." });
+    const g = useApp.getState().generation!;
+    expect(g.notes).toEqual([failed]);
+    expect(g.text).toBe("Here is the answer.");
+    emit({ type: "finished", status: "complete", message: null });
+    await flush();
+    expect(useApp.getState().turnNotes?.notes).toEqual([failed]);
+    finishSend();
+  });
+});

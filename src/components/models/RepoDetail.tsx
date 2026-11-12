@@ -1,13 +1,38 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Check, Download, ExternalLink, Lock } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo, RepoView, VariantView } from "../../lib/types";
 import { formatBytes, formatParams } from "../../lib/format";
 import { toErrorInfo } from "../../store/app";
+import { COMPARE_FULL, COMPARE_LIMIT, useAddToComparison, useCompare } from "../../store/compare";
 import { ErrorBanner } from "../ErrorBanner";
 import { FitBadge } from "../FitBadge";
+import { SafeLink } from "../Markdown";
 import { Badge } from "./Badge";
+import { AddToComparison } from "./Compare";
+
+/**
+ * Add to comparison for one file of the repository (the file picked on this page). The
+ * page is remembered so the Compare tab's Change menu needs no new request.
+ */
+function CompareVariant(props: { view: RepoView; variant: VariantView }) {
+  const file = props.variant.files[0]?.path ?? null;
+  const compare = useAddToComparison({ repo: props.view.id, file });
+  const rememberRepo = useCompare((s) => s.rememberRepo);
+  if (file === null) return null;
+  return (
+    <AddToComparison
+      added={compare.added}
+      full={compare.full}
+      onAdd={() => {
+        rememberRepo(props.view, null);
+        compare.add();
+      }}
+      onRemove={compare.remove}
+      name={props.variant.label}
+    />
+  );
+}
 
 /** One Hugging Face repository: its files with a fit badge each, and Download. */
 export function RepoDetail(props: { repoId: string; onBack: () => void; onStarted: () => void }) {
@@ -15,6 +40,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [withProjector, setWithProjector] = useState(true);
   const [showCard, setShowCard] = useState(false);
+  const compareFull = useCompare((s) => s.entries.length >= COMPARE_LIMIT);
 
   useEffect(() => {
     let alive = true;
@@ -64,9 +90,11 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
             </div>
           )}
         </div>
-        <button type="button" onClick={() => void openUrl(hfUrl)} className="flex shrink-0 items-center gap-1 text-xs underline">
-          Open on Hugging Face <ExternalLink size={11} aria-hidden />
-        </button>
+        {/* Through the destination-confirm dialog, like links in model output. */}
+        <span className="flex shrink-0 items-center gap-1 text-xs">
+          <SafeLink href={hfUrl}>Open on Hugging Face</SafeLink>
+          <ExternalLink size={11} aria-hidden />
+        </span>
       </div>
       {view?.architectureSupported === false && (
         <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
@@ -86,6 +114,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
           <p className="text-xs text-fg-muted">
             Memory estimates assume a context of {view.fitContext.toLocaleString()} tokens.
           </p>
+          {compareFull && <p className="text-xs text-fg-muted">{COMPARE_FULL}</p>}
           <ul className="space-y-2">
             {view.variants.map((v) => (
               <li key={v.label} className="flex items-center gap-3 rounded-md border border-border px-3 py-2 text-sm">
@@ -102,6 +131,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
                     <p className="text-xs text-fg-muted">No checksum is published for this file.</p>
                   )}
                 </div>
+                <CompareVariant view={view} variant={v} />
                 {v.installed ? (
                   <span className="flex items-center gap-1 text-xs text-success">
                     <Check size={12} aria-hidden /> Installed

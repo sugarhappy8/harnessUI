@@ -2803,3 +2803,652 @@ async fn the_preview_carries_the_loops_refusal() {
     assert!(preview.pinned_tokens > preview.pinned_allowance);
     assert!(h.chats().is_empty());
 }
+
+// ---- conversation memory (0.0.5) ---------------------------------------------------------
+
+/// How [`memory_server`] answers fold and summary requests.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Writes {
+    /// A summary with the fixed headings.
+    Summary,
+    /// An empty reply.
+    Nothing,
+    /// An HTTP 500.
+    Error,
+}
+
+/// What a fold of the old summary returns.
+const FOLDED_SUMMARY: &str = "Goal: keep the build green.\nDecisions: the small model.\nWork done: read files.\nWhat is left: nothing.\nExact paths and identifiers: /p/kept-at-the-end.txt";
+/// What a stage-2 summary of earlier turns returns.
+const NEW_SUMMARY: &str = "Goal: answer questions.\nDecisions: none.\nWork done: read files.\nWhat is left: nothing.\nExact paths and identifiers: /p/old.txt";
+
+type Seen = Arc<Mutex<Vec<(&'static str, Value)>>>;
+
+/// The text of the last message of a chat request.
+fn last_message_text(body: &Value) -> String {
+    message_contents(body).last().cloned().unwrap_or_default()
+}
+
+/// What a chat request is: a fold of the old summary, a stage-2 summary, or the chat.
+fn request_kind(body: &Value) -> &'static str {
+    let last = last_message_text(body);
+    if last.contains("Rewrite it more briefly") {
+        "fold"
+    } else if last.contains("Write a summary of the conversation") {
+        "summary"
+    } else {
+        "chat"
+    }
+}
+
+/// A server that answers fold and summary requests as `writes` says and every other chat
+/// request with "Here is the answer.", except the first `overflows` of those, which it
+/// rejects as too long for a context of 4,096 tokens. Records each chat request and its kind.
+async fn memory_server(writes: Writes, overflows: usize) -> (MockServer, Seen) {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let rejected = Arc::new(Mutex::new(0usize));
+    let server = MockServer::start(move |request: &Recorded| {
+        if request.path() != "/v1/chat/completions" {
+            return Reply::not_found();
+        }
+        let body = request.json();
+        let kind = request_kind(&body);
+        log.lock().unwrap().push((kind, body));
+        match (kind, writes) {
+            ("chat", _) => {
+                let mut n = rejected.lock().unwrap();
+                if *n < overflows {
+                    *n += 1;
+                    // llama-server's form, without the size of the rejected request.
+                    Reply::json(
+                        400,
+                        &json!({"error": {
+                            "code": 400,
+                            "message": "the request exceeds the available context size (4096 tokens), try increasing it",
+                            "type": "exceed_context_size_error",
+                            "n_ctx": 4_096
+                        }}),
+                    )
+                } else {
+                    sse_reply(sse::text("Here is the answer."))
+                }
+            }
+            (_, Writes::Summary) => sse_reply(sse::text(if kind == "fold" {
+                FOLDED_SUMMARY
+            } else {
+                NEW_SUMMARY
+            })),
+            (_, Writes::Nothing) => sse_reply(sse::empty()),
+            (_, Writes::Error) => Reply::json(
+                500,
+                &json!({"error": {"message": "boom", "type": "server_error", "code": 500}}),
+            ),
+        }
+    })
+    .await;
+    (server, seen)
+}
+
+fn kinds(seen: &Seen) -> Vec<&'static str> {
+    seen.lock().unwrap().iter().map(|(kind, _)| *kind).collect()
+}
+
+fn requests_of(seen: &Seen, kind: &str) -> Vec<Value> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| *k == kind)
+        .map(|(_, body)| body.clone())
+        .collect()
+}
+
+fn system_of(request: &Value) -> String {
+    request["messages"][0]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The summary of earlier messages as a request's system message carries it.
+fn summary_in(request: &Value) -> String {
+    let system = system_of(request);
+    let start = system
+        .find("Earlier messages of this conversation were summarised:\n")
+        .expect("a summary block")
+        + "Earlier messages of this conversation were summarised:\n".len();
+    let end = system[start..].find("\n</conversation_summary>").unwrap() + start;
+    system[start..end].to_owned()
+}
+
+/// The compaction events of a turn: stage, summary, covered ids.
+fn compaction_events(h: &Harness) -> Vec<(u8, Option<String>, Vec<i64>)> {
+    h.sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            TurnEvent::Compacted {
+                stage,
+                summary,
+                covered_ids,
+            } => Some((stage, summary, covered_ids)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn app_notes(h: &Harness) -> Vec<String> {
+    h.sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            TurnEvent::AppNote { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A summary as a context of 32,768 tokens leaves it: near its cap of 4,096 characters,
+/// about twice what a context of 4,096 tokens allows (2,048).
+fn summary_written_at_32k() -> String {
+    let mut text = String::from("Goal: keep the build green.\nDecisions: ");
+    while text.len() < 3_900 {
+        text.push_str("use the small model and keep notes short; ");
+    }
+    text.push_str("\nExact paths and identifiers: /p/kept-at-the-end.txt");
+    assert!((2_049..=4_096).contains(&text.chars().count()));
+    text
+}
+
+/// A chat that was summarised while the model remembered 32,768 tokens goes on after a
+/// reload with 4,096. Its summary, twice what the smaller context allows, would crowd the
+/// tools out of the fixed part; it is folded again under the smaller cap before anything is
+/// measured, so the tools stay offered and the turn completes.
+#[tokio::test]
+async fn a_chat_summarised_at_32k_continues_at_4k() {
+    let (server, seen) = memory_server(Writes::Summary, 0).await;
+    let h = Harness::on_server(server, ProviderKind::Generic);
+    let mut input = input("unused");
+    let mut history = earlier_turns(6, 60, 1_500);
+    history.push(HistoryMessage::user("And now?"));
+    input.history = history;
+    input.caps.n_ctx = 4_096;
+    // The first three turns were summarised at 32k.
+    let covered: Vec<i64> = (0..3)
+        .flat_map(|turn| (1..=4).map(move |i| turn * 10 + i))
+        .collect();
+    input.summary = Some(CompactionSummary {
+        text: summary_written_at_32k(),
+        covered_ids: covered.clone(),
+    });
+    let outcome = h.run(input).await;
+    assert_eq!(
+        outcome.status,
+        TurnStatus::Completed,
+        "{:?}",
+        outcome.status
+    );
+    // The fold comes first: the old summary in the system message, the instruction to
+    // rewrite it within the 4k cap (512 tokens; at most 341 words), no tool calls.
+    let kinds = kinds(&seen);
+    assert_eq!(kinds.first(), Some(&"fold"), "{kinds:?}");
+    assert_eq!(kinds.last(), Some(&"chat"), "{kinds:?}");
+    let fold = &requests_of(&seen, "fold")[0];
+    assert_eq!(fold["tool_choice"], json!("none"));
+    assert_eq!(fold["max_tokens"], json!(512));
+    assert!(system_of(fold).contains("/p/kept-at-the-end.txt"));
+    assert!(last_message_text(fold).contains("at most 341 words"));
+    let budget = outcome.budget.unwrap();
+    assert_eq!(budget.n_ctx, 4_096);
+    let chars = all_text(fold).chars().count() + fold["tools"].to_string().len();
+    assert!(u32::try_from(chars / 3).unwrap() <= budget.budget);
+    // Its summary replaces the old one and covers the same messages.
+    let events = compaction_events(&h);
+    assert_eq!(
+        events[0],
+        (2, Some(FOLDED_SUMMARY.to_owned()), covered.clone())
+    );
+    let main = requests_of(&seen, "chat").pop().unwrap();
+    assert_eq!(summary_in(&main), FOLDED_SUMMARY);
+    assert!(!system_of(&main).contains("keep notes short"));
+    assert!(
+        main["tools"].as_array().is_some_and(|t| !t.is_empty()),
+        "the tools stay offered"
+    );
+    let sent = all_text(&main);
+    assert!(
+        !sent.contains("Question 0:"),
+        "covered messages are not sent"
+    );
+    assert!(sent.contains("Question 5:") && sent.contains("And now?"));
+    let summary = outcome.summary.unwrap();
+    assert!(covered.iter().all(|id| summary.covered_ids.contains(id)));
+}
+
+/// The input of [`an_oversized_old_summary_is_folded`]: every earlier message is covered by
+/// a summary written at 32k, so nothing new is left to summarise.
+fn covered_chat(n_ctx: u32) -> (TurnInput, Vec<i64>) {
+    let covered = vec![1, 2, 3, 4, 11, 12, 13, 14];
+    let mut input = input("unused");
+    let mut history = earlier_turns(2, 5, 100);
+    history.push(HistoryMessage::user("And now?"));
+    input.history = history;
+    input.caps.n_ctx = n_ctx;
+    input.summary = Some(CompactionSummary {
+        text: summary_written_at_32k(),
+        covered_ids: covered.clone(),
+    });
+    (input, covered)
+}
+
+/// An old summary longer than this context allows, with nothing new to summarise, is folded
+/// again: the model rewrites it under the smaller cap, covering the same messages, and the
+/// event carries the new text for the app to store. When the model writes nothing or the
+/// server fails, the turn says so once and goes on with the summary cut to the cap (its head
+/// and its tail), which is not stored. A server that reports a smaller context than the one
+/// the turn started with gets the same fold before the retry.
+#[tokio::test]
+async fn an_oversized_old_summary_is_folded() {
+    // The model rewrites it.
+    let (server, seen) = memory_server(Writes::Summary, 0).await;
+    let h = Harness::on_server(server, ProviderKind::Generic);
+    let (input, covered) = covered_chat(4_096);
+    let outcome = h.run(input).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(kinds(&seen), ["fold", "chat"]);
+    let fold = &requests_of(&seen, "fold")[0];
+    assert!(
+        system_of(fold).contains("keep notes short"),
+        "the fold reads the old summary"
+    );
+    assert_eq!(
+        compaction_events(&h),
+        [(2, Some(FOLDED_SUMMARY.to_owned()), covered.clone())]
+    );
+    let main = &requests_of(&seen, "chat")[0];
+    assert_eq!(summary_in(main), FOLDED_SUMMARY);
+    assert!(!all_text(main).contains("Question 0:"));
+    assert_eq!(outcome.summary.unwrap().covered_ids, covered);
+    assert!(
+        !app_notes(&h)
+            .iter()
+            .any(|n| n == agent::turn::SUMMARY_FAILED_NOTE)
+    );
+
+    // The model writes nothing, or the server fails.
+    for writes in [Writes::Nothing, Writes::Error] {
+        let (server, seen) = memory_server(writes, 0).await;
+        let h = Harness::on_server(server, ProviderKind::Generic);
+        let outcome = h.run(covered_chat(4_096).0).await;
+        assert_eq!(outcome.status, TurnStatus::Completed, "{writes:?}");
+        assert_eq!(kinds(&seen), ["fold", "chat"], "{writes:?}");
+        let failed = app_notes(&h)
+            .iter()
+            .filter(|n| *n == agent::turn::SUMMARY_FAILED_NOTE)
+            .count();
+        assert_eq!(failed, 1, "{writes:?}");
+        assert!(
+            compaction_events(&h).is_empty(),
+            "a cut summary is not stored"
+        );
+        let sent = summary_in(&requests_of(&seen, "chat")[0]);
+        assert!(sent.chars().count() <= 2_048, "{}", sent.chars().count());
+        assert!(sent.starts_with("Goal: keep the build green."), "{sent}");
+        assert!(sent.ends_with("/p/kept-at-the-end.txt"), "{sent}");
+        assert!(sent.contains("omitted ...]"), "{sent}");
+        assert_eq!(outcome.summary.unwrap().text, sent);
+    }
+
+    // At 32k the summary fits; then the server says the model holds 4,096 tokens.
+    let (server, seen) = memory_server(Writes::Summary, 1).await;
+    let h = Harness::on_server(server, ProviderKind::Generic);
+    let (input, covered) = covered_chat(32_768);
+    let outcome = h.run(input).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(kinds(&seen), ["chat", "fold", "chat"]);
+    assert_eq!(
+        compaction_events(&h),
+        [(2, Some(FOLDED_SUMMARY.to_owned()), covered)]
+    );
+    assert_eq!(summary_in(&requests_of(&seen, "chat")[1]), FOLDED_SUMMARY);
+    assert_eq!(outcome.budget.unwrap().n_ctx, 4_096);
+}
+
+/// A summary that cannot be written is reported once, after the note that one is being
+/// written, and the turn goes on with the other stages instead of failing: here the request
+/// fits the budget once older results are shortened, so the answer comes. No second summary
+/// is tried in the same turn.
+#[tokio::test]
+async fn a_failed_summary_is_reported_and_the_turn_continues() {
+    for writes in [Writes::Nothing, Writes::Error] {
+        let (server, seen) = memory_server(writes, 0).await;
+        let h = Harness::on_server(server, ProviderKind::Generic);
+        let mut input = input("unused");
+        let mut history = earlier_turns(6, 150, 3_400);
+        history.push(HistoryMessage::user("And now?"));
+        input.history = history;
+        let outcome = h.run(input).await;
+        assert_eq!(
+            outcome.status,
+            TurnStatus::Completed,
+            "{writes:?}: {:?}",
+            outcome.status
+        );
+        assert_eq!(kinds(&seen), ["summary", "chat"], "{writes:?}");
+        let notes = app_notes(&h);
+        let summarising = notes
+            .iter()
+            .position(|n| n == agent::turn::SUMMARISING_NOTE)
+            .expect("the summarising note");
+        let failed = notes
+            .iter()
+            .position(|n| n == agent::turn::SUMMARY_FAILED_NOTE)
+            .expect("the failure note");
+        assert!(summarising < failed);
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| *n == agent::turn::SUMMARY_FAILED_NOTE)
+                .count(),
+            1
+        );
+        assert_eq!(compacted_stages(&h), [1], "{writes:?}");
+        assert!(outcome.summary.is_none());
+        let main = &requests_of(&seen, "chat")[0];
+        assert!(
+            all_text(main).contains("Question 0:"),
+            "nothing was left out"
+        );
+        assert_eq!(last_text(&outcome), "Here is the answer.");
+    }
+}
+
+/// Every compaction event names its stage by the stage's number; only stage 2 carries a
+/// summary and the messages it covers, and each later summary covers more of them.
+#[tokio::test]
+async fn each_compaction_event_names_its_stage() {
+    use agent::turn::CompactionStage;
+    // Stages 1 and 2: earlier results shortened, then earlier turns summarised in rounds.
+    let (server, _) = memory_server(Writes::Summary, 0).await;
+    let h = Harness::on_server(server, ProviderKind::Generic);
+    let mut input = input("unused");
+    let mut history = earlier_turns(6, 150, 3_400);
+    history.push(HistoryMessage::user("And now?"));
+    input.history = history;
+    input.caps.n_ctx = 4_096;
+    assert_eq!(h.run(input).await.status, TurnStatus::Completed);
+    let events = compaction_events(&h);
+    let stages: Vec<u8> = events.iter().map(|e| e.0).collect();
+    assert!(stages.len() >= 3, "{stages:?}");
+    assert_eq!(stages[0], 1, "{stages:?}");
+    assert!(stages[1..].iter().all(|s| *s == 2), "{stages:?}");
+    let mut covered_before = 0;
+    for (stage, summary, covered) in &events {
+        match CompactionStage::from_number(*stage) {
+            Some(CompactionStage::ShortenEarlierResults) => {
+                assert!(summary.is_none() && covered.is_empty());
+            }
+            Some(CompactionStage::SummariseEarlier) => {
+                assert_eq!(summary.as_deref(), Some(NEW_SUMMARY));
+                assert!(covered.len() > covered_before, "{covered:?}");
+                covered_before = covered.len();
+            }
+            other => panic!("stage {stage}: {other:?}"),
+        }
+    }
+    // The event says the stage as a number in its JSON form too.
+    let event = h
+        .sink
+        .events()
+        .into_iter()
+        .find(|e| matches!(e, TurnEvent::Compacted { .. }))
+        .unwrap();
+    assert_eq!(serde_json::to_value(&event).unwrap()["stage"], json!(1));
+
+    // Stage 3: older results of the turn itself.
+    let count = Arc::new(Mutex::new(0usize));
+    let counter = Arc::clone(&count);
+    let server = MockServer::start(move |request: &Recorded| {
+        if request.path() != "/v1/chat/completions" {
+            return Reply::not_found();
+        }
+        let mut n = counter.lock().unwrap();
+        *n += 1;
+        if *n < 12 {
+            sse_reply(sse::tool_call(
+                &format!("c{n}"),
+                "read_file",
+                json!({"path": format!("/p/file{n}.txt")}),
+            ))
+        } else {
+            sse_reply(sse::text("Done."))
+        }
+    })
+    .await;
+    let h = Harness::on_server(server, ProviderKind::Generic);
+    h.grant_files();
+    let page: String = (0..2_000).map(|i| format!("line {i}\n")).collect();
+    h.tools.set("read_file", Behaviour::Text(page));
+    assert_eq!(
+        h.run(self::input("Read the files")).await.status,
+        TurnStatus::Completed
+    );
+    let events = compaction_events(&h);
+    assert!(!events.is_empty());
+    for (stage, summary, covered) in events {
+        assert_eq!(
+            CompactionStage::from_number(stage),
+            Some(CompactionStage::ShortenTurnResults)
+        );
+        assert!(summary.is_none() && covered.is_empty());
+    }
+}
+
+/// How long the model may think: each request with thinking on carries a thinking budget of
+/// min(the choice, half its output limit); Default keeps half the output limit. No budget
+/// goes with thinking off, with the retry that switches thinking off, to another kind of
+/// server, or when the request template sets one itself.
+#[tokio::test]
+async fn the_thinking_limit_follows_the_choice() {
+    use agent::ThinkingLimit;
+    async fn sent(limit: ThinkingLimit, n_ctx: u32) -> (u64, u64) {
+        let h = Harness::with_kind(
+            vec![reply_text(sse::text("Hello."))],
+            ProviderKind::LlamaServer,
+        )
+        .await;
+        let mut input = thinking_input("Hi");
+        input.caps.n_ctx = n_ctx;
+        input.thinking_limit = limit;
+        assert_eq!(h.run(input).await.status, TurnStatus::Completed);
+        let chat = &h.chats()[0];
+        assert!(!thinking_off(chat));
+        (
+            chat["reasoning_budget_tokens"].as_u64().unwrap(),
+            chat["max_tokens"].as_u64().unwrap(),
+        )
+    }
+    // A large context: the choice decides.
+    let (default, max_tokens) = sent(ThinkingLimit::NoLimit, 65_536).await;
+    assert_eq!(default, max_tokens / 2);
+    assert!(default > 16_384, "{default}");
+    assert_eq!(sent(ThinkingLimit::Short, 65_536).await.0, 1_024);
+    assert_eq!(sent(ThinkingLimit::Medium, 65_536).await.0, 4_096);
+    assert_eq!(sent(ThinkingLimit::Long, 65_536).await.0, 16_384);
+    // A small one: half the output limit caps every choice.
+    let (default, max_tokens) = sent(ThinkingLimit::NoLimit, 4_096).await;
+    assert_eq!(default, max_tokens / 2);
+    assert!((1_024..4_096).contains(&default), "{default}");
+    assert_eq!(sent(ThinkingLimit::Short, 4_096).await.0, 1_024);
+    assert_eq!(sent(ThinkingLimit::Medium, 4_096).await.0, default);
+    assert_eq!(sent(ThinkingLimit::Long, 4_096).await.0, default);
+
+    // Thinking off for the chat.
+    let h = Harness::with_kind(
+        vec![reply_text(sse::text("Hello."))],
+        ProviderKind::LlamaServer,
+    )
+    .await;
+    let mut input = thinking_input("Hi");
+    input.thinking = false;
+    input.thinking_limit = ThinkingLimit::Short;
+    h.run(input).await;
+    let chat = &h.chats()[0];
+    assert!(thinking_off(chat));
+    assert!(chat.get("reasoning_budget_tokens").is_none());
+
+    // The retry after an empty reply switches thinking off, and its budget with it.
+    let h = Harness::with_kind(
+        vec![reply_text(sse::empty()), reply_text(sse::text("Hello."))],
+        ProviderKind::LlamaServer,
+    )
+    .await;
+    let mut input = thinking_input("Hi");
+    input.thinking_limit = ThinkingLimit::Short;
+    assert_eq!(h.run(input).await.status, TurnStatus::Completed);
+    let chats = h.chats();
+    assert_eq!(chats[0]["reasoning_budget_tokens"], json!(1_024));
+    assert!(thinking_off(&chats[1]));
+    assert!(chats[1].get("reasoning_budget_tokens").is_none());
+
+    // A budget in the request template wins.
+    let h = Harness::with_kind(
+        vec![reply_text(sse::text("Hello."))],
+        ProviderKind::LlamaServer,
+    )
+    .await;
+    let mut input = thinking_input("Hi");
+    input.thinking_limit = ThinkingLimit::Long;
+    input
+        .template
+        .extra
+        .insert("reasoning_budget_tokens".into(), json!(77));
+    h.run(input).await;
+    assert_eq!(h.chats()[0]["reasoning_budget_tokens"], json!(77));
+
+    // Other servers are not sent llama-server's field.
+    let h = Harness::new(vec![reply_text(sse::text("Hello."))]).await;
+    let mut input = thinking_input("Hi");
+    input.caps.local = false;
+    input.thinking_limit = ThinkingLimit::Short;
+    h.run(input).await;
+    assert!(h.chats()[0].get("reasoning_budget_tokens").is_none());
+}
+
+/// When nothing more can be made shorter, the turn says so in plain words and how to go on:
+/// the app's own model can be set to remember more in Model settings; a model on an
+/// endpoint cannot. A second "too long" from the server after making room ends the same way.
+#[tokio::test]
+async fn a_chat_too_long_to_remember_says_what_to_do() {
+    use agent::error::{CHAT_TOO_LONG_LOCAL, CHAT_TOO_LONG_REMOTE};
+    // About 20,000 tokens in one message: far more than a context of 4,096 holds.
+    let long = "word ".repeat(12_000);
+    for (kind, local, message) in [
+        (ProviderKind::LlamaServer, true, CHAT_TOO_LONG_LOCAL),
+        (ProviderKind::Generic, false, CHAT_TOO_LONG_REMOTE),
+    ] {
+        let h = Harness::with_kind(vec![reply_text(sse::text("never sent"))], kind).await;
+        let mut input = input(&long);
+        input.caps.n_ctx = 4_096;
+        input.caps.local = local;
+        let outcome = h.run(input).await;
+        assert_eq!(
+            outcome.status,
+            TurnStatus::Failed {
+                code: "context_full".into(),
+                message: message.into()
+            }
+        );
+        assert!(h.chats().is_empty());
+    }
+    for (kind, local, message) in [
+        (ProviderKind::LlamaServer, true, CHAT_TOO_LONG_LOCAL),
+        (ProviderKind::Generic, false, CHAT_TOO_LONG_REMOTE),
+    ] {
+        let h = Harness::with_kind(
+            vec![
+                Reply::json(400, &sse::overflow_body(9_000, 8_192)),
+                Reply::json(400, &sse::overflow_body(9_000, 8_192)),
+            ],
+            kind,
+        )
+        .await;
+        let mut input = input("Hi");
+        input.caps.local = local;
+        let outcome = h.run(input).await;
+        assert_eq!(
+            outcome.status,
+            TurnStatus::Failed {
+                code: "context_overflow".into(),
+                message: message.into()
+            }
+        );
+        let note = app_notes(&h)
+            .into_iter()
+            .find(|n| n.contains("too long"))
+            .expect("the retry note");
+        assert!(
+            !note.contains("compacting") && !note.contains("context"),
+            "{note}"
+        );
+    }
+}
+
+/// The preview of a turn whose stored summary is too long for this context shows it cut to
+/// the cap (stage 2 in `applied`: the turn has the model rewrite it first) and measures and
+/// checks with that, so it refuses nothing the turn would not; it sends nothing. Over the
+/// trigger, the messages it names as summarised next are those the turn's next summary
+/// replaces.
+#[tokio::test]
+async fn the_preview_cuts_an_oversized_summary_and_names_the_next_summary() {
+    let (server, seen) = memory_server(Writes::Summary, 0).await;
+    let h = Harness::on_server(server, ProviderKind::Generic);
+    let (input, _) = covered_chat(4_096);
+    let preview = preview_of(&h, input.clone()).await;
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "the preview sent a request"
+    );
+    assert_eq!(preview.applied, [2]);
+    assert!(preview.refusal.is_none(), "{:?}", preview.refusal);
+    assert!(preview.tools_on);
+    let block = preview
+        .system_blocks
+        .iter()
+        .find(|b| b.kind == agent::SystemBlockKind::Summary)
+        .expect("a summary block");
+    assert!(block.text.contains("omitted ...]"), "{}", block.text);
+    assert!(block.text.contains("/p/kept-at-the-end.txt"));
+    let request = serde_json::to_value(&preview.request).unwrap();
+    assert!(summary_in(&request).chars().count() <= 2_048);
+    // The turn itself folds with the model, and does not refuse either.
+    assert_eq!(h.run(input).await.status, TurnStatus::Completed);
+
+    // Over the trigger after stage 1: stage 2 next, as the turn's first round chooses it.
+    let (server, _) = memory_server(Writes::Summary, 0).await;
+    let h = Harness::on_server(server, ProviderKind::Generic);
+    let mut input = self::input("unused");
+    let mut history = earlier_turns(6, 150, 3_400);
+    history.push(HistoryMessage::user("And now?"));
+    input.history = history;
+    input.caps.n_ctx = 4_096;
+    let preview = preview_of(&h, input.clone()).await;
+    assert_eq!(preview.applied, [1]);
+    assert!(preview.over_trigger);
+    let agent::NextCompaction::SummariseEarlier { messages } = preview.next else {
+        panic!("{:?}", preview.next);
+    };
+    assert_eq!(h.run(input).await.status, TurnStatus::Completed);
+    let first = compaction_events(&h)
+        .into_iter()
+        .find(|e| e.0 == 2)
+        .expect("a summary");
+    // The ids of tool results are not among those listed; the summary stands for every
+    // earlier message up to the last one listed.
+    let last = *first.2.iter().max().unwrap();
+    let replaced = earlier_turns(6, 150, 3_400)
+        .iter()
+        .filter(|m| m.id.is_some_and(|id| id <= last))
+        .count();
+    assert_eq!(replaced, messages);
+}

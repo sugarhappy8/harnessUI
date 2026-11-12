@@ -4,9 +4,40 @@ import * as ipc from "../../lib/ipc";
 import type { ErrorInfo, HubSort, RepoSummary } from "../../lib/types";
 import { formatCount } from "../../lib/format";
 import { toErrorInfo } from "../../store/app";
+import { COMPARE_FULL, COMPARE_LIMIT, useCompare, useRepoInComparison } from "../../store/compare";
 import { ErrorBanner } from "../ErrorBanner";
 import { Badge } from "./Badge";
+import { AddToComparison } from "./Compare";
 import { RepoDetail } from "./RepoDetail";
+
+/** One search result: opens the repository; Add to comparison puts it in without a file. */
+function ResultRow(props: { repo: RepoSummary; onOpen: () => void }) {
+  const r = props.repo;
+  const compare = useRepoInComparison(r.id);
+  return (
+    <li className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={props.onOpen}
+        className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-bg-muted"
+      >
+        <span className="min-w-0 flex-1 truncate">{r.id}</span>
+        {r.gated !== "no" && <Lock size={12} className="text-fg-muted" aria-label="gated" />}
+        {r.license && <Badge>{r.license}</Badge>}
+        <span className="w-16 text-right text-xs text-fg-muted" title="Downloads">
+          {formatCount(r.downloads)}
+        </span>
+      </button>
+      <AddToComparison
+        added={compare.added}
+        full={compare.full}
+        onAdd={() => void compare.add()}
+        onRemove={compare.remove}
+        name={r.id}
+      />
+    </li>
+  );
+}
 
 /** Models → Browse: Hugging Face search, and a repository's page. */
 export function Browse(props: { onStarted: () => void }) {
@@ -19,6 +50,7 @@ export function Browse(props: { onStarted: () => void }) {
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const timer = useRef<number | undefined>(undefined);
+  const compareFull = useCompare((s) => s.entries.length >= COMPARE_LIMIT);
 
   const run = useCallback(async (q: string, s: HubSort, all: boolean) => {
     // "owner/repo" opens that repository directly.
@@ -93,22 +125,10 @@ export function Browse(props: { onStarted: () => void }) {
         Show all GGUF repositories (including speech, image and video models that cannot chat)
       </label>
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+      {compareFull && items.length > 0 && <p className="text-xs text-fg-muted">{COMPARE_FULL}</p>}
       <ul className="space-y-1">
         {items.map((r) => (
-          <li key={r.id}>
-            <button
-              type="button"
-              onClick={() => setSelected(r.id)}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-bg-muted"
-            >
-              <span className="min-w-0 flex-1 truncate">{r.id}</span>
-              {r.gated !== "no" && <Lock size={12} className="text-fg-muted" aria-label="gated" />}
-              {r.license && <Badge>{r.license}</Badge>}
-              <span className="w-16 text-right text-xs text-fg-muted" title="Downloads">
-                {formatCount(r.downloads)}
-              </span>
-            </button>
-          </li>
+          <ResultRow key={r.id} repo={r} onOpen={() => setSelected(r.id)} />
         ))}
       </ul>
       {!busy && items.length === 0 && !error && <p className="text-sm text-fg-muted">No matching models.</p>}

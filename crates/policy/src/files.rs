@@ -1,6 +1,8 @@
 //! Which file writes always ask, whatever was granted (ARCHITECTURE.md 13.3):
 //! deletes; replacing a file with an empty one; anything under a `.git` folder; shell
-//! start-up files; git and ssh configuration; autostart locations.
+//! start-up files; git and ssh configuration; autostart locations; the settings of the
+//! coding apps Claude Code and Codex (0.0.5: `.claude/`, `.codex/`, `.mcp.json`,
+//! `.claude.json`).
 
 use crate::engine::KeepAsking;
 use crate::path::Flavor;
@@ -39,6 +41,15 @@ const CONFIG_FILES: &[&str] = &[
 /// Folder names whose contents are always sensitive.
 const SENSITIVE_DIRS: &[&str] = &[".git", ".ssh", ".gnupg", "launchagents", "launchdaemons"];
 
+/// The settings folders of the coding apps the app can hand tasks to (0.0.5): a project's
+/// and the user's `.claude` and `.codex`. Hooks and MCP servers configured there run
+/// programs, and their permission settings decide what the app may do on its own.
+pub(crate) const CODING_APP_DIRS: &[&str] = &[".claude", ".codex"];
+
+/// The settings files of those apps, by file name: a project's MCP servers for Claude Code,
+/// and Claude Code's own `~/.claude.json`.
+const CODING_APP_FILES: &[&str] = &[".mcp.json", ".claude.json"];
+
 /// What kind of write is planned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteKind {
@@ -73,6 +84,12 @@ pub fn always_ask_reason(canonical: &str, kind: WriteKind, flavor: Flavor) -> Op
     }
     if dirs.iter().any(|d| SENSITIVE_DIRS.contains(d)) {
         return Some("writing to ssh, gpg or autostart folders always asks");
+    }
+    if dirs.iter().any(|d| CODING_APP_DIRS.contains(d))
+        || CODING_APP_DIRS.contains(name)
+        || CODING_APP_FILES.contains(name)
+    {
+        return Some("changing the settings of Claude Code or Codex always asks");
     }
     if STARTUP_FILES.contains(name) {
         return Some("changing a shell start-up file always asks");
@@ -258,6 +275,53 @@ mod tests {
         for kind in [WriteKind::Create, WriteKind::Edit, shorter] {
             assert_eq!(keep_asking("/p/src/main.rs", kind, P), None);
             assert_eq!(keep_asking("C:\\Users\\me\\proj\\x.txt", kind, W), None);
+        }
+    }
+
+    /// 0.0.5: the settings of the coding apps the app can hand tasks to (Claude Code,
+    /// Codex) keep asking like `.git`: a project's `.claude/` folder and `.mcp.json`, the
+    /// user's `~/.claude/`, `~/.claude.json` and `~/.codex/`. A file there could start a
+    /// program the next time the app runs, or turn off its permission checks.
+    #[test]
+    fn coding_app_settings_always_ask() {
+        for p in [
+            "/home/u/proj/.claude/settings.json",
+            "/home/u/proj/.claude/settings.local.json",
+            "/home/u/proj/.claude/hooks/pre.sh",
+            "/home/u/proj/.claude",
+            "/home/u/proj/.mcp.json",
+            "/home/u/proj/sub/.mcp.json",
+            "/home/u/proj/.codex/config.toml",
+            "/home/u/proj/.codex",
+            "/home/u/.claude/settings.json",
+            "/home/u/.claude.json",
+            "/home/u/.codex/config.toml",
+            "/home/u/.codex/hooks.json",
+            "/Users/u/.CLAUDE/Settings.json",
+        ] {
+            assert!(always_ask_reason(p, WriteKind::Create, P).is_some(), "{p}");
+            assert_eq!(keep_asking(p, WriteKind::Edit, P), Some(KeepAsking::Sensitive), "{p}");
+        }
+        for p in [
+            "C:\\Users\\me\\proj\\.claude\\settings.json",
+            "C:\\Users\\me\\.claude.json",
+            "C:\\Users\\me\\.codex\\config.toml",
+            "C:\\Users\\me\\proj\\.mcp.json",
+        ] {
+            assert!(always_ask_reason(p, WriteKind::Edit, W).is_some(), "{p}");
+        }
+        // Names that only look alike stay grantable.
+        for p in [
+            "/home/u/proj/claude/notes.md",
+            "/home/u/proj/.claudeignore",
+            "/home/u/proj/docs/claude.json",
+            "/home/u/proj/mcp.json",
+            "/home/u/proj/.mcp.json.example",
+            "/home/u/proj/codex/src/main.rs",
+            "/home/u/proj/.codexrc-notes/x",
+            "/home/u/proj/CLAUDE.md",
+        ] {
+            assert_eq!(always_ask_reason(p, WriteKind::Create, P), None, "{p}");
         }
     }
 

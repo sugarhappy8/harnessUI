@@ -282,7 +282,7 @@ pub async fn hub_repo(
     let classified = models::classify(&detail.files);
     let fit_context = ctx
         .unwrap_or(u64::from(
-            crate::settings::local_model_settings(&app).await.ctx,
+            crate::load_settings::browse_fit_ctx(&state).await,
         ))
         .max(512);
 

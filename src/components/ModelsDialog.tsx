@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Dialog, Tabs } from "radix-ui";
 import { X } from "lucide-react";
 import { Browse } from "./models/Browse";
+import { Compare, CompareTabLabel } from "./models/Compare";
 import { Downloads } from "./models/Downloads";
 import { Installed } from "./models/Installed";
 
@@ -31,11 +32,13 @@ export function ModelsDialog(props: { open: boolean; onOpenChange: (open: boolea
             <Tabs.List className="flex gap-1 border-b border-border px-4 py-2" aria-label="Model sections">
               <Tabs.Trigger value="installed" className={tabClass}>Installed</Tabs.Trigger>
               <Tabs.Trigger value="browse" className={tabClass}>Browse</Tabs.Trigger>
+              <Tabs.Trigger value="compare" className={tabClass}><CompareTabLabel /></Tabs.Trigger>
               <Tabs.Trigger value="downloads" className={tabClass}>Downloads</Tabs.Trigger>
             </Tabs.List>
             <div className="min-h-0 flex-1 overflow-y-auto p-5">
               <Tabs.Content value="installed"><Installed onClose={() => props.onOpenChange(false)} /></Tabs.Content>
               <Tabs.Content value="browse"><Browse onStarted={() => setTab("downloads")} /></Tabs.Content>
+              <Tabs.Content value="compare"><Compare onOpen={setTab} /></Tabs.Content>
               <Tabs.Content value="downloads"><Downloads /></Tabs.Content>
             </div>
           </Tabs.Root>

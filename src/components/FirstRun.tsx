@@ -6,8 +6,10 @@ import type { CatalogSuggestion, ErrorInfo, FirstRunInfo } from "../lib/types";
 import { formatBytes } from "../lib/format";
 import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
+import { switchModel } from "../store/modelChange";
 import { ErrorBanner } from "./ErrorBanner";
 import { BrandMark } from "./Brand";
+import { QuestionHost } from "./ModelSettings";
 
 function hardwareLine(info: FirstRunInfo): string {
   const h = info.hardware;
@@ -52,11 +54,12 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
     };
   }, []);
 
+  /** Runs `action`, then ends first run; an action that resolves `false` was cancelled. */
   async function finish(action: () => Promise<unknown>) {
     setBusy(true);
     setError(null);
     try {
-      await action();
+      if ((await action()) === false) return;
       await ipc.completeFirstRun();
       props.onDone();
     } catch (err) {
@@ -75,8 +78,8 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
     if (typeof picked !== "string") return;
     await finish(async () => {
       const m = await ipc.importModel(picked);
-      const settings = await ipc.getLocalModelSettings();
-      await ipc.loadLocalModel(m.path, settings);
+      // With the model's own settings; asks first if another model is busy (D3).
+      if (!(await switchModel(useApp.getState().runtime, m.path))) return false;
       // Open a chat with the model, so the first screen after this one is ready to use.
       await useApp.getState().setChatModel(`local:${m.path}`);
     });
@@ -197,6 +200,7 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
           Skip for now
         </button>
       </div>
+      <QuestionHost />
     </div>
   );
 }

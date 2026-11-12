@@ -93,6 +93,21 @@ pub struct DocumentRef {
 pub struct ChatDetailDto {
     pub chat: ChatDto,
     pub messages: Vec<MessageDto>,
+    /// [0.0.5 memory] The summary the model gets instead of the earlier messages of the
+    /// shown branch, if there is one.
+    pub summary: Option<EarlierSummaryDto>,
+}
+
+/// [0.0.5 memory] A summary of earlier messages, for the line the chat draws under the last
+/// message it stands for ("Above this line, the model sees a summary instead of the
+/// messages. Show summary").
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EarlierSummaryDto {
+    /// The newest message it stands for; every message above it on the branch is covered.
+    pub last_message_id: store::MessageId,
+    /// What the model wrote. Model output: the chat shows it as plain text, never markup.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

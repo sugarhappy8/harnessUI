@@ -4,13 +4,15 @@
 //! Stage names reported by llama-server's managed-child protocol map to
 //! [`LoadStage::from_llama_stage`]; a name this build does not know becomes the generic
 //! [`LoadStage::Loading`], so a new llama.cpp stage never shows a raw identifier.
-//! Transitions that have no [`ServerEvent`](super::server::ServerEvent) of their own
-//! (the retries WP1a adds) are sent as [`ServerEvent::Stage`](super::server::ServerEvent::Stage).
+//! Transitions that have no [`ServerEvent`] of their own (the supervisor's retries on the
+//! same backend) are sent as [`ServerEvent::Stage`]. [`LoadStage::of_event`] is the one
+//! mapping from events to stages.
 
 use serde::{Deserialize, Serialize};
 
 use super::backend::BackendKind;
 use super::failure::LoadFailure;
+use super::server::ServerEvent;
 
 /// One step of loading a model, or a transition between attempts.
 ///
@@ -38,18 +40,20 @@ pub enum LoadStage {
         max: u32,
     },
     /// Trying again on the same backend with Save memory off, after a failure with it
-    /// on (0.0.5 D2c). Sent by the supervisor (WP1a).
+    /// on that it can cause (0.0.5 D2c). Sent by the supervisor as [`ServerEvent::Stage`].
     RetryingWithoutSaveMemory {
         /// The backend being retried.
         backend: BackendKind,
     },
     /// Trying again on the same backend with only as much of the model on the graphics
-    /// card as fits, after it ran out of memory. Sent by the supervisor (WP1a).
+    /// card as fits, after it ran out of memory with all of it there. Sent by the
+    /// supervisor as [`ServerEvent::Stage`].
     RetryingWithLessGpu {
         /// The backend being retried.
         backend: BackendKind,
     },
-    /// Moving to the next backend down after `from` failed.
+    /// Moving to the next backend down after `from` failed. Sent by the supervisor as
+    /// [`ServerEvent::SteppedDown`], never as [`ServerEvent::Stage`].
     SteppingDown {
         /// The backend that failed.
         from: BackendKind,
@@ -70,11 +74,49 @@ impl LoadStage {
             _ => Self::Loading,
         }
     }
+
+    /// The stage an event moves the load to, or `None` when the event does not change it.
+    ///
+    /// [`ServerEvent::State`] maps to nothing: the app shows [`LoadStage::Starting`] when a
+    /// load begins, and a later `Starting` state belongs to a restart, retry or step-down
+    /// whose own stage stays shown until the new process reports progress.
+    pub fn of_event(event: &ServerEvent) -> Option<Self> {
+        match event {
+            ServerEvent::Progress { stage, .. } => stage.as_deref().map(Self::from_llama_stage),
+            ServerEvent::Restarting { attempt, max } => Some(Self::Restarting {
+                attempt: *attempt,
+                max: *max,
+            }),
+            ServerEvent::SteppedDown { from, to, reason } => Some(Self::SteppingDown {
+                from: *from,
+                to: *to,
+                reason: reason.clone(),
+            }),
+            ServerEvent::Stage(stage) => Some(stage.clone()),
+            ServerEvent::State(_)
+            | ServerEvent::Log(_)
+            | ServerEvent::Offloaded { .. }
+            | ServerEvent::Exited { .. } => None,
+        }
+    }
+
+    /// Whether the stage changes how the model runs for the rest of the load (a setting
+    /// turned down, or another backend), so the app keeps it after the load ends
+    /// (`adjustments` in the runtime status).
+    pub fn is_adjustment(&self) -> bool {
+        matches!(
+            self,
+            Self::RetryingWithoutSaveMemory { .. }
+                | Self::RetryingWithLessGpu { .. }
+                | Self::SteppingDown { .. }
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llama::server::ServerState;
 
     #[test]
     fn llama_stage_names_map_and_unknown_names_are_generic() {
@@ -88,6 +130,97 @@ mod tests {
         );
         for other in ["spec_model", "", "some_new_stage", "TEXT_MODEL"] {
             assert_eq!(LoadStage::from_llama_stage(other), LoadStage::Loading);
+        }
+    }
+
+    #[test]
+    fn events_map_to_stages() {
+        let progress = |stage: Option<&str>| ServerEvent::Progress {
+            stage: stage.map(str::to_owned),
+            value: Some(0.5),
+        };
+        assert_eq!(
+            LoadStage::of_event(&progress(Some("text_model"))),
+            Some(LoadStage::ReadingModel)
+        );
+        assert_eq!(
+            LoadStage::of_event(&progress(Some("mmproj_model"))),
+            Some(LoadStage::ReadingImageReader)
+        );
+        assert_eq!(
+            LoadStage::of_event(&progress(Some("spec_model"))),
+            Some(LoadStage::Loading)
+        );
+        assert_eq!(LoadStage::of_event(&progress(None)), None);
+        assert_eq!(
+            LoadStage::of_event(&ServerEvent::Restarting { attempt: 2, max: 3 }),
+            Some(LoadStage::Restarting { attempt: 2, max: 3 })
+        );
+        assert_eq!(
+            LoadStage::of_event(&ServerEvent::SteppedDown {
+                from: BackendKind::Vulkan,
+                to: BackendKind::Cpu,
+                reason: LoadFailure::OutOfMemory,
+            }),
+            Some(LoadStage::SteppingDown {
+                from: BackendKind::Vulkan,
+                to: BackendKind::Cpu,
+                reason: LoadFailure::OutOfMemory,
+            })
+        );
+        for retry in [
+            LoadStage::RetryingWithoutSaveMemory {
+                backend: BackendKind::Metal,
+            },
+            LoadStage::RetryingWithLessGpu {
+                backend: BackendKind::Vulkan,
+            },
+        ] {
+            assert_eq!(
+                LoadStage::of_event(&ServerEvent::Stage(retry.clone())),
+                Some(retry)
+            );
+        }
+        for quiet in [
+            ServerEvent::State(ServerState::Starting),
+            ServerEvent::State(ServerState::Ready),
+            ServerEvent::Log("line".into()),
+            ServerEvent::Offloaded {
+                layers: 1,
+                total: 2,
+            },
+            ServerEvent::Exited { code: Some(0) },
+        ] {
+            assert_eq!(LoadStage::of_event(&quiet), None, "{quiet:?}");
+        }
+    }
+
+    #[test]
+    fn adjustments_are_the_retries_and_step_downs() {
+        let adjustments = [
+            LoadStage::RetryingWithoutSaveMemory {
+                backend: BackendKind::Vulkan,
+            },
+            LoadStage::RetryingWithLessGpu {
+                backend: BackendKind::Vulkan,
+            },
+            LoadStage::SteppingDown {
+                from: BackendKind::Vulkan,
+                to: BackendKind::Cpu,
+                reason: LoadFailure::Unknown,
+            },
+        ];
+        for stage in &adjustments {
+            assert!(stage.is_adjustment(), "{stage:?}");
+        }
+        for stage in [
+            LoadStage::Starting,
+            LoadStage::ReadingModel,
+            LoadStage::ReadingImageReader,
+            LoadStage::Loading,
+            LoadStage::Restarting { attempt: 1, max: 3 },
+        ] {
+            assert!(!stage.is_adjustment(), "{stage:?}");
         }
     }
 

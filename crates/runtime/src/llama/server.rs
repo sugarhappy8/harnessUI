@@ -692,7 +692,7 @@ mod tests {
 
     use super::*;
     use crate::llama::backend::BackendSource;
-    use crate::llama::launch::GpuLayers;
+    use crate::llama::launch::GpuUse;
 
     fn launch() -> LaunchConfig {
         LaunchConfig {
@@ -700,7 +700,7 @@ mod tests {
             mmproj: None,
             ctx: 2048,
             device: None,
-            gpu_layers: GpuLayers::Auto,
+            gpu: GpuUse::Off,
             cache_ram_mib: 256,
             reasoning_budget: None,
             port: 40000,

@@ -2793,10 +2793,510 @@ def p_context_inspector(c, notes):
     s.click_button("Panel")
 
 
+COMPARE_QUESTIONS = [
+    "What is it good at?", "Who made it?", "How big is it?", "Will it fit on this computer?", "Download size",
+    "Can it use tools?", "Can it read images?", "Does it think before answering?",
+    "Longest conversation it was made for", "Languages", "Made from", "Released or last updated", "License",
+    "Downloads on Hugging Face", "Your test results",
+]
+
+
+def compare_columns(s):
+    return s.execute(
+        "const t = document.querySelector('table[aria-label=\"Model comparison\"]');"
+        "return t ? t.querySelectorAll('thead th').length - 1 : 0;")
+
+
+def any_gguf():
+    """A model file to import, found without naming one (TEST_GGUF, else the usual places)."""
+    env = os.environ.get("TEST_GGUF")
+    if env and pathlib.Path(env).is_file():
+        return pathlib.Path(env)
+    for d in (ROOT / ".cache" / "models", ROOT.parent / "llama-dev"):
+        found = sorted((p for p in d.glob("*.gguf") if "mmproj" not in p.name.lower()), key=lambda p: p.stat().st_size)
+        if found:
+            return found[0]
+    return None
+
+
+@probe("compare-models")
+def p_compare_models(c, notes):
+    """Model comparison (0.0.5 item 4): the Models dialog's Compare tab. Empty state and
+    Suggested models from the catalog; a suggestion becomes a column whose rows are the
+    questions of the specification, each answer with its source; an installed file joins
+    from Installed (WP2's button, checked when present); "Compare at" re-checks the fit at
+    the chosen size; Show model card asks before opening; Remove; the list outlives closing
+    the dialog; at four models the suggestions go. Hugging Face columns are not driven here:
+    the app's Hugging Face client only talks https, so the harness cannot serve a fake one
+    (the unit tests cover those columns, their problems and the file choice)."""
+    s = c.s
+    suggestions = s.invoke("catalog_list", {"ctx": None})
+    names = [e["catalog"]["name"] for e in suggestions]
+    notes.append(f"catalog_list: {len(names)} entries")
+    assert len(names) >= 2, suggestions
+
+    def open_compare():
+        s.click_button("Models")
+        s.wait_text("Installed", 10)
+        s.click_button("Compare")
+        s.wait_text("Compare at", 10)
+
+    link = None
+    model_id = None
+    try:
+        open_compare()
+        s.wait_text("Nothing to compare yet. Choose Add to comparison on a model in Browse or Installed.", 10)
+        s.wait_text("Suggested models", 15)
+        s.wait_text(names[0], 15)
+        s.click_button(f"Add to comparison: {names[0]}")
+        s.wait_for(lambda: compare_columns(s) == 1, 15, "one column")
+        s.wait_for(lambda: "Getting the facts" not in s.page_text(), 30, "facts")
+        text = s.page_text()
+        missing = [q for q in COMPARE_QUESTIONS if q not in text]
+        assert not missing, missing
+        assert "From the publisher's model card" in text or "From the app's model list" in text, text[-800:]
+        assert "Estimate for this computer at " in text, text[-800:]
+        assert "Nothing to compare yet" not in text
+        # The added suggestion is no longer suggested.
+        assert not s.execute("return !!document.querySelector(`button[aria-label=\"Add to comparison: ${arguments[0]}\"]`);", names[0])
+
+        s.click_button(f"Add to comparison: {names[1]}")
+        s.wait_for(lambda: compare_columns(s) == 2, 15, "two columns")
+        assert "(2 chosen)" in s.page_text()
+
+        gguf = any_gguf()
+        if gguf is None:
+            notes.append("no model file found: the installed column was not tried")
+        else:
+            link = OUT / "compare-local.gguf"
+            link.unlink(missing_ok=True)
+            link.symlink_to(gguf)
+            m = s.invoke("import_model", {"path": str(link)})
+            model_id = m["id"]
+            s.click_button("Installed")
+            s.wait_text("compare-local.gguf", 15)
+            if s.execute("return [...document.querySelectorAll('button')].some(b => (b.innerText || '').includes('Add to comparison'));"):
+                s.click_button("Add to comparison")
+                s.click_button("Compare")
+                s.wait_for(lambda: compare_columns(s) == 3, 15, "installed column")
+                s.wait_for(lambda: "Getting the facts" not in s.page_text(), 30, "facts")
+                assert "compare-local.gguf" in s.page_text()
+                assert "On this computer" in s.page_text()
+            else:
+                notes.append("Installed rows have no Add to comparison yet (WP2's button): runs at integration")
+                s.click_button("Compare")
+                s.wait_text("Compare at", 10)
+
+        s.execute(
+            """
+            const el = document.getElementById('compare-ctx');
+            Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(el, '32768');
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            """
+        )
+        s.wait_text("Estimate for this computer at 32,768 tokens, about 24,000 words", 20)
+        s.screenshot(str(OUT / "compare-models.png"))
+
+        # A model card opens only after the destination-confirm dialog.
+        if s.execute("return [...document.querySelectorAll('thead button')].some(b => b.innerText === 'Show model card');"):
+            s.click_button("Show model card")
+            s.wait_text("Open this link?", 10)
+            assert "huggingface.co" in s.page_text()
+            s.click_button("Cancel")
+            s.wait_for(lambda: "Open this link?" not in s.page_text(), 10, "link dialog closed")
+        else:
+            notes.append("no column has a model card link (catalog entries without a source)")
+
+        n = compare_columns(s)
+        s.execute(
+            "[...document.querySelectorAll('thead button')].find(b => /^Remove .+ from comparison$/.test(b.getAttribute('aria-label') || '')).click();")
+        s.wait_for(lambda: compare_columns(s) == n - 1, 10, "a column removed")
+
+        s.click_button("Close models")
+        s.wait_for(lambda: "Compare at" not in s.page_text(), 10, "dialog closed")
+        open_compare()
+        s.wait_for(lambda: compare_columns(s) == n - 1, 15, "the comparison kept after closing")
+
+        if len(names) >= 4:
+            for name in names:
+                if compare_columns(s) >= 4:
+                    break
+                if s.execute("return !!document.querySelector(`button[aria-label=\"Add to comparison: ${arguments[0]}\"]`);", name):
+                    s.click_button(f"Add to comparison: {name}")
+                    s.wait_for(lambda: "Getting the facts" not in s.page_text(), 30, "facts")
+            s.wait_for(lambda: compare_columns(s) == 4, 15, "four columns")
+            s.wait_for(lambda: "Suggested models" not in s.page_text(), 10, "suggestions gone at four")
+        else:
+            notes.append(f"only {len(names)} catalog entries: four columns are covered by the unit tests")
+        s.click_button("Close models")
+    finally:
+        if model_id is not None:
+            s.invoke("delete_model", {"id": model_id, "deleteFiles": False})
+        if link is not None:
+            link.unlink(missing_ok=True)
+
+@probe("chat-memory")
+def p_chat_memory(c, notes):
+    """0.0.5 item 1, "it auto compresses": a long chat on a small context (4,096 tokens) is
+    summarised; the chat says so in plain words and draws a lasting line under the last
+    message the summary stands for, whose Show summary shows the model's summary as plain
+    text, also after a window reload. A summary that fails is reported and the reply goes
+    on. A document longer than its share of the context is cut, with a note for the model
+    and one for the user."""
+    s = c.s
+    s.invoke("set_setting", {"key": "remoteContextLength", "value": 4096})
+    try:
+        _chat_memory(c, notes)
+    finally:
+        s.invoke("set_setting", {"key": "remoteContextLength", "value": 32768})
+
+
+def _memory_text(m):
+    content = m.get("content")
+    if isinstance(content, str):
+        return content
+    return "\n".join(p.get("text", "") for p in (content or []) if isinstance(p, dict))
+
+
+def _memory_turns(c, chat, notes, summary_reply):
+    """Sends questions with long scripted answers until the Context tab says the next
+    request makes room with a summary; that turn gets `summary_reply` for the summary request
+    first. Returns the requests of that turn."""
+    s = c.s
+    for i in range(1, 9):
+        drop = s.invoke("inspect_context", {"chatId": chat})["nextDrop"]
+        summarising = drop.startswith("Before the next request is sent, the oldest") and "summary" in drop
+        if summarising:
+            Fake.queue.append(summary_reply)
+        # About 2,400 characters (800 tokens at the app's estimate) per answer. A reported
+        # prompt of 0 tokens keeps the estimate as it is (no calibration, no "dropping" note).
+        Fake.queue.append({"content": f"Answer {i}. " + "The river runs past the old mill and on to the sea. " * 45,
+                           "prompt_tokens": 0, "chunk": 400, "delay": 0.005})
+        Fake.requests.clear()
+        send(s, f"Question {i}: tell me more.")
+        wait_idle(s)
+        if summarising:
+            notes.append(f"summarised in turn {i}: {drop[:160]}")
+            return list(Fake.requests)
+    raise AssertionError("the chat was never summarised: " + drop)
+
+
+def _chat_memory(c, notes):
+    s = c.s
+    summary = "Goal: hear about the river.\nDecisions: none yet. <b>Plain</b> & simple."
+    chat = new_chat(c, tools=[])
+    s.invoke("rename_chat", {"chatId": chat, "title": "Memory"})
+    reqs = _memory_turns(c, chat, notes, {"content": summary, "prompt_tokens": 0, "chunk": 200})
+
+    # The turn asked for a summary first, then sent the request with it in place of the
+    # oldest messages.
+    def is_summary(r):
+        users = [m for m in r["messages"] if m["role"] == "user"]
+        return bool(users) and "Write a summary" in _memory_text(users[-1])
+    assert [is_summary(r) for r in reqs] == [True, False], [(_memory_text(r["messages"][-1])[:80]) for r in reqs]
+    system = _memory_text(reqs[1]["messages"][0])
+    assert "Goal: hear about the river." in system, system[-400:]
+    assert not any("Answer 1." in _memory_text(m) for m in reqs[1]["messages"][1:]), "the summarised answer was still sent"
+    s.wait_for(lambda: "Earlier messages were summarised to make room." in s.page_text(), 10, "the stage note")
+    assert "Earlier messages were summarised to make room in the context." not in s.page_text()
+
+    # The lasting line, under the last message the summary stands for.
+    detail = s.invoke("get_chat", {"chatId": chat})
+    assert detail["summary"] and detail["summary"]["text"] == summary, detail.get("summary")
+    last_covered = next(m for m in detail["messages"] if m["id"] == detail["summary"]["lastMessageId"])
+    notes.append(f"the summary stands for messages up to {last_covered['id']} ({last_covered['role']}: {last_covered['text'][:20]!r})")
+
+    def check_line():
+        s.wait_for(lambda: s.execute("return document.querySelectorAll('[data-summary-divider]').length;") == 1, 15, "the summary line")
+        row = s.execute("return document.querySelector('[data-summary-divider]').closest('.message-row').innerText;")
+        assert last_covered["text"][:10] in row, (last_covered["text"][:40], row[:300])
+        line = s.execute("return document.querySelector('[data-summary-divider]').innerText;")
+        assert "Above this line, the model sees a summary instead of the messages." in line, line
+        assert s.execute("return document.querySelector('[data-summary-text]');") is None
+        s.click_button("Show summary")
+        s.wait_for(lambda: s.execute("return !!document.querySelector('[data-summary-text]');"), 10, "the summary text")
+        shown = s.execute("return document.querySelector('[data-summary-text]').innerText;")
+        assert shown.strip() == summary, shown
+        # Model output is plain text: no element was made from it.
+        assert s.execute("return document.querySelector('[data-summary-text] b');") is None
+
+    check_line()
+    s.screenshot(str(OUT / "chat-memory.png"))
+    # After a window reload, from what is stored.
+    s.execute("window.location.reload();")
+    time.sleep(1.5)
+    s.wait_for(lambda: "Memory" in s.page_text(), 20, "sidebar after reload")
+    s.execute(HOOK)
+    s.execute("[...document.querySelectorAll('nav[aria-label=\"Chat history\"] button')].find(b => b.innerText.includes('Memory')).click();")
+    time.sleep(0.8)
+    check_line()
+
+    # A summary that fails: the reply goes on and the chat says so.
+    Fake.queue.clear()
+    chat2 = new_chat(c, tools=[])
+    s.invoke("rename_chat", {"chatId": chat2, "title": "Memory two"})
+    reqs = _memory_turns(c, chat2, notes, {"status": 500, "message": "busy"})
+    failed = "Could not summarise earlier messages. The reply goes on, but this chat may run out of room soon."
+    s.wait_for(lambda: failed in s.page_text(), 10, "the failure note")
+    last = messages(s, chat2)[-1]
+    assert last["role"] == "assistant" and last["status"] == "complete" and last["text"].startswith("Answer "), last
+    assert s.invoke("get_chat", {"chatId": chat2})["summary"] is None
+    assert s.execute("return document.querySelectorAll('[data-summary-divider]').length;") == 0
+
+    # A document longer than its share of 4,096 tokens: cut, with notes.
+    Fake.queue.clear()
+    chat3 = new_chat(c, tools=[])
+    report = "".join(f"line {i} of the long report\n" for i in range(1, 1001))
+    Fake.requests.clear()
+    Fake.queue.append({"content": "I read the start of it.", "prompt_tokens": 0})
+    sent = s.execute_async(
+        """
+        const [chatId, data, done] = arguments;
+        window.__memoryEvents = [];
+        const cb = window.__TAURI_INTERNALS__.transformCallback((e) => window.__memoryEvents.push(e));
+        window.__TAURI_INTERNALS__.invoke('send_message', {chatId, text: 'Read the report', parentId: null,
+            documents: [{fileName: 'report.txt', data}], onEvent: '__CHANNEL__:' + cb})
+          .then(() => done({ok: true}))
+          .catch(e => done({ok: false, error: e}));
+        """, chat3, __import__("base64").b64encode(report.encode()).decode())
+    assert sent.get("ok"), sent
+    user = [m for m in Fake.requests[-1]["messages"] if m["role"] == "user"][-1]
+    text = _memory_text(user)
+    assert "line 1 of the long report" in text and "line 1000 of the long report" not in text, text[-300:]
+    assert "[The rest of this file was left out to fit what the model can remember: lines " in text, text[-400:]
+    assert "the file tools can read more" in text, text[-400:]
+    assert len(text) < 4_000, len(text)
+    s.wait_for(lambda: s.execute("return (window.__memoryEvents || []).some(e => e && e.message && e.message.type === 'finished' || e && e.type === 'finished');"), 10, "the turn's end")
+    events = s.execute("return JSON.stringify(window.__memoryEvents || []);")
+    assert "Only the first part of report.txt was sent (about " in events, events[:600]
+    docs = [m for m in messages(s, chat3) if m["role"] == "user"][-1]["documents"]
+    assert [d["name"] for d in docs] == ["report.txt"], docs
+
+
+
+@probe("model-settings")
+def p_model_settings(c, notes):
+    """0.0.5 WP2: the model settings panel opened from the picker's gear and from an
+    Installed row (change, Save), Installed's Use with the model's own settings, the ready
+    line in plain words, the D3 question while the local model writes a reply (Cancel,
+    Restart when it ends), Unload and Load from the header. Uses the real small model
+    (TEST_GGUF); D3 needs a local model, since only turns on the local model keep it busy.
+    Steps that need WP1b's real commands (settings read back, Apply and restart with them,
+    the busy counter, the waiting reload, `unloadedPath`) run when those commands answer
+    with real data, and are noted as waiting for integration otherwise."""
+    s = c.s
+    model = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
+    if not os.path.isfile(model):
+        notes.append(f"skipped: no test model at {model}")
+        return
+    name = os.path.basename(model)
+    question = "A reply is being written. Stop it and restart the model?"
+
+    def info():
+        return s.invoke("model_load_info", {"path": model})
+
+    def set_select(css, value):
+        s.execute(
+            """
+            const el = document.querySelector(arguments[0]);
+            if (!el) throw new Error('no select ' + arguments[0]);
+            Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(el, arguments[1]);
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            css, value)
+        time.sleep(0.2)
+
+    def escape():
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.5)
+
+    def click_css(css, what, timeout=15):
+        el = s.wait_for(lambda: s.execute("return document.querySelector(arguments[0]);", css) or False, timeout, what)
+        try:
+            s.click(next(iter(el.values())))
+        except WebDriverError:
+            s.execute("arguments[0].click();", el)
+
+    def click_in_header(label):
+        el = s.wait_for(lambda: s.execute(
+            "return [...document.querySelectorAll('main header button')].find(b => b.innerText.trim() === arguments[0]) || false;",
+            label), 15, f"header button {label!r}")
+        s.click(next(iter(el.values())))
+
+    def click_in(container, label):
+        el = s.wait_for(lambda: s.execute(
+            "return [...document.querySelectorAll(arguments[0] + ' button')].find(b => b.innerText.trim() === arguments[1]) || false;",
+            container, label), 15, f"{label!r} in {container}")
+        s.click(next(iter(el.values())))
+
+    def header():
+        return s.execute("const h = document.querySelector('main header'); return h ? h.innerText : '';")
+
+    def state():
+        return s.invoke("runtime_status")
+
+    # The model on this computer, in a chat of its own.
+    try:
+        s.invoke("import_model", {"path": model})
+    except WebDriverError as e:
+        notes.append(f"import: {str(e)[:120]}")
+    chat = s.invoke("create_chat", {"modelRef": f"local:{model}"})
+    s.invoke("set_chat_tools", {"chatId": chat["id"], "enabled": []})
+    s.execute("window.location.reload();")
+    time.sleep(1.5)
+    s.wait_for(lambda: "New chat" in s.page_text(), 20, "sidebar after reload")
+    s.execute(HOOK)
+    s.execute(
+        """
+        const a = [...document.querySelectorAll('nav[aria-label="Chat history"] button')].find(b => b.innerText.includes('New chat'));
+        a && a.click();
+        """
+    )
+    time.sleep(0.8)
+    real = info()["sizeBytes"] == os.path.getsize(model)
+    notes.append("model_load_info: " + ("real (WP1b)" if real else "WP0 sample data; integration steps noted"))
+
+    # Installed → Use: no settings are passed, so the model loads with its own.
+    s.click_button("Models")
+    s.click_button("Installed")
+    s.wait_text(name, 15)
+    page = s.page_text()
+    assert "Add to comparison" in page, page[-400:]
+    assert any(w in page for w in ("Fits", "Fits with limits", "Too large")), "no fit mark on the Installed row"
+    use = s.wait_for(lambda: s.execute(
+        """
+        const li = [...document.querySelectorAll('li')].find(l => l.innerText.includes(arguments[0]) && l.querySelector('button'));
+        return li ? [...li.querySelectorAll('button')].find(b => b.innerText.trim() === 'Use') || false : false;
+        """, name), 10, "Use on the model's row")
+    s.click(next(iter(use.values())))
+    s.wait_for(lambda: state()["state"] == "ready", 180, "model ready")
+    s.wait_for(lambda: "Remembers about" in header(), 20, "ready line")
+    line = header()
+    notes.append("header: " + line.replace("\n", " | ")[:200])
+    assert "vulkan" not in line and " context" not in line and "Vulkan0" not in line, line
+
+    # The panel from the picker's gear: help lines, Same as default, change, Save.
+    s.click_button("Model for this chat")
+    click_css('[role=menuitem][aria-label^="Settings for this model"]', "the picker's gear")
+    s.wait_text("Settings for this model", 10)
+    time.sleep(0.5)
+    s.screenshot(str(OUT / "model-settings-panel.png"))
+    page = s.page_text()
+    for words in ("How much of the chat the model can see at once.",
+                  "Lets the model remember more in the same memory.",
+                  "Not recommended with 16 GB or less.",
+                  "Same as default (",
+                  "Apply and restart"):
+        assert words in page, (words, page[-900:])
+    options = s.execute("return [...document.querySelectorAll('#model-context option')].map(o => o.value);")
+    size = "fixed:4096" if "fixed:4096" in options else next(o for o in options if o.startswith("fixed:"))
+    set_select("#model-context", size)
+    set_select("#model-save-memory", "on")
+    click_in("[role=dialog]", "Save")
+    s.wait_text("Saved.", 10)
+    if real:
+        o = info()["overrides"]
+        assert o["context"] == {"fixed": int(size[6:])} and o["saveMemory"] == "on", o
+    else:
+        notes.append("integration: the saved settings read back from model_load_info (WP1b)")
+    escape()
+    assert "Settings for this model" not in s.page_text(), "the panel did not close"
+
+    # The panel from the Installed row's gear.
+    s.click_button("Models")
+    s.click_button("Installed")
+    click_css(f'button[aria-label="Settings for this model: {name}"]', "the Installed gear")
+    s.wait_text("Settings for this model", 10)
+    time.sleep(0.4)
+    assert name in s.page_text()
+    if real:
+        shown = s.execute("return document.querySelector('#model-context').value;")
+        assert shown == size, shown
+    escape()
+    escape()
+
+    # Apply and restart with the saved size (needs WP1b's resolver and reload).
+    if real:
+        click_in_header("Change")
+        s.wait_text("Settings for this model", 10)
+        s.wait_text("Settings changed. Restart the model to use them.", 10)
+        click_in("[role=dialog]", "Apply and restart")
+        s.wait_for(lambda: state()["state"] == "ready" and state()["nCtx"] == int(size[6:]), 180, "restarted with the saved size")
+    else:
+        notes.append("integration: Apply and restart loads the saved size (WP1b)")
+
+    # D3 while the model writes a reply: Cancel, then Restart when it ends.
+    for attempt in range(2):
+        send(s, "Write the numbers from 1 to 400, one per line, and nothing else.")
+        s.wait_for(lambda: not idle(s), 30, "the reply started")
+        time.sleep(1.0)
+        busy = s.invoke("model_busy")
+        notes.append(f"model_busy while the reply streams: {busy}")
+        if busy["chatTurns"] == 0:
+            break
+        s.click_button("Model menu")
+        s.click_menu_item("Reload")
+        try:
+            s.wait_text(question, 10)
+        except WebDriverError:
+            notes.append(f"attempt {attempt + 1}: the reply ended before the question")
+            wait_idle(s, 180)
+            continue
+        page = s.page_text()
+        assert "Restart when it ends" in page and "Stop and restart" in page and "Cancel" in page, page[-400:]
+        s.screenshot(str(OUT / "model-settings-d3.png"))
+        click_in("[role=alertdialog]", "Cancel")
+        time.sleep(0.6)
+        st = state()
+        assert question not in s.page_text() and st["state"] == "ready" and not st["reloadWaiting"], st
+        assert not idle(s), "Cancel stopped the reply"
+        s.click_button("Model menu")
+        s.click_menu_item("Reload")
+        s.wait_text(question, 10)
+        click_in("[role=alertdialog]", "Restart when it ends")
+        s.wait_text("Restarts when the reply ends", 10)
+        assert state()["reloadWaiting"], state()
+        assert not idle(s), "Restart when it ends stopped the reply"
+        wait_idle(s, 240)
+        last = messages(s, chat["id"])[-1]
+        assert last["status"] == "complete", last["status"]
+        s.wait_for(lambda: "Restarts when the reply ends" not in s.page_text() and state()["state"] == "ready", 180,
+                   "restarted after the reply")
+        break
+    else:
+        raise AssertionError("the reply never lasted long enough for the question")
+    if busy["chatTurns"] == 0:
+        notes.append("integration: the D3 question needs the busy counter to see local turns (WP1b)")
+        if not idle(s):
+            s.click_button("Stop")
+        wait_idle(s, 60)
+
+    # Unload to free memory, then Load from the header.
+    s.click_button("Model menu")
+    s.click_menu_item("Unload to free memory")
+    s.wait_for(lambda: state()["state"] == "stopped", 60, "unloaded")
+    st = state()
+    if st["unloadedPath"]:
+        s.wait_for(lambda: "Unloaded to free memory" in header(), 10, "the unloaded line")
+        placeholder = s.execute("return document.querySelector('textarea').placeholder;")
+        assert placeholder.startswith("The model was unloaded to free memory."), placeholder
+    else:
+        s.wait_for(lambda: "Not loaded" in header(), 10, "the not-loaded line")
+        notes.append("integration: 'Unloaded to free memory' needs unloadedPath (WP1b)")
+    click_in_header("Load")
+    s.wait_for(lambda: state()["state"] == "ready", 180, "loaded again")
+
+    # Leave the next scenarios a free computer and no saved settings.
+    s.invoke("unload_model", {})
+    if real:
+        s.invoke("reset_model_load_settings", {"path": model})
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
           p_tool_selection, p_artifacts, p_search, p_pinned,
-          p_tool_errors_output, p_task_state, p_mentions, p_capability_check, p_context_inspector]
+          p_tool_errors_output, p_task_state, p_mentions, p_capability_check, p_context_inspector, p_compare_models,
+          p_chat_memory, p_model_settings]
 
 
 def main() -> int:

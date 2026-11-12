@@ -1,6 +1,7 @@
 import { useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Brain, FileText, PanelRight } from "lucide-react";
+import { ArrowDown, Brain, FileText, PanelRight, Settings2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
+import { aboutWords } from "../lib/words";
 import { useApp, toErrorInfo } from "../store/app";
 import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
@@ -29,11 +30,25 @@ function LiveReply(props: { text: string }) {
   );
 }
 
+/** [0.0.5 memory] The meter's title: how much of what the model can remember the last
+ *  request used, in tokens and in words. */
+export function contextMeterTitle(used: number, nCtx: number | null): string {
+  const n = (x: number) => x.toLocaleString("en-US");
+  if (!nCtx) {
+    const words = aboutWords(used);
+    return `How much it can remember: ${n(used)} tokens used` + (words > 0 ? ` (about ${n(words)} words)` : "");
+  }
+  return `How much it can remember: ${n(used)} of ${n(nCtx)} tokens used (about ${n(aboutWords(used))} of ${n(aboutWords(nCtx))} words)`;
+}
+
 /** How much of the context window the last request filled. */
-function ContextMeter(props: { used: number; nCtx: number | null }) {
+export function ContextMeter(props: { used: number; nCtx: number | null }) {
   if (!props.nCtx) {
     return (
-      <span className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums" title="Context used by the last request">
+      <span
+        className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums"
+        title={contextMeterTitle(props.used, null)}
+      >
         {props.used.toLocaleString()} tokens
       </span>
     );
@@ -43,13 +58,81 @@ function ContextMeter(props: { used: number; nCtx: number | null }) {
   return (
     <span
       className="flex shrink-0 items-center gap-2 text-xs whitespace-nowrap text-fg-muted tabular-nums"
-      title={`Context used by the last request: ${props.used.toLocaleString()} of ${props.nCtx.toLocaleString()} tokens`}
+      title={contextMeterTitle(props.used, props.nCtx)}
     >
       <span className="h-1.5 w-12 overflow-hidden rounded-full bg-bg-muted" aria-hidden>
         <span className={"block h-full rounded-full transition-[width] duration-500 " + tone} style={{ width: `${pct}%` }} />
       </span>
       {formatCount(props.used)} / {formatCount(props.nCtx)} tokens ({pct}%)
     </span>
+  );
+}
+
+/** [0.0.5 memory] Where the summary's line goes: under the last shown message it stands
+ *  for (ids grow along a branch, so every message up to `lastMessageId` is covered; a tool
+ *  result's card is drawn in the row of the message that called it). */
+export function summaryDividerAfter(messages: MessageDto[], lastMessageId: number): number | null {
+  let after: number | null = null;
+  for (const m of messages) if (m.id <= lastMessageId) after = m.id;
+  return after;
+}
+
+/** [0.0.5 memory] The lasting line under the last message the summary stands for. The
+ *  summary is model output: it is shown as plain text, never as markup. */
+export function SummaryDivider(props: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="space-y-2 pt-2" data-summary-divider>
+      <div className="flex items-center gap-2 text-xs text-fg-muted">
+        <span className="h-px flex-1 bg-border" aria-hidden />
+        <span>
+          Above this line, the model sees a summary instead of the messages.{" "}
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => setOpen(!open)}
+            className="underline underline-offset-2 hover:text-fg"
+          >
+            {open ? "Hide summary" : "Show summary"}
+          </button>
+        </span>
+        <span className="h-px flex-1 bg-border" aria-hidden />
+      </div>
+      {open && (
+        <div
+          className="rounded-lg border border-border bg-bg-subtle px-3 py-2 text-sm whitespace-pre-wrap break-words text-fg-muted"
+          aria-label="Summary of earlier messages"
+          data-summary-text
+        >
+          {props.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** [0.0.5 memory] Errors about the chat no longer fitting the model's memory, which Model
+ *  settings can help with. */
+const MEMORY_ERRORS = new Set(["context_full", "context_overflow", "tools_do_not_fit"]);
+
+/** [0.0.5 memory] Asks for one local model's settings panel (the model settings of 0.0.5 D1). */
+export function openModelSettings(path: string) {
+  window.dispatchEvent(new CustomEvent("app:open-model-settings", { detail: path }));
+}
+
+/** [0.0.5 memory] The button under a "too long" error of a chat on a local model. */
+export function ModelSettingsAction(props: { path: string }) {
+  return (
+    <div className="flex justify-start">
+      <button
+        type="button"
+        onClick={() => openModelSettings(props.path)}
+        className="flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-sm hover:bg-bg-muted"
+      >
+        <Settings2 size={14} aria-hidden />
+        Model settings
+      </button>
+    </div>
   );
 }
 
@@ -133,6 +216,8 @@ export function ChatView() {
   else if (!modelRef) disabledReason = "Choose a model above to start chatting";
   else if (modelRef.startsWith("local:") && runtime?.state === "starting")
     disabledReason = "The model is still loading…";
+  else if (modelRef.startsWith("local:") && runtime?.state === "stopped" && runtime.unloadedPath)
+    disabledReason = "The model was unloaded to free memory. Choose Load at the top to load it again.";
   else if (modelRef.startsWith("local:") && runtime?.state !== "ready")
     disabledReason = "The model is not loaded. Pick it again from the list above.";
 
@@ -147,6 +232,12 @@ export function ChatView() {
           ? lastAssistant.promptTokens + (lastAssistant.completionTokens ?? 0)
           : null;
   const nCtx = live?.nCtx ?? (modelRef?.startsWith("local:") ? (runtime?.nCtx ?? null) : null);
+
+  // [0.0.5 memory] The summary the model gets instead of the earlier messages, and the
+  // message its line goes under.
+  const summary = detail?.summary ?? null;
+  const dividerAfter = summary ? summaryDividerAfter(messages, summary.lastMessageId) : null;
+  const localPath = modelRef?.startsWith("local:") ? modelRef.slice(6) : null;
 
   // Stable callbacks, so the memoised messages are not rendered again for every token.
   const editResend = useCallback((m: MessageDto, text: string) => void send(text, m.parentId), [send]);
@@ -272,6 +363,10 @@ export function ChatView() {
                 const view = waiting && stored.status === "running" ? { ...stored, status: "waiting" } : stored;
                 return <ToolCallCard key={c.id} call={view} />;
               })}
+              {localPath !== null && m.error && MEMORY_ERRORS.has(m.error.code) && (
+                <ModelSettingsAction path={localPath} />
+              )}
+              {summary && dividerAfter === m.id && <SummaryDivider text={summary.text} />}
             </div>
           ))}
           {live && (

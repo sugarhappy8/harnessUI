@@ -1,6 +1,7 @@
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
+import { askBeforeChange, isLoadedNow, runChange } from "./modelChange";
 import type {
   ApprovalRequest,
   ChatDetail,
@@ -99,8 +100,12 @@ interface AppState {
   setRuntime: (s: RuntimeStatus) => void;
   refreshModelOptions: () => Promise<void>;
   setChatModel: (modelRef: string | null) => Promise<void>;
-  /** Makes a model the open chat's (or a new chat's) and loads it when it is local. */
-  pickModel: (modelRef: string) => Promise<void>;
+  /**
+   * Makes a model the open chat's (or a new chat's) and loads it when it is local, with the
+   * model's own saved settings. Asks first when the loaded model is busy (0.0.5 D3); a
+   * Cancel changes nothing. `onChatSet` runs once the chat has the model, before the load.
+   */
+  pickModel: (modelRef: string, opts?: { onChatSet?: () => void }) => Promise<void>;
   /** Asks for a .gguf file and picks it. */
   openModelFile: () => Promise<void>;
   setSystemPrompt: (prompt: string | null) => Promise<void>;
@@ -108,6 +113,22 @@ interface AppState {
   addApproval: (r: ApprovalRequest) => void;
   removeApproval: (id: string) => void;
   decideApproval: (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) => Promise<void>;
+}
+
+/** [0.0.5 memory] What the chat says when a reply had to make room, by the stage of the
+ *  agent loop's `Compacted` event (1: earlier tool results, 2: a summary of earlier
+ *  messages, written or rewritten shorter, 3: this reply's own older steps). */
+export function compactionNote(stage: number): string {
+  switch (stage) {
+    case 1:
+      return "Older tool results were shortened to make room.";
+    case 2:
+      return "Earlier messages were summarised to make room.";
+    case 3:
+      return "Older steps of this reply were shortened to make room.";
+    default:
+      return "Earlier parts of this chat were shortened to make room.";
+  }
 }
 
 /** Turns anything thrown by `invoke` into the four-part error the UI shows. */
@@ -234,12 +255,12 @@ export const useApp = create<AppState>((set, get) => {
       case "note":
         updateGen(chatId, (g) => ({ ...g, notes: [...g.notes, e.text] }));
         return;
-      case "compacted":
-        updateGen(chatId, (g) => ({
-          ...g,
-          notes: [...g.notes, "Earlier messages were summarised to make room in the context."],
-        }));
+      case "compacted": {
+        // [0.0.5 memory] What the loop did, once per kind (a stage can run several times).
+        const note = compactionNote(e.stage);
+        updateGen(chatId, (g) => (g.notes.includes(note) ? g : { ...g, notes: [...g.notes, note] }));
         return;
+      }
       case "finished":
         if (e.message && e.status !== "error") {
           set({
@@ -389,14 +410,23 @@ export const useApp = create<AppState>((set, get) => {
       await get().openChat(chatId);
     },
 
-    pickModel: async (modelRef) => {
+    pickModel: async (modelRef, opts) => {
       try {
-        await get().setChatModel(modelRef);
-        if (modelRef.startsWith("local:")) {
-          const settings = await ipc.getLocalModelSettings();
-          await ipc.loadLocalModel(modelRef.slice(6), settings);
-          await get().refreshModelOptions();
+        const path = modelRef.startsWith("local:") ? modelRef.slice(6) : null;
+        const runtime = get().runtime;
+        // An endpoint, or the local model already loaded (or loading): nothing to load. Its
+        // changed settings wait for Apply and restart (D3).
+        if (path === null || isLoadedNow(runtime, path)) {
+          await get().setChatModel(modelRef);
+          opts?.onChatSet?.();
+          return;
         }
+        const answer = await askBeforeChange(runtime);
+        if (answer === null) return;
+        await get().setChatModel(modelRef);
+        opts?.onChatSet?.();
+        await runChange("switch", answer.whenIdle, () => ipc.loadLocalModel(path, null, answer.whenIdle));
+        await get().refreshModelOptions();
       } catch (err) {
         set({ error: toErrorInfo(err) });
       }

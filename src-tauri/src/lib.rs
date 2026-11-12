@@ -333,6 +333,10 @@ pub fn run() {
                 model_busy: Default::default(),
             });
             app.manage(turns::PendingApprovals::default());
+            // 0.0.5: sharing the loaded model with other apps; listens again only if the
+            // user left it on.
+            app.manage(share::Sharing::default());
+            share::start_saved(&handle);
             // "Allow all in every chat", if the user switched it on (a saved setting).
             approvals::load_default(&handle);
             // Before the startup check below, which records what it finds here.

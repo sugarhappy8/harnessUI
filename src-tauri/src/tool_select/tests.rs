@@ -983,3 +983,32 @@ fn the_allowance_follows_the_loops_own_limit() {
     assert!(allowance(8_192, 200) > 2 * allowance(4_096, 200));
     assert!(allowance(32_768, 200) > 8_000);
 }
+
+/// [0.0.5 memory] The summary of earlier messages is part of the fixed part: it counts
+/// with its lines, and the tools get that much less room. A chat summarised under a large
+/// context and continued at 4,096 tokens then shows fewer tools instead of refusing the
+/// turn because its fixed part no longer fits.
+#[test]
+fn the_summary_takes_from_the_tools_share() {
+    let prompt = "You are a helpful assistant.";
+    let without = fixed_tokens(prompt, None);
+    assert_eq!(without, agent::estimate::estimate_tokens(prompt) + 220);
+    // Nothing to count for an empty summary.
+    assert_eq!(fixed_tokens(prompt, Some("  \n")), without);
+    // A summary of about 300 tokens.
+    let summary = "Goal: plan the trip. ".repeat(43);
+    let with = fixed_tokens(prompt, Some(&summary));
+    assert_eq!(
+        with,
+        without + agent::estimate::estimate_tokens(summary.trim()) + SUMMARY_LINES_TOKENS
+    );
+    // At 4,096 tokens the tools get exactly that much less room.
+    let room_without = allowance(4_096, without);
+    let room_with = allowance(4_096, with);
+    assert!(room_with > 0);
+    assert_eq!(room_without - room_with, with - without);
+    // The longest summary the loop writes at 32,768 tokens (1,024 tokens, 4,096
+    // characters) leaves the tools no room of their own at 4,096.
+    let longest = "x".repeat(4_096);
+    assert_eq!(allowance(4_096, fixed_tokens(prompt, Some(&longest))), 0);
+}

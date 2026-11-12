@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 
+use crate::context::{group_digits, tokens_with_words};
+
 /// The longest server message kept in an error, in characters. Longer messages are cut so a
 /// misbehaving server cannot fill the UI or the log with one error.
 const MAX_MESSAGE_CHARS: usize = 2_000;
@@ -9,6 +11,26 @@ const MAX_MESSAGE_CHARS: usize = 2_000;
 /// Text in a llama-server error that means its tool-call parser could not read the model's
 /// output (ARCHITECTURE.md 8.3, step 3).
 const PARSE_ERROR_MARKER: &str = "does not match the expected";
+
+/// A turn's message when the chat no longer fits the app's own model, even after older tool
+/// results were shortened and earlier messages summarised (codes `context_full` and
+/// `context_overflow`). How much the model remembers is set in its Model settings.
+pub const CHAT_TOO_LONG_LOCAL: &str = "This chat is too long for the model to remember, even \
+     after summarising. Start a new chat, or let this model remember more in Model settings.";
+
+/// The same for a model on an endpoint, whose size the app does not choose.
+pub const CHAT_TOO_LONG_REMOTE: &str =
+    "This chat is too long for the model to remember, even after summarising. Start a new chat.";
+
+/// A turn's message when the chat no longer fits, even after the context stages: `local` for
+/// the app's own model ([`CHAT_TOO_LONG_LOCAL`]), else [`CHAT_TOO_LONG_REMOTE`].
+pub fn chat_too_long(local: bool) -> &'static str {
+    if local {
+        CHAT_TOO_LONG_LOCAL
+    } else {
+        CHAT_TOO_LONG_REMOTE
+    }
+}
 
 /// An error from a model server or from talking to one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -75,16 +97,22 @@ impl ProviderError {
             Self::ContextOverflow {
                 n_prompt_tokens,
                 n_ctx,
-            } => match (n_prompt_tokens, n_ctx) {
-                (Some(prompt), Some(ctx)) => format!(
-                    "This conversation is too long for the model's context window: it needs \
-                     {prompt} tokens and the window holds {ctx}."
-                ),
-                (None, Some(ctx)) => format!(
-                    "This conversation is too long for the model's context window of {ctx} tokens."
-                ),
-                _ => "This conversation is too long for the model's context window.".to_owned(),
-            },
+            } => {
+                let needs = n_prompt_tokens
+                    .map(|prompt| format!(" It needs {} tokens.", group_digits(u64::from(prompt))));
+                match (needs, n_ctx) {
+                    (needs, Some(ctx)) => format!(
+                        "This chat is too long for the model to remember.{} The model can \
+                         remember {}.",
+                        needs.unwrap_or_default(),
+                        tokens_with_words(*ctx)
+                    ),
+                    (Some(needs), None) => {
+                        format!("This chat is too long for the model to remember.{needs}")
+                    }
+                    (None, None) => "This chat is too long for the model to remember.".to_owned(),
+                }
+            }
             Self::Unauthorized => {
                 "The server rejected the API key. Check the key in Settings.".to_owned()
             }
@@ -383,14 +411,54 @@ mod tests {
 
     #[test]
     fn user_messages_are_plain() {
-        assert!(
+        // 0.0.5: no "context window"; the model's size comes with words.
+        assert_eq!(
             ProviderError::ContextOverflow {
                 n_prompt_tokens: Some(5009),
                 n_ctx: Some(4096)
             }
-            .user_message()
-            .contains("5009 tokens")
+            .user_message(),
+            "This chat is too long for the model to remember. It needs 5,009 tokens. The model \
+             can remember 4,096 tokens, about 3,000 words."
         );
+        assert_eq!(
+            ProviderError::ContextOverflow {
+                n_prompt_tokens: None,
+                n_ctx: Some(8192)
+            }
+            .user_message(),
+            "This chat is too long for the model to remember. The model can remember 8,192 \
+             tokens, about 6,000 words."
+        );
+        assert_eq!(
+            ProviderError::ContextOverflow {
+                n_prompt_tokens: Some(9000),
+                n_ctx: None
+            }
+            .user_message(),
+            "This chat is too long for the model to remember. It needs 9,000 tokens."
+        );
+        assert_eq!(
+            ProviderError::ContextOverflow {
+                n_prompt_tokens: None,
+                n_ctx: None
+            }
+            .user_message(),
+            "This chat is too long for the model to remember."
+        );
+        for message in [chat_too_long(true), chat_too_long(false)] {
+            assert!(
+                message.starts_with(
+                    "This chat is too long for the model to remember, even after summarising. \
+                     Start a new chat"
+                ),
+                "{message}"
+            );
+            assert!(!message.contains("context"), "{message}");
+            assert!(!message.contains('!'), "{message}");
+        }
+        assert!(chat_too_long(true).ends_with("let this model remember more in Model settings."));
+        assert!(!chat_too_long(false).contains("Model settings"));
         assert!(
             ProviderError::Unauthorized
                 .user_message()

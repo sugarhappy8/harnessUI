@@ -972,14 +972,7 @@ async fn context_for_defaults(state: &AppState, chat: &store::Chat) -> KnownCont
         let loaded = (status.model_path.as_deref() == Some(path))
             .then_some(status.n_ctx)
             .flatten();
-        let configured = state
-            .store
-            .get_setting::<crate::dto::LocalModelSettings>(crate::settings::LOCAL_MODEL)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .ctx;
+        let configured = crate::load_settings::configured_ctx(state, path).await;
         return KnownContext::Local { loaded, configured };
     }
     if model.starts_with("remote:") {
@@ -1356,10 +1349,21 @@ mod tests {
                 true,
             )
         };
-        // A local model with the default 8,192 setting, before it is loaded.
+        // A local model before it is loaded: the context its next load asks for (0.0.5:
+        // its own setting, else the defaults, else what Automatic picks now). A fixed
+        // 8,192, or Automatic at its cap, turns the browser on; Automatic at its floor on
+        // a computer short of memory does not.
         assert!(on(KnownContext::Local {
             loaded: None,
-            configured: crate::dto::LocalModelSettings::default().ctx,
+            configured: 8192,
+        }));
+        assert!(on(KnownContext::Local {
+            loaded: None,
+            configured: models::fit::AUTO_CAP_CTX as u32,
+        }));
+        assert!(!on(KnownContext::Local {
+            loaded: None,
+            configured: models::fit::AUTO_FLOOR_CTX as u32,
         }));
         assert!(!on(KnownContext::Local {
             loaded: None,

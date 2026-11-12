@@ -41,6 +41,28 @@ pub struct ModelSummary {
 /// Bytes per KV-cache element for the default f16 cache type.
 pub const KV_F16_BYTES: u64 = 2;
 
+/// How the conversation memory (the KV cache) is stored (0.0.5 D2c).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KvCacheType {
+    /// llama.cpp's default: 2 bytes per value.
+    #[default]
+    F16,
+    /// Save memory (`-ctk q8_0 -ctv q8_0`): blocks of 32 values in 34 bytes (a 2-byte
+    /// scale and 32 one-byte values), about half of f16.
+    Q8_0,
+}
+
+impl KvCacheType {
+    /// Bytes for one row of `values` cache values, as llama.cpp lays a row out.
+    pub fn row_bytes(self, values: u64) -> u64 {
+        match self {
+            Self::F16 => values.saturating_mul(KV_F16_BYTES),
+            Self::Q8_0 => values.div_ceil(32).saturating_mul(34),
+        }
+    }
+}
+
 impl ModelSummary {
     pub fn from_header(h: &GgufHeader) -> Self {
         let arch = h.architecture().unwrap_or("unknown").to_string();
@@ -115,6 +137,20 @@ impl ModelSummary {
 
     pub fn kv_bytes(&self, ctx: u64) -> u64 {
         self.kv_bytes_per_token().saturating_mul(ctx)
+    }
+
+    /// KV-cache bytes per token of context with the cache stored as `cache`: per layer, one
+    /// key row (KV heads × key length values) and one value row, each laid out as `cache`
+    /// lays out a row. The same sliding-window caveat as [`Self::kv_bytes_per_token`].
+    pub fn kv_bytes_per_token_as(&self, cache: KvCacheType) -> u64 {
+        self.head_count_kv
+            .iter()
+            .map(|&n| {
+                cache
+                    .row_bytes(n.saturating_mul(self.key_length))
+                    .saturating_add(cache.row_bytes(n.saturating_mul(self.value_length)))
+            })
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Whether this is a mixture-of-experts model.
@@ -252,6 +288,44 @@ mod tests {
                 .build(),
         );
         assert_eq!(s.kv_bytes_per_token(), 2 * (64 + 64) * 8 * 2);
+    }
+
+    /// Save memory stores the cache as q8_0: 34 bytes per 32 values instead of 64.
+    #[test]
+    fn q8_0_cache_is_about_half_of_f16() {
+        // Llama-3-8B-like: 32 layers, 8 KV heads of 128: 1,024 key and 1,024 value values
+        // per layer and token.
+        let s = summary(
+            Writer::new()
+                .str("general.architecture", "llama")
+                .u32("llama.block_count", 32)
+                .u32("llama.embedding_length", 4096)
+                .u32("llama.attention.head_count", 32)
+                .u32("llama.attention.head_count_kv", 8)
+                .build(),
+        );
+        assert_eq!(s.kv_bytes_per_token_as(KvCacheType::F16), 131_072);
+        assert_eq!(
+            s.kv_bytes_per_token_as(KvCacheType::F16),
+            s.kv_bytes_per_token()
+        );
+        // 32 layers × 2 rows × 1,024 / 32 blocks × 34 bytes.
+        assert_eq!(s.kv_bytes_per_token_as(KvCacheType::Q8_0), 69_632);
+        // A hybrid model: the recurrent layers have no cache in either type.
+        let hybrid = summary(
+            Writer::new()
+                .str("general.architecture", "lfm2")
+                .u32("lfm2.block_count", 4)
+                .u32("lfm2.embedding_length", 1024)
+                .u32("lfm2.attention.head_count", 16)
+                .u32_array("lfm2.attention.head_count_kv", &[8, 0, 8, 0])
+                .build(),
+        );
+        assert_eq!(hybrid.kv_bytes_per_token_as(KvCacheType::Q8_0), 2 * 2 * 16 * 34);
+        // A row that is not a whole number of blocks is rounded up to one more block.
+        assert_eq!(KvCacheType::Q8_0.row_bytes(33), 68);
+        assert_eq!(KvCacheType::Q8_0.row_bytes(0), 0);
+        assert_eq!(KvCacheType::F16.row_bytes(33), 66);
     }
 
     #[test]

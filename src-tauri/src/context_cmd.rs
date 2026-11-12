@@ -327,6 +327,12 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
+/// [0.0.5 memory] What the tab says when the stored summary is too long for the model's
+/// context now (the loop's stage 2 rewrites it shorter; the preview shows it cut).
+const SUMMARY_TOO_LONG: &str = "The summary of earlier messages was written when the model \
+     could remember more. Before the next request, the model rewrites it shorter; it is shown \
+     here cut to that length.";
+
 /// What the loop's stages would remove next, as the tab says it.
 fn next_drop(preview: &TurnPreview) -> String {
     let what = match &preview.next {
@@ -345,6 +351,12 @@ fn next_drop(preview: &TurnPreview) -> String {
         NextCompaction::Nothing => String::new(),
     };
     let mut out = String::new();
+    // [0.0.5 memory] A summary written when the model could remember more (stage 2 of the
+    // loop, `TurnPreview::applied`): the turn has it rewritten shorter first.
+    if preview.applied.contains(&2) {
+        out.push_str(SUMMARY_TOO_LONG);
+        out.push(' ');
+    }
     if preview.applied.contains(&1) {
         out.push_str(
             "Results of tool calls in earlier messages are already shortened to one-line notes \
@@ -354,8 +366,8 @@ fn next_drop(preview: &TurnPreview) -> String {
     if what.is_empty() {
         if preview.over_budget {
             out.push_str(
-                "The conversation no longer fits the model's context and nothing is left to \
-                 shorten. Start a new chat or raise the context size.",
+                "The chat no longer fits what the model can remember, and nothing is left to \
+                 shorten. Start a new chat, or let the model remember more.",
             );
         } else {
             out.push_str("Nothing would be left out: there is nothing earlier to shorten.");
@@ -524,7 +536,14 @@ pub fn view(inspected: &Inspected) -> ContextView {
         "summary",
         "Summary of earlier messages",
         SystemBlockKind::Summary,
-        "Written by the model to stand for the messages left out".to_owned(),
+        if p.applied.contains(&2) {
+            // [0.0.5 memory]
+            "Written by the model to stand for the messages left out. Too long for this \
+             model's memory now: the next request has it rewritten shorter"
+                .to_owned()
+        } else {
+            "Written by the model to stand for the messages left out".to_owned()
+        },
     );
     let kept_count = p.kept.len();
     let mut kept_detail = plural(kept_count, "message", "messages");

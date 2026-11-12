@@ -150,6 +150,16 @@ export interface ImageInput {
 export interface ChatDetail {
   chat: Chat;
   messages: MessageDto[];
+  /** [0.0.5 memory] The summary the model gets instead of the earlier messages of the
+   *  shown branch (null when there is none; absent in older test fixtures). */
+  summary?: EarlierSummary | null;
+}
+
+/** [0.0.5 memory] A summary of earlier messages. Model output: shown as plain text only. */
+export interface EarlierSummary {
+  /** The newest message it stands for; every message above it on the branch is covered. */
+  lastMessageId: number;
+  text: string;
 }
 
 export type RuntimeState = "stopped" | "starting" | "ready" | "stopping" | "failed";
