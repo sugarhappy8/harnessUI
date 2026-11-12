@@ -73,7 +73,7 @@ describe("D3: changing what is loaded asks first when the model is busy", () => 
     vi.clearAllMocks();
     unregister = change.registerQuestionHost();
     useApp.setState({ runtime: null, activeChatId: 3, detail: null, error: null });
-    change.useWaiting.setState({ change: null });
+    change.useWaiting.setState({ change: null, kind: null });
     change.useRestartNote.setState({ shown: false });
   });
   afterEach(() => unregister());
@@ -135,25 +135,49 @@ describe("D3: changing what is loaded asks first when the model is busy", () => 
     await expect(second).resolves.toBe("y");
   });
 
+  it("notes a restart only when the model really restarted", async () => {
+    ipcMock.modelBusy.mockResolvedValue(IDLE);
+    // The backend found nothing to change (the same launch) and restarted nothing.
+    ipcMock.reloadLocalModel.mockResolvedValueOnce(true);
+    await expect(change.reloadModel(runtime("ready"), false)).resolves.toBe(true);
+    expect(change.useRestartNote.getState().shown).toBe(false);
+    // It restarted: the runtime went through starting.
+    ipcMock.reloadLocalModel.mockImplementationOnce(async () => {
+      useApp.setState({ runtime: runtime("starting") });
+      useApp.setState({ runtime: runtime("ready") });
+      return true;
+    });
+    await change.reloadModel(runtime("ready"), false);
+    expect(change.useRestartNote.getState().shown).toBe(true);
+  });
+
   it("reloads with force and when_idle, remembers what waits, and notes the restart", async () => {
     ipcMock.modelBusy.mockResolvedValue(REPLY);
     let finish: (v: boolean) => void = () => undefined;
-    ipcMock.reloadLocalModel.mockImplementationOnce(() => new Promise<boolean>((r) => (finish = r)));
+    ipcMock.reloadLocalModel.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((r) => {
+          finish = (v) => {
+            useApp.setState({ runtime: runtime("starting") });
+            r(v);
+          };
+        }),
+    );
     const done = change.reloadModel(runtime("ready"), true);
     await answer("Restart when it ends");
-    await flush();
-    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(true, true);
+    await vi.waitFor(() => expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(true, true));
     expect(change.useWaiting.getState().change).toBe("reload");
     finish(true);
     await expect(done).resolves.toBe(true);
     expect(change.useWaiting.getState().change).toBeNull();
     expect(change.useRestartNote.getState().shown).toBe(true);
 
-    // Idle: Apply and restart restarts at once, without force and without waiting.
+    // Idle: Apply and restart, without force and with no question or waiting line; the
+    // backend acts at once because nothing uses the model.
     ipcMock.modelBusy.mockResolvedValue(IDLE);
     change.useRestartNote.setState({ shown: false });
     await change.reloadModel(runtime("ready"), false);
-    expect(ipcMock.reloadLocalModel).toHaveBeenLastCalledWith(false, false);
+    expect(ipcMock.reloadLocalModel).toHaveBeenLastCalledWith(false, true);
     expect(change.useWaiting.getState().change).toBeNull();
 
     // A cancelled wait (load_replaced) is not a restart.
@@ -176,6 +200,47 @@ describe("D3: changing what is loaded asks first when the model is busy", () => 
     await answer("Stop and restart");
     await stop;
     expect(ipcMock.unloadModel).toHaveBeenCalledWith(false);
+  });
+
+  it("never stops a user of the model it did not ask about: with no question the backend waits if one started since", async () => {
+    // Nothing uses the model when asked: no question, no waiting line, but the backend is
+    // told to wait (it acts at once when the model is free), so a reply or another app's
+    // request that starts between the check and the command is not stopped unasked.
+    ipcMock.modelBusy.mockResolvedValue(IDLE);
+    ipcMock.reloadLocalModel.mockImplementationOnce(async () => {
+      expect(change.useWaiting.getState().change).toBeNull();
+      return true;
+    });
+    await expect(change.reloadModel(runtime("ready"), true)).resolves.toBe(true);
+    expect(ipcMock.reloadLocalModel).toHaveBeenLastCalledWith(true, true);
+    await expect(change.unloadModel(runtime("ready"))).resolves.toBe(true);
+    expect(ipcMock.unloadModel).toHaveBeenLastCalledWith(true);
+    await expect(change.switchModel(runtime("ready"), "/m/b.gguf")).resolves.toBe(true);
+    expect(ipcMock.loadLocalModel).toHaveBeenLastCalledWith("/m/b.gguf", null, true);
+    expect(change.useQuestion.getState().question).toBeNull();
+    expect(change.useWaiting.getState().change).toBeNull();
+  });
+
+  it("stops nothing when the busy count cannot be read", async () => {
+    ipcMock.modelBusy.mockRejectedValue(new Error("no answer"));
+    await expect(change.askBeforeChange(runtime("ready"))).resolves.toEqual({});
+    expect(change.useQuestion.getState().question).toBeNull();
+    await change.reloadModel(runtime("ready"), true);
+    expect(ipcMock.reloadLocalModel).toHaveBeenLastCalledWith(true, true);
+    await change.unloadModel(runtime("ready"));
+    expect(ipcMock.unloadModel).toHaveBeenLastCalledWith(true);
+    await change.switchModel(runtime("starting"), "/m/b.gguf");
+    expect(ipcMock.loadLocalModel).toHaveBeenLastCalledWith("/m/b.gguf", null, true);
+  });
+
+  it("remembers which change runs, so a wait the backend starts on its own is worded by it", async () => {
+    let end: (v: boolean) => void = () => undefined;
+    const run = change.runChange("switch", undefined, () => new Promise<boolean>((r) => (end = r)));
+    expect(change.useWaiting.getState().change).toBeNull();
+    expect(change.useWaiting.getState().kind).toBe("switch");
+    end(true);
+    await run;
+    expect(change.useWaiting.getState().kind).toBeNull();
   });
 
   it("keeps the newer waiting change when an older one ends", async () => {
@@ -204,7 +269,7 @@ describe("pickModel (store): the model's own settings, and D3 before a switch", 
     vi.clearAllMocks();
     unregister = change.registerQuestionHost();
     useApp.setState({ runtime: null, activeChatId: 3, detail: null, error: null });
-    change.useWaiting.setState({ change: null });
+    change.useWaiting.setState({ change: null, kind: null });
   });
   afterEach(() => unregister());
 
@@ -212,7 +277,7 @@ describe("pickModel (store): the model's own settings, and D3 before a switch", 
     await useApp.getState().pickModel("local:/m/b.gguf");
     expect(ipcMock.getLocalModelSettings).not.toHaveBeenCalled();
     expect(ipcMock.setChatModel).toHaveBeenCalledWith(3, "local:/m/b.gguf");
-    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/m/b.gguf", null, undefined);
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/m/b.gguf", null, true);
     expect(useApp.getState().error).toBeNull();
   });
 

@@ -18,6 +18,8 @@ import {
   LOAD_FAILURE_WORDS,
   loadStageWords,
   readyLine,
+  readyLineParts,
+  stepDownAction,
   SLOW_WORDS,
   slowSpeedWords,
   THINKING_WORDS,
@@ -131,6 +133,57 @@ describe("plain words", () => {
     ).toContain("Reload");
   });
 
+  it("says why Save memory was turned off where the load ran: the model on the processor, the card on a card", () => {
+    expect(adjustmentWords({ kind: "retryingWithoutSaveMemory", backend: "cpu" })).toBe(
+      "Save memory doesn't work with this model, so it was turned off for this load.",
+    );
+    expect(adjustmentWords({ kind: "retryingWithoutSaveMemory", backend: "metal" })).toBe(
+      "Save memory doesn't work with this model on Apple graphics, so it was turned off for this load.",
+    );
+    for (const backend of ["vulkan", "cuda", "rocm"] as const) {
+      expect(adjustmentWords({ kind: "retryingWithoutSaveMemory", backend })).toBe(
+        "Save memory doesn't work with this graphics card, so it was turned off for this load.",
+      );
+    }
+    expect(adjustmentWords({ kind: "retryingWithLessGpu", backend: "vulkan" })).toBe(
+      "The graphics card ran out of memory, so part of the model runs on the processor. Replies are slower.",
+    );
+    expect(adjustmentWords({ kind: "retryingWithLessGpu", backend: "metal" })).toBe(
+      "Apple graphics ran out of memory, so part of the model runs on the processor. Replies are slower.",
+    );
+  });
+
+  it("words a step-down by its reason, with an action that can help", () => {
+    const down = (reason: LoadFailure, from: BackendKind = "vulkan"): LoadStage => ({ kind: "steppingDown", from, to: "cpu", reason });
+    expect(adjustmentWords(down({ code: "context_too_large" }))).toBe(
+      "Running on the processor because the graphics card ran out of memory. Reload to try the graphics card again.",
+    );
+    expect(adjustmentWords(down({ code: "invalid_device", device: "Vulkan1" }))).toBe(
+      "Running on the processor because the chosen graphics card was not found. Choose another in Model settings.",
+    );
+    expect(adjustmentWords(down({ code: "model_file_invalid" }))).toBe(
+      "Running on the processor because the graphics card could not load this model.",
+    );
+    expect(adjustmentWords(down({ code: "port_in_use" }))).toBe(
+      "Running on the processor because the graphics card could not get the connection it needs. Reload to try the graphics card again.",
+    );
+    expect(adjustmentWords(down({ code: "unknown" }, "metal"))).toBe(
+      "Running on the processor because Apple graphics stopped while loading. Reload to try Apple graphics again.",
+    );
+    expect(loadStageWords(down({ code: "invalid_device", device: "Vulkan1" }))).toBe(
+      "The chosen graphics card was not found, so trying the processor",
+    );
+    expect(loadStageWords(down({ code: "model_file_invalid" }))).toBe("The graphics card could not load this model, so trying the processor");
+    expect(stepDownAction({ code: "out_of_memory" })).toBe("reload");
+    expect(stepDownAction({ code: "context_too_large" })).toBe("reload");
+    expect(stepDownAction({ code: "invalid_device", device: "Vulkan1" })).toBe("settings");
+    expect(stepDownAction({ code: "model_file_invalid" })).toBeNull();
+    // Reload only where the sentence says to.
+    for (const f of Object.values(FAILURES)) {
+      expect(adjustmentWords(down(f))?.includes("Reload") ?? false, f.code).toBe(stepDownAction(f) === "reload");
+    }
+  });
+
   it("words the slow states with a reason and words per second", () => {
     expect(SLOW_WORDS.partial).toBe(
       "Part of the model runs on the processor, so replies are slower. Save memory or a smaller memory size lets more fit on the graphics card.",
@@ -148,6 +201,14 @@ describe("plain words", () => {
     expect(readyLine(32_768, "automatic")).toBe("Remembers about 24,000 words (Automatic)");
     expect(readyLine(8192, null)).toBe("Remembers about 6,000 words");
     expect(readyLine(8192, "modelSetting")).toBe("Remembers about 6,000 words (set for this model)");
+    // The shorter forms a crowded header shows, the number always whole.
+    expect(readyLineParts(32_768, "automatic")).toEqual({
+      remembers: "Remembers about 24,000 words",
+      reason: " (Automatic)",
+      about: "About 24,000 words",
+      words: "24,000 words",
+    });
+    expect(readyLineParts(8192, null).reason).toBe("");
     expect(automaticResult(24_576)).toBe("Automatic: 24,576 tokens, about 18,000 words, on this computer right now");
     expect(TOO_LARGE_LINE).toBe(
       "Too large for this computer, even with the shortest memory. Try Save memory, As much as fits, or a smaller download.",

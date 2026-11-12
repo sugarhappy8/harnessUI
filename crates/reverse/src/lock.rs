@@ -158,6 +158,31 @@ pub struct Build {
     pub verified_by: Vec<String>,
 }
 
+/// The publisher checks a part's build must have recorded at pin time for a release build of
+/// the app to offer it (item5-spec.md WP9a): rea by npm's integrity, provenance and
+/// signatures, Node.js and Temurin by their publishers' signatures, Ghidra by the SHA-256
+/// digest GitHub publishes. Kuna's releases carry no signature, so its first download is all
+/// there is (any recorded check). `None` for a part this build does not know.
+/// `scripts/pin_reverse.py --check --release` applies the same rule.
+pub fn release_checks(part: &str) -> Option<&'static [&'static str]> {
+    Some(match part {
+        "rea" => &["npm-integrity", "npm-provenance:", "npm-audit-signatures"],
+        "node" => &["gpg:nodejs-release-keys"],
+        "kuna" => &[],
+        "ghidra" => &["github-digest"],
+        "java" => &["gpg:adoptium", "adoptium-api-checksum"],
+        _ => return None,
+    })
+}
+
+/// Whether a pinned file's name is one plain file name and its SHA-256 64 hex digits, so its
+/// resumable download (`.downloads/<name>.<16 hex>.part`) stays inside `.downloads/`.
+pub fn safe_pinned_file(f: &PackFile) -> bool {
+    crate::archive::safe_relative(&f.name).is_some_and(|parts| parts.len() == 1)
+        && f.sha256.len() == 64
+        && f.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 impl ReverseLock {
     /// Parses a lock file.
     pub fn parse(json: &str) -> Result<Self, serde_json::Error> {
@@ -184,6 +209,40 @@ impl ReverseLock {
         self.disabled_ghidra_analyzers
             .get(platform.key())
             .map(String::as_str)
+    }
+
+    /// Every build a release build of the app would not offer, because a publisher check
+    /// it needs ([`release_checks`]) was not recorded at pin time ("ghidra windows-x86_64").
+    /// Empty when the lock is ready for a release.
+    pub fn release_blockers(&self) -> Vec<String> {
+        self.parts
+            .iter()
+            .flat_map(|p| {
+                p.builds
+                    .iter()
+                    .filter(|b| !b.release_ready(&p.name))
+                    .map(move |b| format!("{} {}", p.name, b.platform))
+            })
+            .collect()
+    }
+}
+
+impl Build {
+    /// Whether the check `kind` was recorded (`npm-provenance:` matches any commit).
+    pub fn verified(&self, kind: &str) -> bool {
+        self.verified_by.iter().any(|v| {
+            if kind.ends_with(':') {
+                v.starts_with(kind) && v.len() > kind.len()
+            } else {
+                v == kind
+            }
+        })
+    }
+
+    /// Whether a release build of the app offers this build of `part` ([`release_checks`]).
+    pub fn release_ready(&self, part: &str) -> bool {
+        !self.verified_by.is_empty()
+            && release_checks(part).is_some_and(|need| need.iter().all(|k| self.verified(k)))
     }
 }
 
@@ -312,6 +371,7 @@ mod tests {
                 assert!(url.username().is_empty() && url.password().is_none());
                 assert!(b.file.url.ends_with(&b.file.name), "{}", b.file.url);
                 assert_eq!(b.file.name, b.upstream_asset);
+                assert!(safe_pinned_file(&b.file), "{}", b.file.name);
                 assert!(is_hex64(&b.file.sha256), "{}", b.file.name);
                 assert!(b.file.size > 0);
                 count += 1;
@@ -388,6 +448,112 @@ mod tests {
                 }
                 assert!(b.entries > 0 && b.unpacked_bytes > 0 && b.max_path_chars > 0);
             }
+        }
+    }
+
+    #[test]
+    fn pinned_file_names_stay_in_the_downloads_folder() {
+        let ok = PackFile {
+            name: "rea-agents-6.9.0.tgz".into(),
+            url: String::new(),
+            size: 1,
+            sha256: "a".repeat(64),
+        };
+        assert!(safe_pinned_file(&ok));
+        for name in ["../x.zip", "a/b.zip", "", "..", "con.zip", "x:y", "a\\b"] {
+            let f = PackFile {
+                name: name.into(),
+                ..ok.clone()
+            };
+            assert!(!safe_pinned_file(&f), "{name:?}");
+        }
+        for sha in [
+            "../../../../../../../../../../../../../../../../../../../../../../../.",
+            "abc",
+        ] {
+            let f = PackFile {
+                sha256: sha.into(),
+                ..ok.clone()
+            };
+            assert!(!safe_pinned_file(&f), "{sha:?}");
+        }
+    }
+
+    /// Only Ghidra may lack its publisher check in the committed lock, and only until the lead
+    /// pins it where GitHub's API answers (the WP9a report); every other part already has
+    /// what a release build needs.
+    #[test]
+    fn only_ghidra_may_wait_for_its_publisher_check() {
+        for b in embedded().release_blockers() {
+            assert!(b.starts_with("ghidra "), "{b} is not ready for a release");
+        }
+        let ghidra = embedded().part("ghidra").unwrap();
+        for b in &ghidra.builds {
+            assert!(
+                b.verified("github-digest") || b.verified_by == ["first-download-only"],
+                "{:?}",
+                b.verified_by
+            );
+        }
+    }
+
+    #[test]
+    fn release_checks_follow_each_publisher() {
+        let lock = embedded();
+        let mut b = lock.part("java").unwrap().builds[0].clone();
+        assert!(b.release_ready("java"));
+        b.verified_by = vec!["first-download-only".into()];
+        assert!(!b.release_ready("java"), "Temurin needs its signature");
+        assert!(b.release_ready("kuna"), "Kuna has nothing more to give");
+        assert!(!b.release_ready("ghidra"), "Ghidra needs GitHub's digest");
+        assert!(
+            !b.release_ready("someday"),
+            "an unknown part is never offered"
+        );
+        b.verified_by = vec!["github-digest".into()];
+        assert!(b.release_ready("ghidra"));
+        b.verified_by = vec!["npm-integrity".into(), "npm-audit-signatures".into()];
+        assert!(!b.release_ready("rea"), "rea needs its provenance");
+        b.verified_by.push("npm-provenance:".into());
+        assert!(!b.release_ready("rea"), "a provenance names its commit");
+        b.verified_by
+            .push("npm-provenance:morluto/rea@d74549e".into());
+        assert!(b.release_ready("rea"));
+        b.verified_by.clear();
+        assert!(!b.release_ready("kuna"));
+        // A lock with a Ghidra build pinned on first download names it.
+        let mut lock = lock.clone();
+        for p in &mut lock.parts {
+            for b in &mut p.builds {
+                b.verified_by = release_checks(&p.name)
+                    .unwrap()
+                    .iter()
+                    .map(|k| format!("{k}{}", if k.ends_with(':') { "x@y" } else { "" }))
+                    .collect();
+                if b.verified_by.is_empty() {
+                    b.verified_by.push("first-download-only".into());
+                }
+            }
+        }
+        assert!(lock.release_blockers().is_empty());
+        let g = lock.parts.iter_mut().find(|p| p.name == "ghidra").unwrap();
+        g.builds[0].verified_by = vec!["first-download-only".into()];
+        let platform = g.builds[0].platform.clone();
+        assert_eq!(lock.release_blockers(), [format!("ghidra {platform}")]);
+    }
+
+    /// The previous rea stays usable after a bump: no accepted version is below rea's minimum
+    /// unless the minimum was raised for a recorded reason (R15).
+    #[test]
+    fn accepted_rea_versions_are_not_below_the_minimum() {
+        let rea = embedded().part("rea").unwrap();
+        for a in &rea.accepted_rea_versions {
+            assert!(
+                version_at_least(&a.version, &rea.minimum_version) || rea.minimum_reason.is_some(),
+                "accepted {} is below minimum {} with no reason",
+                a.version,
+                rea.minimum_version
+            );
         }
     }
 

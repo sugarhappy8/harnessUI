@@ -101,6 +101,15 @@ pub const KUNA_NOT_ON_WINDOWS: &str = "rea can't use Kuna on Windows yet.";
 pub const GHIDRA_NOT_ON_MAC: &str = "Not available on Mac in this version.";
 /// Any other part missing for this computer.
 pub const NOT_FOR_THIS_COMPUTER: &str = "Not available for this computer.";
+/// A release build whose lock lacks a publisher check for one of the row's parts (never
+/// meant to ship: `scripts/pin_reverse.py --check --release` fails on such a lock).
+pub const NOT_IN_THIS_VERSION: &str = "Not available in this version of harnessUI.";
+
+/// Whether this build follows the release rules: only builds with their publishers' checks
+/// are offered ([`crate::lock::release_checks`]). Release builds do; debug builds also offer
+/// a part pinned on first download only, so development can go on before the lead pins it
+/// where GitHub's API answers.
+pub const RELEASE_RULES: bool = cfg!(not(debug_assertions));
 
 /// Whether `component` can be installed here, with the reason shown when it cannot.
 ///
@@ -111,8 +120,30 @@ pub fn availability(
     component: Component,
     platform: Platform,
 ) -> (bool, Option<String>) {
-    let mut parts = lock.parts_of(component).peekable();
-    let complete = parts.peek().is_some() && parts.all(|p| p.build_for(platform).is_some());
+    availability_with(lock, component, platform, RELEASE_RULES)
+}
+
+/// [`availability`], with the release rules on or off (tests, and the installer's own
+/// setting).
+pub fn availability_with(
+    lock: &ReverseLock,
+    component: Component,
+    platform: Platform,
+    release_rules: bool,
+) -> (bool, Option<String>) {
+    let complete = lock.parts_of(component).next().is_some()
+        && lock
+            .parts_of(component)
+            .all(|p| p.build_for(platform).is_some());
+    if complete && release_rules {
+        let ready = lock
+            .parts_of(component)
+            .filter_map(|p| p.build_for(platform).map(|b| (p, b)))
+            .all(|(p, b)| b.release_ready(&p.name));
+        if !ready {
+            return (false, Some(NOT_IN_THIS_VERSION.to_string()));
+        }
+    }
     if complete {
         return (true, None);
     }
@@ -242,6 +273,54 @@ mod tests {
         assert_eq!(
             a(Component::Rea, Platform::LinuxArm64),
             (false, Some("Not available for this computer.".into()))
+        );
+    }
+
+    /// A release build offers a row only when every part has its publishers' checks: Ghidra
+    /// pinned on first download only is not offered, and nothing else changes.
+    #[test]
+    fn release_rules_need_each_publishers_checks() {
+        let mut lock = embedded().clone();
+        for b in &mut lock
+            .parts
+            .iter_mut()
+            .find(|p| p.name == "ghidra")
+            .unwrap()
+            .builds
+        {
+            b.verified_by = vec!["first-download-only".into()];
+        }
+        let r = |c, p| availability_with(&lock, c, p, true);
+        assert_eq!(
+            r(Component::Ghidra, Platform::WindowsX64),
+            (false, Some(NOT_IN_THIS_VERSION.into()))
+        );
+        assert_eq!(
+            availability_with(&lock, Component::Ghidra, Platform::WindowsX64, false),
+            (true, None),
+            "a debug build still offers it"
+        );
+        for p in Platform::SHIPPED {
+            assert_eq!(r(Component::Rea, p), (true, None), "{}", p.key());
+        }
+        assert_eq!(r(Component::Kuna, Platform::MacosArm64), (true, None));
+        assert_eq!(
+            r(Component::Ghidra, Platform::MacosArm64),
+            (false, Some(GHIDRA_NOT_ON_MAC.into())),
+            "the platform's own reason comes first"
+        );
+        for b in &mut lock
+            .parts
+            .iter_mut()
+            .find(|p| p.name == "ghidra")
+            .unwrap()
+            .builds
+        {
+            b.verified_by = vec!["github-digest".into()];
+        }
+        assert_eq!(
+            availability_with(&lock, Component::Ghidra, Platform::WindowsX64, true),
+            (true, None)
         );
     }
 

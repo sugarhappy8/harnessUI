@@ -9,6 +9,8 @@ const ipcMock = vi.hoisted(() => ({
   modelLoadInfo: vi.fn<(path: string) => Promise<ModelLoadInfo>>(),
   modelBusy: vi.fn<() => Promise<ModelBusy>>(async () => ({ chatTurns: 0, modelChecks: 0, otherApps: 0 })),
   loadLocalModel: vi.fn<(path: string, s?: unknown, w?: boolean) => Promise<boolean>>(async () => true),
+  unloadModel: vi.fn<(w?: boolean) => Promise<boolean>>(async () => true),
+  deleteModel: vi.fn<(id: number, files: boolean) => Promise<void>>(async () => undefined),
   getLocalModelSettings: vi.fn(async () => {
     throw new Error("Use must not pass the defaults for all models");
   }),
@@ -72,6 +74,34 @@ function info(path: string, patch: Partial<ModelLoadInfo> = {}): ModelLoadInfo {
   };
 }
 
+function readyOn(path: string): RuntimeStatus {
+  return {
+    state: "ready",
+    backend: "cpu",
+    device: null,
+    modelPath: path,
+    modelName: path.split("/").pop() ?? null,
+    progress: 1,
+    stage: null,
+    nCtx: 4096,
+    supportsTools: true,
+    preserveReasoning: false,
+    thinking: false,
+    speedTps: null,
+    slow: false,
+    vision: false,
+    offloadedLayers: null,
+    totalLayers: null,
+    error: null,
+    loadStage: null,
+    adjustments: [],
+    ctxSource: null,
+    settingsChanged: false,
+    reloadWaiting: false,
+    unloadedPath: null,
+  };
+}
+
 const SMALL = model(1, "small.gguf");
 const BIG = model(2, "big.gguf");
 
@@ -122,7 +152,7 @@ describe("Models → Installed", () => {
     await click(useButtons()[0] as HTMLButtonElement);
     expect(ipcMock.getLocalModelSettings).not.toHaveBeenCalled();
     expect(ipcMock.setChatModel).toHaveBeenCalledWith(3, "local:/models/small.gguf");
-    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/small.gguf", null, undefined);
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/small.gguf", null, true);
     expect(onClose).toHaveBeenCalled();
     expect(useApp.getState().error).toBeNull();
   });
@@ -136,7 +166,7 @@ describe("Models → Installed", () => {
     expect(onClose).not.toHaveBeenCalled();
     await click(useButtons()[1] as HTMLButtonElement);
     await click(screen.getByRole("button", { name: "Load anyway" }));
-    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/big.gguf", null, undefined);
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/big.gguf", null, true);
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -177,6 +207,83 @@ describe("Models → Installed", () => {
     await click(useButtons()[0] as HTMLButtonElement);
     await click(screen.getByRole("button", { name: "Restart when it ends" }));
     expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/small.gguf", null, true);
+  });
+
+  it("asks the D3 question before deleting the loaded model while it is busy, and unloads it first", async () => {
+    useApp.setState({ runtime: readyOn(SMALL.path) });
+    ipcMock.modelBusy.mockResolvedValue({ chatTurns: 1, modelChecks: 0, otherApps: 0 });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await show();
+    await click(screen.getByRole("button", { name: "Delete small.gguf" }));
+    expect(confirm.mock.calls[0]?.[0]).toMatch(/^Delete small\.gguf\? This removes .+ from disk\.$/);
+    expect(screen.getByText("A reply is being written. Stop it and restart the model?")).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Cancel" }));
+    expect(ipcMock.unloadModel).not.toHaveBeenCalled();
+    expect(ipcMock.deleteModel).not.toHaveBeenCalled();
+
+    // Restart when it ends: the unload waits for the reply; a cancelled wait deletes nothing.
+    ipcMock.unloadModel.mockResolvedValueOnce(false);
+    await click(screen.getByRole("button", { name: "Delete small.gguf" }));
+    await click(screen.getByRole("button", { name: "Restart when it ends" }));
+    expect(ipcMock.unloadModel).toHaveBeenLastCalledWith(true);
+    expect(ipcMock.deleteModel).not.toHaveBeenCalled();
+
+    const order: string[] = [];
+    ipcMock.unloadModel.mockImplementationOnce(async () => {
+      order.push("unload");
+      return true;
+    });
+    ipcMock.deleteModel.mockImplementationOnce(async () => {
+      order.push("delete");
+    });
+    await click(screen.getByRole("button", { name: "Delete small.gguf" }));
+    await click(screen.getByRole("button", { name: "Stop and restart" }));
+    expect(ipcMock.unloadModel).toHaveBeenLastCalledWith(false);
+    expect(order).toEqual(["unload", "delete"]);
+    expect(ipcMock.deleteModel).toHaveBeenCalledWith(1, true);
+    confirm.mockRestore();
+  });
+
+  it("deletes a model that is not loaded without asking about the loaded one", async () => {
+    useApp.setState({ runtime: readyOn(BIG.path) });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await show();
+    await click(screen.getByRole("button", { name: "Delete small.gguf" }));
+    expect(ipcMock.modelBusy).not.toHaveBeenCalled();
+    expect(ipcMock.unloadModel).not.toHaveBeenCalled();
+    expect(ipcMock.deleteModel).toHaveBeenCalledWith(1, true);
+    // The loaded model while nothing uses it: unloaded (told to wait, which acts at once), then deleted.
+    ipcMock.modelBusy.mockResolvedValue({ chatTurns: 0, modelChecks: 0, otherApps: 0 });
+    await click(screen.getByRole("button", { name: "Delete big.gguf" }));
+    expect(ipcMock.unloadModel).toHaveBeenCalledWith(true);
+    expect(ipcMock.deleteModel).toHaveBeenLastCalledWith(2, true);
+    // Cancel on the delete question itself does nothing at all.
+    confirm.mockReturnValue(false);
+    ipcMock.deleteModel.mockClear();
+    await click(screen.getByRole("button", { name: "Delete big.gguf" }));
+    expect(ipcMock.deleteModel).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("says what the model was made for in plain words: tokens with words, no jargon badges", async () => {
+    ipcMock.listInstalledModels.mockResolvedValue([
+      {
+        ...SMALL,
+        summary: {
+          architecture: "qwen3moe",
+          quantization: "Q4_K_M",
+          sizeLabel: null,
+          contextLength: 40_960,
+          templateTools: true,
+          templateThinking: false,
+          isMoe: true,
+        },
+      },
+    ]);
+    await show();
+    expect(screen.getByText("remembers up to 40,960 tokens, about 30,000 words")).toBeTruthy();
+    expect(screen.getByText("uses part of itself at a time")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/\bcontext\b|MoE|40k/);
   });
 
   it("opens the model's settings from its gear", async () => {

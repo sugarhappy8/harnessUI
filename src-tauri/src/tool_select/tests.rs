@@ -1081,3 +1081,38 @@ fn a_summary_is_counted_as_the_loop_sends_it() {
     // A short summary is never changed.
     assert_eq!(summary_as_sent("Goal: x.", 4_096), "Goal: x.");
 }
+
+/// [0.0.6] The Tools panel reads the fixed part before it knows the context
+/// ([`other_fixed`]) and counts it for the context it then knows, with the summary as a turn
+/// in that context sends it: after a chat summarised at 32,768 tokens moves to a 4,096-token
+/// model, the panel marks the tools the next turn shows, not none.
+#[test]
+fn the_tools_panel_counts_the_summary_as_a_turn_sends_it() {
+    let prompt = "You are a helpful assistant.";
+    // The longest summary the loop writes at 32,768 tokens.
+    let longest = "x".repeat(4_096);
+    let fixed = OtherFixed {
+        text: prompt.to_owned(),
+        summary: Some(longest.clone()),
+    };
+    let turn = allowance(
+        4_096,
+        fixed_tokens(prompt, Some(&summary_as_sent(&longest, 4_096))),
+    );
+    assert!(turn > 0);
+    assert_eq!(allowance(4_096, fixed.clone()), turn);
+    // Where it fits, it is counted whole.
+    assert_eq!(
+        allowance(32_768, fixed),
+        allowance(32_768, fixed_tokens(prompt, Some(&longest)))
+    );
+    // Without a summary, the text alone.
+    let none = OtherFixed {
+        text: prompt.to_owned(),
+        summary: None,
+    };
+    assert_eq!(
+        allowance(4_096, none),
+        allowance(4_096, fixed_tokens(prompt, None))
+    );
+}

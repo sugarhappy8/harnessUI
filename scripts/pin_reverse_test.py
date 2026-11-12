@@ -12,6 +12,8 @@ version, engine-range and path-name helpers, and the archive survey on small fak
 Standard library only.
 """
 
+import argparse
+import contextlib
 import copy
 import io
 import json
@@ -21,6 +23,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pin_reverse as pr  # noqa: E402
@@ -138,6 +141,254 @@ class CheckCatches(unittest.TestCase):
         def edit(lock):
             lock["disabled_ghidra_analyzers"]["linux-x86_64"] = "-bad,name"
         self.assert_caught(edit, "disabled_ghidra_analyzers")
+
+    def test_a_file_name_that_leaves_the_downloads_folder(self):
+        for name in ["../../../escape.zip", "sub/x.zip", "..", "con.zip"]:
+            def edit(lock, name=name):
+                b = part(lock, "java")["builds"][0]
+                b["file"]["name"] = name
+                b["upstream_asset"] = name
+                b["file"]["url"] = "https://github.com/adoptium/x/" + name
+            self.assert_caught(edit, "file name")
+
+    def test_each_part_needs_its_own_publishers_checks(self):
+        # Another part's check, or a first download, is not enough for rea, Node.js or Java.
+        for name, vb in [
+            ("java", ["first-download-only"]),
+            ("java", ["gpg:adoptium"]),
+            ("node", ["gpg:adoptium"]),
+            ("rea", ["npm-integrity", "npm-audit-signatures"]),
+            ("rea", ["npm-integrity", "npm-provenance:", "npm-audit-signatures"]),
+            ("ghidra", ["gpg:adoptium"]),
+        ]:
+            def edit(lock, name=name, vb=vb):
+                part(lock, name)["builds"][0]["verified_by"] = vb
+            self.assert_caught(edit, "lacks")
+
+    def test_an_accepted_rea_below_the_minimum_without_a_reason(self):
+        # What the pin script used to write at a rea bump: minimum = the new pin.
+        def edit(lock):
+            rea = part(lock, "rea")
+            rea["accepted_rea_versions"].append({"version": "6.8.0", "schema_fixture": "rea-6.9.0-catalog.json"})
+        self.assert_caught(edit, "below minimum_version")
+
+
+class ReleaseGate(unittest.TestCase):
+    """Ghidra pinned on first download only passes --check but never --check --release."""
+
+    def test_only_ghidra_waits_for_its_check(self):
+        lock = committed()
+        for b in pr.release_blockers(lock):
+            self.assertTrue(b.startswith("ghidra "), b)
+        problems = pr.check(lock, release=True)
+        ghidra = part(lock, "ghidra")["builds"]
+        if any(b["verified_by"] == ["first-download-only"] for b in ghidra):
+            self.assertTrue(problems and all("ghidra" in p and "github-digest" in p for p in problems), problems)
+        else:
+            self.assertEqual(problems, [])
+
+    def test_a_ghidra_with_githubs_digest_is_ready(self):
+        lock = copy.deepcopy(committed())
+        for b in part(lock, "ghidra")["builds"]:
+            b["verified_by"] = ["github-digest"]
+        self.assertEqual(pr.check(lock, release=True), [])
+        self.assertEqual(pr.release_blockers(lock), [])
+
+    def test_kuna_needs_nothing_more_than_its_first_download(self):
+        self.assertTrue(pr.release_ready("kuna", ["first-download-only"]))
+        self.assertFalse(pr.release_ready("kuna", []))
+        self.assertFalse(pr.release_ready("ghidra", ["first-download-only"]))
+        self.assertFalse(pr.release_ready("someday", ["github-digest"]))
+
+
+def raw_parts(lock: dict, rea_version: str = "6.9.0") -> dict:
+    """What the pin_* functions return, rebuilt from a lock."""
+    raw = {}
+    for p in lock["parts"]:
+        r = {k: copy.deepcopy(v) for k, v in p.items() if k in ("name", "version", "minimum_version", "vendor", "entry", "accepted_rea_versions", "builds")}
+        raw[p["name"]] = r
+    return raw
+
+
+def fixture_for(version: str) -> dict:
+    data = json.loads((pr.FIXTURES / "rea-6.9.0-catalog.json").read_text())
+    data["rea_version"] = version
+    return data
+
+
+class Minimums(unittest.TestCase):
+    """R15: a bump keeps the previous version usable; only --minimum with --reason raises it."""
+
+    def bumped(self, minimums=(), reason=None) -> list:
+        old = committed()
+        raw = raw_parts(old)
+        raw["rea"]["accepted_rea_versions"] = [
+            {"version": "6.10.0", "schema_fixture": "rea-6.10.0-catalog.json"},
+            {"version": "6.9.0", "schema_fixture": "rea-6.9.0-catalog.json"},
+        ]
+        raw["kuna"]["version"] = "1.991"
+        raw["kuna"]["minimum_version"] = "1.991"
+        return pr.assemble_parts(raw, "6.10.0", old, list(minimums), reason)
+
+    def lock_of(self, parts) -> dict:
+        lock = copy.deepcopy(committed())
+        lock["parts"] = parts
+        return lock
+
+    def test_a_rea_bump_keeps_the_previous_rea_usable(self):
+        parts = self.bumped()
+        rea = next(p for p in parts if p["name"] == "rea")
+        self.assertEqual(rea["version"], "6.10.0")
+        self.assertEqual(rea["minimum_version"], "6.9.0")
+        for a in rea["accepted_rea_versions"]:
+            self.assertGreaterEqual(pr.version_key(a["version"]), pr.version_key(rea["minimum_version"]))
+        kuna = next(p for p in parts if p["name"] == "kuna")
+        self.assertEqual((kuna["version"], kuna["minimum_version"]), ("1.991", "1.990"))
+        lock = self.lock_of(parts)
+        # The bumped Kuna's builds still carry 1.990's assets; only the versions matter here.
+        problems = [p for p in pr.check(lock, fixtures={"rea-6.10.0-catalog.json": fixture_for("6.10.0")}) if "dir" not in p]
+        self.assertEqual(problems, [])
+
+    def test_a_security_fix_raises_the_minimum_with_its_reason(self):
+        parts = self.bumped(["rea=6.10.0"], "rea 6.9.0 reads files outside the folder it was given")
+        rea = next(p for p in parts if p["name"] == "rea")
+        self.assertEqual(rea["minimum_version"], "6.10.0")
+        self.assertIn("outside the folder", rea["minimum_reason"])
+        lock = self.lock_of(parts)
+        problems = [p for p in pr.check(lock, fixtures={"rea-6.10.0-catalog.json": fixture_for("6.10.0")}) if "dir" not in p]
+        self.assertEqual(problems, [])
+        # The next bump keeps the raised minimum and its reason.
+        old = lock
+        raw = raw_parts(old)
+        raw["rea"]["accepted_rea_versions"] = [
+            {"version": "6.11.0", "schema_fixture": "rea-6.11.0-catalog.json"},
+            {"version": "6.10.0", "schema_fixture": "rea-6.10.0-catalog.json"},
+        ]
+        nxt = next(p for p in pr.assemble_parts(raw, "6.11.0", old, [], None) if p["name"] == "rea")
+        self.assertEqual(nxt["minimum_version"], "6.10.0")
+        self.assertEqual(nxt.get("minimum_reason"), rea["minimum_reason"])
+
+    def test_a_minimum_needs_a_reason(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.bumped(["rea=6.10.0"], None)
+
+
+class Temurin(unittest.TestCase):
+    """Adoptium's answer is checked before anything is fetched or written."""
+
+    GOOD = {
+        "name": "OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz",
+        "link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz",
+        "signature_link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz.sig",
+        "size": 207858352,
+        "checksum": "d" * 64,
+    }
+
+    def test_temurins_own_names(self):
+        self.assertEqual(pr.java_asset_name("21", "21.0.13+9", "linux", "x64"), self.GOOD["name"])
+        self.assertEqual(
+            pr.java_asset_name("21", "21.0.13+9", "windows", "x64"),
+            "OpenJDK21U-jdk_x64_windows_hotspot_21.0.13_9.zip",
+        )
+        self.assertEqual(pr.java_package_problems(self.GOOD, self.GOOD["name"]), [])
+
+    def test_a_hostile_answer_is_refused(self):
+        for key, value in [
+            ("name", "../../escaped-by-api.zip"),
+            ("name", "OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz/../x"),
+            ("link", "https://attacker.example/jdk.zip"),
+            ("link", "http://github.com/adoptium/x/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz"),
+            ("link", "https://user@github.com/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz"),
+            ("link", "https://github.com:8443/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz"),
+            ("signature_link", "https://attacker.example/x.sig"),
+            ("size", "1"),
+            ("checksum", "../"),
+        ]:
+            pkg = dict(self.GOOD, **{key: value})
+            self.assertNotEqual(pr.java_package_problems(pkg, self.GOOD["name"]), [], (key, value))
+
+    def test_pin_java_stops_before_fetching_a_hostile_package(self):
+        api = {"binaries": [
+            {"os": "windows", "architecture": "x64", "image_type": "jdk", "package": dict(
+                self.GOOD, name="../../escaped-by-api.zip", link="https://attacker.example/jdk.zip")},
+        ]}
+        fetched = []
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(pr, "http_json", return_value=api), \
+                mock.patch.object(pr, "download", side_effect=lambda *a, **k: fetched.append(a)), \
+                mock.patch.object(pr, "http_get", side_effect=lambda *a, **k: fetched.append(a)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                pr.pin_java("jdk-21.0.13+9", "21", Path(d) / "scratch")
+            self.assertEqual(fetched, [])
+            self.assertEqual(list(Path(d).iterdir()), [])
+
+
+class Npm(unittest.TestCase):
+    """npm ignores the developer's npm settings when it checks rea's signatures."""
+
+    def test_npm_settings_are_dropped_from_the_environment(self):
+        env = pr.npm_env({
+            "PATH": "/usr/bin", "HOME": "/home/x",
+            "npm_config_registry": "https://mirror.example/",
+            "NPM_CONFIG_REGISTRY": "https://mirror.example/",
+            "Npm_Config_Userconfig": "/tmp/rc", "npm_token": "x",
+            "NODE_OPTIONS": "--require /tmp/evil.js",
+        })
+        self.assertEqual(env, {"PATH": "/usr/bin", "HOME": "/home/x"})
+
+    def test_npm_reads_no_npmrc_and_asks_npms_registry(self):
+        args = pr.npm_isolation_args(Path("/s/user-npmrc"), Path("/s/global-npmrc"))
+        self.assertIn("--registry=https://registry.npmjs.org/", args)
+        self.assertIn("--userconfig=/s/user-npmrc", args)
+        self.assertIn("--globalconfig=/s/global-npmrc", args)
+
+
+class Pin(unittest.TestCase):
+    """`pin` writes the lock and fixture only when they pass --check."""
+
+    def run_pin(self, edit) -> tuple[Path, Path, str]:
+        base = committed()
+        raw = raw_parts(base)
+        edit(raw)
+        facts = {"kuna": "1.990", "ghidra": "12.1.4", "java_major": "21",
+                 "engines": "^22.23.4 || ^24.22.1 || >=26.12.1", "ghidra_minimum": "12.1"}
+        rea = raw["rea"]
+        fx = fixture_for("6.9.0")
+        d = tempfile.mkdtemp()
+        repo = Path(d) / "repo"
+        lock_path = repo / "reverse.lock.json"
+        fixtures = repo / "fixtures"
+        args = argparse.Namespace(scratch=str(Path(d) / "scratch"), rea="6.9.0", node=None, java=None,
+                                  ghidra_asset=None, first_download_only=set(), minimum=None, reason=None)
+        out = io.StringIO()
+        with mock.patch.object(pr, "ROOT", repo), mock.patch.object(pr, "LOCK", lock_path), \
+                mock.patch.object(pr, "FIXTURES", fixtures), \
+                mock.patch.object(pr, "pin_rea", return_value=(rea, {"fixture": fx, "facts": facts})), \
+                mock.patch.object(pr, "pin_node", return_value=raw["node"]), \
+                mock.patch.object(pr, "pin_kuna", return_value=raw["kuna"]), \
+                mock.patch.object(pr, "pin_ghidra", return_value=raw["ghidra"]), \
+                mock.patch.object(pr, "pin_java", return_value=raw["java"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                pr.cmd_pin(args)
+            except SystemExit:
+                pass
+        return lock_path, fixtures / "rea-6.9.0-catalog.json", out.getvalue()
+
+    def test_a_lock_that_fails_the_check_is_not_written(self):
+        def edit(raw):
+            raw["java"]["builds"][0]["file"]["url"] = "https://attacker.example/jdk.zip"
+        lock, fixture, _ = self.run_pin(edit)
+        self.assertFalse(lock.exists())
+        self.assertFalse(fixture.exists())
+
+    def test_a_good_lock_is_written_and_names_what_is_not_ready(self):
+        lock, fixture, out = self.run_pin(lambda raw: None)
+        self.assertTrue(lock.is_file() and fixture.is_file())
+        self.assertEqual(pr.check(json.loads(lock.read_text()), fixtures={fixture.name: json.loads(fixture.read_text())}), [])
+        if any(b["verified_by"] == ["first-download-only"] for b in part(committed(), "ghidra")["builds"]):
+            self.assertIn("NOT READY FOR A RELEASE: ghidra", out)
 
 
 class Helpers(unittest.TestCase):

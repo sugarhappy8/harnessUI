@@ -124,9 +124,12 @@ pub async fn save_images(
 
 /// Largest text or PDF document accepted.
 pub const MAX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
-/// Text kept from one document at most, whatever the context (a last guard for storage:
-/// [`document_cap_chars`] is smaller for every context the app accepts).
+/// Bytes of text kept from one document at most, whatever the context (a last guard for
+/// storage: [`document_cap_chars`] keeps every share under it, note included).
 const MAX_DOCUMENT_TEXT: usize = 2 * 1024 * 1024;
+/// [0.0.6] The most bytes one character takes in UTF-8: a share of at most
+/// `MAX_DOCUMENT_TEXT / MAX_CHAR_BYTES` characters is under the storage guard in any language.
+const MAX_CHAR_BYTES: usize = 4;
 
 /// [0.0.5 memory] Characters per token when sizing a document to the context: the app's
 /// cautious estimate (`agent::estimate`), as for mentions.
@@ -147,10 +150,13 @@ const CUT_NOTE_ROOM: usize = 320;
 /// package owns (WP3b owns the documents' side, which already counts the mentions).
 /// The current message is never summarised, so a document larger than this would stop the
 /// chat with "too long" instead.
+/// [0.0.6] At most a quarter of the storage guard in characters (524,288, about 175,000
+/// tokens: contexts above about 870,000 tokens, which endpoints may report), so the text
+/// sent, note included, is never cut again by the guard, whatever bytes its characters take.
 pub fn document_cap_chars(n_ctx: usize, shared_by: usize) -> usize {
     let shared_by = shared_by.max(1);
     let tokens = (n_ctx / 5).min(n_ctx * 2 / 5 / shared_by);
-    (tokens * CHARS_PER_TOKEN).max(MIN_DOCUMENT_CHARS)
+    (tokens * CHARS_PER_TOKEN).clamp(MIN_DOCUMENT_CHARS, MAX_DOCUMENT_TEXT / MAX_CHAR_BYTES)
 }
 
 /// [0.0.5 memory] What was left out of an attached document cut to fit the context; stored
@@ -256,11 +262,40 @@ where
     out
 }
 
+/// [0.0.6] An attached document's text as it is stored and sent: cut to its share of a
+/// context of `n_ctx` tokens ([`document_cap_chars`], [`cut_to_share`]), then held under
+/// the storage guard ([`MAX_DOCUMENT_TEXT`] bytes).
+pub async fn document_for_model<F, Fut>(
+    text: &str,
+    n_ctx: usize,
+    shared_by: usize,
+    pdf: bool,
+    count: Option<F>,
+) -> (String, Option<DocumentCut>)
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<usize>>,
+{
+    let (mut text, cut) =
+        cut_to_share(text, document_cap_chars(n_ctx, shared_by), pdf, count).await;
+    if text.len() > MAX_DOCUMENT_TEXT {
+        let mut end = MAX_DOCUMENT_TEXT;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    (text, cut)
+}
+
 /// [0.0.5 memory] What the user is told when a turn sends a document that was cut to fit
 /// (plain words; the model's own note is in the document's text). [0.0.6] In Full access
 /// the file tools reach the whole computer except the app's own folders, so the note does
 /// not narrow it to the chat's folders (D12); Ask first and Allow all say the same.
+/// The file name's hidden characters (bidirectional overrides, zero-width and tag
+/// characters) come as visible escapes, as on approval cards, so the note reads as written.
 pub fn cut_note(name: &str, cut: DocumentCut, full_access: bool) -> String {
+    let name = policy::sanitize::visible(name);
     let percent = (cut.kept * 100 / cut.total.max(1)).clamp(1, 99);
     let rest = if full_access {
         "Full access is on, so the model can read the rest itself if it finds the file on \
@@ -411,15 +446,7 @@ pub async fn save_documents(
                     .map(|tokens| tokens.len())
             }
         });
-        let (mut text, cut) =
-            cut_to_share(&text, document_cap_chars(n_ctx, shared_by), is_pdf, count).await;
-        if text.len() > MAX_DOCUMENT_TEXT {
-            let mut cut = MAX_DOCUMENT_TEXT;
-            while !text.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            text.truncate(cut);
-        }
+        let (text, cut) = document_for_model(&text, n_ctx, shared_by, is_pdf, count).await;
         let name: String = doc
             .file_name
             .chars()
@@ -607,8 +634,10 @@ mod tests {
         assert_eq!(document_cap_chars(4_096, 0), 819 * 3);
         assert_eq!(document_cap_chars(200_000, 1), 40_000 * 3);
         assert_eq!(document_cap_chars(100, 8), 600);
-        // Every context the app accepts keeps the share under the storage guard.
-        assert!(document_cap_chars(1_048_576, 1) < MAX_DOCUMENT_TEXT);
+        // Every context keeps the share under the storage guard, in bytes ([0.0.6]: 4 bytes
+        // a character at most).
+        assert!(document_cap_chars(1_048_576, 1) * MAX_CHAR_BYTES <= MAX_DOCUMENT_TEXT);
+        assert_eq!(document_cap_chars(2_000_000, 1), MAX_DOCUMENT_TEXT / 4);
         // A share is what the turn can carry: with the reply kept free and tools at their
         // 40%, a document still fits under the point where room is made.
         for n_ctx in [4_096u32, 8_192, 32_768] {
@@ -829,5 +858,76 @@ mod tests {
         );
         assert!(out.chars().count() > 0);
         assert!(asked.lock().unwrap().len() <= MAX_COUNTS);
+    }
+
+    /// `n` characters of `c`, a line break after every 99.
+    fn lines_of(c: char, n: usize) -> String {
+        (0..n)
+            .map(|i| if i % 100 == 99 { '\n' } else { c })
+            .collect()
+    }
+
+    /// [0.0.6] The share is held in bytes too: an endpoint may report a context of a
+    /// million tokens or more, and text of 3 or 4 bytes a character (Chinese, Japanese,
+    /// emoji) would otherwise pass the 2 MiB storage guard, which then cut off the model's
+    /// note, made the user's "about N%" wrong, or dropped text with no note at all.
+    #[tokio::test]
+    async fn a_documents_share_fits_the_storage_guard_in_bytes() {
+        type Count = fn(String) -> std::future::Ready<Option<usize>>;
+        for n_ctx in [1_048_576usize, 2_000_000, u32::MAX as usize] {
+            assert!(
+                document_cap_chars(n_ctx, 1) * 4 <= MAX_DOCUMENT_TEXT,
+                "{n_ctx}"
+            );
+        }
+        // Longer than the share and than the guard: cut, with the note, under the guard,
+        // and what is stored as kept is what was sent.
+        for (c, chars) in [('漢', 1_200_000), ('𝄞', 600_000), ('漢', 984_000)] {
+            let text = lines_of(c, chars);
+            assert!(text.len() > MAX_DOCUMENT_TEXT);
+            let (out, cut) = document_for_model(&text, 2_000_000, 1, false, None::<Count>).await;
+            let cut = cut.unwrap_or_else(|| panic!("{c} {chars}: not cut"));
+            assert!(out.len() <= MAX_DOCUMENT_TEXT, "{c} {chars}: {}", out.len());
+            assert_eq!(cut.total, chars);
+            let kept_end = out
+                .char_indices()
+                .nth(cut.kept)
+                .map_or(out.len(), |(i, _)| i);
+            assert!(text.starts_with(&out[..kept_end]), "{c} {chars}");
+            let note = &out[kept_end..];
+            assert!(
+                note.starts_with("[The rest of this file was left out"),
+                "{c} {chars}: {}",
+                &note[..note.len().min(80)]
+            );
+            assert!(note.ends_with(".]"), "{c} {chars}");
+        }
+        // Short text is sent whole, as before.
+        let short = lines_of('漢', 5_000);
+        assert_eq!(
+            document_for_model(&short, 2_000_000, 1, false, None::<Count>).await,
+            (short.clone(), None)
+        );
+    }
+
+    /// [0.0.6] A file name holding characters that change how text is shown (a right-to-left
+    /// override, zero-width or tag characters) is shown with them as visible escapes in the
+    /// user's note, as approval cards show them, so the rest of the note reads as written.
+    #[test]
+    fn the_cut_note_shows_hidden_characters_in_the_file_name() {
+        let cut = DocumentCut { kept: 1, total: 4 };
+        for full_access in [false, true] {
+            let note = cut_note("evil\u{202E}txt.exe\u{200B}\u{E0041}", cut, full_access);
+            assert!(
+                note.starts_with(
+                    "Only the first part of evil\\u{202E}txt.exe\\u{200B}\\u{E0041} was sent"
+                ),
+                "{note}"
+            );
+            assert!(
+                !note.contains(['\u{202E}', '\u{200B}', '\u{E0041}']),
+                "{note}"
+            );
+        }
     }
 }

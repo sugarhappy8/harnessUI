@@ -17,7 +17,7 @@ use crate::context::{
     ContextBudget, KEPT_RESULT_IMAGES, PinnedDoNotFit, SUMMARY_CHARS_PER_TOKEN, ToolsDoNotFit,
     call_groups, cut_summary, drop_old_result_images, estimate_message, estimate_request,
     fold_instruction, group_digits, pinned_allowance, stub_results, summarisable_prefix,
-    summary_instruction, truncate_head_tail, turn_starts,
+    summary_instruction, tokens_with_words, truncate_head_tail, turn_starts,
 };
 use crate::error::{ProviderError, chat_too_long};
 use crate::estimate::{BASELINE_CHARS_PER_TOKEN, TokenCalibrator};
@@ -50,6 +50,15 @@ const MAX_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_SUMMARY_ROUNDS: u32 = 4;
 /// Candidate summary requests counted before a round gives up on finding one that fits.
 const MAX_SUMMARY_FIT_TRIES: usize = 6;
+
+/// Which summary a request writes ([`Turn::write_summary`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryKind {
+    /// The old summary rewritten under a smaller context's cap.
+    Fold,
+    /// A summary of the oldest earlier messages, folding in the summary before it.
+    Earlier,
+}
 
 /// What stage 2 would do next, decided by one function for the turn and its preview.
 enum SummaryPlan {
@@ -194,7 +203,13 @@ pub(super) struct Turn<'a> {
     /// Calls of this turn whose results are stubbed (stage 3).
     stubbed: HashSet<String>,
     summary: Option<CompactionSummary>,
+    /// A summary of earlier messages could not be made: no more are tried in this turn.
     summary_failed: bool,
+    /// The old summary could not be rewritten under this context's cap: it is cut for this
+    /// turn and not tried again in it. Summaries of earlier messages are still tried.
+    fold_failed: bool,
+    /// [`SUMMARY_FAILED_NOTE`] was sent (once per turn).
+    failure_noted: bool,
     budget: ContextBudget,
     calibrator: TokenCalibrator,
     /// Correction for counts after the server rejected a request as too long.
@@ -216,22 +231,16 @@ pub(super) struct Turn<'a> {
 
 impl<'a> Turn<'a> {
     pub(super) fn new(deps: TurnDeps<'a>, mut input: TurnInput, cancel: CancellationToken) -> Self {
-        let history = normalize(std::mem::take(&mut input.history));
-        let covered: HashSet<i64> = input
-            .summary
-            .as_ref()
-            .map(|summary| summary.covered_ids.iter().copied().collect())
-            .unwrap_or_default();
+        // The messages the summary stands for are left out before normalising, while the
+        // stored results still carry their ids.
+        let (_, history) = split_covered(std::mem::take(&mut input.history), &covered_ids(&input));
+        let history = normalize(history);
         let split = history
             .iter()
             .rposition(|message| message.role == Role::User)
             .unwrap_or(history.len());
         let mut earlier = history;
         let turn = earlier.split_off(split);
-        let earlier: Vec<HistoryMessage> = earlier
-            .into_iter()
-            .filter(|message| message.id.is_none_or(|id| !covered.contains(&id)))
-            .collect();
         // Untrusted content already in the turn: an attachment, or the output of a call made
         // before the turn was interrupted and resumed (D9).
         let untrusted = turn.iter().any(|message| {
@@ -277,6 +286,8 @@ impl<'a> Turn<'a> {
             stubbed: HashSet::new(),
             summary: input.summary.clone(),
             summary_failed: false,
+            fold_failed: false,
+            failure_noted: false,
             budget: ContextBudget::new(input.caps.n_ctx, 0),
             calibrator,
             overflow_scale: 1.0,
@@ -741,7 +752,8 @@ impl<'a> Turn<'a> {
     /// Stage 2: summarises the oldest earlier turns with the same model. Returns whether a
     /// summary was made. A summary that cannot be made is reported once
     /// ([`SUMMARY_FAILED_NOTE`]) and not tried again in this turn; the loop goes on with
-    /// stage 3.
+    /// stage 3. A failed fold of the old summary does not stop it: this request is another
+    /// one, and its instruction folds in the summary the turn goes on with.
     async fn summarise(&mut self) -> Result<bool, TurnStatus> {
         if self.summary_failed {
             return Ok(false);
@@ -750,13 +762,18 @@ impl<'a> Turn<'a> {
         let (prefix, request) = match self.plan_summary().await? {
             SummaryPlan::Nothing => return Ok(false),
             SummaryPlan::DoesNotFit => {
-                self.report_summary_failed();
+                self.summary_failed = true;
+                self.note_summary_failed();
                 return Ok(false);
             }
             SummaryPlan::Round { prefix, request } => (prefix, request),
         };
-        let Some(text) = self.write_summary(&request, summary_cap).await? else {
-            self.report_summary_failed();
+        let Some(text) = self
+            .write_summary(&request, summary_cap, SummaryKind::Earlier)
+            .await?
+        else {
+            self.summary_failed = true;
+            self.note_summary_failed();
             return Ok(false);
         };
         let mut covered: Vec<i64> = self
@@ -844,22 +861,33 @@ impl<'a> Turn<'a> {
         Ok(SummaryPlan::DoesNotFit)
     }
 
-    /// Streams a summary request without showing it and returns the summary, cut to the
-    /// summary cap (`cap` tokens, four characters each); `None` when the server failed or the
-    /// model wrote nothing.
+    /// Streams a summary request without showing it and returns the summary; `None` when
+    /// the server failed or the model wrote nothing. A summary longer than the cap (`cap`
+    /// tokens, four characters each) keeps its head and its tail ([`cut_summary`]), where the
+    /// headings that start and end it are. A rewrite of the old summary that the output
+    /// limit cut off, or whose stream ended early, is `None` too: it lost its last sections
+    /// ("What is left", the exact paths), and stored in place of the old summary they would
+    /// be gone for good. A summary of earlier messages cut off the same way is kept: the
+    /// messages it replaces are left out either way, and without it the turn could not go on.
     async fn write_summary(
         &mut self,
         request: &ChatRequest,
         cap: u32,
+        kind: SummaryKind,
     ) -> Result<Option<String>, TurnStatus> {
         self.emit(TurnEvent::AppNote {
             text: SUMMARISING_NOTE.to_owned(),
         });
-        let text = match self.stream(request, false).await {
-            Attempt::Done(reply) => strip_tool_markup(&reply.content),
+        let reply = match self.stream(request, false).await {
+            Attempt::Done(reply) => reply,
             Attempt::Cancelled { .. } => return Err(TurnStatus::Stopped),
             Attempt::Failed(_) => return Ok(None),
         };
+        let cut_off = reply.unfinished || reply.finish == Some(FinishReason::Length);
+        if cut_off && kind == SummaryKind::Fold {
+            return Ok(None);
+        }
+        let text = strip_tool_markup(&reply.content);
         let text = text.trim();
         if text.is_empty() {
             return Ok(None);
@@ -867,13 +895,13 @@ impl<'a> Turn<'a> {
         let max_chars = usize::try_from(cap)
             .unwrap_or(usize::MAX)
             .saturating_mul(SUMMARY_CHARS_PER_TOKEN);
-        Ok(Some(text.chars().take(max_chars).collect()))
+        Ok(Some(cut_summary(text, max_chars)))
     }
 
-    /// Reports, once per turn, that a summary could not be made; no more are tried in it.
-    fn report_summary_failed(&mut self) {
-        if !self.summary_failed {
-            self.summary_failed = true;
+    /// Says, once per turn, that a summary could not be made.
+    fn note_summary_failed(&mut self) {
+        if !self.failure_noted {
+            self.failure_noted = true;
             self.emit(TurnEvent::AppNote {
                 text: SUMMARY_FAILED_NOTE.to_owned(),
             });
@@ -902,15 +930,17 @@ impl<'a> Turn<'a> {
     /// Stage 2 for a summary that no longer fits a smaller context: the model rewrites it
     /// under this context's cap, covering the same messages ([`TurnEvent::Compacted`] carries
     /// the new text, so the app stores it in place of the old one). When that request cannot
-    /// fit, or the model writes nothing, the failure is reported and the summary is cut to
-    /// the cap for this turn, so the turn still goes on. Returns whether the summary changed.
+    /// fit, the model writes nothing or its rewrite is cut off, the failure is reported and
+    /// the summary is cut to the cap for this turn (not stored), so the turn still goes on,
+    /// and summaries of earlier messages can still be made from it. Returns whether the
+    /// summary changed.
     async fn fold_summary(&mut self) -> Result<bool, TurnStatus> {
         if !self.summary_oversized() {
             return Ok(false);
         }
         let cap = self.budget.summary_max_tokens();
         let mut text = None;
-        if !self.summary_failed {
+        if !self.fold_failed && !self.summary_failed {
             let mut request = self.summary_request(&[], &fold_instruction(cap * 2 / 3), cap);
             let mut fits = self.count(&request).await?.0 <= self.budget.budget;
             if !fits && !request.tools.is_empty() {
@@ -921,7 +951,7 @@ impl<'a> Turn<'a> {
                 fits = self.count(&request).await?.0 <= self.budget.budget;
             }
             if fits {
-                text = self.write_summary(&request, cap).await?;
+                text = self.write_summary(&request, cap, SummaryKind::Fold).await?;
             }
         }
         let covered_ids = self
@@ -943,7 +973,8 @@ impl<'a> Turn<'a> {
                 });
             }
             None => {
-                self.report_summary_failed();
+                self.fold_failed = true;
+                self.note_summary_failed();
                 self.cut_oversized_summary();
             }
         }
@@ -1115,11 +1146,11 @@ impl<'a> Turn<'a> {
             self.truncation_noted = true;
             self.emit(TurnEvent::AppNote {
                 text: format!(
-                    "The server reported a prompt of {} tokens for about {} sent. It may be \
+                    "The server reported a prompt of {}, but the app sent about {}. It may be \
                      leaving out older messages because its model remembers less than the app \
                      expects.",
-                    group_digits(u64::from(usage.prompt_tokens)),
-                    group_digits(u64::from(self.calibrator.calibrate(baseline)))
+                    tokens_with_words(usage.prompt_tokens),
+                    tokens_with_words(self.calibrator.calibrate(baseline))
                 ),
             });
         }
@@ -1540,10 +1571,10 @@ impl<'a> Turn<'a> {
                 *count += 1;
                 if *count >= 2 {
                     let message = format!(
-                        "The model's reply hit the output limit ({} tokens) twice while writing a \
-                         call to {name}, so the turn ended. Ask for smaller steps, or raise the \
-                         context size.",
-                        group_digits(u64::from(output_tokens))
+                        "The model's reply hit the output limit ({}) twice while writing a call \
+                         to {name}, so the turn ended. Ask for smaller steps, or let the model \
+                         remember more.",
+                        tokens_with_words(output_tokens)
                     );
                     return Processed::synthetic(
                         record,
@@ -1925,6 +1956,57 @@ fn new_call_id() -> String {
 
 fn has_results(messages: &[HistoryMessage]) -> bool {
     messages.iter().any(|m| m.tool_results().next().is_some())
+}
+
+/// The ids of the stored messages the turn's summary stands for.
+fn covered_ids(input: &TurnInput) -> HashSet<i64> {
+    input
+        .summary
+        .as_ref()
+        .map(|summary| summary.covered_ids.iter().copied().collect())
+        .unwrap_or_default()
+}
+
+/// Splits the chat as stored (before normalising) into the messages a summary stands for
+/// and the rest. It stands for the messages whose ids it lists and for the results of every
+/// call it covers: the app lists every stored message up to the summary's last one, results
+/// included, but the loop's own summaries list none (a result has no id of its own once
+/// normalised). A result left behind would sit at the front of the earlier messages, never
+/// sent but counted by every later summary plan, and could stop all of them. Nothing from
+/// the last user message on (this turn) is covered.
+fn split_covered(
+    history: Vec<HistoryMessage>,
+    covered: &HashSet<i64>,
+) -> (Vec<HistoryMessage>, Vec<HistoryMessage>) {
+    if covered.is_empty() {
+        return (Vec::new(), history);
+    }
+    let turn_start = history
+        .iter()
+        .rposition(|message| message.role == Role::User)
+        .unwrap_or(history.len());
+    let mut summarised = Vec::new();
+    let mut kept = Vec::new();
+    // The last user or assistant message was a covered assistant message with calls, so the
+    // tool messages after it answer covered calls.
+    let mut after_covered_calls = false;
+    for (index, message) in history.into_iter().enumerate() {
+        let listed = message.id.is_some_and(|id| covered.contains(&id));
+        let is_covered = match message.role {
+            Role::Tool => listed || after_covered_calls,
+            Role::System => listed,
+            Role::User | Role::Assistant => {
+                after_covered_calls = listed && message.has_tool_calls();
+                listed
+            }
+        };
+        if is_covered && index < turn_start {
+            summarised.push(message);
+        } else {
+            kept.push(message);
+        }
+    }
+    (summarised, kept)
 }
 
 fn json_kind(value: &Value) -> &'static str {

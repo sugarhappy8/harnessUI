@@ -40,7 +40,10 @@ export function contextMeterTitle(used: number, nCtx: number | null): string {
     const words = aboutWords(used);
     return `How much it can remember: ${n(used)} tokens used` + (words > 0 ? ` (about ${n(words)} words)` : "");
   }
-  return `How much it can remember: ${n(used)} of ${n(nCtx)} tokens used (about ${n(aboutWords(used))} of ${n(aboutWords(nCtx))} words)`;
+  // [0.0.6] Under about 130 tokens the words round down to 0: say "fewer than 100" instead.
+  const usedWords = aboutWords(used);
+  const words = usedWords > 0 ? `about ${n(usedWords)} of ${n(aboutWords(nCtx))}` : `fewer than 100 of about ${n(aboutWords(nCtx))}`;
+  return `How much it can remember: ${n(used)} of ${n(nCtx)} tokens used (${words} words)`;
 }
 
 /** How much of the context window the last request filled. */
@@ -114,8 +117,9 @@ export function SummaryDivider(props: { text: string }) {
 }
 
 /** [0.0.5 memory] Errors about the chat no longer fitting the model's memory, which Model
- *  settings can help with. */
-const MEMORY_ERRORS = new Set(["context_full", "context_overflow", "tools_do_not_fit"]);
+ *  settings can help with. [0.0.6] Pinned instructions get a share of the memory, so a
+ *  larger memory helps them fit too. */
+const MEMORY_ERRORS = new Set(["context_full", "context_overflow", "tools_do_not_fit", "pinned_do_not_fit"]);
 
 /** [0.0.5 memory] The button under a "too long" error of a chat on a local model. */
 export function ModelSettingsAction(props: { path: string }) {

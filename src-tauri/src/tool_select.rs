@@ -341,13 +341,47 @@ pub fn definition_cost(name: &str, description: &str, schema: &Value) -> u32 {
 /// Before the selection knew about sizes, the tools that are on by default did not pass
 /// that check in a 4,096-token context, and no message could be sent. Sizes here are
 /// estimates, so the allowance stays a little under the loop's limit.
-pub fn allowance(n_ctx: u32, other_fixed: u32) -> u32 {
+///
+/// [0.0.6] `other_fixed` is counted for this context ([`FixedPart`]): the Tools panel reads
+/// it before the context is known ([`other_fixed`]), a turn once it is.
+pub fn allowance(n_ctx: u32, other_fixed: impl FixedPart) -> u32 {
     let budget = agent::context::ContextBudget::new(n_ctx, 0).budget;
     let limit = u64::from(budget) * u64::from(agent::context::TOOLS_FIT_PERCENT) / 100;
     let limit = limit * 97 / 100;
     u32::try_from(limit)
         .unwrap_or(u32::MAX)
-        .saturating_sub(other_fixed)
+        .saturating_sub(other_fixed.tokens_in(n_ctx))
+}
+
+/// [0.0.6] The fixed part of every request besides tool definitions and messages, counted
+/// for a context of `n_ctx` tokens.
+pub trait FixedPart {
+    fn tokens_in(&self, n_ctx: u32) -> u32;
+}
+
+/// Tokens already counted for the context.
+impl FixedPart for u32 {
+    fn tokens_in(&self, _n_ctx: u32) -> u32 {
+        *self
+    }
+}
+
+/// [0.0.6] What [`other_fixed`] reads: the fixed text (the system prompt, the list of
+/// skills, loaded skills) and the summary of earlier messages as stored. Counted for a
+/// context, the summary is counted as a turn in that context sends it
+/// ([`summary_as_sent`]): a summary written when the model could remember more is sent at
+/// most this context's cap long, so the Tools panel shows the tools the next turn shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtherFixed {
+    text: String,
+    summary: Option<String>,
+}
+
+impl FixedPart for OtherFixed {
+    fn tokens_in(&self, n_ctx: u32) -> u32 {
+        let summary = self.summary.as_deref().map(|s| summary_as_sent(s, n_ctx));
+        fixed_tokens(&self.text, summary.as_deref())
+    }
 }
 
 /// The app's own part of the system message: folders, the system, how to call tools.
@@ -358,9 +392,10 @@ const SUMMARY_LINES_TOKENS: u32 = 40;
 
 /// About how many tokens a turn in this chat sends besides tool definitions and messages:
 /// the system prompt, the list of skills, loaded skills, the summary of earlier messages of
-/// the branch the chat shows (as stored: without the context size, it cannot be counted as
-/// a turn sends it, which [`other_fixed_for_turn`] does), and the app's own lines around them.
-pub async fn other_fixed(state: &AppState, chat: &store::Chat) -> u32 {
+/// the branch the chat shows, and the app's own lines around them. [0.0.6] Read before the
+/// context is known; [`allowance`] counts it for the context, with the summary as a turn in
+/// that context sends it ([`OtherFixed`]).
+pub async fn other_fixed(state: &AppState, chat: &store::Chat) -> OtherFixed {
     // [0.0.5 memory] The summary is part of every request's system message, so it takes
     // from the tools' share like the rest (a summary written under a larger context
     // could otherwise push the fixed part past it and refuse the turn).
@@ -374,19 +409,20 @@ pub async fn other_fixed(state: &AppState, chat: &store::Chat) -> u32 {
             .map(|s| s.text),
         None => None,
     };
-    other_fixed_with(state, chat, summary.as_deref()).await
+    OtherFixed {
+        text: fixed_text(state, chat).await,
+        summary,
+    }
 }
 
 /// [0.0.5 memory] [`other_fixed`] for a turn that answers the end of `history` (which may
-/// be on another branch than the one the chat shows, after an edit) in a context of
-/// `n_ctx` tokens: its summary is the one of that branch, as `turns::assemble` reads it,
-/// counted as the loop sends it in this context ([`summary_as_sent`]).
+/// be on another branch than the one the chat shows, after an edit): its summary is the one
+/// of that branch, as `turns::assemble` reads it.
 async fn other_fixed_for_turn(
     state: &AppState,
     chat: &store::Chat,
     history: &[HistoryMessage],
-    n_ctx: u32,
-) -> u32 {
+) -> OtherFixed {
     let ids: Vec<store::MessageId> = history
         .iter()
         .filter_map(|m| m.id.map(store::MessageId))
@@ -397,8 +433,11 @@ async fn other_fixed_for_turn(
         .await
         .ok()
         .flatten()
-        .map(|s| summary_as_sent(&s.text, n_ctx));
-    other_fixed_with(state, chat, summary.as_deref()).await
+        .map(|s| s.text);
+    OtherFixed {
+        text: fixed_text(state, chat).await,
+        summary,
+    }
 }
 
 /// [0.0.5 memory] The summary of earlier messages as a turn in a context of `n_ctx` tokens
@@ -411,7 +450,7 @@ pub(crate) fn summary_as_sent(summary: &str, n_ctx: u32) -> String {
     agent::context::cut_summary(summary, cap)
 }
 
-/// [0.0.5 memory] What [`other_fixed`] counts, from the fixed text and the summary.
+/// [0.0.5 memory] What [`other_fixed`] counts, from the fixed text and the summary (as sent).
 pub(crate) fn fixed_tokens(text: &str, summary: Option<&str>) -> u32 {
     let mut tokens = agent::estimate::estimate_tokens(text).saturating_add(APP_LINES_TOKENS);
     if let Some(summary) = summary.map(str::trim).filter(|s| !s.is_empty()) {
@@ -422,7 +461,9 @@ pub(crate) fn fixed_tokens(text: &str, summary: Option<&str>) -> u32 {
     tokens
 }
 
-async fn other_fixed_with(state: &AppState, chat: &store::Chat, summary: Option<&str>) -> u32 {
+/// The fixed text of a chat's requests: the system prompt, the list of skills and the
+/// skills loaded in the chat.
+async fn fixed_text(state: &AppState, chat: &store::Chat) -> String {
     let prompt = match &chat.system_prompt {
         Some(prompt) => prompt.clone(),
         None => state
@@ -442,7 +483,7 @@ async fn other_fixed_with(state: &AppState, chat: &store::Chat, summary: Option<
     for skill in state.skills.loaded_in(chat.id.0) {
         text.push_str(&skill.body);
     }
-    fixed_tokens(&text, summary)
+    text
 }
 
 /// Everything [`select`] decides on.
@@ -1037,10 +1078,7 @@ async fn choose(
         return (enabled, Vec::new());
     }
     // What the definitions may take of this model's context.
-    let room = allowance(
-        n_ctx,
-        other_fixed_for_turn(state, chat, history, n_ctx).await,
-    );
+    let room = allowance(n_ctx, other_fixed_for_turn(state, chat, history).await);
     let builtin = tool_catalog::builtin_servers(&state.host);
     let candidates: Vec<Candidate> = enabled
         .iter()

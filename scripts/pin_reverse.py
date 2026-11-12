@@ -13,7 +13,7 @@ files are read in memory.
     pin_reverse.py pin --scratch DIR [--rea 6.9.0] [--node 24.22.3] [--java jdk-21.0.13+9]
                        [--ghidra-asset NAME] [--first-download-only ghidra,kuna]
                        [--minimum PART=VERSION --reason TEXT]
-    pin_reverse.py --check
+    pin_reverse.py --check [--release]
     pin_reverse.py --download-to DIR     (downloads and verifies this computer's parts)
 
 Publisher checks (each one recorded in `verified_by`; the pin stops when one fails or its
@@ -27,6 +27,16 @@ verifier is missing):
 - Ghidra and Kuna: the SHA-256 digest GitHub publishes for the release asset (same origin
   as the asset). Where GitHub's API cannot be reached, `--first-download-only <part>`
   records `first-download-only` instead (Kuna always is: its releases carry no signature).
+
+Every part's builds must carry their own publisher's checks (REQUIRED_CHECKS). Ghidra alone
+may carry `first-download-only` in place of `github-digest` while 0.0.6 is developed:
+`--check` passes and names it, `--check --release` fails, and a release build of the app does
+not offer such a part (crates/reverse `lock::release_checks`, `platform::RELEASE_RULES`).
+
+The new lock and fixture are written only after they pass `--check`. A part's minimum
+version moves only with `--minimum <part>=<version> --reason <text>` (R15), or for Node.js,
+Ghidra and Java with the oldest version rea accepts; a bump keeps the previous rea and Kuna
+usable.
 """
 
 from __future__ import annotations
@@ -43,6 +53,7 @@ import subprocess
 import sys
 import tarfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -87,6 +98,17 @@ VERIFIED_KINDS = (
     "github-digest",
     "first-download-only",
 )
+# The publisher checks each part's builds must carry for a release (the same table as
+# crates/reverse `lock::release_checks`). Kuna's releases have no signature: its first
+# download is all there is. Ghidra may carry `first-download-only` instead of
+# `github-digest` outside a release (`--check --release` refuses it).
+REQUIRED_CHECKS = {
+    "rea": ("npm-integrity", "npm-provenance:", "npm-audit-signatures"),
+    "node": ("gpg:nodejs-release-keys",),
+    "kuna": (),
+    "ghidra": ("github-digest",),
+    "java": ("gpg:adoptium", "adoptium-api-checksum"),
+}
 # The tools the app offers (item5-spec.md section 5). The fixture keeps their input schemas.
 ALLOW_LISTED = (
     "open_binary", "close_binary", "binary_session",
@@ -198,6 +220,24 @@ def need(program: str) -> str:
     if not found:
         fail(f"{program} is needed for the publisher checks and was not found")
     return found
+
+
+def https_on(url: object, hosts: list[str]) -> bool:
+    """Whether `url` is https on one of `hosts`, with no user, password or port."""
+    if not isinstance(url, str):
+        return False
+    try:
+        u = urllib.parse.urlsplit(url)
+        port = u.port
+    except ValueError:
+        return False
+    return (
+        u.scheme == "https"
+        and u.hostname in hosts
+        and u.netloc == u.hostname
+        and port is None
+        and "\\" not in url
+    )
 
 
 def gpgv(keyring: Path, *args: str) -> subprocess.CompletedProcess:
@@ -383,21 +423,43 @@ def provenance(version: str, tarball_sha512_hex: str) -> str:
     return found  # type: ignore[return-value]
 
 
+NPM_REGISTRY = "https://registry.npmjs.org/"
+
+
+def npm_env(environ: dict[str, str]) -> dict[str, str]:
+    """The environment for npm without the developer's npm settings: every `npm_*` and
+    `NPM_CONFIG_*` variable (any case) and NODE_OPTIONS are dropped."""
+    return {
+        k: v for k, v in environ.items()
+        if not k.lower().startswith("npm_") and k.upper() != "NODE_OPTIONS"
+    }
+
+
+def npm_isolation_args(user_rc: Path, global_rc: Path) -> list[str]:
+    """npm reads no user or global npmrc (two empty files: npm refuses one file for both)
+    and asks npm's own registry only."""
+    return [f"--registry={NPM_REGISTRY}", f"--userconfig={user_rc}", f"--globalconfig={global_rc}"]
+
+
 def npm_audit_signatures(version: str, scratch: Path) -> None:
     project = scratch / "npm-audit"
     if project.exists():
         shutil.rmtree(project)
     project.mkdir(parents=True)
     (project / "package.json").write_text('{"name":"pin-check","version":"0.0.0","private":true}\n')
+    user_rc, global_rc = scratch / "empty-user-npmrc", scratch / "empty-global-npmrc"
+    user_rc.write_text("")
+    global_rc.write_text("")
     npm = need("npm")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("npm_")}
+    env = npm_env(dict(os.environ))
+    iso = npm_isolation_args(user_rc, global_rc)
     for cmd in (
-        [npm, "install", "--ignore-scripts", "--no-audit", "--no-fund", f"rea-agents@{version}"],
-        [npm, "audit", "signatures"],
+        [npm, "install", *iso, "--ignore-scripts", "--no-audit", "--no-fund", f"rea-agents@{version}"],
+        [npm, "audit", "signatures", *iso],
     ):
         r = subprocess.run(cmd, cwd=project, capture_output=True, text=True, env=env, timeout=900)
         if r.returncode != 0:
-            fail(f"{' '.join(cmd[1:3])} failed:\n{r.stdout}\n{r.stderr}")
+            fail(f"npm {cmd[1]} failed:\n{r.stdout}\n{r.stderr}")
         if cmd[1] == "audit":
             print("  " + r.stdout.strip().replace("\n", "\n  "))
 
@@ -690,6 +752,31 @@ def pin_ghidra(version: str, minimum: str, scratch: Path, args) -> dict:
 
 
 JAVA_ASSET = {"windows-x86_64": ("windows", "x64"), "linux-x86_64": ("linux", "x64")}
+JAVA_EXT = {"windows": "zip", "linux": "tar.gz"}
+
+
+def java_asset_name(major: str, version: str, os_name: str, arch: str) -> str:
+    """Temurin's own name for a JDK archive: OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz."""
+    return f"OpenJDK{major}U-jdk_{arch}_{os_name}_hotspot_{version.replace('+', '_')}.{JAVA_EXT[os_name]}"
+
+
+def java_package_problems(pkg: dict, expected: str) -> list[str]:
+    """What is wrong with a package Adoptium's API describes, checked before anything is
+    fetched or written: the name must be exactly Temurin's own (so it is a plain file name
+    under --scratch), and both links https on the Java hosts, ending with that name."""
+    out = []
+    name = pkg.get("name")
+    if name != expected or not safe_name(str(name)) or "/" in str(name):
+        out.append(f"package name {name!r} is not {expected!r}")
+    for key, suffix in (("link", expected), ("signature_link", expected + ".sig")):
+        url = pkg.get(key)
+        if not https_on(url, HOSTS["java"]) or not str(url).endswith("/" + suffix):
+            out.append(f"{key} {url!r} is not https on {HOSTS['java']} ending in {suffix}")
+    if not isinstance(pkg.get("size"), int) or pkg["size"] <= 0:
+        out.append(f"size {pkg.get('size')!r}")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(pkg.get("checksum", ""))):
+        out.append(f"checksum {pkg.get('checksum')!r}")
+    return out
 JAVA_PROGRAMS = {
     "windows-x86_64": [{"path": "bin/java.exe", "exec": False}, {"path": "bin/javac.exe", "exec": False}],
     "linux-x86_64": [{"path": "bin/java", "exec": True}, {"path": "bin/javac", "exec": True}],
@@ -720,6 +807,9 @@ def pin_java(release: str | None, major: str, scratch: Path) -> dict:
         if b is None:
             fail(f"Temurin {release} has no JDK for {p}")
         pkg = b["package"]
+        problems = java_package_problems(pkg, java_asset_name(major, version, os_name, arch))
+        if problems:
+            fail(f"Adoptium's answer for {p} is not what was expected: " + "; ".join(problems))
         path = download(pkg["link"], scratch, pkg["name"], pkg["size"])
         sig = scratch / (pkg["name"] + ".sig")
         http_get(pkg["signature_link"], sig)
@@ -801,7 +891,7 @@ def apply_minimums(parts: list[dict], minimums: list[str], reason: str | None, o
     old_parts = {p["name"]: p for p in (old or {}).get("parts", [])}
     for part in parts:
         prev = old_parts.get(part["name"])
-        if prev and version_key(prev["minimum_version"]) > version_key(part["minimum_version"]):
+        if prev and version_key(prev["minimum_version"]) >= version_key(part["minimum_version"]):
             part["minimum_version"] = prev["minimum_version"]
             if prev.get("minimum_reason"):
                 part["minimum_reason"] = prev["minimum_reason"]
@@ -816,6 +906,34 @@ def apply_minimums(parts: list[dict], minimums: list[str], reason: str | None, o
             fail(f"--minimum {item} is above the pinned {part['version']}")
         part["minimum_version"] = ver
         part["minimum_reason"] = reason
+
+
+def carried_minimum(name: str, version: str, old: dict | None) -> str:
+    """rea and Kuna: the previous lock's minimum, so a bump keeps the previous version usable
+    with an update offered (R15); the pin itself on a first pin. Only `--minimum` with
+    `--reason` raises it."""
+    prev = next((p for p in (old or {}).get("parts", []) if p.get("name") == name), None)
+    if prev:
+        try:
+            if version_key(prev["minimum_version"]) <= version_key(version):
+                return prev["minimum_version"]
+        except (KeyError, ValueError):
+            pass
+    return version
+
+
+def assemble_parts(raw: dict, rea_version: str, old: dict | None, minimums: list[str], reason: str | None) -> list[dict]:
+    """The lock's parts from what each pin_* returned, with their minimum versions."""
+    rea, node, kuna, ghidra, java = (raw[n] for n in ("rea", "node", "kuna", "ghidra", "java"))
+    parts = [
+        finish_part(rea, rea_version, carried_minimum("rea", rea_version, old)),
+        finish_part(node, node["version"], node["minimum_version"]),
+        finish_part(kuna, kuna["version"], carried_minimum("kuna", kuna["version"], old)),
+        finish_part(ghidra, ghidra["version"], ghidra["minimum_version"]),
+        finish_part(java, java["version"], java["minimum_version"]),
+    ]
+    apply_minimums(parts, minimums, reason, old)
+    return parts
 
 
 def cmd_pin(args) -> None:
@@ -837,14 +955,8 @@ def cmd_pin(args) -> None:
     ghidra = pin_ghidra(facts["ghidra"], facts["ghidra_minimum"], scratch, args)
     print("Temurin")
     java = pin_java(args.java, facts["java_major"], scratch)
-    parts = [
-        finish_part(rea, args.rea, args.rea),
-        finish_part(node, node["version"], node["minimum_version"]),
-        finish_part(kuna, kuna["version"], kuna["minimum_version"]),
-        finish_part(ghidra, ghidra["version"], ghidra["minimum_version"]),
-        finish_part(java, java["version"], java["minimum_version"]),
-    ]
-    apply_minimums(parts, args.minimum or [], args.reason, old)
+    raw = {"rea": rea, "node": node, "kuna": kuna, "ghidra": ghidra, "java": java}
+    parts = assemble_parts(raw, args.rea, old, args.minimum or [], args.reason)
     lock = {
         "schema": SCHEMA,
         "comment": (
@@ -856,24 +968,55 @@ def cmd_pin(args) -> None:
         "disabled_ghidra_analyzers": DISABLED_GHIDRA_ANALYZERS,
         "parts": parts,
     }
-    FIXTURES.mkdir(parents=True, exist_ok=True)
     fixture_path = FIXTURES / f"rea-{args.rea}-catalog.json"
     old_fixture = None
     if old_rea and old_rea.get("version") != args.rea:
         prev = FIXTURES / f"rea-{old_rea['version']}-catalog.json"
         if prev.is_file():
             old_fixture = json.loads(prev.read_text())
+    diff_report(old_fixture, extra["fixture"])
+    # Checked before anything is written: a lock that fails leaves the tree as it was.
+    problems = check(lock, fixtures={fixture_path.name: extra["fixture"]})
+    if problems:
+        fail("the new lock does not pass --check (nothing was written):\n  " + "\n  ".join(problems))
+    FIXTURES.mkdir(parents=True, exist_ok=True)
     fixture_path.write_text(json.dumps(extra["fixture"], indent=1, sort_keys=False) + "\n")
     LOCK.write_text(json.dumps(lock, indent=2) + "\n")
-    diff_report(old_fixture, extra["fixture"])
-    problems = check(lock)
-    if problems:
-        fail("the new lock does not pass --check:\n  " + "\n  ".join(problems))
     print(f"\nwrote {LOCK.relative_to(ROOT)} and {fixture_path.relative_to(ROOT)}")
+    for b in release_blockers(lock):
+        print(f"NOT READY FOR A RELEASE: {b}")
 
 
-def check(lock: dict) -> list[str]:
-    """Offline checks of the lock and its fixtures; returns the problems found."""
+def has_check(verified_by: list, kind: str) -> bool:
+    """Whether `kind` was recorded (`npm-provenance:` needs a commit after the colon)."""
+    if kind.endswith(":"):
+        return any(isinstance(v, str) and v.startswith(kind) and len(v) > len(kind) for v in verified_by)
+    return kind in verified_by
+
+
+def release_ready(name: str, verified_by: list) -> bool:
+    """Whether a build of part `name` carries every check a release needs."""
+    need = REQUIRED_CHECKS.get(name)
+    return need is not None and bool(verified_by) and all(has_check(verified_by, k) for k in need)
+
+
+def release_blockers(lock: dict) -> list[str]:
+    """Builds a release build of the app would not offer (their publisher check is missing)."""
+    return [
+        f"{p.get('name')} {b.get('platform')}: verified by {b.get('verified_by')}, "
+        f"a release needs {list(REQUIRED_CHECKS.get(p.get('name'), ('?',)))}"
+        for p in lock.get("parts", [])
+        for b in p.get("builds", [])
+        if not release_ready(p.get("name"), b.get("verified_by") or [])
+    ]
+
+
+def check(lock: dict, fixtures: dict | None = None, release: bool = False) -> list[str]:
+    """Offline checks of the lock and its fixtures; returns the problems found.
+
+    `fixtures` holds fixtures not yet written (by name); others are read from disk. With
+    `release`, every build must also carry its part's publisher checks (no
+    `first-download-only` Ghidra)."""
     out: list[str] = []
     if lock.get("schema") != SCHEMA:
         out.append(f"schema is {lock.get('schema')}, expected {SCHEMA}")
@@ -914,8 +1057,12 @@ def check(lock: dict) -> list[str]:
                 out.append(f"{bw}: sha256")
             if not isinstance(f.get("size"), int) or f["size"] <= 0:
                 out.append(f"{bw}: size")
-            if not f.get("name") or not url.endswith(f["name"]) or f.get("name") != b.get("upstream_asset"):
-                out.append(f"{bw}: file name")
+            fname = str(f.get("name") or "")
+            if (
+                not fname or "/" in fname or not safe_name(fname)
+                or not url.endswith("/" + fname) or fname != b.get("upstream_asset")
+            ):
+                out.append(f"{bw}: file name {fname!r}")
             strip = b.get("strip_prefix", "")
             if not strip.endswith("/") or not safe_name(strip.rstrip("/")):
                 out.append(f"{bw}: strip_prefix {strip!r}")
@@ -935,6 +1082,11 @@ def check(lock: dict) -> list[str]:
             vb = b.get("verified_by") or []
             if not vb or not all(any(x == k or (k.endswith(":") and x.startswith(k)) for k in VERIFIED_KINDS) for x in vb):
                 out.append(f"{bw}: verified_by {vb}")
+            elif not release_ready(name, vb):
+                waiting = name == "ghidra" and vb == ["first-download-only"] and not release
+                if not waiting:
+                    need = [k for k in REQUIRED_CHECKS.get(name, ("?",)) if not has_check(vb, k)]
+                    out.append(f"{bw}: verified_by {vb} lacks {need}")
     rea = parts.get("rea", {})
     if not rea.get("entry") or not safe_name(rea.get("entry", "")):
         out.append("rea: entry")
@@ -942,18 +1094,29 @@ def check(lock: dict) -> list[str]:
     if not accepted or len(accepted) > 2 or accepted[0].get("version") != rea.get("version"):
         out.append("rea: accepted_rea_versions must start with the pinned version and hold at most two")
     for a in accepted:
-        fixture = FIXTURES / str(a.get("schema_fixture", ""))
-        if a.get("schema_fixture") != f"rea-{a.get('version')}-catalog.json" or not fixture.is_file():
+        try:
+            if version_key(a["version"]) < version_key(rea["minimum_version"]) and not rea.get("minimum_reason"):
+                out.append(
+                    f"rea: accepted version {a['version']} is below minimum_version "
+                    f"{rea['minimum_version']} with no minimum_reason"
+                )
+        except (KeyError, ValueError):
+            out.append(f"rea: accepted version {a.get('version')!r}")
+        name = str(a.get("schema_fixture", ""))
+        given = (fixtures or {}).get(name)
+        fixture = FIXTURES / name
+        plain = safe_name(name) and "/" not in name
+        if name != f"rea-{a.get('version')}-catalog.json" or not plain or (given is None and not fixture.is_file()):
             out.append(f"rea: fixture for {a.get('version')} missing")
             continue
-        data = json.loads(fixture.read_text())
+        data = given if given is not None else json.loads(fixture.read_text())
         if data.get("rea_version") != a.get("version"):
-            out.append(f"rea: fixture {fixture.name} names another version")
+            out.append(f"rea: fixture {name} names another version")
         missing = [n for n in ALLOW_LISTED if n not in data.get("allow_listed", {})]
         if missing:
-            out.append(f"rea: fixture {fixture.name} lacks {missing}")
+            out.append(f"rea: fixture {name} lacks {missing}")
         if data.get("tool_count") != len(data.get("tool_names", [])):
-            out.append(f"rea: fixture {fixture.name} tool count")
+            out.append(f"rea: fixture {name} tool count")
     analyzers = lock.get("disabled_ghidra_analyzers", {})
     for p in OFFERED["ghidra"]:
         names = [n.strip() for n in str(analyzers.get(p, "")).split(",") if n.strip()]
@@ -995,6 +1158,10 @@ def cmd_download_to(target: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="check the lock and fixtures offline")
+    parser.add_argument(
+        "--release", action="store_true",
+        help="with --check: also refuse builds without their publisher's checks (no first-download-only Ghidra)",
+    )
     parser.add_argument("--download-to", metavar="DIR", help="download and verify this computer's parts")
     sub = parser.add_subparsers(dest="command")
     pin = sub.add_parser("pin", help="pin the parts and write the lock and the fixture")
@@ -1010,10 +1177,17 @@ def main() -> None:
     if args.check:
         if not LOCK.is_file():
             fail("reverse.lock.json is missing")
-        problems = check(json.loads(LOCK.read_text()))
+        lock = json.loads(LOCK.read_text())
+        problems = check(lock, release=args.release)
         if problems:
             fail("reverse.lock.json:\n  " + "\n  ".join(problems))
-        print("reverse.lock.json and its fixtures pass")
+        blockers = release_blockers(lock)
+        for b in blockers:
+            print(f"not ready for a release (a release build does not offer it): {b}")
+        if args.release:
+            print("reverse.lock.json and its fixtures pass, ready for a release")
+        else:
+            print("reverse.lock.json and its fixtures pass" + (" (not ready for a release)" if blockers else ""))
     elif args.download_to:
         cmd_download_to(args.download_to)
     elif args.command == "pin":

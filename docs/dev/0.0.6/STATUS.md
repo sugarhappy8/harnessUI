@@ -82,6 +82,10 @@ one starts from this file and `README.md`.
   second fix round; WP1a fixed (being checked), WP1b fixing, WP2 reviewed; WP3a, WP3b, WP5b
   reviewed, WP5a in review; WP4b finishing against the real data; WP9a in development.
   Disk was down to 6.6 GB: old scratch files removed.
+- 21:51 UTC check: done: WP1a, WP4a, WP4c, WP7, WP10c. Fixing: WP1b, WP2, WP3a, WP5b, WP4b,
+  WP9a; WP3b fixed (being checked next); WP5a reviewed; WP6 second fix round being checked.
+  Disk 6.4 GB → 9.3 GB after removing finished reviewers' scratch and superseded test
+  binaries in target/debug/deps.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

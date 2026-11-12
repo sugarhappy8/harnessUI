@@ -426,7 +426,7 @@ fn full_environment(names: impl Iterator<Item = String>) -> runtime::EnvSpec {
 /// The keys the generic `set_setting` may write: plain UI preferences only. Anything with
 /// a policy meaning has its own command (ARCHITECTURE.md 13.5); model settings (the
 /// defaults for all models and each model's own) are never on it (D12).
-const SETTABLE_KEYS: &[&str] = &[
+const ALLOWED: &[&str] = &[
     "theme",
     settings::DEFAULT_SYSTEM_PROMPT,
     settings::REMOTE_CONTEXT_LENGTH,
@@ -439,7 +439,7 @@ pub async fn set_setting(
     key: String,
     value: serde_json::Value,
 ) -> AppResult<()> {
-    if !SETTABLE_KEYS.contains(&key.as_str()) {
+    if !ALLOWED.contains(&key.as_str()) {
         return Err(AppError::bad_request(
             "That setting cannot be changed this way.",
         ));
@@ -702,7 +702,7 @@ mod tests {
     fn the_generic_setting_command_never_reaches_model_settings() {
         use crate::load_settings::{KEY_PREFIX, settings_key};
         assert_eq!(
-            super::SETTABLE_KEYS,
+            super::ALLOWED,
             [
                 "theme",
                 crate::settings::DEFAULT_SYSTEM_PROMPT,
@@ -715,10 +715,10 @@ mod tests {
             crate::settings::LOCAL_MODEL.to_string(),
             settings_key("model.gguf", 4_920_000_000),
         ] {
-            assert!(!super::SETTABLE_KEYS.contains(&key.as_str()), "{key}");
+            assert!(!super::ALLOWED.contains(&key.as_str()), "{key}");
         }
         assert!(
-            super::SETTABLE_KEYS
+            super::ALLOWED
                 .iter()
                 .all(|k| !k.starts_with(KEY_PREFIX) && *k != crate::settings::LOCAL_MODEL)
         );

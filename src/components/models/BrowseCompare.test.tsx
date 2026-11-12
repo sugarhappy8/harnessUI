@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { FitResult, RepoView, SearchPage, VariantView } from "../../lib/types";
 
-// "Add to comparison" on Browse results and on a repository page (0.0.5 item 4). Made-up
+// "Add to comparison" on Browse results and on a repository page (0.0.6 item 4). Made-up
 // repository names only.
 
 const ipcMock = vi.hoisted(() => ({
@@ -193,6 +193,20 @@ describe("Uploader text on Browse and a repository page", () => {
     expect(card.textContent).toContain("\u{1F680}\uFE0F done");
     expect(document.body.textContent).not.toContain("\u202E");
     expect(document.body.textContent).not.toContain("\u200B");
+  });
+
+  it("shows a card written with Windows line endings without codes at line ends, and hides nothing in joiners", async () => {
+    ipcMock.hubRepo.mockResolvedValue({
+      ...VIEW,
+      card: "# Title\r\nFirst line.\r\nSecond\u200D\u200C\uFE0E\uFE0F line \u{1F469}\u200D\u{1F4BB}\r\n",
+    });
+    render(<RepoDetail repoId="someone/alpha-GGUF" onBack={() => undefined} onStarted={() => undefined} />);
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Show model card" }));
+    const card = document.querySelector("pre")!;
+    expect(card.textContent).toBe(
+      "# Title\nFirst line.\nSecond[U+200D][U+200C][U+FE0E][U+FE0F] line \u{1F469}\u200D\u{1F4BB}\n",
+    );
   });
 
   it("says token counts with words", async () => {

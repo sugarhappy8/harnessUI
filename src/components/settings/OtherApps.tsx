@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as ipc from "../../lib/ipc";
-import type { ErrorInfo, ModelLoadInfo, SetupStep, ShareApp, ShareSetup, ShareStatus } from "../../lib/types";
-import { FIT_WORDS, isAppleComputer, tokensWithWords } from "../../lib/words";
+import type { ErrorInfo, ModelBusy, ModelLoadInfo, SetupStep, ShareApp, ShareSetup, ShareStatus } from "../../lib/types";
+import { FIT_WORDS, isAppleComputer, tokensWithWords, waitingWords } from "../../lib/words";
 import { toErrorInfo, useApp } from "../../store/app";
-import { reloadModel } from "../../store/modelChange";
+import { reloadModel, useWaiting } from "../../store/modelChange";
 import { ErrorBanner } from "../ErrorBanner";
 import { ModelSettings } from "../ModelSettings";
 
@@ -15,16 +15,20 @@ import { ModelSettings } from "../ModelSettings";
 //
 // - The switch changes only on the user's click (`set_share_enabled`).
 // - The key is read only when asked for (Show key, Copy) and is never kept outside React
-//   state. The setup cards contain it too, so a card is fetched only when its app is chosen
-//   and forgotten when it is closed or sharing is switched off.
+//   state. Every key request is numbered: one that answers after the key was hidden, or
+//   after sharing went off, is dropped. The setup cards contain the key too: a card is
+//   fetched only when its app is chosen, shows the key as dots until Show key (Copy copies
+//   the backend's text exactly), is forgotten when it is closed or sharing goes off, and is
+//   shown only while it matches the current key, port and size.
 // - The page asks `share_status` again every POLL_MS while it is open and visible (there is
 //   no push event); a late answer never overwrites a newer one.
-// - What a copied setup assumed (the model's context and the port, never the key) is kept in
-//   this webview's local storage, so "Copy the setup again" is still said after a restart.
+// - What each app's copied setup assumed (the model's context, the port and the model file,
+//   never the key) is kept in this webview's local storage, so "Copy the setup again" is
+//   still said after a restart, for the apps it concerns.
 
 /** How often the page asks for the sharing status while it is open. */
 export const POLL_MS = 2000;
-/** Local storage: what the last copied setup assumed (`{ctx, port}`; no key). */
+/** Local storage: what each app's copied setup assumed (`{claudeCode: {ctx, port, model}, …}`; no key). */
 export const COPIED_KEY = "otherApps.copiedSetup";
 /** Claude Code and Codex need at least this much context. */
 const WANTED_CTX = 32_768;
@@ -38,9 +42,16 @@ const WARNING =
   "Claude Code and Codex send long instructions. Set How much it can remember to at least 32,768 tokens (about 24,000 words) for this model.";
 const TOO_MUCH = "This model can't remember that much on this computer. Try Save memory or a smaller model.";
 const SIZE_CHANGED = "You changed how much this model can remember. Copy the setup again.";
+const MODEL_CHANGED =
+  "The loaded model can remember a different amount than when you copied the setup. Copy the setup again.";
 const PORT_CHANGED = "You changed the port. Copy the setup again.";
 const OLD_KEY = "Apps set up with the old key stop working until you copy the new one.";
 const BAD_PORT = "Choose a port from 1024 to 65535.";
+const COPY_FAILED = "Could not copy";
+/** The sharing key inside setup text (`harnessui-share-` and hex digits). */
+const KEY_IN_TEXT = /harnessui-share-[0-9A-Za-z]+/g;
+/** How a card shows the key until the user asks to see it. */
+const HIDDEN_KEY = "harnessui-share-••••••••";
 
 const APPS: { app: ShareApp; label: string }[] = [
   { app: "claudeCode", label: "Claude Code" },
@@ -51,26 +62,37 @@ const APPS: { app: ShareApp; label: string }[] = [
 type Tab = "windows" | "mac";
 const TAB_LABELS: Record<Tab, string> = { windows: "Windows", mac: "Mac" };
 
-/** What the last copied setup assumed. `ctx` is null for the Claude app, whose setup has none. */
+/**
+ * What one app's copied setup assumed. `ctx` is null for the Claude app, whose setup has
+ * none; `model` is the model file loaded then (null when none was).
+ */
 interface Copied {
   ctx: number | null;
   port: number;
+  model: string | null;
 }
+type CopiedSetups = Partial<Record<ShareApp, Copied>>;
 
-function readCopied(): Copied | null {
+function readCopied(): CopiedSetups {
+  const out: CopiedSetups = {};
   try {
     const value: unknown = JSON.parse(window.localStorage.getItem(COPIED_KEY) ?? "null");
     if (value && typeof value === "object") {
-      const { ctx, port } = value as Record<string, unknown>;
-      if (typeof port === "number" && (ctx === null || typeof ctx === "number")) return { ctx, port };
+      for (const { app } of APPS) {
+        const entry: unknown = (value as Record<string, unknown>)[app];
+        if (!entry || typeof entry !== "object") continue;
+        const { ctx, port, model } = entry as Record<string, unknown>;
+        if (typeof port === "number" && (ctx === null || typeof ctx === "number") && (model === null || typeof model === "string"))
+          out[app] = { ctx, port, model };
+      }
     }
   } catch {
     // Unreadable or unavailable: nothing is known about a copied setup.
   }
-  return null;
+  return out;
 }
 
-function writeCopied(copied: Copied): void {
+function writeCopied(copied: CopiedSetups): void {
   try {
     window.localStorage.setItem(COPIED_KEY, JSON.stringify(copied));
   } catch {
@@ -88,34 +110,66 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-/** A Copy button that says "Copied" for a moment. */
-function CopyButton(props: { label: string; text: () => Promise<string> | string; onCopied?: () => void }) {
-  const [copied, setCopied] = useState(false);
+/** "Ann", "Ann and Bo", "Ann, Bo and Cy". */
+function listWords(names: string[]): string {
+  return names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** A Copy button that says "Copied", or "Could not copy", for a moment. */
+function CopyButton(props: {
+  label: string;
+  text: () => Promise<string> | string;
+  onCopied?: () => void;
+  /** The text could not be had (e.g. the key could not be read). */
+  onError?: (e: unknown) => void;
+  disabled?: boolean;
+}) {
+  const [shown, setShown] = useState<"copy" | "copied" | "failed">("copy");
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  function flash(next: "copied" | "failed") {
+    setShown(next);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setShown("copy"), next === "copied" ? 1500 : 3000);
+  }
   async function copy() {
     let text: string;
     try {
       text = await props.text();
-    } catch {
+    } catch (e) {
+      flash("failed");
+      props.onError?.(e);
       return;
     }
-    if (!(await copyText(text))) return;
-    setCopied(true);
+    if (!(await copyText(text))) {
+      flash("failed");
+      return;
+    }
+    flash("copied");
     props.onCopied?.();
-    window.setTimeout(() => setCopied(false), 1500);
   }
   return (
     <button
       type="button"
       aria-label={props.label}
+      disabled={props.disabled}
       onClick={() => void copy()}
-      className="shrink-0 rounded-md border border-border px-2 py-0.5 text-xs hover:bg-bg-muted"
+      className="shrink-0 rounded-md border border-border px-2 py-0.5 text-xs hover:bg-bg-muted disabled:opacity-40"
     >
-      {copied ? "Copied" : "Copy"}
+      {shown === "copied" ? "Copied" : shown === "failed" ? COPY_FAILED : "Copy"}
     </button>
   );
 }
 
-type ErrorPlace = "switch" | "port" | "key" | "memory";
+type ErrorPlace = "read" | "switch" | "port" | "key" | "memory";
+
+/** A setup card, and what it was made for (it is shown only while these are still true). */
+interface Made {
+  app: ShareApp;
+  ctx: number;
+  port: number | null;
+  version: number;
+}
 
 /** Settings → Other apps. */
 export function OtherApps() {
@@ -132,18 +186,26 @@ export function OtherApps() {
   const [keyVersion, setKeyVersion] = useState(0);
   // Setup cards.
   const [app, setApp] = useState<ShareApp | null>(null);
-  const [card, setCard] = useState<{ app: ShareApp; setup: ShareSetup; ctx: number; port: number | null; version: number } | null>(
-    null,
-  );
-  const [cardError, setCardError] = useState<{ app: ShareApp; error: ErrorInfo } | null>(null);
-  const [copied, setCopied] = useState<Copied | null>(readCopied);
+  const [card, setCard] = useState<(Made & { setup: ShareSetup }) | null>(null);
+  const [cardError, setCardError] = useState<(Made & { error: ErrorInfo }) | null>(null);
+  const [copied, setCopied] = useState<CopiedSetups>(readCopied);
   // The loaded model's settings, for the context warning's fit mark.
   const [loadInfo, setLoadInfo] = useState<{ path: string; info: ModelLoadInfo } | null>(null);
   // The loaded model's own settings panel, opened over this page (inside the settings window,
   // so the window stays open under it and Escape closes only the panel).
   const [panelFor, setPanelFor] = useState<string | null>(null);
+  // This page's restart (Use 32,768 tokens and restart): "asking" until the D3 question is
+  // answered, then "running" until the change ends (it may wait for the model to be free).
+  const [restart, setRestart] = useState<"asking" | "running" | null>(null);
+  const [busy, setBusy] = useState<ModelBusy | null>(null);
+  const waitingChange = useWaiting((s) => s.change);
+  const runningChange = useWaiting((s) => s.kind);
   const runtime = useApp((s) => s.runtime);
   const modelPath = runtime?.state === "ready" ? runtime.modelPath : null;
+
+  // Every key request is numbered; hiding the key or sharing going off moves the number on,
+  // so an answer that arrives after that is dropped instead of showing the key again.
+  const keyAsk = useRef(0);
 
   // Every status answer is numbered; one that arrives after a newer one is dropped.
   const asked = useRef(0);
@@ -154,15 +216,29 @@ export function OtherApps() {
     if (n > shown.current) {
       shown.current = n;
       setStatus(next);
+      if (!next.enabled) {
+        // Off (by the switch or as the backend reports it): the key and the cards, which
+        // contain it, are forgotten, and a key still on its way is dropped.
+        keyAsk.current += 1;
+        setKey(null);
+        setChoosing(false);
+        setPortText("");
+        setConfirmNewKey(false);
+        setApp(null);
+        setCard(null);
+        setCardError(null);
+      }
     }
     return next;
   }, []);
 
   useEffect(() => {
-    track(ipc.shareStatus).catch((e) => setError({ place: "switch", error: toErrorInfo(e) }));
+    // A read that works clears the error of one that did not.
+    const read = () => track(ipc.shareStatus).then(() => setError((e) => (e?.place === "read" ? null : e)));
+    read().catch((e) => setError({ place: "read", error: toErrorInfo(e) }));
     const timer = window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
-      track(ipc.shareStatus).catch(() => undefined);
+      read().catch(() => undefined);
     }, POLL_MS);
     return () => window.clearInterval(timer);
   }, [track]);
@@ -170,20 +246,25 @@ export function OtherApps() {
   const enabled = status?.enabled ?? false;
   const port = status?.port ?? null;
   const modelCtx = status?.modelCtx ?? null;
+  const cardCtx = modelCtx ?? ASSUMED_CTX;
 
   // The chosen app's card, fetched again when what it contains changes (port, size, key).
   useEffect(() => {
     if (!app || !enabled) return;
     let alive = true;
-    const ctx = modelCtx ?? ASSUMED_CTX;
+    const made: Made = { app, ctx: modelCtx ?? ASSUMED_CTX, port, version: keyVersion };
     ipc
       .shareSetup(app)
       .then((setup) => {
         if (!alive) return;
-        setCard({ app, setup, ctx, port, version: keyVersion });
+        setCard({ ...made, setup });
         setCardError(null);
       })
-      .catch((e) => alive && setCardError({ app, error: toErrorInfo(e) }));
+      .catch((e) => {
+        if (!alive) return;
+        setCard(null);
+        setCardError({ ...made, error: toErrorInfo(e) });
+      });
     return () => {
       alive = false;
     };
@@ -203,6 +284,29 @@ export function OtherApps() {
     };
   }, [short, modelPath, modelCtx]);
 
+  // This page's restart waits for the model to be free (D3: Restart when it ends, or the
+  // backend waiting on its own for a request that started after the check).
+  const waitingHere =
+    restart === "running" && runtime?.state === "ready" && (waitingChange !== null || runtime.reloadWaiting);
+  // What it waits for, polled while the line shows (as the runtime indicator does).
+  useEffect(() => {
+    if (!waitingHere) return;
+    let alive = true;
+    const read = () =>
+      ipc
+        .modelBusy()
+        .then((b) => alive && setBusy(b))
+        .catch(() => undefined);
+    void read();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") void read();
+    }, POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [waitingHere]);
+
   /** Opens one app's card, or closes it. A closed card is forgotten: it contains the key. */
   function chooseApp(next: ShareApp | null) {
     setApp(next);
@@ -218,17 +322,28 @@ export function OtherApps() {
     return error?.place === place ? <ErrorBanner error={error.error} onDismiss={() => setError(null)} /> : null;
   }
 
+  function hideKey() {
+    keyAsk.current += 1;
+    setKey(null);
+  }
+
+  /** Reads the key and shows it, unless it was hidden (or sharing went off) meanwhile. */
+  async function revealKey() {
+    const n = ++keyAsk.current;
+    try {
+      const next = await ipc.revealShareKey();
+      if (n === keyAsk.current) setKey(next);
+    } catch (e) {
+      if (n === keyAsk.current) fail("key", e);
+    }
+  }
+
   async function toggle(on: boolean) {
     setWorking(on ? "Switching on…" : "Switching off…");
     setError(null);
     try {
+      // Switched off, `track` forgets the key and the cards.
       await track(() => ipc.setShareEnabled(on));
-      if (!on) {
-        setKey(null);
-        setChoosing(false);
-        setConfirmNewKey(false);
-        chooseApp(null);
-      }
     } catch (e) {
       fail("switch", e);
     } finally {
@@ -255,45 +370,62 @@ export function OtherApps() {
 
   async function showKey() {
     setError(null);
-    try {
-      setKey(await ipc.revealShareKey());
-    } catch (e) {
-      fail("key", e);
-    }
+    await revealKey();
   }
 
   async function makeNewKey() {
     setConfirmNewKey(false);
     setWorking("Making a new key…");
     setError(null);
+    // Shown now: the new key is shown once made, unless the user hides it meanwhile.
+    const shownAt = key !== null ? keyAsk.current : null;
     try {
       await track(ipc.newShareKey);
       setKeyReplaced(true);
       setKeyVersion((v) => v + 1);
-      if (key !== null) setKey(await ipc.revealShareKey());
     } catch (e) {
       fail("key", e);
+      return;
     } finally {
       setWorking(null);
     }
+    if (shownAt !== null && shownAt === keyAsk.current) await revealKey();
   }
 
-  /** A step of the setup was copied: remember what that setup assumed. */
+  const shownCard =
+    card && card.app === app && card.version === keyVersion && card.port === port && card.ctx === cardCtx ? card : null;
+  const shownCardError =
+    !shownCard &&
+    cardError &&
+    cardError.app === app &&
+    cardError.version === keyVersion &&
+    cardError.port === port &&
+    cardError.ctx === cardCtx
+      ? cardError.error
+      : null;
+
+  /** A step of the shown card was copied: remember what that app's setup assumed. */
   function setupCopied() {
-    if (!card) return;
-    const next: Copied = {
-      ctx: card.app === "claudeApp" ? (copied?.ctx ?? null) : card.ctx,
-      port: card.port ?? copied?.port ?? 0,
+    if (!shownCard) return;
+    const claudeApp = shownCard.app === "claudeApp";
+    const next: CopiedSetups = {
+      ...copied,
+      [shownCard.app]: {
+        ctx: claudeApp ? null : shownCard.ctx,
+        port: shownCard.port ?? 0,
+        model: claudeApp ? null : modelPath,
+      },
     };
     writeCopied(next);
     setCopied(next);
-    if (card.version === keyVersion) setKeyReplaced(false);
+    if (shownCard.version === keyVersion) setKeyReplaced(false);
   }
 
   /**
    * Saves 32,768 tokens for the loaded model and restarts it (asking first when it is busy,
    * D3). The model's other settings are read again first, so a change made in its panel
-   * since the warning appeared is kept.
+   * since the warning appeared is kept. While the restart waits for the model to be free,
+   * only this button waits: the rest of the page stays usable.
    */
   async function applyWanted(path: string) {
     setWorking("Saving…");
@@ -301,20 +433,53 @@ export function OtherApps() {
     try {
       const { overrides } = await ipc.modelLoadInfo(path);
       await ipc.setModelLoadSettings(path, { ...overrides, context: { fixed: WANTED_CTX } });
+    } catch (e) {
+      fail("memory", e);
+      return;
+    } finally {
       setWorking(null);
-      await reloadModel(useApp.getState().runtime, false, () => setWorking("Restarting the model…"));
+    }
+    setRestart("asking");
+    try {
+      await reloadModel(useApp.getState().runtime, false, () => setRestart("running"));
     } catch (e) {
       fail("memory", e);
     } finally {
-      setWorking(null);
+      setRestart(null);
+    }
+  }
+
+  async function cancelWait() {
+    try {
+      await ipc.cancelPendingReload();
+    } catch (e) {
+      fail("memory", e);
     }
   }
 
   const info = loadInfo && loadInfo.path === modelPath ? loadInfo.info : null;
-  const shownCard = card && card.app === app ? card : null;
-  const shownCardError = cardError && cardError.app === app && !shownCard ? cardError.error : null;
-  const sizeChanged = copied !== null && copied.ctx !== null && modelCtx !== null && modelCtx !== copied.ctx;
-  const portChanged = copied !== null && port !== null && port !== copied.port;
+  const shownLine = working ?? (restart === "running" && !waitingHere ? "Restarting the model…" : null);
+  // Which copied setups no longer match: the size (Claude Code, Codex) or the port (all).
+  const sizeStale = (c: Copied) => c.ctx !== null && modelCtx !== null && c.ctx !== modelCtx;
+  const portStale = (c: Copied) => port !== null && c.port !== port;
+  const staleBySize = APPS.filter((a) => {
+    const c = copied[a.app];
+    return c !== undefined && sizeStale(c);
+  });
+  const sizeNote =
+    staleBySize.length === 0
+      ? null
+      : staleBySize.every((a) => copied[a.app]?.model === modelPath)
+        ? SIZE_CHANGED
+        : MODEL_CHANGED;
+  const portChanged = APPS.some((a) => {
+    const c = copied[a.app];
+    return c !== undefined && portStale(c);
+  });
+  const setUpAgain = APPS.filter((a) => {
+    const c = copied[a.app];
+    return c !== undefined && (sizeStale(c) || portStale(c));
+  }).map((a) => a.label);
 
   return (
     <div className="space-y-4 text-sm">
@@ -336,10 +501,11 @@ export function OtherApps() {
         <span className={enabled ? "font-medium" : ""}>{SWITCH_LABEL}</span>
         <span className="rounded-full border border-warning/50 px-2 py-0.5 text-xs text-warning">Experimental</span>
       </label>
+      {errorAt("read")}
       {errorAt("switch")}
-      {working !== null && (
+      {shownLine !== null && (
         <p className="text-xs text-fg-muted" role="status">
-          {working}
+          {shownLine}
         </p>
       )}
 
@@ -356,7 +522,7 @@ export function OtherApps() {
             {status.listening && status.inUse && <p className="text-accent">Another app is using the model now.</p>}
             {status.listening && modelCtx === null && (
               <p className="text-fg-muted">
-                {runtime?.state === "starting"
+                {runtime?.state === "starting" || runtime?.state === "stopping"
                   ? "The model is still loading. Apps get an answer saying so until it is ready."
                   : "No model is loaded now. Apps get an answer saying so until you load one."}
               </p>
@@ -417,9 +583,9 @@ export function OtherApps() {
                 Choose another port
               </button>
             )}
-            <p>{`Requests refused since sharing was switched on: ${status.refused}`}</p>
+            <p>{`Requests refused since sharing was switched on: ${status.refused.toLocaleString("en-US")}`}</p>
             <p className="text-xs text-fg-muted">
-              A request is refused when it has no key or a wrong key, or comes from a web page. Each answered request
+              A request is refused when it has no key or a wrong key, or comes from a web page. Each request for a reply
               is listed in the Audit log, without what was asked.
             </p>
           </section>
@@ -430,7 +596,27 @@ export function OtherApps() {
               aria-label="How much the model can remember"
             >
               <p>{WARNING}</p>
-              {info && <MemoryChoice info={info} disabled={working !== null} onUse={() => void applyWanted(info.path)} />}
+              {info && (
+                <MemoryChoice
+                  info={info}
+                  disabled={working !== null || restart !== null}
+                  onUse={() => void applyWanted(info.path)}
+                />
+              )}
+              {waitingHere && (
+                <p className="flex flex-wrap items-center gap-1.5 text-xs text-warning" role="status">
+                  <span>{waitingWords(waitingChange ?? runningChange ?? "reload", busy)}</span>
+                  <span aria-hidden>·</span>
+                  <button
+                    type="button"
+                    aria-label="Cancel the restart"
+                    onClick={() => void cancelWait()}
+                    className="underline hover:text-fg"
+                  >
+                    Cancel
+                  </button>
+                </p>
+              )}
               {modelPath && (
                 <button
                   type="button"
@@ -454,15 +640,16 @@ export function OtherApps() {
               {key === null ? (
                 <button
                   type="button"
+                  disabled={working !== null}
                   onClick={() => void showKey()}
-                  className="rounded-md border border-border px-3 py-1 hover:bg-bg-muted"
+                  className="rounded-md border border-border px-3 py-1 hover:bg-bg-muted disabled:opacity-40"
                 >
                   Show key
                 </button>
               ) : (
                 <button
                   type="button"
-                  onClick={() => setKey(null)}
+                  onClick={hideKey}
                   className="rounded-md border border-border px-3 py-1 hover:bg-bg-muted"
                 >
                   Hide key
@@ -470,8 +657,10 @@ export function OtherApps() {
               )}
               <CopyButton
                 label="Copy the key"
+                disabled={working !== null}
                 text={() => key ?? ipc.revealShareKey()}
                 onCopied={() => setKeyReplaced(false)}
+                onError={(e) => fail("key", e)}
               />
               {!confirmNewKey && (
                 <button
@@ -514,10 +703,12 @@ export function OtherApps() {
               Set up an app
             </h3>
             <p className="text-xs text-fg-muted">
-              Choose an app to see how to set it up. The setup includes the key.
+              Choose an app to see how to set it up. The setup includes the key, shown as dots until you choose Show
+              key.
             </p>
-            {sizeChanged && <p className="text-warning">{SIZE_CHANGED}</p>}
+            {sizeNote !== null && <p className="text-warning">{sizeNote}</p>}
             {portChanged && <p className="text-warning">{PORT_CHANGED}</p>}
+            {setUpAgain.length > 0 && <p className="text-xs text-warning">{`Apps to set up again: ${listWords(setUpAgain)}.`}</p>}
             <div className="flex flex-wrap gap-2">
               {APPS.map((a) => (
                 <button
@@ -536,7 +727,9 @@ export function OtherApps() {
             </div>
             {shownCardError && <ErrorBanner error={shownCardError} onDismiss={() => setCardError(null)} />}
             {app && !shownCard && !shownCardError && <p className="text-xs text-fg-muted">Getting the setup…</p>}
-            {shownCard && <SetupCard key={shownCard.app} setup={shownCard.setup} onCopied={setupCopied} />}
+            {shownCard && (
+              <SetupCard key={shownCard.app} setup={shownCard.setup} keyShown={key !== null} onCopied={setupCopied} />
+            )}
           </section>
         </>
       )}
@@ -579,8 +772,11 @@ function MemoryChoice(props: { info: ModelLoadInfo; disabled: boolean; onUse: ()
   );
 }
 
-/** One app's setup: Windows and Mac tabs (when the ways differ), steps with Copy buttons, and the notes. */
-function SetupCard(props: { setup: ShareSetup; onCopied: () => void }) {
+/**
+ * One app's setup: Windows and Mac tabs (when the ways differ), steps with Copy buttons, and
+ * the notes. The key shows as dots unless `keyShown`; Copy copies the backend's text as it is.
+ */
+function SetupCard(props: { setup: ShareSetup; keyShown: boolean; onCopied: () => void }) {
   const { setup } = props;
   const tabs = (["windows", "mac"] as const).filter((t) => setup.ways.some((w) => w.system === t));
   const [chosen, setChosen] = useState<Tab>(isAppleComputer() ? "mac" : "windows");
@@ -604,7 +800,13 @@ function SetupCard(props: { setup: ShareSetup; onCopied: () => void }) {
           <h5 className="text-sm font-medium">{way.title}</h5>
           <ol className="list-decimal space-y-2 pl-5">
             {way.steps.map((step, i) => (
-              <Step key={i} step={step} name={`step ${i + 1} of ${way.title}`} onCopied={props.onCopied} />
+              <Step
+                key={i}
+                step={step}
+                name={`step ${i + 1} of ${way.title}`}
+                keyShown={props.keyShown}
+                onCopied={props.onCopied}
+              />
             ))}
           </ol>
         </div>
@@ -665,11 +867,12 @@ function SetupCard(props: { setup: ShareSetup; onCopied: () => void }) {
   );
 }
 
-function Step(props: { step: SetupStep; name: string; onCopied: () => void }) {
+function Step(props: { step: SetupStep; name: string; keyShown: boolean; onCopied: () => void }) {
   const { step } = props;
+  const shown = (text: string) => (props.keyShown ? text : text.replace(KEY_IN_TEXT, HIDDEN_KEY));
   return (
     <li className="space-y-1">
-      <p>{step.text}</p>
+      <p>{shown(step.text)}</p>
       {step.file !== null && (
         <div className="flex items-center gap-2">
           <code className="min-w-0 font-mono text-xs break-all">{step.file}</code>
@@ -679,7 +882,7 @@ function Step(props: { step: SetupStep; name: string; onCopied: () => void }) {
       {step.code !== null && (
         <div className="flex items-start gap-2">
           <pre className="min-w-0 flex-1 overflow-x-auto rounded-md bg-bg-muted p-2 font-mono text-xs whitespace-pre">
-            {step.code}
+            {shown(step.code)}
           </pre>
           <CopyButton label={`Copy ${props.name}`} text={() => step.code ?? ""} onCopied={props.onCopied} />
         </div>

@@ -21,10 +21,11 @@
 //! 3. [`stub_results`] over this turn's own results, oldest first, keeping the user's message
 //!    and the latest call and result.
 //!
-//! A summary is cut to [`ContextBudget::summary_max_chars`]. One written when the model had a
-//! larger context can be longer than a smaller context allows; before the turn measures
-//! anything it is folded again under the smaller cap ([`fold_instruction`]), or, when the
-//! model cannot do that, cut to it ([`cut_summary`]).
+//! A summary is cut to [`ContextBudget::summary_max_chars`], keeping its head and its tail
+//! ([`cut_summary`]). One written when the model had a larger context can be longer than a
+//! smaller context allows; before the turn measures anything it is folded again under the
+//! smaller cap ([`fold_instruction`]), or, when the model cannot do that, cut to it for the
+//! turn.
 //!
 //! A stubbed call keeps its name and arguments (long string values shortened) and its result
 //! becomes a note with the status, the size and "call again to re-read"; a call and its
@@ -180,12 +181,30 @@ pub fn about_words(tokens: u32) -> u64 {
 }
 
 /// A token count with words, as the app writes them: "8,192 tokens, about 6,000 words".
+/// Below a hundred words: "100 tokens, under 100 words".
 pub fn tokens_with_words(tokens: u32) -> String {
     format!(
-        "{} tokens, about {} words",
+        "{} tokens, {}",
         group_digits(u64::from(tokens)),
-        group_digits(about_words(tokens))
+        words_of(tokens)
     )
+}
+
+/// An estimated token count with words: "about 3,500 tokens (about 2,600 words)".
+pub fn about_tokens_with_words(tokens: u32) -> String {
+    format!(
+        "about {} tokens ({})",
+        group_digits(u64::from(tokens)),
+        words_of(tokens)
+    )
+}
+
+/// "about 6,000 words", or "under 100 words".
+fn words_of(tokens: u32) -> String {
+    match about_words(tokens) {
+        0 => "under 100 words".to_owned(),
+        words => format!("about {} words", group_digits(words)),
+    }
 }
 
 /// The "tools do not fit" refusal, with the numbers for the message
@@ -206,7 +225,9 @@ pub struct ToolsDoNotFit {
 }
 
 impl ToolsDoNotFit {
-    /// "These 23 tools need about 3,500 tokens; this model's window is 8,192."
+    /// "These 23 tools need about 3,500 tokens (about 2,000 words). That is too much for a
+    /// model that can remember 8,192 tokens, about 6,000 words. …" (0.0.6: in the words of
+    /// Model settings, "How much it can remember", not "window" or "context size").
     pub fn message(&self) -> String {
         let tools = if self.tool_count == 1 {
             "This tool needs".to_owned()
@@ -214,10 +235,10 @@ impl ToolsDoNotFit {
             format!("These {} tools need", self.tool_count)
         };
         format!(
-            "{tools} about {} tokens; this model's window is {}. Turn some tool groups off or \
-             raise the context size.",
-            group_digits(u64::from(self.tool_tokens)),
-            group_digits(u64::from(self.n_ctx))
+            "{tools} {}. That is too much for a model that can remember {}. Turn some tool \
+             groups off, or let the model remember more.",
+            about_tokens_with_words(self.tool_tokens),
+            tokens_with_words(self.n_ctx)
         )
     }
 }
@@ -244,8 +265,9 @@ pub struct PinnedDoNotFit {
 }
 
 impl PinnedDoNotFit {
-    /// "Your 20 pinned instructions need about 6,700 tokens; this model's window is 4,096,
-    /// and pinned instructions may take up to 748 of it."
+    /// "Your 20 pinned instructions need about 6,741 tokens (about 5,000 words). The model
+    /// can remember 4,096 tokens, about 3,000 words, and pinned instructions may take up to
+    /// 748 tokens of it (about 500 words). …" (0.0.6: plain words, as [`ToolsDoNotFit`]).
     pub fn message(&self) -> String {
         let pins = if self.pin_count == 1 {
             "Your pinned instruction needs".to_owned()
@@ -253,12 +275,13 @@ impl PinnedDoNotFit {
             format!("Your {} pinned instructions need", self.pin_count)
         };
         format!(
-            "{pins} about {} tokens; this model's window is {}, and pinned instructions may \
-             take up to {} of it. Remove or shorten pins in the Context tab, or raise the \
-             context size.",
-            group_digits(u64::from(self.pinned_tokens)),
-            group_digits(u64::from(self.n_ctx)),
-            group_digits(u64::from(self.allowed_tokens))
+            "{pins} {}. The model can remember {}, and pinned instructions may take up to {} \
+             tokens of it ({}). Remove or shorten pins in the Context tab, or let the model \
+             remember more.",
+            about_tokens_with_words(self.pinned_tokens),
+            tokens_with_words(self.n_ctx),
+            group_digits(u64::from(self.allowed_tokens)),
+            words_of(self.allowed_tokens)
         )
     }
 }
@@ -707,8 +730,9 @@ mod tests {
         };
         assert_eq!(
             refusal.message(),
-            "These 23 tools need about 3,500 tokens; this model's window is 8,192. Turn some tool \
-             groups off or raise the context size."
+            "These 23 tools need about 3,500 tokens (about 2,000 words). That is too much for a \
+             model that can remember 8,192 tokens, about 6,000 words. Turn some tool groups off, \
+             or let the model remember more."
         );
     }
 
@@ -730,9 +754,10 @@ mod tests {
         };
         assert_eq!(
             refusal.message(),
-            "Your 20 pinned instructions need about 6,741 tokens; this model's window is 4,096, \
-             and pinned instructions may take up to 748 of it. Remove or shorten pins in the \
-             Context tab, or raise the context size."
+            "Your 20 pinned instructions need about 6,741 tokens (about 5,000 words). The model \
+             can remember 4,096 tokens, about 3,000 words, and pinned instructions may take up \
+             to 748 tokens of it (about 500 words). Remove or shorten pins in the Context tab, \
+             or let the model remember more."
         );
         let one = PinnedDoNotFit {
             pin_count: 1,
@@ -741,7 +766,7 @@ mod tests {
         };
         assert!(
             one.message()
-                .starts_with("Your pinned instruction needs about 900 tokens; "),
+                .starts_with("Your pinned instruction needs about 900 tokens (about 600 words). "),
             "{}",
             one.message()
         );
@@ -985,6 +1010,16 @@ mod tests {
         assert_eq!(tokens_with_words(4_096), "4,096 tokens, about 3,000 words");
         assert_eq!(tokens_with_words(600), "600 tokens, about 400 words");
         assert_eq!(about_words(0), 0);
+        // Fewer than a hundred words is not "about 0 words".
+        assert_eq!(tokens_with_words(100), "100 tokens, under 100 words");
+        assert_eq!(
+            about_tokens_with_words(100),
+            "about 100 tokens (under 100 words)"
+        );
+        assert_eq!(
+            about_tokens_with_words(3_500),
+            "about 3,500 tokens (about 2,000 words)"
+        );
     }
 
     #[test]

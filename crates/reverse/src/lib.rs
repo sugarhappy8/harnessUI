@@ -203,11 +203,15 @@ pub struct PartInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
-    /// Installed version of the row's main part.
+    /// The part `from` and `to` belong to: the row's main part (`rea`, `kuna`, `ghidra`)
+    /// when it changes, else the first part that does (`node` or `java`), so an update of
+    /// Node.js alone reads "Node.js 24.22.3 → 24.22.4", never "rea 6.9.0 → 6.9.0".
+    pub part: String,
+    /// Installed version of that part.
     pub from: String,
-    /// Pinned version.
+    /// Its pinned version.
     pub to: String,
-    /// Bytes to download.
+    /// Bytes to download (every part that changes).
     pub download_bytes: u64,
 }
 
@@ -353,6 +357,17 @@ pub enum ReverseError {
         /// The host.
         host: String,
     },
+    /// The host was reached but answered the download with an error status (404 when the
+    /// file was withdrawn, 403 when it refused, 5xx when it has a problem). Suggested text
+    /// for WP9d: "<host> didn't send the file (error <status>). Try again later. If it
+    /// keeps failing, report it."
+    #[error("{host} answered HTTP {status}")]
+    ServerError {
+        /// The host.
+        host: String,
+        /// The HTTP status.
+        status: u16,
+    },
     /// The URL or a redirect left the part's hosts.
     #[error("redirected to {host}, which is not trusted")]
     BlockedHost {
@@ -491,6 +506,24 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({"kind":"cantReach","host":"nodejs.org"})
+        );
+        assert_eq!(
+            serde_json::to_value(ReverseError::ServerError {
+                host: "github.com".into(),
+                status: 404
+            })
+            .unwrap(),
+            serde_json::json!({"kind":"serverError","host":"github.com","status":404})
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateInfo {
+                part: "node".into(),
+                from: "24.22.3".into(),
+                to: "24.22.4".into(),
+                download_bytes: 5
+            })
+            .unwrap(),
+            serde_json::json!({"part":"node","from":"24.22.3","to":"24.22.4","downloadBytes":5})
         );
         assert_eq!(
             serde_json::to_value(ReverseError::DiskFull { need_bytes: 9 }).unwrap(),

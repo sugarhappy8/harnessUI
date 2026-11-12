@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::archive::{self, ArchiveError, Rules, safe_relative};
 use crate::diskspace::{self, FreeSpace};
 use crate::layout::{COMPLETE_MARKER, ReverseLayout};
-use crate::lock::{self, Acceptance, Build, Part, ReverseLock, version_key};
+use crate::lock::{self, Acceptance, Build, Part, ReverseLock, safe_pinned_file, version_key};
 use crate::platform::{self, Os, Platform};
 use crate::{
     BrokenWhy, Component, ComponentState, ComponentStatus, Decompiler, DownloadStage, LicenseInfo,
@@ -107,8 +107,22 @@ async fn preflight(url: &reqwest::Url, cancel: &CancellationToken) -> Result<(),
     }
 }
 
-/// Maps the pack downloader's errors; a failure before any byte arrived is "can't reach".
+/// The status of a `runtime::packs` failure that was an HTTP answer ("HTTP 404").
+fn http_status(message: &str) -> Option<u16> {
+    message.strip_prefix("HTTP ")?.trim().parse().ok()
+}
+
+/// Maps the pack downloader's errors. A failure before any byte arrived is "can't reach",
+/// unless the host answered with an error status: then it was reached and said no.
 fn from_pack_error(e: PackError, part: &str, host: &str, got_bytes: bool) -> ReverseError {
+    if let PackError::Network { message, .. } = &e
+        && let Some(status) = http_status(message)
+    {
+        return ReverseError::ServerError {
+            host: host.to_string(),
+            status,
+        };
+    }
     match e {
         PackError::Cancelled => ReverseError::Cancelled,
         PackError::BlockedHost(host) => ReverseError::BlockedHost { host },
@@ -409,6 +423,7 @@ pub struct Installer {
     free_space: FreeSpace,
     opener: Opener,
     fs_name: FsName,
+    release_rules: bool,
     active: Mutex<HashMap<Component, ComponentState>>,
 }
 
@@ -507,6 +522,7 @@ impl Installer {
             free_space: diskspace::system(),
             opener: Arc::new(open_for_read),
             fs_name: Arc::new(diskspace::filesystem_name),
+            release_rules: platform::RELEASE_RULES,
             active: Mutex::new(HashMap::new()),
         }
     }
@@ -535,6 +551,12 @@ impl Installer {
         self.fs_name = fs_name;
         self
     }
+    /// Follows the release rules (only parts with their publishers' checks are offered) or
+    /// not; by default a release build does and a debug build does not (tests).
+    pub fn with_release_rules(mut self, on: bool) -> Self {
+        self.release_rules = on;
+        self
+    }
 
     /// The lock in use.
     pub fn lock(&self) -> &ReverseLock {
@@ -555,6 +577,32 @@ impl Installer {
             .parts_of(component)
             .filter_map(|p| p.build_for(self.platform).map(|b| (p, b)))
             .collect()
+    }
+
+    /// Where a pinned file's resumable download lives, or `None` when its name or digest
+    /// would leave `.downloads/` (never joined, never fetched).
+    fn part_path(&self, f: &PackFile) -> Option<PathBuf> {
+        safe_pinned_file(f).then(|| self.layout.downloads().join(part_file_name(f)))
+    }
+
+    /// Bytes of a part's paused download.
+    fn part_bytes(&self, f: &PackFile) -> u64 {
+        self.part_path(f)
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map_or(0, |m| m.len())
+    }
+
+    /// Deletes the paused downloads of a row once every one of its parts is in place, so a
+    /// Cancel while a later part unpacks keeps the row resumable ("Paused at …").
+    fn forget_downloads_if_complete(&self, component: Component) {
+        let parts = self.parts(component);
+        if parts.iter().all(|(p, _)| self.pinned_ok(p)) {
+            for (_, b) in parts {
+                if let Some(path) = self.part_path(&b.file) {
+                    let _ = remove_file_if_present(&path);
+                }
+            }
+        }
     }
 
     fn read_marker(&self, dir: &Path, part: &Part, version: &str) -> Option<Marker> {
@@ -624,10 +672,7 @@ impl Installer {
     fn partial_bytes(&self, component: Component) -> u64 {
         self.parts(component)
             .iter()
-            .filter_map(|(_, b)| {
-                std::fs::metadata(self.layout.downloads().join(part_file_name(&b.file))).ok()
-            })
-            .map(|m| m.len())
+            .map(|(_, b)| self.part_bytes(&b.file))
             .sum()
     }
 
@@ -645,6 +690,17 @@ impl Installer {
                 DiskState::NotInstalled
             };
             return (state, found);
+        }
+        // Some parts in place and the others still downloaded but not unpacked: a Cancel
+        // while a later part unpacked. The row is paused, not broken.
+        let missing: Vec<&Build> = parts
+            .iter()
+            .zip(&found)
+            .filter(|(_, f)| f.is_none())
+            .map(|((_, b), _)| *b)
+            .collect();
+        if !missing.is_empty() && missing.iter().all(|b| self.part_bytes(&b.file) > 0) {
+            return (DiskState::Partial(self.partial_bytes(component)), found);
         }
         for ((part, _), f) in parts.iter().zip(&found) {
             let Some(f) = f else {
@@ -703,7 +759,8 @@ impl Installer {
 
     /// A row's status for the tab.
     pub fn status(&self, component: Component) -> ComponentStatus {
-        let (available, reason) = platform::availability(&self.lock, component, self.platform);
+        let (available, reason) =
+            platform::availability_with(&self.lock, component, self.platform, self.release_rules);
         let parts = self.parts(component);
         let (_, found) = self.disk_state(component);
         let main_pinned = self
@@ -722,17 +779,25 @@ impl Installer {
         } else {
             parts.iter().map(|(_, b)| b.unpacked_bytes).sum()
         };
-        let stale: Vec<&Build> = parts
+        // Parts whose installed copy differs from the pin: (part, installed version, build).
+        let stale: Vec<(&Part, &str, &Build)> = parts
             .iter()
             .zip(&found)
-            .filter(|((p, _), f)| f.as_ref().is_some_and(|f| f.marker.version != p.version))
-            .map(|((_, b), _)| *b)
+            .filter_map(|((p, b), f)| {
+                let f = f.as_ref()?;
+                (f.marker.version != p.version).then_some((*p, f.marker.version.as_str(), *b))
+            })
             .collect();
-        let update = (all_found && !stale.is_empty()).then(|| UpdateInfo {
-            from: installed_version.clone().unwrap_or_default(),
-            to: main_pinned.clone(),
-            download_bytes: stale.iter().map(|b| b.file.size).sum(),
-        });
+        // The row's main part when it changes, else the first part that does.
+        let update = stale
+            .first()
+            .filter(|_| all_found)
+            .map(|(p, from, _)| UpdateInfo {
+                part: p.name.clone(),
+                from: (*from).to_string(),
+                to: p.version.clone(),
+                download_bytes: stale.iter().map(|(_, _, b)| b.file.size).sum(),
+            });
         ComponentStatus {
             component,
             available,
@@ -914,10 +979,7 @@ impl Installer {
         }
         let mut need: u64 = 0;
         for (_, build) in plan {
-            let have = std::fs::metadata(self.layout.downloads().join(part_file_name(&build.file)))
-                .map(|m| m.len())
-                .unwrap_or(0)
-                .min(build.file.size);
+            let have = self.part_bytes(&build.file).min(build.file.size);
             need = need
                 .saturating_add(build.file.size - have)
                 .saturating_add(build.unpacked_bytes);
@@ -939,21 +1001,21 @@ impl Installer {
         cancel: &CancellationToken,
         progress: &(dyn Fn(Progress) + Send + Sync),
     ) -> Result<Installed, ReverseError> {
-        let (available, reason) = platform::availability(&self.lock, component, self.platform);
+        let (available, reason) =
+            platform::availability_with(&self.lock, component, self.platform, self.release_rules);
         if !available {
             return Err(ReverseError::NotAvailable {
                 reason: reason.unwrap_or_default(),
             });
         }
         let mut rows = Vec::new();
-        if component != Component::Rea && self.usable(Component::Rea).is_err() {
-            let rea_missing = self
-                .parts(Component::Rea)
-                .iter()
-                .all(|(p, _)| self.find(p).is_none());
-            if rea_missing {
-                rows.push(Component::Rea);
-            }
+        if component != Component::Rea
+            && matches!(
+                self.disk_state(Component::Rea).0,
+                DiskState::NotInstalled | DiskState::Partial(_)
+            )
+        {
+            rows.push(Component::Rea);
         }
         rows.push(component);
         let _claim = self.claim(&rows)?;
@@ -967,7 +1029,13 @@ impl Installer {
             return self.usable(component);
         }
         let mut hosts = Vec::new();
-        for (part, _) in &plan {
+        for (part, build) in &plan {
+            if !safe_pinned_file(&build.file) {
+                return Err(ReverseError::Archive {
+                    part: part.name.clone(),
+                    message: format!("the pinned file name {:?} is unsafe", build.file.name),
+                });
+            }
             hosts.push(part.host_set().ok_or_else(|| ReverseError::BlockedHost {
                 host: part.hosts.join(", "),
             })?);
@@ -1050,10 +1118,12 @@ impl Installer {
             checked += build.file.size;
         }
 
-        // 3. Unpack each part into `.tmp-<dir>`, marker last, then rename into place.
+        // 3. Unpack each part into `.tmp-<dir>`, marker last, then rename into place. A
+        // row's downloads are deleted once all of its parts are in place.
         for (part, build) in &plan {
             self.unpack_part(&rows, component, part, build, cancel, progress)
                 .await?;
+            self.forget_downloads_if_complete(part.component);
         }
 
         // 4. Older versions of these parts are no longer used (best effort: on Windows a
@@ -1137,7 +1207,6 @@ impl Installer {
         result.map_err(|e| ReverseError::Io {
             message: e.to_string(),
         })??;
-        let _ = tokio::fs::remove_file(&src).await;
         Ok(())
     }
 
@@ -1179,7 +1248,9 @@ impl Installer {
             .parts
             .iter()
             .filter(|p| names.contains(&p.name))
-            .flat_map(|p| p.builds.iter().map(|b| part_file_name(&b.file)))
+            .flat_map(|p| p.builds.iter())
+            .filter(|b| safe_pinned_file(&b.file))
+            .map(|b| part_file_name(&b.file))
             .collect();
         tokio::task::spawn_blocking(move || -> Result<(), ReverseError> {
             let Ok(entries) = std::fs::read_dir(&root) else {
@@ -1220,11 +1291,21 @@ impl Installer {
     }
 
     /// Deletes a row's paused download (Remove on "Paused at …").
+    /// When some of the row's parts were already unpacked (a Cancel while a later part
+    /// unpacked), those are removed too, so the row is "Not installed" again.
     pub async fn discard_partial(&self, component: Component) -> Result<(), ReverseError> {
         let _claim = self.claim(&[component])?;
+        let (state, found) = self.disk_state(component);
         for (part, build) in self.parts(component) {
-            remove_file_if_present(&self.layout.downloads().join(part_file_name(&build.file)))?;
+            if let Some(path) = self.part_path(&build.file) {
+                remove_file_if_present(&path)?;
+            }
             remove_dir_if_present(&self.layout.tmp_part_dir(&part.dir))?;
+        }
+        if matches!(state, DiskState::Partial(_)) {
+            for f in found.into_iter().flatten() {
+                remove_dir_if_present(&f.dir)?;
+            }
         }
         Ok(())
     }
@@ -1404,6 +1485,39 @@ mod tests {
             from_pack_error(PackError::Cancelled, "rea", "h", true),
             ReverseError::Cancelled
         );
+    }
+
+    /// A host that answered with an error status was reached: "can't reach" would send the
+    /// owner to check a connection that works.
+    #[test]
+    fn an_http_error_status_is_not_cant_reach() {
+        for (status, got) in [(404, false), (403, false), (503, false), (410, true)] {
+            let e = PackError::Network {
+                file: "f".into(),
+                message: format!("HTTP {status}"),
+            };
+            assert_eq!(
+                from_pack_error(e, "ghidra", "github.com", got),
+                ReverseError::ServerError {
+                    host: "github.com".into(),
+                    status
+                },
+                "{status}"
+            );
+        }
+        let dropped = PackError::Network {
+            file: "f".into(),
+            message: "the connection kept dropping".into(),
+        };
+        assert_eq!(
+            from_pack_error(dropped, "ghidra", "github.com", true),
+            ReverseError::Interrupted {
+                part: "ghidra".into()
+            }
+        );
+        assert_eq!(http_status("HTTP 404"), Some(404));
+        assert_eq!(http_status("HTTPS 404"), None);
+        assert_eq!(http_status("dns error"), None);
     }
 
     #[tokio::test]

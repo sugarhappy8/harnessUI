@@ -4,9 +4,9 @@
 //!
 //! The same rules as `browser::own::unpack_tree`, plus Windows device names, for both
 //! formats:
-//! - kept: Unix permission bits, masked to `(mode & 0o777) | 0o600`; relative links whose
-//!   target stays inside the folder, created last, never through another link, and checked
-//!   again on disk afterwards;
+//! - kept: Unix permission bits, masked to `(mode & 0o755) | 0o600` (no write for the
+//!   group or others); relative links whose target stays inside the folder, created last,
+//!   never through another link, and checked again on disk afterwards;
 //! - refused: absolute paths, `..`, `.` and empty components, backslashes, NUL and other
 //!   control characters, colons (drive letters, alternate streams), names ending in a dot or
 //!   a space, Windows device names (`CON`, `NUL`, `COM1`…, with any extension), entries
@@ -172,11 +172,12 @@ fn resolve_link(link: &[String], target: &str) -> Option<Vec<String>> {
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    // Permission bits only (no set-user-id, set-group-id or sticky), and the owner can
-    // always read and replace the file, so the folder can be removed again.
+    // Permission bits only (no set-user-id, set-group-id or sticky), no write for the group
+    // or others (only the owner may change what the app runs), and the owner can always
+    // read and replace the file, so the folder can be removed again.
     std::fs::set_permissions(
         path,
-        std::fs::Permissions::from_mode((mode & 0o777) | 0o600),
+        std::fs::Permissions::from_mode((mode & 0o755) | 0o600),
     )
 }
 
@@ -721,6 +722,11 @@ mod tests {
             &[
                 E::File("p/bin/node", b"elf", 0o4755),
                 E::File("p/LICENSE", b"mit", 0o444),
+                // Ghidra's zip holds Windows programs at 0o666 and Temurin's Windows zip
+                // files at 0o770: nobody but the owner may change what the app runs.
+                E::File("p/bin/world", b"w", 0o4777),
+                E::File("p/os/win/decompile.exe", b"mz", 0o666),
+                E::File("p/lib/group", b"g", 0o770),
             ],
             &rules("p/", &ALL),
         )) {
@@ -734,6 +740,13 @@ mod tests {
             };
             assert_eq!(mode("bin/node"), 0o755, "{format}: set-user-id dropped");
             assert_eq!(mode("LICENSE"), 0o644, "{format}: owner can write");
+            assert_eq!(mode("bin/world"), 0o755, "{format}: no write for others");
+            assert_eq!(
+                mode("os/win/decompile.exe"),
+                0o644,
+                "{format}: no write for others"
+            );
+            assert_eq!(mode("lib/group"), 0o750, "{format}: no write for the group");
         }
     }
 

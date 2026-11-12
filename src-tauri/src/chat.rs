@@ -213,7 +213,10 @@ pub async fn get_chat(
 
 /// [0.0.5 memory] The summary the model is sent instead of the earlier messages of `path`
 /// (the shown branch), chosen as a turn chooses it (`turns::latest_summary`). A summary
-/// that cannot be read is left out: the chat still opens.
+/// that cannot be read is left out: the chat still opens. [0.0.6] The summary is model
+/// output: characters that change how text is shown without being seen (tag characters,
+/// bidirectional overrides, zero-width characters) come as visible escapes, as on approval
+/// cards (`policy::sanitize::visible`), so Show summary shows all of what the model is sent.
 async fn earlier_summary(
     store: &store::Store,
     chat_id: store::ChatId,
@@ -227,8 +230,24 @@ async fn earlier_summary(
         .flatten()?;
     Some(crate::dto::EarlierSummaryDto {
         last_message_id: summary.last_message_id,
-        text: summary.text,
+        text: visible_summary(&summary.text),
     })
+}
+
+/// [0.0.6] A summary as Show summary shows it: the hidden characters as visible escapes
+/// (`policy::sanitize::visible`, plus the soft hyphen and the combining grapheme joiner),
+/// Windows line ends as plain ones, the same as the summary block of the system message
+/// shows the model (`agent::prompt`, `visible_summary`).
+fn visible_summary(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in policy::sanitize::visible(&text.replace("\r\n", "\n")).chars() {
+        if matches!(c, '\u{00AD}' | '\u{034F}') {
+            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[tauri::command]
@@ -650,6 +669,56 @@ mod tests {
         chat.working_folder = None;
         let v = serde_json::to_value(chat_dto(&chat)).unwrap();
         assert_eq!(v["workingFolder"], serde_json::Value::Null);
+    }
+
+    /// [0.0.6] The summary is model output that can carry hidden text copied from a web page
+    /// or a file (tag characters, a right-to-left override, zero-width characters). Show
+    /// summary is where the user sees what the model is sent instead of the messages, so
+    /// those characters come as visible escapes, as on approval cards; line breaks and tabs
+    /// stay.
+    #[tokio::test]
+    async fn the_chat_detail_shows_hidden_characters_of_the_summary() {
+        let store = store::Store::open_in_memory().unwrap();
+        let chat = store
+            .create_chat(store::NewChat {
+                title: "t".into(),
+                model_ref: None,
+                system_prompt: None,
+            })
+            .await
+            .unwrap();
+        let first = store
+            .insert_message(store::NewMessage {
+                chat_id: chat,
+                parent_id: None,
+                role: store::Role::User,
+                content: text_content("question"),
+                reasoning: None,
+                status: store::MessageStatus::Complete,
+                model_ref: None,
+                search_text: "question".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .insert_summary(store::NewSummary {
+                chat_id: chat,
+                last_message_id: first,
+                text: "Goal: tidy up.\u{E0049}\u{E0047}\u{E004E}\r\n\tDone: \u{202E}txt.exe \
+                       a\u{200B}b re\u{00AD}ad"
+                    .into(),
+            })
+            .await
+            .unwrap();
+        let path = store.path_to(chat, first).await.unwrap();
+        let summary = earlier_summary(&store, chat, &path)
+            .await
+            .expect("a summary");
+        assert_eq!(
+            summary.text,
+            "Goal: tidy up.\\u{E0049}\\u{E0047}\\u{E004E}\n\tDone: \\u{202E}txt.exe \
+             a\\u{200B}b re\\u{00AD}ad"
+        );
     }
 
     /// [0.0.5 memory] The chat detail carries the summary of the shown branch, with the

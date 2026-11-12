@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
-import type { CatalogSuggestion, FirstRunInfo } from "../lib/types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import type { CatalogSuggestion, FirstRunInfo, ModelBusy, RuntimeStatus } from "../lib/types";
 
 const suggestion = (id: string, tested: boolean): CatalogSuggestion => ({
   id,
@@ -20,15 +20,28 @@ const suggestion = (id: string, tested: boolean): CatalogSuggestion => ({
 
 let info: FirstRunInfo;
 
-vi.mock("../lib/ipc", () => ({
+const ipcMock = vi.hoisted(() => ({
   firstRunInfo: vi.fn(async () => info),
+  importModel: vi.fn(async (path: string) => ({ id: 7, path })),
+  completeFirstRun: vi.fn(async () => undefined),
+  modelBusy: vi.fn<() => Promise<ModelBusy>>(async () => ({ chatTurns: 0, modelChecks: 0, otherApps: 0 })),
+  loadLocalModel: vi.fn<(path: string, s?: unknown, w?: boolean) => Promise<boolean>>(async () => true),
+  setChatModel: vi.fn(async () => undefined),
+  createChat: vi.fn(async (modelRef: string | null) => ({ id: 9, modelRef })),
+  getChat: vi.fn(async (id: number) => ({ chat: { id, modelRef: null }, messages: [] })),
+  listChats: vi.fn(async () => []),
+  listModelOptions: vi.fn(async () => []),
 }));
+vi.mock("../lib/ipc", () => ipcMock);
+const dialog = vi.hoisted(() => ({ open: vi.fn<() => Promise<string | null>>(async () => "/files/mine.gguf") }));
+vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 
 const { FirstRun } = await import("./FirstRun");
+const { useApp } = await import("../store/app");
 
-async function show() {
+async function show(onDone: () => void = () => undefined) {
   await act(async () => {
-    render(<FirstRun onDone={() => undefined} onOpenEndpoints={() => undefined} onOpenModels={() => undefined} />);
+    render(<FirstRun onDone={onDone} onOpenEndpoints={() => undefined} onOpenModels={() => undefined} />);
   });
 }
 
@@ -101,5 +114,79 @@ describe("FirstRun hardware line", () => {
     info.hardware = { ...info.hardware, target: "gpu", gpuName: "Radeon RX", gpuFreeBytes: 15e9, backend: "vulkan" };
     await show();
     expect(screen.getByText("Radeon RX with 15.0 GB free (vulkan).")).toBeTruthy();
+  });
+});
+
+describe("FirstRun: I have a GGUF file", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    info = base(null, [suggestion("small", false)]);
+  });
+  afterEach(cleanup);
+
+  const loaded: RuntimeStatus = {
+    state: "ready",
+    backend: "cpu",
+    device: null,
+    modelPath: "/models/other.gguf",
+    modelName: "other.gguf",
+    progress: 1,
+    stage: null,
+    nCtx: 4096,
+    supportsTools: true,
+    preserveReasoning: false,
+    thinking: false,
+    speedTps: null,
+    slow: false,
+    vision: false,
+    offloadedLayers: null,
+    totalLayers: null,
+    error: null,
+    loadStage: null,
+    adjustments: [],
+    ctxSource: null,
+    settingsChanged: false,
+    reloadWaiting: false,
+    unloadedPath: null,
+  };
+
+  async function importIt() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "I have a GGUF file" }));
+    });
+  }
+
+  it("loads the file with its own settings and ends first run", async () => {
+    useApp.setState({ runtime: null, activeChatId: null, detail: null });
+    const onDone = vi.fn();
+    await show(onDone);
+    await importIt();
+    expect(ipcMock.importModel).toHaveBeenCalledWith("/files/mine.gguf");
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/files/mine.gguf", null, true);
+    expect(ipcMock.completeFirstRun).toHaveBeenCalled();
+    expect(onDone).toHaveBeenCalled();
+  });
+
+  it("asks the D3 question when the loaded model is busy: Cancel keeps first run open, Stop and restart ends it", async () => {
+    useApp.setState({ runtime: loaded, activeChatId: null, detail: null });
+    ipcMock.modelBusy.mockResolvedValue({ chatTurns: 1, modelChecks: 0, otherApps: 0 });
+    const onDone = vi.fn();
+    await show(onDone);
+    await importIt();
+    expect(screen.getByText("A reply is being written. Stop it and restart the model?")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    });
+    expect(ipcMock.loadLocalModel).not.toHaveBeenCalled();
+    expect(ipcMock.completeFirstRun).not.toHaveBeenCalled();
+    expect(onDone).not.toHaveBeenCalled();
+
+    await importIt();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop and restart" }));
+    });
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/files/mine.gguf", null, false);
+    expect(ipcMock.completeFirstRun).toHaveBeenCalled();
+    expect(onDone).toHaveBeenCalled();
   });
 });

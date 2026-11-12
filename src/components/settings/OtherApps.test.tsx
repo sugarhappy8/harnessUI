@@ -20,6 +20,16 @@ const TOO_MUCH = "This model can't remember that much on this computer. Try Save
 const SIZE_CHANGED = "You changed how much this model can remember. Copy the setup again.";
 const OLD_KEY = "Apps set up with the old key stop working until you copy the new one.";
 const PORT_TAKEN = "Port 51234 is used by another program. Choose another port.";
+const MODEL_CHANGED =
+  "The loaded model can remember a different amount than when you copied the setup. Copy the setup again.";
+const PORT_CHANGED = "You changed the port. Copy the setup again.";
+const HIDDEN_KEY = "harnessui-share-••••••••";
+const KEYCHAIN = {
+  code: "keychain",
+  message: "The sharing key could not be read from or saved to the system keychain.",
+  nextStep: "Unlock the keychain and try again.",
+  details: "",
+};
 
 let statusNow: ShareStatus;
 
@@ -35,6 +45,7 @@ const ipcMock = vi.hoisted(() => ({
   setModelLoadSettings: vi.fn<(path: string, o: ModelLoadSettings) => Promise<ModelLoadInfo>>(),
   modelBusy: vi.fn<() => Promise<ModelBusy>>(),
   reloadLocalModel: vi.fn<(force: boolean, whenIdle: boolean) => Promise<boolean>>(async () => true),
+  cancelPendingReload: vi.fn<() => Promise<void>>(async () => undefined),
 }));
 vi.mock("../../lib/ipc", () => ipcMock);
 const clipboard = vi.hoisted(() => ({ writeText: vi.fn<(text: string) => Promise<void>>(async () => undefined) }));
@@ -62,7 +73,7 @@ vi.mock("../ModelSettings", () => ({
 
 const { OtherApps, POLL_MS, COPIED_KEY } = await import("./OtherApps");
 const { useApp } = await import("../../store/app");
-const { useQuestion } = await import("../../store/modelChange");
+const { useQuestion, useWaiting, answerQuestion } = await import("../../store/modelChange");
 
 const browserClipboard = vi.fn<(text: string) => Promise<void>>(async () => undefined);
 Object.defineProperty(navigator, "clipboard", { value: { writeText: browserClipboard }, configurable: true });
@@ -244,6 +255,28 @@ async function poll() {
   await act(async () => undefined);
 }
 
+/** A promise and the functions that settle it, for answers that arrive late. */
+function deferred<T>() {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (e: unknown) => void = () => undefined;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Runs `body` as if on a Mac (`navigator.platform`), then puts the platform back. */
+async function onAMac(body: () => Promise<void>) {
+  Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+  try {
+    await body();
+  } finally {
+    // The own property shadows jsdom's getter; removing it brings that back.
+    delete (navigator as { platform?: string }).platform;
+  }
+}
+
 /** The first "Copy step 1 of …" button (of the first way shown). */
 function firstCopy(inside?: HTMLElement): HTMLElement {
   const [button] = (inside ? within(inside) : screen).getAllByRole("button", { name: /^Copy step 1/ });
@@ -283,6 +316,7 @@ beforeEach(() => {
   ipcMock.modelBusy.mockResolvedValue(IDLE);
   useApp.setState({ runtime: null });
   useQuestion.setState({ question: null, hosts: 0 });
+  useWaiting.setState({ change: null, kind: null });
   panel.saved = null;
 });
 
@@ -395,6 +429,99 @@ describe("OtherApps: the switch", () => {
     await act(async () => late(share()));
     expect(theSwitch().checked).toBe(true);
   });
+
+  it("says the model is still loading while it stops for a restart, as the other app is told", async () => {
+    // A restart unloads first; the proxy answers "still loading" then, not "no model".
+    useApp.setState({ runtime: runtime({ state: "stopping", nCtx: null }) });
+    statusNow = ON();
+    await show();
+    expect(screen.getByText("The model is still loading. Apps get an answer saying so until it is ready.")).toBeTruthy();
+    expect(screen.queryByText(/No model is loaded now/)).toBeNull();
+  });
+
+  it("writes the refused count like other numbers, and says which requests the Audit log lists", async () => {
+    statusNow = ON({ refused: 123_456 });
+    await show();
+    expect(screen.getByText("Requests refused since sharing was switched on: 123,456")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "A request is refused when it has no key or a wrong key, or comes from a web page. Each request for a reply is listed in the Audit log, without what was asked.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says when sharing is on but cannot be reached, also with no reason from the backend", async () => {
+    statusNow = ON({ listening: false, error: null });
+    await show();
+    expect(screen.getByRole("alert").textContent).toBe("Sharing is not reachable now. Switch it off and on again.");
+    expect(screen.queryByText(/On at port/)).toBeNull();
+  });
+
+  it("drops the first read's error once a later read works", async () => {
+    vi.useFakeTimers();
+    ipcMock.shareStatus.mockRejectedValueOnce({ code: "internal", message: "Boom.", nextStep: "", details: "" });
+    await show();
+    expect(screen.getByRole("alert").textContent).toContain("Boom.");
+    expect(theSwitch().disabled).toBe(true);
+    await poll();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(theSwitch().disabled).toBe(false);
+  });
+
+  it("does not ask while the page is hidden, and asks again once it is visible", async () => {
+    vi.useFakeTimers();
+    await show();
+    const calls = ipcMock.shareStatus.mock.calls.length;
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    try {
+      await poll();
+      await poll();
+      expect(ipcMock.shareStatus.mock.calls.length).toBe(calls);
+    } finally {
+      visibility.mockRestore();
+    }
+    await poll();
+    expect(ipcMock.shareStatus.mock.calls.length).toBe(calls + 1);
+  });
+
+  it("drops a key that arrives after sharing was switched off, and keeps Show key and Copy still while it switches", async () => {
+    statusNow = ON();
+    await show();
+    // Show key goes out; the user switches off before it answers.
+    const reveal = deferred<string>();
+    ipcMock.revealShareKey.mockImplementationOnce(() => reveal.promise);
+    await click(screen.getByRole("button", { name: "Show key" }));
+    const off = deferred<ShareStatus>();
+    ipcMock.setShareEnabled.mockImplementationOnce(() => off.promise);
+    await click(theSwitch());
+    // While it switches, the key cannot be asked for or copied.
+    expect((screen.getByRole("button", { name: "Show key" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Copy the key" }) as HTMLButtonElement).disabled).toBe(true);
+    statusNow = share({ port: 51234 });
+    await act(async () => off.resolve(statusNow));
+    await act(async () => reveal.resolve(KEY));
+    // On again: no key on the page until Show key is clicked again.
+    await click(theSwitch());
+    expect(theSwitch().checked).toBe(true);
+    expect(screen.queryByText(KEY)).toBeNull();
+    expect(screen.getByRole("button", { name: "Show key" })).toBeTruthy();
+  });
+
+  it("forgets the key and the card when the backend reports sharing off", async () => {
+    vi.useFakeTimers();
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    await click(screen.getByRole("button", { name: "Show key" }));
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    expect(screen.getAllByText(new RegExp(KEY)).length).toBeGreaterThan(1);
+    statusNow = share({ port: 51234 });
+    await poll();
+    statusNow = ON({ modelCtx: 32_768 });
+    await poll();
+    expect(screen.queryByText(new RegExp(KEY))).toBeNull();
+    expect(screen.queryByRole("region", { name: "Set up Claude Code" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Show key" })).toBeTruthy();
+  });
 });
 
 describe("OtherApps: the port", () => {
@@ -435,6 +562,20 @@ describe("OtherApps: the port", () => {
     expect(ipcMock.setSharePort).toHaveBeenLastCalledWith(0);
     expect(screen.getByText(/On at port 60001\./)).toBeTruthy();
   });
+
+  it("Cancel closes the chooser and changes nothing", async () => {
+    statusNow = ON();
+    await show();
+    await click(screen.getByRole("button", { name: "Choose another port" }));
+    fireEvent.change(screen.getByLabelText("Port number"), { target: { value: "52000" } });
+    await click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByLabelText("Port number")).toBeNull();
+    expect(ipcMock.setSharePort).not.toHaveBeenCalled();
+    expect(screen.getByText(/On at port 51234\./)).toBeTruthy();
+    // Opened again, it starts empty.
+    await click(screen.getByRole("button", { name: "Choose another port" }));
+    expect((screen.getByLabelText("Port number") as HTMLInputElement).value).toBe("");
+  });
 });
 
 describe("OtherApps: the key", () => {
@@ -474,6 +615,61 @@ describe("OtherApps: the key", () => {
     await click(screen.getByRole("button", { name: "Copy the key" }));
     expect(screen.queryByText(OLD_KEY)).toBeNull();
   });
+
+  it("keeps the key hidden when Hide key is clicked while a new key is made", async () => {
+    statusNow = ON();
+    await show();
+    await click(screen.getByRole("button", { name: "Show key" }));
+    expect(screen.getByText(KEY)).toBeTruthy();
+    const made = deferred<ShareStatus>();
+    ipcMock.newShareKey.mockImplementationOnce(() => {
+      ipcMock.revealShareKey.mockResolvedValue(NEW_KEY);
+      return made.promise;
+    });
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    // The user hides the key while the new one is made.
+    await click(screen.getByRole("button", { name: "Hide key" }));
+    await act(async () => made.resolve(statusNow));
+    expect(screen.queryByText(NEW_KEY)).toBeNull();
+    expect(screen.queryByText(KEY)).toBeNull();
+    expect(screen.getByRole("button", { name: "Show key" })).toBeTruthy();
+  });
+
+  it("shows why the key could not be read, copied or replaced", async () => {
+    statusNow = ON();
+    await show();
+    ipcMock.revealShareKey.mockRejectedValueOnce(KEYCHAIN);
+    await click(screen.getByRole("button", { name: "Show key" }));
+    expect(screen.getByRole("alert").textContent).toContain(KEYCHAIN.message);
+    expect(screen.queryByText(/harnessui-share-/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Show key" })).toBeTruthy();
+    // Copy reads the key too: it says it could not copy, and why.
+    ipcMock.revealShareKey.mockRejectedValueOnce(KEYCHAIN);
+    await click(screen.getByRole("button", { name: "Copy the key" }));
+    expect(screen.getByRole("button", { name: "Copy the key" }).textContent).toBe("Could not copy");
+    expect(browserClipboard).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toContain(KEYCHAIN.message);
+    ipcMock.newShareKey.mockRejectedValueOnce(KEYCHAIN);
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    expect(screen.getByRole("alert").textContent).toContain(KEYCHAIN.message);
+    // The old key still works, so the page does not say it stopped working.
+    expect(screen.queryByText(OLD_KEY)).toBeNull();
+  });
+
+  it("says when the clipboard refused a copy, instead of saying nothing", async () => {
+    vi.useFakeTimers();
+    browserClipboard.mockRejectedValueOnce(new Error("denied"));
+    statusNow = ON();
+    await show();
+    await click(screen.getByRole("button", { name: "Copy the key" }));
+    expect(screen.getByRole("button", { name: "Copy the key" }).textContent).toBe("Could not copy");
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+    expect(screen.getByRole("button", { name: "Copy the key" }).textContent).toBe("Copy");
+  });
 });
 
 describe("OtherApps: the context warning", () => {
@@ -499,8 +695,9 @@ describe("OtherApps: the context warning", () => {
     const button = screen.getByRole("button", { name: "Use 32,768 tokens and restart · Fits with limits" });
     await click(button);
     expect(ipcMock.setModelLoadSettings).toHaveBeenCalledWith("/models/a.gguf", { ...OVERRIDES, context: { fixed: 32_768 } });
-    // Nothing used the model, so it restarted at once (no question), without force.
-    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, false);
+    // Nothing used the model, so it restarted at once (no question), without force. (WP2:
+    // with no question the backend is told to wait, which acts at once when nothing uses it.)
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, true);
   });
 
   it("keeps the model's other settings as they are saved now, not as they were when the warning appeared", async () => {
@@ -524,6 +721,59 @@ describe("OtherApps: the context warning", () => {
     const q = useQuestion.getState().question;
     expect(q?.text).toBe("Another app is using the model. Stop its request and restart the model?");
     expect(ipcMock.reloadLocalModel).not.toHaveBeenCalled();
+  });
+
+  it("Restart when it ends: says what it waits for, offers Cancel, and leaves the rest of the page usable", async () => {
+    useApp.setState({ runtime: runtime() });
+    useQuestion.setState({ question: null, hosts: 1 });
+    const otherApp: ModelBusy = { chatTurns: 0, modelChecks: 0, otherApps: 1 };
+    ipcMock.modelBusy.mockResolvedValue(otherApp);
+    const restarted = deferred<boolean>();
+    ipcMock.reloadLocalModel.mockImplementationOnce(() => restarted.promise);
+    statusNow = ON({ modelCtx: 8192, inUse: true });
+    await show();
+    await click(screen.getByRole("button", { name: /Use 32,768 tokens and restart/ }));
+    const q = useQuestion.getState().question;
+    if (!q) throw new Error("no question");
+    await act(async () => answerQuestion(q.id, "wait"));
+    // The backend sets reloadWaiting while it waits.
+    await act(async () => useApp.setState({ runtime: runtime({ reloadWaiting: true }) }));
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, true);
+    expect(screen.getByText("Restarts when the other app's request ends")).toBeTruthy();
+    expect(screen.queryByText("Restarting the model…")).toBeNull();
+    // Only the restart button waits; the switch, the port and the key still work.
+    expect((screen.getByRole("button", { name: /Use 32,768 tokens and restart/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(theSwitch().disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Make a new key" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Show key" }) as HTMLButtonElement).disabled).toBe(false);
+    // Cancel ends the wait (the backend answers the waiting call with "replaced").
+    await click(screen.getByRole("button", { name: "Cancel the restart" }));
+    expect(ipcMock.cancelPendingReload).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      useApp.setState({ runtime: runtime({ reloadWaiting: false }) });
+      restarted.resolve(false);
+    });
+    expect(screen.queryByText("Restarts when the other app's request ends")).toBeNull();
+    expect((screen.getByRole("button", { name: /Use 32,768 tokens and restart/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Stop and restart: says it restarts", async () => {
+    useApp.setState({ runtime: runtime() });
+    useQuestion.setState({ question: null, hosts: 1 });
+    ipcMock.modelBusy.mockResolvedValue({ chatTurns: 0, modelChecks: 0, otherApps: 1 });
+    const restarted = deferred<boolean>();
+    ipcMock.reloadLocalModel.mockImplementationOnce(() => restarted.promise);
+    statusNow = ON({ modelCtx: 8192, inUse: true });
+    await show();
+    await click(screen.getByRole("button", { name: /Use 32,768 tokens and restart/ }));
+    const q = useQuestion.getState().question;
+    if (!q) throw new Error("no question");
+    await act(async () => answerQuestion(q.id, "now"));
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, false);
+    expect(screen.getByRole("status").textContent).toBe("Restarting the model…");
+    expect(screen.queryByRole("button", { name: "Cancel the restart" })).toBeNull();
+    await act(async () => restarted.resolve(true));
+    expect(screen.queryByText("Restarting the model…")).toBeNull();
   });
 
   it("says when 32,768 tokens do not fit on this computer, with no button to try", async () => {
@@ -665,7 +915,9 @@ describe("OtherApps: setup cards", () => {
     await click(screen.getByRole("button", { name: "Claude Code" }));
     await click(firstCopy());
     expect(screen.queryByText(SIZE_CHANGED)).toBeNull();
-    expect(JSON.parse(window.localStorage.getItem(COPIED_KEY) ?? "null")).toEqual({ ctx: 16_384, port: 51234 });
+    expect(JSON.parse(window.localStorage.getItem(COPIED_KEY) ?? "null")).toEqual({
+      claudeCode: { ctx: 16_384, port: 51234, model: null },
+    });
   });
 
   it("assumes 32,768 tokens for a setup copied with no model loaded", async () => {
@@ -729,6 +981,106 @@ describe("OtherApps: setup cards", () => {
     expect(screen.queryByRole("region", { name: "Set up Claude Code" })).toBeNull();
     expect(screen.queryByText(/harnessui-share-/)).toBeNull();
     expect(screen.getByRole("button", { name: "Show key" })).toBeTruthy();
+  });
+
+  it("opens on the Mac tab on a Mac", async () => {
+    await onAMac(async () => {
+      statusNow = ON({ modelCtx: 32_768 });
+      await show();
+      await click(screen.getByRole("button", { name: "Claude Code" }));
+      const card = screen.getByRole("region", { name: "Set up Claude Code" });
+      expect(within(card).getByRole("tab", { name: "Mac" }).getAttribute("aria-selected")).toBe("true");
+      expect(within(card).getByText("Open Terminal and paste these lines.")).toBeTruthy();
+    });
+  });
+
+  it("shows the key in a card as dots until Show key, and Copy still copies it exactly", async () => {
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    const card = screen.getByRole("region", { name: "Set up Claude Code" });
+    expect(document.body.textContent).not.toContain(KEY);
+    expect(within(card).getByText(`$env:A = '${HIDDEN_KEY}'`, { exact: false })).toBeTruthy();
+    await click(firstCopy(card));
+    expect(browserClipboard).toHaveBeenLastCalledWith(`$env:A = '${KEY}'\nclaude`);
+    // Show key shows it in the card too; Hide key hides it everywhere again.
+    await click(screen.getByRole("button", { name: "Show key" }));
+    expect(within(card).getByText(`$env:A = '${KEY}'`, { exact: false })).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Hide key" }));
+    expect(document.body.textContent).not.toContain(KEY);
+  });
+
+  it("never shows or copies a card made for an old key or port, and says why a new one could not be made", async () => {
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    expect(screen.getByRole("region", { name: "Set up Claude Code" })).toBeTruthy();
+    // A new key: while the card is made again, the old one (with the old key) is gone.
+    const again = deferred<ShareSetup>();
+    ipcMock.shareSetup.mockImplementationOnce(() => again.promise);
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    expect(screen.queryByRole("region", { name: "Set up Claude Code" })).toBeNull();
+    expect(screen.getByText("Getting the setup…")).toBeTruthy();
+    // It fails: the page says why, and there is nothing to copy.
+    await act(async () => again.reject(KEYCHAIN));
+    expect(screen.getByRole("alert").textContent).toContain(KEYCHAIN.message);
+    expect(screen.queryByRole("button", { name: /^Copy step/ })).toBeNull();
+    // A new port: the card is made again for it.
+    ipcMock.shareSetup.mockImplementation(async (app) => setup(app, { title: "Claude Code at the new port" }));
+    await click(screen.getByRole("button", { name: "Choose another port" }));
+    await click(screen.getByRole("button", { name: "Pick a free port" }));
+    expect(screen.getByRole("region", { name: "Set up Claude Code at the new port" })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("remembers each app's copied setup on its own", async () => {
+    vi.useFakeTimers();
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    await click(firstCopy());
+    await click(screen.getByRole("button", { name: "Claude app" }));
+    await click(screen.getByRole("button", { name: "Copy step 2 of In the Claude app" }));
+    statusNow = ON({ modelCtx: 16_384, port: 52000 });
+    await poll();
+    expect(screen.getByText(SIZE_CHANGED)).toBeTruthy();
+    expect(screen.getByText(PORT_CHANGED)).toBeTruthy();
+    expect(screen.getByText("Apps to set up again: Claude Code and Claude app.")).toBeTruthy();
+    // Copying Codex (never copied before) changes nothing for the other two.
+    await click(screen.getByRole("button", { name: "Codex" }));
+    await click(firstCopy());
+    expect(screen.getByText(SIZE_CHANGED)).toBeTruthy();
+    expect(screen.getByText("Apps to set up again: Claude Code and Claude app.")).toBeTruthy();
+    // Claude Code copied again: only the Claude app (port) is left; it has no size.
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    await click(firstCopy());
+    expect(screen.queryByText(SIZE_CHANGED)).toBeNull();
+    expect(screen.getByText(PORT_CHANGED)).toBeTruthy();
+    expect(screen.getByText("Apps to set up again: Claude app.")).toBeTruthy();
+    expect(JSON.parse(window.localStorage.getItem(COPIED_KEY) ?? "null")).toEqual({
+      claudeCode: { ctx: 16_384, port: 52000, model: null },
+      codex: { ctx: 16_384, port: 52000, model: null },
+      claudeApp: { ctx: null, port: 51234, model: null },
+    });
+  });
+
+  it("says a different model is loaded, rather than that its size was changed", async () => {
+    vi.useFakeTimers();
+    useApp.setState({ runtime: runtime({ modelPath: "/models/a.gguf", nCtx: 32_768 }) });
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    await click(screen.getByRole("button", { name: "Codex" }));
+    await click(firstCopy());
+    // The same model, now at 16,384 tokens: the size was changed.
+    statusNow = ON({ modelCtx: 16_384 });
+    await poll();
+    expect(screen.getByText(SIZE_CHANGED)).toBeTruthy();
+    // Another model, with another size: it says so.
+    await act(async () => useApp.setState({ runtime: runtime({ modelPath: "/models/b.gguf", nCtx: 16_384 }) }));
+    expect(screen.queryByText(SIZE_CHANGED)).toBeNull();
+    expect(screen.getByText(MODEL_CHANGED)).toBeTruthy();
+    expect(screen.getByText("Apps to set up again: Codex.")).toBeTruthy();
   });
 
   it("shows why a card could not be made", async () => {

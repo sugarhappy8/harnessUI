@@ -76,16 +76,40 @@ export const CONTEXT_SOURCE_WORDS: Record<ContextSource, string> = {
   trainedLimit: "the most this model can",
 };
 
-/** Why a load failed, short, for the middle of a sentence ("because the graphics card …"). */
+/**
+ * Why a load on a backend failed, short, for the middle of a sentence after the backend
+ * ("because the graphics card ran out of memory"). Running out of room for the
+ * conversation memory is running out of memory too.
+ */
 export const LOAD_FAILURE_WORDS: Record<LoadFailure["code"], string> = {
   out_of_memory: "ran out of memory",
-  invalid_device: "could not find the chosen graphics card",
+  invalid_device: "was not found",
   missing_runtime_dll: "is missing a file it needs",
   port_in_use: "could not get the connection it needs",
-  model_file_invalid: "could not read the model file",
-  context_too_large: "did not have room for that much memory",
+  model_file_invalid: "could not load this model",
+  context_too_large: "ran out of memory",
   unknown: "stopped while loading",
 };
+
+/** What can help after a step-down for this reason: Reload, Model settings…, or nothing. */
+export function stepDownAction(reason: LoadFailure): "reload" | "settings" | null {
+  switch (reason.code) {
+    case "invalid_device":
+      return "settings";
+    case "model_file_invalid":
+      return null;
+    default:
+      return "reload";
+  }
+}
+
+/** Why a step-down happened, as a clause with its subject ("the graphics card ran out of memory"). */
+function stepDownCause(from: BackendKind, reason: LoadFailure): string {
+  // The device was the chosen one (or the backend's own pick); "the chosen graphics card"
+  // says which without its device id.
+  const subject = reason.code === "invalid_device" ? "the chosen graphics card" : place(from);
+  return `${subject} ${LOAD_FAILURE_WORDS[reason.code] ?? LOAD_FAILURE_WORDS.unknown}`;
+}
 
 /**
  * About how many words fit in `tokens` tokens (three quarters of a token count), rounded
@@ -123,7 +147,7 @@ export function loadStageWords(stage: LoadStage): string {
     case "retryingWithLessGpu":
       return "Trying again with part of the model on the processor";
     case "steppingDown":
-      return `${capitalise(place(stage.from))} ${LOAD_FAILURE_WORDS[stage.reason.code] ?? LOAD_FAILURE_WORDS.unknown}, so trying ${place(stage.to)}`;
+      return `${capitalise(stepDownCause(stage.from, stage.reason))}, so trying ${place(stage.to)}`;
   }
 }
 
@@ -141,14 +165,21 @@ export function adjustmentWords(stage: LoadStage): string | null {
     case "restarting":
       return "The model stopped unexpectedly and was restarted.";
     case "retryingWithoutSaveMemory":
-      // D2c, word for word.
+      // On the processor only the model refusing Save memory turns it off (WP1a); on a
+      // graphics card it is D2c, word for word.
+      if (stage.backend === "cpu") return "Save memory doesn't work with this model, so it was turned off for this load.";
+      if (stage.backend === "metal") {
+        return "Save memory doesn't work with this model on Apple graphics, so it was turned off for this load.";
+      }
       return "Save memory doesn't work with this graphics card, so it was turned off for this load.";
     case "retryingWithLessGpu":
-      return "The graphics card ran out of memory, so part of the model runs on the processor. Replies are slower.";
+      return `${capitalise(place(stage.backend))} ran out of memory, so part of the model runs on the processor. Replies are slower.`;
     case "steppingDown": {
-      const from = place(stage.from);
-      const why = LOAD_FAILURE_WORDS[stage.reason.code] ?? LOAD_FAILURE_WORDS.unknown;
-      return `Running on ${place(stage.to)} because ${from} ${why}. Reload to try ${from} again.`;
+      const cause = `Running on ${place(stage.to)} because ${stepDownCause(stage.from, stage.reason)}.`;
+      const action = stepDownAction(stage.reason);
+      if (action === "reload") return `${cause} Reload to try ${place(stage.from)} again.`;
+      if (action === "settings") return `${cause} Choose another in Model settings.`;
+      return cause;
     }
   }
 }
@@ -172,10 +203,27 @@ export function slowSpeedWords(tokensPerSecond: number): string {
   return `Replies are slow here (${wordsPerSecond(tokensPerSecond)}). The graphics card may be short of memory. Try a smaller memory size or a smaller model.`;
 }
 
+/**
+ * The ready line in parts, for a crowded header: the whole line is `remembers` + `reason`;
+ * `about` and `words` are the shorter forms, each with the number whole.
+ */
+export function readyLineParts(
+  nCtx: number,
+  source: ContextSource | null,
+): { remembers: string; reason: string; about: string; words: string } {
+  const words = `${count(aboutWords(nCtx))} words`;
+  return {
+    remembers: `Remembers about ${words}`,
+    reason: source ? ` (${CONTEXT_SOURCE_WORDS[source]})` : "",
+    about: `About ${words}`,
+    words,
+  };
+}
+
 /** The ready line (D1): "Remembers about 24,000 words (Automatic)". */
 export function readyLine(nCtx: number, source: ContextSource | null): string {
-  const reason = source ? ` (${CONTEXT_SOURCE_WORDS[source]})` : "";
-  return `Remembers about ${count(aboutWords(nCtx))} words${reason}`;
+  const parts = readyLineParts(nCtx, source);
+  return parts.remembers + parts.reason;
 }
 
 /** What Automatic chose (D2b). */

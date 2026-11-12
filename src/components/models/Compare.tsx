@@ -37,7 +37,7 @@ import { toErrorInfo } from "../../store/app";
 import { FitBadge } from "../FitBadge";
 import { SafeLink } from "../Markdown";
 
-// Models → Compare (0.0.5 item 4): up to four models side by side, each row a plain
+// Models → Compare (0.0.6 item 4): up to four models side by side, each row a plain
 // question, each answer with where it comes from (D6): the publisher's model card (signed
 // catalog), what the Hugging Face uploader lists, the model file, an estimate for this
 // computer, or the user's own results. Nothing here is written by a model, and uploader
@@ -51,7 +51,7 @@ export const SOURCE = {
   hub: "From Hugging Face",
   file: "From the model file",
   disk: "On this computer",
-  results: "Your results on this computer",
+  results: "Your results",
 } as const;
 
 /** The fit row's source: the size it was checked at. */
@@ -59,7 +59,7 @@ export function fitSource(ctx: number): string {
   return `Estimate for this computer at ${tokensWithWords(ctx)}`;
 }
 
-/** Why a column's facts are missing, in words (0.0.5 item 4). */
+/** Why a column's facts are missing, in words (0.0.6 item 4). */
 export const PROBLEM_WORDS: Record<CompareProblem | "noFiles", string> = {
   offline: "These facts need the internet. They are saved once the model is downloaded.",
   rateLimited: "Hugging Face is busy. Try again in a minute.",
@@ -69,7 +69,7 @@ export const PROBLEM_WORDS: Record<CompareProblem | "noFiles", string> = {
   noFiles: "This repository has no model files this app can use.",
 };
 
-/** Shown when nothing is chosen (0.0.5 item 4, word for word). */
+/** Shown when nothing is chosen (0.0.6 item 4, word for word). */
 export const EMPTY_TEXT = "Nothing to compare yet. Choose Add to comparison on a model in Browse or Installed.";
 
 /** D6: when nothing says what the model is good at. */
@@ -77,6 +77,13 @@ export const NO_DESCRIPTION = "No description from the publisher in this app.";
 
 /** The sizes "Compare at" offers besides the defaults' size. */
 export const COMPARE_SIZES = [4096, 8192, 16384, 32768, 65536, 131072] as const;
+
+/**
+ * How long "Compare at" waits for the size to stop changing before it asks again, so
+ * stepping through the sizes does not spend Hugging Face's anonymous rate limit (Browse
+ * waits the same way while the user types).
+ */
+export const COMPARE_AT_DELAY_MS = 400;
 
 /** How a failed request reads as a column's problem. */
 export function problemFromError(err: ErrorInfo): CompareProblem {
@@ -104,22 +111,58 @@ const INVISIBLE =
   // eslint-disable-next-line no-control-regex, no-misleading-character-class
   /[\u{0}-\u{8}\u{B}-\u{1F}\u{7F}-\u{9F}\u{AD}\u{61C}\u{115F}\u{1160}\u{17B4}\u{17B5}\u{180B}-\u{180F}\u{200B}-\u{200F}\u{202A}-\u{202E}\u{2060}-\u{206F}\u{3164}\u{FE00}-\u{FE0F}\u{FEFF}\u{FFA0}\u{FFF9}-\u{FFFB}\u{1D173}-\u{1D17A}\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 
+const PICTOGRAPHIC = /^\p{Extended_Pictographic}$/u;
+const SKIN_TONE = /^\p{Emoji_Modifier}$/u;
+const ZWJ = 0x200d;
+const EMOJI_STYLE = 0xfe0f;
+const TEXT_STYLE = 0xfe0e;
+
+/** The whole character that ends just before `at` (a UTF-16 index), or "". */
+function charBefore(s: string, at: number): string {
+  if (at <= 0) return "";
+  const low = s.charCodeAt(at - 1);
+  if (low >= 0xdc00 && low <= 0xdfff && at >= 2) {
+    const high = s.charCodeAt(at - 2);
+    if (high >= 0xd800 && high <= 0xdbff) return s.slice(at - 2, at);
+  }
+  return s.slice(at - 1, at);
+}
+
+/** The whole character that starts at `at`, or "". */
+function charAt(s: string, at: number): string {
+  const code = s.codePointAt(at);
+  return code === undefined ? "" : String.fromCodePoint(code);
+}
+
 /**
- * Joiners and emoji selectors, kept in long free text (a model card): emoji and several
- * scripts need them, and they cannot reorder text. Short fields escape them too.
+ * Whether a joiner or a style selector at `at` is part of an emoji, so a model card keeps it:
+ * a style selector right after a pictograph (or in a keycap, "1" + selector + U+20E3), and a
+ * joiner between two pictographs (after a skin tone or a kept selector too). Anywhere else
+ * these are invisible and could carry hidden text, so they are shown as codes.
  */
-const JOINERS = new Set([0x200c, 0x200d, 0xfe0e, 0xfe0f]);
+function inEmoji(s: string, at: number, code: number): boolean {
+  const before = charBefore(s, at);
+  if (code === EMOJI_STYLE || code === TEXT_STYLE) {
+    if (PICTOGRAPHIC.test(before)) return true;
+    return /^[0-9#*]$/.test(before) && charAt(s, at + 1) === "\u20E3";
+  }
+  if (code !== ZWJ || !PICTOGRAPHIC.test(charAt(s, at + 1))) return false;
+  if (PICTOGRAPHIC.test(before) || SKIN_TONE.test(before)) return true;
+  return before === "\uFE0F" && PICTOGRAPHIC.test(charBefore(s, at - 1));
+}
 
 /**
  * Untrusted text as it is shown: invisible characters made visible, at most `cap`
  * characters (counted whole, so a character outside the basic plane is never cut in half).
- * `keepJoiners` is for a model card (see `JOINERS`); direction overrides and zero-width
- * spaces are made visible there too.
+ * `card` is for a model card: Windows and old Mac line endings become new lines, and joiners
+ * and style selectors inside emoji stay (see `inEmoji`); everything else invisible, direction
+ * overrides included, is made visible there too.
  */
-export function shown(text: string, cap = 300, keepJoiners = false): string {
-  const visible = text.replace(INVISIBLE, (ch) => {
+export function shown(text: string, cap = 300, card = false): string {
+  const source = card ? text.replace(/\r\n?/g, "\n") : text;
+  const visible = source.replace(INVISIBLE, (ch: string, at: number) => {
     const code = ch.codePointAt(0) ?? 0;
-    if (keepJoiners && JOINERS.has(code)) return ch;
+    if (card && inEmoji(source, at, code)) return ch;
     return `[U+${code.toString(16).toUpperCase().padStart(4, "0")}]`;
   });
   const chars = Array.from(visible);
@@ -158,10 +201,12 @@ export function dateWords(text: string): string | null {
   return m[3] ? `${month} ${Number(m[3])}, ${m[1]}` : `${month} ${m[1]}`;
 }
 
-/** Milliseconds since 1970 as a date in words; null when it is not a time. */
+/** Milliseconds since 1970 as a date in words, on this computer's calendar; null when it is not a time. */
 function msDateWords(ms: number): string | null {
   const d = new Date(ms);
-  return Number.isNaN(d.getTime()) ? null : dateWords(d.toISOString());
+  if (Number.isNaN(d.getTime())) return null;
+  const month = MONTHS[d.getMonth()];
+  return month ? `${month} ${d.getDate()}, ${d.getFullYear()}` : null;
 }
 
 /** The repository of a model card URL on huggingface.co ("owner/name"), else null. */
@@ -382,7 +427,7 @@ function yourResults(f: CompareFacts): Answer {
   };
 }
 
-/** The rows, as questions (0.0.5 item 4, word for word). */
+/** The rows, as questions (0.0.6 item 4, word for word). */
 export const ROWS: { question: string; answer: (f: CompareFacts) => Answer | null }[] = [
   { question: "What is it good at?", answer: goodAt },
   { question: "Who made it?", answer: whoMadeIt },
@@ -509,6 +554,35 @@ export function Compare(props: { onOpen?: (tab: "installed" | "browse") => void 
   const requested = useRef(new Set<string>());
   const repoRequests = useRef(new Map<string, Promise<RepoView>>());
   const suggestRequest = useRef<string | null>(null);
+
+  // "Compare at": the list shows the choice at once; the comparison follows once the size
+  // has stopped changing for COMPARE_AT_DELAY_MS.
+  const [pendingCtx, setPendingCtx] = useState<{ value: number | null } | null>(null);
+  const pendingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingValue = useRef<{ value: number | null } | null>(null);
+  function chooseCtx(value: number | null) {
+    pendingValue.current = { value };
+    setPendingCtx({ value });
+    if (pendingTimer.current) clearTimeout(pendingTimer.current);
+    pendingTimer.current = setTimeout(() => {
+      pendingTimer.current = null;
+      pendingValue.current = null;
+      setPendingCtx(null);
+      setCtx(value);
+    }, COMPARE_AT_DELAY_MS);
+  }
+  // A size chosen just before the tab closes still counts.
+  useEffect(
+    () => () => {
+      if (pendingTimer.current) clearTimeout(pendingTimer.current);
+      pendingTimer.current = null;
+      const pending = pendingValue.current;
+      pendingValue.current = null;
+      if (pending) useCompare.getState().setCtx(pending.value);
+    },
+    [],
+  );
+  const shownCtx = pendingCtx ? pendingCtx.value : ctx;
 
   /** One repository page at the comparison size, fetched once even when asked twice. */
   const fetchRepo = useCallback(
@@ -675,8 +749,8 @@ export function Compare(props: { onOpen?: (tab: "installed" | "browse") => void 
         </label>
         <select
           id="compare-ctx"
-          value={ctx === null ? "" : String(ctx)}
-          onChange={(e) => setCtx(e.target.value === "" ? null : Number(e.target.value))}
+          value={shownCtx === null ? "" : String(shownCtx)}
+          onChange={(e) => chooseCtx(e.target.value === "" ? null : Number(e.target.value))}
           className="rounded-md border border-border bg-bg px-2 py-1 text-sm"
         >
           <option value="">Same as your default{defaultCtx ? ` (${tokensWithWords(defaultCtx)})` : ""}</option>
@@ -950,7 +1024,8 @@ function FileChange(props: {
                 className={`block w-full rounded px-1.5 py-1 text-left hover:bg-bg-muted ${current ? "font-medium" : ""}`}
               >
                 {current && <Check size={11} className="mr-1 inline" aria-hidden />}
-                {fileWords(v.label) ?? v.label} · {formatBytes(v.totalSize)}
+                {/* A label without a quantisation is the uploader's file name. */}
+                <Outside text={fileWords(v.label) ?? v.label} cap={80} /> · {formatBytes(v.totalSize)}
                 {v.fit ? ` · ${FIT_LABEL[v.fit.verdict]}` : ""}
               </button>
             );

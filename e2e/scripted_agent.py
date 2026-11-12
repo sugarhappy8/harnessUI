@@ -3123,7 +3123,9 @@ FAKE_COMMIT = "e2e0" * 10
 FAKE_TINY = "e2e-uploader/Tiny-Chat-GGUF"
 FAKE_BUSY = "e2e-uploader/Busy-GGUF"
 FAKE_LOCKED = "e2e-uploader/Locked-GGUF"
-FAKE_CARD = '# Tiny chat\n<b>bold</b> <img src=x onerror="alert(1)"> safe\u202etxt.exe ok\n'
+# Windows line endings, a joiner and a selector hiding between letters, and an emoji that needs its joiner.
+FAKE_CARD = ('# Tiny chat\r\n<b>bold</b> <img src=x onerror="alert(1)"> safe\u202etxt.exe ok\r\n'
+             'hidden\u200d\ufe0fbits \U0001F469\u200d\U0001F4BB\r\n')
 COMPARE_HUB = {}
 
 
@@ -3288,6 +3290,7 @@ def p_compare_models(c, notes):
     shows its card as text and adds the file picked there; at four models the suggestions
     go and Add to comparison is disabled with its reason; a rate-limited and a gated
     repository say so; Remove; the list outlives closing the dialog."""
+    import re
     s = c.s
     catalog = json.loads((ROOT / "catalog" / "models.json").read_text())["models"]
     suggestions = s.invoke("catalog_list", {"ctx": None})
@@ -3400,10 +3403,32 @@ def p_compare_models(c, notes):
             assert answer("Download size", 1).endswith("On this computer")
             notes.append("installed column: " + " | ".join(compare_row(s, "How big is it?")[1:2] + [fit.splitlines()[0]]))
 
-        set_ctx("32768")
+        # "Compare at": the default option names the defaults' size (Automatic on a fresh
+        # profile: 32,768 tokens); a different size checks the fit again at that size.
+        default_ctx = s.invoke("compare_facts", {"items": [{"catalogId": first["id"]}], "ctx": None})[0]["ctx"]
+        default_option = lambda: s.execute("return document.getElementById('compare-ctx').options[0].textContent;")
+        s.wait_for(lambda: default_option() == f"Same as your default ({words_tokens(default_ctx)})", 15,
+                   f"the default option at {default_ctx}")
+        notes.append(f"Compare at: {default_option()}")
+        chosen = 8192 if default_ctx != 8192 else 16384
+        def needs(fit):
+            m = re.search(r"Needs about ([\d.]+) (GB|MB)", fit)
+            assert m, fit
+            return float(m.group(1)) * (1 if m.group(2) == "GB" else 0.001)
+        before = answer("Will it fit on this computer?", 1) if gguf is not None else None
+        if before is not None:
+            assert f"Estimate for this computer at {words_tokens(default_ctx)}" in before, before
+        set_ctx(str(chosen))
         if gguf is not None:
-            s.wait_text("Estimate for this computer at 32,768 tokens, about 24,000 words", 30)
+            s.wait_for(lambda: f"Estimate for this computer at {words_tokens(chosen)}"
+                       in answer("Will it fit on this computer?", 1), 30, f"the fit at {chosen}")
         settle()
+        assert s.execute("return document.getElementById('compare-ctx').value;") == str(chosen)
+        assert default_option() == f"Same as your default ({words_tokens(default_ctx)})", default_option()
+        if before is not None:
+            after = answer("Will it fit on this computer?", 1)
+            assert (needs(after) < needs(before)) == (chosen < default_ctx) and needs(after) != needs(before), (before, after)
+            notes.append(f"installed fit at {default_ctx}: {needs(before)} GB; at {chosen}: {needs(after)} GB")
         tab = s.execute("return document.querySelector('[role=tablist][aria-label=\"Model sections\"] [role=tab][aria-selected=true]')?.innerText || '';")
         assert tab.startswith("Compare"), tab
         s.execute_async("const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));")
@@ -3436,7 +3461,7 @@ def p_compare_models(c, notes):
             settle()
             assert answer("Downloads on Hugging Face", 0) == "12,345 in the last 30 days, 89 likes\nFrom Hugging Face"
             fit = answer("Will it fit on this computer?", 0)
-            assert "Estimate for this computer at 32,768 tokens, about 24,000 words" in fit, fit
+            assert f"Estimate for this computer at {words_tokens(chosen)}" in fit, fit
             assert answer("Longest conversation it was made for", 0).endswith("From the model file")
             # The catalog's source still names what it is made from, not the uploader.
             assert answer("Made from", 0) == f"{source_repo}\nFrom the app's model list"
@@ -3483,6 +3508,7 @@ def p_compare_models(c, notes):
             s.click_button("Show model card")
             card = s.execute("return document.querySelector('pre')?.innerText || '';")
             assert '<b>bold</b> <img src=x onerror="alert(1)">' in card and "safe[U+202E]txt.exe" in card, card
+            assert "hidden[U+200D][U+FE0F]bits \U0001F469\u200d\U0001F4BB" in card and "[U+000D]" not in card, card
             assert "\u202e" not in s.page_text()
             assert not s.execute("return !!document.querySelector('pre b, pre img');")
             s.click_button("Add to comparison: Q8_0")
@@ -3689,6 +3715,8 @@ def _chat_memory(c, notes):
     assert not any("Answer 1." in _memory_text(m) for m in reqs[1]["messages"][1:]), "the summarised answer was still sent"
     s.wait_for(lambda: "Earlier messages were summarised to make room." in s.page_text(), 10, "the stage note")
     assert "Earlier messages were summarised to make room in the context." not in s.page_text()
+    # The note shown while the summary was written gave way to the outcome (one note a stage).
+    assert "Summarising earlier messages to make room." not in s.page_text(), "the Summarising note stayed"
 
     # The lasting line, under the last message the summary stands for.
     detail = s.invoke("get_chat", {"chatId": chat})
@@ -3755,6 +3783,7 @@ def _chat_memory(c, notes):
     last = detail["messages"][-1]
     assert last["role"] == "assistant" and last["status"] == "complete", last
     s.wait_for(lambda: "Earlier messages were summarised to make room." in s.page_text(), 10, "the stage note")
+    assert "Summarising earlier messages to make room." not in s.page_text(), "the Summarising note stayed"
     covered = next(m for m in detail["messages"] if m["id"] == detail["summary"]["lastMessageId"])
     check_line(short, covered)
     s.invoke("set_setting", {"key": "remoteContextLength", "value": 4096})
@@ -3918,34 +3947,73 @@ def p_model_settings(c, notes):
     notes.append("header: " + line.replace("\n", " | ")[:200])
     assert "vulkan" not in line and " context" not in line and "Vulkan0" not in line, line
 
-    def ready_line_geometry():
-        """The ready line never runs under what follows it (its button clips what does not
-        fit), "Remembers about N words" is shown whole in this window, and the whole text,
-        reason included, is in the tooltip."""
-        geo = s.execute(
+    def header_geometry():
+        """Where the header puts the picker and the ready line: which form of the ready line
+        shows (`remembers`: "Remembers about N words" with the reason, `about`: "About N
+        words", `words`: "N words", by the room the header leaves it), whether its number is
+        whole, whether anything runs past the header's right edge or the picker runs into
+        the ready line, how wide the model's name is, the tooltip, and "· Change"."""
+        return s.execute(
             """
-            const b = document.querySelector('main header button[aria-label="Model menu"]');
+            const h = document.querySelector('main header');
+            const b = h && h.querySelector('button[aria-label="Model menu"]');
             if (!b) return null;
-            const span = b.querySelector('span');
-            const text = span.textContent;
-            const end = text.indexOf(' words') + ' words'.length;
-            // Where "Remembers about N words" ends, against where the span is cut (an
-            // ellipsis, about one character wide, covers the end of a cut span).
-            const range = document.createRange();
-            range.setStart(span.firstChild, 0);
-            range.setEnd(span.firstChild, end);
-            const cut = span.scrollWidth > span.clientWidth;
-            const whole = range.getBoundingClientRect().right <= span.getBoundingClientRect().right - (cut ? 12 : 0) + 0.5;
-            const next = b.nextElementSibling;
-            const r = next && next.getBoundingClientRect();
-            const after = r && r.width > 0 ? r.left : b.parentElement.getBoundingClientRect().right;
-            return [b.getBoundingClientRect().right, after, getComputedStyle(b).overflowX, b.title,
-                    whole, text.slice(0, end), !!(r && r.width > 0), cut];
+            const tier = [...b.querySelectorAll('[data-ready]')].find(e => getComputedStyle(e).display !== 'none');
+            const num = tier.dataset.ready === 'remembers' ? tier.firstElementChild : tier;
+            const box = b.getBoundingClientRect();
+            const numWhole = num.scrollWidth <= num.clientWidth + 0.5 && num.getBoundingClientRect().right <= box.right + 0.5;
+            const reason = tier.dataset.ready === 'remembers' ? tier.lastElementChild : null;
+            const picker = h.querySelector('button[aria-label="Model for this chat"]');
+            const indicator = b.closest('main header > *');
+            const last = h.lastElementChild.getBoundingClientRect();
+            const row = b.closest('.flex-wrap');
+            const ch = [...row.querySelectorAll('button')].find(x => x.innerText.trim() === 'Change');
+            return {
+              inner: window.innerWidth,
+              tier: tier.dataset.ready,
+              text: tier.textContent,
+              numWhole,
+              reasonCut: !!reason && reason.scrollWidth > reason.clientWidth + 0.5,
+              over: h.scrollWidth > h.clientWidth + 0.5 || last.right > h.getBoundingClientRect().right + 0.5,
+              overlap: picker.getBoundingClientRect().right > indicator.getBoundingClientRect().left + 0.5,
+              name: Math.round(picker.querySelector('span').getBoundingClientRect().width),
+              clipped: getComputedStyle(b).overflowX === 'hidden',
+              title: b.title,
+              change: !!ch && ch.getBoundingClientRect().top < row.getBoundingClientRect().bottom - 1,
+            };
             """)
-        assert geo and geo[0] <= geo[1] + 0.5 and geo[2] == "hidden", geo
-        assert geo[4], f"the ready line is cut short: {geo!r}"
-        notes.append(f"shown whole: {geo[5]!r}; reason cut: {geo[7]}; '· Change' shown: {geo[6]}")
-        return geo[3].split("\n")[0]
+
+    def ready_line_geometry():
+        """In this window (an empty chat), "Remembers about N words" is shown whole, nothing
+        runs over, and the whole text, reason included, is in the tooltip."""
+        geo = header_geometry()
+        assert geo and geo["clipped"] and not geo["over"] and not geo["overlap"], geo
+        assert geo["tier"] == "remembers" and geo["numWhole"], f"the ready line is cut short: {geo!r}"
+        notes.append(f"shown whole: {geo['text']!r}; reason cut: {geo['reasonCut']}; '· Change' shown: {geo['change']}; "
+                     f"model name {geo['name']} px")
+        return geo["title"].split("\n")[0]
+
+    def header_with_messages():
+        """With messages the context meter takes room in the header: at the default width
+        nothing runs over and the ready line shows what fits; from 1366 px the number is
+        whole beside part of the model's name, and from 1440 px "Remembers about N words"."""
+        rect = s._req("GET", s._s("/window/rect"))
+        try:
+            for width in (1200, 1280, 1366, 1440):
+                s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
+                time.sleep(1.0)
+                geo = header_geometry()
+                notes.append(f"with messages at {geo['inner']} px: {geo['tier']} {geo['text']!r}, number whole "
+                             f"{geo['numWhole']}, model name {geo['name']} px, runs over {geo['over']}")
+                assert not geo["over"] and not geo["overlap"], geo
+                if width >= 1366:
+                    assert geo["numWhole"] and geo["name"] >= 40, geo
+                if width >= 1440:
+                    assert geo["tier"] == "remembers", geo
+                s.screenshot(str(OUT / f"model-settings-messages-{width}.png"))
+        finally:
+            s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
+            time.sleep(1.0)
 
     full = ready_line_geometry()
     notes.append(f"ready line in full: {full!r}")
@@ -4023,6 +4091,18 @@ def p_model_settings(c, notes):
         assert full == f"Remembers about {words:,} words (set for this model)", full
     else:
         notes.append("integration: Apply and restart loads the saved size (WP1b)")
+
+    # A short reply, so the chat has messages (the context meter shows) and the note about
+    # the first reply after a restart is gone: the header at several widths.
+    send(s, "Say hi in one word.")
+    try:
+        wait_idle(s, 120)
+    except WebDriverError:
+        notes.append("the short reply was still being written after 120 s; ended with Stop")
+        s.click_button("Stop")
+        wait_idle(s, 60)
+    s.wait_for(lambda: "The first reply after a restart takes longer" not in header(), 10, "the restart note gone")
+    header_with_messages()
 
     # D3 while the model writes a reply: Cancel, then Restart when it ends.
     for attempt in range(2):

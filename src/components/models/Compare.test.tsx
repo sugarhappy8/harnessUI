@@ -32,8 +32,19 @@ vi.mock("../../store/app", () => ({
       : { code: "unexpected", message: "Something went wrong.", nextStep: "Try again.", details: String(e) },
 }));
 
-const { Compare, CompareTabLabel, PROBLEM_WORDS, EMPTY_TEXT, NO_DESCRIPTION, SOURCE, SUGGESTED_SHOWN, fitSource, shown } =
-  await import("./Compare");
+const {
+  Compare,
+  CompareTabLabel,
+  COMPARE_AT_DELAY_MS,
+  COMPARE_SIZES,
+  PROBLEM_WORDS,
+  EMPTY_TEXT,
+  NO_DESCRIPTION,
+  SOURCE,
+  SUGGESTED_SHOWN,
+  fitSource,
+  shown,
+} = await import("./Compare");
 const { useCompare } = await import("../../store/compare");
 
 function fit(verdict: Verdict, sentence = "Needs about 4.4 GB; your GPU has 15.2 GB free."): FitResult {
@@ -186,6 +197,16 @@ async function show(onOpen?: (tab: "installed" | "browse") => void) {
   });
 }
 
+/** Wait out the pause after a "Compare at" change, then let the requests it starts settle. */
+async function waitOut() {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, COMPARE_AT_DELAY_MS + 50));
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
 function cell(question: string, column = 0): HTMLElement {
   const row = screen.getByRole("rowheader", { name: question }).closest("tr")!;
   return row.querySelectorAll("td")[column] as HTMLElement;
@@ -227,6 +248,13 @@ describe("Compare: nothing chosen", () => {
 });
 
 describe("Compare: rows and where each answer comes from", () => {
+  it("uses the labels of decision D6 word for word", () => {
+    expect(SOURCE.card).toBe("From the publisher's model card");
+    expect(SOURCE.uploader).toBe("The uploader lists");
+    expect(SOURCE.results).toBe("Your results");
+    expect(NO_DESCRIPTION).toBe("No description from the publisher in this app.");
+  });
+
   it("asks every question of the specification, in order", async () => {
     useCompare.setState({ entries: [{ catalogId: "one" }] });
     await show();
@@ -333,9 +361,10 @@ describe("Compare: rows and where each answer comes from", () => {
       facts(item, ctx, {
         catalog: null,
         fileFacts: fileFacts({ parameters: 35e9, moe: true, activeParameters: 3e9 }),
+        // Noon, local time, so the day is the same in every time zone the tests run in.
         results: [
-          { kind: "modelCheck", id: "p1", at: Date.UTC(2026, 2, 12), backend: "vulkan", passed: 3, total: 3 },
-          { kind: "benchmark", id: "b1", at: Date.UTC(2026, 2, 14), backend: "cpu", passed: 7, total: 11 },
+          { kind: "modelCheck", id: "p1", at: new Date(2026, 2, 12, 12).getTime(), backend: "vulkan", passed: 3, total: 3 },
+          { kind: "benchmark", id: "b1", at: new Date(2026, 2, 14, 12).getTime(), backend: "cpu", passed: 7, total: 11 },
         ],
       });
     useCompare.setState({ entries: [{ installedPath: "/models/local.gguf" }] });
@@ -350,6 +379,29 @@ describe("Compare: rows and where each answer comes from", () => {
     expect(results).toContain(SOURCE.results);
     expect(cell("Download size").textContent).toBe(`2.7 GB${SOURCE.disk}`);
     expect(within(screen.getAllByRole("columnheader")[1]!).getByText("On this computer")).toBeTruthy();
+  });
+
+  it("dates the user's results by this computer's calendar, not by UTC", async () => {
+    // 18:00 on March 12 in Los Angeles is already March 13 in UTC; 08:00 on March 13 in
+    // Tokyo is still March 12 in UTC.
+    const zone = process.env.TZ;
+    try {
+      for (const [tz, at, day] of [
+        ["America/Los_Angeles", Date.UTC(2026, 2, 13, 1, 0), "March 12, 2026"],
+        ["Asia/Tokyo", Date.UTC(2026, 2, 12, 23, 0), "March 13, 2026"],
+      ] as const) {
+        process.env.TZ = tz;
+        factsFor = (item, ctx) =>
+          facts(item, ctx, { results: [{ kind: "modelCheck", id: "p1", at, backend: null, passed: 3, total: 3 }] });
+        useCompare.setState({ entries: [{ installedPath: "/models/local.gguf" }] });
+        await show();
+        expect(cell("Your test results").textContent).toContain(`Model check: 3 of 3 checks passed · ${day}`);
+        cleanup();
+      }
+    } finally {
+      if (zone === undefined) delete process.env.TZ;
+      else process.env.TZ = zone;
+    }
   });
 });
 
@@ -425,9 +477,7 @@ describe("Compare: a repository's file", () => {
     await act(async () => {
       fireEvent.change(screen.getByLabelText("Compare at"), { target: { value: "32768" } });
     });
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
-    });
+    await waitOut();
     expect(ipcMock.hubRepo).toHaveBeenLastCalledWith("someone/alpha-GGUF", 32768);
     expect(useCompare.getState().entries).toEqual([
       { repo: "someone/alpha-GGUF", file: "alpha-Q2_K.gguf" },
@@ -465,6 +515,36 @@ describe("Compare: the comparison size", () => {
     expect(labels[0]).toBe("Same as your default (8,192 tokens, about 6,000 words)");
     expect(labels).toContain("32,768 tokens, about 24,000 words");
     expect(select.value).toBe("");
+  });
+
+  it("waits until the size stops changing before asking Hugging Face again", async () => {
+    useCompare.setState({ entries: ["a", "b", "c", "d"].map((n) => ({ repo: `someone/${n}-GGUF`, file: null })) });
+    await show();
+    expect(ipcMock.hubRepo).toHaveBeenCalledTimes(4);
+    const factCalls = ipcMock.compareFacts.mock.calls.length;
+    const select = screen.getByLabelText("Compare at") as HTMLSelectElement;
+    // Stepping through every size, as the arrow keys on the list do.
+    for (const n of COMPARE_SIZES) {
+      fireEvent.change(select, { target: { value: String(n) } });
+      expect(select.value).toBe(String(n));
+    }
+    expect(useCompare.getState().ctx).toBeNull();
+    expect(ipcMock.hubRepo).toHaveBeenCalledTimes(4);
+    await waitOut();
+    expect(useCompare.getState().ctx).toBe(131072);
+    // One page per repository and one facts request, at the size the user stopped at.
+    expect(ipcMock.hubRepo).toHaveBeenCalledTimes(8);
+    expect(ipcMock.hubRepo.mock.calls.slice(4).map(([, ctx]) => ctx)).toEqual([131072, 131072, 131072, 131072]);
+    expect(ipcMock.compareFacts.mock.calls.length).toBe(factCalls + 1);
+    expect(ipcMock.compareFacts).toHaveBeenLastCalledWith(expect.any(Array), 131072);
+  });
+
+  it("keeps a size chosen just before the tab closes", async () => {
+    useCompare.setState({ entries: [{ catalogId: "one" }] });
+    await show();
+    fireEvent.change(screen.getByLabelText("Compare at"), { target: { value: "16384" } });
+    cleanup();
+    expect(useCompare.getState().ctx).toBe(16384);
   });
 });
 
@@ -552,6 +632,58 @@ describe("Compare: uploader text is shown as text", () => {
     expect(within(cell("License")).queryByRole("button")).toBeNull();
     expect(shown("a\u200Bb\u2066c", 300)).toBe("a[U+200B]b[U+2066]c");
     expect(shown("x".repeat(400))).toHaveLength(300);
+  });
+
+  it("shows the uploader's file names in the Change menu with hidden characters visible", async () => {
+    // A file without a quantisation in its name is labelled by its name (crates/models/src/files.rs).
+    ipcMock.hubRepo.mockImplementation(async (repo, ctx) =>
+      repoView(repo, ctx ?? 8192, [variant("notes\u202Eexe\u200B", 4e8, "green"), variant("Q8_0", 8e9, "red")]),
+    );
+    useCompare.setState({ entries: [{ repo: "someone/alpha-GGUF", file: null }] });
+    await show();
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
+    const files = screen.getByRole("group", { name: "Files in this repository" });
+    const buttons = within(files).getAllByRole("button");
+    expect(buttons.map((b) => b.textContent)).toEqual([
+      "notes[U+202E]exe[U+200B] · 400 MB · Fits",
+      "Q8_0: large file, almost the original quality · 8.0 GB · Too large",
+    ]);
+    // Isolated, so the app's own words after it keep their order.
+    expect(buttons[0]!.querySelector("bdi")?.textContent).toBe("notes[U+202E]exe[U+200B]");
+    expect(files.textContent).not.toContain("\u202E");
+    expect(files.textContent).not.toContain("\u200B");
+  });
+
+  it("keeps joiners and emoji selectors in a model card only inside emoji", () => {
+    const card = (text: string) => shown(text, 262_144, true);
+    // Emoji sequences that draw one picture keep them.
+    for (const emoji of [
+      "\u{1F469}\u200D\u{1F4BB}",
+      "\u2764\uFE0F",
+      "\u2764\uFE0F\u200D\u{1F525}",
+      "\u{1F3F3}\uFE0F\u200D\u{1F308}",
+      "\u{1F469}\u{1F3FD}\u200D\u{1F4BB}",
+      "1\uFE0F\u20E3",
+      "\u2194\uFE0E",
+    ]) {
+      expect(card(`a ${emoji} b`)).toBe(`a ${emoji} b`);
+    }
+    // Anywhere else they would carry hidden text, so they are shown as codes.
+    expect(card("a\u200Cb\u200Dc\uFE0Fd\uFE0Ee\u200Bf")).toBe("a[U+200C]b[U+200D]c[U+FE0F]d[U+FE0E]e[U+200B]f");
+    expect(card("\u{1F600}\u200D\u200D\u{1F600}")).toBe("\u{1F600}[U+200D][U+200D]\u{1F600}");
+    expect(card("\u{1F600}\uFE0F\uFE0F\uFE0E")).toBe("\u{1F600}\uFE0F[U+FE0F][U+FE0E]");
+    expect(card("\u{1F600}\u200Dx")).toBe("\u{1F600}[U+200D]x");
+    expect(card("x\u200D\u{1F600}")).toBe("x[U+200D]\u{1F600}");
+    expect(card("a\uFE0F\u200D\u{1F600}")).toBe("a[U+FE0F][U+200D]\u{1F600}");
+    expect(card("1\uFE0Fx")).toBe("1[U+FE0F]x");
+    // Short fields escape them always.
+    expect(shown("\u{1F469}\u200D\u{1F4BB}")).toBe("\u{1F469}[U+200D]\u{1F4BB}");
+  });
+
+  it("reads a model card's Windows and old Mac line endings as new lines", () => {
+    expect(shown("line one\r\nline two\rline three \u202Ex", 262_144, true)).toBe("line one\nline two\nline three [U+202E]x");
+    // Short fields still show a carriage return as a code.
+    expect(shown("a\r\nb")).toBe("a[U+000D]\nb");
   });
 
   it("makes every invisible character the approval cards escape visible, and never cuts a character in half", () => {

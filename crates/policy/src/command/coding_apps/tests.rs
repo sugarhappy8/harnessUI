@@ -421,6 +421,11 @@ fn a_a_name_split_over_lines_or_written_as_a_pattern() {
         "{claude,} -p x",
         "{c,}laude -p x",
         "c{la,}ude -p x",
+        "{c..c}laude -p x",
+        "co{d..d}ex exec x",
+        "/usr/local/bin/(x|claude) -p y",
+        "~/.local/bin/(codex|nothing) exec x",
+        "cl[[:alpha:]]ude -p x",
         "env cl?ude -p x",
         "timeout 9 ~/.local/bin/clau* -p x",
         "sudo /usr/local/bin/co?ex exec x",
@@ -451,6 +456,8 @@ fn a_a_name_split_over_lines_or_written_as_a_pattern() {
         "cp x.txt{,.bak}",
         // Braces expand to `echo claude -p x`: echo runs.
         "{echo,claude} -p x",
+        // `coddx codex codfx exec x`: coddx runs.
+        "cod{d..f}x exec x",
     ] {
         assert_not_seen(SH, line);
     }
@@ -492,6 +499,9 @@ fn a_inline_code_and_located_programs() {
         "env \"$(which claude)\" -p x",
         "$(echo claude) -p x",
         "$(printf %s codex) exec x",
+        "$(ls ~/.local/bin/cl*) -p x",
+        "$(find / -name claude -type f) -p x",
+        "\"$(realpath ~/.local/bin/claude)\" -p x",
     ] {
         assert_asks(SH, line);
     }
@@ -499,6 +509,8 @@ fn a_inline_code_and_located_programs() {
         "Start-Process -FilePath (Get-Command claude).Source -ArgumentList '-p x'",
         "Start-Process (gcm codex).Source",
         "saps -FilePath (Get-Command claude).Path",
+        "& (Join-Path $env:APPDATA 'npm\\claude.cmd') -p x",
+        "& (Resolve-Path ~\\.local\\bin\\cl*.exe) -p x",
         "& (Get-Command claude) -p x",
         "&(Get-Command claude) -p x",
         "& (gcm codex) exec x",
@@ -529,6 +541,54 @@ fn a_inline_code_and_located_programs() {
         "Write-Output (Get-Command claude).Source",
         "Test-Path (gcm claude).Path",
         "[Diagnostics.Process]::Start('notepad', 'claude.txt')",
+    ] {
+        assert_not_seen(PS, line);
+    }
+}
+
+/// (a) A name kept in a variable or an alias on the same line and then run
+/// (`c=claude; $c -p x`, `$c = 'claude'; & $c`, `Set-Alias c claude; c`) (review of 0.0.6,
+/// round 2).
+#[test]
+fn a_a_name_kept_in_a_variable_or_alias() {
+    for line in [
+        "c=claude; $c -p x",
+        "c=claude; ${c} -p x",
+        "export C=/usr/local/bin/claude; \"$C\" -p x",
+        "declare -x c=codex; $c exec x",
+        "c=claude && env $c -p x",
+        "alias c=claude; c -p x",
+        "alias c='claude --model x'; c -p y",
+        "alias c='claude --model x'\nc -p x",
+        "p=~/.local/bin/clau*; $p -p x",
+    ] {
+        assert_asks(SH, line);
+    }
+    for line in [
+        "$c='claude'; & $c -p x",
+        "$c = 'codex'; & $c exec x",
+        "$env:c = 'claude'; & $env:c -p x",
+        "Set-Alias c claude; c -p x",
+        "Set-Alias -Name c -Value 'C:\\Users\\me\\.local\\bin\\claude.exe'; c -p x",
+        "sal -Name c -Value codex; c exec x",
+        "New-Variable -Name c -Value claude; & $c -p x",
+        "cmd /c \"set c=claude & %c% -p x\"",
+    ] {
+        assert_asks(PS, line);
+    }
+    for line in [
+        "c=cargo; $c test",
+        "x=claude; echo $x",
+        "alias ll='ls -l'; ll",
+        "c=claude; ls $c",
+        "NAME=claude make build",
+    ] {
+        assert_not_seen(SH, line);
+    }
+    for line in [
+        "$c = 'claude'",
+        "Set-Alias c claude",
+        "$c = 'claude'; Write-Output $c",
     ] {
         assert_not_seen(PS, line);
     }

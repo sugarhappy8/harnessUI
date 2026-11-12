@@ -113,7 +113,23 @@ function ready(path: string): RuntimeStatus {
   };
 }
 
+/** The info of the panel opened last (whether it is the loaded model). */
+let opened: ModelLoadInfo = sample();
+
+/**
+ * What the backend answers for `overrides` (saved, or asked about unsaved): as with WP1b's
+ * `same_launch`, the loaded copy is older when a launch setting differs, and How long it
+ * may think is not one (it is a per-request limit).
+ */
+function answerFor(path: string, overrides: ModelLoadSettings): ModelLoadInfo {
+  const launch = (Object.keys(overrides) as (keyof ModelLoadSettings)[]).some(
+    (k) => k !== "thinkingLimit" && overrides[k] !== "default",
+  );
+  return { ...sample(path), overrides, loaded: opened.loaded, olderSettingsLoaded: opened.loaded && launch };
+}
+
 async function openPanel(info: ModelLoadInfo, onClose = vi.fn()) {
+  opened = info;
   ipcMock.modelLoadInfo.mockResolvedValue(info);
   await act(async () => {
     render(
@@ -150,9 +166,9 @@ describe("ModelSettings: one model's load settings in plain words", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     ipcMock.modelBusy.mockResolvedValue(IDLE);
-    ipcMock.setModelLoadSettings.mockImplementation(async (path, overrides) => ({ ...sample(path), overrides }));
+    ipcMock.setModelLoadSettings.mockImplementation(async (path, overrides) => answerFor(path, overrides));
     ipcMock.resetModelLoadSettings.mockImplementation(async (path) => sample(path));
-    ipcMock.previewModelLoadSettings.mockImplementation(async (path, overrides) => ({ ...sample(path), overrides }));
+    ipcMock.previewModelLoadSettings.mockImplementation(async (path, overrides) => answerFor(path, overrides));
     useApp.setState({ runtime: null, activeChatId: 3, detail: null, error: null });
     Object.defineProperty(navigator, "platform", { value: "Linux x86_64", configurable: true });
   });
@@ -270,8 +286,52 @@ describe("ModelSettings: one model's load settings in plain words", () => {
     await choose("Keep the model in memory", "on");
     await click("Apply and restart");
     expect(ipcMock.setModelLoadSettings).toHaveBeenCalledWith("/models/model.gguf", { ...DEFAULTS, keepInMemory: "on" });
-    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, false);
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, true);
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("restarts nothing for a change that needs no restart: How long it may think is saved for the next reply", async () => {
+    vi.useFakeTimers();
+    try {
+      const info = sample();
+      info.loaded = true;
+      useApp.setState({ runtime: ready(info.path) });
+      ipcMock.modelBusy.mockResolvedValue({ chatTurns: 1, modelChecks: 0, otherApps: 0 });
+      const onClose = await openPanel(info);
+      await choose("How long it may think", "short");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      const apply = screen.getByRole("button", { name: "Apply and restart" }) as HTMLButtonElement;
+      expect(apply.disabled).toBe(true);
+      expect(apply.title).toBe("This change needs no restart. Save keeps it.");
+      await click("Save");
+      expect(ipcMock.setModelLoadSettings).toHaveBeenCalledWith("/models/model.gguf", { ...DEFAULTS, thinkingLimit: "short" });
+      expect(screen.getByRole("status").textContent).toBe("Saved. They are used from the next reply.");
+      expect(ipcMock.modelBusy).not.toHaveBeenCalled();
+      expect(ipcMock.reloadLocalModel).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Apply and restart before the fit answer came: saves, and restarts only when the backend says the loaded copy is older", async () => {
+    const info = sample();
+    info.loaded = true;
+    useApp.setState({ runtime: ready(info.path) });
+    const onClose = await openPanel(info);
+    // "Same as default (Off)" changed to "Off" resolves to what is loaded: nothing to restart.
+    ipcMock.setModelLoadSettings.mockImplementationOnce(async (path, overrides) => ({
+      ...answerFor(path, overrides),
+      olderSettingsLoaded: false,
+    }));
+    await choose("Save memory", "off");
+    await click("Apply and restart");
+    expect(ipcMock.setModelLoadSettings).toHaveBeenCalledWith("/models/model.gguf", { ...DEFAULTS, saveMemory: "off" });
+    expect(ipcMock.reloadLocalModel).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("status").textContent).toBe("Saved. They are used from the next reply.");
   });
 
   it("asks the D3 question when the model is busy: Cancel keeps the panel, Restart when it ends waits", async () => {
@@ -343,7 +403,7 @@ describe("ModelSettings: one model's load settings in plain words", () => {
     await click("Load with these settings");
     expect(ipcMock.setModelLoadSettings).toHaveBeenCalledWith("/models/other.gguf", { ...DEFAULTS, thinkingLimit: "short" });
     expect(ipcMock.setChatModel).toHaveBeenCalledWith(3, "local:/models/other.gguf");
-    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/other.gguf", null, undefined);
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/other.gguf", null, true);
     expect(onClose).toHaveBeenCalled();
   });
 

@@ -30,8 +30,8 @@ export function ModelPicker() {
         <button
           type="button"
           className={
-            // Gives way a little faster than the ready line beside it (its number matters more).
-            "flex max-w-xs min-w-0 shrink-[2.5] items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm font-medium hover:bg-bg-muted " +
+            // Gives way in step with the ready line beside it (WP2), down to its arrow.
+            "flex max-w-xs min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm font-medium hover:bg-bg-muted " +
             (current ? "border-transparent" : "border-border bg-surface shadow-soft")
           }
           aria-label="Model for this chat"

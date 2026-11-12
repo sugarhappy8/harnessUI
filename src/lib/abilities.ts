@@ -1,4 +1,4 @@
-// Plain words for what a model can do and how its file is made (0.0.5 item 4, D6): the
+// Plain words for what a model can do and how its file is made (0.0.6 item 4, D6): the
 // catalog's `goodAt` keys, what a Hugging Face uploader lists (pipeline tag, tags), the
 // quantisation in a file name, parameter counts and languages.
 //

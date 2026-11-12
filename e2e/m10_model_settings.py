@@ -30,9 +30,9 @@ Drives the backend commands the model settings panel uses, in the real app:
   stops it with Stop and restart) and is the one loaded afterwards; with nothing loaded,
   "Unloaded to free memory" is as it was after the check.
 
-The small model sometimes shortens the long reply ("1 ... 500"); a step that needs the
-reply to still stream then tries again with a new reply, and a change that went ahead is
-accepted only when the reply had ended by itself.
+The small model sometimes ends the long reply after a few words; a step that needs the
+reply to still stream then tries again with a new reply in a new chat, and a change that
+went ahead is accepted only when the reply had ended by itself.
 
 The D3 question in the window itself is WP2's scenario (`model-settings`).
 
@@ -88,7 +88,10 @@ window.__TAURI_INTERNALS__.invoke('send_message', {chatId, text, parentId, onEve
   .catch(e => { window.__sent = {ok: false, error: e}; });
 """
 
-LONG_REPLY = "Count from 1 to 500, one number per line, and nothing else. /no_think"
+LONG_REPLY = "Write a story of about 1,500 words about a lighthouse keeper and a long storm. /no_think"
+
+# The chat of the reply started last.
+REPLY = {"chat": None}
 
 
 def free_port() -> int:
@@ -175,34 +178,48 @@ def messages(s, chat_id):
     return s.invoke("get_chat", {"chatId": chat_id})["messages"]
 
 
-def start_reply(s, chat_id):
-    """Sends the long prompt as a follow-up to the chat's last message and waits until the
-    reply streams. True while it still streams, False when it already ended."""
-    msgs = messages(s, chat_id)
-    s.execute(SEND, chat_id, LONG_REPLY, msgs[-1]["id"] if msgs else None)
+def start_reply(s):
+    """Sends the long prompt in a new chat (in a chat with short answers the small model
+    answers short again) and waits until the reply streams. True while it still streams,
+    False when it already ended by itself; a reply that could not start fails."""
+    chat = s.invoke("create_chat", {"modelRef": f"local:{MODEL}"})
+    # No tools: the reply is text, which a stopped reply keeps.
+    s.invoke("set_chat_tools", {"chatId": chat["id"], "enabled": []})
+    REPLY["chat"] = chat["id"]
+    s.execute(SEND, chat["id"], LONG_REPLY, None)
     s.wait_for(lambda: busy(s)["chatTurns"] == 1 or not pending(s, "__sent"), 120, "the reply to start")
     s.wait_for(lambda: s.execute("return window.__text") > 20 or not pending(s, "__sent"), 300, "the reply to stream")
-    return pending(s, "__sent")
+    if pending(s, "__sent"):
+        return True
+    sent = fired(s, "__sent")
+    assert sent.get("ok"), ("the reply could not start", sent)
+    return False
 
 
-def went_ahead(s, chat_id, slot):
+def reply_streams(s):
+    """A reply started by `start_reply` is still being written."""
+    return pending(s, "__sent") and busy(s)["chatTurns"] == 1
+
+
+def went_ahead(s, slot):
     """A change that was to wait for the reply went ahead: fine only when the reply had
     ended by itself (status complete), never when the change stopped it."""
     r = fired(s, slot, 600)
     fired(s, "__sent", 300)
-    last = messages(s, chat_id)[-1]
+    last = messages(s, REPLY["chat"])[-1]
     assert last["role"] == "assistant" and last["status"] == "complete", (
         f"{slot} went ahead while the reply streamed", r, last["status"])
     if r.get("ok"):
         ready(s)
 
 
-def while_a_reply_streams(s, chat_id, name, attempt, tries=4):
-    """Runs `attempt()` while a real reply streams. When the reply ended by itself before
-    `attempt` could check what it needed, `attempt` returns False (after the model is ready
-    again) and it is tried again with a new reply."""
+def while_a_reply_streams(s, name, attempt, tries=4):
+    """Runs `attempt()` while a real reply streams (the one still streaming from the step
+    before, else a new one). When the reply ended by itself before `attempt` could check
+    what it needed, `attempt` returns False (after the model is ready again) and it is
+    tried again with a new reply."""
     for n in range(1, tries + 1):
-        if start_reply(s, chat_id) and attempt():
+        if (reply_streams(s) or start_reply(s)) and attempt():
             return
         fired(s, "__sent", 300)
         print(f"    {name}: the reply ended by itself too soon ({n} of {tries})", flush=True)
@@ -241,7 +258,7 @@ def check_settings_saved_while_loading(s):
     assert s.invoke("runtime_status")["settingsChanged"] is False, "the loaded copy matches the settings again"
 
 
-def check_removing_the_loaded_model(s, home, chat_id):
+def check_removing_the_loaded_model(s, home):
     """Removing the loaded model from Installed while a change waits for it ("Restart when
     it ends"): the change is cancelled and the model is not loaded again."""
     installed = call(s, "import_model", {"path": MODEL})
@@ -251,7 +268,7 @@ def check_removing_the_loaded_model(s, home, chat_id):
         s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"] or not pending(s, "__reload3"), 10,
                    "reloadWaiting while the reply streams")
         if not pending(s, "__reload3"):
-            went_ahead(s, chat_id, "__reload3")
+            went_ahead(s, "__reload3")
             return False
         call(s, "delete_model", {"id": installed["id"], "deleteFiles": False})
         r = fired(s, "__reload3", 120)
@@ -265,7 +282,7 @@ def check_removing_the_loaded_model(s, home, chat_id):
         assert server_processes(home) == [], server_processes(home)
         return True
 
-    while_a_reply_streams(s, chat_id, "removing the loaded model", remove_while_waiting)
+    while_a_reply_streams(s, "removing the loaded model", remove_while_waiting)
 
 
 def check_removing_the_unloaded_model(s):
@@ -302,14 +319,22 @@ def check_a_pick_waits_for_the_backend_check(s):
             os.link(MODEL, second)
         except OSError:
             os.symlink(MODEL, second)
+    # Its header is read now, so the pick below reaches the question at once.
+    call(s, "model_load_info", {"path": str(second)})
     call(s, "load_local_model", {"path": MODEL})
     ready(s)
     s.execute(FIRE, "__diag", "run_diagnostics", {"modelPath": MODEL})
     s.wait_for(lambda: busy(s)["modelChecks"] == 1 or not pending(s, "__diag"), 300, "the check to start")
     assert pending(s, "__diag") and busy(s)["modelChecks"] == 1, ("the check does not count as a model check", busy(s))
     s.execute(FIRE, "__pick", "load_local_model", {"path": str(second), "settings": None, "whenIdle": True})
-    s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"] or not pending(s, "__pick"), 10, "the pick to wait")
-    assert pending(s, "__pick") or not pending(s, "__diag"), "the pick did not wait for the check"
+    seen = {}
+
+    def waits():
+        seen["status"] = s.invoke("runtime_status")
+        return seen["status"]["reloadWaiting"] or not pending(s, "__pick") or not pending(s, "__diag")
+
+    s.wait_for(waits, 60, "the pick to wait for the check")
+    assert seen["status"]["reloadWaiting"], ("the pick did not wait for the check", seen["status"], busy(s))
     r = fired(s, "__diag", 1200)
     assert r.get("ok"), r
     r = fired(s, "__pick", 600)
@@ -522,13 +547,10 @@ def main() -> int:
         pid = new_pid
 
         step("Restart when it ends: waits while a real reply streams; Cancel")
-        chat = s.invoke("create_chat", {"modelRef": f"local:{MODEL}"})
-        # No tools: the reply is text, which a stopped reply keeps.
-        s.invoke("set_chat_tools", {"chatId": chat["id"], "enabled": []})
 
         def change_went_ahead(slot):
             nonlocal pid
-            went_ahead(s, chat["id"], slot)
+            went_ahead(s, slot)
             pid = the_server(home)[0]
             return False
 
@@ -549,7 +571,7 @@ def main() -> int:
             assert the_server(home)[0] == pid, "Cancel restarted the model"
             return True
 
-        while_a_reply_streams(s, chat["id"], "Restart when it ends, Cancel", wait_then_cancel)
+        while_a_reply_streams(s, "Restart when it ends, Cancel", wait_then_cancel)
 
         step("Restart when it ends: goes ahead once the reply has ended")
 
@@ -572,7 +594,7 @@ def main() -> int:
             fired(s, "__sent", 120)
             return True
 
-        while_a_reply_streams(s, chat["id"], "Restart when it ends, goes ahead", wait_then_stop)
+        while_a_reply_streams(s, "Restart when it ends, goes ahead", wait_then_stop)
 
         step("Stop and restart: the reply is stopped first and keeps what it wrote")
 
@@ -588,16 +610,14 @@ def main() -> int:
             new_pid = the_server(home)[0]
             assert new_pid != pid, "the model did not restart"
             pid = new_pid
-            last = messages(s, chat["id"])[-1]
+            last = messages(s, REPLY["chat"])[-1]
             if last["status"] == "complete":  # it ended by itself just before; nothing to stop
                 return False
             assert last["role"] == "assistant" and last["text"], ("the stopped reply lost what it wrote", last)
+            print("    the stopped reply:", last["status"], len(last["text"]), "characters")
             return True
 
-        while_a_reply_streams(s, chat["id"], "Stop and restart", stop_and_restart)
-        replies = [m for m in messages(s, chat["id"]) if m["role"] == "assistant"]
-        print("    assistant messages:", [(m["status"], len(m["text"] or "")) for m in replies])
-        assert all(m["text"] for m in replies if m["status"] != "complete"), replies
+        while_a_reply_streams(s, "Stop and restart", stop_and_restart)
 
         step("Unload remembers the model; Load again uses its saved settings")
         call(s, "unload_model")
@@ -629,7 +649,7 @@ def main() -> int:
         check_settings_saved_while_loading(s)
 
         step("removing the loaded model cancels a change that waits for it")
-        check_removing_the_loaded_model(s, home, chat["id"])
+        check_removing_the_loaded_model(s, home)
 
         step("removing the unloaded model forgets it")
         check_removing_the_unloaded_model(s)

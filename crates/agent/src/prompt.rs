@@ -617,10 +617,26 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
     if let Some(summary) = parts.summary.map(str::trim).filter(|s| !s.is_empty()) {
         blocks.push(format!(
             "<conversation_summary>\nEarlier messages of this conversation were summarised:\n{}\n</conversation_summary>",
-            quote_app_notes(&sanitizer.clean(summary))
+            quote_app_notes(&sanitizer.clean(&visible_summary(summary)))
         ));
     }
     blocks.join("\n\n")
+}
+
+/// A model-written summary with its hidden characters shown as visible escapes, as approval
+/// cards show them ([`policy::sanitize::visible`]: zero-width, joining, bidirectional and tag
+/// characters, which can carry text a person cannot see), and the soft hyphen and the
+/// combining grapheme joiner as well. Windows line ends become plain ones first.
+fn visible_summary(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in policy::sanitize::visible(&text.replace("\r\n", "\n")).chars() {
+        if matches!(c, '\u{00AD}' | '\u{034F}') {
+            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// A model-written summary as the summary block shows it: every "[App note]" marker (any
@@ -628,36 +644,69 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
 /// hand-over) gets round brackets, "(App note)". The agent instructions say lines starting
 /// with "[App note]" come from the app; a summary is model output that can echo a web page
 /// or a file, and in the system message it sits outside every tool-output block, so it must
-/// not be able to pass for a note from the app (0.0.6). The text is otherwise unchanged;
-/// the stored summary is never changed.
+/// not be able to pass for a note from the app (0.0.6). Hidden characters inside the
+/// brackets (by now visible escapes, [`visible_summary`]) do not hide a marker, and
+/// full-width brackets count as brackets. The text is otherwise unchanged; the stored
+/// summary is never changed.
 fn quote_app_notes(text: &str) -> String {
+    const OPEN: [char; 2] = ['[', '\u{FF3B}'];
+    const CLOSE: [char; 2] = [']', '\u{FF3D}'];
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(open) = rest.find('[') {
+    while let Some(open) = rest.find(OPEN) {
         out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        let marker = after.find(']').filter(|&close| {
-            let inner: String = after[..close]
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            inner.to_lowercase() == "appnote"
-        });
+        let bracket = rest[open..].chars().next().map_or(1, char::len_utf8);
+        let after = &rest[open + bracket..];
+        let marker = after
+            .find(CLOSE)
+            .filter(|&close| is_app_note_marker(&after[..close]));
         match marker {
             Some(close) => {
+                let bracket = after[close..].chars().next().map_or(1, char::len_utf8);
                 out.push('(');
                 out.push_str(&after[..close]);
                 out.push(')');
-                rest = &after[close + 1..];
+                rest = &after[close + bracket..];
             }
             None => {
-                out.push('[');
+                out.push_str(&rest[open..open + bracket]);
                 rest = after;
             }
         }
     }
     out.push_str(rest);
     out
+}
+
+/// True when the text between two brackets reads "App note" once spacing, the zero-width
+/// space [`Sanitizer::clean`] inserts and the `\u{…}` escapes of hidden characters are left
+/// out (any letter case).
+fn is_app_note_marker(inner: &str) -> bool {
+    let mut letters = String::new();
+    let mut rest = inner;
+    while let Some(c) = rest.chars().next() {
+        if let Some(len) = escape_len(rest) {
+            rest = &rest[len..];
+            continue;
+        }
+        rest = &rest[c.len_utf8()..];
+        if c.is_whitespace() || c == BREAK {
+            continue;
+        }
+        letters.extend(c.to_lowercase());
+        if letters.len() > "appnote".len() {
+            return false;
+        }
+    }
+    letters == "appnote"
+}
+
+/// The length in bytes of a `\u{…}` escape (one to six hex digits) at the start of `text`.
+fn escape_len(text: &str) -> Option<usize> {
+    let digits = text.strip_prefix("\\u{")?;
+    let close = digits.find('}')?;
+    ((1..=6).contains(&close) && digits[..close].chars().all(|c| c.is_ascii_hexdigit()))
+        .then_some(3 + close + 1)
 }
 
 /// Sanitises the texts of a tool's JSON Schema before it is offered to the model: every

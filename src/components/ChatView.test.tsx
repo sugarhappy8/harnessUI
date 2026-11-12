@@ -148,7 +148,8 @@ describe("the Model settings button under a too-long error", () => {
   });
 
   it("is offered for every error about the chat no longer fitting, and only those", () => {
-    for (const code of ["context_full", "context_overflow", "tools_do_not_fit"]) {
+    // [0.0.6] Pinned instructions that do not fit get more room with a larger memory too.
+    for (const code of ["context_full", "context_overflow", "tools_do_not_fit", "pinned_do_not_fit"]) {
       show(detail("local:/m.gguf", null, [message(1, "user", "hi"), message(2, "assistant", "", { ...tooLong, code })]));
       expect(screen.getAllByRole("button", { name: "Model settings" })).toHaveLength(1);
       cleanup();
@@ -179,6 +180,13 @@ describe("the meter", () => {
   it("says how much it can remember, in tokens and words", () => {
     expect(contextMeterTitle(1_200, 8_192)).toBe(
       "How much it can remember: 1,200 of 8,192 tokens used (about 900 of 6,000 words)",
+    );
+    // [0.0.6] Fewer words than the rounding shows: never "about 0".
+    expect(contextMeterTitle(120, 8_192)).toBe(
+      "How much it can remember: 120 of 8,192 tokens used (fewer than 100 of about 6,000 words)",
+    );
+    expect(contextMeterTitle(134, 4_096)).toBe(
+      "How much it can remember: 134 of 4,096 tokens used (about 100 of 3,000 words)",
     );
     expect(contextMeterTitle(40, null)).toBe("How much it can remember: 40 tokens used");
     expect(contextMeterTitle(2_000, null)).toBe("How much it can remember: 2,000 tokens used (about 1,000 words)");

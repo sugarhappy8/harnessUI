@@ -1138,6 +1138,293 @@ async fn a_row_not_offered_here_is_refused() {
     assert_eq!(s.download_bytes, 0);
 }
 
+/// A part whose archive holds `extra` small files that are not kept, so that unpacking it
+/// takes long enough for Cancel to land while it runs.
+fn slow_part(name: &'static str, component: Component, version: &'static str) -> FakePart {
+    let top: &'static str = match name {
+        "node" => "node-v24.22.3-linux-x64/",
+        _ => "kuna-v1.990-linux-x86_64/",
+    };
+    let program: &'static str = if name == "node" { "bin/node" } else { "kuna" };
+    let mut entries = vec![
+        (
+            format!("{top}{program}"),
+            format!("ELF {name}").into_bytes(),
+            true,
+        ),
+        (format!("{top}LICENSE"), b"MIT".to_vec(), false),
+    ];
+    for i in 0..20_000 {
+        entries.push((format!("{top}lib/x{i}.js"), b"x".to_vec(), false));
+    }
+    FakePart {
+        name,
+        component,
+        version,
+        minimum: version,
+        asset: format!("{}-slow.tar.gz", name),
+        strip: top,
+        keep: Keep::Files(vec![program.into(), "LICENSE".into()]),
+        entries,
+        programs: vec![(program, true)],
+        max_path_chars: 12,
+    }
+}
+
+impl Fixture {
+    /// The fixture's lock with `name` replaced by a part that unpacks slowly.
+    fn with_slow(&self, name: &'static str) -> ReverseLock {
+        let mut lock = self.lock.clone();
+        let (component, version, platforms, hosts): (_, _, &[Platform], _) = match name {
+            "node" => (Component::Rea, "24.22.3", &PLATFORMS, NODE),
+            _ => (Component::Kuna, "1.990", &[Platform::LinuxX64], GH),
+        };
+        let part = fake_part(
+            &self.archives,
+            &slow_part(name, component, version),
+            platforms,
+            hosts,
+        );
+        *lock.parts.iter_mut().find(|p| p.name == name).unwrap() = part;
+        lock
+    }
+}
+
+/// Downloads `c`, pressing Cancel as soon as `part` starts unpacking.
+async fn cancel_while_unpacking(
+    i: &Installer,
+    c: Component,
+    part: &str,
+) -> Result<reverse::Installed, ReverseError> {
+    let cancel = CancellationToken::new();
+    i.download(c, &cancel, &|p| {
+        if p.part == part && p.stage == DownloadStage::Unpacking {
+            cancel.cancel();
+        }
+    })
+    .await
+}
+
+/// Cancel while Node unpacks, after rea is already in place: the row is paused ("Paused at
+/// …" with Resume and Remove), not "part of rea is missing", and Resume finishes it.
+#[tokio::test]
+async fn cancel_while_a_later_part_unpacks_keeps_the_row_paused() {
+    let f = fixture();
+    let lock = f.with_slow("node");
+    let i = f.installer_with(lock.clone(), Platform::LinuxX64);
+    let e = cancel_while_unpacking(&i, Component::Rea, "node")
+        .await
+        .unwrap_err();
+    assert_eq!(e, ReverseError::Cancelled);
+    assert!(
+        f.root.join("rea-6.9.0/.complete").is_file(),
+        "rea is in place"
+    );
+    assert!(!f.root.join("node-24.22.3").exists());
+    assert!(!f.root.join(".tmp-node-24.22.3").exists());
+    let size = |name: &str| lock.part(name).unwrap().builds[0].file.size;
+    assert_eq!(
+        i.state(Component::Rea),
+        ComponentState::Partial {
+            bytes: size("rea") + size("node")
+        }
+    );
+    // Resume: nothing is fetched again, Node is unpacked, and no download is left behind.
+    let counting = Arc::new(Counting::new(&f.archives));
+    let i = f
+        .installer_with(lock.clone(), Platform::LinuxX64)
+        .with_fetch(counting.clone() as Arc<dyn Fetch>);
+    download(&i, Component::Rea, &Seen::default())
+        .await
+        .unwrap();
+    assert_eq!(i.state(Component::Rea), ComponentState::Installed);
+    assert_eq!(
+        counting.starts.lock().unwrap().clone(),
+        [(
+            lock.part("node").unwrap().builds[0].file.name.clone(),
+            size("node")
+        )]
+    );
+    let left: Vec<_> = std::fs::read_dir(f.downloads())
+        .map(|d| d.filter_map(Result::ok).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// Remove on that paused row frees everything of it, the part already unpacked included.
+#[tokio::test]
+async fn discarding_a_row_paused_while_unpacking_frees_all_of_it() {
+    let f = fixture();
+    let i = f.installer_with(f.with_slow("node"), Platform::LinuxX64);
+    cancel_while_unpacking(&i, Component::Rea, "node")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        i.state(Component::Rea),
+        ComponentState::Partial { .. }
+    ));
+    i.discard_partial(Component::Rea).await.unwrap();
+    assert_eq!(i.state(Component::Rea), ComponentState::NotInstalled);
+    assert!(!f.root.join("rea-6.9.0").exists());
+    assert!(!f.part_file("rea").exists());
+}
+
+/// Kuna's download brought rea; Cancel during Kuna's unpack leaves rea installed with its
+/// downloads deleted, and only Kuna paused.
+#[tokio::test]
+async fn cancel_during_a_decompiler_unpack_keeps_rea_and_pauses_the_decompiler() {
+    let f = fixture();
+    let lock = f.with_slow("kuna");
+    let i = f.installer_with(lock.clone(), Platform::LinuxX64);
+    let e = cancel_while_unpacking(&i, Component::Kuna, "kuna")
+        .await
+        .unwrap_err();
+    assert_eq!(e, ReverseError::Cancelled);
+    assert_eq!(i.state(Component::Rea), ComponentState::Installed);
+    assert!(!f.part_file("rea").exists() && !f.part_file("node").exists());
+    assert_eq!(
+        i.state(Component::Kuna),
+        ComponentState::Partial {
+            bytes: lock.part("kuna").unwrap().builds[0].file.size
+        }
+    );
+}
+
+/// When only Node.js changes, the update names Node.js and its versions, not "rea 6.9.0 →
+/// 6.9.0".
+#[tokio::test]
+async fn an_update_of_node_alone_names_node() {
+    let f = fixture();
+    download(&f.installer(), Component::Rea, &Seen::default())
+        .await
+        .unwrap();
+    let mut lock = f.lock.clone();
+    let node = lock.parts.iter_mut().find(|p| p.name == "node").unwrap();
+    node.version = "24.22.4".into();
+    node.dir = "node-24.22.4".into();
+    let i = f.installer_with(lock.clone(), Platform::LinuxX64);
+    let update = i.status(Component::Rea).update.unwrap();
+    assert_eq!(
+        (
+            update.part.as_str(),
+            update.from.as_str(),
+            update.to.as_str()
+        ),
+        ("node", "24.22.3", "24.22.4")
+    );
+    assert_eq!(
+        update.download_bytes,
+        lock.part("node").unwrap().builds[0].file.size
+    );
+}
+
+/// A lock whose file name or digest would leave `.downloads/` is refused before anything is
+/// fetched or written, and status and removal never use such a name (defence in depth: the
+/// lock is compiled in and reviewed).
+#[tokio::test]
+async fn a_pinned_file_name_that_leaves_the_downloads_folder_is_refused() {
+    let bad_sha = "../../../../../../../../../../../../../../../../../../../../../../../.";
+    for (name, sha) in [
+        ("../sentinel.zip", None),
+        ("../../../escape.zip", None),
+        ("sub/dir.tgz", None),
+        ("ok.tgz", Some(bad_sha)),
+    ] {
+        let f = fixture();
+        let mut lock = f.lock.clone();
+        let b = &mut lock
+            .parts
+            .iter_mut()
+            .find(|p| p.name == "rea")
+            .unwrap()
+            .builds[0];
+        b.file.url = format!("https://registry.npmjs.org/x/{name}");
+        b.file.name = name.into();
+        b.upstream_asset = name.into();
+        if let Some(sha) = sha {
+            b.file.sha256 = sha.into();
+        }
+        // What a removal would delete if it joined `../sentinel.zip` under `.downloads/`.
+        std::fs::create_dir_all(&f.root).unwrap();
+        let sentinel = sha.is_none().then(|| {
+            let path = f
+                .root
+                .join(format!("sentinel.zip.{}.part", &b.file.sha256[..16]));
+            std::fs::write(&path, b"keep").unwrap();
+            path
+        });
+        let counting = Arc::new(Counting::new(&f.archives));
+        let i = f
+            .installer_with(lock, Platform::LinuxX64)
+            .with_fetch(counting.clone() as Arc<dyn Fetch>);
+        let e = download(&i, Component::Rea, &Seen::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, ReverseError::Archive { part, .. } if part == "rea"),
+            "{name}: {e:?}"
+        );
+        assert_eq!(counting.calls.load(Ordering::SeqCst), 0, "{name}");
+        let empty = std::fs::read_dir(f.downloads()).map_or(true, |mut d| d.next().is_none());
+        assert!(empty, "{name}");
+        assert_eq!(i.state(Component::Rea), ComponentState::NotInstalled);
+        i.discard_partial(Component::Rea).await.unwrap();
+        i.remove(Component::Rea).await.unwrap();
+        if let Some(sentinel) = sentinel {
+            assert!(sentinel.is_file(), "{name}: removal stayed in its folder");
+        }
+    }
+}
+
+/// A release build of the app offers a part only with its publisher's checks: Ghidra pinned
+/// on first download only (no GitHub digest) is not offered, so it is never downloaded.
+#[tokio::test]
+async fn release_rules_refuse_a_part_without_its_publisher_checks() {
+    let f = fixture();
+    // The fixture pins every part "first-download-only".
+    let i = f.installer().with_release_rules(true);
+    let e = download(&i, Component::Ghidra, &Seen::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e,
+        ReverseError::NotAvailable {
+            reason: reverse::platform::NOT_IN_THIS_VERSION.into()
+        }
+    );
+    assert!(!i.status(Component::Ghidra).available);
+    assert!(!f.root.join("ghidra-12.1.4").exists() && !f.downloads().exists());
+    // Kuna has no publisher check to give: a first download is enough for it.
+    assert!(i.status(Component::Kuna).available);
+    // With every part's own checks recorded, the release build offers it.
+    let mut lock = f.lock.clone();
+    for p in &mut lock.parts {
+        let checks: Vec<String> = match p.name.as_str() {
+            "rea" => vec![
+                "npm-integrity".into(),
+                "npm-provenance:morluto/rea@abc".into(),
+                "npm-audit-signatures".into(),
+            ],
+            "node" => vec!["gpg:nodejs-release-keys".into()],
+            "ghidra" => vec!["github-digest".into()],
+            "java" => vec!["gpg:adoptium".into(), "adoptium-api-checksum".into()],
+            _ => vec!["first-download-only".into()],
+        };
+        for b in &mut p.builds {
+            b.verified_by = checks.clone();
+        }
+    }
+    let i = f
+        .installer_with(lock, Platform::LinuxX64)
+        .with_release_rules(true);
+    for c in Component::ALL {
+        assert!(i.status(c).available, "{c:?}");
+    }
+    download(&i, Component::Ghidra, &Seen::default())
+        .await
+        .unwrap();
+}
+
 /// The real pinned archives through the real unpacker, from a cache filled by
 /// `scripts/pin_reverse.py --download-to <dir>` (about 830 MB on Linux; 2.5 GB of disk while
 /// it runs). Every shipped platform whose archives are all in the cache is installed (the

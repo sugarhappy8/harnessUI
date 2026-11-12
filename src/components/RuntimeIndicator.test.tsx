@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ChatDetail, ModelBusy, RuntimeStatus, ShareStatus } from "../lib/types";
+import type { ChatDetail, LoadFailure, ModelBusy, RuntimeStatus, ShareStatus } from "../lib/types";
 
 // Radix positions menus with ResizeObserver, which jsdom does not have.
 globalThis.ResizeObserver ??= class {
@@ -112,7 +112,7 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     vi.clearAllMocks();
     ipcMock.modelBusy.mockResolvedValue(IDLE);
     ipcMock.shareStatus.mockResolvedValue(SHARE_OFF);
-    useWaiting.setState({ change: null });
+    useWaiting.setState({ change: null, kind: null });
     useRestartNote.setState({ shown: false });
   });
   afterEach(cleanup);
@@ -169,10 +169,10 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect(screen.getByRole("menuitem", { name: /Reload/ })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /Model settings/ })).toBeTruthy();
     await click(screen.getByRole("menuitem", { name: /Reload/ }));
-    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(true, false);
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(true, true);
     await openMenu();
     await click(screen.getByRole("menuitem", { name: /Unload to free memory/ }));
-    expect(ipcMock.unloadModel).toHaveBeenCalledWith(undefined);
+    expect(ipcMock.unloadModel).toHaveBeenCalledWith(true);
   });
 
   it("asks the D3 question from the menu while a reply is being written", async () => {
@@ -221,6 +221,18 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect(screen.getByRole("status").textContent).toContain("Unloads when the model check ends");
   });
 
+  it("words a wait the backend started on its own by the change that runs", async () => {
+    // No question was asked (nothing used the model when checked), then a reply started:
+    // the backend waits instead of stopping it, and the line names the change.
+    useWaiting.setState({ change: null, kind: "switch" });
+    ipcMock.modelBusy.mockResolvedValue({ chatTurns: 1, modelChecks: 0, otherApps: 0 });
+    await show(status());
+    expect(screen.queryByText(/when the reply ends/)).toBeNull();
+    cleanup();
+    await show(status({ reloadWaiting: true }));
+    expect(screen.getByRole("status").textContent).toContain("Changes the model when the reply ends");
+  });
+
   it("does not poll the busy counts when nothing waits", async () => {
     await show(status());
     expect(ipcMock.modelBusy).not.toHaveBeenCalled();
@@ -231,7 +243,7 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     await show(status({ settingsChanged: true }));
     expect(screen.getByRole("status").textContent).toContain("Settings changed. Restart the model to use them.");
     await click(screen.getByRole("button", { name: "Apply and restart" }));
-    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, false);
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, true);
   });
 
   it("explains a step-down with Reload, and a partial load and slowness with Model settings…", async () => {
@@ -245,7 +257,7 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
       "Running on the processor because the graphics card ran out of memory. Reload to try the graphics card again.",
     );
     await click(screen.getByRole("button", { name: "Reload" }));
-    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(true, false);
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(true, true);
     cleanup();
     await show(status({ offloadedLayers: 20, totalLayers: 33 }));
     expect(screen.getByRole("status").textContent).toContain(
@@ -277,7 +289,7 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     ]);
     expect(notes.map((n) => n.action)).toEqual(["reload", "settings"]);
     await click(screen.getByRole("button", { name: "Reload" }));
-    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(true, false);
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(true, true);
 
     // Two step-downs: only the last says where it runs now; the slow part-on-the-processor
     // line comes back when the lower graphics backend runs only part of the model.
@@ -330,6 +342,24 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect(runtimeNotes(status(), { restarted: true, hasMessages: false })).toEqual([]);
   });
 
+  it("offers the action that can help after a step-down: Model settings… for a missing card, none for an unreadable model", () => {
+    const down = (reason: LoadFailure) =>
+      runtimeNotes(status({ backend: "cpu", adjustments: [{ kind: "steppingDown", from: "vulkan", to: "cpu", reason }] }), {
+        restarted: false,
+        hasMessages: false,
+      });
+    expect(down({ code: "invalid_device", device: "Vulkan1" })).toEqual([
+      {
+        text: "Running on the processor because the chosen graphics card was not found. Choose another in Model settings.",
+        action: "settings",
+      },
+    ]);
+    expect(down({ code: "model_file_invalid" })).toEqual([
+      { text: "Running on the processor because the graphics card could not load this model.", action: null },
+    ]);
+    expect(down({ code: "out_of_memory" })[0]?.action).toBe("reload");
+  });
+
   it("notes the slower first reply after a restart until a reply ends", async () => {
     useRestartNote.setState({ shown: true });
     await show(status(), chat("local:/models/a.gguf", 2));
@@ -344,10 +374,25 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
-  it("says Used by another app from the sharing status", async () => {
+  it("says Used by another app from the sharing status, also in the tooltip and the menu", async () => {
     ipcMock.shareStatus.mockResolvedValue({ ...SHARE_OFF, enabled: true, port: 51234, listening: true, inUse: true });
     await show(status());
     expect(text()).toContain("Used by another app");
+    const button = screen.getByRole("button", { name: "Model menu" });
+    expect(button.title).toBe("Remembers about 24,000 words (Automatic)\nUsed by another app\n/models/a.gguf");
+    await openMenu();
+    expect(screen.getByRole("menu").textContent).toContain("Used by another app");
+  });
+
+  it("has the ready line's shorter forms for a crowded header, each with the number whole", async () => {
+    await show(status());
+    const button = screen.getByRole("button", { name: "Model menu" });
+    const form = (name: string) => button.querySelector(`[data-ready="${name}"]`)?.textContent;
+    // Which one shows is up to the room the header leaves (a container query on the line).
+    expect(form("remembers")).toBe("Remembers about 24,000 words (Automatic)");
+    expect(form("about")).toBe("About 24,000 words");
+    expect(form("words")).toBe("24,000 words");
+    expect(button.closest(".\\@container\\/ready")).not.toBeNull();
   });
 
   it("offers Model settings… after a failed load, and Load after Unload", async () => {
@@ -362,12 +407,12 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect(screen.getByRole("status").textContent).toBe("This model doesn't fit.");
     expect(screen.getByRole("button", { name: "Model settings…" })).toBeTruthy();
     await click(screen.getByRole("button", { name: "Try again" }));
-    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/a.gguf", null, undefined);
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/a.gguf", null, true);
     cleanup();
     vi.clearAllMocks();
     await show(status({ state: "stopped", modelPath: null, modelName: null, nCtx: null, unloadedPath: "/models/a.gguf" }));
     expect(text()).toContain("Unloaded to free memory");
     await click(screen.getByRole("button", { name: "Load" }));
-    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/a.gguf", null, undefined);
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/a.gguf", null, true);
   });
 });

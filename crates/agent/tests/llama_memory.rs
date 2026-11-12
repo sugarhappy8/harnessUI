@@ -205,19 +205,51 @@ async fn count_tokens(server: &RunningServer, text: &str) -> usize {
 }
 
 /// A summary as a context of 32,768 tokens leaves it: near its cap there (4,096
-/// characters), about twice what [`CONTEXT`] allows.
+/// characters), about twice what [`CONTEXT`] allows. Each line of its work list says
+/// something new, as a real summary's would (one that repeats a line invites a small model to
+/// repeat it until its output limit).
 fn summary_written_at_32k() -> String {
+    const CROPS: [&str; 18] = [
+        "tomatoes",
+        "lettuce",
+        "basil",
+        "carrots",
+        "beans",
+        "peas",
+        "radishes",
+        "spinach",
+        "chard",
+        "onions",
+        "garlic",
+        "peppers",
+        "courgettes",
+        "cucumbers",
+        "parsley",
+        "chives",
+        "kale",
+        "beetroot",
+    ];
     let mut text = String::from(
-        "Goal: plan a vegetable garden for a small backyard.\nDecisions: raised beds; \
-         tomatoes, lettuce and basil; drip watering.\nWork done: ",
+        "Goal: plan a vegetable garden for a small backyard.\nDecisions: raised beds of 1.2 by \
+         2.4 metres; drip watering; no chemical sprays.\nWork done:\n",
     );
-    while text.len() < 3_900 {
-        text.push_str("measured the beds at 1.2 by 2.4 metres and listed the seeds to buy; ");
+    for (i, crop) in CROPS.iter().cycle().enumerate() {
+        if text.len() >= 3_850 {
+            break;
+        }
+        text.push_str(&format!(
+            "- Bed {}: sow {crop} in week {}, {} cm apart; the user wants {} plants.\n",
+            i % 6 + 1,
+            10 + i % 20,
+            10 + 5 * (i % 9),
+            2 + i % 7
+        ));
     }
     text.push_str(
-        "\nWhat is left: choose a watering timer.\nExact paths and identifiers: garden-plan.txt",
+        "What is left: choose a watering timer.\nExact paths and identifiers: garden-plan.txt",
     );
     assert!(text.chars().count() > SUMMARY_CAP_AT_4K);
+    assert!(text.chars().count() <= 4_096);
     text
 }
 
@@ -285,8 +317,16 @@ async fn conversation_memory_with_the_real_model() {
         old_summary.chars().count(),
         folded
     );
-    // The model wrote the shorter summary (not the cut the turn falls back to): one stage-2
-    // event, for the same messages, within the cap.
+    // The model wrote the shorter summary (not the cut the turn falls back to, and not a
+    // rewrite the output limit cut off, which is not stored): one stage-2 event, for the same
+    // messages, within the cap, that still ends with the old summary's last sections.
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            TurnEvent::AppNote { text } if text == agent::turn::SUMMARY_FAILED_NOTE
+        )),
+        "the fold failed: {events:?}"
+    );
     assert_eq!(folded.len(), 1, "{folded:?}");
     let (stage, text, covered) = &folded[0];
     assert_eq!(*stage, 2);
@@ -298,6 +338,8 @@ async fn conversation_memory_with_the_real_model() {
         "{}",
         text.chars().count()
     );
+    assert!(text.contains("What is left"), "{text}");
+    assert!(text.contains("garden-plan.txt"), "{text}");
     let used = outcome.summary.expect("the summary the turn used");
     assert_eq!(used.text, text);
     assert_eq!(used.covered_ids, [1, 2]);

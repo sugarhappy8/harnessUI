@@ -1,7 +1,7 @@
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
-import { askBeforeChange, isLoadedNow, runChange } from "./modelChange";
+import { askBeforeChange, backendWhenIdle, isLoadedNow, runChange } from "./modelChange";
 import type {
   ApprovalRequest,
   ChatDetail,
@@ -448,7 +448,9 @@ export const useApp = create<AppState>((set, get) => {
         const before = chatId !== null && open?.chat.id === chatId ? open.chat.modelRef : null;
         await get().setChatModel(modelRef);
         opts?.onChatSet?.();
-        const done = await runChange("switch", answer.whenIdle, () => ipc.loadLocalModel(path, null, answer.whenIdle));
+        const done = await runChange("switch", answer.whenIdle, () =>
+          ipc.loadLocalModel(path, null, backendWhenIdle(answer)),
+        );
         // A waiting switch that was cancelled changes nothing: the chat goes back to the model
         // that is still loaded, unless a newer pick has changed it since.
         const now = get().detail;

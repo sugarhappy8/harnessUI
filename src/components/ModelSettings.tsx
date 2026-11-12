@@ -110,6 +110,11 @@ function same(a: ModelLoadSettings, b: ModelLoadSettings): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** Whether a setting the model is launched with differs (How long it may think is not one). */
+function launchChanged(a: ModelLoadSettings, b: ModelLoadSettings): boolean {
+  return !same({ ...a, thinkingLimit: "default" }, { ...b, thinkingLimit: "default" });
+}
+
 const ALL_DEFAULT: ModelLoadSettings = {
   context: "default",
   gpu: "default",
@@ -188,7 +193,19 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
     };
   }, [path, draftKey, savedKey]);
   // What the controls show: the facts for the choices on screen when known, else the saved ones.
-  const facts = info && dirty && preview && preview.key === draftKey ? preview.info : info;
+  const previewNow = info && dirty && preview && preview.key === draftKey ? preview.info : null;
+  const facts = previewNow ?? info;
+  // Whether loading with the choices on screen would launch the model differently from the
+  // copy that is loaded (the backend's own rule, `olderSettingsLoaded`): only then does
+  // Apply and restart have something to restart. How long it may think is a per-request
+  // limit; a change to it alone, or to a choice that comes to the same, restarts nothing.
+  const needsRestart = !info
+    ? false
+    : !dirty
+      ? info.olderSettingsLoaded
+      : previewNow
+        ? previewNow.olderSettingsLoaded
+        : info.olderSettingsLoaded || (!!draft && launchChanged(draft, info.overrides));
 
   function change(patch: Partial<ModelLoadSettings>) {
     setSaved(false);
@@ -240,7 +257,14 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
 
   const onApply = () =>
     run(dirty ? "Saving…" : "Restarting the model…", async () => {
-      if (!(await save())) return;
+      const next = await save();
+      if (!next) return;
+      // The backend says whether the loaded copy now differs from these settings; when it
+      // does not, a restart would change nothing (and must not say it did).
+      if (!next.olderSettingsLoaded) {
+        setSaved(true);
+        return;
+      }
       const state = useApp.getState();
       // The question (when the model is busy) shows over the panel; the panel closes once
       // it is answered, and stays open after Cancel.
@@ -297,7 +321,12 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
               )}
               {working === null && saved && !dirty && (
                 <p className="text-xs text-fg-muted" role="status">
-                  Saved. {loaded ? "They are used from the next restart." : "They are used every time this model loads."}
+                  Saved.{" "}
+                  {!loaded
+                    ? "They are used every time this model loads."
+                    : info.olderSettingsLoaded
+                      ? "They are used from the next restart."
+                      : "They are used from the next reply."}
                 </p>
               )}
               <div className="flex flex-wrap items-center gap-2">
@@ -322,8 +351,14 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
                   <button
                     type="button"
                     onClick={() => void onApply()}
-                    disabled={working !== null || (!dirty && !info.olderSettingsLoaded)}
-                    title={!dirty && !info.olderSettingsLoaded ? "The model already uses these settings." : undefined}
+                    disabled={working !== null || !needsRestart}
+                    title={
+                      needsRestart
+                        ? undefined
+                        : dirty
+                          ? "This change needs no restart. Save keeps it."
+                          : "The model already uses these settings."
+                    }
                     className="btn-primary rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-40"
                   >
                     Apply and restart

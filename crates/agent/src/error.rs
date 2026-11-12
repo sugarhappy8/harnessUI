@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::context::{group_digits, tokens_with_words};
+use crate::context::tokens_with_words;
 
 /// The longest server message kept in an error, in characters. Longer messages are cut so a
 /// misbehaving server cannot fill the UI or the log with one error.
@@ -99,7 +99,7 @@ impl ProviderError {
                 n_ctx,
             } => {
                 let needs = n_prompt_tokens
-                    .map(|prompt| format!(" It needs {} tokens.", group_digits(u64::from(prompt))));
+                    .map(|prompt| format!(" It needs {}.", tokens_with_words(prompt)));
                 match (needs, n_ctx) {
                     (needs, Some(ctx)) => format!(
                         "This chat is too long for the model to remember.{} The model can \
@@ -418,8 +418,8 @@ mod tests {
                 n_ctx: Some(4096)
             }
             .user_message(),
-            "This chat is too long for the model to remember. It needs 5,009 tokens. The model \
-             can remember 4,096 tokens, about 3,000 words."
+            "This chat is too long for the model to remember. It needs 5,009 tokens, about \
+             3,000 words. The model can remember 4,096 tokens, about 3,000 words."
         );
         assert_eq!(
             ProviderError::ContextOverflow {
@@ -436,7 +436,8 @@ mod tests {
                 n_ctx: None
             }
             .user_message(),
-            "This chat is too long for the model to remember. It needs 9,000 tokens."
+            "This chat is too long for the model to remember. It needs 9,000 tokens, about \
+             6,000 words."
         );
         assert_eq!(
             ProviderError::ContextOverflow {

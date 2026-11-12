@@ -5,8 +5,9 @@
 // restart (the first reply after it is slower).
 //
 // No React here: questions are shown by a `QuestionHost` (ModelSettings.tsx) that is on
-// screen with the chat or the first-run screen. Nothing here reads the app store, so the
-// store can use these functions without an import cycle; callers pass the runtime status.
+// screen with the chat or the first-run screen. Callers pass the runtime status; the app
+// store is imported only at call time (`reloadModel`), so the store can use these
+// functions without an import cycle.
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
 import type { RuntimeStatus } from "../lib/types";
@@ -90,9 +91,21 @@ export interface ChangeAnswer {
 }
 
 /**
+ * What the backend is told for an answer (`when_idle`). With no question it is told to
+ * wait too: when nothing uses the model it acts at once, and a reply or another app's
+ * request that started after the check (or while the count could not be read) is waited
+ * for, with the waiting line and its Cancel, instead of being stopped unasked. Only "Stop
+ * and restart" stops what uses the model.
+ */
+export function backendWhenIdle(answer: ChangeAnswer): boolean {
+  return answer.whenIdle ?? true;
+}
+
+/**
  * The D3 question, asked only when a local model is loaded (or loading) and something uses
- * it. Resolves `{}` when nothing uses it (act now), `{whenIdle: true}` for "Restart when it
- * ends", `{whenIdle: false}` for "Stop and restart", and null for Cancel.
+ * it. Resolves `{}` when nothing uses it (no question; see `backendWhenIdle`),
+ * `{whenIdle: true}` for "Restart when it ends", `{whenIdle: false}` for "Stop and
+ * restart", and null for Cancel.
  */
 export async function askBeforeChange(runtime: RuntimeStatus | null): Promise<ChangeAnswer | null> {
   if (!runtime || (runtime.state !== "ready" && runtime.state !== "starting")) return {};
@@ -100,7 +113,8 @@ export async function askBeforeChange(runtime: RuntimeStatus | null): Promise<Ch
   try {
     text = busyQuestion(await ipc.modelBusy());
   } catch {
-    // The counter could not be read: nothing is known to use the model.
+    // The counter could not be read. No question (its text would be a guess); the change
+    // is sent to wait, so it stops nothing (see `backendWhenIdle`).
     return {};
   }
   if (text === null) return {};
@@ -132,28 +146,34 @@ export async function askTooLarge(): Promise<boolean> {
 interface WaitingState {
   /** The change the user asked to wait for the model to be free, while its call runs. */
   change: WaitingChange | null;
+  /**
+   * The change whose call runs now, asked to wait or not: when the backend waits on its
+   * own (something started to use the model after the check), the waiting line it shows
+   * (`reloadWaiting`) names this change.
+   */
+  kind: WaitingChange | null;
   token: number;
 }
 
-export const useWaiting = create<WaitingState>(() => ({ change: null, token: 0 }));
+export const useWaiting = create<WaitingState>(() => ({ change: null, kind: null, token: 0 }));
 
 /**
- * Runs a change of what is loaded. With `whenIdle` the call can last until the reply ends,
- * so the change is remembered meanwhile (the waiting line says what waits). Resolves with
- * the wrapper's answer: false when the change was cancelled or replaced.
+ * Runs a change of what is loaded. With `whenIdle` (the user's "Restart when it ends") the
+ * call can last until the reply ends, so the change is remembered meanwhile and the waiting
+ * line shows at once. Resolves with the wrapper's answer: false when the change was
+ * cancelled or replaced.
  */
 export async function runChange(
   change: WaitingChange,
   whenIdle: boolean | undefined,
   run: () => Promise<boolean>,
 ): Promise<boolean> {
-  if (!whenIdle) return run();
   const token = useWaiting.getState().token + 1;
-  useWaiting.setState({ change, token });
+  useWaiting.setState({ change: whenIdle ? change : null, kind: change, token });
   try {
     return await run();
   } finally {
-    if (useWaiting.getState().token === token) useWaiting.setState({ change: null });
+    if (useWaiting.getState().token === token) useWaiting.setState({ change: null, kind: null });
   }
 }
 
@@ -173,10 +193,21 @@ export async function reloadModel(
   const answer = await askBeforeChange(runtime);
   if (!answer) return false;
   onStart?.();
-  const done = await runChange("reload", answer.whenIdle, () =>
-    ipc.reloadLocalModel(force, answer.whenIdle ?? false),
-  );
-  if (done) useRestartNote.setState({ shown: true });
+  // Whether the model really restarts (it goes through "starting"): without `force` the
+  // backend restarts nothing when the loaded copy already uses the settings, and then the
+  // header must not say the next reply is slower.
+  const { useApp } = await import("./app");
+  let restarted = false;
+  const unsubscribe = useApp.subscribe((s) => {
+    if (s.runtime?.state === "starting") restarted = true;
+  });
+  let done: boolean;
+  try {
+    done = await runChange("reload", answer.whenIdle, () => ipc.reloadLocalModel(force, backendWhenIdle(answer)));
+  } finally {
+    unsubscribe();
+  }
+  if (done && restarted) useRestartNote.setState({ shown: true });
   return done;
 }
 
@@ -184,14 +215,14 @@ export async function reloadModel(
 export async function unloadModel(runtime: RuntimeStatus | null): Promise<boolean> {
   const answer = await askBeforeChange(runtime);
   if (!answer) return false;
-  return runChange("unload", answer.whenIdle, () => ipc.unloadModel(answer.whenIdle));
+  return runChange("unload", answer.whenIdle, () => ipc.unloadModel(backendWhenIdle(answer)));
 }
 
 /** Loads `path` after the D3 question (first run). Resolves false when it was cancelled. */
 export async function switchModel(runtime: RuntimeStatus | null, path: string): Promise<boolean> {
   const answer = await askBeforeChange(runtime);
   if (!answer) return false;
-  return runChange("switch", answer.whenIdle, () => ipc.loadLocalModel(path, null, answer.whenIdle));
+  return runChange("switch", answer.whenIdle, () => ipc.loadLocalModel(path, null, backendWhenIdle(answer)));
 }
 
 /** Whether `path` is the local model loaded or loading now (picking it again loads nothing). */

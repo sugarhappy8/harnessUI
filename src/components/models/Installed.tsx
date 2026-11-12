@@ -7,7 +7,7 @@ import { formatBytes } from "../../lib/format";
 import { FIT_WORDS, tokensWithWords } from "../../lib/words";
 import { toErrorInfo, useApp } from "../../store/app";
 import { COMPARE_FULL, COMPARE_LIMIT, sameEntry, useAddToComparison, useCompare } from "../../store/compare";
-import { askTooLarge } from "../../store/modelChange";
+import { askTooLarge, isLoadedNow, unloadModel } from "../../store/modelChange";
 import { ErrorBanner } from "../ErrorBanner";
 import { ModelSettings } from "../ModelSettings";
 import { Badge } from "./Badge";
@@ -109,6 +109,11 @@ export function Installed(props: { onClose: () => void }) {
       : `Remove ${m.fileName} from the list? The file itself stays where it is.`;
     if (!window.confirm(question)) return;
     try {
+      // The loaded model is unloaded first, the way Unload does it: when something uses it,
+      // the D3 question comes first, and with Restart when it ends the delete waits for it
+      // (a cancelled wait deletes nothing). Removing it never cuts a reply off unasked.
+      const runtime = useApp.getState().runtime;
+      if (isLoadedNow(runtime, m.path) && !(await unloadModel(runtime))) return;
       await ipc.deleteModel(m.id, files);
       await load();
     } catch (err) {
@@ -194,14 +199,16 @@ function Row(props: {
           <Badge>{formatBytes(m.sizeBytes)}</Badge>
           {m.summary?.quantization && <Badge>{m.summary.quantization}</Badge>}
           {m.summary?.contextLength && (
-            <Badge title="Context length the model was trained for">
-              {(m.summary.contextLength / 1024).toFixed(0)}k context
-            </Badge>
+            <Badge title="The most this model can remember">remembers up to {tokensWithWords(m.summary.contextLength)}</Badge>
           )}
           {m.summary?.templateTools && <Badge>tools</Badge>}
           {m.summary?.templateThinking && <Badge>thinking</Badge>}
           {m.projectorPath && <Badge>vision</Badge>}
-          {m.summary?.isMoe && <Badge>MoE</Badge>}
+          {m.summary?.isMoe && (
+            <Badge title="It uses only part of itself at a time, so it runs faster than its size suggests.">
+              uses part of itself at a time
+            </Badge>
+          )}
           {m.source === "import" && <Badge>imported</Badge>}
           {m.architectureSupported === false && (
             <span className="text-xs text-danger">

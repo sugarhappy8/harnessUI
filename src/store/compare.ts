@@ -1,4 +1,4 @@
-// The models chosen for comparison ("Add to comparison", 0.0.5 item 4).
+// The models chosen for comparison ("Add to comparison", 0.0.6 item 4).
 //
 // Up to four entries, kept while the app runs (not saved). Browse results, repository pages
 // and the Compare tab's suggestions add to it; WP2's Installed rows use
@@ -46,7 +46,7 @@ export function toCompareItem(entry: CompareEntry): CompareItem | null {
 }
 
 /**
- * The file a repository entry uses when the user has not picked one (0.0.5 item 4): the
+ * The file a repository entry uses when the user has not picked one (0.0.6 item 4): the
  * largest file marked as fitting ("Fits", not "Fits with limits") at the comparison size,
  * else the smallest. A split model is named by its first part. Null without model files.
  */

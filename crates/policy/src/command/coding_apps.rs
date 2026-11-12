@@ -38,7 +38,8 @@
 //! Known limits: this reads names. A copy of one of these programs under another name, or
 //! a link to it (`ln -s "$(which claude)" helper; ./helper -p …`), is not seen, nor is code
 //! in a script file or code that builds the name from pieces (`"cl" + "aude"`,
-//! `$'\x63laude'`, `$c='claude'; & $c`), a program named by a setting
+//! `$'\x63laude'`, `c=cl; ${c}aude`), a name kept in a file or passed in from outside
+//! the line, a program named by a setting
 //! (`git -c core.pager=claude`), a project's own script or task (`make claude`,
 //! `npm run claude`), a program that runs on another computer (`ssh host claude`), or a
 //! program not listed here that runs the next word it is given without a word such as
@@ -286,6 +287,21 @@ const LOCATORS: &[&str] = &[
     "echo",
     "printf",
     "write-output",
+    // Programs that print paths they find (`$(ls ~/.local/bin/cl*)`,
+    // `& (Join-Path $env:APPDATA npm\claude.cmd)`).
+    "ls",
+    "dir",
+    "find",
+    "realpath",
+    "readlink",
+    "resolve-path",
+    "rvpa",
+    "convert-path",
+    "join-path",
+    "get-childitem",
+    "gci",
+    "get-item",
+    "gi",
 ];
 
 /// Programs that run a JavaScript file they are handed.
@@ -328,6 +344,26 @@ pub fn find(line: &str, parsed: &Parsed) -> Option<String> {
                 .find_map(|c| command(&c.program, &c.args, 0))
             {
                 return Some(why);
+            }
+            // An alias given an assistant's name and then run (`alias c=claude; c -p x`,
+            // `Set-Alias c claude; c -p x`).
+            let words: Vec<Vec<String>> = commands
+                .iter()
+                .map(|c| {
+                    std::iter::once(c.program.clone())
+                        .chain(c.args.clone())
+                        .collect()
+                })
+                .collect();
+            let named = named_assistants(&words);
+            if let Some((c, name)) = commands
+                .iter()
+                .find_map(|c| holds_assistant(&c.program, &named).map(|name| (c, name)))
+            {
+                return Some(format!(
+                    "{} stands for {name}, a coding assistant that works online with your account",
+                    c.program
+                ));
             }
             // A command line fed to a shell on its standard input (`echo 'claude -p x' | sh`):
             // what the other commands print may be what it runs.
@@ -529,6 +565,31 @@ fn class_matches(pattern: &[char], start: usize, c: char) -> Option<(bool, usize
             return Some((matched != negated, i + 1));
         }
         first = false;
+        // A named class: `[:alpha:]`, `[:lower:]`, `[:alnum:]`, …
+        if d == '[' && pattern.get(i + 1) == Some(&':') {
+            let rest: String = pattern[i + 2..].iter().collect();
+            if let Some(end) = rest.find(":]") {
+                let name = &rest[..end];
+                let fits = match name {
+                    "alpha" => c.is_alphabetic(),
+                    "lower" => c.is_lowercase(),
+                    "upper" => c.is_uppercase(),
+                    "digit" => c.is_ascii_digit(),
+                    "xdigit" => c.is_ascii_hexdigit(),
+                    "space" | "blank" => c.is_whitespace(),
+                    "punct" => c.is_ascii_punctuation(),
+                    "cntrl" => c.is_control(),
+                    // alnum, word, graph, print, and names this check does not know:
+                    // anything a name is made of.
+                    _ => !c.is_whitespace() && !c.is_control(),
+                };
+                if fits {
+                    matched = true;
+                }
+                i += 2 + name.chars().count() + 2;
+                continue;
+            }
+        }
         if pattern.get(i + 1) == Some(&'-') && pattern.get(i + 2).is_some_and(|&e| e != ']') {
             let e = pattern[i + 2];
             if d <= c && c <= e {
@@ -1004,8 +1065,9 @@ fn resolve_locators(text: &str) -> String {
 }
 
 /// The words a word gives once the shell expands its braces (`{claude,}` gives `claude`,
-/// `c{la,}ude` gives `claude cude`); a word without a brace group with a comma is itself.
-/// At most [`MAX_BRACE_WORDS`] words; what is left after that stays as written.
+/// `c{la,}ude` gives `claude cude`, `{c..c}laude` gives `claude`); a word without such a
+/// group is itself. At most [`MAX_BRACE_WORDS`] words; what is left after that stays as
+/// written.
 fn brace_words(word: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut todo = vec![word.to_string()];
@@ -1014,17 +1076,16 @@ fn brace_words(word: &str) -> Vec<String> {
             out.push(word);
             continue;
         }
-        match brace_group(&word) {
-            Some((open, commas, close)) => {
+        match group(&word, '{') {
+            Some((open, close, parts)) => {
                 let (head, tail) = (&word[..open], &word[close + 1..]);
-                let mut from = open + 1;
-                let mut parts = Vec::new();
-                for at in commas.into_iter().chain(std::iter::once(close)) {
-                    parts.push(format!("{head}{}{tail}", &word[from..at]));
-                    from = at + 1;
-                }
                 // In their order: the stack takes the last first.
-                todo.extend(parts.into_iter().rev());
+                todo.extend(
+                    parts
+                        .into_iter()
+                        .rev()
+                        .map(|part| format!("{head}{part}{tail}")),
+                );
             }
             None if word.is_empty() => {}
             None => out.push(word),
@@ -1036,45 +1097,103 @@ fn brace_words(word: &str) -> Vec<String> {
 /// How many words [`brace_words`] gives at most.
 const MAX_BRACE_WORDS: usize = 64;
 
-/// The first brace group of a word that holds a comma at its own level (not `${…}`): where
-/// it opens, its commas, and where it closes.
-fn brace_group(word: &str) -> Option<(usize, Vec<usize>, usize)> {
-    for (open, c) in word.char_indices() {
-        if c != '{' || word[..open].ends_with('$') {
+/// The longest word whose groups [`expand_braces`] expands.
+const MAX_GROUP_WORD: usize = 4096;
+
+/// The first group of a word that the shell turns into several (not `${…}` or `$(…)`):
+/// with `{`, braces with a comma (`{claude,}`) or a sequence of single letters or digits
+/// (`{a..e}`); with `(`, zsh's alternatives in a pattern (`/usr/bin/(cla|x)ude`). Where it
+/// opens and closes, and its parts.
+fn group(word: &str, open_char: char) -> Option<(usize, usize, Vec<String>)> {
+    let (close_char, cut) = if open_char == '{' {
+        ('}', ',')
+    } else {
+        (')', '|')
+    };
+    let opens = word.char_indices().filter(|&(_, c)| c == open_char);
+    for (open, _) in opens.take(64) {
+        if word[..open].ends_with(['$', '<', '>']) {
             continue;
         }
         let mut level = 0;
-        let mut commas = Vec::new();
+        let mut cuts = Vec::new();
+        let mut close = None;
         for (i, d) in word[open..].char_indices() {
-            match d {
-                '{' => level += 1,
-                ',' if level == 1 => commas.push(open + i),
-                '}' => {
-                    level -= 1;
-                    if level == 0 {
-                        if !commas.is_empty() {
-                            return Some((open, commas, open + i));
-                        }
-                        break;
-                    }
+            if d == open_char {
+                level += 1;
+            } else if d == close_char {
+                level -= 1;
+                if level == 0 {
+                    close = Some(open + i);
+                    break;
                 }
-                _ => {}
+            } else if d == cut && level == 1 {
+                cuts.push(open + i);
             }
+        }
+        let Some(close) = close else {
+            continue;
+        };
+        if !cuts.is_empty() {
+            let mut parts = Vec::new();
+            let mut from = open + 1;
+            for at in cuts.into_iter().chain(std::iter::once(close)) {
+                parts.push(word[from..at].to_string());
+                from = at + 1;
+            }
+            return Some((open, close, parts));
+        }
+        // A sequence: `{a..e}`, `{e..a}`, `{0..3}`.
+        if open_char == '{'
+            && let Some((a, b)) = word[open + 1..close].split_once("..")
+            && let (Some(a), Some(b)) = (single(a), single(b))
+        {
+            let (low, high) = if a <= b { (a, b) } else { (b, a) };
+            let parts: Vec<String> = (low..=high)
+                .take(MAX_BRACE_WORDS)
+                .map(String::from)
+                .collect();
+            return Some((open, close, parts));
         }
     }
     None
 }
 
-/// A text with each of its words expanded as the shell expands braces.
+/// The one letter or digit a piece of text is, if it is one.
+fn single(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphanumeric() => Some(c),
+        _ => None,
+    }
+}
+
+/// A text with each of its words expanded as the shell expands braces, and zsh's
+/// alternatives in a pattern each read as a program of its own: the pattern
+/// `/usr/bin/(x|claude)` runs whichever of its alternatives exists, so
+/// `/usr/bin/(x|claude) -p y` reads as `/usr/bin/x ; /usr/bin/claude -p y`.
 fn expand_braces(text: &str) -> String {
-    if !text.contains('{') || !text.contains(',') {
+    if !text.contains(['{', '(']) {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len());
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut String| {
-        if brace_group(word).is_some() {
-            out.push_str(&brace_words(word).join(" "));
+        if word.len() <= MAX_GROUP_WORD {
+            let mut words = brace_words(word);
+            if words.len() == 1
+                && let Some((open, close, parts)) = group(&words[0], '(')
+            {
+                let (head, tail) = (&words[0][..open], &words[0][close + 1..]);
+                words = vec![
+                    parts
+                        .iter()
+                        .map(|part| format!("{head}{part}{tail}"))
+                        .collect::<Vec<_>>()
+                        .join(" ; "),
+                ];
+            }
+            out.push_str(&words.join(" "));
         } else {
             out.push_str(word);
         }
@@ -1188,34 +1307,244 @@ fn in_text(line: &str, depth: usize) -> Option<String> {
                 ));
             }
         }
-        let commands: Vec<Vec<String>> = text
-            .split([';', '\n', '(', ')', '{', '}', '|', '&', '`'])
-            .map(command_words)
-            .collect();
-        for words in &commands {
-            if let Some((program, args)) = words.split_first()
-                && let Some(why) = command(program, args, depth + 1)
-            {
-                return Some(why);
-            }
-        }
-        // A shell on the line that runs what it reads (`echo "claude -p $x" | sh`): what
-        // the other commands print may be what it runs.
-        let fed = |words: &Vec<String>| {
-            words
-                .split_first()
-                .is_some_and(|(program, args)| reads_commands(program, args))
-        };
-        if commands.iter().any(fed)
-            && let Some(why) = commands
-                .iter()
-                .filter(|words| !fed(words) && !words.is_empty())
-                .find_map(|words| fed_line(&words[1..], depth + 1))
-        {
+        // `${name}` read as `$name`, so the braces do not split it.
+        if let Some(why) = read_commands(&plain_variables(text), depth, true) {
             return Some(why);
         }
     }
     None
+}
+
+/// Why the commands of one reading of a line start a coding assistant, if they do: the
+/// first word of each command, read as a program; a name given an assistant's name on the
+/// line and used as the program or in its place (`c=claude; $c -p x`, `alias c=claude`,
+/// `Set-Alias c claude`), read once more with the names put in (when `put_names`); and
+/// what a command prints when a shell on the line runs it.
+fn read_commands(text: &str, depth: usize, put_names: bool) -> Option<String> {
+    let segments: Vec<&str> = text
+        .split([';', '\n', '(', ')', '{', '}', '|', '&', '`'])
+        .collect();
+    let named = named_assistants(&segments.iter().map(|s| shell_words(s)).collect::<Vec<_>>());
+    let commands: Vec<Vec<String>> = segments.iter().map(|s| command_words(s)).collect();
+    for words in &commands {
+        let Some((program, args)) = words.split_first() else {
+            continue;
+        };
+        // `$c = 'claude'` gives the name; it does not use it.
+        let assigns = args.first().is_some_and(|a| a.ends_with('='));
+        if !assigns && let Some(name) = holds_assistant(program, &named) {
+            return Some(format!(
+                "{program} stands for {name}, a coding assistant that works online with your account"
+            ));
+        }
+        if let Some(why) = command(program, args, depth + 1) {
+            return Some(why);
+        }
+    }
+    // A shell on the line that runs what it reads (`echo "claude -p $x" | sh`): what the
+    // other commands print may be what it runs.
+    let fed = |words: &Vec<String>| {
+        words
+            .split_first()
+            .is_some_and(|(program, args)| reads_commands(program, args))
+    };
+    if commands.iter().any(fed)
+        && let Some(why) = commands
+            .iter()
+            .filter(|words| !fed(words) && !words.is_empty())
+            .find_map(|words| fed_line(&words[1..], depth + 1))
+    {
+        return Some(why);
+    }
+    // The names put in where they are used (`c=claude && env $c -p x`).
+    if put_names && named.iter().any(|n| !n.alias) {
+        let put = put_in_names(text, &named);
+        if put != text {
+            if too_much(put.len()) {
+                return Some(TOO_MUCH.into());
+            }
+            return read_commands(&put, depth, false);
+        }
+    }
+    None
+}
+
+/// A text with each use of a variable given an assistant's name (`$c`, `$env:c`, `%c%`)
+/// replaced by that name.
+fn put_in_names(text: &str, named: &[Named]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while let Some(at) = rest.find(['$', '%', '!']) {
+        out.push_str(&rest[..at]);
+        let mark = &rest[at..at + 1];
+        let after = &rest[at + 1..];
+        let after_env = after.strip_prefix("env:").unwrap_or(after);
+        for n in named.iter().filter(|n| !n.alias) {
+            let candidates: &[&str] = if mark == "$" {
+                &[after, after_env]
+            } else {
+                &[after]
+            };
+            for &candidate in candidates {
+                let Some(tail) = candidate.strip_prefix(n.name.as_str()) else {
+                    continue;
+                };
+                let ends = if mark == "$" {
+                    // Not where it is given (`$c = 'claude'`).
+                    let given =
+                        tail.trim_start().starts_with('=') && !tail.trim_start().starts_with("==");
+                    !given && !tail.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                } else {
+                    tail.starts_with(mark)
+                };
+                if ends {
+                    out.push_str(&n.value);
+                    rest = if mark == "$" { tail } else { &tail[1..] };
+                    continue 'scan;
+                }
+            }
+        }
+        out.push_str(mark);
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A text with every `${name}` written as `$name`.
+fn plain_variables(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        let after = &rest[at + 2..];
+        let name_len = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+            .unwrap_or(after.len());
+        out.push_str(&rest[..at]);
+        if name_len > 0 && after[name_len..].starts_with('}') {
+            out.push('$');
+            out.push_str(&after[..name_len]);
+            rest = &after[name_len + 1..];
+        } else {
+            out.push_str("${");
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A name given a value on a line, and whether it is an alias (used as a program by its
+/// bare name) or a variable (used as `$name`, `${name}`, `$env:name` or `%name%`).
+struct Named {
+    name: String,
+    value: String,
+    alias: bool,
+}
+
+/// The names given an assistant's name (or a path or pattern naming one) on a line read as
+/// text: `c=claude`, `export C=/usr/local/bin/claude`, `$c = 'claude'`, `set c=codex`,
+/// `alias c=claude`, `Set-Alias c claude`, `Set-Variable c claude`.
+fn named_assistants(commands: &[Vec<String>]) -> Vec<Named> {
+    let mut out = Vec::new();
+    for words in commands {
+        let words: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+        let mut add = |name: &str, value: &str, alias: bool| {
+            let name = name
+                .trim_start_matches('$')
+                .trim_start_matches("env:")
+                .trim_matches(['{', '}']);
+            // An alias can hold options too (`alias c='claude --model x'`).
+            let value = clean(value);
+            let program = value.split_whitespace().next().unwrap_or_default();
+            if !name.is_empty() && (is_assistant(program) || names_package_path(&value)) {
+                out.push(Named {
+                    name: name.to_string(),
+                    value: program.to_string(),
+                    alias,
+                });
+            }
+        };
+        let Some(first) = words.first() else {
+            continue;
+        };
+        match first.as_str() {
+            // PowerShell: `Set-Alias c claude`, `New-Variable -Name c -Value claude`.
+            "set-alias" | "sal" | "new-alias" | "nal" | "set-variable" | "sv" | "new-variable"
+            | "nv" => {
+                let alias = first.contains("alias") || first.starts_with("sa") || first == "nal";
+                let mut name = None;
+                let mut value = None;
+                let mut i = 1;
+                while let Some(word) = words.get(i) {
+                    match word.as_str() {
+                        "-name" | "-n" => name = words.get(i + 1).cloned(),
+                        "-value" | "-definition" | "-v" | "-d" => value = words.get(i + 1).cloned(),
+                        w if w.starts_with('-') => {
+                            i += 1;
+                            continue;
+                        }
+                        w if name.is_none() => {
+                            name = Some(w.to_string());
+                            i += 1;
+                            continue;
+                        }
+                        w => {
+                            value.get_or_insert_with(|| w.to_string());
+                            i += 1;
+                            continue;
+                        }
+                    }
+                    i += 2;
+                }
+                if let (Some(name), Some(value)) = (name, value) {
+                    add(&name, &value, alias);
+                }
+            }
+            _ => {
+                let alias = first == "alias";
+                let skip = usize::from(matches!(
+                    first.as_str(),
+                    "alias" | "export" | "declare" | "typeset" | "local" | "readonly" | "set"
+                ));
+                // `$c = 'claude'` (PowerShell).
+                if let [name, eq, value, ..] = &words[skip..]
+                    && eq == "="
+                {
+                    add(name, value, alias);
+                }
+                for word in words[skip..].iter().filter(|w| !w.starts_with('-')) {
+                    match word.split_once('=') {
+                        Some((name, value)) => add(name, value, alias),
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Which assistant a program word stands for through a name given on the line, if any.
+fn holds_assistant<'a>(program: &str, named: &'a [Named]) -> Option<&'a str> {
+    if named.is_empty() {
+        return None;
+    }
+    let word = clean(program);
+    let variable = word
+        .strip_prefix("${")
+        .and_then(|w| w.strip_suffix('}'))
+        .or_else(|| word.strip_prefix("$env:"))
+        .or_else(|| word.strip_prefix('$'))
+        .or_else(|| word.strip_prefix('%').and_then(|w| w.strip_suffix('%')))
+        .or_else(|| word.strip_prefix('!').and_then(|w| w.strip_suffix('!')));
+    named
+        .iter()
+        .find(|n| match variable {
+            Some(v) => !n.alias && v == n.name,
+            None => n.alias && word == n.name,
+        })
+        .map(|n| n.value.as_str())
 }
 
 /// The words of one command read as text, without the keywords and settings in front of

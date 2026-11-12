@@ -2178,6 +2178,25 @@ mod tests {
         assert!(failure_next_step("no_answer", false).contains("Regenerate"));
     }
 
+    /// [0.0.6] The chat takes the "Summarising…" note away when the outcome arrives, and
+    /// knows the failure note, by their exact text (`src/store/app.ts`): the webview's copies
+    /// must be the loop's notes word for word, or the "Summarising…" note would stay beside
+    /// the outcome.
+    #[test]
+    fn the_chat_knows_the_loops_summary_notes_word_for_word() {
+        let app = include_str!("../../src/store/app.ts").replace("\r\n", "\n");
+        let quoted = |note: &str| {
+            let at = app.find(&format!("\"{note}\""));
+            assert!(at.is_some(), "src/store/app.ts lacks {note:?}");
+        };
+        quoted(agent::turn::SUMMARISING_NOTE);
+        quoted(agent::turn::SUMMARY_FAILED_NOTE);
+        assert!(app.contains(&format!(
+            "const SUMMARISING_NOTE = \"{}\";",
+            agent::turn::SUMMARISING_NOTE
+        )));
+    }
+
     /// A call that did not run has no output; the card shows the app's reason instead of
     /// an empty box under "Failed".
     #[test]

@@ -9,8 +9,6 @@
 //! instead, the form the turn falls back to (`applied` gets 2). Policy, approvals and the
 //! sink are inert: nothing is decided, asked or recorded.
 
-use std::collections::HashSet;
-
 use crate::estimate::estimate_tokens;
 use crate::turn::{NextCompaction, SystemBlock, SystemBlockKind, TurnPreview};
 
@@ -44,16 +42,9 @@ pub(in crate::turn) async fn preview(
     sanitizer: &crate::prompt::Sanitizer,
     input: TurnInput,
 ) -> TurnPreview {
-    // What the summary replaces: the stored messages it covers.
-    let covered: HashSet<i64> = input
-        .summary
-        .as_ref()
-        .map(|s| s.covered_ids.iter().copied().collect())
-        .unwrap_or_default();
-    let left_out: Vec<HistoryMessage> = normalize(input.history.clone())
-        .into_iter()
-        .filter(|m| m.id.is_some_and(|id| covered.contains(&id)))
-        .collect();
+    // What the summary replaces: the stored messages it covers, with the results of the
+    // calls it covers, as the turn leaves them out.
+    let (left_out, _) = split_covered(input.history.clone(), &covered_ids(&input));
     let deps = TurnDeps {
         client,
         tools,
