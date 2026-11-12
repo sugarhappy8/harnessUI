@@ -866,10 +866,11 @@ def p_subagent(c, notes):
     Fake.queue.append({"content": "PARENT-FINAL: the helper found the word."})
     send(s, "use a helper")
     s.wait_for(lambda: "Allow once" in s.page_text(), 30, "the helper's approval card")
+    # The tool card's own status arrives a moment after the approval card.
+    s.wait_for(lambda: "Waiting for you" in s.page_text(), 15, "the run_subagent tool card showing it is waiting")
     card = s.page_text()
     s.screenshot(str(OUT / "subagent-card.png"))
     assert "Subagent: " in card, "the card does not say it comes from a subagent: " + card[-500:]
-    assert "Waiting for you" in card, "the run_subagent tool card does not show it is waiting"
     assert not any(n in card for n in ("7,777", "7,787")), "the helper's token count is shown as the chat's"
     assert f"read_file {path}"[:60] in card, "the tool card does not show what the helper is doing"
     time.sleep(0.9)

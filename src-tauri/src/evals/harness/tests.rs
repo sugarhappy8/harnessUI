@@ -323,6 +323,12 @@ async fn a_benchmark_run_has_the_terminal_under_the_rule() {
         "{record:?}"
     );
     assert!(ws.read("hello.py").is_some());
+    // The model is told up front what the terminal runs.
+    let system = endpoint.requests()[0]["messages"][0]["content"].to_string();
+    assert!(
+        system.contains(crate::evals::sandbox::COMMANDS_ALLOWED),
+        "{system}"
+    );
     let blocked: Vec<bool> = record.calls.iter().map(|c| c.blocked).collect();
     assert_eq!(blocked, [false, true, true], "{:?}", record.calls);
     let offered = tool_names(&endpoint.requests()[0]);
