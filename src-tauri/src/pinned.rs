@@ -122,15 +122,16 @@ fn tell_window(app: &AppHandle, chat_id: Option<i64>) {
 /// caller returns at once.
 pub async fn for_turn(app: &AppHandle, chat_id: store::ChatId) -> AppResult<Vec<String>> {
     let state = app.state::<AppState>();
-    let pins = texts(&state.store, chat_id).await;
+    let pins = texts(state.store.pins_for_chat(chat_id).await);
     if pins.is_err() {
         crate::computer_cmd::end_turn(app);
     }
     pins
 }
 
-async fn texts(store: &store::Store, chat_id: store::ChatId) -> AppResult<Vec<String>> {
-    match store.pins_for_chat(chat_id).await {
+/// The texts of the pins read for a turn, or the refusal that stops the turn.
+fn texts(read: Result<Vec<store::Pin>, store::StoreError>) -> AppResult<Vec<String>> {
+    match read {
         Ok(pins) => Ok(pins.into_iter().map(|pin| pin.text).collect()),
         Err(e) => Err(AppError::new(
             "pinned_unreadable",
@@ -264,3 +265,6 @@ pub async fn set_pin_scope(
     tell_window(&app, None);
     listing(&state.store, chat_id).await
 }
+
+#[cfg(test)]
+mod tests;

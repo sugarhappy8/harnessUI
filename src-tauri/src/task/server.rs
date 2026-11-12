@@ -62,8 +62,71 @@ pub fn tool_def() -> ToolDef {
 
 /// Arguments into an action, or the reason they cannot be one. No side effects.
 pub fn describe(tool: &str, args: &Map<String, Value>) -> Described {
-    let _ = (tool, args);
-    Described::Invalid("not written yet".into())
+    if tool != TOOL_NAME {
+        return Described::Invalid(format!("There is no tool named {tool:?} in this group."));
+    }
+    let update = match edits::ModelUpdate::from_args(args) {
+        Ok(update) => update,
+        Err(why) => return Described::Invalid(why),
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut preview: Vec<String> = Vec::new();
+    if let Some(goal) = &update.goal {
+        parts.push("goal".into());
+        preview.push(format!("Goal: {goal}"));
+    }
+    if let Some(constraints) = &update.constraints {
+        parts.push(count(constraints.len(), "constraint"));
+        preview.extend(constraints.iter().map(|c| format!("Constraint: {c}")));
+    }
+    if let Some(steps) = &update.steps {
+        parts.push(count(steps.len(), "step"));
+        preview.extend(steps.iter().map(|s| format!("Step: {}", s.text)));
+    }
+    if let Some(next) = &update.next_action {
+        parts.push("next action".into());
+        preview.push(format!("Next action: {next}"));
+    }
+    if let Some(status) = update.status {
+        parts.push(format!("status {}", status.as_str()));
+    }
+    if let Some(note) = &update.note {
+        parts.push("note".into());
+        preview.push(format!("Note: {note}"));
+    }
+    let summary = if parts.is_empty() {
+        "Read the task".to_owned()
+    } else {
+        format!("Update the task: {}", parts.join(", "))
+    };
+    let preview = if preview.is_empty() {
+        summary.clone()
+    } else {
+        preview.join("\n")
+    };
+    Described::Action(policy::Action {
+        server: SERVER_NAME.into(),
+        tool: TOOL_NAME.into(),
+        summary: policy::sanitize::one_line(&summary, 200),
+        preview: policy::sanitize::visible(&preview),
+        scope: policy::Scope::AppData,
+        risk: policy::Risk::Normal,
+        read_only: false,
+        outbound: false,
+        keep_asking: None,
+        network: false,
+        hard_limit: None,
+        payload: Value::Null,
+    })
+}
+
+/// `1 step`, `2 steps`.
+fn count(n: usize, what: &str) -> String {
+    if n == 1 {
+        format!("1 {what}")
+    } else {
+        format!("{n} {what}s")
+    }
 }
 
 /// What the server needs, without the app around it.
@@ -81,17 +144,67 @@ pub struct Core {
 impl Core {
     /// Runs one `update_task` call for the chat it came from.
     pub async fn call(&self, tool: &str, args: &Map<String, Value>, chat_id: i64) -> ToolOutput {
-        let _ = (
-            tool,
-            args,
-            chat_id,
-            &self.store,
-            edits::GOAL,
-            note::NOTE_TOKENS,
-        );
-        let _ = (ChatId(0), HELPER_REFUSAL);
-        let _: Option<StoreError> = None;
-        ToolOutput::error("not written yet")
+        if tool != TOOL_NAME {
+            return ToolOutput::error(format!("There is no tool named {tool:?} in this group."));
+        }
+        if (self.helper_at_work)(chat_id) {
+            return ToolOutput::error(HELPER_REFUSAL);
+        }
+        let update = match edits::ModelUpdate::from_args(args) {
+            Ok(update) => update,
+            Err(why) => return ToolOutput::error(format!("Nothing was saved. {why}")),
+        };
+        let shortened = update.shortened.clone();
+        let now = (self.now)();
+        let result = self
+            .store
+            .change_task(ChatId(chat_id), move |slot| {
+                let before = slot.clone();
+                let applied = edits::apply_model(slot, update, now);
+                // The result shows the task as it now stands, with what the user changed;
+                // from then on the model has seen it.
+                let shown = slot.as_ref().map(note::for_result);
+                edits::shown_in_result(slot);
+                let stored = *slot != before;
+                (applied, shown, stored)
+            })
+            .await;
+        let (applied, shown, stored) = match result {
+            Ok((_, r)) => r,
+            Err(StoreError::NotFound { .. }) => {
+                return ToolOutput::error(
+                    "The chat this task belongs to no longer exists. Nothing was saved.",
+                );
+            }
+            Err(StoreError::Json(_)) => {
+                return ToolOutput::error(
+                    "The saved task of this chat could not be read, so nothing was saved. The user can clear it in the Task tab.",
+                );
+            }
+            Err(e) => {
+                tracing::warn!("update_task: {e}");
+                return ToolOutput::error("The task could not be saved. Nothing was changed.");
+            }
+        };
+        if stored {
+            (self.notify)(chat_id);
+        }
+        let Some(shown) = shown else {
+            return ToolOutput::text(
+                "No task is recorded for this chat yet. A goal or steps start one.",
+            );
+        };
+        let mut lines = vec![if applied.changed {
+            "Task saved.".to_owned()
+        } else {
+            "Nothing changed.".to_owned()
+        }];
+        lines.extend(applied.notices);
+        if applied.changed && !shortened.is_empty() {
+            lines.push(format!("Shortened to fit: {}.", shortened.join(", ")));
+        }
+        lines.push(shown);
+        ToolOutput::text(lines.join("\n"))
     }
 }
 

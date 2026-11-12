@@ -13,7 +13,7 @@
 //!   not be what brings it in.
 //! - The whole note stays under [`NOTE_TOKENS`], however large the task.
 
-use store::{Task, TaskStatus};
+use store::{FileChange, StepStatus, Task, TaskStatus};
 
 /// The most a note may take, in tokens by the agent loop's own cautious estimate.
 pub const NOTE_TOKENS: u32 = 300;
@@ -31,8 +31,353 @@ pub const HEADER: &str = "Task state, from the app's record of the work in this 
 /// counts (`agent::estimate_tokens`), except that a character outside ASCII counts as a
 /// whole token, so a note in another script stays bounded too.
 pub fn cost(text: &str) -> u32 {
-    let _ = text;
-    0
+    let (ascii, other) = text.chars().fold((0u32, 0u32), |(a, o), c| {
+        if c.is_ascii() {
+            (a.saturating_add(1), o)
+        } else {
+            (a, o.saturating_add(1))
+        }
+    });
+    ascii.div_ceil(3).saturating_add(other)
+}
+
+/// Most tokens the goal takes in a note; it is cut short beyond that.
+const GOAL_TOKENS: u32 = 70;
+/// Most tokens the next action takes.
+const NEXT_ACTION_TOKENS: u32 = 60;
+/// Most tokens one item of a list (a constraint, a step, a note, a command, a path) takes.
+const ITEM_TOKENS: u32 = 40;
+
+/// What the app's own notes start with, in any spelling.
+fn app_note_marker() -> &'static regex::Regex {
+    static MARKER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    MARKER.get_or_init(|| regex::Regex::new(r"(?i)\[\s*app\s*note\s*\]").expect("valid"))
+}
+
+/// Text supplied by the model, the user or a tool call's arguments, as it appears in the
+/// note: one line, nothing invisible, no double quotes, no app note marker, in quotes,
+/// cut to `max` tokens.
+fn quote(text: &str, max: u32) -> String {
+    let squeezed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let visible = policy::sanitize::visible(&squeezed).replace('"', "'");
+    let safe = app_note_marker().replace_all(&visible, "(App note)");
+    let whole = format!("\"{safe}\"");
+    if cost(&whole) <= max {
+        return whole;
+    }
+    let mut cut = String::new();
+    for c in safe.chars() {
+        cut.push(c);
+        if cost(&format!("\"{cut}…\"")) > max {
+            cut.pop();
+            break;
+        }
+    }
+    format!("\"{}…\"", cut.trim_end())
+}
+
+/// Whether a note's text is within [`NOTE_TOKENS`], with the marker the loop puts before it.
+fn fits(text: &str) -> bool {
+    cost(&format!("[App note] {text}")) <= NOTE_TOKENS
+}
+
+/// The names in `UserMarks::changed`, in the order they are said, and how.
+const CHANGED_NAMES: &[(&str, &str)] = &[
+    (super::edits::GOAL, "the goal"),
+    (super::edits::CONSTRAINTS, "the constraints"),
+    (super::edits::STEPS, "the steps"),
+    (super::edits::NEXT_ACTION, "the next action"),
+];
+
+/// `a`, `a and b`, `a, b and c`.
+fn sentence(parts: &[&str]) -> String {
+    match parts {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// What the user did since the model last saw the task, or `None`.
+fn since_line(task: &Task, say_pause: bool) -> Option<String> {
+    let user = &task.state.user;
+    let mut parts = Vec::new();
+    if say_pause && user.paused {
+        parts.push("paused this task and has now resumed it".to_owned());
+    }
+    let changed: Vec<&str> = CHANGED_NAMES
+        .iter()
+        .filter(|(name, _)| user.changed.iter().any(|c| c == name))
+        .map(|(_, said)| *said)
+        .collect();
+    if !changed.is_empty() {
+        parts.push(format!("changed {}", sentence(&changed)));
+    }
+    (!parts.is_empty()).then(|| format!("- since you last saw this, the user: {}", parts.join("; ")))
+}
+
+fn status_word(status: StepStatus) -> &'static str {
+    match status {
+        StepStatus::Todo => "todo",
+        StepStatus::Doing => "doing",
+        StepStatus::Done => "done",
+    }
+}
+
+fn kind_word(kind: FileChange) -> &'static str {
+    match kind {
+        FileChange::Created => "created",
+        FileChange::Edited => "edited",
+        FileChange::Deleted => "deleted",
+    }
+}
+
+fn is_separator(c: char) -> bool {
+    c == '/' || c == '\\'
+}
+
+/// The folder every path is in (without a separator at its end), or `None` when they share
+/// none worth naming.
+fn common_folder(paths: &[&str]) -> Option<String> {
+    let dirs: Vec<&str> = paths
+        .iter()
+        .map(|p| p.rfind(is_separator).map(|i| &p[..i]))
+        .collect::<Option<Vec<_>>>()?;
+    let first = *dirs.first()?;
+    let mut common: &str = first;
+    for dir in &dirs[1..] {
+        let shared = common
+            .char_indices()
+            .zip(dir.chars())
+            .find(|((_, a), b)| a != b)
+            .map_or_else(|| common.len().min(dir.len()), |((i, _), _)| i);
+        common = &common[..shared.min(common.len())];
+    }
+    // It has to end where a folder name ends in every path.
+    loop {
+        if common.is_empty() {
+            return None;
+        }
+        let at_boundary = dirs.iter().all(|d| {
+            d.len() == common.len() || d[common.len()..].starts_with(is_separator)
+        });
+        if at_boundary {
+            break;
+        }
+        common = &common[..common.rfind(is_separator)?];
+    }
+    // A drive or the root alone is not worth naming.
+    if !common.contains(is_separator) && common.ends_with(':') {
+        return None;
+    }
+    Some(common.to_owned())
+}
+
+/// A list line: `label` + items joined by "; " + "; +N more" when `more` > 0.
+fn list_line(label: &str, items: &[String], more: usize) -> String {
+    let mut line = format!("{label}{}", items.join("; "));
+    if more > 0 {
+        line.push_str(&format!("; +{more} more"));
+    }
+    line
+}
+
+/// The lines in the order they are shown.
+#[derive(Default)]
+struct Lines {
+    status: String,
+    since: Option<String>,
+    goal: Option<String>,
+    constraints: Option<String>,
+    steps: Option<String>,
+    note: Option<String>,
+    files: Option<String>,
+    checks: Option<String>,
+    next_action: Option<String>,
+}
+
+impl Lines {
+    fn join(&self, header: Option<&str>) -> String {
+        let mut out: Vec<&str> = Vec::new();
+        out.extend(header);
+        out.push(&self.status);
+        for line in [
+            &self.since,
+            &self.goal,
+            &self.constraints,
+            &self.steps,
+            &self.note,
+            &self.files,
+            &self.checks,
+            &self.next_action,
+        ] {
+            out.extend(line.as_deref());
+        }
+        out.join("\n")
+    }
+}
+
+/// Which line a list fills.
+#[derive(Clone, Copy)]
+enum Slot {
+    Constraints,
+    Steps,
+    Note,
+    Files,
+    Checks,
+}
+
+impl Lines {
+    fn slot(&mut self, slot: Slot) -> &mut Option<String> {
+        match slot {
+            Slot::Constraints => &mut self.constraints,
+            Slot::Steps => &mut self.steps,
+            Slot::Note => &mut self.note,
+            Slot::Files => &mut self.files,
+            Slot::Checks => &mut self.checks,
+        }
+    }
+
+    /// Fills a list line with as many items as fit, in order. `render(n)` is the line with
+    /// the first `n` items, or `None` for a line that cannot be shown with `n` items.
+    fn fill(&mut self, slot: Slot, count: usize, header: Option<&str>, render: impl Fn(usize) -> Option<String>) {
+        for n in 1..=count {
+            let Some(line) = render(n) else { continue };
+            let previous = self.slot(slot).replace(line);
+            if !fits(&self.join(header)) {
+                *self.slot(slot) = previous;
+                break;
+            }
+        }
+    }
+}
+
+/// The task's lines within the size limit. `in_turn`: for the start of a turn (a paused
+/// task reads as active, and the pause as news).
+fn render(task: &Task, header: Option<&str>, in_turn: bool) -> String {
+    let state = &task.state;
+    let user = &state.user;
+    let mut lines = Lines {
+        status: match task.status {
+            TaskStatus::Active => "- status: active".to_owned(),
+            TaskStatus::Paused if in_turn => "- status: active".to_owned(),
+            TaskStatus::Paused => "- status: paused (the user put this task on hold; it stays paused until the user resumes it)".to_owned(),
+            TaskStatus::Done if user.done => "- status: done (the user marked this task done)".to_owned(),
+            TaskStatus::Done => "- status: done".to_owned(),
+        },
+        since: since_line(task, in_turn || task.status != TaskStatus::Paused),
+        ..Lines::default()
+    };
+
+    // The goal and the next action matter most: always there, cut short if need be.
+    if !state.goal.is_empty() {
+        let label = if user.goal { "- goal (the user wrote it): " } else { "- goal: " };
+        lines.goal = Some(format!("{label}{}", quote(&state.goal, GOAL_TOKENS)));
+    }
+    if !state.next_action.is_empty() {
+        let label = if user.next_action {
+            "- next action (the user wrote it): "
+        } else {
+            "- next action: "
+        };
+        lines.next_action = Some(format!("{label}{}", quote(&state.next_action, NEXT_ACTION_TOKENS)));
+    }
+
+    // Then the lists, in this order, each with as many items as still fit.
+    let constraints: Vec<String> = state
+        .constraints
+        .iter()
+        .map(|c| {
+            let mark = if user.constraints.contains(c) { " (user)" } else { "" };
+            format!("{}{mark}", quote(c, ITEM_TOKENS))
+        })
+        .collect();
+    lines.fill(Slot::Constraints, constraints.len(), header, |n| {
+        Some(list_line("- constraints: ", &constraints[..n], constraints.len() - n))
+    });
+
+    let total = state.steps.len();
+    let done = state.steps.iter().filter(|s| s.status == StepStatus::Done).count();
+    if total > 0 && done == total {
+        lines.steps = Some(format!("- steps: all {total} done"));
+        if !fits(&lines.join(header)) {
+            lines.steps = None;
+        }
+    } else if total > 0 {
+        let start = state
+            .steps
+            .iter()
+            .position(|s| s.status != StepStatus::Done)
+            .unwrap_or(0);
+        let steps: Vec<String> = state.steps[start..]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let mark = if user.steps.contains(&s.text) { " (user)" } else { "" };
+                format!(
+                    "{} [{}] {}{mark}",
+                    start + i + 1,
+                    status_word(s.status),
+                    quote(&s.text, ITEM_TOKENS)
+                )
+            })
+            .collect();
+        let label = format!("- steps ({done} of {total} done): ");
+        lines.fill(Slot::Steps, steps.len(), header, |n| {
+            Some(list_line(&label, &steps[..n], steps.len() - n))
+        });
+    }
+
+    if let Some(latest) = state.notes.last() {
+        let line = format!("- your latest note: {}", quote(&latest.text, ITEM_TOKENS));
+        lines.fill(Slot::Note, 1, header, |_| Some(line.clone()));
+    }
+
+    // Checks: the newest first. Only the app's own facts: never the output's summary.
+    let checks: Vec<String> = state
+        .checks
+        .iter()
+        .rev()
+        .take(MAX_CHECKS)
+        .map(|c| {
+            let command = quote(&c.command, ITEM_TOKENS);
+            match c.exit_code {
+                None => format!("did not finish {command}"),
+                Some(_) if c.passed => format!("passed {command}"),
+                Some(code) => format!("failed {command} (exit code {code})"),
+            }
+        })
+        .collect();
+    lines.fill(Slot::Checks, checks.len(), header, |n| {
+        Some(list_line("- last checks: ", &checks[..n], 0))
+    });
+
+    // Changed files: the newest first, relative to the folder they share.
+    let recent: Vec<&store::ChangedFile> = state.changed_files.iter().rev().take(MAX_FILES).collect();
+    let all = state.changed_files.len() + state.files_not_listed as usize;
+    if !recent.is_empty() {
+        let paths: Vec<&str> = recent.iter().map(|f| f.path.as_str()).collect();
+        let folder = common_folder(&paths);
+        let label = match &folder {
+            Some(folder) => format!("- changed files (in {}): ", quote(folder, ITEM_TOKENS)),
+            None => "- changed files: ".to_owned(),
+        };
+        let files: Vec<String> = recent
+            .iter()
+            .map(|f| {
+                let shown = match &folder {
+                    Some(folder) => &f.path[folder.len() + 1..],
+                    None => f.path.as_str(),
+                };
+                format!("{} {}", kind_word(f.kind), quote(shown, ITEM_TOKENS))
+            })
+            .collect();
+        lines.fill(Slot::Files, files.len(), header, |n| {
+            Some(list_line(&label, &files[..n], all - n))
+        });
+    }
+
+    lines.join(header)
 }
 
 /// The note for the start of a turn, or `None` when there is nothing to tell: no task, a
@@ -41,14 +386,30 @@ pub fn cost(text: &str) -> u32 {
 ///
 /// A paused task is shown as active: the turn that carries this note is the work going on.
 pub fn for_turn(task: &Task) -> Option<String> {
-    let _ = task;
-    None
+    if !super::edits::has_content(&task.state) {
+        return None;
+    }
+    if task.status == TaskStatus::Done {
+        if !task.state.user.done {
+            return None;
+        }
+        // Said once: the user finished it.
+        let mut lines = vec![
+            HEADER.to_owned(),
+            "- status: done (the user marked this task done)".to_owned(),
+        ];
+        if !task.state.goal.is_empty() {
+            let label = if task.state.user.goal { "- goal (the user wrote it): " } else { "- goal: " };
+            lines.push(format!("{label}{}", quote(&task.state.goal, GOAL_TOKENS)));
+        }
+        return Some(lines.join("\n"));
+    }
+    Some(render(task, Some(HEADER), true))
 }
 
 /// The task as an `update_task` result shows it: the same lines without the first one.
 pub fn for_result(task: &Task) -> String {
-    let _ = (task, TaskStatus::Active);
-    String::new()
+    render(task, None, false)
 }
 
 #[cfg(test)]

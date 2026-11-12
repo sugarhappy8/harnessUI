@@ -1,0 +1,19 @@
+{
+  "title": "Fix a bug found by a failing test (JavaScript)",
+  "kind": "javascript",
+  "needs": "node",
+  "prompt": "The tests of this small JavaScript project fail. Run them with `{node} test.js`, find the bug in slugify.js and fix it. Do not change test.js.",
+  "checks": [
+    {
+      "type": "run",
+      "script": "verify.cjs"
+    },
+    {
+      "type": "unchanged",
+      "file": "test.js"
+    }
+  ],
+  "parse": [
+    "js"
+  ]
+}

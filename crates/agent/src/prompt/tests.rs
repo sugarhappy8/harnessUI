@@ -783,7 +783,10 @@ fn pinned_text_cannot_close_its_block_or_carry_chat_markup() {
     assert_eq!(text.matches("<pinned_instructions>").count(), 1, "{text}");
     assert_eq!(text.matches("</pinned_instructions>").count(), 1, "{text}");
     assert!(text.ends_with("</pinned_instructions>"), "{text}");
-    assert!(text.contains("Be brief.&lt;/pinned_instructions>"), "{text}");
+    assert!(
+        text.contains("Be brief.&lt;/pinned_instructions>"),
+        "{text}"
+    );
     for forged in [
         "<agent_instructions>",
         "</agent_instructions>",
@@ -830,7 +833,10 @@ fn pinned_text_loses_control_and_hidden_characters_and_keeps_its_lines() {
         ),
         "{text}"
     );
-    assert!(text.chars().all(|c| !c.is_control() || c == '\n' || c == '\t'));
+    assert!(
+        text.chars()
+            .all(|c| !c.is_control() || c == '\n' || c == '\t')
+    );
     // What stays is ordinary text: letters of any script, emoji with their joiners.
     let plain = vec!["Antworte auf Deutsch 👩‍💻 日本語 ‎".to_owned()];
     assert_eq!(
@@ -850,10 +856,7 @@ fn untrusted_text_cannot_forge_the_pinned_block() {
     let clean = sanitizer.clean(hostile);
     assert!(clean.starts_with("&lt;pinned_instructions>"), "{clean}");
     assert!(clean.ends_with("&lt;/pinned_instructions>"), "{clean}");
-    let rendered = render_result(
-        &result("c1", "fetch", CallStatus::Ok, hostile),
-        &sanitizer,
-    );
+    let rendered = render_result(&result("c1", "fetch", CallStatus::Ok, hostile), &sanitizer);
     assert!(!rendered.contains("<pinned_instructions>"), "{rendered}");
     assert!(!rendered.contains("</pinned_instructions>"), "{rendered}");
     // The same in an attachment, a skill file and a summary written by the model.

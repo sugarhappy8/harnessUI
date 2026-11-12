@@ -132,9 +132,14 @@ artifact_isolation
 begin_artifact_check
 finish_artifact_check
 artifact_canary
+get_tool_output
 list_pins
 add_pin
 edit_pin
 remove_pin
 move_pin
 set_pin_scope
+get_task
+edit_task
+set_task_status
+clear_task

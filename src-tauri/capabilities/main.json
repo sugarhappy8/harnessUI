@@ -158,12 +158,17 @@
     "allow-begin-artifact-check",
     "allow-finish-artifact-check",
     "allow-artifact-canary",
+    "allow-get-tool-output",
     "allow-minimize-main-window",
     "allow-list-pins",
     "allow-add-pin",
     "allow-edit-pin",
     "allow-remove-pin",
     "allow-move-pin",
-    "allow-set-pin-scope"
+    "allow-set-pin-scope",
+    "allow-get-task",
+    "allow-edit-task",
+    "allow-set-task-status",
+    "allow-clear-task"
   ]
 }

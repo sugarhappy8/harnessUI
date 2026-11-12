@@ -1,7 +1,19 @@
 import { useState } from "react";
-import { minimizeMainWindow } from "../lib/ipc";
+import { getToolOutput, isTauri, minimizeMainWindow, type SavedToolOutput } from "../lib/ipc";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useApp } from "../store/app";
 import { TOOL_CARD_EXTRAS } from "./toolcards";
-import { Ban, CheckCircle2, ChevronDown, ChevronRight, Hand, Loader2, Wrench, XCircle } from "lucide-react";
+import {
+  Ban,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  Hand,
+  Loader2,
+  Wrench,
+  XCircle,
+} from "lucide-react";
 
 /** How much of a result is shown before "Show all". */
 const RESULT_PREVIEW_CHARS = 4000;
@@ -55,6 +67,100 @@ const STATUS_TEXT: Record<string, string> = {
   refused: "Not allowed",
 };
 
+/** The line the app appends to a shortened result (src-tauri/src/outputs.rs, `shortened_line`). */
+const SHORTENED_LINE =
+  /^\[Shortened: \d+ of \d+ lines shown\. Full output is saved as output #(\d+)\. Read more with read_output .*\]$/;
+
+/** The saved output a result names on its last line, if it ends with the "Shortened" line. */
+export function savedOutputId(text: string): number | null {
+  const lines = text.trimEnd().split("\n");
+  const match = SHORTENED_LINE.exec(lines[lines.length - 1] ?? "");
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) ? id : null;
+}
+
+type FullOutputState =
+  | { kind: "closed" }
+  | { kind: "loading" }
+  | { kind: "shown"; output: SavedToolOutput }
+  | { kind: "failed" };
+
+/**
+ * "Full output": the whole text of a shortened result, saved by the app, shown in the card
+ * as plain text. Only the chat on screen's own outputs can be opened.
+ */
+function FullOutput(props: { id: number }) {
+  const chatId = useApp((s) => s.activeChatId);
+  const [state, setState] = useState<FullOutputState>({ kind: "closed" });
+  const [copied, setCopied] = useState(false);
+
+  async function open() {
+    if (chatId === null) return;
+    setState({ kind: "loading" });
+    try {
+      setState({ kind: "shown", output: await getToolOutput(chatId, props.id) });
+    } catch {
+      setState({ kind: "failed" });
+    }
+  }
+
+  async function copy(text: string) {
+    try {
+      if (isTauri()) await writeText(text);
+      else await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  const button = "rounded-md border border-border px-2 py-1 text-xs hover:border-border-strong hover:bg-bg-muted";
+  if (state.kind === "shown") {
+    const o = state.output;
+    return (
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2 text-xs text-fg-muted">
+          <span className="min-w-0 flex-1 truncate">
+            Output #{o.id} · {o.lines.toLocaleString()} lines
+          </span>
+          <button type="button" className={button} onClick={() => void copy(o.text)}>
+            {copied ? "Copied" : "Copy output"}
+          </button>
+          <button type="button" className={button} onClick={() => setState({ kind: "closed" })}>
+            Hide
+          </button>
+        </div>
+        <pre
+          aria-label={`Output #${o.id}`}
+          className="max-h-96 overflow-auto rounded bg-bg p-2 font-mono text-xs whitespace-pre-wrap break-all"
+        >
+          {o.text}
+        </pre>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        className={`flex items-center gap-1.5 ${button}`}
+        disabled={chatId === null || state.kind === "loading"}
+        onClick={() => void open()}
+      >
+        <FileText size={13} aria-hidden />
+        {state.kind === "loading" ? "Opening…" : "Full output"}
+      </button>
+      {state.kind === "failed" && (
+        <span className="text-xs text-fg-muted">
+          The full output could not be opened. A chat keeps only its 200 newest saved outputs.
+        </span>
+      )}
+    </div>
+  );
+}
+
 /** The tool that hands a task to a helper (src-tauri/src/subagent.rs). */
 const SUBAGENT_TOOL = "run_subagent";
 
@@ -80,6 +186,7 @@ export function ToolCallCard(props: { call: ToolCallView }) {
   const shown = all ? result : result.slice(0, RESULT_PREVIEW_CHARS);
   // The name is the model's: only a card of its own, never something every object has.
   const extra = Object.hasOwn(TOOL_CARD_EXTRAS, c.name) ? (TOOL_CARD_EXTRAS[c.name]?.(c) ?? null) : null;
+  const savedId = c.status === "running" ? null : savedOutputId(c.text);
   const helperNow =
     c.name === SUBAGENT_TOOL && (c.status === "running" || c.status === "waiting") ? lastLine(c.progress ?? "") : "";
   return (
@@ -105,6 +212,11 @@ export function ToolCallCard(props: { call: ToolCallView }) {
         </p>
       )}
       {extra && <div className="border-t border-border px-3 py-2">{extra}</div>}
+      {savedId !== null && (
+        <div className="border-t border-border px-3 py-2">
+          <FullOutput key={savedId} id={savedId} />
+        </div>
+      )}
       {open && (
         <div className="enter-fade space-y-2 border-t border-border px-3 py-2">
           {c.recovered && (

@@ -1758,6 +1758,7 @@ pub async fn run(
         });
     }
     input.summary = latest_summary(&state, chat_id, &path).await;
+    input.app_notes.extend(crate::task::begin_turn(app, chat_id.0).await); // [0.0.4 task]
     let _ = channel.send(TurnStreamEvent::Started {
         user_message_id: req.user_message_id.map(|m| m.0),
     });

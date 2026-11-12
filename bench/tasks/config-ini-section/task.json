@@ -1,0 +1,44 @@
+{
+  "title": "Edit one section of an INI file",
+  "kind": "config",
+  "needs": null,
+  "prompt": "In app.ini, set timeout to 30 in the [database] section and add the line `pool = 4` to that same section. The [cache] section must not change.",
+  "checks": [
+    {
+      "type": "ini",
+      "file": "app.ini",
+      "section": "database",
+      "key": "timeout",
+      "equals": "30"
+    },
+    {
+      "type": "ini",
+      "file": "app.ini",
+      "section": "database",
+      "key": "pool",
+      "equals": "4"
+    },
+    {
+      "type": "ini",
+      "file": "app.ini",
+      "section": "database",
+      "key": "host",
+      "equals": "localhost"
+    },
+    {
+      "type": "ini",
+      "file": "app.ini",
+      "section": "cache",
+      "key": "timeout",
+      "equals": "5"
+    },
+    {
+      "type": "ini",
+      "file": "app.ini",
+      "section": "cache",
+      "key": "size",
+      "equals": "64"
+    }
+  ],
+  "parse": []
+}

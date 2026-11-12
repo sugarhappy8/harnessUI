@@ -1,0 +1,19 @@
+{
+  "title": "Fix a crash from its error message (Python)",
+  "kind": "python",
+  "needs": "python",
+  "prompt": "Running `{python} report.py` stops with this error:\n\n    Traceback (most recent call last):\n      File \"report.py\", line 15, in <module>\n        print(summary(load(\"orders.json\")))\n      File \"report.py\", line 10, in summary\n        total = sum(order[\"amount\"] for order in orders)\n    TypeError: unsupported operand type(s) for +: 'int' and 'str'\n\nSome amounts in orders.json are written as text, and one order has no amount. Fix report.py so that it also reads amounts written as text and counts a missing amount as 0. Do not edit orders.json.",
+  "checks": [
+    {
+      "type": "run",
+      "script": "verify.py"
+    },
+    {
+      "type": "unchanged",
+      "file": "orders.json"
+    }
+  ],
+  "parse": [
+    "py"
+  ]
+}

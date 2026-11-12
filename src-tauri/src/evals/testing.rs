@@ -248,3 +248,41 @@ async fn serve(
     socket.write_all(b"data: [DONE]\n\n").await?;
     socket.shutdown().await
 }
+
+/// The scripted endpoint as the harness's model.
+pub fn model(endpoint: &Endpoint) -> crate::evals::harness::Model {
+    crate::evals::harness::Model {
+        client: endpoint.client.clone(),
+        caps: agent::turn::ModelCaps {
+            n_ctx: 32_768,
+            ..agent::turn::ModelCaps::default()
+        },
+        template: agent::turn::RequestTemplate {
+            model: "fake-model".into(),
+            ..Default::default()
+        },
+        sanitizer: agent::Sanitizer::generic(),
+    }
+}
+
+/// A run of `prompt`, with the terminal when `terminal`.
+pub fn spec(prompt: &str, terminal: bool) -> crate::evals::harness::Spec {
+    crate::evals::harness::Spec {
+        prompt: prompt.into(),
+        terminal: terminal.then(tools::TerminalConfig::default),
+        settings: crate::evals::harness::Settings::default(),
+        step_cap: 10,
+        time_limit: std::time::Duration::from_secs(60),
+        forbidden: Vec::new(),
+    }
+}
+
+/// An audit function that keeps the rows.
+pub fn audit_rows() -> (crate::evals::harness::AuditFn, Arc<Mutex<Vec<store::AuditEntry>>>) {
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let kept = rows.clone();
+    (
+        Arc::new(move |entry| kept.lock().unwrap().push(entry)),
+        rows,
+    )
+}

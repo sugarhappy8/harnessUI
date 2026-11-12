@@ -327,3 +327,14 @@ export const setGitToken = (host: string, token: string) => invoke<string[]>("se
 export const removeGitToken = (host: string) => invoke<string[]>("remove_git_token", { host });
 export const setGitIdentity = (identity: GitIdentity) => invoke<void>("set_git_identity", { identity });
 export const minimizeMainWindow = () => invoke<void>("minimize_main_window");
+
+// Saved tool output (0.0.4): the whole text of a result the model saw shortened.
+export interface SavedToolOutput {
+  id: number;
+  tool: string;
+  lines: number;
+  bytes: number;
+  text: string;
+}
+export const getToolOutput = (chatId: number, id: number) =>
+  invoke<SavedToolOutput>("get_tool_output", { chatId, id });

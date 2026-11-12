@@ -36,10 +36,6 @@ fn check(
     );
 }
 
-// TODO(0.0.5): the tests marked `ignore` below were written before the patterns of their
-// language. They have never run against real code: check each expected line against its
-// fixture when the language is written.
-
 #[track_caller]
 fn absent(all: &[Symbol], unwanted: &[&str]) {
     for name in unwanted {
@@ -332,7 +328,6 @@ declare namespace Api {
 "##;
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn typescript_definitions_with_kind_and_line_range() {
     let all = find_symbols(TYPESCRIPT, Lang::TypeScript);
     check(&all, "add", Function, None, 4, 8);
@@ -402,7 +397,6 @@ fn one_fn<'a>(all: &'a [Symbol], name: &str) -> &'a Symbol {
 }
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn javascript_functions_classes_and_methods() {
     let text = r##"'use strict';
 const path = require('path');
@@ -499,7 +493,6 @@ def fake_in_string():
 "##;
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn python_definitions_end_by_indentation() {
     let all = find_symbols(PYTHON, Lang::Python);
     check(&all, "add", Function, None, 10, 18);
@@ -528,7 +521,6 @@ fn python_definitions_end_by_indentation() {
 }
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn python_without_a_final_newline_and_with_tabs() {
     let text = "class A:\n\tdef f(self):\n\t\treturn 1\n\n\tdef g(self):\n\t\treturn 2";
     let all = find_symbols(text, Lang::Python);
@@ -594,7 +586,6 @@ func main() {
 "##;
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn go_functions_methods_and_types() {
     let all = find_symbols(GO, Lang::Go);
     check(&all, "Add", Function, None, 6, 11);
@@ -683,7 +674,6 @@ public abstract class Shape<T extends Number> implements Comparable<Shape<T>> {
 "##;
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn java_types_and_methods() {
     let all = find_symbols(JAVA, Lang::Java);
     check(&all, "Shape", Class, None, 7, 56);
@@ -796,7 +786,6 @@ namespace Shop.Models
 "##;
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn csharp_types_and_methods() {
     let all = find_symbols(CSHARP, Lang::CSharp);
     check(&all, "Shop.Models", Module, None, 3, 50);
@@ -889,7 +878,6 @@ fun `runs a test`() {
 "##;
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn kotlin_functions_classes_and_members() {
     let all = find_symbols(KOTLIN, Lang::Kotlin);
     check(&all, "add", Function, None, 6, 12);
@@ -981,7 +969,6 @@ typealias Handler = (Item) -> Void
 "##;
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn swift_functions_types_and_members() {
     let all = find_symbols(SWIFT, Lang::Swift);
     let top = one_kind(&all, "add", Function);
@@ -1083,7 +1070,6 @@ int main(int argc, char **argv) { return add(1, 2); }
 "##;
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn c_functions_and_types() {
     let all = find_symbols(C, Lang::C);
     check(&all, "point", Struct, None, 5, 8);
@@ -1169,7 +1155,6 @@ int c_entry(void) { return 0; }
 "##;
 
 #[test]
-#[ignore = "TODO(0.0.5): this language has no patterns yet"]
 fn cpp_classes_functions_and_members() {
     let all = find_symbols(CPP, Lang::Cpp);
     check(&all, "shop", Module, None, 3, 49);
@@ -1214,6 +1199,24 @@ fn cpp_classes_functions_and_members() {
             "items_",
         ],
     );
+}
+
+#[test]
+fn a_closing_brace_in_the_first_column_heals_a_drifted_count() {
+    // Both `#ifdef` branches open a block; one `}` follows. The `}` in the first column
+    // still ends `f`, and `h` is found at file level.
+    let text = "int f(int a)\n{\n#ifdef A\n    if (a) {\n#else\n    if (!a) {\n#endif\n        g();\n    }\n}\nint h(void) { return 1; }\n";
+    let all = find_symbols(text, Lang::C);
+    check(&all, "f", Function, None, 1, 10);
+    check(&all, "h", Function, None, 11, 11);
+    // A class closed in the first column inside an unindented namespace ends the class
+    // only: the namespace goes on and the function after it is still inside it.
+    let text = "namespace a {\nclass B {\n    void m() {}\n};\nvoid f() {}\n}\n";
+    let all = find_symbols(text, Lang::Cpp);
+    check(&all, "a", Module, None, 1, 6);
+    check(&all, "B", Class, None, 2, 4);
+    check(&all, "m", Method, Some("B"), 3, 3);
+    check(&all, "f", Function, None, 5, 5);
 }
 
 #[test]
@@ -1266,7 +1269,6 @@ fn text_that_is_not_ascii_does_not_break_the_finder() {
 }
 
 #[test]
-#[ignore = "TODO(0.0.5): uses the TypeScript fixture, which has no patterns yet"]
 fn names_shown_to_the_user() {
     let all = find_symbols(RUST, Lang::Rust);
     let new = one(&all, "new");

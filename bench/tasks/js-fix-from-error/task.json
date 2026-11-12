@@ -1,0 +1,19 @@
+{
+  "title": "Fix a crash from its error message (JavaScript)",
+  "kind": "javascript",
+  "needs": "node",
+  "prompt": "Running `{node} index.js` stops with this error:\n\n    TypeError: Cannot read properties of undefined (reading 'name')\n        at displayName (names.js:3:23)\n        at Object.<anonymous> (index.js:5:15)\n\nSome users have no profile, or a profile without a name. Fix displayName in names.js so that such users are shown as \"(no name)\". Do not edit users.json.",
+  "checks": [
+    {
+      "type": "run",
+      "script": "verify.cjs"
+    },
+    {
+      "type": "unchanged",
+      "file": "users.json"
+    }
+  ],
+  "parse": [
+    "js"
+  ]
+}

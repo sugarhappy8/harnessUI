@@ -884,14 +884,12 @@ impl BuiltinServer for GitServer {
                     Ok(u) => u,
                     Err(e) => return Described::Invalid(e),
                 };
-                // The fallback cannot push over ssh; say so before anyone approves.
-                if self.fallback()
-                    && let Err(why) = self.remote_host(&url)
-                {
+                // The fallback cannot push over ssh; say so before anyone approves. The
+                // address comes from the repository's config, a file: an answer given
+                // before the gate (an app note) does not quote it.
+                if self.fallback() && self.remote_host(&url).is_err() {
                     return Described::Invalid(format!(
-                        "cannot push to {remote} ({}): {}",
-                        display_url(&url),
-                        why.message()
+                        "cannot push to {remote}: Git is not installed, and the built-in Git library pushes over https only, to an address written in standard form (https://host/path, with no backslash or spaces), so that the server it connects to is the one shown for approval. The address of {remote} is not like that; git remote -v (run_command) shows it. Install Git, or give the remote an https address."
                     ));
                 }
                 let shown: Vec<String> = url.lines().map(|u| self.card_url(u)).collect();

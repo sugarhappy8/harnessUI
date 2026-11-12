@@ -76,16 +76,93 @@ pub enum Fact {
 /// the terminal's command line) and from whether the call failed, never from the wording
 /// of a result. A call made through `call_tool` arrives here as the tool it ran.
 pub fn fact_of(action: &policy::Action, out: &ToolOutput, now: i64) -> Option<Fact> {
-    let _ = (action, out, now, COMMAND_CHARS);
-    None
+    match (action.server.as_str(), action.tool.as_str()) {
+        ("files", tool @ ("write_file" | "edit_file" | "delete_file")) => {
+            // A change happened only when the call succeeded and was the write the policy
+            // approved: an `edit_file` that only reads the file to explain why it failed
+            // is described as a read, and answered as an error.
+            if out.is_error
+                || action.read_only
+                || !matches!(action.scope, policy::Scope::FileWrite { .. })
+            {
+                return None;
+            }
+            let path = action.payload.get("canonical")?.as_str()?;
+            if path.trim().is_empty() {
+                return None;
+            }
+            let kind = match tool {
+                "write_file" => match action.payload.get("expectedSha256") {
+                    Some(Value::Null) => FileChange::Created,
+                    Some(_) => FileChange::Edited,
+                    None if action.payload.get("exists") == Some(&Value::Bool(false)) => {
+                        FileChange::Created
+                    }
+                    None => FileChange::Edited,
+                },
+                "edit_file" => FileChange::Edited,
+                _ => FileChange::Deleted,
+            };
+            Some(Fact::File {
+                path: path.to_owned(),
+                kind,
+            })
+        }
+        ("terminal", "run_command") => {
+            if !matches!(
+                action.scope,
+                policy::Scope::Command { .. }
+                    | policy::Scope::Commands { .. }
+                    | policy::Scope::ReadOnlyProgram { .. }
+            ) {
+                return None;
+            }
+            let command = action.payload.get("command")?.as_str()?;
+            if !checks::is_check(command) {
+                return None;
+            }
+            let outcome = checks::outcome(out);
+            // Without an exit code a result that is not an error says nothing about how
+            // the check went.
+            if outcome.exit_code.is_none() && !out.is_error {
+                return None;
+            }
+            Some(Fact::Check(TaskCheck {
+                command: edits::clean(command, COMMAND_CHARS),
+                passed: outcome.passed,
+                at: now,
+                summary: outcome.summary,
+                exit_code: outcome.exit_code,
+            }))
+        }
+        _ => None,
+    }
 }
 
 /// Records a fact in the chat's task, creating the record when the chat has none: the
 /// Task tab shows changed files and checks also when the model never wrote a goal.
 /// Returns whether the stored task differs.
 pub async fn record(store: &Store, chat_id: i64, fact: Fact, now: i64) -> Result<bool, StoreError> {
-    let _ = (store, chat_id, fact, now);
-    Ok(false)
+    let (_, changed) = store
+        .change_task(ChatId(chat_id), move |slot| {
+            let before = slot.clone();
+            let task = slot.get_or_insert_with(|| Task::new(ChatId(chat_id)));
+            match fact {
+                Fact::File { path, kind } => task.state.record_file(&path, kind, now),
+                Fact::Check(check) => task.state.record_check(check),
+            }
+            // A file created and deleted again in a chat with no task leaves no record.
+            if before.is_none() && task.state == store::TaskState::default() {
+                *slot = None;
+            }
+            let changed = *slot != before;
+            if changed && let Some(task) = slot.as_mut() {
+                task.updated_at = now;
+            }
+            changed
+        })
+        .await?;
+    Ok(changed)
 }
 
 /// Called after every tool call of a turn: notes changed files and checks.
@@ -249,21 +326,67 @@ pub struct TaskDto {
 
 impl From<Task> for TaskDto {
     fn from(task: Task) -> Self {
-        let _ = &task;
+        let state = task.state;
+        let user = state.user;
         Self {
-            chat_id: 0,
-            status: TaskStatus::Active,
-            updated_at: 0,
-            goal: String::new(),
-            goal_by_user: false,
-            constraints: Vec::new(),
-            steps: Vec::new(),
-            changed_files: Vec::new(),
-            files_not_listed: 0,
-            checks: Vec::new(),
-            next_action: String::new(),
-            next_action_by_user: false,
-            notes: Vec::new(),
+            chat_id: task.chat_id.0,
+            status: task.status,
+            updated_at: task.updated_at,
+            goal: state.goal,
+            goal_by_user: user.goal,
+            constraints: state
+                .constraints
+                .into_iter()
+                .map(|text| ItemDto {
+                    by_user: user.constraints.contains(&text),
+                    text,
+                })
+                .collect(),
+            steps: state
+                .steps
+                .into_iter()
+                .map(|s| StepDto {
+                    by_user: user.steps.contains(&s.text),
+                    text: s.text,
+                    status: s.status,
+                })
+                .collect(),
+            changed_files: state
+                .changed_files
+                .into_iter()
+                .rev()
+                .map(|f| FileDto {
+                    shown: policy::sanitize::visible(&f.path),
+                    path: f.path,
+                    kind: f.kind,
+                    at: f.at,
+                })
+                .collect(),
+            files_not_listed: state.files_not_listed,
+            checks: state
+                .checks
+                .into_iter()
+                .rev()
+                .map(|c| CheckDto {
+                    finished: c.exit_code.is_some(),
+                    command: c.command,
+                    passed: c.passed,
+                    at: c.at,
+                    summary: c.summary,
+                    exit_code: c.exit_code,
+                })
+                .collect(),
+            next_action: state.next_action,
+            next_action_by_user: user.next_action,
+            notes: state
+                .notes
+                .into_iter()
+                .rev()
+                .map(|n| NoteDto {
+                    text: n.text,
+                    at: n.at,
+                })
+                .collect(),
         }
     }
 }

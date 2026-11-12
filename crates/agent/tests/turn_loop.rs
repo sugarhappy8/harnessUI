@@ -2056,10 +2056,9 @@ async fn a_finished_reply_has_no_cut_short_note() {
 /// here) and answers every chat request with "ok".
 async fn counting_server() -> MockServer {
     MockServer::start(|request: &Recorded| match request.path() {
-        "/v1/chat/completions/input_tokens" => Reply::json(
-            200,
-            &json!({ "input_tokens": request.body.len() / 3 }),
-        ),
+        "/v1/chat/completions/input_tokens" => {
+            Reply::json(200, &json!({ "input_tokens": request.body.len() / 3 }))
+        }
         "/v1/chat/completions" => sse_reply(sse::text("ok")),
         _ => Reply::not_found(),
     })
@@ -2139,7 +2138,10 @@ fn assert_pins_lead(request: &Value) {
         system.starts_with(&format!("You are a careful assistant.\n\n{TWO_PINS_BLOCK}")),
         "{system}"
     );
-    assert_eq!(all_text(request).matches("<pinned_instructions>").count(), 1);
+    assert_eq!(
+        all_text(request).matches("<pinned_instructions>").count(),
+        1
+    );
 }
 
 fn compacted_stages(h: &Harness) -> Vec<u8> {
@@ -2222,7 +2224,10 @@ async fn pins_follow_the_system_prompt_in_a_request_that_fits() {
         .iter()
         .filter(|r| r.path() == "/v1/chat/completions/input_tokens")
         .count();
-    assert_eq!(counts, 3, "the fixed part with and without pins, then the request");
+    assert_eq!(
+        counts, 3,
+        "the fixed part with and without pins, then the request"
+    );
     // The pins count toward the fixed part of the budget.
     let with_pins = outcome.budget.unwrap().fixed_overhead;
     let h = Harness::on_server(counting_server().await, ProviderKind::LlamaServer);
@@ -2253,7 +2258,10 @@ async fn pins_stay_when_old_tool_results_are_trimmed() {
     assert_pins_lead(&chats[0]);
     let sent = all_text(&chats[0]);
     assert!(sent.contains("Earlier result removed to save space"));
-    assert!(!sent.contains(&"x".repeat(300)), "an old result was sent whole");
+    assert!(
+        !sent.contains(&"x".repeat(300)),
+        "an old result was sent whole"
+    );
     assert!(sent.contains("Question 0:") && sent.contains("And now?"));
 }
 
@@ -2443,7 +2451,12 @@ async fn pins_that_do_not_fit_refuse_the_turn_with_the_numbers() {
     large.caps.n_ctx = 32_768;
     large.pinned = twenty_full_pins();
     let outcome = h.run(large).await;
-    assert_eq!(outcome.status, TurnStatus::Completed, "{:?}", outcome.status);
+    assert_eq!(
+        outcome.status,
+        TurnStatus::Completed,
+        "{:?}",
+        outcome.status
+    );
     let system = h.chats()[0]["messages"][0]["content"]
         .as_str()
         .unwrap()
@@ -2489,7 +2502,10 @@ async fn pins_do_not_take_room_from_the_tools() {
     );
     // With pins worth about a fifth of it the turn still starts, although the whole fixed
     // part is now over the tools' 40%.
-    let pinned = vec!["Keep it short. ".repeat(60), "Answer in German. ".repeat(50)];
+    let pinned = vec![
+        "Keep it short. ".repeat(60),
+        "Answer in German. ".repeat(50),
+    ];
     let with_pins = run(pinned.clone(), bulky_tools(4, 11)).await;
     assert_eq!(
         with_pins.status,
@@ -2498,7 +2514,10 @@ async fn pins_do_not_take_room_from_the_tools() {
         with_pins.status
     );
     let budget = with_pins.budget.unwrap();
-    assert!(!budget.tools_fit(), "the pins are part of the fixed overhead");
+    assert!(
+        !budget.tools_fit(),
+        "the pins are part of the fixed overhead"
+    );
     assert!(budget.fixed_overhead < budget.trigger, "{budget:?}");
     // Tools that do not fit by themselves: the refusal names the tools, pins or no pins.
     for pinned in [Vec::new(), pinned] {
@@ -2555,8 +2574,66 @@ async fn a_pin_cannot_approve_anything() {
     assert_eq!(with, without);
     assert_eq!(
         with.0,
-        [("write_file".to_owned(), CardKind::Grantable, AskReason::Normal)]
+        [(
+            "write_file".to_owned(),
+            CardKind::Grantable,
+            AskReason::Normal
+        )]
     );
     assert_eq!(with.1, [("write_file".to_owned(), false, false)]);
     assert_eq!((with.2, with.3), (0, 0), "a grant appeared or the call ran");
+}
+
+/// Without pins, giving pins a share of their own changed nothing about the tools: for tool
+/// lists on both sides of the limit, a 4,096-token turn is refused exactly when the rule
+/// before pins existed refuses it (the whole fixed part over 40% of the budget), with the
+/// same message, and accepted otherwise. The default tools on a 4,096-token model, with
+/// nothing pinned, still get through.
+#[tokio::test]
+async fn without_pins_the_tools_are_refused_or_accepted_as_before() {
+    let run = |tools: FakeTools| async move {
+        let mut h = Harness::new(vec![reply_text(sse::text("ok"))]).await;
+        h.tools = tools;
+        let mut input = input("Hi");
+        input.caps.n_ctx = 4_096;
+        h.run(input).await
+    };
+    let plain = run(FakeTools::new(default_tools())).await;
+    assert_eq!(plain.status, TurnStatus::Completed, "{:?}", plain.status);
+    assert!(plain.budget.unwrap().tools_fit());
+
+    let (mut accepted, mut refused) = (Vec::new(), Vec::new());
+    for repeats in (4..=40).step_by(2) {
+        let outcome = run(bulky_tools(4, repeats)).await;
+        let budget = outcome.budget.expect("a budget");
+        // The rule before pins: the whole fixed part against 40% of the budget.
+        let old_rule_fits =
+            agent::ContextBudget::new(budget.n_ctx, budget.fixed_overhead).tools_fit();
+        assert_eq!(old_rule_fits, budget.tools_fit());
+        match outcome.status {
+            TurnStatus::Completed => {
+                assert!(old_rule_fits, "{repeats}: accepted, the old rule refused");
+                accepted.push(repeats);
+            }
+            TurnStatus::Failed { code, message } => {
+                assert!(!old_rule_fits, "{repeats}: refused, the old rule accepted");
+                assert_eq!(code, "tools_do_not_fit");
+                assert!(
+                    message.starts_with("These 4 tools need about "),
+                    "{message}"
+                );
+                refused.push(repeats);
+            }
+            other => panic!("{repeats}: {other:?}"),
+        }
+    }
+    // Both sides of the limit were tried, and the limit is one place.
+    assert!(
+        !accepted.is_empty() && !refused.is_empty(),
+        "{accepted:?} {refused:?}"
+    );
+    assert!(
+        accepted.iter().max() < refused.iter().min(),
+        "{accepted:?} {refused:?}"
+    );
 }

@@ -14,9 +14,12 @@
 
 use super::lex::{self, Backtick, Masked, Rules, Single};
 
-// TODO(0.0.5): only Rust has its patterns. The other ten languages are designed in
-// docs/dev/0.0.4/handoff-H-mentions.md and have tests (ignored) in `find/tests.rs`.
+mod c;
+mod go;
+mod managed;
+mod python;
 mod rust;
+mod script;
 #[cfg(test)]
 mod tests;
 
@@ -252,8 +255,12 @@ impl Symbol {
 
 /// The definitions in `text`, in the order they start.
 pub fn find_symbols(text: &str, lang: Lang) -> Vec<Symbol> {
-    let masked = lex::mask(text, &lang.rules());
-    let mut scan = Scan::new(lang, &masked, text);
+    let mut masked = lex::mask(text, &lang.rules());
+    let (all_braces, depths) = braces(&masked);
+    // The `{` depth of each line as the brace table counts it, so that scopes (from the
+    // table) and lines (from this) agree after a `}` in the first column.
+    masked.curly = depths;
+    let mut scan = Scan::new(lang, &masked, text, all_braces);
     for i in 0..masked.lines.len() {
         if scan.out.len() >= MAX_SYMBOLS_PER_FILE {
             break;
@@ -262,9 +269,13 @@ pub fn find_symbols(text: &str, lang: Lang) -> Vec<Symbol> {
         if masked.lines[i].trim().is_empty() {
             continue;
         }
-        // TODO(0.0.5): the other languages find nothing yet.
-        if lang == Lang::Rust {
-            rust::line(&mut scan, i);
+        match lang {
+            Lang::Rust => rust::line(&mut scan, i),
+            Lang::TypeScript | Lang::JavaScript => script::line(&mut scan, i),
+            Lang::Python => python::line(&mut scan, i),
+            Lang::Go => go::line(&mut scan, i),
+            Lang::Java | Lang::CSharp | Lang::Kotlin | Lang::Swift => managed::line(&mut scan, i),
+            Lang::C | Lang::Cpp => c::line(&mut scan, i),
         }
     }
     scan.out.truncate(MAX_SYMBOLS_PER_FILE);
@@ -427,16 +438,26 @@ struct Brace {
     depth: u32,
 }
 
-/// Every `{` of the masked text with its `}`, in the order they open. A `}` in the first
-/// column closes everything open, as in the masking pass.
-fn braces(m: &Masked) -> Vec<Brace> {
+/// Every `{` of the masked text with its `}`, in the order they open, and the number of
+/// blocks open at the start of each line.
+///
+/// A `}` in the first column heals a drifted count (an `#ifdef` with two opening lines, a
+/// brace the masking pass misread): it closes every open block whose opening line was
+/// indented, then one whose opening line starts in the first column. So the class closed by
+/// `};` in an unindented C++ `namespace` closes the class only, not the namespace.
+fn braces(m: &Masked) -> (Vec<Brace>, Vec<u32>) {
     let mut all: Vec<Brace> = Vec::new();
     let mut open: Vec<usize> = Vec::new();
+    let mut indented: Vec<bool> = Vec::new();
+    let mut depths: Vec<u32> = Vec::with_capacity(m.lines.len());
     for (li, line) in m.lines.iter().enumerate() {
+        depths.push(open.len() as u32);
+        let line_indented = line.starts_with([' ', '\t']);
         for (ci, b) in line.bytes().enumerate() {
             match b {
                 b'{' => {
                     open.push(all.len());
+                    indented.push(line_indented);
                     all.push(Brace {
                         line: li as u32,
                         col: ci as u32,
@@ -446,13 +467,15 @@ fn braces(m: &Masked) -> Vec<Brace> {
                     });
                 }
                 b'}' => {
-                    let closes = if ci == 0 {
-                        open.len()
+                    let drifted = if ci == 0 {
+                        indented.iter().rev().take_while(|&&ind| ind).count()
                     } else {
-                        open.len().min(1)
+                        0
                     };
+                    let closes = (drifted + 1).min(open.len());
                     for _ in 0..closes {
                         if let Some(k) = open.pop() {
+                            indented.pop();
                             all[k].close_line = li as u32;
                             all[k].close_col = ci as u32;
                         }
@@ -462,7 +485,7 @@ fn braces(m: &Masked) -> Vec<Brace> {
             }
         }
     }
-    all
+    (all, depths)
 }
 
 /// The block of a definition. Lines are indexes (0-based).
@@ -512,7 +535,7 @@ struct Scan<'a> {
 }
 
 impl<'a> Scan<'a> {
-    fn new(lang: Lang, m: &'a Masked, text: &'a str) -> Self {
+    fn new(lang: Lang, m: &'a Masked, text: &'a str, braces: Vec<Brace>) -> Self {
         let mut orig: Vec<&str> = text.split('\n').collect();
         if orig.last() == Some(&"") {
             orig.pop();
@@ -521,7 +544,7 @@ impl<'a> Scan<'a> {
             lang,
             m,
             orig,
-            braces: braces(m),
+            braces,
             out: Vec::new(),
             scopes: Vec::new(),
         }

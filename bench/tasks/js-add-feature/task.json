@@ -1,0 +1,15 @@
+{
+  "title": "Add a small feature (JavaScript)",
+  "kind": "javascript",
+  "needs": "node",
+  "prompt": "Add a method `total(discountPercent = 0)` to the Cart class in cart.js. It returns the sum of price times quantity over all lines, reduced by the discount percentage and rounded to 2 decimals, as a number. Example: lines of 10.00 x 2 and 5.50 x 1 with a 10 percent discount give 22.95. Then run `{node} --test` to check that the existing tests still pass.",
+  "checks": [
+    {
+      "type": "run",
+      "script": "verify.cjs"
+    }
+  ],
+  "parse": [
+    "js"
+  ]
+}

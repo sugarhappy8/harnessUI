@@ -1,0 +1,19 @@
+{
+  "title": "Fix a bug found by a failing test (Python)",
+  "kind": "python",
+  "needs": "python",
+  "prompt": "A test fails in this small Python project. Run the tests with `{python} -m unittest -q`, find the bug in stats.py and fix it. Do not change the tests.",
+  "checks": [
+    {
+      "type": "run",
+      "script": "verify.py"
+    },
+    {
+      "type": "unchanged",
+      "file": "test_stats.py"
+    }
+  ],
+  "parse": [
+    "py"
+  ]
+}

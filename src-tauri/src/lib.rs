@@ -228,12 +228,17 @@ pub fn run() {
             artifacts::begin_artifact_check,
             artifacts::finish_artifact_check,
             artifacts::artifact_canary,
+            outputs::get_tool_output,
             pinned::list_pins,
             pinned::add_pin,
             pinned::edit_pin,
             pinned::remove_pin,
             pinned::move_pin,
             pinned::set_pin_scope,
+            task::get_task,
+            task::edit_task,
+            task::set_task_status,
+            task::clear_task,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

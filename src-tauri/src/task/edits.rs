@@ -44,8 +44,77 @@ pub const NEXT_ACTION: &str = "next action";
 /// Text as it is stored: one line (every run of white space becomes one space), invisible
 /// and control characters shown as escapes, at most `max` characters.
 pub fn clean(text: &str, max: usize) -> String {
-    let _ = (text, max);
-    String::new()
+    let squeezed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    policy::sanitize::one_line(&squeezed, max)
+}
+
+/// `text` cleaned, and whether it had to be shortened to fit.
+fn clean_noting(text: &str, max: usize) -> (String, bool) {
+    let cleaned = clean(text, max);
+    let whole = clean(text, usize::MAX);
+    let cut = cleaned != whole;
+    (cleaned, cut)
+}
+
+/// A list of texts cleaned: empty ones dropped, each kept once, at most `max_items`.
+/// Returns the list and whether anything had to be shortened or left out.
+fn clean_list(items: impl IntoIterator<Item = String>, max_chars: usize, max_items: usize) -> (Vec<String>, bool) {
+    let mut out: Vec<String> = Vec::new();
+    let mut cut = false;
+    for item in items {
+        let (text, shortened) = clean_noting(&item, max_chars);
+        if text.is_empty() || out.contains(&text) {
+            continue;
+        }
+        if out.len() == max_items {
+            cut = true;
+            break;
+        }
+        cut |= shortened;
+        out.push(text);
+    }
+    (out, cut)
+}
+
+/// Steps cleaned: empty ones dropped, at most [`MAX_STEPS`]. Returns whether anything was
+/// shortened or left out.
+fn clean_steps(steps: impl IntoIterator<Item = TaskStep>) -> (Vec<TaskStep>, bool) {
+    let mut out = Vec::new();
+    let mut cut = false;
+    for step in steps {
+        let (text, shortened) = clean_noting(&step.text, ITEM_CHARS);
+        if text.is_empty() {
+            continue;
+        }
+        if out.len() == MAX_STEPS {
+            cut = true;
+            break;
+        }
+        cut |= shortened;
+        out.push(TaskStep {
+            text,
+            status: step.status,
+        });
+    }
+    (out, cut)
+}
+
+fn string_arg(args: &Map<String, Value>, name: &str) -> Result<Option<String>, String> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(format!("`{name}` must be a string.")),
+    }
+}
+
+fn step_status(value: Option<&Value>) -> Result<StepStatus, String> {
+    match value {
+        None | Some(Value::Null) => Ok(StepStatus::Todo),
+        Some(Value::String(s)) if s == "todo" => Ok(StepStatus::Todo),
+        Some(Value::String(s)) if s == "doing" => Ok(StepStatus::Doing),
+        Some(Value::String(s)) if s == "done" => Ok(StepStatus::Done),
+        Some(_) => Err("A step's `status` is todo, doing or done.".into()),
+    }
 }
 
 /// What an `update_task` call asks for, cleaned. A field that is `None` was not sent and
@@ -67,8 +136,87 @@ impl ModelUpdate {
     /// Reads a call's arguments. Only the six known fields are read: anything else in the
     /// arguments (`changed_files`, `checks`, …) has no effect.
     pub fn from_args(args: &Map<String, Value>) -> Result<Self, String> {
-        let _ = args;
-        Ok(Self::default())
+        let mut update = Self::default();
+        let mut cut_notes: Vec<String> = Vec::new();
+
+        if let Some(goal) = string_arg(args, "goal")? {
+            let (goal, cut) = clean_noting(&goal, GOAL_CHARS);
+            if cut {
+                cut_notes.push(format!("goal (to {GOAL_CHARS} characters)"));
+            }
+            // An empty goal is not a goal.
+            update.goal = (!goal.is_empty()).then_some(goal);
+        }
+        match args.get("constraints") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(items)) => {
+                let texts = items
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<String>>>()
+                    .ok_or("`constraints` must be a list of strings.")?;
+                let (list, cut) = clean_list(texts, ITEM_CHARS, MAX_CONSTRAINTS);
+                if cut {
+                    cut_notes.push(format!(
+                        "constraints (at most {MAX_CONSTRAINTS}, {ITEM_CHARS} characters each)"
+                    ));
+                }
+                update.constraints = Some(list);
+            }
+            Some(_) => return Err("`constraints` must be a list of strings.".into()),
+        }
+        match args.get("steps") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(items)) => {
+                let mut steps = Vec::new();
+                for item in items {
+                    let Some(object) = item.as_object() else {
+                        return Err("`steps` must be a list of objects with `text` and `status`.".into());
+                    };
+                    let Some(text) = object.get("text").and_then(Value::as_str) else {
+                        return Err("Each step needs a `text` string.".into());
+                    };
+                    steps.push(TaskStep {
+                        text: text.to_owned(),
+                        status: step_status(object.get("status"))?,
+                    });
+                }
+                let (steps, cut) = clean_steps(steps);
+                if cut {
+                    cut_notes.push(format!(
+                        "steps (at most {MAX_STEPS}, {ITEM_CHARS} characters each)"
+                    ));
+                }
+                update.steps = Some(steps);
+            }
+            Some(_) => {
+                return Err("`steps` must be a list of objects with `text` and `status`.".into());
+            }
+        }
+        if let Some(next) = string_arg(args, "next_action")? {
+            let (next, cut) = clean_noting(&next, NEXT_ACTION_CHARS);
+            if cut {
+                cut_notes.push(format!("next_action (to {NEXT_ACTION_CHARS} characters)"));
+            }
+            update.next_action = Some(next);
+        }
+        match args.get("status") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) if s == "active" => update.status = Some(TaskStatus::Active),
+            Some(Value::String(s)) if s == "done" => update.status = Some(TaskStatus::Done),
+            Some(_) => {
+                return Err("`status` is active or done. Only the user pauses a task.".into());
+            }
+        }
+        if let Some(note) = string_arg(args, "note")? {
+            let (note, cut) = clean_noting(&note, NOTE_CHARS);
+            if cut {
+                cut_notes.push(format!("note (to {NOTE_CHARS} characters)"));
+            }
+            update.note = (!note.is_empty()).then_some(note);
+        }
+        update.shortened = cut_notes;
+        Ok(update)
     }
 
     /// The call sets nothing.
@@ -93,8 +241,164 @@ pub struct Applied {
 
 /// Applies the model's update to the chat's task, creating the task when there is none.
 pub fn apply_model(slot: &mut Option<Task>, update: ModelUpdate, now: i64) -> Applied {
-    let _ = (slot, update, now);
-    Applied::default()
+    if update.is_empty() {
+        return Applied::default();
+    }
+    let existed = slot.is_some();
+    let before = slot.clone();
+    let mut task = slot.clone().unwrap_or_else(|| Task::new(ChatId(0)));
+    let mut notices = Vec::new();
+    let user_changed = |name: &str| task.state.user.changed.iter().any(|c| c == name);
+
+    // What the user changed and the model has not been shown yet stays, once.
+    let mut goal = update.goal;
+    if goal.as_ref().is_some_and(|g| *g != task.state.goal) && user_changed(GOAL) {
+        goal = None;
+        notices.push(not_changed("goal"));
+    }
+    let mut constraints = update.constraints;
+    if constraints
+        .as_ref()
+        .is_some_and(|c| *c != task.state.constraints)
+        && user_changed(CONSTRAINTS)
+    {
+        constraints = None;
+        notices.push(not_changed("constraints"));
+    }
+    let mut steps = update.steps;
+    if steps.as_ref().is_some_and(|s| *s != task.state.steps) && user_changed(STEPS) {
+        steps = None;
+        notices.push(not_changed("steps"));
+    }
+    let mut next_action = update.next_action;
+    if next_action
+        .as_ref()
+        .is_some_and(|n| *n != task.state.next_action)
+        && user_changed(NEXT_ACTION)
+    {
+        next_action = None;
+        notices.push(not_changed("next action"));
+    }
+
+    // Who holds the status: the user, while the task is paused or was marked done by them
+    // and the model has not been told.
+    let paused = task.status == TaskStatus::Paused;
+    let marked_done = task.status == TaskStatus::Done && task.state.user.done;
+    let mut status = update.status;
+    if status.is_some() && paused {
+        status = None;
+        notices.push(
+            "Not changed: the status. The user paused this task; it stays paused until the user resumes it."
+                .into(),
+        );
+    } else if status.is_some() && marked_done {
+        status = None;
+        notices.push("Not changed: the status. The user marked this task done.".into());
+    }
+
+    // A done task that gets a different goal is new work.
+    if task.status == TaskStatus::Done
+        && !marked_done
+        && goal.as_ref().is_some_and(|g| *g != task.state.goal)
+    {
+        let user = std::mem::take(&mut task.state.user);
+        let kept: Vec<String> = task
+            .state
+            .constraints
+            .iter()
+            .filter(|c| user.constraints.contains(c))
+            .cloned()
+            .collect();
+        task.state = TaskState {
+            constraints: kept.clone(),
+            user: UserMarks {
+                constraints: kept,
+                ..UserMarks::default()
+            },
+            ..TaskState::default()
+        };
+        task.status = TaskStatus::Active;
+        notices.push(
+            "The earlier task was done, so this starts a new one: its steps, notes, changed files and checks were cleared."
+                .into(),
+        );
+    }
+
+    let content_before = task.state.clone();
+    let state = &mut task.state;
+    if let Some(goal) = goal
+        && goal != state.goal
+    {
+        state.goal = goal;
+        state.user.goal = false;
+    }
+    if let Some(list) = constraints
+        && list != state.constraints
+    {
+        state.user.constraints.retain(|c| list.contains(c));
+        state.constraints = list;
+    }
+    if let Some(list) = steps
+        && list != state.steps
+    {
+        state.user.steps.retain(|t| list.iter().any(|s| s.text == *t));
+        state.steps = list;
+    }
+    if let Some(next) = next_action
+        && next != state.next_action
+    {
+        state.next_action = next;
+        state.user.next_action = false;
+    }
+    if let Some(note) = update.note {
+        state.notes.push(TaskNote { text: note, at: now });
+        let extra = state.notes.len().saturating_sub(MAX_NOTES);
+        state.notes.drain(..extra);
+    }
+    let content_changed = task.state != content_before;
+    match status {
+        Some(status) => task.status = status,
+        // Work on a done task opens it again.
+        None if content_changed && task.status == TaskStatus::Done && !marked_done => {
+            task.status = TaskStatus::Active;
+        }
+        None => {}
+    }
+
+    if !existed && !has_content(&task.state) {
+        return Applied {
+            changed: false,
+            notices,
+        };
+    }
+    let mut after = Some(task);
+    let changed = after != before;
+    if changed && let Some(task) = &mut after {
+        task.updated_at = now;
+    }
+    *slot = after;
+    Applied { changed, notices }
+}
+
+fn not_changed(what: &str) -> String {
+    format!(
+        "Not changed: the {what}. The user changed it since you last saw the task; the lines below show the user's version."
+    )
+}
+
+/// Who wrote each item of a list the user edited: an item the model wrote and the user
+/// left as it was stays the model's; a new text, or one the user wrote before, is theirs.
+fn users_items(new: &[String], old: &[String], old_users: &[String]) -> Vec<String> {
+    new.iter()
+        .filter(|t| old_users.contains(t) || !old.contains(t))
+        .cloned()
+        .collect()
+}
+
+fn mark_changed(user: &mut UserMarks, name: &str) {
+    if !user.changed.iter().any(|c| c == name) {
+        user.changed.push(name.to_owned());
+    }
 }
 
 /// A step as the Task tab sends it.
@@ -123,35 +427,117 @@ pub struct UserEdit {
 /// wrote is marked as theirs, and what changed is remembered until the model has been
 /// shown it. Returns whether the stored task differs.
 pub fn apply_user(slot: &mut Option<Task>, edit: UserEdit, now: i64) -> bool {
-    let _ = (slot, edit, now);
-    false
+    let existed = slot.is_some();
+    let before = slot.clone();
+    let mut task = slot.clone().unwrap_or_else(|| Task::new(ChatId(0)));
+    let state = &mut task.state;
+    if let Some(goal) = edit.goal {
+        let goal = clean(&goal, GOAL_CHARS);
+        if goal != state.goal {
+            state.user.goal = !goal.is_empty();
+            state.goal = goal;
+            mark_changed(&mut state.user, GOAL);
+        }
+    }
+    if let Some(list) = edit.constraints {
+        let (list, _) = clean_list(list, ITEM_CHARS, MAX_CONSTRAINTS);
+        if list != state.constraints {
+            state.user.constraints = users_items(&list, &state.constraints, &state.user.constraints);
+            state.constraints = list;
+            mark_changed(&mut state.user, CONSTRAINTS);
+        }
+    }
+    if let Some(steps) = edit.steps {
+        let (steps, _) = clean_steps(steps.into_iter().map(|s| TaskStep {
+            text: s.text,
+            status: s.status,
+        }));
+        if steps != state.steps {
+            let new: Vec<String> = steps.iter().map(|s| s.text.clone()).collect();
+            let old: Vec<String> = state.steps.iter().map(|s| s.text.clone()).collect();
+            state.user.steps = users_items(&new, &old, &state.user.steps);
+            state.steps = steps;
+            mark_changed(&mut state.user, STEPS);
+        }
+    }
+    if let Some(next) = edit.next_action {
+        let next = clean(&next, NEXT_ACTION_CHARS);
+        if next != state.next_action {
+            state.user.next_action = !next.is_empty();
+            state.next_action = next;
+            mark_changed(&mut state.user, NEXT_ACTION);
+        }
+    }
+    if !existed && !has_content(&task.state) {
+        return false;
+    }
+    let mut after = Some(task);
+    let changed = after != before;
+    if changed && let Some(task) = &mut after {
+        task.updated_at = now;
+    }
+    *slot = after;
+    changed
 }
 
 /// The user's Pause (`Paused`), Resume or Reopen (`Active`) and Mark done (`Done`).
 /// Returns whether the stored task differs; there is nothing to do without a task.
 pub fn set_status(slot: &mut Option<Task>, status: TaskStatus, now: i64) -> bool {
-    let _ = (slot, status, now);
-    false
+    let Some(task) = slot.as_mut() else {
+        return false;
+    };
+    if task.status == status {
+        return false;
+    }
+    match status {
+        TaskStatus::Paused => {
+            task.state.user.paused = true;
+            task.state.user.done = false;
+        }
+        TaskStatus::Active => task.state.user.done = false,
+        TaskStatus::Done => {
+            task.state.user.done = true;
+            task.state.user.paused = false;
+        }
+    }
+    task.status = status;
+    task.updated_at = now;
+    true
 }
 
 /// A turn started and its note carried the task: the model has now been shown what the
 /// user changed, and a paused task is being worked on again. Does not move "last updated".
 pub fn turn_started(slot: &mut Option<Task>) {
-    let _ = slot;
+    let Some(task) = slot.as_mut() else {
+        return;
+    };
+    if task.status == TaskStatus::Paused {
+        task.status = TaskStatus::Active;
+    }
+    task.state.user.changed.clear();
+    task.state.user.paused = false;
+    task.state.user.done = false;
 }
 
 /// An `update_task` result showed the task: the model has now been shown what the user
 /// changed, and that the user marked the task done. A pause is not forgotten here: the
 /// turn that follows it says so.
 pub fn shown_in_result(slot: &mut Option<Task>) {
-    let _ = slot;
+    let Some(task) = slot.as_mut() else {
+        return;
+    };
+    task.state.user.changed.clear();
+    task.state.user.done = false;
 }
 
 /// Whether the record holds anything the model or the user wrote. A record with only
 /// changed files and checks is not yet a task to tell the model about.
 pub fn has_content(state: &TaskState) -> bool {
-    let _ = state;
-    false
+    !state.goal.is_empty()
+        || !state.constraints.is_empty()
+        || !state.steps.is_empty()
+        || !state.next_action.is_empty()
+        || !state.notes.is_empty()
 }
 
 #[cfg(test)]

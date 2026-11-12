@@ -2061,9 +2061,103 @@ def p_search(c, notes):
         server.shutdown()
 
 
+@probe("pinned")
+def p_pinned(c, notes):
+    """Pinned instructions (0.0.4): pinned in the Context tab for this chat and for every
+    chat, sent right after the system prompt; another chat gets only the one for every chat;
+    still listed after a reload."""
+    s = c.s
+    own_text = "Use metric units in every answer."
+    every_text = "Answer in German."
+    aside = 'aside[aria-label="Workbench"]'
+
+    def open_context_tab():
+        s.wait_for(lambda: s.execute("return !!document.querySelector('button[aria-label=\"Panel\"]');"), 10, "the panel button")
+        if not s.execute(f"return !!document.querySelector('{aside}');"):
+            s.click_button("Panel")
+        s.wait_for(lambda: s.execute(f"return !!document.querySelector('{aside}');"), 10, "the panel")
+        s.execute(f"[...document.querySelectorAll('{aside} [role=tab]')].find(b => b.innerText.includes('Context')).click();")
+        s.wait_for(lambda: s.execute(f"return !!document.querySelector('{aside} [data-pin-count]');"), 10, "the pinned list")
+
+    def listed():
+        return s.execute(f"return [...document.querySelectorAll('{aside} li[data-pin]')].map(li => [li.dataset.scope, li.querySelector('[data-pin-text]').innerText]);")
+
+    def pin(text, every_chat):
+        s.execute(
+            f"""
+            const box = document.querySelector('{aside} textarea[aria-label="New pinned instruction"]');
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(box, arguments[0]);
+            box.dispatchEvent(new Event('input', {{bubbles: true}}));
+            const radio = [...document.querySelectorAll('{aside} input[name="pin-scope"]')][arguments[1] ? 1 : 0];
+            radio.click();
+            """, text, every_chat)
+        time.sleep(0.3)
+        counter = s.execute(f"return document.querySelector('{aside} #new-pin-count').innerText;")
+        assert counter.startswith(f"{len(text)} of 1,000 characters"), counter
+        s.execute(f"[...document.querySelectorAll('{aside} button')].find(b => b.innerText === 'Pin it').click();")
+        s.wait_for(lambda: any(t == text for _, t in listed()), 10, f"the pin {text!r} listed")
+
+    def system_of(marker):
+        reqs = [r for r in Fake.requests if marker in json.dumps(r.get("messages", []))]
+        assert reqs, f"no request carried {marker!r}"
+        return reqs[0]["messages"][0]["content"], json.dumps(reqs[0])
+
+    chat_a = new_chat(c)
+    s.invoke("rename_chat", {"chatId": chat_a, "title": "Pinned A"})
+    open_context_tab()
+    assert "0 of 20" in s.execute(f"return document.querySelector('{aside} [data-pin-count]').innerText;")
+    assert "do not put passwords or keys" in s.execute(f"return document.querySelector('{aside}').innerText;")
+    pin(own_text, False)
+    pin(every_text, True)
+    assert listed() == [["every", every_text], ["chat", own_text]], listed()
+    assert "2 of 20" in s.execute(f"return document.querySelector('{aside} [data-pin-count]').innerText;")
+    s.screenshot(str(OUT / "pinned-context-tab.png"))
+
+    # A turn in this chat: both pins, after the system prompt, before anything else.
+    Fake.requests.clear()
+    Fake.queue.append({"content": "Gut."})
+    send(s, "first chat question")
+    wait_idle(s)
+    system, _ = system_of("first chat question")
+    block = ("<pinned_instructions>\nThe user pinned these instructions. Follow them in every reply:\n"
+             f"1. {every_text}\n2. {own_text}\n</pinned_instructions>")
+    assert system.count(block) == 1, system[:800]
+    before = system.split("<pinned_instructions>")[0]
+    notes.append("system prompt before the pins: " + before.strip()[:80])
+    assert before.strip() and "<" not in before, before[:300]
+    if "<agent_instructions>" in system:
+        assert system.index(block) < system.index("<agent_instructions>")
+
+    # Another chat: only the pin for every chat.
+    chat_b = new_chat(c)
+    Fake.requests.clear()
+    Fake.queue.append({"content": "Ja."})
+    send(s, "second chat question")
+    wait_idle(s)
+    system, whole = system_of("second chat question")
+    assert f"1. {every_text}\n</pinned_instructions>" in system, system[:800]
+    assert own_text not in whole, "the other chat's pin was sent"
+    assert [p["text"] for p in s.invoke("list_pins", {"chatId": chat_b})["pins"]] == [every_text]
+
+    # After a reload the pins of chat A are still listed.
+    s.execute("window.location.reload();")
+    time.sleep(1.5)
+    s.wait_for(lambda: "Pinned A" in s.page_text(), 20, "sidebar after reload")
+    s.execute(HOOK)
+    s.execute("[...document.querySelectorAll('nav[aria-label=\"Chat history\"] button')].find(b => b.innerText.includes('Pinned A')).click();")
+    time.sleep(0.8)
+    open_context_tab()
+    s.wait_for(lambda: len(listed()) == 2, 10, "the pins after the reload")
+    assert listed() == [["every", every_text], ["chat", own_text]], listed()
+    # Leave no pin for every chat behind for the probes that follow.
+    for p in s.invoke("list_pins", {"chatId": chat_a})["pins"]:
+        s.invoke("remove_pin", {"chatId": chat_a, "id": p["id"]})
+    s.click_button("Panel")
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
-          p_tool_selection, p_artifacts, p_search]
+          p_tool_selection, p_artifacts, p_search, p_pinned]
 
 
 def main() -> int:

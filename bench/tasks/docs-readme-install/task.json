@@ -1,0 +1,25 @@
+{
+  "title": "Add a section to a README",
+  "kind": "docs",
+  "needs": null,
+  "prompt": "Add a section \"## Install\" to README.md, between the introduction and \"## Usage\". It should say that the tool is installed with the command `pip install tidy-notes`, written in a code block. Keep the rest of the file as it is.",
+  "checks": [
+    {
+      "type": "order",
+      "file": "README.md",
+      "texts": [
+        "# tidy-notes",
+        "A small tool that sorts the notes in a folder by date.",
+        "## Install",
+        "```",
+        "pip install tidy-notes",
+        "```",
+        "## Usage",
+        "Run `tidy-notes ./notes` to sort the notes in `./notes`.",
+        "## License",
+        "MIT"
+      ]
+    }
+  ],
+  "parse": []
+}

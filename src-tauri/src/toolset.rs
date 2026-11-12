@@ -69,6 +69,10 @@ pub async fn build_host(
     host.add_builtin(Arc::new(crate::search_cmd::SearchServer::new(app.clone())));
     // Lists `find_tools` and `call_tool` (0.0.4, adaptive tool selection); the turn runs them.
     host.add_builtin(Arc::new(crate::tool_select::ToolFinderServer));
+    // `read_output` (0.0.4): more of a shortened result, offered with any other tool.
+    host.add_builtin(Arc::new(crate::outputs::OutputsServer::new(app.clone())));
+    // `update_task` (0.0.4): the chat's task state, offered with any other tool.
+    host.add_builtin(Arc::new(crate::task::TaskServer::new(app.clone())));
     host
 }
 

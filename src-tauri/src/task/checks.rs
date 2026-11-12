@@ -82,7 +82,10 @@ fn tokens(command: &str) -> Vec<Token> {
                 }
             }
             '\n' | ';' => {
-                flush!();
+                if in_word {
+                    out.push(Token::Word(std::mem::take(&mut word)));
+                    in_word = false;
+                }
                 out.push(Token::End);
                 statement_has_word = false;
             }
@@ -116,8 +119,10 @@ fn tokens(command: &str) -> Vec<Token> {
                     out.push(Token::Background);
                 }
             }
-            // Grouping: `(cd app && npm test)`.
-            '(' | ')' if !in_word => {}
+            // Grouping: `(cd app && npm test)`. A closing parenthesis ends the word it
+            // follows.
+            '(' if !in_word => {}
+            ')' => flush!(),
             c if c.is_whitespace() => flush!(),
             c => {
                 in_word = true;
@@ -126,7 +131,9 @@ fn tokens(command: &str) -> Vec<Token> {
         }
         i += 1;
     }
-    flush!();
+    if in_word {
+        out.push(Token::Word(word));
+    }
     out
 }
 
@@ -369,9 +376,203 @@ const INTERPRETERS: &[&str] = &[
 
 const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "pwsh", "powershell", "cmd"];
 
+/// Options that make a run something other than a check with a verdict.
+fn asks_for_no_verdict(word: &str) -> bool {
+    let w = word.to_lowercase();
+    w == "--help" || w == "-h" || w == "--version" || w.starts_with("--watch")
+}
+
+/// A redirection (`2>&1`, `>out.txt`, `&>log`), and whether its target is the next word
+/// (`> out.txt`).
+fn redirection(word: &str) -> Option<bool> {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = rest.strip_prefix('&').unwrap_or(rest);
+    if !(rest.starts_with('>') || rest.starts_with('<')) {
+        return None;
+    }
+    Some(matches!(rest, ">" | ">>" | "<"))
+}
+
+/// The words of one command without its redirections.
+fn without_redirections(words: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    for word in words {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match redirection(word) {
+            Some(target_follows) => skip_next = target_follows,
+            None => out.push(word.clone()),
+        }
+    }
+    out
+}
+
+/// The base name of a word, lower case (`./scripts/Run-Tests.ps1` → `run-tests.ps1`).
+fn base_name(word: &str) -> String {
+    word.rsplit(['/', '\\']).next().unwrap_or(word).to_lowercase()
+}
+
+fn has_script_ending(word: &str) -> bool {
+    let base = base_name(word);
+    SCRIPT_ENDINGS.iter().any(|e| base.ends_with(e))
+}
+
 /// Whether one command (words between `&&`) is a check.
 fn words_are_a_check(words: &[String], depth: usize) -> bool {
-    let _ = (words, depth);
+    let words = without_redirections(words);
+    if words.iter().any(|w| asks_for_no_verdict(w)) {
+        return false;
+    }
+    let mut rest: &[String] = &words;
+    // Assignments before the program (`CI=1 npm test`).
+    while rest.first().is_some_and(|w| is_assignment(w)) {
+        rest = &rest[1..];
+    }
+    // Programs that only start the program that matters.
+    loop {
+        let Some(first) = rest.first() else {
+            return false;
+        };
+        let program = program_of(first);
+        if WRAPPERS.contains(&program.as_str()) {
+            rest = &rest[1..];
+            while rest
+                .first()
+                .is_some_and(|w| is_option(w) || is_assignment(w) || w.parse::<f64>().is_ok())
+            {
+                rest = &rest[1..];
+            }
+            continue;
+        }
+        let second = rest.get(1).map(|w| w.to_lowercase());
+        if let Some(second) = &second
+            && WRAPPER_PAIRS.contains(&(program.as_str(), second.as_str()))
+        {
+            rest = &rest[2..];
+            while rest.first().is_some_and(|w| is_option(w)) {
+                rest = &rest[1..];
+            }
+            continue;
+        }
+        break;
+    }
+    let program = program_of(&rest[0]);
+    let args = &rest[1..];
+    let p = program.as_str();
+    // The first plain argument, lower case, skipping a toolchain (`cargo +1.99 test`).
+    let first_plain = || {
+        args.iter()
+            .find(|w| !is_option(w) && !w.starts_with('+'))
+            .map(|w| w.to_lowercase())
+    };
+
+    // Formatters count when they only report.
+    if FORMATTERS.contains(&p) {
+        let reports = args
+            .iter()
+            .any(|w| w == "--check" || w == "--check-only");
+        let right_sub = match p {
+            "cargo" => first_plain().as_deref() == Some("fmt"),
+            "ruff" => first_plain().as_deref() == Some("format"),
+            _ => true,
+        };
+        if reports && right_sub {
+            return true;
+        }
+    }
+    if p == "cmake" {
+        return args.iter().any(|w| w == "--build");
+    }
+    if ALWAYS.contains(&p) {
+        return true;
+    }
+    if SCRIPT_RUNNERS.contains(&p) {
+        let mut plain_args = args.iter().filter(|w| !is_option(w));
+        let Some(sub) = plain_args.next().map(|w| w.to_lowercase()) else {
+            return false;
+        };
+        return match sub.as_str() {
+            "test" | "t" => true,
+            "run" | "run-script" => plain_args.next().is_some_and(|s| named_like_a_check(s)),
+            _ if p == "npm" => false,
+            // `yarn lint`, `pnpm build`: a script by its name; never the runner's own
+            // commands (`install`, `add`, …), which are not named like checks.
+            other => named_like_a_check(other),
+        };
+    }
+    if let Some((_, subs)) = WITH_SUBCOMMAND.iter().find(|(name, _)| *name == p) {
+        return first_plain().is_some_and(|s| subs.contains(&s.as_str()));
+    }
+    if let Some((_, bare_is_build)) = TARGET_RUNNERS.iter().find(|(name, _)| *name == p) {
+        let maven = p == "mvn" || p == "mvnw";
+        let targets: Vec<&String> = args
+            .iter()
+            .filter(|w| !is_option(w) && !is_assignment(w))
+            .collect();
+        if targets.is_empty() {
+            return *bare_is_build;
+        }
+        return targets.iter().any(|t| {
+            named_like_a_check(t) || (maven && MAVEN_PHASES.contains(&t.to_lowercase().as_str()))
+        });
+    }
+    if SHELLS.contains(&p) {
+        let mut i = 0;
+        while i < args.len() {
+            let w = &args[i];
+            let lower = w.to_lowercase();
+            let runs_text = match p {
+                "pwsh" | "powershell" => lower == "-command" || lower == "-c",
+                "cmd" => lower == "/c",
+                _ => w.starts_with('-') && !w.starts_with("--") && w.contains('c'),
+            };
+            if runs_text {
+                let text = args[i + 1..].join(" ");
+                return depth < MAX_NESTING && is_check_at(&text, depth + 1);
+            }
+            if lower == "-file" {
+                return args.get(i + 1).is_some_and(|s| named_like_a_check(&base_name(s)));
+            }
+            if !is_option(w) && !(p == "cmd" && w.starts_with('/')) {
+                // A script the shell runs.
+                return named_like_a_check(&base_name(w));
+            }
+            i += 1;
+        }
+        return false;
+    }
+    if INTERPRETERS.contains(&p) {
+        // `node --test`
+        if p == "node" && args.iter().any(|w| w == "--test") {
+            return true;
+        }
+        let mut i = 0;
+        while i < args.len() {
+            let w = &args[i];
+            if w == "-m" {
+                return args
+                    .get(i + 1)
+                    .is_some_and(|m| ALWAYS.contains(&m.to_lowercase().as_str()));
+            }
+            if !is_option(w) {
+                // A script: by its name, or by the command it is given (`manage.py test`).
+                return named_like_a_check(&base_name(w))
+                    || args[i + 1..]
+                        .iter()
+                        .find(|a| !is_option(a))
+                        .is_some_and(|a| named_like_a_check(a));
+            }
+            i += 1;
+        }
+        return false;
+    }
+    // A script run directly (`./build.sh`, `.\scripts\Run-Tests.ps1`).
+    if has_script_ending(&rest[0]) {
+        return named_like_a_check(&base_name(&rest[0]));
+    }
     false
 }
 
@@ -382,8 +583,36 @@ pub fn is_check(command: &str) -> bool {
 }
 
 fn is_check_at(command: &str, depth: usize) -> bool {
-    let _ = (command, depth);
-    false
+    // The statements of the line; only the last one that has words is judged.
+    let mut statements: Vec<Vec<Token>> = vec![Vec::new()];
+    for token in tokens(command) {
+        if token == Token::End {
+            statements.push(Vec::new());
+        } else if let Some(last) = statements.last_mut() {
+            last.push(token);
+        }
+    }
+    let Some(last) = statements.into_iter().rev().find(|s| !s.is_empty()) else {
+        return false;
+    };
+    // A hidden result: `|| true`, a pipe, the background.
+    if last
+        .iter()
+        .any(|t| matches!(t, Token::Or | Token::Pipe | Token::Background))
+    {
+        return false;
+    }
+    // In an `&&` chain every part must succeed, so any part that is a check counts.
+    last.split(|t| *t == Token::And).any(|part| {
+        let words: Vec<String> = part
+            .iter()
+            .filter_map(|t| match t {
+                Token::Word(w) => Some(w.clone()),
+                _ => None,
+            })
+            .collect();
+        words_are_a_check(&words, depth)
+    })
 }
 
 // ---- Reading a result ---------------------------------------------------------------------
@@ -402,17 +631,41 @@ pub struct Outcome {
 
 /// The exit code in a result's first line, `Exit code N (…)`.
 fn exit_code_in(text: &str) -> Option<i32> {
-    let _ = text;
-    None
+    let first = text.lines().next()?.trim_start();
+    let rest = first.strip_prefix("Exit code ")?;
+    let end = rest
+        .char_indices()
+        .find(|&(i, c)| !(c.is_ascii_digit() || (i == 0 && c == '-')))
+        .map_or(rest.len(), |(i, _)| i);
+    rest[..end].parse().ok()
+}
+
+/// A line the app adds in brackets (`[Shortened: …]`), not output of the command.
+fn is_marker(line: &str) -> bool {
+    line.starts_with('[') && line.ends_with(']')
 }
 
 /// Reads how a `run_command` call ended from its result.
 pub fn outcome(out: &ToolOutput) -> Outcome {
-    let _ = (out, SUMMARY_CHARS, exit_code_in(""));
+    let text = out.full_text.clone().unwrap_or_else(|| out.joined_text());
+    let exit_code = exit_code_in(&text);
+    let passed = exit_code == Some(0) && !out.is_error;
+    let line = match exit_code {
+        // The last line of the output after the exit code line.
+        Some(_) => text
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !is_marker(l))
+            .last()
+            .unwrap_or(""),
+        // No exit code: the tool's own word on what happened.
+        None => text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(""),
+    };
     Outcome {
-        exit_code: None,
-        passed: false,
-        summary: String::new(),
+        exit_code,
+        passed,
+        summary: policy::sanitize::one_line(line, SUMMARY_CHARS),
     }
 }
 
