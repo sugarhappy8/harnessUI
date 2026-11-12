@@ -22,8 +22,9 @@
 //!     `env` block.
 //!   - Codex (developers.openai.com/codex, which now redirects to learn.chatgpt.com/docs:
 //!     config-advanced, config-reference, developer-commands): `model_provider`, `model`,
-//!     `model_context_window`, `model_auto_compact_token_limit`, `[model_providers.<id>]` with
-//!     `name`, `base_url`, `env_key` and `wire_api = "responses"` (the only value). Profiles
+//!     `model_context_window`, `model_auto_compact_token_limit`, `model_providers.<id>` with
+//!     `name`, `base_url`, `env_key` and `wire_api = "responses"` (the only value), written as
+//!     one dotted key with an inline table so that every line is a top-level key. Profiles
 //!     are separate files next to `config.toml`, `$CODEX_HOME/<name>.config.toml` with
 //!     top-level keys, layered on top of `config.toml` by the global flag `--profile <name>`
 //!     (also `-p`), which applies to the interactive `codex` command too; since Codex 0.134.0
@@ -204,7 +205,6 @@ struct CodexConfig {
     model: String,
     model_context_window: u32,
     model_auto_compact_token_limit: u32,
-    model_providers: std::collections::BTreeMap<String, CodexProvider>,
 }
 
 #[derive(Serialize)]
@@ -216,28 +216,35 @@ struct CodexProvider {
 }
 
 /// The Codex settings, as TOML: the same lines serve as a profile file and as lines for
-/// `config.toml` (the plain keys come before the provider table).
+/// the top of `config.toml`. Every line is a top-level key: the provider is one dotted key
+/// with an inline table (`model_providers.harnessui = { … }`), not a `[model_providers.…]`
+/// header, which would take every setting below it in the user's file into the provider
+/// (round 1). The dotted form still lets the file add `[model_providers.<other>]` tables.
 pub fn codex_toml(input: &SetupInput) -> String {
     let ctx = input.ctx();
-    let mut providers = std::collections::BTreeMap::new();
-    providers.insert(
-        CODEX_PROFILE.to_owned(),
-        CodexProvider {
-            name: "harnessUI".into(),
-            base_url: format!("{}/v1", input.base_url()),
-            env_key: CODEX_KEY_VARIABLE.into(),
-            wire_api: "responses".into(),
-        },
-    );
     let config = CodexConfig {
         model_provider: CODEX_PROFILE.into(),
         model: input.model.clone(),
         model_context_window: ctx,
         // Compact at four fifths, leaving room for the answer.
         model_auto_compact_token_limit: ctx / 5 * 4,
-        model_providers: providers,
     };
-    toml::to_string(&config).unwrap_or_default()
+    let provider = CodexProvider {
+        name: "harnessUI".into(),
+        base_url: format!("{}/v1", input.base_url()),
+        env_key: CODEX_KEY_VARIABLE.into(),
+        wire_api: "responses".into(),
+    };
+    let mut inline = String::new();
+    let (Ok(mut text), Ok(_)) = (
+        toml::to_string(&config),
+        provider.serialize(toml::ser::ValueSerializer::new(&mut inline)),
+    ) else {
+        return String::new();
+    };
+    // Both key parts are fixed bare keys of this file; the value comes from the serialiser.
+    text.push_str(&format!("model_providers.{CODEX_PROFILE} = {inline}\n"));
+    text
 }
 
 fn codex(input: &SetupInput) -> Vec<SetupWay> {
@@ -271,7 +278,7 @@ fn codex(input: &SetupInput) -> Vec<SetupWay> {
         system,
         steps: vec![
             step(
-                "Open this file in a text editor, or create it if it is not there. Paste these lines at the very top and save. If the file already has model, model_provider, model_context_window or model_auto_compact_token_limit, change those lines instead of adding them again.",
+                "Open this file in a text editor, or create it if it is not there. Paste these lines at the very top and save. If the file already has model, model_provider, model_context_window, model_auto_compact_token_limit or model_providers.harnessui, change those lines instead of adding them again.",
                 Some(toml.clone()),
                 Some(&format!("{folder}{sep}config.toml")),
             ),
@@ -477,11 +484,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed, expected);
-        // The plain keys come first, so the lines can go at the top of config.toml.
+        // Every line is a top-level key (no table header), so the lines can go at the top
+        // of config.toml without taking the user's own settings into a table.
         let text = codex_toml(&input());
-        assert!(text.find("model_provider").unwrap() < text.find("[model_providers").unwrap());
+        for line in text.lines() {
+            assert!(!line.trim_start().starts_with('['), "{line:?}");
+        }
+        assert!(text.contains("model_providers.harnessui = {"), "{text}");
         // The key itself is never in the Codex file: it comes from the variable.
         assert!(!text.contains(KEY));
+    }
+
+    /// Round 1: pasted "at the very top" of a config.toml that already has settings, the
+    /// lines leave every one of the user's own settings where it was.
+    #[test]
+    fn codex_lines_pasted_at_the_top_of_a_config_keep_its_settings_in_place() {
+        let users = r#"approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+model_reasoning_effort = "high"
+
+[mcp_servers.docs]
+command = "docs-server"
+
+[model_providers.other]
+name = "Other"
+base_url = "https://example.com/v1"
+
+[profiles.fast]
+model = "small"
+"#;
+        let before: toml::Table = toml::from_str(users).unwrap();
+        let joined = format!("{}{users}", codex_toml(&input()));
+        let parsed: toml::Table = toml::from_str(&joined).unwrap();
+        // The user's settings: all still there, with the same values, at the same level.
+        for (key, value) in &before {
+            if key == "model_providers" {
+                continue;
+            }
+            assert_eq!(parsed.get(key), Some(value), "{key}");
+        }
+        assert_eq!(
+            parsed["model_providers"]["other"],
+            before["model_providers"]["other"]
+        );
+        // Ours: at the top level, and the provider holds only its four keys.
+        assert_eq!(parsed["model_provider"].as_str(), Some("harnessui"));
+        assert_eq!(parsed["model"].as_str(), Some("harnessui-local"));
+        assert_eq!(parsed["model_context_window"].as_integer(), Some(32_768));
+        let ours = parsed["model_providers"]["harnessui"].as_table().unwrap();
+        assert_eq!(
+            ours.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["base_url", "env_key", "name", "wire_api"]
+        );
+        assert_eq!(parsed.len(), before.len() + 4, "{parsed:?}");
     }
 
     #[test]

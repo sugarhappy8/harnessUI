@@ -44,7 +44,9 @@ pub enum LoadStage {
     /// With `backend` the processor it always means the model itself refused Save memory
     /// (its log said so); on a graphics backend it may be the model or the card.
     RetryingWithoutSaveMemory {
-        /// The backend being retried.
+        /// Where the model runs: the backend being retried when a graphics card is in use,
+        /// otherwise the processor, also on a graphics backend with Don't use it (which
+        /// runs everything on the processor).
         backend: BackendKind,
     },
     /// Trying again on the same backend with only as much of the model on the graphics

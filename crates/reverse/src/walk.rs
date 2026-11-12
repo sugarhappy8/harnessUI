@@ -1,13 +1,26 @@
 //! Walking a folder a reverse tool names (item5-spec.md WP9c `walk.rs`, section 6): at most
 //! 50,000 entries and 32 levels; each link read with `read_link` and refused without being
 //! resolved when it names a network, UNC, device-namespace or (on a Mac) `/net/…` place;
-//! other links resolved and refused outside the approved folders (not in Full access) or
-//! inside a forbidden folder (every mode); devices, pipes and sockets refused.
+//! other links resolved and refused outside the approved folders or inside a forbidden
+//! folder (every mode); devices, pipes and sockets refused.
 //!
-//! TODO(0.0.6): WP9c builds [`walk_folder`] and [`RealWalkFs`]. This is WP9a's contract
-//! stub: the trait, types and signatures are frozen.
+//! rea follows links inside a folder it is given (an app folder, a `.app` bundle, an
+//! extracted JavaScript app), so a link is checked by its own text first (no I/O for a
+//! network target) and then where the system resolves it; a link to another folder that
+//! passes is walked too, with the same limits, so a chain of links cannot lead out. Links
+//! are never followed into folders by the walk itself.
+//!
+//! Known limits: a link created after the walk is not seen until the next call (WP9g walks
+//! again in `call`); a hard link to a file elsewhere on the same drive looks like an ordinary
+//! file (the file tools share this limit); a folder the user cannot list is skipped, since
+//! rea, running as the user, cannot list it either.
 
-use policy::path::{Fs, PathSandbox};
+use std::collections::HashSet;
+use std::path::Path;
+
+use policy::path::{CaseRule, Flavor, Fs, PathError, PathSandbox};
+
+use crate::FileIdentity;
 
 /// Entries walked at most before a folder is refused as too large.
 pub const MAX_ENTRIES: usize = 50_000;
@@ -42,9 +55,19 @@ pub trait WalkFs: Fs + Send + Sync {
     fn read_link(&self, path: &str) -> Result<Option<String>, String>;
     /// What `path` is, without following a link; `None` when it does not exist.
     fn kind(&self, path: &str) -> Option<EntryKind>;
+    /// The identity of the regular file at `path` (links followed); `None` when it is not
+    /// one or cannot be read. (Added by WP9c, with a default for the real file system.)
+    fn identity(&self, path: &str) -> Option<FileIdentity> {
+        FileIdentity::of(Path::new(path)).ok()
+    }
+    /// How names compare on the volume holding `path`. (Added by WP9c, with a default for
+    /// the real file system.)
+    fn case_of(&self, path: &str) -> CaseRule {
+        policy::path::volume_case(path)
+    }
 }
 
-/// Why a folder was refused (each maps to a message of section 6).
+/// Why a folder was refused (each maps to a message of section 6, [`WalkRefusal::message`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WalkRefusal {
     /// More than [`MAX_ENTRIES`] entries or [`MAX_DEPTH`] levels.
@@ -59,11 +82,34 @@ pub enum WalkRefusal {
         /// Its path.
         path: String,
     },
+    /// A folder the walk could not read for another reason than permission, or a name it
+    /// cannot represent (not valid text): it is not checked, so it is refused. (Added by
+    /// WP9c.)
+    Unreadable {
+        /// Its path.
+        path: String,
+    },
+}
+
+impl WalkRefusal {
+    /// The message the model reads (section 6), with paths made safe to show.
+    pub fn message(&self) -> String {
+        use crate::describe::messages as m;
+        match self {
+            WalkRefusal::TooLarge => m::TOO_LARGE.to_string(),
+            WalkRefusal::LinkOut { link } => format!("{}{}.", m::LINK_OUT, shown(link)),
+            WalkRefusal::Device { path } => format!("{}{}.", m::DEVICE_IN_FOLDER, shown(path)),
+            WalkRefusal::Unreadable { path } => format!("{}{}.", m::UNREADABLE, shown(path)),
+        }
+    }
+}
+
+/// A path as a message or card shows it: one line, invisible characters escaped.
+pub(crate) fn shown(path: &str) -> String {
+    policy::sanitize::one_line(path, 500)
 }
 
 /// The real file system.
-///
-/// TODO(0.0.6): WP9c. The stub lists nothing and reports no links.
 pub struct RealWalkFs;
 
 impl Fs for RealWalkFs {
@@ -76,26 +122,883 @@ impl Fs for RealWalkFs {
 }
 
 impl WalkFs for RealWalkFs {
-    fn read_dir(&self, _path: &str) -> Result<Vec<String>, String> {
-        Ok(Vec::new())
+    fn read_dir(&self, path: &str) -> Result<Vec<String>, String> {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            // rea runs as the user and cannot list it either.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| "a name that is not valid text".to_string())?;
+            out.push(name);
+            // One more than the limit is enough to refuse; never list millions.
+            if out.len() > MAX_ENTRIES {
+                break;
+            }
+        }
+        Ok(out)
     }
-    fn read_link(&self, _path: &str) -> Result<Option<String>, String> {
-        Ok(None)
+
+    fn read_link(&self, path: &str) -> Result<Option<String>, String> {
+        let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if !meta.file_type().is_symlink() {
+            return Ok(None);
+        }
+        let target = std::fs::read_link(path).map_err(|e| e.to_string())?;
+        target
+            .into_os_string()
+            .into_string()
+            .map(Some)
+            .map_err(|_| "a link whose target is not valid text".to_string())
     }
-    fn kind(&self, _path: &str) -> Option<EntryKind> {
-        None
+
+    fn kind(&self, path: &str) -> Option<EntryKind> {
+        let ft = std::fs::symlink_metadata(path).ok()?.file_type();
+        Some(if ft.is_symlink() {
+            EntryKind::Link
+        } else if ft.is_dir() {
+            EntryKind::Dir
+        } else if ft.is_file() {
+            EntryKind::File
+        } else {
+            special_kind(&ft)
+        })
+    }
+}
+
+#[cfg(unix)]
+fn special_kind(ft: &std::fs::FileType) -> EntryKind {
+    use std::os::unix::fs::FileTypeExt;
+    if ft.is_char_device() || ft.is_block_device() {
+        EntryKind::Device
+    } else if ft.is_fifo() {
+        EntryKind::Pipe
+    } else if ft.is_socket() {
+        EntryKind::Socket
+    } else {
+        EntryKind::Other
+    }
+}
+
+#[cfg(not(unix))]
+fn special_kind(_ft: &std::fs::FileType) -> EntryKind {
+    EntryKind::Other
+}
+
+/// The path flavour of a canonical path: POSIX paths start with `/`.
+pub(crate) fn flavor_of(path: &str) -> Flavor {
+    if path.starts_with('/') {
+        Flavor::Posix
+    } else {
+        Flavor::Windows
+    }
+}
+
+fn is_sep(c: char, flavor: Flavor) -> bool {
+    c == '/' || (flavor == Flavor::Windows && c == '\\')
+}
+
+/// `dir` joined with one name.
+pub(crate) fn join(dir: &str, name: &str, flavor: Flavor) -> String {
+    let sep = if flavor == Flavor::Windows { '\\' } else { '/' };
+    if dir.ends_with(|c| is_sep(c, flavor)) {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}{sep}{name}")
+    }
+}
+
+/// The folder holding `path` (a canonical path).
+pub(crate) fn parent(path: &str, flavor: Flavor) -> String {
+    let trimmed = path.trim_end_matches(|c| is_sep(c, flavor));
+    match trimmed.rfind(|c| is_sep(c, flavor)) {
+        Some(0) => trimmed[..1].to_string(),
+        // `C:\x` → `C:\`.
+        Some(i) if flavor == Flavor::Windows && trimmed[..i].ends_with(':') => {
+            trimmed[..=i].to_string()
+        }
+        Some(i) => trimmed[..i].to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+/// The last name of a path.
+pub(crate) fn file_name(path: &str, flavor: Flavor) -> &str {
+    let trimmed = path.trim_end_matches(|c| is_sep(c, flavor));
+    match trimmed.rfind(|c| is_sep(c, flavor)) {
+        Some(i) => &trimmed[i + 1..],
+        None => trimmed,
+    }
+}
+
+fn key(path: &str, flavor: Flavor) -> String {
+    match flavor {
+        Flavor::Windows => path.to_lowercase(),
+        Flavor::Posix => path.to_string(),
+    }
+}
+
+/// Whether a link's own text, or a path the model gave, names a network or device place:
+/// `\\server\share`, `\\?\UNC\…`, `\\.\…`, `\\?\Volume{…}`, `//server`, `/net/…`, a URL. Such
+/// a place is refused without being looked at: on Windows, resolving `\\server\share`
+/// makes the computer connect and sign in to that server. The verbatim form of a local
+/// drive path (`\\?\C:\…`, `\??\C:\…`, which Windows uses for absolute links) is not one.
+pub fn is_network_or_device(text: &str, flavor: Flavor) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("://")
+        || ["smb:", "afp:", "nfs:", "cifs:", "webdav:"]
+            .iter()
+            .any(|p| lower.starts_with(p))
+        || lower == "/net"
+        || lower.starts_with("/net/")
+        || lower == "/network"
+        || lower.starts_with("/network/")
+    {
+        return true;
+    }
+    let mut chars = text.chars();
+    let (a, b) = (chars.next(), chars.next());
+    let two_seps = matches!((a, b), (Some(a), Some(b)) if is_sep(a, flavor) && is_sep(b, flavor));
+    match flavor {
+        Flavor::Posix => two_seps,
+        Flavor::Windows => {
+            if verbatim_drive(text).is_some() {
+                return false;
+            }
+            two_seps || lower.starts_with("\\??\\")
+        }
+    }
+}
+
+/// `C:\x` for `\\?\C:\x` or `\??\C:\x` (either slash), else `None`.
+fn verbatim_drive(text: &str) -> Option<&str> {
+    let rest = ["\\\\?\\", "//?/", "\\??\\"]
+        .iter()
+        .find_map(|p| text.strip_prefix(p))?;
+    let b = rest.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
+        .then_some(rest)
+}
+
+fn is_absolute(text: &str, flavor: Flavor) -> bool {
+    match flavor {
+        Flavor::Posix => text.starts_with('/'),
+        Flavor::Windows => {
+            let b = text.as_bytes();
+            b.len() >= 3
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && (b[2] == b'\\' || b[2] == b'/')
+        }
+    }
+}
+
+/// The absolute path a link's own text names, or `None` when it names a network or device
+/// place (never resolved) or cannot be a path.
+fn link_target(text: &str, link: &str, flavor: Flavor) -> Option<String> {
+    if text.is_empty() || text.contains('\0') || is_network_or_device(text, flavor) {
+        return None;
+    }
+    let text = verbatim_drive(text).unwrap_or(text);
+    if is_absolute(text, flavor) {
+        Some(text.to_string())
+    } else {
+        // Relative to the folder holding the link. That folder is a real folder (the walk
+        // never descends through a link), so reading `..` lexically is what the system does.
+        Some(join(&parent(link, flavor), text, flavor))
+    }
+}
+
+/// Whether a name read from a folder is a plain name.
+fn plain_name(name: &str, flavor: Flavor) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('\0')
+        && !name.contains(|c| is_sep(c, flavor))
+}
+
+/// Checks one link: by its own text, then where the system resolves it. Returns the
+/// folder it leads to, when it leads to one that must be walked too.
+fn check_link(
+    fs: &dyn WalkFs,
+    link: &str,
+    flavor: Flavor,
+    sandbox: &PathSandbox,
+) -> Result<Option<String>, WalkRefusal> {
+    let out = || WalkRefusal::LinkOut {
+        link: link.to_string(),
+    };
+    let text = match fs.read_link(link) {
+        Ok(Some(text)) => text,
+        _ => return Err(out()),
+    };
+    let target = link_target(&text, link, flavor).ok_or_else(out)?;
+    // A target outside the roots is refused in every mode: in Full access the roots are
+    // already the whole computer (`approvals::widen`), and a forbidden folder is refused
+    // by the sandbox before containment is looked at.
+    let checked = |path: &str| sandbox.check(path, None, fs).map_err(|_: PathError| out());
+    let by_text = checked(&target)?;
+    let by_system = checked(link)?;
+    if !by_system.exists {
+        // A dangling link: its text was checked above; nothing to look inside.
+        return Ok(None);
+    }
+    match fs.kind(&by_system.canonical) {
+        Some(EntryKind::Dir) => Ok(Some(by_system.canonical)),
+        Some(EntryKind::File) => Ok(None),
+        // A link to a device or pipe is refused like the thing itself.
+        Some(EntryKind::Device | EntryKind::Pipe | EntryKind::Socket | EntryKind::Other) => {
+            Err(WalkRefusal::Device {
+                path: link.to_string(),
+            })
+        }
+        // Resolves to a link: the sandbox resolved it fully, so this cannot happen; refuse.
+        Some(EntryKind::Link) | None => {
+            let _ = by_text;
+            Err(out())
+        }
     }
 }
 
 /// Walks `folder` (a canonical path that passed the sandbox).
 ///
-/// TODO(0.0.6): WP9c. The stub accepts every folder; nothing calls it yet.
+/// `full_access` is the chat's mode. In Full access the caller has already widened the
+/// sandbox's roots to the whole computer (`approvals::widen`), which is what lets links
+/// lead anywhere but the forbidden folders; a target outside even those roots (a drive
+/// added since) is refused in every mode, so the flag changes nothing here.
 pub fn walk_folder(
     fs: &dyn WalkFs,
     folder: &str,
     sandbox: &PathSandbox,
     full_access: bool,
 ) -> Result<(), WalkRefusal> {
-    let _ = (fs, folder, sandbox, full_access);
+    let _ = full_access;
+    let flavor = flavor_of(folder);
+    let mut entries = 0usize;
+    let mut visited: HashSet<String> = HashSet::from([key(folder, flavor)]);
+    let mut pending: Vec<(String, usize)> = vec![(folder.to_string(), 0)];
+    while let Some((dir, depth)) = pending.pop() {
+        let names = fs
+            .read_dir(&dir)
+            .map_err(|_| WalkRefusal::Unreadable { path: dir.clone() })?;
+        if names.is_empty() {
+            continue;
+        }
+        if depth >= MAX_DEPTH {
+            return Err(WalkRefusal::TooLarge);
+        }
+        for name in names {
+            entries += 1;
+            if entries > MAX_ENTRIES {
+                return Err(WalkRefusal::TooLarge);
+            }
+            let path = join(&dir, &name, flavor);
+            if !plain_name(&name, flavor) {
+                return Err(WalkRefusal::Unreadable { path });
+            }
+            let next = match fs.kind(&path) {
+                // Gone since the listing: nothing rea could read.
+                None | Some(EntryKind::File) => None,
+                Some(EntryKind::Dir) => Some(path),
+                Some(EntryKind::Link) => check_link(fs, &path, flavor, sandbox)?,
+                Some(EntryKind::Device | EntryKind::Pipe | EntryKind::Socket | EntryKind::Other) => {
+                    return Err(WalkRefusal::Device { path });
+                }
+            };
+            if let Some(next) = next
+                && visited.insert(key(&next, flavor))
+            {
+                pending.push((next, depth + 1));
+            }
+        }
+    }
     Ok(())
+}
+
+/// An in-memory file system for tests, recording every access.
+#[cfg(test)]
+pub(crate) mod fake {
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Mutex;
+
+    use policy::path::{CaseRule, Flavor, Fs, LexicalPath, lexical};
+
+    use super::{EntryKind, WalkFs, join};
+    use crate::FileIdentity;
+
+    /// One entry.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Node {
+        File(u64),
+        Dir,
+        Link(String),
+        Device,
+        Pipe,
+        Socket,
+    }
+
+    /// Paths map to nodes; keys are lower case in the Windows flavour.
+    pub struct FakeFs {
+        pub flavor: Flavor,
+        pub nodes: BTreeMap<String, (String, Node)>,
+        /// Folders holding this many generated files `f0`, `f1`, ….
+        pub big: HashMap<String, usize>,
+        pub calls: Mutex<Vec<String>>,
+    }
+
+    impl FakeFs {
+        pub fn posix() -> Self {
+            Self::new(Flavor::Posix)
+        }
+        pub fn windows() -> Self {
+            Self::new(Flavor::Windows)
+        }
+        fn new(flavor: Flavor) -> Self {
+            let mut fs = Self {
+                flavor,
+                nodes: BTreeMap::new(),
+                big: HashMap::new(),
+                calls: Mutex::new(Vec::new()),
+            };
+            match flavor {
+                Flavor::Posix => fs.put("/", Node::Dir),
+                Flavor::Windows => fs.put("C:\\", Node::Dir),
+            }
+            fs
+        }
+        fn key(&self, path: &str) -> String {
+            match self.flavor {
+                Flavor::Windows => path.to_lowercase().replace('/', "\\"),
+                Flavor::Posix => path.to_string(),
+            }
+        }
+        fn put(&mut self, path: &str, node: Node) {
+            let k = self.key(path);
+            self.nodes.insert(k, (path.to_string(), node));
+        }
+        /// Adds folders, creating the folders above them.
+        pub fn dir(mut self, path: &str) -> Self {
+            let lex = lexical(path, None, self.flavor).expect("absolute");
+            let mut cur = LexicalPath {
+                prefix: lex.prefix.clone(),
+                components: vec![],
+                flavor: self.flavor,
+            };
+            for c in &lex.components {
+                cur.components.push(c.clone());
+                let p = cur.to_string();
+                if !self.nodes.contains_key(&self.key(&p)) {
+                    self.put(&p, Node::Dir);
+                }
+            }
+            self
+        }
+        fn above(self, path: &str) -> Self {
+            let parent = super::parent(path, self.flavor);
+            self.dir(&parent)
+        }
+        pub fn file(self, path: &str) -> Self {
+            let mut fs = self.above(path);
+            let n = fs.nodes.len() as u64;
+            fs.put(path, Node::File(n));
+            fs
+        }
+        pub fn link(self, path: &str, target: &str) -> Self {
+            let mut fs = self.above(path);
+            fs.put(path, Node::Link(target.to_string()));
+            fs
+        }
+        pub fn special(self, path: &str, node: Node) -> Self {
+            let mut fs = self.above(path);
+            fs.put(path, node);
+            fs
+        }
+        pub fn many(mut self, path: &str, files: usize) -> Self {
+            self = self.dir(path);
+            let k = self.key(path);
+            self.big.insert(k, files);
+            self
+        }
+        pub fn accessed(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+        pub fn clear(&self) {
+            self.calls.lock().unwrap().clear();
+        }
+        fn note(&self, what: &str, path: &str) {
+            self.calls.lock().unwrap().push(format!("{what} {path}"));
+        }
+        fn node(&self, path: &str) -> Option<Node> {
+            let k = self.key(path);
+            if let Some((_, n)) = self.nodes.get(&k) {
+                return Some(n.clone());
+            }
+            let parent = super::parent(path, self.flavor);
+            let name = super::file_name(path, self.flavor);
+            let count = *self.big.get(&self.key(&parent))?;
+            let i: usize = name.strip_prefix('f')?.parse().ok()?;
+            (i < count).then_some(Node::File(1_000_000 + i as u64))
+        }
+        /// Resolves every component, following links (at most 40 hops).
+        fn resolve(&self, path: &str) -> Result<Option<String>, String> {
+            let lex = lexical(path, None, self.flavor).map_err(|e| e.to_string())?;
+            let mut cur = LexicalPath {
+                prefix: lex.prefix.clone(),
+                components: vec![],
+                flavor: self.flavor,
+            };
+            let mut rest: Vec<String> = lex.components.clone();
+            rest.reverse();
+            let mut hops = 0;
+            while let Some(c) = rest.pop() {
+                cur.components.push(c);
+                let here = cur.to_string();
+                match self.node(&here) {
+                    None => return Ok(None),
+                    Some(Node::Link(target)) => {
+                        hops += 1;
+                        if hops > 40 {
+                            return Err("too many levels of links".into());
+                        }
+                        cur.components.pop();
+                        let base = cur.to_string();
+                        let t = if super::is_absolute(&target, self.flavor) {
+                            target
+                        } else {
+                            join(&base, &target, self.flavor)
+                        };
+                        let t = lexical(&t, None, self.flavor).map_err(|e| e.to_string())?;
+                        cur.prefix = t.prefix;
+                        cur.components = vec![];
+                        let mut more = t.components;
+                        more.reverse();
+                        rest.extend(more);
+                    }
+                    Some(_) => {}
+                }
+            }
+            // Report the stored spelling, as a real file system does.
+            let out = cur.to_string();
+            Ok(Some(match self.nodes.get(&self.key(&out)) {
+                Some((spelled, _)) => spelled.clone(),
+                None => out,
+            }))
+        }
+    }
+
+    impl Fs for FakeFs {
+        fn canonicalize(&self, path: &str) -> Result<Option<String>, String> {
+            self.note("canonicalize", path);
+            self.resolve(path)
+        }
+        fn is_symlink(&self, path: &str) -> Option<bool> {
+            self.note("is_symlink", path);
+            Some(matches!(self.node(path)?, Node::Link(_)))
+        }
+    }
+
+    impl WalkFs for FakeFs {
+        fn read_dir(&self, path: &str) -> Result<Vec<String>, String> {
+            self.note("read_dir", path);
+            if let Some(n) = self.big.get(&self.key(path)) {
+                return Ok((0..*n).map(|i| format!("f{i}")).collect());
+            }
+            if !matches!(self.node(path), Some(Node::Dir)) {
+                return Err("not a folder".into());
+            }
+            let prefix = self.key(&join(path, "", self.flavor));
+            Ok(self
+                .nodes
+                .iter()
+                .filter(|(k, _)| {
+                    k.len() > prefix.len()
+                        && k.starts_with(&prefix)
+                        && !k[prefix.len()..].contains(['/', '\\'])
+                })
+                .map(|(_, (spelled, _))| super::file_name(spelled, self.flavor).to_string())
+                .collect())
+        }
+        fn read_link(&self, path: &str) -> Result<Option<String>, String> {
+            self.note("read_link", path);
+            match self.node(path) {
+                Some(Node::Link(t)) => Ok(Some(t)),
+                Some(_) => Ok(None),
+                None => Err("missing".into()),
+            }
+        }
+        fn kind(&self, path: &str) -> Option<EntryKind> {
+            self.note("kind", path);
+            Some(match self.node(path)? {
+                Node::File(_) => EntryKind::File,
+                Node::Dir => EntryKind::Dir,
+                Node::Link(_) => EntryKind::Link,
+                Node::Device => EntryKind::Device,
+                Node::Pipe => EntryKind::Pipe,
+                Node::Socket => EntryKind::Socket,
+            })
+        }
+        fn identity(&self, path: &str) -> Option<FileIdentity> {
+            self.note("identity", path);
+            let real = self.resolve(path).ok()??;
+            match self.node(&real)? {
+                Node::File(n) => Some(FileIdentity {
+                    device: 1,
+                    file: n,
+                    size: 100 + n,
+                    modified: i128::from(n),
+                }),
+                _ => None,
+            }
+        }
+        fn case_of(&self, _path: &str) -> CaseRule {
+            match self.flavor {
+                Flavor::Windows => CaseRule::Insensitive,
+                Flavor::Posix => CaseRule::Sensitive,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::{FakeFs, Node};
+    use super::*;
+
+    fn sandbox(fs: &FakeFs, approved: &[&str], forbidden: &[&str]) -> PathSandbox {
+        let a: Vec<String> = approved.iter().map(|s| s.to_string()).collect();
+        let f: Vec<String> = forbidden.iter().map(|s| s.to_string()).collect();
+        let (sb, skipped) = PathSandbox::new(fs.flavor, &a, &f, fs, &|p| fs.case_of(p));
+        assert!(skipped.is_empty(), "{skipped:?}");
+        sb
+    }
+
+    fn app() -> FakeFs {
+        FakeFs::posix()
+            .file("/w/app/main.js")
+            .file("/w/app/lib/a.js")
+            .dir("/w/app/empty")
+            .file("/w/other/x.js")
+            .file("/etc/passwd")
+            .dir("/data/harnessUI/reverse")
+    }
+
+    #[test]
+    fn a_plain_folder_passes() {
+        let fs = app().link("/w/app/lib/rel", "../main.js");
+        let sb = sandbox(&fs, &["/w"], &["/data/harnessUI"]);
+        assert_eq!(walk_folder(&fs, "/w/app", &sb, false), Ok(()));
+    }
+
+    #[test]
+    fn a_link_out_is_refused_except_into_another_approved_folder() {
+        for target in ["/etc/passwd", "/etc", "../../../etc/passwd", "/missing/x"] {
+            let fs = app().link("/w/app/lib/l", target);
+            let sb = sandbox(&fs, &["/w/app"], &[]);
+            assert_eq!(
+                walk_folder(&fs, "/w/app", &sb, false),
+                Err(WalkRefusal::LinkOut {
+                    link: "/w/app/lib/l".into()
+                }),
+                "{target}"
+            );
+        }
+        // Into another approved folder: fine.
+        let fs = app().link("/w/app/lib/l", "/w/other/x.js");
+        let sb = sandbox(&fs, &["/w/app", "/w/other"], &[]);
+        assert_eq!(walk_folder(&fs, "/w/app", &sb, false), Ok(()));
+    }
+
+    /// A link into a forbidden folder is refused in every mode, Full access (whole-computer
+    /// roots) included; a link elsewhere passes in Full access.
+    #[test]
+    fn full_access_reaches_everything_but_the_forbidden_folders() {
+        let fs = app().link("/w/app/l", "/data/harnessUI/reverse");
+        let full = sandbox(&fs, &["/w/app", "/"], &["/data/harnessUI"]);
+        assert_eq!(
+            walk_folder(&fs, "/w/app", &full, true),
+            Err(WalkRefusal::LinkOut {
+                link: "/w/app/l".into()
+            })
+        );
+        let fs = app().link("/w/app/l", "/etc/passwd");
+        let full = sandbox(&fs, &["/w/app", "/"], &["/data/harnessUI"]);
+        assert_eq!(walk_folder(&fs, "/w/app", &full, true), Ok(()));
+    }
+
+    /// A chain of links cannot lead out: a link to a folder that passes is walked too.
+    #[test]
+    fn a_folder_reached_through_a_link_is_walked_too() {
+        let fs = app()
+            .link("/w/app/to-other", "/w/other")
+            .link("/w/other/out", "/etc");
+        let sb = sandbox(&fs, &["/w"], &[]);
+        assert_eq!(
+            walk_folder(&fs, "/w/app", &sb, false),
+            Err(WalkRefusal::LinkOut {
+                link: "/w/other/out".into()
+            })
+        );
+        // A loop of links ends.
+        let fs = app()
+            .link("/w/app/a", "/w/app/b")
+            .link("/w/app/b", "/w/app/a");
+        let sb = sandbox(&fs, &["/w"], &[]);
+        assert!(matches!(
+            walk_folder(&fs, "/w/app", &sb, false),
+            Err(WalkRefusal::LinkOut { .. })
+        ));
+        // A link back to the folder itself is walked once.
+        let fs = app().link("/w/app/lib/up", "/w/app");
+        let sb = sandbox(&fs, &["/w"], &[]);
+        assert_eq!(walk_folder(&fs, "/w/app", &sb, false), Ok(()));
+    }
+
+    /// A link to a network or device place is refused from its text alone: nothing is
+    /// looked up for it.
+    #[test]
+    fn network_and_device_links_cause_no_lookup() {
+        for target in ["//server/share/x", "/net/server/x", "smb://server/x"] {
+            let fs = app().link("/w/app/n", target);
+            let sb = sandbox(&fs, &["/"], &[]);
+            fs.clear();
+            assert_eq!(
+                walk_folder(&fs, "/w/app", &sb, true),
+                Err(WalkRefusal::LinkOut {
+                    link: "/w/app/n".into()
+                }),
+                "{target}"
+            );
+            let looked: Vec<String> = fs
+                .accessed()
+                .into_iter()
+                .filter(|a| a.contains("server"))
+                .collect();
+            assert!(looked.is_empty(), "{target}: {looked:?}");
+        }
+    }
+
+    #[test]
+    fn windows_junctions_and_shares() {
+        let base = || {
+            FakeFs::windows()
+                .file("C:\\Users\\me\\app\\app.exe")
+                .file("C:\\Windows\\System32\\cmd.exe")
+                .dir("C:\\Users\\me\\AppData\\Local\\harnessUI")
+        };
+        // A junction (absolute, in the verbatim form Windows reports) out of the folder.
+        let fs = base().link("C:\\Users\\me\\app\\j", "\\\\?\\C:\\Windows");
+        let sb = sandbox(&fs, &["C:\\Users\\me\\app"], &[]);
+        assert_eq!(
+            walk_folder(&fs, "C:\\Users\\me\\app", &sb, false),
+            Err(WalkRefusal::LinkOut {
+                link: "C:\\Users\\me\\app\\j".into()
+            })
+        );
+        // The same in Full access passes; into the app's data it does not.
+        let full = sandbox(&fs, &["C:\\Users\\me\\app", "C:\\"], &[]);
+        assert_eq!(walk_folder(&fs, "C:\\Users\\me\\app", &full, true), Ok(()));
+        let fs = base().link(
+            "C:\\Users\\me\\app\\j",
+            "\\??\\C:\\Users\\me\\AppData\\Local\\harnessUI",
+        );
+        let full = sandbox(
+            &fs,
+            &["C:\\Users\\me\\app", "C:\\"],
+            &["C:\\Users\\me\\AppData\\Local\\harnessUI"],
+        );
+        assert!(matches!(
+            walk_folder(&fs, "C:\\Users\\me\\app", &full, true),
+            Err(WalkRefusal::LinkOut { .. })
+        ));
+        // Shares and device namespaces: refused from the text, nothing looked up.
+        for target in [
+            "\\\\server\\share\\x",
+            "\\\\?\\UNC\\server\\share",
+            "\\\\.\\PhysicalDrive0",
+            "\\\\?\\Volume{0000}\\x",
+            "//server/share",
+        ] {
+            let fs = base().link("C:\\Users\\me\\app\\n", target);
+            let full = sandbox(&fs, &["C:\\"], &[]);
+            fs.clear();
+            assert!(
+                matches!(
+                    walk_folder(&fs, "C:\\Users\\me\\app", &full, true),
+                    Err(WalkRefusal::LinkOut { .. })
+                ),
+                "{target}"
+            );
+            assert!(
+                !fs.accessed()
+                    .iter()
+                    .any(|a| a.to_lowercase().contains("server")
+                        || a.contains("PhysicalDrive")
+                        || a.contains("Volume")),
+                "{target}: {:?}",
+                fs.accessed()
+            );
+        }
+    }
+
+    #[test]
+    fn devices_pipes_and_sockets_are_refused() {
+        for node in [Node::Device, Node::Pipe, Node::Socket] {
+            let fs = app().special("/w/app/lib/odd", node.clone());
+            let sb = sandbox(&fs, &["/"], &[]);
+            assert_eq!(
+                walk_folder(&fs, "/w/app", &sb, true),
+                Err(WalkRefusal::Device {
+                    path: "/w/app/lib/odd".into()
+                }),
+                "{node:?}"
+            );
+        }
+        // A link to a device, even where the link itself may lead.
+        let fs = app()
+            .special("/dev/zero", Node::Device)
+            .link("/w/app/z", "/dev/zero");
+        let sb = sandbox(&fs, &["/"], &[]);
+        assert_eq!(
+            walk_folder(&fs, "/w/app", &sb, true),
+            Err(WalkRefusal::Device {
+                path: "/w/app/z".into()
+            })
+        );
+    }
+
+    #[test]
+    fn the_limits() {
+        let fs = FakeFs::posix().many("/w/big", MAX_ENTRIES + 1);
+        let sb = sandbox(&fs, &["/w"], &[]);
+        assert_eq!(
+            walk_folder(&fs, "/w/big", &sb, false),
+            Err(WalkRefusal::TooLarge)
+        );
+        let fs = FakeFs::posix().many("/w/big", MAX_ENTRIES);
+        let sb = sandbox(&fs, &["/w"], &[]);
+        assert_eq!(walk_folder(&fs, "/w/big", &sb, false), Ok(()));
+        // 32 levels below the folder are walked; a 33rd is refused.
+        let deep = |levels: usize| {
+            let mut p = "/w/deep".to_string();
+            for i in 0..levels {
+                p.push_str(&format!("/{i}"));
+            }
+            p
+        };
+        let fs = FakeFs::posix().file(&format!("{}/f", deep(MAX_DEPTH - 1)));
+        let sb = sandbox(&fs, &["/w"], &[]);
+        assert_eq!(walk_folder(&fs, "/w/deep", &sb, false), Ok(()));
+        let fs = FakeFs::posix().file(&format!("{}/f", deep(MAX_DEPTH)));
+        let sb = sandbox(&fs, &["/w"], &[]);
+        assert_eq!(
+            walk_folder(&fs, "/w/deep", &sb, false),
+            Err(WalkRefusal::TooLarge)
+        );
+    }
+
+    #[test]
+    fn link_texts() {
+        let w = Flavor::Windows;
+        let p = Flavor::Posix;
+        assert!(is_network_or_device("\\\\srv\\s", w));
+        assert!(is_network_or_device("//srv/s", w));
+        assert!(is_network_or_device("\\\\?\\UNC\\srv\\s", w));
+        assert!(is_network_or_device("\\\\.\\pipe\\x", w));
+        assert!(is_network_or_device("\\??\\Volume{1}\\x", w));
+        assert!(!is_network_or_device("\\\\?\\C:\\x", w));
+        assert!(!is_network_or_device("\\??\\D:\\x", w));
+        assert!(!is_network_or_device("C:\\x", w));
+        assert!(!is_network_or_device("..\\x", w));
+        assert!(is_network_or_device("//srv/s", p));
+        assert!(is_network_or_device("/net/srv/s", p));
+        assert!(is_network_or_device("/Network/Servers/x", p));
+        assert!(is_network_or_device("file:///etc/passwd", p));
+        assert!(!is_network_or_device("/netbook/x", p));
+        assert!(!is_network_or_device("../x", p));
+        assert_eq!(
+            link_target("\\\\?\\C:\\Windows", "C:\\a\\l", w).as_deref(),
+            Some("C:\\Windows")
+        );
+        assert_eq!(
+            link_target("..\\b", "C:\\a\\l", w).as_deref(),
+            Some("C:\\a\\..\\b")
+        );
+        assert_eq!(link_target("x", "/a/l", p).as_deref(), Some("/a/x"));
+        assert_eq!(link_target("", "/a/l", p), None);
+        assert_eq!(parent("/a", p), "/");
+        assert_eq!(parent("C:\\a", w), "C:\\");
+        assert_eq!(file_name("C:\\a\\b.exe", w), "b.exe");
+        assert_eq!(
+            WalkRefusal::LinkOut {
+                link: "/w/a\u{202E}b".into()
+            }
+            .message(),
+            "That folder contains a link to a place this chat can't reach: /w/a\\u{202E}b."
+        );
+    }
+
+    /// The real file system (Unix: links, a pipe and a socket made in a temporary folder).
+    #[cfg(unix)]
+    #[test]
+    fn the_real_file_system() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let app = root.join("app");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(app.join("lib")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(app.join("main.js"), "x").unwrap();
+        std::fs::write(outside.join("secret"), "s").unwrap();
+        symlink("../main.js", app.join("lib/rel")).unwrap();
+        let s = |p: &Path| p.display().to_string();
+        let sb = |approved: &[&Path]| {
+            let a: Vec<String> = approved.iter().map(|p| s(p)).collect();
+            PathSandbox::new(Flavor::Posix, &a, &[], &RealWalkFs, &|p| RealWalkFs.case_of(p)).0
+        };
+        assert_eq!(walk_folder(&RealWalkFs, &s(&app), &sb(&[&app]), false), Ok(()));
+        assert_eq!(RealWalkFs.kind(&s(&app.join("lib/rel"))), Some(EntryKind::Link));
+        assert_eq!(
+            RealWalkFs.read_link(&s(&app.join("lib/rel"))).unwrap().as_deref(),
+            Some("../main.js")
+        );
+        assert_eq!(RealWalkFs.read_link(&s(&app.join("main.js"))).unwrap(), None);
+        assert!(RealWalkFs.identity(&s(&app.join("main.js"))).is_some());
+        assert!(RealWalkFs.identity(&s(&app)).is_none());
+
+        symlink(&outside, app.join("lib/out")).unwrap();
+        assert_eq!(
+            walk_folder(&RealWalkFs, &s(&app), &sb(&[&app]), false),
+            Err(WalkRefusal::LinkOut {
+                link: s(&app.join("lib/out"))
+            })
+        );
+        assert_eq!(walk_folder(&RealWalkFs, &s(&app), &sb(&[&root]), false), Ok(()));
+        std::fs::remove_file(app.join("lib/out")).unwrap();
+
+        let fifo = app.join("pipe");
+        let c = std::ffi::CString::new(s(&fifo)).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated path; mkfifo only reads it.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert_eq!(RealWalkFs.kind(&s(&fifo)), Some(EntryKind::Pipe));
+        assert_eq!(
+            walk_folder(&RealWalkFs, &s(&app), &sb(&[&app]), false),
+            Err(WalkRefusal::Device { path: s(&fifo) })
+        );
+        std::fs::remove_file(&fifo).unwrap();
+        let sock = app.join("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert_eq!(RealWalkFs.kind(&s(&sock)), Some(EntryKind::Socket));
+        assert!(matches!(
+            walk_folder(&RealWalkFs, &s(&app), &sb(&[&app]), false),
+            Err(WalkRefusal::Device { .. })
+        ));
+    }
 }

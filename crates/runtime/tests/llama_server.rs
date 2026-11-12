@@ -353,7 +353,24 @@ async fn supervisor_restarts_a_crashed_server_and_stops_on_cancel() {
         assert!(wait_gone(pid).await, "llama-server {pid} still running");
     }
     let events = drain(&mut rx);
-    assert!(events.contains(&ServerEvent::Restarting { attempt: 1, max: 3 }));
+    let restart = events
+        .iter()
+        .position(|e| *e == ServerEvent::Restarting { attempt: 1, max: 3 })
+        .expect("the restart is reported");
+    let exited = events
+        .iter()
+        .position(|e| matches!(e, ServerEvent::Exited { .. }))
+        .expect("the crash is reported");
+    assert!(
+        exited < restart,
+        "the crashed server's exit comes before the restart"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::State(ServerState::Failed(_)))),
+        "a restarted server is not a failed load"
+    );
     assert_eq!(
         events.last(),
         Some(&ServerEvent::State(ServerState::Stopped))
@@ -867,18 +884,39 @@ fn states_and_stages(events: &[ServerEvent]) -> Vec<&ServerEvent> {
         .collect()
 }
 
+/// The log lines of a run, for a failure message.
+fn log_lines(events: &[ServerEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            ServerEvent::Log(line) => Some(line.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A model that refuses Save memory (0.0.6 D2c), through real llama-server processes and
-/// the real supervisor on the processor: the first start fails with the pinned build's
-/// refusal line, the supervisor retries once without Save memory on the same backend with
-/// a typed event, and the model loads. This is the processor's only retry without Save
-/// memory; it is decided by the log, not by the backend.
+/// the real supervisor as the app runs it ([`runtime::Supervisor::run`]): the first start
+/// fails with the pinned build's refusal line, the supervisor retries once without Save
+/// memory on the same backend with a typed event, and the model loads. On the processor
+/// this is the only retry without Save memory; it is decided by the log, not by the
+/// backend.
 ///
-/// The event order is what the app gets for every retry on the same backend: the failed
-/// attempt's `Failed` first, then the stage, then the new attempt's `Starting` and `Ready`.
+/// The events are what the app gets for every retry on the same backend: `Starting`, the
+/// stage, the new attempt's `Starting`, `Ready` (then `Stopping`, `Stopped` for the stop).
+/// The attempt that failed reports no `Failed`: the load is not over, so the app keeps
+/// showing it as loading, with the stage.
+///
+/// The stage names where the model runs. On Linux the same processor build also runs
+/// labelled Vulkan with Don't use it (`--device none`), the owner's setup when a model
+/// is set to Don't use it: the stage still names the processor, so the app says the model
+/// does not take Save memory instead of blaming a graphics card.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_model_that_refuses_save_memory_is_retried_once_without_it() {
     use runtime::Supervisor;
-    use runtime::llama::server::Candidate;
+    use runtime::llama::server::{Candidate, SupervisorExit};
+    use tokio_util::sync::CancellationToken;
 
     let Some((bin, _)) = env_paths("a_model_that_refuses_save_memory_is_retried_once_without_it")
     else {
@@ -888,67 +926,85 @@ async fn a_model_that_refuses_save_memory_is_retried_once_without_it() {
     let model = dir.path().join("head80.gguf");
     write_head_size_80_model(&model);
     let cpu = backend(&bin, BackendKind::Cpu);
-    let (tx, mut rx) = unbounded_channel();
-    let mut supervisor = Supervisor::local(
-        vec![Candidate {
-            backend: cpu.clone(),
-            device: None,
-            hip_visible_devices: None,
-        }],
-        tx,
-    );
-    let spec = StartSpec {
-        backend: cpu,
-        launch: LaunchConfig {
-            save_memory: true,
-            ..launch(model.clone())
-        },
-        load_timeout: LOAD_TIMEOUT,
-    };
-    let (server, running) = match supervisor.start(spec).await {
-        Ok(started) => started,
-        Err(error) => panic!(
-            "did not load without Save memory: {error}\n{}",
-            error.stderr_tail().join("\n")
-        ),
-    };
-    assert!(!running.launch.save_memory, "the load runs without it");
-    assert_eq!(running.backend.kind, BackendKind::Cpu);
-    assert_eq!(server.props().n_ctx, 2048);
-    server.stop().await;
-
-    let events = drain(&mut rx);
-    let logged = |needle: &str| {
-        events
-            .iter()
-            .any(|e| matches!(e, ServerEvent::Log(line) if line.contains(needle)))
-    };
-    assert!(
-        logged("does not divide n_embd_head_k=80"),
-        "the pinned build's refusal line"
-    );
-    let states: Vec<&ServerEvent> = states_and_stages(&events)
-        .into_iter()
-        .take_while(|e| **e != ServerEvent::State(ServerState::Stopping))
-        .collect();
-    assert_eq!(
-        states,
-        vec![
-            &ServerEvent::State(ServerState::Starting),
-            &ServerEvent::State(ServerState::Failed(LoadFailure::ContextTooLarge)),
-            &ServerEvent::Stage(LoadStage::RetryingWithoutSaveMemory {
-                backend: BackendKind::Cpu
-            }),
-            &ServerEvent::State(ServerState::Starting),
-            &ServerEvent::State(ServerState::Ready),
-        ]
-    );
+    let mut cases = vec![(cpu.clone(), None)];
+    if cfg!(target_os = "linux") {
+        let mut graphics = cpu;
+        graphics.kind = BackendKind::Vulkan;
+        cases.push((graphics, Some("Vulkan0".to_owned())));
+    }
+    for (first, device) in cases {
+        let kind = first.kind;
+        let (tx, mut rx) = unbounded_channel();
+        let supervisor = Supervisor::local(
+            vec![Candidate {
+                backend: first.clone(),
+                device: device.clone(),
+                hip_visible_devices: None,
+            }],
+            tx,
+        );
+        let spec = StartSpec {
+            backend: first,
+            launch: LaunchConfig {
+                save_memory: true,
+                device,
+                ..launch(model.clone())
+            },
+            load_timeout: LOAD_TIMEOUT,
+        };
+        let cancel = CancellationToken::new();
+        let mut loaded = None;
+        let exit = {
+            let stop = cancel.clone();
+            supervisor
+                .run(spec, cancel, |server, running| {
+                    loaded = Some((
+                        running.backend.kind,
+                        running.launch.save_memory,
+                        server.props().n_ctx,
+                    ));
+                    stop.cancel();
+                })
+                .await
+        };
+        let events = drain(&mut rx);
+        assert_eq!(
+            exit,
+            SupervisorExit::Stopped,
+            "{kind}: {}",
+            log_lines(&events)
+        );
+        assert_eq!(
+            loaded,
+            Some((kind, false, 2048)),
+            "{kind}: the load runs without Save memory on the same backend"
+        );
+        assert!(
+            log_lines(&events).contains("does not divide n_embd_head_k=80"),
+            "{kind}: the pinned build's refusal line"
+        );
+        assert_eq!(
+            states_and_stages(&events),
+            vec![
+                &ServerEvent::State(ServerState::Starting),
+                &ServerEvent::Stage(LoadStage::RetryingWithoutSaveMemory {
+                    backend: BackendKind::Cpu
+                }),
+                &ServerEvent::State(ServerState::Starting),
+                &ServerEvent::State(ServerState::Ready),
+                &ServerEvent::State(ServerState::Stopping),
+                &ServerEvent::State(ServerState::Stopped),
+            ],
+            "{kind}"
+        );
+    }
 }
 
 /// A context far too large for any computer fails to allocate, through real llama-server
 /// processes and the real supervisor. Without a graphics card in use that is a plain lack
 /// of memory: no retry without Save memory (it would need more), no step-down (the
-/// processor build would repeat the same load), one start and the failure. That holds on
+/// processor build would repeat the same load), one start and the failure, reported once
+/// as the app runs it ([`runtime::Supervisor::run`]). That holds on
 /// the processor and on a graphics backend with Don't use it, so the backend's label
 /// changes nothing; on this Linux build the "graphics" backend is the same processor build
 /// labelled Vulkan, which with Don't use it runs as `--device none`, exactly as on a real
@@ -962,7 +1018,8 @@ async fn a_model_that_refuses_save_memory_is_retried_once_without_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plain_memory_failure_without_a_graphics_card_is_not_retried() {
     use runtime::Supervisor;
-    use runtime::llama::server::Candidate;
+    use runtime::llama::server::{Candidate, SupervisorExit};
+    use tokio_util::sync::CancellationToken;
 
     let Some((bin, gguf)) =
         env_paths("a_plain_memory_failure_without_a_graphics_card_is_not_retried")
@@ -992,7 +1049,7 @@ async fn a_plain_memory_failure_without_a_graphics_card_is_not_retried() {
     ] {
         let kind = first.kind;
         let (tx, mut rx) = unbounded_channel();
-        let mut supervisor = Supervisor::local(candidates, tx);
+        let supervisor = Supervisor::local(candidates, tx);
         let spec = StartSpec {
             backend: first,
             launch: LaunchConfig {
@@ -1010,21 +1067,25 @@ async fn a_plain_memory_failure_without_a_graphics_card_is_not_retried() {
                 .any(|w| w == ["--device", "none"]),
             "Don't use it names no device"
         );
-        let error = supervisor.start(spec).await.expect_err("cannot allocate");
-        assert_eq!(
-            error.failure(),
-            LoadFailure::ContextTooLarge,
-            "{kind}: {}",
-            error.stderr_tail().join("\n")
-        );
+        let exit = supervisor
+            .run(spec, CancellationToken::new(), |_, _| {
+                panic!("{kind}: a context of 50 million tokens loaded")
+            })
+            .await;
         let events = drain(&mut rx);
+        assert_eq!(
+            exit,
+            SupervisorExit::Failed(LoadFailure::ContextTooLarge),
+            "{kind}: {}",
+            log_lines(&events)
+        );
         assert_eq!(
             states_and_stages(&events),
             vec![
                 &ServerEvent::State(ServerState::Starting),
                 &ServerEvent::State(ServerState::Failed(LoadFailure::ContextTooLarge)),
             ],
-            "{kind}: one start, no retry, no step-down"
+            "{kind}: one start, no retry, no step-down, one failure"
         );
     }
 }

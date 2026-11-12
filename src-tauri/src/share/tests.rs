@@ -632,6 +632,17 @@ async fn bodies_over_the_cap_are_refused() {
         Err(e) => assert!(e.is_request() || e.is_body(), "{e}"),
     }
     assert!(h.llama.seen().is_empty());
+    // Round 1: both are authenticated requests, refused by the size rule, each with its row.
+    let rows = h.audit_done(2).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row.decision, store::AuditDecision::RefusedByPolicy);
+        assert_eq!(row.result_status.as_deref(), Some("not_run"));
+        assert_eq!(
+            row.result_summary.as_deref(),
+            Some("Refused: the request was too large.")
+        );
+    }
 }
 
 #[tokio::test]
@@ -670,7 +681,38 @@ async fn no_model_and_loading_are_answered_in_each_apis_shape() {
         "The model in harnessUI is still loading. Try again in a minute."
     );
     assert!(h.llama.seen().is_empty());
-    assert!(h.audit().await.is_empty());
+    // Round 1: each of these authenticated requests has its audit row, saying why it never
+    // reached a model (token counting at most once a minute: 3 + 1 + 3).
+    let rows = h.audit_done(7).await;
+    assert_eq!(rows.len(), 7, "{rows:?}");
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.tool == "/v1/messages/count_tokens")
+            .count(),
+        1
+    );
+    for row in &rows {
+        assert_eq!(row.decision, store::AuditDecision::AllowedWithoutPrompt);
+        assert_eq!(row.decided_by, "sharing key");
+        assert_eq!(row.result_status.as_deref(), Some("not_run"), "{row:?}");
+        assert!(
+            matches!(
+                row.result_summary.as_deref(),
+                Some("No model was loaded." | "The model was still loading.")
+            ),
+            "{row:?}"
+        );
+        assert!(
+            row.preview.contains("was not passed to the model"),
+            "{row:?}"
+        );
+    }
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.result_summary.as_deref() == Some("No model was loaded."))
+            .count(),
+        4
+    );
 }
 
 #[tokio::test]
@@ -689,11 +731,39 @@ async fn image_links_are_refused_before_forwarding() {
             "/v1/messages",
             json!({"messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}}]}]}),
         ),
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "http://169.254.169.254/latest/meta-data/", "format": "wav"}}]}]}),
+        ),
     ] {
-        let response = h.post(path, &body).send().await.unwrap();
+        let response = h
+            .post(path, &body)
+            .header("user-agent", "curl/8.5")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), 400, "{path}");
     }
     assert!(h.llama.seen().is_empty());
+    // Round 1: the owner can see that an app tried to make the model fetch an address. The
+    // row names the rule, never the address or anything else from the request.
+    let rows = h.audit_done(4).await;
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row.decision, store::AuditDecision::RefusedByPolicy, "{row:?}");
+        assert_eq!(row.result_status.as_deref(), Some("not_run"), "{row:?}");
+        assert_eq!(
+            row.result_summary.as_deref(),
+            Some(
+                "Refused: an image, audio, video or file was sent as a link or a file id, not inline."
+            )
+        );
+        assert!(row.preview.contains("It says it is curl/8.5."), "{row:?}");
+        let text = serde_json::to_string(row).unwrap();
+        for part in ["example.com", "169.254", "127.0.0.1:1", "x.png"] {
+            assert!(!text.contains(part), "{part} in {text}");
+        }
+    }
 }
 
 #[tokio::test]

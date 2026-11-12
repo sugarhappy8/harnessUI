@@ -22,8 +22,9 @@
 //!   the top-level fields each public API defines (llama.cpp extras such as `grammar`,
 //!   `n_probs`, `id_slot`, `lora` or `cache_prompt` are dropped), the output limit capped
 //!   at [`MAX_OUTPUT_TOKENS`] and the model's context, the model name replaced by the
-//!   alias, and every image or file inline: a `data:` URL or base64, never a link or a file
-//!   id, in all three API shapes.
+//!   alias, and every image, audio, video or file inline: a `data:` URL or base64, never a
+//!   link or a file id, in all three API shapes and in every field llama-server's media
+//!   loader reads (round 1: `input_audio`, `input_video` and `video_url` too).
 //! - **Forwarded with a fixed header list** (`authorization` with the private key,
 //!   `content-type`, `accept`) through a client with no system proxy and no redirects.
 //! - **Answers are cleaned**: `timings`, `system_fingerprint` and cached-token counters are
@@ -379,6 +380,19 @@ impl BadRequest {
             Self::BadStream => "stream must be true or false.",
         }
     }
+
+    /// What the audit row says (never anything from the request itself).
+    fn audit_summary(self) -> &'static str {
+        match self {
+            Self::NotJson => "Refused: the request was not valid JSON.",
+            Self::NotAnObject => "Refused: the request was not a JSON object.",
+            Self::NotInline => {
+                "Refused: an image, audio, video or file was sent as a link or a file id, not inline."
+            }
+            Self::BadLimit => "Refused: the output token limit was not a whole number.",
+            Self::BadStream => "Refused: stream was not true or false.",
+        }
+    }
 }
 
 /// A request ready to forward.
@@ -478,14 +492,9 @@ fn check_part(part: &Value) -> Result<(), BadRequest> {
     if obj.contains_key("file_id") || obj.contains_key("file_url") {
         return Err(BadRequest::NotInline);
     }
-    for key in ["image_url", "video_url", "audio_url"] {
+    for key in MEDIA_KEYS {
         if let Some(value) = obj.get(key) {
-            let url = value
-                .as_str()
-                .or_else(|| value.get("url").and_then(Value::as_str));
-            if !url.is_some_and(is_data_url) {
-                return Err(BadRequest::NotInline);
-            }
+            check_media(value)?;
         }
     }
     if let Some(file) = obj.get("file").and_then(Value::as_object)
@@ -504,6 +513,54 @@ fn check_part(part: &Value) -> Result<(), BadRequest> {
         check_parts(obj.get(key))?;
     }
     Ok(())
+}
+
+/// The keys of a content part that hold an image, audio or video. llama-server's media
+/// loader (b12110, `oaicompat_content_load_media`) reads `image_url.url`, and `data`, else
+/// `url`, of `input_audio`, `input_video` and `video_url`, and downloads any value that
+/// starts with `http` (its `--offline` flag does not stop that). `audio_url` is no shape it
+/// reads, and is held to the same rule.
+const MEDIA_KEYS: [&str; 5] = [
+    "image_url",
+    "input_audio",
+    "input_video",
+    "video_url",
+    "audio_url",
+];
+
+/// One media value: a string, or an object whose `url` and `data` (at least one) are
+/// strings. Every string llama-server may read must be inline. A `url` or `data` that is
+/// not a string is refused too: llama-server would fall back to the other one.
+fn check_media(value: &Value) -> Result<(), BadRequest> {
+    match value {
+        Value::String(s) if is_inline(s) => Ok(()),
+        Value::Object(obj) => {
+            let mut found = false;
+            for key in ["url", "data"] {
+                match obj.get(key) {
+                    None => {}
+                    Some(Value::String(s)) if is_inline(s) => found = true,
+                    Some(_) => return Err(BadRequest::NotInline),
+                }
+            }
+            if found {
+                Ok(())
+            } else {
+                Err(BadRequest::NotInline)
+            }
+        }
+        _ => Err(BadRequest::NotInline),
+    }
+}
+
+/// A `data:` URL, or plain base64 (llama-server decodes such a value as it is; it fetches
+/// only a value with `://` in it, which base64 never has).
+fn is_inline(value: &str) -> bool {
+    is_data_url(value)
+        || (!value.trim().is_empty()
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b) || b.is_ascii_whitespace()))
 }
 
 fn is_data_url(url: &str) -> bool {
@@ -1166,17 +1223,28 @@ pub fn says(headers: &HeaderMap) -> String {
 }
 
 async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<Body> {
-    let fail = |status: StatusCode, message: &str| {
-        json_response(status, &error_body(Some(api), status, message, None))
+    let started = Instant::now();
+    let caller = says(req.headers());
+    // An authenticated request the proxy answers itself still has its audit row (round 1),
+    // saying why it never reached the model.
+    let unforwarded = async |status: StatusCode, message: &str, code, why: NotForwarded| {
+        AuditRow::not_forwarded(shared, api, &caller, why, started).await;
+        json_response(status, &error_body(Some(api), status, message, code))
     };
+    let too_large = NotForwarded::Refused("Refused: the request was too large.");
     let declared = req
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
     if declared.is_some_and(|n| n > MAX_BODY as u64) {
-        return fail(StatusCode::PAYLOAD_TOO_LARGE, "The request is too large.");
+        return unforwarded(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "The request is too large.",
+            None,
+            too_large,
+        )
+        .await;
     }
-    let caller = says(req.headers());
     let body = match tokio::time::timeout(
         BODY_TIMEOUT,
         Limited::new(req.into_body(), MAX_BODY).collect(),
@@ -1185,19 +1253,31 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
     {
         Ok(Ok(collected)) => collected.to_bytes(),
         Ok(Err(e)) if e.is::<http_body_util::LengthLimitError>() => {
-            return fail(StatusCode::PAYLOAD_TOO_LARGE, "The request is too large.");
+            return unforwarded(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "The request is too large.",
+                None,
+                too_large,
+            )
+            .await;
         }
         Ok(Err(_)) => {
-            return fail(
+            return unforwarded(
                 StatusCode::BAD_REQUEST,
                 "The request body could not be read.",
-            );
+                None,
+                NotForwarded::NotRun("The request could not be read."),
+            )
+            .await;
         }
         Err(_) => {
-            return fail(
+            return unforwarded(
                 StatusCode::REQUEST_TIMEOUT,
                 "The request body took too long to arrive.",
-            );
+                None,
+                NotForwarded::Refused("Refused: the request took too long to arrive."),
+            )
+            .await;
         }
     };
     let (base_url, upstream_key, model, n_ctx) = match shared.deps.model.current().await {
@@ -1208,25 +1288,40 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
             n_ctx,
         } => (base_url, key, model, n_ctx),
         Upstream::Loading => {
-            let status = StatusCode::SERVICE_UNAVAILABLE;
-            return json_response(
-                status,
-                &error_body(Some(api), status, LOADING, Some("model_loading")),
-            );
+            return unforwarded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                LOADING,
+                Some("model_loading"),
+                NotForwarded::NotRun("The model was still loading."),
+            )
+            .await;
         }
         Upstream::NotLoaded => {
-            let status = StatusCode::SERVICE_UNAVAILABLE;
-            return json_response(
-                status,
-                &error_body(Some(api), status, NO_MODEL, Some("model_not_loaded")),
-            );
+            return unforwarded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                NO_MODEL,
+                Some("model_not_loaded"),
+                NotForwarded::NotRun("No model was loaded."),
+            )
+            .await;
         }
     };
     let rebuilt = match rebuild_request(api, &body, n_ctx) {
         Ok(rebuilt) => rebuilt,
-        Err(bad) => return fail(StatusCode::BAD_REQUEST, bad.message()),
+        Err(bad) => {
+            return unforwarded(
+                StatusCode::BAD_REQUEST,
+                bad.message(),
+                None,
+                NotForwarded::Refused(bad.audit_summary()),
+            )
+            .await;
+        }
     };
     drop(body);
+    let fail = |status: StatusCode, message: &str| {
+        json_response(status, &error_body(Some(api), status, message, None))
+    };
 
     let busy = shared.deps.busy.hold(BusyKind::OtherApp);
     let active = Active::new(&shared.deps.counters);
@@ -1417,36 +1512,82 @@ struct AuditRow {
     done: bool,
 }
 
+/// Why an authenticated request was answered by the proxy and never reached the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotForwarded {
+    /// A rule of the proxy refused it (too large, too slow, a link to an image, not JSON).
+    Refused(&'static str),
+    /// It could not be passed on (no model, still loading, the body could not be read).
+    NotRun(&'static str),
+}
+
+/// Whether a request of `api` gets an audit row: every generation request, token counting
+/// at most once a minute.
+fn audit_wanted(shared: &Shared, api: Api) -> bool {
+    api.generates()
+        || Counters::due(
+            &shared.deps.counters.last_count_audit,
+            COUNT_TOKENS_AUDIT_EVERY,
+        )
+}
+
+/// The row of one authenticated request, without its result. Never the request's text.
+fn audit_entry(
+    api: Api,
+    caller: &str,
+    stream: Option<bool>,
+    forwarded: bool,
+    decision: store::AuditDecision,
+) -> store::AuditEntry {
+    let says = if caller.is_empty() {
+        "It did not say which program it is.".to_owned()
+    } else {
+        format!("It says it is {caller}.")
+    };
+    let preview = if forwarded {
+        format!("Another app used the loaded model ({}). {says}", api.label())
+    } else {
+        format!(
+            "Another app sent a request ({}) that was not passed to the model. {says}",
+            api.label()
+        )
+    };
+    let mut arguments = json!({"path": api.upstream_path(), "says": caller});
+    if let Some(stream) = stream {
+        arguments["stream"] = json!(stream);
+    }
+    store::AuditEntry {
+        ts: None,
+        chat_id: None,
+        server: AUDIT_SERVER.into(),
+        tool: api.upstream_path().into(),
+        arguments,
+        preview,
+        risk: "normal".into(),
+        decision,
+        decided_by: match decision {
+            store::AuditDecision::RefusedByPolicy => "sharing proxy".into(),
+            _ => "sharing key".into(),
+        },
+        note: None,
+        parent_audit_id: None,
+        result: None,
+    }
+}
+
 impl AuditRow {
     async fn open(shared: &Shared, api: Api, stream: bool, caller: &str) -> Self {
         let store = shared.deps.store.clone();
         let started = Instant::now();
-        let wanted = api.generates()
-            || Counters::due(
-                &shared.deps.counters.last_count_audit,
-                COUNT_TOKENS_AUDIT_EVERY,
-            );
-        let id = if wanted {
-            let says = if caller.is_empty() {
-                "It did not say which program it is.".to_owned()
-            } else {
-                format!("It says it is {caller}.")
-            };
+        let id = if audit_wanted(shared, api) {
             store
-                .append_audit(store::AuditEntry {
-                    ts: None,
-                    chat_id: None,
-                    server: AUDIT_SERVER.into(),
-                    tool: api.upstream_path().into(),
-                    arguments: json!({"path": api.upstream_path(), "stream": stream, "says": caller}),
-                    preview: format!("Another app used the loaded model ({}). {says}", api.label()),
-                    risk: "normal".into(),
-                    decision: store::AuditDecision::AllowedWithoutPrompt,
-                    decided_by: "sharing key".into(),
-                    note: None,
-                    parent_audit_id: None,
-                    result: None,
-                })
+                .append_audit(audit_entry(
+                    api,
+                    caller,
+                    Some(stream),
+                    true,
+                    store::AuditDecision::AllowedWithoutPrompt,
+                ))
                 .await
                 .map_err(|e| tracing::error!("could not write the audit log: {e}"))
                 .ok()
@@ -1458,6 +1599,41 @@ impl AuditRow {
             id,
             started,
             done: false,
+        }
+    }
+
+    /// The whole row of an authenticated request the proxy answered itself: refused by one
+    /// of its rules (decision `refused_by_policy`) or not passed on (no model), result
+    /// `not_run` with the reason.
+    async fn not_forwarded(
+        shared: &Shared,
+        api: Api,
+        caller: &str,
+        why: NotForwarded,
+        started: Instant,
+    ) {
+        if !audit_wanted(shared, api) {
+            return;
+        }
+        let (decision, summary) = match why {
+            NotForwarded::Refused(summary) => (store::AuditDecision::RefusedByPolicy, summary),
+            NotForwarded::NotRun(summary) => (store::AuditDecision::AllowedWithoutPrompt, summary),
+        };
+        let store = &shared.deps.store;
+        let written = store
+            .append_audit(audit_entry(api, caller, None, false, decision))
+            .await;
+        let result = match written {
+            Ok(id) => {
+                let duration = started.elapsed().as_millis() as u64;
+                store
+                    .complete_audit(id, "not_run".into(), Some(summary.into()), Some(duration))
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
+            tracing::error!("could not write the audit log: {e}");
         }
     }
 
@@ -1912,6 +2088,49 @@ mod tests {
             Api::ChatCompletions,
             msg(json!({"type": "input_audio", "audio_url": "https://x/a.wav"}))
         ));
+        // Audio and video in the shapes llama-server reads (its media loader takes `data`
+        // first, then `url`, for input_audio, input_video and video_url, and downloads any
+        // value that starts with http).
+        let metadata = "http://169.254.169.254/latest/meta-data/";
+        for part in [
+            json!({"type": "input_audio", "input_audio": {"data": metadata, "format": "wav"}}),
+            json!({"type": "input_audio", "input_audio": {"url": metadata, "format": "wav"}}),
+            json!({"type": "input_audio", "input_audio": {"data": "UklGRg==", "url": metadata}}),
+            json!({"type": "input_video", "input_video": {"url": metadata}}),
+            json!({"type": "input_video", "input_video": {"data": metadata}}),
+            json!({"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA", "data": metadata}}),
+            json!({"type": "video_url", "video_url": {"url": metadata}}),
+            json!({"type": "video_url", "video_url": metadata}),
+            json!({"type": "input_audio", "input_audio": metadata}),
+            json!({"type": "input_audio", "input_audio": {"data": "file:///etc/passwd"}}),
+            json!({"type": "input_audio", "input_audio": {"data": ""}}),
+            json!({"type": "input_audio", "input_audio": {"format": "wav"}}),
+            json!({"type": "input_audio", "input_audio": {"data": 7, "url": metadata}}),
+            json!({"type": "input_video", "input_video": {"data": ["x"]}}),
+            json!({"type": "image_url", "image_url": {"url": PNG, "data": metadata}}),
+        ] {
+            assert!(refused(Api::ChatCompletions, msg(part.clone())), "{part}");
+            // Also inside a tool message, which llama-server loads the same way.
+            assert!(
+                refused(
+                    Api::ChatCompletions,
+                    json!({"messages": [{"role": "tool", "tool_call_id": "1", "content": [part.clone()]}]})
+                ),
+                "{part}"
+            );
+        }
+        // Audio and video sent inline: a data: URL, or plain base64 as OpenAI's input_audio
+        // sends it.
+        for part in [
+            json!({"type": "input_audio", "input_audio": {"data": "UklGRiQAAABXQVZF", "format": "wav"}}),
+            json!({"type": "input_audio", "input_audio": {"data": "UklG\nRiQA AABX=="}}),
+            json!({"type": "input_audio", "input_audio": {"url": "data:audio/wav;base64,UklGRg=="}}),
+            json!({"type": "input_video", "input_video": {"data": "data:video/mp4;base64,AAAA"}}),
+            json!({"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA"}}),
+            json!({"type": "image_url", "image_url": {"url": "iVBORw0KGgo="}}),
+        ] {
+            assert!(!refused(Api::ChatCompletions, msg(part.clone())), "{part}");
+        }
         // Inline data is fine, and so is an address in text or in a tool call.
         assert!(!refused(
             Api::ChatCompletions,

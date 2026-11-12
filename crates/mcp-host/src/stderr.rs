@@ -39,6 +39,15 @@ impl StderrLog {
         }
     }
 
+    /// A log writing to exactly `file`, when set (the app's own managed server,
+    /// `mcp-reverse.log`, which no user server's `mcp-server-<name>.log` can share).
+    pub(crate) fn to_file(file: Option<PathBuf>) -> Self {
+        Self {
+            lines: Mutex::new(VecDeque::with_capacity(TAIL_LINES)),
+            file,
+        }
+    }
+
     /// Appends one line to the ring (not to the file).
     pub(crate) fn push(&self, line: String) {
         let mut lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());

@@ -22,6 +22,12 @@
 //!   retry happens once, so this ends. Without a card in use, running out of memory does
 //!   not step down: the processor build would repeat the same load.
 //! - **Port taken:** pick a new port, up to [`RestartPolicy::port_retries`] times.
+//! - **Events:** [`ServerState::Failed`] is reported once, when the supervisor gives up. An
+//!   attempt it retries does not report it ([`LocalStarter`]), so a retry on the same
+//!   backend reads `Starting`, the [`ServerEvent::Stage`], `Starting`, `Ready`, and a
+//!   step-down reads `Starting`, [`ServerEvent::SteppedDown`], `Starting`, `Ready`.
+//!   [`LoadStage::RetryingWithoutSaveMemory`] names where the model runs: the processor
+//!   when no graphics card is in use, whatever the backend's label.
 //!
 //! "A graphics card in use" means what the command line does, not the backend's label: a
 //! graphics backend with a device and a card choice other than Don't use it
@@ -40,7 +46,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::time::Duration;
 
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -79,6 +85,13 @@ pub trait Supervised: Send {
 }
 
 /// Starts real llama-server processes with [`start`].
+///
+/// Each start is one attempt of a load. What the attempt reports is passed on to the
+/// starter's events in the order it was sent, except the attempt's own
+/// [`ServerState::Failed`]: the supervisor may still retry (a new port, a setting turned
+/// down, a backend lower), and it reports [`ServerState::Failed`] itself, once, when it
+/// gives up. So the app never sees a load as failed while it is being retried, and a load
+/// that fails for good is reported once.
 #[derive(Clone, Debug)]
 pub struct LocalStarter {
     events: UnboundedSender<ServerEvent>,
@@ -92,13 +105,114 @@ impl LocalStarter {
 }
 
 impl Starter for LocalStarter {
-    type Server = RunningServer;
+    type Server = LocalServer;
 
     fn start(
         &self,
         spec: StartSpec,
-    ) -> impl Future<Output = Result<RunningServer, StartError>> + Send {
-        start(spec, self.events.clone())
+    ) -> impl Future<Output = Result<LocalServer, StartError>> + Send {
+        let events = self.events.clone();
+        async move {
+            let (attempt_events, mut from_server) = unbounded_channel();
+            // Every reader of a failed attempt has finished by the time `start` returns,
+            // so nothing of it is left behind in `from_server`.
+            relay_until(start(spec, attempt_events), &mut from_server, &events)
+                .await
+                .map(|server| LocalServer {
+                    server,
+                    from_server,
+                    events,
+                })
+        }
+    }
+}
+
+/// A llama-server started by [`LocalStarter`]: the [`RunningServer`], whose methods it
+/// offers through `Deref`, and the events it still sends. Those are passed on while the
+/// supervisor waits for the server to exit, and when it stops: [`RunningServer`] reports
+/// everything up to its exit (the last log lines, then [`ServerEvent::Exited`]) before
+/// either returns, so the supervisor's own events still come after them.
+pub struct LocalServer {
+    server: RunningServer,
+    from_server: UnboundedReceiver<ServerEvent>,
+    events: UnboundedSender<ServerEvent>,
+}
+
+impl LocalServer {
+    /// Stops the server ([`RunningServer::stop`]) and passes on what it reported, ending
+    /// with [`ServerState::Stopped`].
+    pub async fn stop(self) {
+        let Self {
+            server,
+            mut from_server,
+            events,
+        } = self;
+        server.stop().await;
+        while let Ok(event) = from_server.try_recv() {
+            relay(&events, event);
+        }
+    }
+}
+
+impl std::ops::Deref for LocalServer {
+    type Target = RunningServer;
+
+    fn deref(&self) -> &RunningServer {
+        &self.server
+    }
+}
+
+impl std::fmt::Debug for LocalServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.server.fmt(f)
+    }
+}
+
+impl Supervised for LocalServer {
+    fn wait_exit(&mut self) -> impl Future<Output = Option<i32>> + Send {
+        let Self {
+            server,
+            from_server,
+            events,
+        } = self;
+        relay_until(server.wait_exit(), from_server, events)
+    }
+
+    fn stop(self) -> impl Future<Output = ()> + Send {
+        LocalServer::stop(self)
+    }
+
+    fn crash_reason(&self, exit_code: Option<i32>) -> LoadFailure {
+        classify(&self.server.stderr_tail(), exit_code)
+    }
+}
+
+/// Awaits `work` (a start, or a wait for the exit) while passing on what the server
+/// reports, then whatever it reported before `work` ended, all in the order it was sent.
+async fn relay_until<T>(
+    work: impl Future<Output = T>,
+    from_server: &mut UnboundedReceiver<ServerEvent>,
+    events: &UnboundedSender<ServerEvent>,
+) -> T {
+    let mut work = std::pin::pin!(work);
+    let result = loop {
+        tokio::select! {
+            biased;
+            Some(event) = from_server.recv() => relay(events, event),
+            result = &mut work => break result,
+        }
+    };
+    while let Ok(event) = from_server.try_recv() {
+        relay(events, event);
+    }
+    result
+}
+
+/// Passes one event of a server on, except its own [`ServerState::Failed`] (see
+/// [`LocalStarter`]).
+fn relay(events: &UnboundedSender<ServerEvent>, event: ServerEvent) {
+    if !matches!(event, ServerEvent::State(ServerState::Failed(_))) {
+        let _ = events.send(event);
     }
 }
 
@@ -380,6 +494,9 @@ impl<S: Starter> Supervisor<S> {
             && (save_memory_refused(stderr_tail) || (card && reason.save_memory_may_be_the_cause()))
         {
             next.launch.save_memory = false;
+            // Where the model runs: without a card in use only the model can refuse it, and
+            // the processor is what the user is told about, not a card the load never used.
+            let backend = if card { backend } else { BackendKind::Cpu };
             LoadStage::RetryingWithoutSaveMemory { backend }
         } else if card && spec.launch.gpu == GpuUse::All && reason.is_out_of_memory() {
             next.launch.gpu = GpuUse::Fit;
@@ -1206,13 +1323,40 @@ mod tests {
     /// The model refuses Save memory (0.0.6 D2c): retried once without it on the same
     /// backend, on the processor too, where nothing else could make it load. A plain
     /// memory failure there still keeps it on (see the test above).
+    ///
+    /// The event names where the model runs: the processor when no graphics card is in
+    /// use (Don't use it, or no device), whatever the backend's label, so the app says the
+    /// model does not take Save memory instead of blaming a card the load never used.
     #[tokio::test(start_paused = true)]
     async fn a_model_that_refuses_save_memory_is_retried_without_it_on_any_backend() {
         for line in REFUSALS {
-            for (kind, device, gpu) in [
-                (BackendKind::Cpu, None, GpuUse::Off),
-                (BackendKind::Vulkan, Some("Vulkan0"), GpuUse::Off),
-                (BackendKind::Vulkan, Some("Vulkan0"), GpuUse::All),
+            for (kind, device, gpu, runs_on) in [
+                (BackendKind::Cpu, None, GpuUse::Off, BackendKind::Cpu),
+                (
+                    BackendKind::Vulkan,
+                    Some("Vulkan0"),
+                    GpuUse::Off,
+                    BackendKind::Cpu,
+                ),
+                (BackendKind::Vulkan, None, GpuUse::All, BackendKind::Cpu),
+                (
+                    BackendKind::Metal,
+                    Some("MTL0"),
+                    GpuUse::Off,
+                    BackendKind::Cpu,
+                ),
+                (
+                    BackendKind::Vulkan,
+                    Some("Vulkan0"),
+                    GpuUse::All,
+                    BackendKind::Vulkan,
+                ),
+                (
+                    BackendKind::Metal,
+                    Some("MTL0"),
+                    GpuUse::Fit,
+                    BackendKind::Metal,
+                ),
             ] {
                 let script = vec![
                     Script::FailLog(LoadFailure::ContextTooLarge, refusal(line)),
@@ -1237,7 +1381,11 @@ mod tests {
                     vec![(kind, gpu, true), (kind, gpu, false)],
                     "{line}"
                 );
-                assert_eq!(drain(&mut rx), vec![without_save_memory(kind)], "{line}");
+                assert_eq!(
+                    drain(&mut rx),
+                    vec![without_save_memory(runs_on)],
+                    "{kind} {device:?} {gpu:?}: {line}"
+                );
             }
         }
 
@@ -1746,6 +1894,97 @@ mod tests {
             .await;
         assert_eq!(exit, SupervisorExit::Stopped);
         assert!(log.lock().expect("log").started.is_empty());
+    }
+
+    /// What a real server reports goes through [`relay_until`] ([`LocalStarter`] and
+    /// [`LocalServer`]): passed on while the attempt runs (load progress is live), all of it
+    /// before the call returns (so the supervisor's own events come after), in the order it
+    /// was sent, except the attempt's own `Failed`. The supervisor may still retry; it
+    /// reports `Failed` itself when it gives up, so the app never shows a load as failed
+    /// while it is retried.
+    #[tokio::test]
+    async fn a_server_is_relayed_in_order_without_its_own_failure() {
+        let progress = ServerEvent::Progress {
+            stage: Some("text_model".into()),
+            value: Some(0.5),
+        };
+        let starting = ServerEvent::State(ServerState::Starting);
+        let (to_relay, mut from_server) = unbounded_channel();
+        let (events, mut app) = unbounded_channel();
+
+        // A failed attempt: it reports its start and progress, then waits until the app
+        // has seen them, then logs, exits and fails.
+        let (seen, wait_seen) = tokio::sync::oneshot::channel::<()>();
+        let attempt = {
+            let to_relay = to_relay.clone();
+            let (starting, progress) = (starting.clone(), progress.clone());
+            async move {
+                let _ = to_relay.send(starting);
+                let _ = to_relay.send(progress);
+                let _ = wait_seen.await;
+                for event in [
+                    ServerEvent::Log("E failed to create context".into()),
+                    ServerEvent::Exited { code: Some(1) },
+                    ServerEvent::State(ServerState::Failed(LoadFailure::ContextTooLarge)),
+                ] {
+                    let _ = to_relay.send(event);
+                }
+                "failed"
+            }
+        };
+        let app_side = async {
+            let early = vec![app.recv().await, app.recv().await];
+            let _ = seen.send(());
+            early
+        };
+        let (result, early) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(relay_until(attempt, &mut from_server, &events), app_side)
+        })
+        .await
+        .expect("events are passed on while the attempt runs");
+        assert_eq!(result, "failed");
+        assert_eq!(early, vec![Some(starting.clone()), Some(progress)]);
+        assert_eq!(
+            drain(&mut app),
+            vec![
+                ServerEvent::Log("E failed to create context".into()),
+                ServerEvent::Exited { code: Some(1) },
+            ],
+            "everything up to the exit, before the supervisor decides; no Failed"
+        );
+
+        // A ready server, then its wait for the exit and its stop: the other states pass.
+        let ready = async {
+            let _ = to_relay.send(starting.clone());
+            let _ = to_relay.send(ServerEvent::State(ServerState::Ready));
+        };
+        relay_until(ready, &mut from_server, &events).await;
+        let exit = async {
+            for event in [
+                ServerEvent::Log("last line".into()),
+                ServerEvent::Exited { code: Some(134) },
+                ServerEvent::State(ServerState::Stopping),
+                ServerEvent::State(ServerState::Stopped),
+            ] {
+                let _ = to_relay.send(event);
+            }
+            Some(134)
+        };
+        assert_eq!(
+            relay_until(exit, &mut from_server, &events).await,
+            Some(134)
+        );
+        assert_eq!(
+            drain(&mut app),
+            vec![
+                starting,
+                ServerEvent::State(ServerState::Ready),
+                ServerEvent::Log("last line".into()),
+                ServerEvent::Exited { code: Some(134) },
+                ServerEvent::State(ServerState::Stopping),
+                ServerEvent::State(ServerState::Stopped),
+            ]
+        );
     }
 
     #[test]
