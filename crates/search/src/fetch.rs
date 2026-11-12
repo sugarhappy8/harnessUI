@@ -550,7 +550,14 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
             listener.local_addr().expect("address").port()
         };
-        let error = client
+        // Windows tries a closed port again for a couple of seconds before it gives up,
+        // so this half gets far more time than that.
+        let patient = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .expect("client");
+        let error = patient
             .get(format!("http://127.0.0.1:{closed}/"))
             .send()
             .await

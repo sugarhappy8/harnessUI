@@ -27,6 +27,12 @@ use crate::netpolicy::{self, AddressPolicy, DnsCache};
 
 /// Timeout for ordinary CDP commands.
 pub(crate) const CMD: Duration = Duration::from_secs(15);
+
+/// How long a browser that was just started may take to answer for the first time. A
+/// first start on a busy machine with a cold disk has been seen to take more than 20
+/// seconds; a browser that answers sooner is used at once, so this only bounds a failure.
+const STARTUP: Duration = Duration::from_secs(60);
+
 /// How long a page-reported form submission is remembered for matching its request.
 // TODO(M6): Chrome reports no `Page.frameRequestedNavigation` for a GET form that opens a
 // new tab (`target=_blank`), so such a submission is not recognised as one: a GET to the
@@ -362,12 +368,7 @@ impl Browser {
         let setup = async {
             browser
                 .cdp
-                .call(
-                    "Browser.getVersion",
-                    json!({}),
-                    None,
-                    Duration::from_secs(20),
-                )
+                .call("Browser.getVersion", json!({}), None, STARTUP)
                 .await?;
             browser
                 .cdp
