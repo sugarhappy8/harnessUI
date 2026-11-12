@@ -10,6 +10,12 @@
 //!   before anything is fetched.
 //! - An update unpacks the new version into its own folder; the old one is deleted only
 //!   after the new one is complete. A download over a broken copy repairs it.
+//! - A row's downloads are deleted only once all of its parts are in place, so a Cancel
+//!   while a later part unpacks leaves the row paused ("Paused at …"), not broken.
+//! - A release build offers only parts whose publishers' checks were recorded at pin time
+//!   (`lock::release_checks`); a debug build also offers one pinned on first download only.
+//! - Names and digests from the lock are used under `.downloads/` only when they are one
+//!   plain file name and 64 hex digits.
 //! - Fetching goes through [`Fetch`], so tests install from local archives ([`DirFetch`])
 //!   and the app from the network ([`NetFetch`]: `runtime::packs::download_verified`, that
 //!   part's hosts only).

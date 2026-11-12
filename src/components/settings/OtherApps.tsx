@@ -82,8 +82,9 @@ function readCopied(): CopiedSetups {
         const entry: unknown = (value as Record<string, unknown>)[app];
         if (!entry || typeof entry !== "object") continue;
         const { ctx, port, model } = entry as Record<string, unknown>;
-        if (typeof port === "number" && (ctx === null || typeof ctx === "number") && (model === null || typeof model === "string"))
-          out[app] = { ctx, port, model };
+        const known =
+          typeof port === "number" && (ctx === null || typeof ctx === "number") && (model === null || typeof model === "string");
+        if (known) out[app] = { ctx, port, model };
       }
     }
   } catch {
@@ -708,7 +709,9 @@ export function OtherApps() {
             </p>
             {sizeNote !== null && <p className="text-warning">{sizeNote}</p>}
             {portChanged && <p className="text-warning">{PORT_CHANGED}</p>}
-            {setUpAgain.length > 0 && <p className="text-xs text-warning">{`Apps to set up again: ${listWords(setUpAgain)}.`}</p>}
+            {setUpAgain.length > 0 && (
+              <p className="text-xs text-warning">{`Apps to set up again: ${listWords(setUpAgain)}.`}</p>
+            )}
             <div className="flex flex-wrap gap-2">
               {APPS.map((a) => (
                 <button

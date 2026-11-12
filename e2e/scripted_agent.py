@@ -4643,8 +4643,10 @@ def p_other_apps(c, notes):
     the page's switch turning sharing off (the port closed, no key in settings or log).
     0.0.6: in Ask first, Allow all and Full access the page and switch are the same (D12);
     Model settings… opens over the settings window; the restart asks first while another
-    app's request runs (D3): Restart when it ends waits for it (then cancelled), Stop and
-    restart ends it and restarts at once."""
+    app's request runs (D3): Restart when it ends waits for it (the page says what it waits
+    for, keeps its switch and key buttons usable, and its Cancel ends the wait), Stop and
+    restart ends it and restarts at once. Round 1: Hide key also hides the key in the open
+    card (dots), and the copied setup is remembered per app."""
     import re
     s = c.s
     model = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
@@ -4656,6 +4658,8 @@ def p_other_apps(c, notes):
     size_changed = "You changed how much this model can remember. Copy the setup again."
     old_key_note = "Apps set up with the old key stop working until you copy the new one."
     copy_step = "Copy step 1 of For this window only"
+    hidden_key = "harnessui-share-••••••••"
+    waiting_line = "Restarts when the other app's request ends"
     ua = {"User-Agent": "e2e-other-apps/1.0"}
     ask = [{"role": "user", "content": "Say hi."}]
     key_re = re.compile(r"harnessui-share-[0-9a-f]{32}")
@@ -4769,13 +4773,20 @@ def p_other_apps(c, notes):
         assert f"http://127.0.0.1:{port}" in text and key in text, text[-800:]
         assert "$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = '8192'" in text, text[-800:]
         assert "This stores the key as plain text in that app's settings." in text
+        # Hide key hides it in the card too (dots); Show key shows it there again.
+        press("Hide key")
+        s.wait_for(lambda: key not in page() and hidden_key in page(), 5, "the key hidden in the card")
+        press("Show key")
+        s.wait_for(lambda: page().count(key) >= 2 and hidden_key not in page(), 10, "the key shown in the card again")
         press("Mac")
         s.wait_for(lambda: "Open Terminal" in page() and "~/.claude/settings.json" in page(), 5, "the Mac tab")
         assert "Windows PowerShell" not in page()
         press(copy_step)
         s.wait_for(copied_shown, 5, "Copied")
-        copied = s.execute("return localStorage.getItem('otherApps.copiedSetup');")
-        assert json.loads(copied) == {"ctx": 8192, "port": port}, copied
+        copied = json.loads(s.execute("return localStorage.getItem('otherApps.copiedSetup');"))
+        assert list(copied) == ["claudeCode"], copied
+        assert copied["claudeCode"]["ctx"] == 8192 and copied["claudeCode"]["port"] == port, copied
+        assert os.path.basename(copied["claudeCode"]["model"] or "") == os.path.basename(model), copied
         s.screenshot(str(OUT / "other-apps-setup.png"))
 
         # 32,768 tokens for this model, then a restart. Another app's request is running, so
@@ -4813,11 +4824,16 @@ def p_other_apps(c, notes):
             s.screenshot(str(OUT / "other-apps-question.png"))
             answer_question("Restart when it ends")
             s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"], 10, "the restart waiting")
-            s.wait_for(lambda: "Restarting the model…" in page(), 5, "the page saying it restarts")
+            s.wait_for(lambda: waiting_line in page(), 5, "the page saying what the restart waits for")
+            assert "Restarting the model…" not in page(), page()
+            # Only the restart waits: the switch and the key buttons still work meanwhile.
+            assert not s.execute(f"return {panel}.querySelector('input[role=switch]').disabled;")
+            assert find_button("Make a new key") and find_button("Hide key"), page()
+            s.screenshot(str(OUT / "other-apps-waiting.png"))
             time.sleep(2)
             assert s.invoke("share_status")["modelCtx"] == 8192 and worker.is_alive(), "it restarted while the request ran"
-            s.invoke("cancel_pending_reload")
-            s.wait_for(lambda: not s.invoke("runtime_status")["reloadWaiting"] and "Restarting the model…" not in page(),
+            press("Cancel the restart")
+            s.wait_for(lambda: not s.invoke("runtime_status")["reloadWaiting"] and waiting_line not in page(),
                        10, "the wait cancelled")
             assert s.invoke("share_status")["modelCtx"] == 8192 and worker.is_alive(), "Cancel restarted or stopped the request"
             press(use)
