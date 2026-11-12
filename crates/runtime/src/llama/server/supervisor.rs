@@ -2,14 +2,16 @@
 //!
 //! - **Crash while Ready:** restart with the same arguments, up to
 //!   [`RestartPolicy::max_restarts`] times within [`RestartPolicy::window`].
-//! - **Retries on the same backend (0.0.5)**, when the server exits while loading or the
+//! - **Retries on the same backend (0.0.6)**, when the server exits while loading or the
 //!   crash limit is reached, before any step-down, each at most once per load (a process
 //!   that could not be created, a load timeout or an unusable `/props` reply changes no
 //!   setting):
-//!   1. **Save memory off** ([`LoadStage::RetryingWithoutSaveMemory`]) when it was on and
-//!      the failure is one it can cause ([`LoadFailure::save_memory_may_be_the_cause`]):
-//!      a device or driver without flash attention for a q8_0 memory fails the context or
-//!      crashes (0.0.5 D2c). It stays off for the rest of the load.
+//!   1. **Save memory off** ([`LoadStage::RetryingWithoutSaveMemory`]) when it was on, the
+//!      backend is a graphics one and the failure is one it can cause
+//!      ([`LoadFailure::save_memory_may_be_the_cause`]): a device or driver without flash
+//!      attention for a q8_0 memory fails the context or crashes (0.0.6 D2c). It stays off
+//!      for the rest of the load. The processor can always do it, so a failure there is
+//!      never retried without it (that would need twice the memory and blame the card).
 //!   2. **As much as fits** ([`LoadStage::RetryingWithLessGpu`]) when a graphics card ran
 //!      out of memory ([`LoadFailure::is_out_of_memory`]) with All of it ([`GpuUse::All`]).
 //! - **Stepping down:** when a GPU backend still fails, and a lower backend passed its
@@ -346,7 +348,12 @@ impl<S: Starter> Supervisor<S> {
     fn retry_spec(&self, spec: &StartSpec, reason: &LoadFailure) -> Option<StartSpec> {
         let backend = spec.backend.kind;
         let mut next = spec.clone();
-        let stage = if spec.launch.save_memory && reason.save_memory_may_be_the_cause() {
+        // The processor can always do Save memory, so it is retried only on a graphics
+        // backend, where a device or driver may lack flash attention for a q8_0 memory.
+        let stage = if spec.launch.save_memory
+            && backend != BackendKind::Cpu
+            && reason.save_memory_may_be_the_cause()
+        {
             next.launch.save_memory = false;
             LoadStage::RetryingWithoutSaveMemory { backend }
         } else if reason.is_out_of_memory()
@@ -855,7 +862,7 @@ mod tests {
         );
     }
 
-    /// The order of 0.0.5 for a graphics card that runs out of memory: Save memory off,
+    /// The order of 0.0.6 for a graphics card that runs out of memory: Save memory off,
     /// then As much as fits, then the processor. Each is tried once.
     #[tokio::test(start_paused = true)]
     async fn graphics_card_memory_failure_order() {
@@ -1068,6 +1075,81 @@ mod tests {
         assert!(drain(&mut rx).is_empty());
     }
 
+    /// The processor can always do Save memory (flash attention and a q8_0 memory), so a
+    /// failure there is not one Save memory causes: no retry without it, which would need
+    /// twice the memory for the conversation and tell the user that Save memory does not
+    /// work with their graphics card. Neither when the load started on the processor, nor
+    /// after a step-down to it with Save memory still on, nor when it keeps crashing there.
+    #[tokio::test(start_paused = true)]
+    async fn save_memory_is_never_retried_on_the_processor() {
+        for failure in [LoadFailure::ContextTooLarge, LoadFailure::Unknown] {
+            let (mut sup, log, mut rx) = supervisor(
+                vec![Script::Fail(failure.clone())],
+                vec![candidate(BackendKind::Cpu, None)],
+            );
+            let error = sup
+                .start(spec_with(BackendKind::Cpu, None, GpuUse::Off, true))
+                .await
+                .expect_err("fails");
+            assert_eq!(error.failure(), failure);
+            assert_eq!(attempts(&log), vec![(BackendKind::Cpu, GpuUse::Off, true)]);
+            assert!(drain(&mut rx).is_empty(), "{failure:?}");
+        }
+
+        // A missing graphics device steps down with Save memory on; the processor then
+        // fails for lack of memory and that is the answer.
+        let script = vec![
+            Script::Fail(LoadFailure::InvalidDevice("Vulkan0".into())),
+            Script::Fail(LoadFailure::ContextTooLarge),
+        ];
+        let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let error = sup
+            .start(spec_with(
+                BackendKind::Vulkan,
+                Some("Vulkan0"),
+                GpuUse::All,
+                true,
+            ))
+            .await
+            .expect_err("fails");
+        assert_eq!(error.failure(), LoadFailure::ContextTooLarge);
+        assert_eq!(
+            attempts(&log),
+            vec![
+                (BackendKind::Vulkan, GpuUse::All, true),
+                (BackendKind::Cpu, GpuUse::Off, true),
+            ]
+        );
+        assert!(
+            drain(&mut rx)
+                .iter()
+                .all(|e| matches!(e, ServerEvent::SteppedDown { .. })),
+            "only the step-down"
+        );
+
+        // Crashing on the processor with Save memory on: the restarts, then the failure.
+        let crash = Script::Run(Some(Duration::from_secs(1)));
+        let (sup, log, mut rx) = supervisor(
+            vec![crash; 4],
+            vec![candidate(BackendKind::Cpu, None)],
+        );
+        let exit = sup
+            .run(
+                spec_with(BackendKind::Cpu, None, GpuUse::Off, true),
+                CancellationToken::new(),
+                |_, _| {},
+            )
+            .await;
+        assert_eq!(exit, SupervisorExit::Failed(LoadFailure::Unknown));
+        assert!(attempts(&log).iter().all(|a| a.2), "Save memory stays on");
+        assert!(
+            !drain(&mut rx)
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Stage(_))),
+            "no retry without Save memory"
+        );
+    }
+
     /// Only a server that exited while loading can have failed because of a load setting.
     /// A process that could not be created, a load that ran out of time and an unusable
     /// `/props` reply are reported as unknown failures too, but retrying them without Save
@@ -1226,7 +1308,7 @@ mod tests {
     }
 
     /// A server that keeps crashing with Save memory on gets it turned off before any
-    /// step-down (0.0.5 D2c), on the same backend.
+    /// step-down (0.0.6 D2c), on the same backend.
     #[tokio::test(start_paused = true)]
     async fn crash_limit_with_save_memory_turns_it_off_before_stepping_down() {
         let crash = Script::Run(Some(Duration::from_secs(1)));

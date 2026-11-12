@@ -1,6 +1,7 @@
-//! Every row of the coding-assistant rule (0.0.5), in both directions and both approval
-//! modes: what asks with Allow once / Deny and counts as going online, and what stays an
-//! ordinary command.
+//! Every row of the coding-assistant rule (0.0.6), in both directions and in the three
+//! approval modes: what asks with Allow once / Deny in Ask first and Allow all, runs without
+//! a card in Full access (D12) and counts as going online, and what stays an ordinary
+//! command.
 
 use super::*;
 use crate::allow_all::command_facts;
@@ -57,9 +58,18 @@ fn turn(allow_all: bool, untrusted: bool) -> TurnContext {
     }
 }
 
+/// Full access (0.0.5, D12): the user chose that nothing asks, with or without Allow all.
+fn full_access(allow_all: bool, untrusted: bool) -> TurnContext {
+    TurnContext {
+        full_access: true,
+        ..turn(allow_all, untrusted)
+    }
+}
+
 /// The line starts a coding assistant (or turns off one's checks): Ask first shows Allow
 /// once / Deny whatever was granted, Allow all asks too, before and after untrusted
-/// content, and the line counts as going online.
+/// content, Full access runs it without a card (the terminal reaches everything there,
+/// D12), and the line counts as going online.
 fn assert_asks(shell: Shell, line: &str) {
     let verdict = classify(shell, line);
     let facts = command_facts(shell, line, &parse(shell, line));
@@ -92,6 +102,13 @@ fn assert_asks(shell: Shell, line: &str) {
             },
             "Allow all, {shell:?} {line:?}"
         );
+        for allow_all in [false, true] {
+            assert_eq!(
+                evaluate(&action, &full_access(allow_all, untrusted), &Everything),
+                Decision::AllowedByFullAccess,
+                "Full access, {shell:?} {line:?}"
+            );
+        }
     }
 }
 
@@ -410,10 +427,11 @@ fn the_reason_names_what_was_found() {
     assert!(why("timeout 9 codex exec").contains("codex"));
 }
 
-/// Sensitive places (0.0.5): a command that writes the settings of Claude Code or Codex (a
+/// Sensitive places (0.0.6): a command that writes the settings of Claude Code or Codex (a
 /// project's `.claude/` and `.mcp.json`, the user's `~/.claude/`, `~/.claude.json` and
-/// `~/.codex/`) keeps asking in Allow all, the same rule as `.git`; names that only look
-/// alike, and plain reads, do not.
+/// `~/.codex/`) keeps asking in Allow all, the same rule as `.git`, is decided in Ask first
+/// exactly as the same line for `.git` is, and runs in Full access; names that only look
+/// alike, and plain reads, do not keep asking.
 #[test]
 fn writing_their_settings_keeps_asking() {
     use crate::engine::KeepAsking;
@@ -448,6 +466,38 @@ fn writing_their_settings_keeps_asking() {
             ),
             "{line:?} did not ask in Allow all"
         );
+        // Ask first: the same decision as the same line writing into `.git`, whatever was
+        // granted (a grant for the command's own scope included).
+        let as_git = line
+            .replace(".claude.json", ".git/config")
+            .replace(".claude", ".git")
+            .replace(".codex", ".git")
+            .replace(".mcp.json", ".git/config");
+        let git = command_action(shell, &as_git);
+        assert!(
+            matches!(
+                command_facts(shell, &as_git, &parse(shell, &as_git)).keep_asking,
+                Some((KeepAsking::Sensitive, _))
+            ),
+            "{as_git:?}"
+        );
+        let granted: std::collections::BTreeSet<Scope> = [action.scope.clone()].into();
+        assert_eq!(
+            evaluate(&action, &turn(false, false), &granted),
+            evaluate(
+                &git,
+                &turn(false, false),
+                &[git.scope.clone()]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+            ),
+            "{line:?} vs {as_git:?} in Ask first"
+        );
+        assert_eq!(
+            evaluate(&action, &full_access(false, false), &Everything),
+            Decision::AllowedByFullAccess,
+            "{line:?} in Full access"
+        );
     }
     for (shell, line) in [
         (SH, "cat .claude/settings.json"),
@@ -462,4 +512,94 @@ fn writing_their_settings_keeps_asking() {
     ] {
         assert_eq!(kind(shell, line), None, "{shell:?} {line:?}");
     }
+}
+
+/// Sensitive places for the file tools (0.0.6), as the files describer builds the action
+/// (`files::always_ask_reason` makes it always-ask, `files::keep_asking` keeps it asking in
+/// Allow all): writing the settings of Claude Code or Codex asks with Allow once / Deny in
+/// Ask first whatever was granted, still asks in Allow all, and runs in Full access, exactly
+/// like a write into `.git`; a look-alike name stays grantable.
+#[test]
+fn the_file_tools_keep_asking_for_their_settings_in_every_mode() {
+    use crate::files::{WriteKind, always_ask_reason, keep_asking};
+    use crate::path::Flavor;
+    let write = |path: &str| {
+        let always = always_ask_reason(path, WriteKind::Edit, Flavor::Posix);
+        Action {
+            server: "files".into(),
+            tool: "write_file".into(),
+            summary: path.into(),
+            preview: path.into(),
+            scope: Scope::FileWrite {
+                folder: "/home/u/proj".into(),
+            },
+            risk: if always.is_some() {
+                Risk::AlwaysAsk
+            } else {
+                Risk::Normal
+            },
+            read_only: false,
+            outbound: false,
+            keep_asking: keep_asking(path, WriteKind::Edit, Flavor::Posix),
+            network: false,
+            hard_limit: None,
+            payload: serde_json::Value::Null,
+        }
+    };
+    let git = write("/home/u/proj/.git/config");
+    for path in [
+        "/home/u/proj/.claude/settings.json",
+        "/home/u/proj/.mcp.json",
+        "/home/u/proj/.codex/config.toml",
+        "/home/u/.claude/settings.json",
+        "/home/u/.claude.json",
+        "/home/u/.codex/config.toml",
+    ] {
+        let action = write(path);
+        assert_eq!(action.risk, Risk::AlwaysAsk, "{path}");
+        for untrusted in [false, true] {
+            assert_eq!(
+                evaluate(&action, &turn(false, untrusted), &Everything),
+                Decision::Ask {
+                    card: CardKind::OnceOnly,
+                    reason: AskReason::AlwaysAsk
+                },
+                "Ask first, {path}"
+            );
+            assert!(
+                matches!(
+                    evaluate(&action, &turn(true, untrusted), &Everything),
+                    Decision::Ask {
+                        reason: AskReason::StillAsksInAllowAll,
+                        ..
+                    }
+                ),
+                "Allow all, {path}"
+            );
+            for allow_all in [false, true] {
+                assert_eq!(
+                    evaluate(&action, &full_access(allow_all, untrusted), &Everything),
+                    Decision::AllowedByFullAccess,
+                    "Full access, {path}"
+                );
+            }
+            for mode in [
+                turn(false, untrusted),
+                turn(true, untrusted),
+                full_access(false, untrusted),
+            ] {
+                assert_eq!(
+                    evaluate(&action, &mode, &Everything),
+                    evaluate(&git, &mode, &Everything),
+                    "{path} is not decided like .git in {mode:?}"
+                );
+            }
+        }
+    }
+    let plain = write("/home/u/proj/claude/notes.md");
+    assert_eq!(plain.risk, Risk::Normal);
+    assert_eq!(
+        evaluate(&plain, &turn(false, false), &Everything),
+        Decision::AllowedByGrant
+    );
 }

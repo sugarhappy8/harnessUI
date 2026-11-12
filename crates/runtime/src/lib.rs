@@ -33,8 +33,7 @@ pub use llama::devices::{
 };
 pub use llama::failure::{LoadFailure, classify};
 pub use llama::launch::{
-    GpuLayers, GpuUse, LaunchConfig, MODEL_ALIAS, build_args, build_env, free_loopback_port,
-    random_api_key,
+    GpuUse, LaunchConfig, MODEL_ALIAS, build_args, build_env, free_loopback_port, random_api_key,
 };
 pub use llama::lock::{LlamaLock, PackFile, PackSpec};
 pub use llama::props::{Modalities, Props, TemplateCaps};

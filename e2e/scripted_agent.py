@@ -440,6 +440,8 @@ def p_folders(c, notes):
     s.screenshot(str(OUT / "tools-panel-folders.png"))
     panel = s.page_text()
     assert work in panel and other in panel, panel[-600:]
+    # [0.0.6 item 7] The folder chip in the chat header shows the same folders.
+    s.wait_for(lambda: folder_chip(s) == f"Folders for this chat: {os.path.basename(work)} + 1 more", 10, "the folder chip")
     radios = s.execute("return [...document.querySelectorAll('input[type=radio]')].map(r => ({v: r.value, c: r.checked, l: r.getAttribute('aria-label') || r.closest('label')?.innerText}));")
     notes.append("radios " + json.dumps(radios))
     assert any(r["c"] for r in radios), "no working folder selected in the panel"
@@ -452,6 +454,7 @@ def p_folders(c, notes):
     )
     time.sleep(0.6)
     assert s.invoke("get_chat", {"chatId": chat})["chat"]["workingFolder"] == other
+    s.wait_for(lambda: folder_chip(s) == f"Folders for this chat: {os.path.basename(other)} + 1 more", 10, "the chip names the new working folder")
     # A relative path now resolves in the working folder.
     Fake.queue.append({"tool_calls": [{"name": "list_dir", "arguments": {"path": "."}}]})
     Fake.queue.append({"content": "listed"})
@@ -481,6 +484,7 @@ def p_folders(c, notes):
     wait_idle(s)
     last_tool = json.dumps([m for m in messages(s, chat) if m["role"] == "tool"][-1])
     assert "notes.txt" in last_tool and "only-in-other" not in last_tool, last_tool[:400]
+    s.wait_for(lambda: folder_chip(s) == f"Folders for this chat: {os.path.basename(work)}", 10, "the chip after the folder was removed")
 
 
 @probe("skills-unload")
@@ -1361,6 +1365,7 @@ def p_full_access(c, notes):
         click_in_confirmation("Turn on Full access")
         s.wait_for(lambda: mode() == "fullAccess", 10, "the chat in Full access")
         s.wait_for(lambda: header("Full access"), 10, "the Full access button")
+        s.wait_for(lambda: folder_chip(s) == "Folders for this chat: Whole computer", 10, "the folder chip in Full access")  # [0.0.6 item 7]
         s.screenshot(str(OUT / "full-access-on.png"))
 
         # 2. Nothing asks: a read outside the approved folders, a new folder, a move into it, a
@@ -1416,6 +1421,7 @@ def p_full_access(c, notes):
         # 4. Back to Ask first: one click, no confirmation, and a write asks again.
         choose_mode(s, "Full access", "Ask first")
         s.wait_for(lambda: mode() == "ask", 10, "the chat back in Ask first")
+        s.wait_for(lambda: folder_chip(s) == f"Folders for this chat: {c.work.name}", 10, "the folder chip back in Ask first")  # [0.0.6 item 7]
         assert "Full access in this chat?" not in s.page_text()
         Fake.queue.append(call("write_file", {"path": str(outside / "after.txt"), "content": "x"}))
         Fake.queue.append({"tool_calls": [{"name": "make_folder", "arguments": {"path": str(inside / "nope")}}]})
@@ -3171,13 +3177,93 @@ def p_chat_memory(c, notes):
     message the summary stands for, whose Show summary shows the model's summary as plain
     text, also after a window reload. A summary that fails is reported and the reply goes
     on. A document longer than its share of the context is cut, with a note for the model
-    and one for the user."""
+    and one for the user. With the real small model (TEST_GGUF) loaded at 4,096 tokens, the
+    same with the model server's own token counts (_chat_memory_real)."""
     s = c.s
     s.invoke("set_setting", {"key": "remoteContextLength", "value": 4096})
     try:
         _chat_memory(c, notes)
     finally:
         s.invoke("set_setting", {"key": "remoteContextLength", "value": 32768})
+    _chat_memory_real(c, notes)
+
+
+# 0.0.6 WP3b: sends a message as the composer does (a channel for the streamed events, kept
+# in `window.__memEvents`), without waiting for the turn: the real model takes longer than a
+# script may run. `window.__memSent` says when send_message has returned.
+_MEMORY_SEND = """
+const [chatId, text, documents] = arguments;
+window.__memEvents = [];
+window.__memSent = null;
+const cb = window.__TAURI_INTERNALS__.transformCallback((raw) => {
+  let m = raw && raw.message !== undefined ? raw.message : raw;
+  try { if (typeof m === 'string') m = JSON.parse(m); } catch (e) { /* kept as it is */ }
+  window.__memEvents.push(m);
+});
+window.__TAURI_INTERNALS__.invoke('send_message', {chatId, text, parentId: null, documents,
+    onEvent: '__CHANNEL__:' + cb})
+  .then(() => { window.__memSent = {ok: true}; })
+  .catch(e => { window.__memSent = {ok: false, error: e}; });
+"""
+
+
+def _memory_real_send(s, chat, text, documents=None, timeout=600):
+    """Sends `text` (with `documents`, [(file name, text)]) and waits for the turn's end.
+    Returns (the events, the last message of the chat)."""
+    docs = [{"fileName": n, "data": __import__("base64").b64encode(t.encode()).decode()} for n, t in documents or []]
+    s.execute(_MEMORY_SEND, chat, text, docs or None)
+    s.wait_for(lambda: s.execute("return window.__memSent;"), timeout, "the real model's turn")
+    sent = s.execute("return window.__memSent;")
+    assert sent.get("ok"), sent
+    events = s.execute("return window.__memEvents || [];")
+    return events, messages(s, chat)[-1]
+
+
+def _chat_memory_real(c, notes):
+    """0.0.6 WP3b, with the real small model on the processor at 4,096 tokens, where the loop
+    counts with the model server's own tokens, not the app's estimate: a long document is cut
+    to its share and answered (never refused as too long), also when its text tokenises
+    densely (numbers); and a long chat is summarised by the real model, with the line and its
+    Show summary. Skipped without TEST_GGUF."""
+    s = c.s
+    model = os.environ.get("TEST_GGUF", "")
+    if not os.path.isfile(model):
+        notes.append("real model: skipped (no TEST_GGUF)")
+        return
+    try:
+        s.invoke("import_model", {"path": model})
+    except WebDriverError as e:
+        notes.append(f"real model import: {str(e)[:100]}")
+    s.execute(
+        "window.__memLoad = null; window.__TAURI_INTERNALS__.invoke('load_local_model', {path: arguments[0], "
+        "settings: {ctx: 4096, backend: null, device: null}, whenIdle: null})"
+        ".then(() => { window.__memLoad = {ok: true}; }).catch(e => { window.__memLoad = {ok: false, error: e}; });",
+        model)
+    s.wait_for(lambda: s.execute("return window.__memLoad;"), 300, "the real model loaded")
+    loaded = s.execute("return window.__memLoad;")
+    assert loaded.get("ok"), loaded
+    status = s.invoke("runtime_status")
+    assert status["state"] == "ready" and status["nCtx"] == 4096, status
+    try:
+        chat = s.invoke("create_chat", {"modelRef": f"local:{model}"})["id"]
+        s.invoke("set_chat_tools", {"chatId": chat, "enabled": c.default_tools})
+        s.invoke("set_chat_thinking", {"chatId": chat, "on": False})
+        ask = "In one short sentence: what is this file about?"
+        for name, text in (
+            ("prose.txt", "".join(f"Line {i}: the river runs past the old mill and on to the sea.\n" for i in range(1, 801))),
+            ("numbers.csv", "".join(f"{i},{(i * 7919) % 100003},{(i * 104729) % 1000003},{(i * 31337) % 99991}\n" for i in range(1, 1201))),
+        ):
+            began = time.time()
+            events, last = _memory_real_send(s, chat, ask, [(name, text)])
+            said = json.dumps(events)
+            notes.append(f"real model, {name} ({len(text):,} characters): {last['status']} in {time.time() - began:.0f} s, "
+                         f"{last.get('promptTokens')} prompt tokens; {(last.get('error') or {}).get('code')}")
+            assert last["role"] == "assistant" and last["status"] == "complete", last
+            assert f"Only the first part of {name} was sent (about " in said, said[:600]
+            assert last["promptTokens"] is None or last["promptTokens"] < 4096, last
+    finally:
+        s.invoke("unload_model", {})
+
 
 
 def _memory_text(m):
@@ -3627,6 +3713,10 @@ CLAUDE_TEMPLATE = {
             "--tools", "Read,Grep,Glob", "--settings",
             '{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}',
             "--output-format", "stream-json", "--verbose"],
+    True: ["-p", "--restricted", "--safe-mode", "--strict-mcp-config", "--permission-mode", "acceptEdits",
+           "--tools", "Read,Grep,Glob,Edit,Write", "--settings",
+           '{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}',
+           "--output-format", "stream-json", "--verbose"],
 }
 CODEX_TEMPLATE = {
     True: ["exec", "--json", "--sandbox", "workspace-write", "-c", "features.hooks=false", "-"],
@@ -3655,8 +3745,11 @@ def p_coding_apps(c, notes):
     switching it on in the Tools panel finds the fakes (located, never run) and names them by
     their full paths; a call shows a card with Allow once and Deny only, also in Allow all;
     Deny runs nothing; Allow once runs the fake with exactly the template, the task on
-    standard input, in the working folder, and its answer comes back. The real programs are
-    never run: the scenario stops before any Allow unless the programs found are the fakes."""
+    standard input, in the working folder, and its answer comes back. In Full access (0.0.6,
+    D11 as amended, D12) nothing asks: the fake runs at once with the same template, the
+    audit row says Full access, and the Tools panel still names the program. The real
+    programs are never run: the scenario stops before any Allow unless the programs found
+    are the fakes."""
     s = c.s
     bin_dir = pathlib.Path(os.path.realpath(c.fakebin))
     work = os.path.realpath(c.work)
@@ -3773,12 +3866,46 @@ def p_coding_apps(c, notes):
     assert (bin_dir / "codex-cwd.txt").read_text().strip() == work
     assert "FAKE-CODEX-ANSWER" in json.dumps(Fake.requests[-1]["messages"][-1])
 
-    # The audit log: the denied call and the two allowed ones, each with the task, never a grant.
+    # 4. Full access: no card; the fake runs with the may-edit template and the task on stdin.
+    for f in ("args", "stdin", "cwd"):
+        (bin_dir / f"claude-{f}.txt").unlink(missing_ok=True)
+    assert s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "fullAccess"}) == "fullAccess"
+    try:
+        Fake.requests.clear()
+        Fake.queue.append({"tool_calls": [{"name": "ask_claude_code",
+                                           "arguments": {"task": CODING_TASK, "may_edit": True}}]})
+        Fake.queue.append({"content": "FULL-ACCESS-FOLLOW-UP"})
+        send(s, "ask Claude Code to fix it, in Full access")
+        time.sleep(0.4)
+        deadline = time.time() + 60
+        while not idle(s):
+            assert "Allow once" not in s.page_text(), "a card was shown in Full access"
+            assert time.time() < deadline, "the turn did not finish"
+            time.sleep(0.2)
+        assert ran("claude"), "Full access did not run the program"
+        assert (bin_dir / "claude-args.txt").read_text().splitlines() == CLAUDE_TEMPLATE[True], \
+            (bin_dir / "claude-args.txt").read_text()
+        assert (bin_dir / "claude-stdin.txt").read_text() == CODING_TASK
+        assert (bin_dir / "claude-cwd.txt").read_text().strip() == work
+        assert "FAKE-CLAUDE-ANSWER" in json.dumps(Fake.requests[-1]["messages"][-1])
+        # The Tools panel still shows the resolved program and says the group is experimental.
+        s.click_button("Tools")
+        s.wait_text("Coding apps (experimental)", 10)
+        assert f"{bin_dir}/claude" in s.page_text(), s.page_text()[-600:]
+        s.screenshot(str(OUT / "coding-apps-full-access-panel.png"))
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.3)
+    finally:
+        s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
+
+    # The audit log: the denied call, the two allowed ones and the one Full access ran, each
+    # with the task, never a grant.
     audit = s.invoke("list_audit", {"filter": {"chatId": chat}})
-    rows = [(a["tool"], a["decision"], a["result_status"]) for a in audit if a["server"] == "coding_apps"]
+    rows = [(a["tool"], a["decision"], a["result_status"], a.get("note")) for a in audit if a["server"] == "coding_apps"]
     notes.append("audit: " + json.dumps(rows))
     assert sorted(r[:2] for r in rows) == sorted([("ask_claude_code", "denied"), ("ask_claude_code", "allow_once"),
-                                                 ("ask_codex", "allow_once")]), rows
+                                                 ("ask_codex", "allow_once"), ("ask_claude_code", "allowed_by_mode")]), rows
+    assert any(r[1] == "allowed_by_mode" and r[3] == "Full access" for r in rows), rows
 
 
 def share_call(port, method, path, body=None, key=None, bearer=False, headers=None, raw=None):
@@ -4238,11 +4365,107 @@ def p_other_apps(c, notes):
         assert k[-32:] not in log, "a sharing key is in the log"
 
 
+def folder_chip(s):
+    """[0.0.6 item 7] The whole text of the folder chip in the chat header (its accessible name)."""
+    return s.execute("const b = document.querySelector('[data-folder-chip]'); return b ? b.getAttribute('aria-label') : null;")
+
+
+@probe("folder-chip")
+def p_folder_chip(c, notes):
+    """Owner's request for 0.0.6 (item 7): "make it clear what folder is being used if u dont
+    have full access on and stuff. it currently kinda hidden." The chip in the chat header,
+    its menu (make working, remove, open the Tools panel), the message box's placeholder, a
+    path with hidden characters shown escaped, and Full access."""
+    s = c.s
+    chat = new_chat(c)
+    work, other = str(c.work), str(c.other)
+    odd = c.other.parent / "odd\u202egnp.exe\u200b"
+    odd.mkdir(exist_ok=True)
+    odd_shown = str(odd).replace("\u202e", "\\u{202E}").replace("\u200b", "\\u{200B}")
+    label = "Folders for this chat: "
+
+    def placeholder():
+        return s.execute("const t = document.querySelector('textarea'); return t ? t.placeholder : null;")
+
+    def menu_text():
+        s.wait_for(lambda: s.execute("return !!document.querySelector('[role=menu]');"), 10, "the folder menu")
+        time.sleep(0.3)
+        return s.execute("return document.querySelector('[role=menu]').innerText;")
+
+    def close():
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.3)
+
+    try:
+        # Only the folder approved for every chat: its last name, and the message box names it.
+        s.wait_for(lambda: folder_chip(s) == label + c.work.name, 10, "the chip with one folder")
+        assert placeholder() == f"Ask anything. Files: {c.work.name}", placeholder()
+        # Two folders for this chat only (the picker is native): the chip shows them without a reload.
+        con = sqlite3.connect(c.db)
+        for path in (other, str(odd)):
+            con.execute("INSERT INTO approved_folders(path, chat_id, created_at) VALUES (?, ?, ?)", (path, chat, int(time.time() * 1000)))
+        con.commit()
+        con.close()
+        s.wait_for(lambda: folder_chip(s) == label + f"{c.work.name} + 2 more", 10, "the chip with three folders")
+        s.screenshot(str(OUT / "folder-chip.png"))
+        s.click_button(label + f"{c.work.name} + 2 more")
+        menu = menu_text()
+        s.screenshot(str(OUT / "folder-chip-menu.png"))
+        notes.append("menu: " + menu.replace("\n", " | ")[:600])
+        assert work in menu and other in menu and odd_shown in menu, menu
+        assert "Working folder" in menu and "Add a folder…" in menu and "Open in Tools panel" in menu, menu
+        assert "\u202e" not in s.page_text() and "\u200b" not in s.page_text(), "a hidden character was shown as it is"
+        # Make this the working folder: the Tools panel's command, and the chat reads it.
+        s.click_button(f"Make {other} the working folder")
+        s.wait_for(lambda: s.invoke("get_chat", {"chatId": chat})["chat"]["workingFolder"] == other, 10, "the working folder set from the chip")
+        s.wait_for(lambda: folder_chip(s) == label + f"{c.other.name} + 2 more", 10, "the chip names the new working folder")
+        s.wait_for(lambda: placeholder() == f"Ask anything. Files: {c.other.name}", 10, "the placeholder names it")
+        # Open in Tools panel: the panel opens with the same working folder selected.
+        s.click_button(label + f"{c.other.name} + 2 more")
+        menu_text()
+        s.click_button("Open in Tools panel")
+        s.wait_for(lambda: s.execute(
+            "return [...document.querySelectorAll('h2')].some(h => h.innerText.trim() === 'Tools for this chat');"), 10, "the Tools panel")
+        s.wait_for(lambda: s.execute(
+            "const r = [...document.querySelectorAll('input[type=radio]')].find(r => r.checked); return r ? r.closest('label').title : null;")
+            == other, 10, "the same working folder selected in the Tools panel")
+        close()
+        # Remove, for this chat's own folders: the hidden-character one, then the working one.
+        s.click_button(label + f"{c.other.name} + 2 more")
+        menu_text()
+        s.click_button(f"Remove {odd_shown} from this chat")
+        s.wait_for(lambda: folder_chip(s) == label + f"{c.other.name} + 1 more", 10, "the chip after removing a folder")
+        s.click_button(label + f"{c.other.name} + 1 more")
+        menu = menu_text()
+        assert f"Remove {work} from this chat" not in json.dumps(s.execute(
+            "return [...document.querySelectorAll('[role=menuitem]')].map(e => e.getAttribute('aria-label'));")), "a folder for every chat was offered for removal"
+        s.click_button(f"Remove {other} from this chat")
+        s.wait_for(lambda: folder_chip(s) == label + c.work.name, 10, "the chip back to one folder")
+        assert [f["path"] for f in s.invoke("list_approved_folders", {"chatId": chat})] == [work]
+        # Full access: the whole computer, said plainly, with the working folder.
+        s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "fullAccess"})
+        s.wait_for(lambda: folder_chip(s) == label + "Whole computer", 10, "the chip in Full access")
+        s.click_button(label + "Whole computer")
+        menu = menu_text()
+        s.screenshot(str(OUT / "folder-chip-full-access.png"))
+        line = ("Full access is on, so the file and terminal tools can reach every folder on this computer except "
+                f"harnessUI's own. Working folder: {work}.")
+        assert line in menu.replace("\n", " "), menu
+        close()
+        s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "allowAll"})
+        s.wait_for(lambda: folder_chip(s) == label + c.work.name, 10, "the chip in Allow all")
+    finally:
+        s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
+        shutil.rmtree(odd, ignore_errors=True)
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all, p_full_access,
           p_tool_selection, p_artifacts, p_search, p_pinned,
           p_tool_errors_output, p_task_state, p_mentions, p_capability_check, p_context_inspector, p_compare_models,
           p_chat_memory, p_model_settings, p_coding_apps, p_share_proxy, p_other_apps]
+
+PROBES.append(p_folder_chip)  # [0.0.6 item 7]
 
 
 def main() -> int:

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sequence": 1,
+  "sequence": 2,
   "generated": "2026-11-10",
   "note": "Pinned commits, sizes and SHA-256 were HEAD-verified on 2026-11-10 (docs/research/huggingface.md). 'tested' records a passing scripts/catalog_test.py run (template shapes and a real tool-call round trip) under the pinned llama.cpp.",
   "tiers": {
@@ -75,7 +75,21 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Qwen3.5 represents a significant leap forward, integrating breakthroughs in multimodal learning, architectural efficiency, reinforcement learning scale, and global accessibility to empower developers and enterprises with unprecedented capability and efficiency.",
+      "source": "https://huggingface.co/Qwen/Qwen3.5-4B",
+      "goodAt": [
+        "tools",
+        "images",
+        "long-documents",
+        "languages"
+      ],
+      "publisher": "Qwen Team",
+      "parameters": 4000000000,
+      "languages": [
+        "multilingual"
+      ],
+      "released": "2026-02"
     },
     "granite-4.2-3b-q4km": {
       "name": "Granite 4.2 3B",
@@ -101,7 +115,35 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Granite-4.2-3B is the compact reasoning model in the Granite 4.2 family.",
+      "source": "https://huggingface.co/ibm-granite/granite-4.2-3b",
+      "goodAt": [
+        "chat",
+        "coding",
+        "reasoning",
+        "math",
+        "tools",
+        "long-documents",
+        "languages"
+      ],
+      "publisher": "IBM",
+      "parameters": 3000000000,
+      "languages": [
+        "en",
+        "de",
+        "es",
+        "fr",
+        "ja",
+        "pt",
+        "ar",
+        "cs",
+        "it",
+        "ko",
+        "nl",
+        "zh"
+      ],
+      "released": "2026-08-25"
     },
     "gemma-4-e4b-q40": {
       "name": "Gemma 4 E4B",
@@ -132,7 +174,22 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Smaller models are specifically designed for efficient local execution on laptops and mobile devices.",
+      "source": "https://huggingface.co/google/gemma-4-E4B-it",
+      "goodAt": [
+        "coding",
+        "reasoning",
+        "tools",
+        "images",
+        "long-documents",
+        "languages"
+      ],
+      "publisher": "Google DeepMind",
+      "parameters": 8000000000,
+      "languages": [
+        "multilingual"
+      ]
     },
     "qwen3.5-9b-q4km": {
       "name": "Qwen3.5 9B",
@@ -163,7 +220,21 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Qwen3.5 represents a significant leap forward, integrating breakthroughs in multimodal learning, architectural efficiency, reinforcement learning scale, and global accessibility to empower developers and enterprises with unprecedented capability and efficiency.",
+      "source": "https://huggingface.co/Qwen/Qwen3.5-9B",
+      "goodAt": [
+        "tools",
+        "images",
+        "long-documents",
+        "languages"
+      ],
+      "publisher": "Qwen Team",
+      "parameters": 9000000000,
+      "languages": [
+        "multilingual"
+      ],
+      "released": "2026-02"
     },
     "gemma-4-12b-qat": {
       "name": "Gemma 4 12B (QAT)",
@@ -194,7 +265,22 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Gemma 4 models are designed to deliver frontier-level performance at each size, targeting deployment scenarios from mobile and edge devices (E2B, E4B) to consumer GPUs and workstations (12B, 26B A4B, 31B). They are well-suited for reasoning, agentic workflows, coding, and multimodal understanding.",
+      "source": "https://huggingface.co/google/gemma-4-12B-it",
+      "goodAt": [
+        "coding",
+        "reasoning",
+        "tools",
+        "images",
+        "long-documents",
+        "languages"
+      ],
+      "publisher": "Google DeepMind",
+      "parameters": 11950000000,
+      "languages": [
+        "multilingual"
+      ]
     },
     "granite-4.2-8b-q4km": {
       "name": "Granite 4.2 8B",
@@ -220,7 +306,35 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Granite-4.2-8B is the mid-size reasoning model in the Granite 4.2 family.",
+      "source": "https://huggingface.co/ibm-granite/granite-4.2-8b",
+      "goodAt": [
+        "chat",
+        "coding",
+        "reasoning",
+        "math",
+        "tools",
+        "long-documents",
+        "languages"
+      ],
+      "publisher": "IBM",
+      "parameters": 8000000000,
+      "languages": [
+        "en",
+        "de",
+        "es",
+        "fr",
+        "ja",
+        "pt",
+        "ar",
+        "cs",
+        "it",
+        "ko",
+        "nl",
+        "zh"
+      ],
+      "released": "2026-08-25"
     },
     "gpt-oss-20b-mxfp4": {
       "name": "gpt-oss 20B",
@@ -246,7 +360,17 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Welcome to the gpt-oss series, OpenAI’s open-weight models designed for powerful reasoning, agentic tasks, and versatile developer use cases.",
+      "source": "https://huggingface.co/openai/gpt-oss-20b",
+      "goodAt": [
+        "reasoning",
+        "tools",
+        "speed"
+      ],
+      "publisher": "OpenAI",
+      "parameters": 21000000000,
+      "activeParameters": 3600000000
     },
     "ministral-3-14b-q4km": {
       "name": "Ministral 3 14B",
@@ -276,7 +400,31 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "The Ministral 3 family is designed for edge deployment, capable of running on a wide range of hardware.",
+      "source": "https://huggingface.co/mistralai/Ministral-3-14B-Instruct-2512",
+      "goodAt": [
+        "chat",
+        "tools",
+        "images",
+        "long-documents",
+        "languages"
+      ],
+      "publisher": "Mistral AI",
+      "parameters": 13900000000,
+      "languages": [
+        "en",
+        "fr",
+        "es",
+        "de",
+        "it",
+        "pt",
+        "nl",
+        "zh",
+        "ja",
+        "ko",
+        "ar"
+      ]
     },
     "qwen3.8-27b-udq4km": {
       "name": "Qwen3.8 27B",
@@ -307,7 +455,18 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Built on the architectural foundation of Qwen3.5, Qwen3.8 delivers substantial gains across coding, professional work, research, and long-horizon agentic tasks. Qwen3.8-27B brings these advances to a compact, deployment-friendly dense model: a native vision-language model that understands images and videos, with flexible thinking control, designed to carry complex, multi-step tasks through to completion with greater reliability.",
+      "source": "https://huggingface.co/Qwen/Qwen3.8-27B",
+      "goodAt": [
+        "coding",
+        "tools",
+        "images",
+        "long-documents"
+      ],
+      "publisher": "Qwen Team",
+      "parameters": 27000000000,
+      "released": "2026-08"
     },
     "gemma-4-26b-a4b-qat": {
       "name": "Gemma 4 26B A4B (QAT)",
@@ -338,7 +497,24 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "By only activating a 4B subset of parameters during inference, the Mixture-of-Experts model runs much faster than its 26B total might suggest. This makes it an excellent choice for fast inference compared to the dense 31B model since it runs almost as fast as a 4B-parameter model.",
+      "source": "https://huggingface.co/google/gemma-4-26B-A4B-it",
+      "goodAt": [
+        "coding",
+        "reasoning",
+        "tools",
+        "images",
+        "long-documents",
+        "languages",
+        "speed"
+      ],
+      "publisher": "Google DeepMind",
+      "parameters": 25200000000,
+      "activeParameters": 3800000000,
+      "languages": [
+        "multilingual"
+      ]
     },
     "granite-4.2-30b-q4km": {
       "name": "Granite 4.2 30B",
@@ -364,7 +540,35 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Granite-4.2-30B is the flagship reasoning model in the Granite 4.2 family.",
+      "source": "https://huggingface.co/ibm-granite/granite-4.2-30b",
+      "goodAt": [
+        "chat",
+        "coding",
+        "reasoning",
+        "math",
+        "tools",
+        "long-documents",
+        "languages"
+      ],
+      "publisher": "IBM",
+      "parameters": 30000000000,
+      "languages": [
+        "en",
+        "de",
+        "es",
+        "fr",
+        "ja",
+        "pt",
+        "ar",
+        "cs",
+        "it",
+        "ko",
+        "nl",
+        "zh"
+      ],
+      "released": "2026-08-25"
     },
     "qwen3.6-35b-a3b-q4km": {
       "name": "Qwen3.6 35B A3B",
@@ -395,7 +599,18 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Built on direct feedback from the community, Qwen3.6 prioritizes stability and real-world utility, offering developers a more intuitive, responsive, and genuinely productive coding experience.",
+      "source": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B",
+      "goodAt": [
+        "coding",
+        "tools",
+        "long-documents"
+      ],
+      "publisher": "Qwen Team",
+      "parameters": 35000000000,
+      "activeParameters": 3000000000,
+      "released": "2026-04"
     },
     "qwen3.8-27b-udq6k": {
       "name": "Qwen3.8 27B (higher precision)",
@@ -426,7 +641,18 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Built on the architectural foundation of Qwen3.5, Qwen3.8 delivers substantial gains across coding, professional work, research, and long-horizon agentic tasks. Qwen3.8-27B brings these advances to a compact, deployment-friendly dense model: a native vision-language model that understands images and videos, with flexible thinking control, designed to carry complex, multi-step tasks through to completion with greater reliability.",
+      "source": "https://huggingface.co/Qwen/Qwen3.8-27B",
+      "goodAt": [
+        "coding",
+        "tools",
+        "images",
+        "long-documents"
+      ],
+      "publisher": "Qwen Team",
+      "parameters": 27000000000,
+      "released": "2026-08"
     },
     "gemma-4-31b-qat": {
       "name": "Gemma 4 31B (QAT)",
@@ -457,7 +683,22 @@
       "sampling": {},
       "minLlamaBuild": null,
       "tested": null,
-      "memoryAtRecommendedCtx": null
+      "memoryAtRecommendedCtx": null,
+      "summary": "Gemma 4 models are designed to deliver frontier-level performance at each size, targeting deployment scenarios from mobile and edge devices (E2B, E4B) to consumer GPUs and workstations (12B, 26B A4B, 31B). They are well-suited for reasoning, agentic workflows, coding, and multimodal understanding.",
+      "source": "https://huggingface.co/google/gemma-4-31B-it",
+      "goodAt": [
+        "coding",
+        "reasoning",
+        "tools",
+        "images",
+        "long-documents",
+        "languages"
+      ],
+      "publisher": "Google DeepMind",
+      "parameters": 30700000000,
+      "languages": [
+        "multilingual"
+      ]
     }
   }
 }

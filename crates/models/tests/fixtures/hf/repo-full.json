@@ -1,0 +1,61 @@
+{
+  "_id": "000000000000000000000001",
+  "id": "example-quants/Sample-7B-GGUF",
+  "author": "example-quants",
+  "sha": "4444444444444444444444444444444444444444",
+  "lastModified": "2026-04-18T09:12:44.000Z",
+  "gated": false,
+  "downloads": 123456,
+  "likes": 789,
+  "pipeline_tag": "text-generation",
+  "tags": [
+    "gguf",
+    "conversational",
+    "code",
+    "text-generation",
+    "en",
+    "fr",
+    "base_model:example-labs/Sample-7B",
+    "base_model:quantized:example-labs/Sample-7B",
+    "license:other",
+    "endpoints_compatible",
+    "region:us",
+    "imatrix",
+    "Tool-Use"
+  ],
+  "cardData": {
+    "base_model": "example-labs/Sample-7B",
+    "language": ["en", "fr", "zh-Hans"],
+    "license": "other",
+    "license_name": "example-model-license",
+    "license_link": "LICENSE",
+    "pipeline_tag": "text-generation",
+    "tags": ["code"]
+  },
+  "gguf": {
+    "total": 7241732096,
+    "architecture": "sample",
+    "context_length": 32768,
+    "chat_template": "{% if tools %}{{ tools }}{% endif %}<think>"
+  },
+  "siblings": [
+    {"rfilename": ".gitattributes", "size": 1570},
+    {"rfilename": "README.md", "size": 4200},
+    {"rfilename": "LICENSE", "size": 11000},
+    {
+      "rfilename": "Sample-7B-Q4_K_M.gguf",
+      "size": 4400000000,
+      "lfs": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 4400000000, "pointerSize": 135}
+    },
+    {
+      "rfilename": "Sample-7B-Q8_0.gguf",
+      "size": 7700000000,
+      "lfs": {"sha256": "9999999999999999999999999999999999999999999999999999999999999999", "size": 7700000000, "pointerSize": 135}
+    },
+    {
+      "rfilename": "mmproj-Sample-7B-F16.gguf",
+      "size": 600000000,
+      "lfs": {"sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": 600000000, "pointerSize": 135}
+    }
+  ]
+}

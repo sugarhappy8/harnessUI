@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use runtime::llama::server::{Candidate, Supervisor, SupervisorExit};
 use runtime::{
-    Backend, BackendKind, Device, GpuLayers, GpuUse, LaunchConfig, LoadFailure, LoadStage,
-    ProbeResult, RuntimeLayout, ServerEvent, ServerState, StartSpec,
+    Backend, BackendKind, Device, GpuUse, LaunchConfig, LoadFailure, LoadStage, ProbeResult,
+    RuntimeLayout, ServerEvent, ServerState, StartSpec,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, oneshot};
@@ -425,43 +425,7 @@ impl RuntimeManager {
                 format!("{:?}", self.layout),
             ));
         }
-        let candidates = Self::candidates(&found, settings.device.as_deref());
-        let first = match settings.backend.as_deref() {
-            Some(choice) => match explicit_choice(&candidates, choice) {
-                Some(c) => c.clone(),
-                None => {
-                    let why = found
-                        .iter()
-                        .find(|(b, _)| kind_name(b.kind) == choice)
-                        .and_then(|(_, p)| p.error.as_ref().map(|e| e.to_string()))
-                        .unwrap_or_else(|| "not installed".to_string());
-                    return Err(AppError::new(
-                        "backend_unavailable",
-                        format!("The {choice} backend is not usable on this computer."),
-                        "Pick Auto in Settings → Local models, or run the backend check in Settings → Diagnostics.",
-                        why,
-                    ));
-                }
-            },
-            None => auto_choice(&candidates).cloned().ok_or_else(|| {
-                AppError::new(
-                    "no_usable_backend",
-                    "No llama.cpp backend could start on this computer.",
-                    if candidates.is_empty() {
-                        "Run the backend check in Settings → Diagnostics and copy the report into a bug report."
-                    } else {
-                        // Only CUDA or ROCm work here; Auto never picks them (D3).
-                        "Pick CUDA or ROCm in Settings → Local models, or run the backend check in Settings → Diagnostics."
-                    },
-                    found
-                        .iter()
-                        .map(|(b, p)| format!("{}: {:?}", b.kind, p.error))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-            })?,
-        };
-        Ok((first, candidates))
+        first_candidate(&found, settings)
     }
 
     fn tail_text(&self) -> String {
@@ -816,7 +780,7 @@ pub fn use_local_model(
 
 /// The launch of `model` on candidate `first` as `settings` resolved it: the context,
 /// "Use the graphics card" (always off on the processor), Save memory and Keep in memory.
-/// `gpu_layers` says the same as `gpu` for builds whose arguments still read it.
+/// The old `gpu_layers` field is left at its default: the arguments read `gpu` only.
 fn launch_config(
     settings: &ResolvedLoad,
     first: &Candidate,
@@ -833,17 +797,59 @@ fn launch_config(
     LaunchConfig {
         mmproj,
         device: first.device.clone(),
-        gpu_layers: match gpu {
-            GpuUse::All => GpuLayers::All,
-            GpuUse::Fit => GpuLayers::Auto,
-            GpuUse::Off => GpuLayers::Count(0),
-        },
         gpu,
         save_memory: settings.save_memory,
         keep_in_memory: settings.keep_in_memory,
         hip_visible_devices: first.hip_visible_devices.clone(),
         ..LaunchConfig::new(model, settings.ctx, port, api_key)
     }
+}
+
+/// The candidate a load starts on and the list it may step down through: the backend the
+/// user chose, or Auto's pick (D3), from the probes. Only the settings decide it, never
+/// the backend the last load ended up on, so Reload after a step-down tries the chosen
+/// backend (and the whole graphics card) again.
+fn first_candidate(
+    found: &[(Backend, ProbeResult)],
+    settings: &ResolvedLoad,
+) -> AppResult<(Candidate, Vec<Candidate>)> {
+    let candidates = RuntimeManager::candidates(found, settings.device.as_deref());
+    let first = match settings.backend.as_deref() {
+        Some(choice) => match explicit_choice(&candidates, choice) {
+            Some(c) => c.clone(),
+            None => {
+                let why = found
+                    .iter()
+                    .find(|(b, _)| kind_name(b.kind) == choice)
+                    .and_then(|(_, p)| p.error.as_ref().map(|e| e.to_string()))
+                    .unwrap_or_else(|| "not installed".to_string());
+                return Err(AppError::new(
+                    "backend_unavailable",
+                    format!("The {choice} backend is not usable on this computer."),
+                    "Pick Auto in Settings → Local models, or run the backend check in Settings → Diagnostics.",
+                    why,
+                ));
+            }
+        },
+        None => auto_choice(&candidates).cloned().ok_or_else(|| {
+            AppError::new(
+                "no_usable_backend",
+                "No llama.cpp backend could start on this computer.",
+                if candidates.is_empty() {
+                    "Run the backend check in Settings → Diagnostics and copy the report into a bug report."
+                } else {
+                    // Only CUDA or ROCm work here; Auto never picks them (D3).
+                    "Pick CUDA or ROCm in Settings → Local models, or run the backend check in Settings → Diagnostics."
+                },
+                found
+                    .iter()
+                    .map(|(b, p)| format!("{}: {:?}", b.kind, p.error))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        })?,
+    };
+    Ok((first, candidates))
 }
 
 /// The backend a load would start on: the user's choice (`backend`), or Auto's pick.
@@ -1338,13 +1344,9 @@ mod tests {
         let launch = |r: &ResolvedLoad, c: &Candidate| {
             launch_config(r, c, model.clone(), None, 4242, "key".into())
         };
-        for (gpu, layers) in [
-            (GpuUse::All, GpuLayers::All),
-            (GpuUse::Fit, GpuLayers::Auto),
-            (GpuUse::Off, GpuLayers::Count(0)),
-        ] {
+        for gpu in [GpuUse::All, GpuUse::Fit, GpuUse::Off] {
             let l = launch(&resolved(gpu, true, true), vulkan);
-            assert_eq!((l.gpu, l.gpu_layers), (gpu, layers));
+            assert_eq!(l.gpu, gpu);
             assert_eq!(l.ctx, 24_576);
             assert!(l.save_memory && l.keep_in_memory);
             assert_eq!(l.device.as_deref(), Some("Vulkan0"));
@@ -1353,9 +1355,55 @@ mod tests {
         }
         // The processor: never the graphics card, whatever the choice.
         let l = launch(&resolved(GpuUse::All, false, false), cpu);
-        assert_eq!((l.gpu, l.gpu_layers), (GpuUse::Off, GpuLayers::Count(0)));
+        assert_eq!(l.gpu, GpuUse::Off);
         assert_eq!(l.device, None);
         assert!(!l.save_memory && !l.keep_in_memory);
+    }
+
+    /// Reload after a step-down (D2c, D3): the load starts again on the backend the
+    /// settings choose, with the graphics card choice they hold, and may step down through
+    /// the rest of the list. Nothing of the last load's outcome (the processor it ended
+    /// on) is an input: `first_candidate` reads only the probes and the settings.
+    #[test]
+    fn a_reload_starts_on_the_chosen_backend_again() {
+        let found = vec![
+            usable(
+                BackendKind::Vulkan,
+                vec![device("Vulkan0", "AMD Radeon RX 9070 XT", 16304)],
+            ),
+            usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
+        ];
+        let auto = resolved(GpuUse::All, true, false);
+        let (first, all) = first_candidate(&found, &auto).expect("a candidate");
+        assert_eq!(first.backend.kind, BackendKind::Vulkan, "Auto's pick");
+        assert_eq!(first.device.as_deref(), Some("Vulkan0"));
+        let kinds: Vec<BackendKind> = all.iter().map(|c| c.backend.kind).collect();
+        assert_eq!(
+            kinds,
+            [BackendKind::Vulkan, BackendKind::Cpu],
+            "the step-down list"
+        );
+        let launch = launch_config(&auto, &first, "/m.gguf".into(), None, 1, "k".into());
+        assert_eq!(launch.gpu, GpuUse::All, "the whole graphics card again");
+        assert!(
+            launch.save_memory,
+            "Save memory as saved, even if a load turned it off"
+        );
+        let chosen = ResolvedLoad {
+            backend: Some("vulkan".into()),
+            ..auto.clone()
+        };
+        assert_eq!(
+            first_candidate(&found, &chosen).unwrap().0.backend.kind,
+            BackendKind::Vulkan
+        );
+        // A backend that is not usable is an error, never a quiet switch.
+        let gone = ResolvedLoad {
+            backend: Some("cuda".into()),
+            ..auto
+        };
+        let e = first_candidate(&found, &gone).unwrap_err();
+        assert_eq!(e.code, "backend_unavailable");
     }
 
     /// Where Automatic sizes for: the user's backend, else Auto's pick.

@@ -52,7 +52,7 @@ impl LoadFailure {
     ///
     /// For the memory failures it names only what is left for the user: before one is
     /// shown, the supervisor has already put less of the model on the graphics card and
-    /// tried the processor where it could (0.0.5, see
+    /// tried the processor where it could (0.0.6, see
     /// [`Supervisor`](super::server::Supervisor)).
     pub fn next_step(&self) -> &'static str {
         match self {
@@ -81,7 +81,7 @@ impl LoadFailure {
     }
 
     /// Whether Save memory (flash attention with a q8_0 conversation memory) may have
-    /// caused the failure, so a retry with it off is worth one attempt (0.0.5 D2c).
+    /// caused the failure, so a retry with it off is worth one attempt (0.0.6 D2c).
     ///
     /// A device or driver that cannot do it shows as a failed context (llama.cpp refuses a
     /// q8_0 memory without flash attention) or as a crash. A failure to allocate the
@@ -356,7 +356,7 @@ mod tests {
         assert!(LoadFailure::OutOfMemory.may_succeed_on_another_backend());
     }
 
-    /// Which failures make the supervisor retry on the same backend (0.0.5 D2c and the
+    /// Which failures make the supervisor retry on the same backend (0.0.6 D2c and the
     /// step-down): Save memory off for what an unsupported flash attention or q8_0 memory
     /// looks like, less of the model on the graphics card for running out of its memory.
     #[test]

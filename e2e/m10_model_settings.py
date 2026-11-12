@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""M10 end-to-end (0.0.5 WP1b): one model's load settings, with the real small model.
+"""M10 end-to-end (0.0.6 WP1b): one model's load settings, with the real small model.
 
 Drives the backend commands the model settings panel uses, in the real app:
 - a fresh install reads Automatic; the 0.0.4 upgrade rule (8,192 is Automatic, any other
   size stays and shows the one-time note on the first start only);
 - `model_load_info` for the real file; overrides outside the fixed lists are refused;
-- save a per-model context and Save memory, load the model with no settings: the
-  reported size is that context, and the launched llama-server has `-c` with it (and the
-  q8_0 cache flags once the launch arguments read Save memory);
+  unsaved choices previewed with `model_load_info {path, overrides}` change the fit marks
+  and save nothing;
+- save a per-model context, Save memory and Keep in memory, load the model with no
+  settings: the reported size is that context, and the launched llama-server has `-c`
+  with it, `-fa on -ctk q8_0 -ctv q8_0` and `-lm mmap+mlock` (this sandbox's mlock limit
+  means it proves the flag reaches the launch, not that memory is locked); without them
+  the launch has none of those flags;
 - change to Automatic: "Settings changed"; Apply and restart (`reload_local_model` without
   force) uses the new number; again with nothing changed is a no-op (same server process);
   Reload (force) restarts; the thinking limit needs no restart;
@@ -15,7 +19,8 @@ Drives the backend commands the model settings panel uses, in the real app:
   Cancel ends it with `load_replaced`; a second wait goes ahead when the reply is stopped;
   Stop and restart stops the reply first;
 - Unload remembers the model (`unloadedPath`); Load again uses its saved settings; Reset
-  to defaults; the 0.0.4 command shape `{ctx, backend, device}` still loads as given.
+  to defaults; the 0.0.4 command shape `{ctx, backend, device}` still loads as given, and
+  a size outside 512 to 1,048,576 tokens is refused.
 
 The D3 question in the window itself is WP2's scenario (`model-settings`).
 
@@ -38,7 +43,7 @@ sys.path.insert(0, str(ROOT / "e2e"))
 from webdriver import Session, WebDriverError  # noqa: E402
 
 APP = os.environ.get("APP_BIN", str(ROOT / "target" / "debug" / "app"))
-MODEL = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
+MODEL = os.environ.get("TEST_GGUF") or next(iter(sorted((ROOT / ".cache" / "models").glob("*.gguf"))), "")
 LLAMA_DIR = os.environ.get("APP_DEV_LLAMA_DIR", str(ROOT / ".cache" / "llama-linux"))
 OUT = pathlib.Path(os.environ.get("E2E_OUT", tempfile.mkdtemp(prefix="e2e-m10-")))
 IDENTIFIER = "io.github.sugarhappy8.harnessui"
@@ -252,11 +257,31 @@ def main() -> int:
         assert e.get("code") == "model_missing", e
         assert all(v == "default" for v in call(s, "model_load_info", {"path": MODEL})["overrides"].values())
 
-        step("save a per-model context and Save memory")
-        info = call(s, "set_model_load_settings", {"path": MODEL, "overrides": {"context": {"fixed": 8192}, "saveMemory": "on"}})
+        step("unsaved choices: the fit marks follow them, nothing is saved")
+        draft = {"context": "auto", "saveMemory": "on", "gpu": "default", "keepInMemory": "default",
+                 "device": "default", "thinkingLimit": "default"}
+        preview = call(s, "model_load_info", {"path": MODEL, "overrides": draft})
+        assert preview["overrides"]["saveMemory"] == "on" and preview["resolved"]["saveMemory"] is True, preview
+        auto_f16, auto_q8 = info["contextOptions"][0]["tokens"], preview["contextOptions"][0]["tokens"]
+        print("    Automatic:", auto_f16, "tokens; with Save memory:", auto_q8)
+        assert auto_q8 >= auto_f16, (auto_f16, auto_q8)
+        fixed = call(s, "model_load_info", {"path": MODEL, "overrides": {**draft, "context": {"fixed": 4096}}})
+        assert fixed["resolved"]["ctx"] == 4096 and fixed["resolved"]["ctxSource"] == "modelSetting", fixed["resolved"]
+        e = error_of(s, "model_load_info", {"path": MODEL, "overrides": {"context": {"fixed": 12345}}})
+        assert e.get("code") == "bad_request", e
+        assert all(v == "default" for v in call(s, "model_load_info", {"path": MODEL})["overrides"].values()), "a preview saved"
+        con = sqlite3.connect(db)
+        saved = con.execute("SELECT key FROM settings WHERE key LIKE 'modelLoad:%'").fetchall()
+        con.close()
+        assert saved == [], saved
+
+        step("save a per-model context, Save memory and Keep in memory")
+        own = {"context": {"fixed": 8192}, "saveMemory": "on", "keepInMemory": "on"}
+        info = call(s, "set_model_load_settings", {"path": MODEL, "overrides": own})
         assert info["overrides"]["context"] == {"fixed": 8192} and info["overrides"]["saveMemory"] == "on", info["overrides"]
         r = info["resolved"]
-        assert (r["ctx"], r["ctxChoice"], r["ctxSource"], r["saveMemory"]) == (8192, {"fixed": 8192}, "modelSetting", True), r
+        assert (r["ctx"], r["ctxChoice"], r["ctxSource"], r["saveMemory"], r["keepInMemory"]) == (
+            8192, {"fixed": 8192}, "modelSetting", True, True), r
 
         step("load with no settings: the model's own")
         call(s, "load_local_model", {"path": MODEL})
@@ -266,11 +291,10 @@ def main() -> int:
         pid, args = the_server(home)
         print("    llama-server:", " ".join(a for a in args[1:] if not a.startswith("/")))
         assert flag(args, "-c") == "8192", args
-        if "-ctk" in args or "--cache-type-k" in args:
-            assert (flag(args, "-ctk") or flag(args, "--cache-type-k")) == "q8_0", args
-            print("    Save memory reached the launch: q8_0 cache")
-        else:
-            print("    NOTE: the launch arguments do not carry Save memory yet (WP1a's build_args)")
+        assert (flag(args, "-fa"), flag(args, "-ctk"), flag(args, "-ctv")) == ("on", "q8_0", "q8_0"), args
+        assert flag(args, "-lm") == "mmap+mlock", args
+        assert flag(args, "-a") == "harnessui-local", args
+        assert st["adjustments"] == [], ("Save memory had to be turned off", st["adjustments"])
         info = call(s, "model_load_info", {"path": MODEL})
         assert info["loaded"] is True and info["olderSettingsLoaded"] is False and info["autoCtx"] is None, info
         assert st["settingsChanged"] is False
@@ -281,6 +305,7 @@ def main() -> int:
 
         step("change to Automatic: Settings changed, nothing restarts")
         call(s, "set_model_load_settings", {"path": MODEL, "overrides": {"context": "auto", "saveMemory": "on"}})
+        assert the_server(home)[0] == pid
         st = s.invoke("runtime_status")
         assert st["settingsChanged"] is True and st["nCtx"] == 8192, st
         assert call(s, "model_load_info", {"path": MODEL})["olderSettingsLoaded"] is True
@@ -296,6 +321,7 @@ def main() -> int:
         assert st["settingsChanged"] is False
         new_pid, args = the_server(home)
         assert new_pid != pid and flag(args, "-c") == str(st["nCtx"]), (pid, new_pid, args)
+        assert flag(args, "-ctk") == "q8_0" and "-lm" not in args, args
         pid = new_pid
 
         step("Apply and restart with nothing changed does nothing")
@@ -384,6 +410,10 @@ def main() -> int:
         assert all(v == "default" for v in info["overrides"].values()), info["overrides"]
         assert info["resolved"]["saveMemory"] is False and info["olderSettingsLoaded"] is True, info["resolved"]
         assert s.invoke("runtime_status")["settingsChanged"] is True
+        call(s, "reload_local_model", {"force": False, "whenIdle": False})
+        ready(s)
+        args = the_server(home)[1]
+        assert not {"-fa", "-ctk", "-ctv", "-lm"} & set(args), ("Save memory or Keep in memory without the setting", args)
 
         step("the 0.0.4 command shape still loads exactly as given")
         old = {"ctx": 4096, "backend": None, "device": None}
@@ -391,6 +421,10 @@ def main() -> int:
         st = ready(s)
         assert st["nCtx"] == 4096 and st["ctxSource"] == "defaultSetting", st
         assert flag(the_server(home)[1], "-c") == "4096"
+        for bad in (0, 100, 4_000_000):
+            e = error_of(s, "load_local_model", {"path": MODEL, "settings": {**old, "ctx": bad}})
+            assert e.get("code") == "bad_request", (bad, e)
+        assert flag(the_server(home)[1], "-c") == "4096", "a refused load changed nothing"
         call(s, "unload_model")
         s.screenshot(str(OUT / "m10-end.png"))
         print("PASS")

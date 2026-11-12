@@ -65,7 +65,8 @@ toml = { workspace = true, features = ["display"] }
 
 [target.'cfg(windows)'.dependencies]
 # Reading the Windows build number (ROCm needs Windows 11 25H2); same major as Tauri.
-windows = { version = "0.62", features = ["Win32_System_Registry", "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+# 0.0.6 Win32_Storage_FileSystem: a coding app's file identity (outside_agent/identity.rs).
+windows = { version = "0.62", features = ["Win32_System_Registry", "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem"] }
 
 [lints]
 workspace = true

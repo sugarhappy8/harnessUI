@@ -27,7 +27,7 @@ const SERVER_NOTE: Record<string, string> = {
 const LAST_GROUPS = ["subagents"];
 
 /**
- * The Coding apps group (0.0.5, experimental): the local model hands a task to Claude Code
+ * The Coding apps group (0.0.6, experimental): the local model hands a task to Claude Code
  * or Codex. It has a section of its own after the other groups: switching it on looks for
  * the programs (their files are located, never run) and names each by its full path.
  */
@@ -76,7 +76,7 @@ export function ToolsPanel(props: {
   const [gitFallback, setGitFallback] = useState<string | null>(null);
   // "Choose tools for each task automatically" (a setting for every chat). On until read.
   const [auto, setAuto] = useState(true);
-  // Coding apps (0.0.5): what was found when the group was last switched on.
+  // Coding apps (0.0.6): what was found when the group was last switched on.
   const [coding, setCoding] = useState<CodingAppsStatus | null>(null);
   const [finding, setFinding] = useState(false);
   const showError = useApp((s) => s.showError);

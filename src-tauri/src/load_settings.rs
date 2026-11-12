@@ -338,6 +338,11 @@ pub const OLD_DEFAULT_CTX: u32 = 8192;
 /// size: the 0.0.4 default.
 pub const UNKNOWN_AUTO_CTX: u32 = OLD_DEFAULT_CTX;
 
+/// The context sizes a setting may hold (`set_local_model_settings` refuses others). A
+/// stored size outside it (a damaged or hand-edited settings table) is never launched:
+/// `-c 0` would mean "the trained length", which can be far more than this computer has.
+pub const CTX_RANGE: std::ops::RangeInclusive<u32> = 512..=1_048_576;
+
 /// The defaults for all models as a load reads them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Defaults {
@@ -352,7 +357,8 @@ pub struct Defaults {
 /// - nothing stored (a fresh install), or a value that cannot be read: Automatic;
 /// - stored by 0.0.4 (no `contextAuto` key) with `ctx` exactly 8,192: Automatic;
 /// - stored by 0.0.4 with any other size: that size stays, with the one-time note;
-/// - stored by 0.0.5 (the key is there): as stored.
+/// - stored by 0.0.5 (the key is there): as stored;
+/// - a size outside [`CTX_RANGE`] (no version saves one): Automatic, the rest as stored.
 pub fn defaults_from_stored(raw: Option<&serde_json::Value>) -> Defaults {
     let fresh = || Defaults {
         settings: LocalModelSettings {
@@ -367,6 +373,14 @@ pub fn defaults_from_stored(raw: Option<&serde_json::Value>) -> Defaults {
     };
     settings.mmproj = None;
     settings.upgrade_note = None;
+    if !CTX_RANGE.contains(&settings.ctx) {
+        settings.ctx = OLD_DEFAULT_CTX;
+        settings.context_auto = true;
+        return Defaults {
+            settings,
+            upgrade_note: None,
+        };
+    }
     let mut upgrade_note = None;
     if raw.get("contextAuto").is_none() {
         if settings.ctx == OLD_DEFAULT_CTX {
@@ -429,14 +443,28 @@ async fn page_defaults_with(
     settings
 }
 
-/// One model's saved overrides; all `Default` when none are saved.
+/// One model's saved overrides; all `Default` when none are saved or they cannot be read.
 pub async fn read_overrides(store: &store::Store, file_name: &str, size: u64) -> ModelLoadSettings {
-    store
+    let stored: ModelLoadSettings = store
         .get_setting(&settings_key(file_name, size))
         .await
         .ok()
         .flatten()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    sane_overrides(stored)
+}
+
+/// Stored overrides as a load may use them: a fixed size outside [`CTX_RANGE`], which
+/// `set_model_load_settings` never saves, follows the defaults instead. Every other value
+/// is one of a fixed list when it is read, and a device name is only ever matched against
+/// the probed devices.
+fn sane_overrides(mut overrides: ModelLoadSettings) -> ModelLoadSettings {
+    if let ContextChoice::Fixed(n) = overrides.context
+        && !CTX_RANGE.contains(&n)
+    {
+        overrides.context = ContextChoice::Default;
+    }
+    overrides
 }
 
 /// Saves one model's overrides; all `Default` deletes the key ("Reset to defaults").
@@ -992,6 +1020,18 @@ impl Plan {
     }
 }
 
+/// Where a [`Plan`] takes the settings from.
+enum Source {
+    /// The defaults for all models and the model's own overrides, as saved.
+    Saved,
+    /// The 0.0.4 command shape (`load_local_model` with settings): used as the defaults,
+    /// without the model's own overrides.
+    Explicit(LocalModelSettings),
+    /// The saved defaults with these overrides instead of the saved ones (the panel's
+    /// unsaved choices; nothing is saved).
+    Draft(ModelLoadSettings),
+}
+
 /// Resolves a load of the model at `path`. `explicit` is the 0.0.4 command shape
 /// (`load_local_model` with settings): those settings are used as the defaults and the
 /// model's own overrides are not applied; `None` reads both from the store.
@@ -1000,21 +1040,51 @@ pub async fn plan(
     path: &str,
     explicit: Option<LocalModelSettings>,
 ) -> Plan {
-    let (defaults, saved) = match explicit {
-        Some(mut s) => {
+    let source = match explicit {
+        Some(s) => Source::Explicit(s),
+        None => Source::Saved,
+    };
+    plan_from(state, path, source).await
+}
+
+/// [`plan`] with `overrides` in place of the model's saved ones, the saved defaults
+/// otherwise: what the panel shows for choices that are not saved yet.
+pub async fn plan_draft(
+    state: &crate::state::AppState,
+    path: &str,
+    overrides: ModelLoadSettings,
+) -> Plan {
+    plan_from(state, path, Source::Draft(overrides)).await
+}
+
+/// The defaults and the model's overrides a load of `path` uses, from `source`.
+async fn settings_for(
+    store: &store::Store,
+    path: &str,
+    source: Source,
+) -> (LocalModelSettings, ModelLoadSettings) {
+    match source {
+        Source::Explicit(mut s) => {
             s.mmproj = None;
             s.upgrade_note = None;
-            (s, false)
+            (s, ModelLoadSettings::default())
         }
-        None => (read_defaults(&state.store).await.settings, true),
-    };
+        Source::Draft(o) => (read_defaults(store).await.settings, o),
+        Source::Saved => {
+            let overrides = match file_identity(std::path::Path::new(path)) {
+                Some((name, size)) => read_overrides(store, &name, size).await,
+                None => ModelLoadSettings::default(),
+            };
+            (read_defaults(store).await.settings, overrides)
+        }
+    }
+}
+
+async fn plan_from(state: &crate::state::AppState, path: &str, source: Source) -> Plan {
+    let (defaults, overrides) = settings_for(&state.store, path, source).await;
     let mmproj = crate::hub::projector_for(state, path).await;
     let model = std::path::Path::new(path);
     let facts = read_facts(model, mmproj.as_deref()).await;
-    let overrides = match (&facts, saved) {
-        (Some(f), true) => read_overrides(&state.store, &f.file_name, f.size_bytes).await,
-        _ => ModelLoadSettings::default(),
-    };
     let found = state.runtime.backends(false).await;
     let ram = models::hardware::system_memory().map_or(0, |m| m.available_bytes);
     let machine = Machine::from_probes(
@@ -1331,6 +1401,122 @@ mod tests {
             &json!({"ctx": 4096, "backend": null, "device": null, "mmproj": "/x", "upgradeNote": 3}),
         ));
         assert_eq!((d.settings.mmproj, d.settings.upgrade_note), (None, None));
+    }
+
+    /// A size no version of the app saves (a damaged or hand-edited settings table) is
+    /// never launched: `-c 0` would mean the whole trained length. It reads as Automatic,
+    /// with the rest as stored and no note.
+    #[test]
+    fn a_stored_size_outside_the_range_reads_as_automatic() {
+        for stored in [
+            json!({"ctx": 0, "backend": "vulkan", "device": "Vulkan1"}),
+            json!({"ctx": 100, "backend": "vulkan", "device": "Vulkan1", "contextAuto": false}),
+            json!({"ctx": 4_000_000, "backend": "vulkan", "device": "Vulkan1", "contextAuto": false, "saveMemory": true}),
+        ] {
+            let d = defaults_from_stored(Some(&stored));
+            assert!(d.settings.context_auto, "{stored}");
+            assert_eq!(d.settings.ctx, OLD_DEFAULT_CTX, "{stored}");
+            assert_eq!(d.upgrade_note, None, "{stored}");
+            assert_eq!(d.settings.backend.as_deref(), Some("vulkan"), "{stored}");
+            assert_eq!(d.settings.device.as_deref(), Some("Vulkan1"), "{stored}");
+        }
+        let d = defaults_from_stored(Some(
+            &json!({"ctx": 4_000_000, "saveMemory": true, "contextAuto": false}),
+        ));
+        assert!(d.settings.save_memory, "the other fields stay as stored");
+        // The ends of the range are sizes a user can save.
+        for ctx in [512, 1_048_576] {
+            let d = defaults_from_stored(Some(&json!({"ctx": ctx, "contextAuto": false})));
+            assert_eq!((d.settings.ctx, d.settings.context_auto), (ctx, false));
+        }
+    }
+
+    /// The same for one model's stored overrides: a fixed size outside the range follows
+    /// the defaults; overrides that cannot be read at all are all "same as default".
+    #[tokio::test]
+    async fn stored_overrides_outside_the_range_follow_the_defaults() {
+        let store = store::Store::open_in_memory().unwrap();
+        let key = settings_key("m.gguf", 16);
+        for (stored, context) in [
+            (
+                json!({"context": {"fixed": 0}, "saveMemory": "on"}),
+                ContextChoice::Default,
+            ),
+            (
+                json!({"context": {"fixed": 4_000_000}, "saveMemory": "on"}),
+                ContextChoice::Default,
+            ),
+            (
+                json!({"context": {"fixed": 4096}, "saveMemory": "on"}),
+                ContextChoice::Fixed(4096),
+            ),
+        ] {
+            store.set_setting(&key, &stored).await.unwrap();
+            let o = read_overrides(&store, "m.gguf", 16).await;
+            assert_eq!(o.context, context, "{stored}");
+            assert_eq!(o.save_memory, Toggle::On, "{stored}");
+        }
+        store
+            .set_setting(&key, &json!({"gpu": "half", "saveMemory": "on"}))
+            .await
+            .unwrap();
+        assert!(read_overrides(&store, "m.gguf", 16).await.is_default());
+    }
+
+    /// Where a load takes its settings from: as saved (the defaults and the model's own),
+    /// the panel's unsaved choices instead of the model's own, or the 0.0.4 command shape
+    /// as the defaults with nothing of the model's own.
+    #[tokio::test]
+    async fn settings_come_from_the_saved_values_a_draft_or_the_old_command() {
+        let dir = Scratch::new();
+        let path = dir.path().join("m.gguf");
+        std::fs::write(&path, vec![0u8; 16]).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let store = store::Store::open_in_memory().unwrap();
+        let saved_defaults = LocalModelSettings {
+            ctx: 16_384,
+            context_auto: false,
+            gpu: GpuUse::Fit,
+            ..LocalModelSettings::default()
+        };
+        store
+            .set_setting(crate::settings::LOCAL_MODEL, &saved_defaults)
+            .await
+            .unwrap();
+        let own = ModelLoadSettings {
+            save_memory: Toggle::On,
+            ..ModelLoadSettings::default()
+        };
+        save_overrides(&store, "m.gguf", 16, &own).await.unwrap();
+
+        let (defaults, overrides) = settings_for(&store, &path, Source::Saved).await;
+        assert_eq!((defaults.ctx, defaults.gpu), (16_384, GpuUse::Fit));
+        assert_eq!(overrides, own);
+
+        let draft = ModelLoadSettings {
+            gpu: GpuChoice::Off,
+            ..ModelLoadSettings::default()
+        };
+        let (defaults, overrides) = settings_for(&store, &path, Source::Draft(draft.clone())).await;
+        assert_eq!(defaults.ctx, 16_384, "the saved defaults");
+        assert_eq!(overrides, draft, "the draft, not the saved overrides");
+        let stored = read_overrides(&store, "m.gguf", 16).await;
+        assert_eq!(stored, own, "a draft saves nothing");
+
+        let old = LocalModelSettings {
+            ctx: 4096,
+            mmproj: Some("/x/mmproj.gguf".into()),
+            upgrade_note: Some(3),
+            ..LocalModelSettings::default()
+        };
+        let (defaults, overrides) = settings_for(&store, &path, Source::Explicit(old)).await;
+        assert_eq!(defaults.ctx, 4096);
+        assert_eq!((defaults.mmproj, defaults.upgrade_note), (None, None));
+        assert!(overrides.is_default(), "the old shape is used as given");
+
+        // A file that is not there has no overrides of its own.
+        let (_, overrides) = settings_for(&store, "/no/such/m.gguf", Source::Saved).await;
+        assert!(overrides.is_default());
     }
 
     /// The note shows on the first start after the update (for that whole run, while the
@@ -2049,5 +2235,94 @@ mod tests {
         // 2 layers × 2 rows × 2 heads × 64 values: 2 bytes each, or 4 blocks of 34 bytes.
         assert_eq!(header.kv_f16, 1024);
         assert_eq!(header.kv_q8, 2 * 2 * 4 * 34);
+    }
+
+    /// How exact Automatic is, against the pinned llama-server and a real model (set
+    /// `LLAMA_SERVER_BIN` and `TEST_GGUF`; skipped without them, and off Linux, where the
+    /// memory is read from `/proc`): the memory a longer context takes, with and without
+    /// Save memory, is what the estimate counts per token, within 10 %. On the build
+    /// machine it matched llama.cpp's own figure exactly (114,688 bytes a token in f16 and
+    /// 60,928 with q8_0 for the 0.6B test model).
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_memory_estimate_matches_llama_server() {
+        let bin = std::env::var_os("LLAMA_SERVER_BIN").filter(|v| !v.is_empty());
+        let gguf = std::env::var_os("TEST_GGUF").filter(|v| !v.is_empty());
+        let (Some(bin), Some(gguf)) = (bin, gguf) else {
+            eprintln!("skipping: set LLAMA_SERVER_BIN and TEST_GGUF to run it");
+            return;
+        };
+        let (bin, gguf) = (
+            std::path::PathBuf::from(bin),
+            std::path::PathBuf::from(gguf),
+        );
+        let dir = bin.parent().expect("a folder").to_path_buf();
+        let layout = runtime::RuntimeLayout {
+            installed_dir: None,
+            packs_dir: dir.join("no-packs-here"),
+            dev_override: Some(dir),
+        };
+        let backend = runtime::discover(&layout)
+            .into_iter()
+            .find(|b| b.kind == runtime::BackendKind::Cpu)
+            .expect("the processor backend next to LLAMA_SERVER_BIN");
+        let header = read_facts(&gguf, None)
+            .await
+            .and_then(|f| f.header)
+            .expect("the model's header");
+        assert!(header.kv_f16 > 0 && header.kv_q8 > 0);
+        // The resident memory of a server started with `ctx` tokens, once it is ready.
+        let rss_at = |ctx: u32, save_memory: bool| {
+            let (backend, gguf) = (backend.clone(), gguf.clone());
+            async move {
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                let launch = runtime::LaunchConfig {
+                    gpu: GpuUse::Off,
+                    save_memory,
+                    cache_ram_mib: 0,
+                    ..runtime::LaunchConfig::new(
+                        gguf,
+                        ctx,
+                        runtime::free_loopback_port().expect("a port"),
+                        runtime::random_api_key(),
+                    )
+                };
+                let spec = runtime::StartSpec {
+                    backend,
+                    launch,
+                    load_timeout: std::time::Duration::from_secs(180),
+                };
+                let server = match runtime::start(spec, tx).await {
+                    Ok(server) => server,
+                    Err(e) => panic!("start failed: {e}\n{}", e.stderr_tail().join("\n")),
+                };
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let pid = server.pid().expect("a process");
+                let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+                let kib: u64 = status
+                    .lines()
+                    .find_map(|l| l.strip_prefix("VmRSS:"))
+                    .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+                    .expect("VmRSS");
+                server.stop().await;
+                kib * 1024
+            }
+        };
+        const MORE: u32 = 8192;
+        for (save_memory, per_token) in [(false, header.kv_f16), (true, header.kv_q8)] {
+            let short = rss_at(4096, save_memory).await;
+            let long = rss_at(4096 + MORE, save_memory).await;
+            let measured = long.saturating_sub(short) as f64;
+            let estimated = (per_token * u64::from(MORE)) as f64;
+            eprintln!(
+                "save memory {save_memory}: {MORE} more tokens took {:.1} MiB; the estimate is {:.1} MiB",
+                measured / MIB as f64,
+                estimated / MIB as f64
+            );
+            assert!(
+                (measured - estimated).abs() <= estimated * 0.1,
+                "save memory {save_memory}: measured {measured} bytes, estimated {estimated}"
+            );
+        }
     }
 }

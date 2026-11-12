@@ -1,4 +1,4 @@
-//! Coding apps (0.0.5): the templates and the card, finding the programs, the policy
+//! Coding apps (0.0.6): the templates and the card, finding the programs, the policy
 //! decision in every mode, and runs of fake programs that record their arguments, standard
 //! input, working folder and environment. No real Claude Code or Codex is ever run: every
 //! search below is given its own `PATH` of temporary folders.
@@ -92,6 +92,41 @@ fn server_for(bin: &Path, env: BTreeMap<String, String>) -> CodingAppsServer {
     );
     s.windows = false;
     s
+}
+
+/// What the store holds: every approved folder, and the asking chat's own (`None`: they
+/// could not be read).
+fn approved_store(all: Vec<String>, chat: Option<Vec<String>>) -> Approved {
+    Arc::new(move |_| {
+        let now = ApprovedNow {
+            all: all.clone(),
+            chat: chat.clone(),
+        };
+        Box::pin(async move { now })
+    })
+}
+
+/// The chat's tool context in Full access, as `turns::AppTools::chat_now` builds it: its
+/// own folders, then the whole computer, and `home` as the working folder when it has none.
+fn in_full_access(mut chat: ChatContext, home: &Path) -> ChatContext {
+    crate::approvals::widen(&mut chat, &crate::approvals::whole_computer(Some(home)));
+    chat
+}
+
+fn turn_in(
+    allow_all: bool,
+    full_access: bool,
+    untrusted: bool,
+    recovered: bool,
+) -> policy::TurnContext {
+    policy::TurnContext {
+        tool_enabled: true,
+        server_ready: true,
+        untrusted_in_turn: untrusted,
+        recovered_from_text: recovered,
+        allow_all,
+        full_access,
+    }
 }
 
 async fn describe(s: &CodingAppsServer, tool: &str, a: Value, c: &ChatContext) -> policy::Action {
@@ -543,13 +578,10 @@ async fn a_program_inside_an_approved_folder_is_refused() {
     assert!(!bin.join("args.txt").exists(), "it ran");
     // A folder approved only for another chat counts too.
     let elsewhere = temp("elsewhere-work");
-    let s = server_for(&bin, base_env()).with_all_approved({
-        let project = project.display().to_string();
-        Arc::new(move || {
-            let project = project.clone();
-            Box::pin(async move { vec![project] })
-        })
-    });
+    let s = server_for(&bin, base_env()).with_approved(approved_store(
+        vec![project.display().to_string()],
+        Some(vec![elsewhere.display().to_string()]),
+    ));
     let action = describe(&s, CLAUDE_TOOL, json!({"task": "hello"}), &chat(&elsewhere)).await;
     assert!(
         action
@@ -812,6 +844,227 @@ async fn it_always_asks_in_ask_first_and_allow_all_and_after_a_grant() {
             }
         }
     }
+}
+
+/// Full access (D11 as amended for 0.0.6, D12): nothing asks and the call runs, with the
+/// same template and the task on standard input. The chat's tool context then lists the
+/// whole computer as approved; that must not make every program "inside an approved
+/// folder", and the card is described as in the other modes (it is never shown).
+#[cfg(unix)]
+#[tokio::test]
+async fn full_access_runs_without_a_card() {
+    let bin = temp("full-bin");
+    let work = temp("full-work");
+    let home = temp("full-home");
+    fake(&bin, "claude", CLAUDE_OK);
+    fake(&bin, "codex", CODEX_OK);
+    let own = vec![work.display().to_string()];
+    let s =
+        server_for(&bin, base_env()).with_approved(approved_store(own.clone(), Some(own.clone())));
+    let wide = in_full_access(chat(&work), &home);
+    assert!(wide.full_access);
+    assert!(
+        wide.approved_folders.iter().any(|f| f == "/"),
+        "{:?}",
+        wide.approved_folders
+    );
+    let task = "-p --yolo \"quoted\" 'single' 100% $HOME `id`\nsecond line";
+    for (tool, may_edit, app, answer) in [
+        (
+            CLAUDE_TOOL,
+            false,
+            CodingApp::ClaudeCode,
+            "FAKE-CLAUDE-ANSWER: the word is heron",
+        ),
+        (
+            CLAUDE_TOOL,
+            true,
+            CodingApp::ClaudeCode,
+            "FAKE-CLAUDE-ANSWER: the word is heron",
+        ),
+        (CODEX_TOOL, false, CodingApp::Codex, "FAKE-CODEX-ANSWER"),
+        (CODEX_TOOL, true, CodingApp::Codex, "FAKE-CODEX-ANSWER"),
+    ] {
+        let action = describe(&s, tool, json!({"task": task, "may_edit": may_edit}), &wide).await;
+        assert_eq!(action.hard_limit, None, "{tool} {may_edit}");
+        // The same action as outside Full access: the same card text, scope and facts.
+        let narrow = describe(
+            &s,
+            tool,
+            json!({"task": task, "may_edit": may_edit}),
+            &chat(&work),
+        )
+        .await;
+        assert_eq!(action.preview, narrow.preview);
+        assert_eq!(action.scope, narrow.scope);
+        assert_eq!(action.risk, policy::Risk::AlwaysAsk);
+        assert!(action.keep_asking.is_some() && action.network && action.outbound);
+        let granted: BTreeSet<policy::Scope> = [action.scope.clone()].into();
+        for allow_all in [false, true] {
+            for untrusted in [false, true] {
+                for recovered in [false, true] {
+                    for grants in [&BTreeSet::new(), &granted] {
+                        assert_eq!(
+                            policy::evaluate(
+                                &action,
+                                &turn_in(allow_all, true, untrusted, recovered),
+                                grants
+                            ),
+                            policy::Decision::AllowedByFullAccess,
+                            "{tool} {may_edit} allow_all {allow_all} untrusted {untrusted} recovered {recovered}"
+                        );
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(bin.join("args.txt"));
+        let (out, _) = call(&s, &action, &wide).await;
+        assert!(!out.is_error, "{tool} {may_edit}: {out:?}");
+        assert_eq!(out.joined_text(), answer);
+        let recorded: Vec<String> = std::fs::read_to_string(bin.join("args.txt"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(recorded, arguments(app, may_edit), "{tool} {may_edit}");
+        assert_eq!(
+            std::fs::read_to_string(bin.join("stdin.txt")).unwrap(),
+            task
+        );
+        assert_eq!(
+            std::fs::read_to_string(bin.join("cwd.txt")).unwrap().trim(),
+            work.display().to_string()
+        );
+    }
+}
+
+/// Full access keeps steps 1 and 2 (D11): the group off, a program inside a folder the user
+/// approved, a swapped file, a working folder the user did not approve, and approved
+/// folders that cannot be read each stop the call before anything runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn full_access_keeps_the_hard_limits() {
+    let bin = temp("fullhl-bin");
+    let work = temp("fullhl-work");
+    let home = temp("fullhl-home");
+    fake(&bin, "claude", CLAUDE_OK);
+    let own = vec![work.display().to_string()];
+    let store = || approved_store(own.clone(), Some(own.clone()));
+    let refused = |action: &policy::Action, needle: &str| {
+        let why = action.hard_limit.clone().unwrap_or_default();
+        assert!(why.contains(needle), "{needle:?} not in {why:?}");
+        assert!(
+            matches!(
+                policy::evaluate(
+                    action,
+                    &turn_in(false, true, false, false),
+                    &BTreeSet::new()
+                ),
+                policy::Decision::Denied { .. }
+            ),
+            "{needle}"
+        );
+    };
+
+    // 1. The group off in the chat: refused by the engine, in Full access too.
+    let s = server_for(&bin, base_env()).with_approved(store());
+    let wide = in_full_access(chat(&work), &home);
+    let action = describe(&s, CLAUDE_TOOL, json!({"task": "x"}), &wide).await;
+    let off = policy::TurnContext {
+        tool_enabled: false,
+        ..turn_in(false, true, false, false)
+    };
+    assert!(matches!(
+        policy::evaluate(&action, &off, &BTreeSet::new()),
+        policy::Decision::Refused { .. }
+    ));
+
+    // 2. A program inside a folder the user approved (here: for this chat).
+    let project = temp("fullhl-project");
+    let inside = project.join("tools");
+    std::fs::create_dir_all(&inside).unwrap();
+    fake(&inside, "claude", CLAUDE_OK);
+    let mine = vec![project.display().to_string()];
+    let s2 = server_for(&inside, base_env())
+        .with_approved(approved_store(mine.clone(), Some(mine.clone())));
+    let action = describe(
+        &s2,
+        CLAUDE_TOOL,
+        json!({"task": "x"}),
+        &in_full_access(chat(&project), &home),
+    )
+    .await;
+    refused(&action, "inside a folder you approved");
+    assert!(!inside.join("args.txt").exists(), "it ran");
+
+    // 3. A working folder the user did not approve: a chat with no folder of its own works
+    //    in the home folder in Full access, which nobody approved.
+    let none = ChatContext {
+        approved_folders: Vec::new(),
+        working_folder: None,
+        ..chat(&work)
+    };
+    let s3 =
+        server_for(&bin, base_env()).with_approved(approved_store(Vec::new(), Some(Vec::new())));
+    let wide_none = in_full_access(none, &home);
+    assert_eq!(
+        wide_none.working_folder.as_deref(),
+        Some(home.display().to_string().as_str())
+    );
+    let action = describe(&s3, CLAUDE_TOOL, json!({"task": "x"}), &wide_none).await;
+    refused(&action, "No folder is approved for this chat");
+    //    And a working folder outside the chat's own folders.
+    let elsewhere = temp("fullhl-elsewhere");
+    let moved = ChatContext {
+        working_folder: Some(elsewhere.display().to_string()),
+        ..in_full_access(chat(&work), &home)
+    };
+    let action = describe(&s, CLAUDE_TOOL, json!({"task": "x"}), &moved).await;
+    refused(&action, "is not approved");
+
+    // 4. A swapped file: described, then replaced before the run.
+    let action = describe(&s, CLAUDE_TOOL, json!({"task": "x"}), &wide).await;
+    assert_eq!(action.hard_limit, None);
+    // The old file stays alive under another name, so its inode cannot be reused.
+    let body = std::fs::read(bin.join("claude")).unwrap();
+    std::fs::rename(bin.join("claude"), bin.join("claude-old")).unwrap();
+    std::fs::write(bin.join("claude"), body).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    let (out, _) = call(&s, &action, &wide).await;
+    assert!(
+        out.is_error && out.joined_text().contains("Nothing was run"),
+        "{out:?}"
+    );
+    assert!(!bin.join("args.txt").exists(), "it ran");
+    refused(
+        &describe(&s, CLAUDE_TOOL, json!({"task": "x"}), &wide).await,
+        "changed on this computer",
+    );
+
+    // 5. Approved folders that cannot be read: refused rather than taken from the widened
+    //    context.
+    let s5 = server_for(&inside, base_env());
+    let action = describe(
+        &s5,
+        CLAUDE_TOOL,
+        json!({"task": "x"}),
+        &in_full_access(chat(&work), &home),
+    )
+    .await;
+    refused(&action, "could not be read");
+    let s5 = server_for(&inside, base_env()).with_approved(approved_store(own.clone(), None));
+    let action = describe(
+        &s5,
+        CLAUDE_TOOL,
+        json!({"task": "x"}),
+        &in_full_access(chat(&work), &home),
+    )
+    .await;
+    refused(&action, "could not be read");
 }
 
 /// The card says when the app is set up to use the model this app shares (WP5).

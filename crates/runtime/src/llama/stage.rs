@@ -1,4 +1,4 @@
-//! Where a load is, as typed values (0.0.5, "LoadStage"). The plain words for each value
+//! Where a load is, as typed values (0.0.6, "LoadStage"). The plain words for each value
 //! live in the webview (`src/lib/words.ts`); nothing here is shown as it is.
 //!
 //! Stage names reported by llama-server's managed-child protocol map to
@@ -40,7 +40,7 @@ pub enum LoadStage {
         max: u32,
     },
     /// Trying again on the same backend with Save memory off, after a failure with it
-    /// on that it can cause (0.0.5 D2c). Sent by the supervisor as [`ServerEvent::Stage`].
+    /// on that it can cause (0.0.6 D2c). Sent by the supervisor as [`ServerEvent::Stage`].
     RetryingWithoutSaveMemory {
         /// The backend being retried.
         backend: BackendKind,

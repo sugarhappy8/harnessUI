@@ -617,10 +617,67 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
     if let Some(summary) = parts.summary.map(str::trim).filter(|s| !s.is_empty()) {
         blocks.push(format!(
             "<conversation_summary>\nEarlier messages of this conversation were summarised:\n{}\n</conversation_summary>",
-            sanitizer.clean(summary)
+            quote_app_notes(&sanitizer.clean(summary))
         ));
     }
     blocks.join("\n\n")
+}
+
+/// A model-written summary as the summary block shows it: every "[App note]" marker (any
+/// letter case, any spacing inside the brackets) gets round brackets, "(App note)". The
+/// agent instructions say lines starting with "[App note]" come from the app; a summary is
+/// model output that can echo a web page or a file, and in the system message it sits
+/// outside every tool-output block, so it must not be able to pass for a note from the app
+/// (0.0.6). The text is otherwise unchanged; the stored summary is never changed.
+fn quote_app_notes(text: &str) -> String {
+    /// The length in bytes of an "[App note]" marker at the start of `rest`, if there is one.
+    fn marker_len(rest: &str) -> Option<usize> {
+        let mut chars = rest.char_indices().peekable();
+        let skip_space = |chars: &mut std::iter::Peekable<std::str::CharIndices>| {
+            let mut skipped = false;
+            while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {
+                skipped = true;
+            }
+            skipped
+        };
+        let word = |chars: &mut std::iter::Peekable<std::str::CharIndices>, word: &str| {
+            word.chars().all(|w| {
+                chars
+                    .next_if(|(_, c)| c.eq_ignore_ascii_case(&w))
+                    .is_some()
+            })
+        };
+        if chars.next()?.1 != '[' {
+            return None;
+        }
+        skip_space(&mut chars);
+        if !word(&mut chars, "app") || !skip_space(&mut chars) || !word(&mut chars, "note") {
+            return None;
+        }
+        skip_space(&mut chars);
+        match chars.next()? {
+            (at, ']') => Some(at + 1),
+            _ => None,
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('[') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        if let Some(len) = marker_len(rest) {
+            // '[' and ']' are one byte each.
+            out.push('(');
+            out.push_str(&rest[1..len - 1]);
+            out.push(')');
+            rest = &rest[len..];
+        } else {
+            out.push('[');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Sanitises the texts of a tool's JSON Schema before it is offered to the model: every

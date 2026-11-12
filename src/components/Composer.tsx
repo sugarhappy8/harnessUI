@@ -3,6 +3,7 @@ import { ArrowUp, AtSign, FileText, Paperclip, Square, X } from "lucide-react";
 import type { DocumentInput, ImageInput, MentionHit, MentionInput } from "../lib/types";
 import { resolveMentions, searchMentions } from "../lib/ipc";
 import { ApprovalHint } from "./AllowAllButton";
+import { messagePlaceholder, useWorkingFolderName } from "./FolderChip";
 import {
   type MentionChip,
   MentionPicker,
@@ -85,6 +86,8 @@ export function Composer(props: {
   onStop: () => void;
 }) {
   const chatId = props.chatId ?? null;
+  // [0.0.6 item 7] The placeholder names the working folder when there is one.
+  const workingFolderName = useWorkingFolderName(chatId);
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageInput[]>([]);
   const [documents, setDocuments] = useState<DocumentInput[]>([]);
@@ -372,7 +375,7 @@ export function Composer(props: {
               }
             }}
             rows={Math.min(8, Math.max(1, text.split("\n").length))}
-            placeholder={props.disabledReason ?? "Ask anything, or type @ to mention a file"}
+            placeholder={props.disabledReason ?? messagePlaceholder(workingFolderName)}
             className="chat-text max-h-48 flex-1 resize-none self-center bg-transparent py-1 outline-none placeholder:text-fg-muted"
           />
           {props.busy ? (

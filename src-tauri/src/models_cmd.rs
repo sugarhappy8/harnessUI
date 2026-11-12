@@ -43,6 +43,18 @@ fn gguf_path(path: &str) -> AppResult<PathBuf> {
     Ok(model)
 }
 
+/// A context size a command was given: one of [`load::CTX_RANGE`] (`-c 0` would mean the
+/// trained length, which can be far more than this computer has).
+fn check_ctx(ctx: u32) -> AppResult<()> {
+    if load::CTX_RANGE.contains(&ctx) {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "The context size must be between 512 and 1,048,576 tokens.",
+        ))
+    }
+}
+
 /// A model file that must be there (the settings panel's commands).
 fn existing_model(path: &str) -> AppResult<PathBuf> {
     let model = gguf_path(path)?;
@@ -101,6 +113,9 @@ pub async fn load_local_model(
     when_idle: Option<bool>,
 ) -> AppResult<()> {
     let model = gguf_path(&path)?;
+    if let Some(s) = &settings {
+        check_ctx(s.ctx)?;
+    }
     settings::remember_local_model(&state, &path).await;
     let plan = load::plan(&state, &path, settings.clone()).await;
     // A newer load cancels a change that waits, even when nothing needs to change.
@@ -143,31 +158,53 @@ pub async fn unload_model(state: State<'_, AppState>, when_idle: Option<bool>) -
 
 // ---- 0.0.5 per-model load settings and reload (WP1b) --------------------------------
 
-/// Everything the settings panel shows about one model file.
+/// Everything the settings panel shows about one model file. With `overrides` (the
+/// panel's unsaved choices, checked like `set_model_load_settings` checks them), the facts
+/// are worked out as if they were saved, so the fit marks follow the draft; nothing is
+/// saved and nothing restarts. Without them, the model's saved settings.
 #[tauri::command]
 pub async fn model_load_info(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     path: String,
+    overrides: Option<ModelLoadSettings>,
 ) -> AppResult<ModelLoadInfo> {
     crate::commands::only_main_window(window.label())?;
     existing_model(&path)?;
-    info_for(&state, &path).await
+    match overrides {
+        None => info_for(&state, &path).await,
+        Some(draft) => {
+            let plan = load::plan_draft(&state, &path, draft).await;
+            let facts = plan_facts(&plan, &path)?;
+            load::validate(&plan.overrides, facts.trained_ctx(), &plan.machine)
+                .map_err(AppError::bad_request)?;
+            Ok(info_from(&state, &path, &plan, facts))
+        }
+    }
 }
 
-/// The panel's facts for `path` as saved now.
-async fn info_for(state: &AppState, path: &str) -> AppResult<ModelLoadInfo> {
-    let plan = load::plan(state, path, None).await;
-    let facts = plan.facts.as_ref().ok_or_else(|| {
+/// The model file's facts in `plan`, or "could not be found".
+fn plan_facts<'a>(plan: &'a Plan, path: &str) -> AppResult<&'a load::ModelFacts> {
+    plan.facts.as_ref().ok_or_else(|| {
         AppError::new(
             "model_missing",
             "The model file could not be found.",
             "Pick the file again; it may have been moved or deleted.",
             path.to_string(),
         )
-    })?;
+    })
+}
+
+/// The panel's facts for `path` as saved now.
+async fn info_for(state: &AppState, path: &str) -> AppResult<ModelLoadInfo> {
+    let plan = load::plan(state, path, None).await;
+    let facts = plan_facts(&plan, path)?;
+    Ok(info_from(state, path, &plan, facts))
+}
+
+fn info_from(state: &AppState, path: &str, plan: &Plan, facts: &load::ModelFacts) -> ModelLoadInfo {
     let loaded = state.runtime.loaded_choices(path);
-    Ok(load::build_info(
+    load::build_info(
         path,
         facts,
         plan.overrides.clone(),
@@ -175,7 +212,7 @@ async fn info_for(state: &AppState, path: &str) -> AppResult<ModelLoadInfo> {
         plan.resolved.clone(),
         &plan.machine,
         loaded.as_ref(),
-    ))
+    )
 }
 
 /// Saves one model's overrides (validated against the fixed lists, the trained length and
@@ -308,11 +345,7 @@ pub async fn set_local_model_settings(
     settings.mmproj = None;
     // A response-only field (the one-time upgrade note); never stored.
     settings.upgrade_note = None;
-    if !(512..=1_048_576).contains(&settings.ctx) {
-        return Err(AppError::bad_request(
-            "The context size must be between 512 and 1,048,576 tokens.",
-        ));
-    }
+    check_ctx(settings.ctx)?;
     state
         .store
         .set_setting(settings::LOCAL_MODEL, &settings)

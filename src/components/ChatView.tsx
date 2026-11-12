@@ -13,6 +13,7 @@ import { ErrorBanner } from "./ErrorBanner";
 import { ToolCallCard, type ToolCallView } from "./ToolCallCard";
 import { ToolsPanel } from "./ToolsPanel";
 import { ApprovalModeMenu } from "./AllowAllButton";
+import { FolderChip } from "./FolderChip";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
 import { EmptyChat, Welcome } from "./Welcome";
@@ -278,6 +279,7 @@ export function ChatView() {
             unsupported={!!modelRef?.startsWith("local:") && runtime?.state === "ready" && !runtime.supportsTools}
           />
         )}
+        {detail && <FolderChip chatId={detail.chat.id} workingFolder={detail.chat.workingFolder ?? null} />}
         {detail && <ApprovalModeMenu chatId={detail.chat.id} />}
         {detail && (
           <button

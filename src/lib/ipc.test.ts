@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const core = vi.hoisted(() => ({ invoke: vi.fn(), Channel: class {} }));
 vi.mock("@tauri-apps/api/core", () => core);
 
-import { loadLocalModel, reloadLocalModel, unloadModel } from "./ipc";
+import { loadLocalModel, modelLoadInfo, previewModelLoadSettings, reloadLocalModel, unloadModel } from "./ipc";
 
 const replaced = { code: "load_replaced", message: "Replaced.", hint: "", details: "" };
 
@@ -41,5 +41,25 @@ describe("changes of what is loaded", () => {
     core.invoke.mockRejectedValue(failed);
     await expect(loadLocalModel("/m/a.gguf")).rejects.toBe(failed);
     await expect(unloadModel()).rejects.toBe(failed);
+  });
+});
+
+describe("one model's settings", () => {
+  afterEach(() => core.invoke.mockReset());
+
+  it("ask for the saved settings, or preview unsaved ones with the same command", async () => {
+    core.invoke.mockResolvedValue({});
+    await modelLoadInfo("/m/a.gguf");
+    expect(core.invoke).toHaveBeenLastCalledWith("model_load_info", { path: "/m/a.gguf" });
+    const draft = {
+      context: "auto" as const,
+      gpu: "off" as const,
+      saveMemory: "on" as const,
+      keepInMemory: "default" as const,
+      device: "default" as const,
+      thinkingLimit: "default" as const,
+    };
+    await previewModelLoadSettings("/m/a.gguf", draft);
+    expect(core.invoke).toHaveBeenLastCalledWith("model_load_info", { path: "/m/a.gguf", overrides: draft });
   });
 });

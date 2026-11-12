@@ -28,6 +28,32 @@ fn get_setting_text(conn: &Connection, key: &str) -> Result<Option<String>, Stor
         .optional()?)
 }
 
+/// The most rows [`Store::settings_with_prefix`] returns.
+pub const MAX_PREFIX_ROWS: usize = 1000;
+
+/// Settings whose key starts with `prefix`, by key, as stored text. `substr` compares the
+/// start of the key exactly: `%` and `_` in a prefix are ordinary characters.
+fn settings_with_prefix_text(
+    conn: &Connection,
+    prefix: &str,
+) -> Result<Vec<(String, String)>, StoreError> {
+    if prefix.is_empty() {
+        return Err(StoreError::InvalidInput(
+            "a settings prefix cannot be empty".into(),
+        ));
+    }
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM settings WHERE substr(key, 1, length(?1)) = ?1 \
+         ORDER BY key LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![prefix, MAX_PREFIX_ROWS as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+    Ok(rows)
+}
+
 fn set_setting_text(conn: &Connection, key: &str, value: &str) -> Result<(), StoreError> {
     conn.execute(
         "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3) \
@@ -477,6 +503,23 @@ impl Store {
         self.call(move |c| set_setting_text(c, &key, &text)).await
     }
 
+    /// 0.0.6: every setting whose key starts with `prefix` (non-empty), in key order, at
+    /// most [`MAX_PREFIX_ROWS`]. Callers check each value's shape themselves (the table
+    /// holds JSON only; a row that still failed to parse would be left out).
+    pub async fn settings_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, Value)>, StoreError> {
+        let prefix = prefix.to_owned();
+        let rows = self
+            .call(move |c| settings_with_prefix_text(c, &prefix))
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(k, v)| serde_json::from_str(&v).ok().map(|v| (k, v)))
+            .collect())
+    }
+
     /// Removes a setting; returns whether it existed.
     pub async fn delete_setting(&self, key: &str) -> Result<bool, StoreError> {
         let key = key.to_owned();
@@ -699,6 +742,49 @@ mod tests {
         ));
         assert!(store.delete_setting("n").await.expect("delete"));
         assert!(!store.delete_setting("n").await.expect("delete again"));
+    }
+
+    /// 0.0.6: the prefix query matches the start of the key exactly.
+    #[tokio::test]
+    async fn settings_by_prefix() {
+        let store = Store::open_in_memory().expect("open");
+        for (k, v) in [
+            ("modelProfile:bb", json!({"n": 2})),
+            ("modelProfile:aa", json!({"n": 1})),
+            ("modelProfiles", json!("not a profile")),
+            ("xmodelProfile:cc", json!(3)),
+            ("modelprofile:dd", json!(4)),
+            ("model_Profile:ee", json!(5)),
+            ("a%b:1", json!(6)),
+            ("axb:2", json!(7)),
+        ] {
+            store.set_setting(k, &v).await.expect("set");
+        }
+        let got = store.settings_with_prefix("modelProfile:").await.expect("list");
+        assert_eq!(
+            got,
+            vec![
+                ("modelProfile:aa".to_string(), json!({"n": 1})),
+                ("modelProfile:bb".to_string(), json!({"n": 2})),
+            ]
+        );
+        // `%` and `_` are not wildcards; the comparison is case-sensitive.
+        let got = store.settings_with_prefix("a%b").await.expect("list");
+        assert_eq!(got, vec![("a%b:1".to_string(), json!(6))]);
+        let got = store.settings_with_prefix("model_").await.expect("list");
+        assert_eq!(got, vec![("model_Profile:ee".to_string(), json!(5))]);
+        assert!(store.settings_with_prefix("nothing").await.expect("list").is_empty());
+        assert!(matches!(
+            store.settings_with_prefix("").await,
+            Err(StoreError::InvalidInput(_))
+        ));
+        // The table refuses text that is not JSON (its CHECK), so every row parses.
+        assert!(
+            store
+                .call(|c| set_setting_text(c, "modelProfile:zz", "{not json"))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

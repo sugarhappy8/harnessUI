@@ -960,10 +960,11 @@ mod tests {
         );
     }
 
-    /// A task for a coding app (0.0.5, D11) asks with Allow once / Deny in every mode,
-    /// after a grant for exactly it, with or without untrusted content, native call or
-    /// recovered from text. The engine holds to this even for an action whose describer
-    /// left out the always-ask facts. Steps 1 and 2 still come first.
+    /// A task for a coding app (0.0.6, D11 as amended) asks with Allow once / Deny in Ask
+    /// first and Allow all, after a grant for exactly it, with or without untrusted
+    /// content, native call or recovered from text, and runs without a card in Full access.
+    /// The engine holds to this even for an action whose describer left out the always-ask
+    /// facts. Steps 1 and 2 still come first, in every mode.
     #[test]
     fn a_coding_app_task_always_asks_and_no_grant_covers_it() {
         let scope = Scope::CodingApp {
@@ -1023,20 +1024,57 @@ mod tests {
                     },
                     "Allow all, untrusted {untrusted}, recovered {recovered}"
                 );
+                // Full access (D11 as amended for 0.0.6, D12): nothing asks, with or
+                // without Allow all, a grant or untrusted content.
+                for allow_all in [false, true] {
+                    let full_access = TurnContext {
+                        full_access: true,
+                        allow_all,
+                        ..ask
+                    };
+                    for grants in [&Everything as &dyn Grants, &BTreeSet::<Scope>::new()] {
+                        assert_eq!(
+                            evaluate(a, &full_access, grants),
+                            Decision::AllowedByFullAccess,
+                            "Full access, allow_all {allow_all}, untrusted {untrusted}, recovered {recovered}"
+                        );
+                    }
+                }
             }
         }
-        let mut off = ready();
-        off.tool_enabled = false;
-        assert!(matches!(
-            evaluate(&full, &off, &Everything),
-            Decision::Refused { .. }
-        ));
-        let mut limited = full.clone();
-        limited.hard_limit = Some("the program is inside an approved folder".into());
-        assert!(matches!(
-            evaluate(&limited, &ready(), &Everything),
-            Decision::Denied { .. }
-        ));
+        // Steps 1 and 2 come first in every mode, Full access included.
+        for (allow_all, full_access) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mode = TurnContext {
+                allow_all,
+                full_access,
+                ..ready()
+            };
+            let mut off = mode;
+            off.tool_enabled = false;
+            assert!(
+                matches!(evaluate(&full, &off, &Everything), Decision::Refused { .. }),
+                "group off, allow_all {allow_all}, full access {full_access}"
+            );
+            let mut not_ready = mode;
+            not_ready.server_ready = false;
+            assert!(
+                matches!(
+                    evaluate(&full, &not_ready, &Everything),
+                    Decision::Refused { .. }
+                ),
+                "not ready, allow_all {allow_all}, full access {full_access}"
+            );
+            let mut limited = full.clone();
+            limited.hard_limit = Some("the program is inside an approved folder".into());
+            assert!(
+                matches!(
+                    evaluate(&limited, &mode, &Everything),
+                    Decision::Denied { .. }
+                ),
+                "hard limit, allow_all {allow_all}, full access {full_access}"
+            );
+        }
         assert_eq!(
             serde_json::to_value(&scope).unwrap(),
             serde_json::json!({"type": "codingApp", "app": "claudeCode", "folder": "/p"})

@@ -1,64 +1,78 @@
-//! Coding apps (0.0.5 item 3, direction B, experimental and off by default, D5): the local
+//! Coding apps (0.0.6 item 3, direction B, experimental and off by default, D5): the local
 //! model hands a task to Claude Code or Codex installed on this computer, with the tools
 //! `ask_claude_code {task, may_edit?}` and `ask_codex {task, may_edit?}` of the group
 //! "Coding apps (experimental)" in the Tools panel.
 //!
 //! What must hold:
 //!
-//! - **It always asks (D11).** Every call shows a card with Allow once / Deny, in Ask first
-//!   and in Allow all, after a grant, with or without untrusted content: the action has
-//!   risk `AlwaysAsk`, keeps asking, reaches the network, and its scope
-//!   ([`policy::Scope::CodingApp`]) is one no grant covers and the engine always asks for.
+//! - **It asks, except in Full access (D11 as amended for 0.0.6, D12).** In Ask first and
+//!   Allow all every call shows a card with Allow once / Deny, after a grant, with or
+//!   without untrusted content: the action has risk `AlwaysAsk`, keeps asking, reaches the
+//!   network, and its scope ([`policy::Scope::CodingApp`]) is one no grant covers and the
+//!   engine always asks for. In Full access nothing asks (the terminal could start the
+//!   programs anyway), but the checks below still refuse before the policy engine runs.
 //! - **The card states only what the command line confines** ([`card_lines`], tested
 //!   against [`arguments`]), names the program by its absolute path, and says that the task
 //!   goes online with the user's account.
 //! - **Programs are resolved once**, when the user turns the group on
 //!   ([`find_coding_apps`]): the file is located on `PATH` (the login `PATH` on macOS) or
-//!   in `~/.local/bin`, never run. Its absolute path, real path and identity (device and
-//!   inode, size, modified time; on Windows size, creation and modified time) are saved
-//!   under [`SETTINGS_KEY`]. Before each run the path must still lead to the same file
-//!   with the same identity, or nothing runs. A program inside an approved folder is
-//!   refused. On Windows the real `.exe` is used when there is one; an npm `.cmd` shim
-//!   gets only the fixed words of the template.
+//!   in `~/.local/bin`, never run. Its absolute path, real path and identity
+//!   ([`FileIdentity`]: device and inode on Unix, volume serial number and file index on
+//!   Windows; size and modified time on both) are saved under [`SETTINGS_KEY`]. Before each
+//!   run the path must still lead to the same file with the same identity, or nothing runs.
+//!   A program inside an approved folder is refused. On Windows the real `.exe` is used
+//!   when there is one; an npm `.cmd` shim gets only the fixed words of the template.
 //! - **The task goes on standard input**, never on the command line. The command line is
 //!   the fixed template of [`arguments`]: the model chooses only `may_edit`, which picks
 //!   between two fixed templates. No token that turns off a permission check
 //!   ([`policy::command::coding_apps::BYPASS_TOKENS`]) can appear in it (tested).
 //! - **The working folder** is the chat's working folder, and it must be approved.
-//! - **Helpers never get these tools** (`subagent.rs`).
+//! - **Full access does not widen these checks.** In Full access the chat's tool context
+//!   lists the whole computer as approved (`approvals::widen`); here "approved" keeps
+//!   meaning the folders the user approved ([`ApprovedNow`], read from the store), so a
+//!   program anywhere is not "inside an approved folder" and the working folder must still
+//!   be one the user approved.
+//! - **Helpers never get these tools** (`subagent.rs`), in any mode.
 //! - **Secret environment variables stay stripped** (the apps use their own stored login),
 //!   as in the terminal (`tools::terminal::looks_secret`).
 //! - **Stop** ends the process group (Unix) or job (Windows). Processes the app started in
 //!   a new session can outlive it (known limit, ARCHITECTURE 13.14).
 //! - **The answer is untrusted tool output**, shortened like any other long result.
 //!
-//! The templates, with the flags checked against the official documentation and against
-//! Claude Code 2.1.322 on the build machine (`claude --help`, and the full read-only line
-//! started without network: it reported the tools Glob, Grep and Read, permission mode
-//! "default" and no MCP servers):
+//! The templates. Every Claude Code flag was checked against its documentation
+//! (code.claude.com/docs/en/cli-reference and settings) and against Claude Code 2.1.322 on
+//! the build machine (`claude --help`, and the strings of its binary, without starting a
+//! session):
 //!
 //! - Claude Code: `claude -p --restricted --safe-mode --strict-mcp-config --permission-mode
 //!   default --tools Read,Grep,Glob --settings {"disableAllHooks":true,"permissions":
 //!   {"blockReadsOutsideWorkingDirectories":true}} --output-format stream-json --verbose`;
 //!   with `may_edit`, `Edit,Write` are added to `--tools` and the permission mode is
-//!   `acceptEdits`. `--verbose` is not in the 0.0.5 specification's template: Claude Code
-//!   2.1.322 refuses `--output-format stream-json` with `-p` without it ("When using
-//!   --print, --output-format=stream-json requires --verbose"), and its documentation
-//!   pairs the two. `--restricted` needs 2.1.248 or later and the setting
-//!   `permissions.blockReadsOutsideWorkingDirectories` 2.1.257 or later ([`FLAG_SINCE`]); a
-//!   known older version is not offered. `--permission-mode default`: 2.1.322's `--help`
-//!   lists the mode as `manual`, and its documentation keeps `default` as the mode's value
-//!   (`manual` is the alias); 2.1.322 accepts `default`. `--restricted` also means Claude
-//!   Code reads no user settings file, so only the environment can point it at the sharing
-//!   port.
+//!   `acceptEdits`. `--verbose` is not in the specification's template: 2.1.322 refuses
+//!   `--output-format stream-json` with `-p` without it (its binary holds the check
+//!   `outputFormat==="stream-json"&&!verbose` and the message "When using --print,
+//!   --output-format=stream-json requires --verbose"), and every stream-json example in the
+//!   documentation pairs the two. `--restricted` needs 2.1.248 or later and the setting
+//!   `permissions.blockReadsOutsideWorkingDirectories` 2.1.257 or later (both from the
+//!   documentation; [`FLAG_SINCE`]); a known older version is not offered.
+//!   `--permission-mode default`: 2.1.322's `--help` lists the mode as `manual`; the
+//!   documentation and the binary keep `default` as the value (`manual` is mapped to it).
+//!   `--restricted` also means Claude Code reads no user settings file, so only the
+//!   environment can point it at the sharing port.
 //! - Codex: `codex exec --json --sandbox read-only|workspace-write -c features.hooks=false -`
 //!   in the working folder. Codex is not installed on the build machine; every flag is
-//!   from its documentation (`exec`, `--json`, `--sandbox`, `-c key=value`, the `hooks`
-//!   feature key, `-` for standard input) and none was run.
+//!   from its documentation (developers.openai.com/codex, CLI reference, non-interactive
+//!   mode and hooks): `exec`, `--json` ("Print newline-delimited JSON events"), `--sandbox`
+//!   with `read-only` and `workspace-write`, `-c key=value`, the feature key `hooks`
+//!   (`[features] hooks = false`; `--enable` is documented as `-c features.<name>=true`) and
+//!   `-` ("Use `-` to pipe the prompt from stdin"). None was run.
 
+mod identity;
 mod output;
 #[cfg(test)]
 mod tests;
+
+pub use identity::FileIdentity;
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -346,66 +360,6 @@ pub fn online_line(app: CodingApp, uses_shared_model: bool) -> String {
 }
 
 // ---- Finding the programs ----------------------------------------------------------------
-
-/// Who a file is, to notice when it was replaced after the user turned the group on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileIdentity {
-    /// The device (Unix); 0 on Windows.
-    pub device: u64,
-    /// The inode (Unix); the creation time on Windows.
-    pub file: u64,
-    pub size: u64,
-    /// Modified time, in nanoseconds since 1970.
-    pub modified_ns: u64,
-}
-
-impl FileIdentity {
-    pub fn of(path: &Path) -> std::io::Result<Self> {
-        let meta = std::fs::metadata(path)?;
-        if !meta.is_file() {
-            return Err(std::io::Error::other("not a file"));
-        }
-        let modified_ns = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
-            .unwrap_or(0);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            Ok(Self {
-                device: meta.dev(),
-                file: meta.ino(),
-                size: meta.len(),
-                modified_ns,
-            })
-        }
-        #[cfg(windows)]
-        {
-            // TODO(0.0.6): the volume serial number and file index (stable Rust has no
-            // portable way to read them yet); creation time, size and modified time are
-            // compared instead.
-            use std::os::windows::fs::MetadataExt;
-            Ok(Self {
-                device: 0,
-                file: meta.creation_time(),
-                size: meta.file_size(),
-                modified_ns,
-            })
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            Ok(Self {
-                device: 0,
-                file: 0,
-                size: meta.len(),
-                modified_ns,
-            })
-        }
-    }
-}
 
 /// Why a program cannot be used.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -726,10 +680,21 @@ fn codex_config_uses(file: &Path, port: u16) -> bool {
 pub type SharePort =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<u16>> + Send>> + Send + Sync>;
 
-/// Reads every approved folder, of every chat, to refuse a program inside any of them
-/// (also one approved after the programs were found).
-pub type AllApproved =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<String>> + Send>> + Send + Sync>;
+/// The folders the user approved, read from the store when a call is checked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApprovedNow {
+    /// Every approved folder, of every chat: a program inside any of them is refused (also
+    /// one approved after the programs were found).
+    pub all: Vec<String>,
+    /// The folders approved for the chat that asks (global plus its own, as stored),
+    /// without the whole computer that Full access adds to its tool context. `None` when
+    /// they could not be read.
+    pub chat: Option<Vec<String>>,
+}
+
+/// Reads [`ApprovedNow`] for a chat (by its id).
+pub type Approved =
+    Arc<dyn Fn(i64) -> Pin<Box<dyn Future<Output = ApprovedNow> + Send>> + Send + Sync>;
 
 /// The "Coding apps" server. It lists the tools of the apps that were found usable when
 /// the group was last turned on; it is registered again each time they are looked for.
@@ -740,7 +705,7 @@ pub struct CodingAppsServer {
     base_env: BTreeMap<String, String>,
     home: Option<PathBuf>,
     share_port: SharePort,
-    all_approved: AllApproved,
+    approved: Approved,
     windows: bool,
     max_run: Duration,
     tick: Duration,
@@ -758,16 +723,17 @@ impl CodingAppsServer {
             base_env,
             home,
             share_port,
-            all_approved: Arc::new(|| Box::pin(async { Vec::new() })),
+            approved: Arc::new(|_| Box::pin(async { ApprovedNow::default() })),
             windows: cfg!(windows),
             max_run: MAX_RUN,
             tick: TICK,
         }
     }
 
-    /// Where to read every approved folder from (by default, only the chat's are known).
-    pub fn with_all_approved(mut self, all_approved: AllApproved) -> Self {
-        self.all_approved = all_approved;
+    /// Where to read the approved folders from. By default only the chat's tool context is
+    /// known, and a chat in Full access is refused (its context lists the whole computer).
+    pub fn with_approved(mut self, approved: Approved) -> Self {
+        self.approved = approved;
         self
     }
 
@@ -792,15 +758,39 @@ impl CodingAppsServer {
         env
     }
 
-    fn sandbox(chat: &ChatContext) -> PathSandbox {
+    /// The working folder's sandbox: the folders the user approved for the chat (never the
+    /// whole computer of Full access), without the app's own folders.
+    fn sandbox(own: &[String], chat: &ChatContext) -> PathSandbox {
         PathSandbox::new(
             Flavor::native(),
-            &chat.approved_folders,
+            own,
             &chat.forbidden_folders,
             &RealFs,
             &|p| volume_case(p),
         )
         .0
+    }
+
+    /// The folders the user approved for the chat, and every approved folder. Outside Full
+    /// access the chat's tool context holds the chat's folders as stored; in Full access it
+    /// also lists the whole computer (`approvals::widen`), so they are read from the store.
+    async fn folders(
+        &self,
+        app: CodingApp,
+        chat: &ChatContext,
+    ) -> Result<(Vec<String>, ApprovedNow), String> {
+        let now = (self.approved)(chat.chat_id).await;
+        let own = if chat.full_access {
+            now.chat.clone().ok_or_else(|| {
+                format!(
+                    "The folders approved for this chat could not be read, so {} was not asked.",
+                    app.label()
+                )
+            })?
+        } else {
+            chat.approved_folders.clone()
+        };
+        Ok((own, now))
     }
 }
 
@@ -899,7 +889,13 @@ impl CodingAppsServer {
 
     /// The program to run, if it is still the one found and is not inside an approved
     /// folder (this chat's, its skill folders, or any other chat's).
-    async fn program(&self, app: CodingApp, chat: &ChatContext) -> Result<PathBuf, String> {
+    async fn program(
+        &self,
+        app: CodingApp,
+        chat: &ChatContext,
+        own: &[String],
+        approved: &ApprovedNow,
+    ) -> Result<PathBuf, String> {
         if !template_ok(app) {
             return Err(format!(
                 "{} cannot be asked: the app's command line for it is missing a setting it needs.",
@@ -915,9 +911,9 @@ impl CodingAppsServer {
             return Err(problem.words(app));
         };
         let program = unchanged(saved).map_err(|p| p.words(app))?;
-        let mut folders = chat.approved_folders.clone();
+        let mut folders = own.to_vec();
         folders.extend(chat.skill_folders.iter().cloned());
-        folders.extend((self.all_approved)().await);
+        folders.extend(approved.all.iter().cloned());
         for candidate in [
             saved.path.as_deref().unwrap_or_default(),
             &program.display().to_string(),
@@ -932,14 +928,21 @@ impl CodingAppsServer {
         Ok(program)
     }
 
-    /// The chat's working folder, checked: approved and a folder.
-    fn working_folder(app: CodingApp, chat: &ChatContext) -> Result<policy::CheckedPath, String> {
-        let sandbox = Self::sandbox(chat);
-        let Some(base) = chat
-            .working_folder
-            .clone()
-            .or_else(|| sandbox.roots().first().map(|r| r.canonical.to_string()))
-        else {
+    /// The chat's working folder, checked: approved by the user (`own`) and a folder.
+    fn working_folder(
+        app: CodingApp,
+        chat: &ChatContext,
+        own: &[String],
+    ) -> Result<policy::CheckedPath, String> {
+        let sandbox = Self::sandbox(own, chat);
+        let base = if own.is_empty() {
+            None
+        } else {
+            chat.working_folder
+                .clone()
+                .or_else(|| sandbox.roots().first().map(|r| r.canonical.to_string()))
+        };
+        let Some(base) = base else {
             return Err(format!(
                 "No folder is approved for this chat, so {} has nowhere to work. The user can approve a folder in the Tools panel.",
                 app.label()
@@ -1024,11 +1027,15 @@ impl BuiltinServer for CodingAppsServer {
             Ok(planned) => planned,
             Err(why) => return Described::Invalid(why),
         };
-        let program = match self.program(app, chat).await {
+        let (own, approved) = match self.folders(app, chat).await {
+            Ok(f) => f,
+            Err(why) => return Self::refused(app, &task, why),
+        };
+        let program = match self.program(app, chat, &own, &approved).await {
             Ok(p) => p,
             Err(why) => return Self::refused(app, &task, why),
         };
-        let cwd = match Self::working_folder(app, chat) {
+        let cwd = match Self::working_folder(app, chat, &own) {
             Ok(c) => c,
             Err(why) => return Self::refused(app, &task, why),
         };
@@ -1100,7 +1107,11 @@ impl BuiltinServer for CodingAppsServer {
         };
         let app = planned.app;
         // Everything is checked again immediately before the run (13.4 step 5).
-        let program = match self.program(app, &ctx.chat).await {
+        let (own, approved) = match self.folders(app, &ctx.chat).await {
+            Ok(f) => f,
+            Err(why) => return ToolOutput::error(format!("{why} Nothing was run.")),
+        };
+        let program = match self.program(app, &ctx.chat, &own, &approved).await {
             Ok(p) => p,
             Err(why) => return ToolOutput::error(format!("{why} Nothing was run.")),
         };
@@ -1109,7 +1120,7 @@ impl BuiltinServer for CodingAppsServer {
         {
             return ToolOutput::error(format!("{} Nothing was run.", Problem::Changed.words(app)));
         }
-        if let Err(e) = Self::sandbox(&ctx.chat).recheck(&planned.cwd, &RealFs) {
+        if let Err(e) = Self::sandbox(&own, &ctx.chat).recheck(&planned.cwd, &RealFs) {
             return ToolOutput::error(format!(
                 "The working folder changed after the request was approved ({e}), so nothing was run."
             ));
@@ -1374,21 +1385,32 @@ fn server(app: &AppHandle, saved: SavedSetup) -> CodingAppsServer {
         })
     });
     let handle = app.clone();
-    let all_approved: AllApproved = Arc::new(move || {
+    let approved: Approved = Arc::new(move |chat_id| {
         let handle = handle.clone();
         Box::pin(async move {
             let Some(state) = handle.try_state::<AppState>() else {
-                return Vec::new();
+                return ApprovedNow::default();
             };
-            state
-                .store
-                .list_approved_folders()
-                .await
-                .map(|all| all.into_iter().map(|f| f.path).collect())
-                .unwrap_or_default()
+            let paths = |rows: Vec<store::ApprovedFolder>| -> Vec<String> {
+                rows.into_iter().map(|f| f.path).collect()
+            };
+            ApprovedNow {
+                all: state
+                    .store
+                    .list_approved_folders()
+                    .await
+                    .map(paths)
+                    .unwrap_or_default(),
+                chat: state
+                    .store
+                    .approved_folders_for_chat(store::ChatId(chat_id))
+                    .await
+                    .map(paths)
+                    .ok(),
+            }
         })
     });
-    CodingAppsServer::new(saved, env, home, share_port).with_all_approved(all_approved)
+    CodingAppsServer::new(saved, env, home, share_port).with_approved(approved)
 }
 
 fn now_ms() -> i64 {

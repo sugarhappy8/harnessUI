@@ -47,7 +47,7 @@ const ipcMock = vi.hoisted(() => ({
   getChat: vi.fn(async () => {
     throw new Error("not used");
   }),
-  // Coding apps (0.0.5): never looked for unless a test says otherwise.
+  // Coding apps (0.0.6): never looked for unless a test says otherwise.
   codingAppsStatus: vi.fn<() => Promise<CodingAppsStatus>>(async () => NOT_CHECKED),
   findCodingApps: vi.fn<() => Promise<CodingAppsStatus>>(async () => NOT_CHECKED),
 }));
@@ -333,7 +333,7 @@ describe("ToolsPanel: tools chosen for each task", () => {
     const line = screen.getByText(/Always included/);
     expect(line.textContent).toContain("find_tools, call_tool, update_task");
     expect(line.closest("label")).toBeNull();
-    // The automatic-choice switch, Files, read_file and (0.0.5) the Coding apps switch:
+    // The automatic-choice switch, Files, read_file and (0.0.6) the Coding apps switch:
     // no companion has one.
     expect(document.querySelectorAll("input[type=checkbox]").length).toBe(4);
     expect(screen.getByRole("switch", { name: "Coding apps (experimental)" })).toBeTruthy();
@@ -399,7 +399,7 @@ describe("ToolsPanel: tools chosen for each task", () => {
   });
 });
 
-describe("ToolsPanel: the Coding apps group (0.0.5)", () => {
+describe("ToolsPanel: the Coding apps group (0.0.6)", () => {
   const NOTE =
     "Lets the model hand a task to Claude Code or Codex on this computer. They work online with your own account, and every request asks you first.";
   const NOT_INSTALLED = "Claude Code and Codex are not installed on this computer.";

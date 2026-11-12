@@ -5,10 +5,15 @@
 //! origin and downloads from the network. The model's own file name is never the API's
 //! model id: `-a` reports the fixed [`MODEL_ALIAS`] instead.
 //!
-//! The 0.0.5 load settings are typed fields with a fixed set of words each (0.0.5 D4):
+//! The 0.0.6 load settings are typed fields with a fixed set of words each (0.0.6 D4):
 //! [`LaunchConfig::gpu`], [`LaunchConfig::save_memory`] and
 //! [`LaunchConfig::keep_in_memory`]. Nothing a user or a model types reaches the command
 //! line.
+//!
+//! TODO(0.0.6): the optional fit estimate from the pinned build's `llama-fit-params` (spec
+//! WP1a) is not built; item 6 (finer offloading controls) will run it. Until then As much
+//! as fits leaves the split to llama-server's own `--fit on` at load time, and the fit
+//! marks before a load come from `models::fit`.
 
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
@@ -41,15 +46,18 @@ pub const HIP_VISIBLE_DEVICES_ENV: &str = "HIP_VISIBLE_DEVICES";
 /// API response never shows the model file's path. [`LaunchConfig::alias`] holds it.
 pub const MODEL_ALIAS: &str = "harnessui-local";
 
-/// How much of the model goes on the graphics card ("Use the graphics card", 0.0.5 D4).
+/// How much of the model goes on the graphics card ("Use the graphics card", 0.0.6 D4).
 ///
 /// The arguments ([`build_args`]):
-/// - `All`: `-ngl all --fit off`. Every layer on the device; llama.cpp's own fitting is off,
-///   so a model that does not fit fails instead of being changed silently (the supervisor
-///   then retries with `Fit`, see [`super::server::Supervisor`]).
+/// - `All`: `-ngl all --fit off`. Every layer on the device, so a model that does not fit
+///   fails (the supervisor then retries with `Fit`, see [`super::server::Supervisor`]).
+///   The pinned build's fitting would not change an explicit `-ngl` or `-c` anyway (its
+///   library logs "n_gpu_layers already set by user ..., abort" and "context size set by
+///   user ... -> no change"); `--fit off` only skips its measuring pass.
 /// - `Fit`: no `-ngl` and `--fit on`. llama.cpp measures free device memory and puts as
-///   many layers as fit on the device, the rest on the processor. `-c` stays explicit, so
-///   only the layers change.
+///   many layers as fit on the device, the rest on the processor (for a mixture of experts
+///   it may also keep expert weights on the processor). `-c` stays explicit, so only where
+///   the weights go changes, never how much the model remembers.
 /// - `Off`: `--device none -ngl 0 --fit off`. Nothing on the graphics card, and no device
 ///   at all, so llama.cpp does not offload the processor's work to it either
 ///   (`--op-offload`), whatever [`LaunchConfig::device`] holds.
@@ -65,29 +73,6 @@ pub enum GpuUse {
     Off,
 }
 
-/// How many layers to offload to the GPU (`-ngl`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", content = "layers", rename_all = "snake_case")]
-pub enum GpuLayers {
-    /// Let llama.cpp fit as many layers as free memory allows.
-    Auto,
-    /// Every layer.
-    All,
-    /// Exactly this many layers.
-    Count(u32),
-}
-
-impl GpuLayers {
-    /// The `-ngl` argument value.
-    pub fn as_arg(self) -> String {
-        match self {
-            Self::Auto => "auto".to_owned(),
-            Self::All => "all".to_owned(),
-            Self::Count(n) => n.to_string(),
-        }
-    }
-}
-
 /// Everything that varies between launches.
 ///
 /// `Debug` shows the API key as `<redacted>`, so a logged config never leaks it.
@@ -101,10 +86,6 @@ pub struct LaunchConfig {
     pub ctx: u32,
     /// Device name from the probe (`Vulkan0`, `ROCm0`, `MTL0`); `None` means CPU (`none`).
     pub device: Option<String>,
-    /// GPU layers. **No longer an argument** since 0.0.5: [`gpu`](Self::gpu) decides
-    /// `-ngl`. Kept so existing callers and saved configs still compile and read.
-    /// TODO(0.0.6): remove it and [`GpuLayers`] once the app stops setting it.
-    pub gpu_layers: GpuLayers,
     /// Host prompt cache in MiB (`--cache-ram`).
     pub cache_ram_mib: u32,
     /// Thinking budget in tokens (`--reasoning-budget`); `None` keeps the build's default.
@@ -148,7 +129,6 @@ impl Default for LaunchConfig {
             mmproj: None,
             ctx: 8192,
             device: None,
-            gpu_layers: GpuLayers::All,
             cache_ram_mib: 512,
             reasoning_budget: None,
             port: 0,
@@ -186,7 +166,6 @@ impl std::fmt::Debug for LaunchConfig {
             .field("mmproj", &self.mmproj)
             .field("ctx", &self.ctx)
             .field("device", &self.device)
-            .field("gpu_layers", &self.gpu_layers)
             .field("cache_ram_mib", &self.cache_ram_mib)
             .field("reasoning_budget", &self.reasoning_budget)
             .field("port", &self.port)
@@ -361,7 +340,6 @@ mod tests {
             mmproj: None,
             ctx: 8192,
             device: Some("Vulkan0".into()),
-            gpu_layers: GpuLayers::Auto,
             cache_ram_mib: 512,
             reasoning_budget: None,
             port: 40123,
@@ -375,7 +353,6 @@ mod tests {
     #[test]
     fn defaults_and_constructor() {
         let d = LaunchConfig::default();
-        assert_eq!(d.gpu_layers, GpuLayers::All);
         assert_eq!(d.gpu, GpuUse::All);
         assert_eq!(d.cache_ram_mib, 512);
         assert_eq!(d.reasoning_budget, None);
@@ -389,19 +366,9 @@ mod tests {
         assert_eq!(n.device, None);
     }
 
-    /// `gpu_layers` is no longer an argument: [`LaunchConfig::gpu`] decides `-ngl`.
-    #[test]
-    fn gpu_layers_is_not_an_argument_any_more() {
-        for layers in [GpuLayers::Auto, GpuLayers::All, GpuLayers::Count(7)] {
-            let cfg = LaunchConfig {
-                gpu_layers: layers,
-                ..config()
-            };
-            assert_eq!(build_args(&cfg), build_args(&config()), "{layers:?}");
-        }
-    }
-
-    /// A config saved before 0.0.5 still reads, with the new fields at their defaults.
+    /// A config written by 0.0.5 still reads: the new fields take their defaults, and its
+    /// `gpu_layers` (removed in 0.0.6, when [`LaunchConfig::gpu`] took over `-ngl`) is
+    /// ignored, whatever it says.
     #[test]
     fn old_json_reads_with_defaults() {
         let mut v = serde_json::to_value(config()).expect("json");
@@ -409,6 +376,11 @@ mod tests {
         for key in ["gpu", "save_memory", "keep_in_memory", "alias"] {
             assert!(obj.remove(key).is_some(), "{key}");
         }
+        assert!(obj.get("gpu_layers").is_none(), "no longer a field");
+        obj.insert(
+            "gpu_layers".into(),
+            serde_json::json!({"mode": "count", "layers": 7}),
+        );
         let back: LaunchConfig = serde_json::from_value(v).expect("reads");
         assert_eq!(back, config());
         assert_eq!(
@@ -456,7 +428,7 @@ mod tests {
         );
     }
 
-    /// The arguments between `--device` and `--cache-ram`, where the 0.0.5 choices go.
+    /// The arguments between `--device` and `--cache-ram`, where the 0.0.6 choices go.
     fn choice_args(cfg: &LaunchConfig) -> Vec<String> {
         let args = build_args(cfg);
         let from = args.iter().position(|a| a == "--device").expect("--device");
@@ -607,6 +579,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every combination of the choices, as the exact list the spec's table gives: the
+    /// card choice, Save memory, Keep in memory, a graphics device or the processor (and an
+    /// empty device name), with and without an image reader and a thinking budget. Each
+    /// flag appears once, and `-ngl` only where a choice sets it.
+    #[test]
+    fn args_are_exact_for_every_combination() {
+        let gpu_words = |gpu: GpuUse| -> &'static [&'static str] {
+            match gpu {
+                GpuUse::All => &["-ngl", "all", "--fit", "off"],
+                GpuUse::Fit => &["--fit", "on"],
+                GpuUse::Off => &["-ngl", "0", "--fit", "off"],
+            }
+        };
+        let mut seen = 0;
+        for gpu in [GpuUse::All, GpuUse::Fit, GpuUse::Off] {
+            for save_memory in [false, true] {
+                for keep_in_memory in [false, true] {
+                    for device in [Some("Vulkan0"), None, Some("")] {
+                        for mmproj in [false, true] {
+                            for budget in [None, Some(0)] {
+                                let cfg = LaunchConfig {
+                                    gpu,
+                                    save_memory,
+                                    keep_in_memory,
+                                    device: device.map(str::to_owned),
+                                    mmproj: mmproj.then(|| PathBuf::from("/models/p.gguf")),
+                                    reasoning_budget: budget,
+                                    ..config()
+                                };
+                                let mut want: Vec<&str> = vec![
+                                    "--host",
+                                    "127.0.0.1",
+                                    "--port",
+                                    "40123",
+                                    "--no-webui",
+                                    "--no-slots",
+                                    "--offline",
+                                    "--jinja",
+                                    "--cors-origins",
+                                    "none",
+                                    "--no-context-shift",
+                                    "-a",
+                                    "harnessui-local",
+                                    "-m",
+                                    "/models/m.gguf",
+                                ];
+                                if mmproj {
+                                    want.extend(["--mmproj", "/models/p.gguf"]);
+                                }
+                                // Don't use it never names a device, whatever was probed.
+                                let shown = match (gpu, device) {
+                                    (GpuUse::Off, _) | (_, None | Some("")) => "none",
+                                    (_, Some(name)) => name,
+                                };
+                                want.extend(["-c", "8192", "-np", "1", "--device", shown]);
+                                want.extend(gpu_words(gpu));
+                                if save_memory {
+                                    want.extend(["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]);
+                                }
+                                if keep_in_memory {
+                                    want.extend(["-lm", "mmap+mlock"]);
+                                }
+                                want.extend(["--cache-ram", "512"]);
+                                if budget.is_some() {
+                                    want.extend(["--reasoning-budget", "0"]);
+                                }
+                                let args = build_args(&cfg);
+                                assert_eq!(args, want, "{cfg:?}");
+                                for flag in [
+                                    "--host",
+                                    "--port",
+                                    "-a",
+                                    "-m",
+                                    "-c",
+                                    "-np",
+                                    "--device",
+                                    "--fit",
+                                    "--cache-ram",
+                                ] {
+                                    let n = args.iter().filter(|a| *a == flag).count();
+                                    assert_eq!(n, 1, "{flag} in {args:?}");
+                                }
+                                let ngl = args.iter().filter(|a| *a == "-ngl").count();
+                                assert_eq!(ngl, usize::from(gpu != GpuUse::Fit), "{args:?}");
+                                seen += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(seen, 3 * 2 * 2 * 3 * 2 * 2);
     }
 
     #[test]
@@ -769,17 +835,5 @@ mod tests {
         let port = free_loopback_port().expect("port");
         assert_ne!(port, 0);
         TcpListener::bind((Ipv4Addr::LOCALHOST, port)).expect("port is free");
-    }
-
-    #[test]
-    fn gpu_layers_serialise() {
-        assert_eq!(
-            serde_json::to_string(&GpuLayers::Count(3)).expect("json"),
-            r#"{"mode":"count","layers":3}"#
-        );
-        assert_eq!(
-            serde_json::to_string(&GpuLayers::Auto).expect("json"),
-            r#"{"mode":"auto"}"#
-        );
     }
 }

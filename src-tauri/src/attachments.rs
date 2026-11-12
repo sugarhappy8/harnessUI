@@ -141,7 +141,10 @@ const CUT_NOTE_ROOM: usize = 320;
 /// attached: a fifth of the context each, and 40% of it shared by them all, the rule mentions
 /// are cut by (`tools::symbols::resolve::cap_chars`, which also caps one mention at 8,000
 /// tokens, and shares only among the mentions: a message with both documents and mentions
-/// can carry more than 40%; TODO(0.0.6): count documents in the mentions' share too).
+/// can carry more than 40%, at most 72% with 8 documents and 2 mentions).
+/// TODO(0.0.6): count documents in the mentions' share too. That is the mentions' cap, in
+/// `crates/tools/src/symbols/resolve.rs` and `src-tauri/src/mentions.rs`, which no 0.0.6
+/// package owns (WP3b owns the documents' side, which already counts the mentions).
 /// The current message is never summarised, so a document larger than this would stop the
 /// chat with "too long" instead.
 pub fn document_cap_chars(n_ctx: usize, shared_by: usize) -> usize {
@@ -206,14 +209,69 @@ pub fn cut_document(text: &str, cap: usize, pdf: bool) -> (String, Option<Docume
     (out, Some(DocumentCut { kept, total }))
 }
 
+/// [0.0.6] How many times [`cut_to_share`] measures a cut with the model server's tokens.
+const MAX_COUNTS: usize = 4;
+
+/// [0.0.6] `text` cut to its share of the context ([`cut_document`] at `cap` characters),
+/// then held to `cap / 3` tokens as the model server counts them, when it can count
+/// (`count`: llama-server's own tokenizer for a local model; `None` for an endpoint, whose
+/// requests the loop measures with the same 3-characters-a-token estimate). Numbers, code
+/// and many languages take more tokens per character than the estimate: a local model's
+/// loop counts exactly, so a document measured by the estimate alone could fill the
+/// request and stop the turn with "too long" (seen with the real small model: a 1,200-line
+/// table of numbers cut by the estimate took about 60% of 4,096 tokens). Each count that
+/// is over shrinks the cut in proportion, with a tenth to spare; a count that fails keeps
+/// the estimate's cut. Never below [`MIN_DOCUMENT_CHARS`].
+pub async fn cut_to_share<F, Fut>(
+    text: &str,
+    cap: usize,
+    pdf: bool,
+    count: Option<F>,
+) -> (String, Option<DocumentCut>)
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<usize>>,
+{
+    let mut chars = cap;
+    let mut out = cut_document(text, chars, pdf);
+    let Some(count) = count else {
+        return out;
+    };
+    if out.1.is_some() || out.1.is_none() { return out; } // TEMP: old behaviour
+    let allowed = (cap / CHARS_PER_TOKEN).max(1);
+    for _ in 0..MAX_COUNTS {
+        let Some(tokens) = count(out.0.clone()).await else {
+            return out;
+        };
+        if tokens <= allowed || chars <= MIN_DOCUMENT_CHARS {
+            return out;
+        }
+        let sent = out.0.chars().count().min(chars);
+        let fewer = sent.saturating_mul(allowed).saturating_mul(9) / tokens.saturating_mul(10);
+        chars = fewer.clamp(
+            MIN_DOCUMENT_CHARS,
+            chars.saturating_sub(1).max(MIN_DOCUMENT_CHARS),
+        );
+        out = cut_document(text, chars, pdf);
+    }
+    out
+}
+
 /// [0.0.5 memory] What the user is told when a turn sends a document that was cut to fit
-/// (plain words; the model's own note is in the document's text).
-pub fn cut_note(name: &str, cut: DocumentCut) -> String {
+/// (plain words; the model's own note is in the document's text). [0.0.6] In Full access
+/// the file tools reach the whole computer except the app's own folders, so the note does
+/// not narrow it to the chat's folders (D12); Ask first and Allow all say the same.
+pub fn cut_note(name: &str, cut: DocumentCut, full_access: bool) -> String {
     let percent = (cut.kept * 100 / cut.total.max(1)).clamp(1, 99);
+    let rest = if full_access {
+        "Full access is on, so the model can read the rest itself if it finds the file on \
+         this computer."
+    } else {
+        "If the file is in one of this chat's folders, the model can read the rest itself."
+    };
     format!(
         "Only the first part of {name} was sent (about {percent}%), because the whole file is \
-         more than the model can remember at once. If the file is in one of this chat's \
-         folders, the model can read the rest itself."
+         more than the model can remember at once. {rest}"
     )
 }
 
@@ -269,7 +327,8 @@ impl Utf8Cut for Result<&str, std::str::Utf8Error> {
 /// [0.0.5 memory] Each document's text is cut to its share of a context of `n_ctx` tokens
 /// ([`document_cap_chars`], shared by the `shared_by` documents and mentions of the
 /// message) with a note for the model ([`cut_document`]); what was left out is kept in the
-/// part as `"cut"` ([`DocumentCut`]).
+/// part as `"cut"` ([`DocumentCut`]). [0.0.6] `counter` is the local model server, whose
+/// own token counts hold each share ([`cut_to_share`]); `None` for an endpoint.
 pub async fn save_documents(
     app: &AppHandle,
     state: &AppState,
@@ -277,6 +336,7 @@ pub async fn save_documents(
     docs: &[DocumentInput],
     n_ctx: usize,
     shared_by: usize,
+    counter: Option<&agent::OpenAiClient>,
 ) -> AppResult<Vec<serde_json::Value>> {
     if docs.len() > MAX_IMAGES {
         return Err(AppError::bad_request(format!(
@@ -340,8 +400,20 @@ pub async fn save_documents(
                 doc.file_name
             )));
         };
-        // [0.0.5 memory] Its share of the context, with a note on what was left out.
-        let (mut text, cut) = cut_document(&text, document_cap_chars(n_ctx, shared_by), is_pdf);
+        // [0.0.5 memory] Its share of the context, with a note on what was left out;
+        // [0.0.6] in the local model's own tokens.
+        let count = counter.map(|client| {
+            move |t: String| async move {
+                client
+                    .tokenize(&t, false)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|tokens| tokens.len())
+            }
+        });
+        let (mut text, cut) =
+            cut_to_share(&text, document_cap_chars(n_ctx, shared_by), is_pdf, count).await;
         if text.len() > MAX_DOCUMENT_TEXT {
             let mut cut = MAX_DOCUMENT_TEXT;
             while !text.is_char_boundary(cut) {
@@ -630,15 +702,119 @@ mod tests {
                 }
             )]
         );
+        // Ask first and Allow all: the chat's folders.
         assert_eq!(
-            cut_note(&cuts[0].0, cuts[0].1),
+            cut_note(&cuts[0].0, cuts[0].1, false),
             "Only the first part of report.txt was sent (about 24%), because the whole file is \
              more than the model can remember at once. If the file is in one of this chat's \
              folders, the model can read the rest itself."
+        );
+        // [0.0.6] Full access: the file tools reach the whole computer (D12).
+        assert_eq!(
+            cut_note(&cuts[0].0, cuts[0].1, true),
+            "Only the first part of report.txt was sent (about 24%), because the whole file is \
+             more than the model can remember at once. Full access is on, so the model can read \
+             the rest itself if it finds the file on this computer."
         );
         assert!(document_cuts(&serde_json::json!("plain")).is_empty());
         // A stored part round-trips the cut as the save path writes it.
         let part = serde_json::json!({"cut": DocumentCut { kept: 5, total: 9 }});
         assert_eq!(part["cut"], serde_json::json!({"kept": 5, "total": 9}));
+    }
+
+    /// A made-up model server's count for [`cut_to_share`]: `per_char` tokens for each
+    /// character of a digit, one for every three other characters (the estimate), and the
+    /// texts it was asked to count.
+    fn counter(
+        per_char: usize,
+        asked: &std::sync::Mutex<Vec<usize>>,
+    ) -> impl Fn(String) -> std::future::Ready<Option<usize>> + '_ {
+        move |t: String| {
+            asked.lock().unwrap().push(t.chars().count());
+            let digits = t.chars().filter(char::is_ascii_digit).count();
+            let other = t.chars().count() - digits;
+            std::future::ready(Some(digits * per_char + other.div_ceil(3)))
+        }
+    }
+
+    fn table(rows: usize) -> String {
+        (1..=rows)
+            .map(|i| format!("{i},{},{}\n", (i * 7_919) % 100_003, (i * 104_729) % 1_000_003))
+            .collect()
+    }
+
+    /// [0.0.6] With a local model the share is held in the model server's own tokens: a
+    /// table of numbers (a token per digit, as the small test model counts them) is cut
+    /// further than the estimate alone would, to at most its share of tokens, still at a
+    /// line end with the note; prose that the estimate already covers is cut as before and
+    /// counted once.
+    #[tokio::test]
+    async fn a_documents_share_is_held_in_the_models_own_tokens() {
+        let cap = document_cap_chars(4_096, 1);
+        let allowed = cap / 3;
+        let numbers = table(1_200);
+
+        // An endpoint: the estimate alone (no count).
+        let none: Option<fn(String) -> std::future::Ready<Option<usize>>> = None;
+        let by_estimate = cut_to_share(&numbers, cap, false, none).await;
+        assert_eq!(by_estimate, cut_document(&numbers, cap, false));
+
+        // A local model whose tokenizer splits digits.
+        let asked = std::sync::Mutex::new(Vec::new());
+        let count = counter(1, &asked);
+        let (out, cut) = cut_to_share(&numbers, cap, false, Some(&count)).await;
+        let cut = cut.expect("cut");
+        let tokens = count(out.clone()).await.unwrap();
+        assert!(tokens <= allowed, "{tokens} > {allowed}");
+        // Not cut to nothing: more than half the share is used.
+        assert!(tokens * 2 > allowed, "{tokens} of {allowed}");
+        assert!(cut.kept < by_estimate.1.unwrap().kept);
+        assert!(out[..cut.kept].ends_with('\n'));
+        assert!(out[cut.kept..].starts_with("[The rest of this file was left out"));
+        assert_eq!(cut.total, numbers.chars().count());
+        // Counted only a few times.
+        assert!(asked.lock().unwrap().len() <= MAX_COUNTS + 1);
+
+        // Prose the estimate covers: the same cut, counted once.
+        let prose = "The river runs past the old mill and on to the sea.\n".repeat(400);
+        let asked = std::sync::Mutex::new(Vec::new());
+        let count = counter(1, &asked);
+        assert_eq!(
+            cut_to_share(&prose, cap, false, Some(&count)).await,
+            cut_document(&prose, cap, false)
+        );
+        assert_eq!(asked.lock().unwrap().len(), 1);
+    }
+
+    /// [0.0.6] A short document that fits by characters but not in tokens is cut too; a
+    /// server that cannot count leaves the estimate's cut; nothing goes below the floor,
+    /// even for a tokenizer far denser than any real one.
+    #[tokio::test]
+    async fn the_models_count_cuts_short_dense_text_and_never_below_the_floor() {
+        let cap = document_cap_chars(8_192, 1);
+        let dense = "1234567890\n".repeat(cap / 11);
+        assert_eq!(cut_document(&dense, cap, false).1, None, "fits by characters");
+        let asked = std::sync::Mutex::new(Vec::new());
+        let count = counter(1, &asked);
+        let (out, cut) = cut_to_share(&dense, cap, false, Some(&count)).await;
+        assert!(cut.is_some());
+        assert!(count(out).await.unwrap() <= cap / 3);
+
+        // The server could not count: the estimate's cut.
+        let failed = |_: String| std::future::ready(None::<usize>);
+        let numbers = table(1_200);
+        assert_eq!(
+            cut_to_share(&numbers, cap, false, Some(failed)).await,
+            cut_document(&numbers, cap, false)
+        );
+
+        // Fifty tokens a digit: the floor, and a bounded number of counts.
+        let asked = std::sync::Mutex::new(Vec::new());
+        let count = counter(50, &asked);
+        let (out, cut) = cut_to_share(&numbers, cap, false, Some(&count)).await;
+        assert!(cut.is_some());
+        assert!(out.chars().count() <= MIN_DOCUMENT_CHARS, "{}", out.chars().count());
+        assert!(out.chars().count() > 0);
+        assert!(asked.lock().unwrap().len() <= MAX_COUNTS);
     }
 }

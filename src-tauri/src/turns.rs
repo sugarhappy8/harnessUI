@@ -1616,14 +1616,15 @@ pub(crate) struct Assembled {
 }
 
 /// [0.0.5 memory] What the user is told about the documents of `message` that were cut to
-/// fit the context when it was sent (`attachments::save_documents`).
-fn cut_document_notes(message: Option<&store::Message>) -> Vec<String> {
+/// fit the context when it was sent (`attachments::save_documents`); [0.0.6] worded for the
+/// chat's approval mode (`full_access`: the file tools reach the whole computer).
+fn cut_document_notes(message: Option<&store::Message>, full_access: bool) -> Vec<String> {
     message
         .filter(|m| m.role == store::Role::User)
         .map(|m| {
             crate::attachments::document_cuts(&m.content)
                 .into_iter()
-                .map(|(name, cut)| crate::attachments::cut_note(&name, cut))
+                .map(|(name, cut)| crate::attachments::cut_note(&name, cut, full_access))
                 .collect()
         })
         .unwrap_or_default()
@@ -1784,7 +1785,7 @@ pub(crate) async fn assemble(
         hidden,
         folders,
         notes: if turn {
-            cut_document_notes(path.last())
+            cut_document_notes(path.last(), full_access)
         } else {
             Vec::new()
         },
@@ -2624,6 +2625,9 @@ mod tests {
 
     /// [0.0.5 memory] A turn that answers a message with a document cut to fit tells the
     /// user so when it starts; a message whose documents fit, or one from the model, does not.
+    /// [0.0.6] In each approval mode (D12), read as `assemble` reads it: Ask first and Allow
+    /// all name the chat's folders; Full access, whose file tools reach the whole computer,
+    /// does not narrow it to them.
     #[test]
     fn a_turn_tells_the_user_which_documents_were_cut() {
         let message = |role, content| store::Message {
@@ -2646,16 +2650,53 @@ mod tests {
             {"type": "text", "text": "summarise this"},
             {"type": "document", "attachment_id": 9, "name": "minutes.txt", "cut": {"kept": 4_914, "total": 49_140}}
         ]);
-        let notes = cut_document_notes(Some(&message(store::Role::User, cut.clone())));
-        assert_eq!(notes.len(), 1);
-        assert!(
-            notes[0].starts_with("Only the first part of minutes.txt was sent (about 10%)"),
-            "{}",
-            notes[0]
-        );
-        let whole = json!([{"type": "document", "attachment_id": 9, "name": "minutes.txt"}]);
-        assert!(cut_document_notes(Some(&message(store::Role::User, whole))).is_empty());
-        assert!(cut_document_notes(Some(&message(store::Role::Assistant, cut))).is_empty());
-        assert!(cut_document_notes(None).is_empty());
+        let modes = crate::approvals::ApprovalModes::default();
+        for (mode, folders) in [
+            (crate::approvals::ApprovalMode::Ask, true),
+            (crate::approvals::ApprovalMode::AllowAll, true),
+            (crate::approvals::ApprovalMode::FullAccess, false),
+        ] {
+            modes.set_chat_mode(1, mode);
+            let full_access = modes.full_access(1);
+            let notes =
+                cut_document_notes(Some(&message(store::Role::User, cut.clone())), full_access);
+            assert_eq!(notes.len(), 1, "{mode:?}");
+            assert!(
+                notes[0].starts_with(
+                    "Only the first part of minutes.txt was sent (about 10%), because the \
+                     whole file is more than the model can remember at once. "
+                ),
+                "{mode:?}: {}",
+                notes[0]
+            );
+            assert_eq!(
+                notes[0].ends_with(
+                    "If the file is in one of this chat's folders, the model can read the rest \
+                     itself."
+                ),
+                folders,
+                "{mode:?}: {}",
+                notes[0]
+            );
+            assert_eq!(
+                notes[0].ends_with(
+                    "Full access is on, so the model can read the rest itself if it finds the \
+                     file on this computer."
+                ),
+                !folders,
+                "{mode:?}: {}",
+                notes[0]
+            );
+            let whole = json!([{"type": "document", "attachment_id": 9, "name": "minutes.txt"}]);
+            assert!(
+                cut_document_notes(Some(&message(store::Role::User, whole)), full_access)
+                    .is_empty()
+            );
+            assert!(
+                cut_document_notes(Some(&message(store::Role::Assistant, cut.clone())), full_access)
+                    .is_empty()
+            );
+            assert!(cut_document_notes(None, full_access).is_empty());
+        }
     }
 }

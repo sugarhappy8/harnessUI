@@ -1,13 +1,14 @@
-//! Coding assistants on a command line (0.0.5, the item "the local model may hand a task to
+//! Coding assistants on a command line (0.0.6, the item "the local model may hand a task to
 //! Claude Code or Codex").
 //!
 //! The app has its own tools for handing a task to Claude Code or Codex (`ask_claude_code`,
 //! `ask_codex`), which always ask. A command line can start the same programs, and others
 //! like them, without those tools: `claude -p "…" --dangerously-skip-permissions` in the
 //! terminal. Such a program works online with the user's account and can change files on
-//! its own, so in every approval mode a line that starts one asks with Allow once / Deny
-//! (Ask first: [`crate::Risk::AlwaysAsk`]; Allow all: [`crate::KeepAsking::Hidden`]) and
-//! counts as going online. [`find`] says why a line is such a line, if it is:
+//! its own, so a line that starts one asks with Allow once / Deny (Ask first:
+//! [`crate::Risk::AlwaysAsk`]; Allow all: [`crate::KeepAsking::Hidden`]) and counts as
+//! going online. In Full access nothing asks (D12): the user chose that the terminal runs
+//! everything there. [`find`] says why a line is such a line, if it is:
 //!
 //! - (a) the program, also after a wrapper (`env`, `timeout`, `sudo`, `cmd /c`,
 //!   `Start-Process`, a shell given a command, …), is a coding assistant ([`ASSISTANTS`],
@@ -29,7 +30,7 @@
 
 use crate::command::{ELEVATION, Parsed, WRAPPERS, program_name};
 
-/// The program names of coding assistants (D8 as amended for 0.0.5 allows them here).
+/// The program names of coding assistants (D8 as amended for 0.0.6 allows them here).
 pub const ASSISTANTS: &[&str] = &[
     "claude",
     "claude-code",

@@ -171,6 +171,12 @@ export const openLogsFolder = () => invoke<void>("open_logs_folder");
 // 0.0.5: one model's load settings, reload and what is using the model (WP1b; stubs
 // return fixed sample data until it lands).
 export const modelLoadInfo = (path: string) => invoke<ModelLoadInfo>("model_load_info", { path });
+/**
+ * The panel's facts as if `overrides` were saved, so the fit marks follow unsaved choices.
+ * Nothing is saved and nothing restarts; values outside the lists are refused.
+ */
+export const previewModelLoadSettings = (path: string, overrides: ModelLoadSettings) =>
+  invoke<ModelLoadInfo>("model_load_info", { path, overrides });
 export const setModelLoadSettings = (path: string, overrides: ModelLoadSettings) =>
   invoke<ModelLoadInfo>("set_model_load_settings", { path, overrides });
 /** "Reset to defaults": forgets the model's own settings. */

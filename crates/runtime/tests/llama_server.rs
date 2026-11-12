@@ -4,7 +4,7 @@
 //! GGUF model with tool-call support, such as Qwen3 0.6B) and skip with a note when either
 //! is unset, so a machine without them still passes. CI sets both on Windows and macOS.
 //!
-//! Every server here runs on the processor, so the 0.0.5 load settings are checked for
+//! Every server here runs on the processor, so the 0.0.6 load settings are checked for
 //! what the processor can show: Save memory allocates a q8_0 memory, Keep the model in
 //! memory starts (and locks the model where the system allows it), As much as fits starts
 //! with `--fit on` and keeps the explicit context, the alias is the model id in every API
@@ -588,6 +588,31 @@ async fn as_much_as_fits_starts_with_fit_on_and_keeps_the_context() {
         2048,
         "fitting changes only the layers, never an explicit -c"
     );
+    let reply = post(&server, "/v1/chat/completions", chat_request("x")).await;
+    assert!(reply["choices"][0]["message"].is_object(), "{reply}");
+    server.stop().await;
+}
+
+/// All of it (`-ngl all --fit off`), the default on a graphics card, is accepted by the
+/// pinned build. Here there is no graphics card (`--device none`), so this proves the words
+/// parse and the context stays as given; what a card does with them is on the owner
+/// checklist.
+#[tokio::test(flavor = "multi_thread")]
+async fn all_of_it_starts_with_fit_off() {
+    let Some((bin, gguf)) = env_paths("all_of_it_starts_with_fit_off") else {
+        return;
+    };
+    let all = LaunchConfig {
+        gpu: GpuUse::All,
+        ..launch(gguf)
+    };
+    let args = build_args(&all);
+    assert!(
+        args.windows(4).any(|w| w == ["-ngl", "all", "--fit", "off"]),
+        "{args:?}"
+    );
+    let server = start_cpu(&bin, all).await;
+    assert_eq!(server.props().n_ctx, 2048);
     let reply = post(&server, "/v1/chat/completions", chat_request("x")).await;
     assert!(reply["choices"][0]["message"].is_object(), "{reply}");
     server.stop().await;
