@@ -2,6 +2,17 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.0.5 (2026-11-12)
+
+The owner asked for the app to "stop asking me to allow everything", named *Full access*, and for models to be able to make their own folders, move around the computer, delete and organise, only when Full access is on. The four things first planned for 0.0.5 (context per model, plain-language loading settings, talking to Claude and Codex, model comparisons) moved to 0.0.6; the plan and the half-built work are in `docs/dev/0.0.6/`.
+
+### Added
+- **Full access.** The shield button in a chat's header now opens a menu with three modes: *Ask first*, *Allow all* and *Full access*. In Full access nothing asks: the model runs commands, reads, writes, edits and deletes files, browses and uses its other tools without a card, and the file tools reach the whole computer, not only your approved folders. Only the app's own folders (its database, logs and install folder) stay out of reach of its tools, and your saved keys stay in the system keychain. Turning it on shows a plain warning and asks you to confirm; turning it off takes one click and reaches a reply that is running at once. *Settings → Permissions → Approvals* chooses the mode every chat starts in. Calls that ran this way are listed in the audit log as "allowed by Full access". [SECURITY.md](SECURITY.md) says what it means for safety: a web page or a file that tricks the model is no longer stopped by an approval card.
+- **Folder tools in Full access.** `make_folder`, `move_path` and `delete_folder` let the model create folders, move and rename files and folders, and delete whole folders. A move never replaces anything, and a move into an existing folder puts the item inside it. A folder that holds the app's own data (your home folder does) or a drive's top is never moved or deleted. The tools are offered only while the chat is in Full access.
+
+### Changed
+- `list_dir` and `search_files` no longer go into the app's own folders when they lie inside the folder being listed or searched (in every mode); a listing names such a folder and marks it "not reachable".
+
 ## 0.0.4 (2026-11-12)
 
 The owner asked for thirteen things in 0.0.4 and split the work into three steps. Step 1 brought an Allow all button, artifacts beside the chat, web search with sources, and a short tool list per task. Steps 2 and 3 brought helpful tool errors and manageable tool output, a visible and resumable task, file and symbol mentions, pinned instructions and a context inspector, tested settings per model, and coding benchmarks. All of it is built and was reviewed; the developers' reports and the two independent reviews are in `docs/dev/0.0.4/`. *Settings → General* now also shows which build it is.
