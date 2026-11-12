@@ -358,7 +358,8 @@ const SUMMARY_LINES_TOKENS: u32 = 40;
 
 /// About how many tokens a turn in this chat sends besides tool definitions and messages:
 /// the system prompt, the list of skills, loaded skills, the summary of earlier messages of
-/// the branch the chat shows, and the app's own lines around them.
+/// the branch the chat shows (as stored: without the context size, it cannot be counted as
+/// a turn sends it, which [`other_fixed_for_turn`] does), and the app's own lines around them.
 pub async fn other_fixed(state: &AppState, chat: &store::Chat) -> u32 {
     // [0.0.5 memory] The summary is part of every request's system message, so it takes
     // from the tools' share like the rest (a summary written under a larger context
@@ -377,12 +378,14 @@ pub async fn other_fixed(state: &AppState, chat: &store::Chat) -> u32 {
 }
 
 /// [0.0.5 memory] [`other_fixed`] for a turn that answers the end of `history` (which may
-/// be on another branch than the one the chat shows, after an edit): its summary is the
-/// one of that branch, as `turns::assemble` reads it.
+/// be on another branch than the one the chat shows, after an edit) in a context of
+/// `n_ctx` tokens: its summary is the one of that branch, as `turns::assemble` reads it,
+/// counted as the loop sends it in this context ([`summary_as_sent`]).
 async fn other_fixed_for_turn(
     state: &AppState,
     chat: &store::Chat,
     history: &[HistoryMessage],
+    n_ctx: u32,
 ) -> u32 {
     let ids: Vec<store::MessageId> = history
         .iter()
@@ -394,8 +397,18 @@ async fn other_fixed_for_turn(
         .await
         .ok()
         .flatten()
-        .map(|s| s.text);
+        .map(|s| summary_as_sent(&s.text, n_ctx));
     other_fixed_with(state, chat, summary.as_deref()).await
+}
+
+/// [0.0.5 memory] The summary of earlier messages as a turn in a context of `n_ctx` tokens
+/// sends it. One written when the model could remember more is folded again under this
+/// context's cap before the loop measures anything, or cut to that cap when the model
+/// cannot fold it (`agent::context::cut_summary`): either way it is at most
+/// `ContextBudget::summary_max_chars` long. A summary that fits is sent as it is (trimmed).
+pub(crate) fn summary_as_sent(summary: &str, n_ctx: u32) -> String {
+    let cap = agent::context::ContextBudget::new(n_ctx, 0).summary_max_chars();
+    agent::context::cut_summary(summary, cap)
 }
 
 /// [0.0.5 memory] What [`other_fixed`] counts, from the fixed text and the summary.
@@ -1024,7 +1037,10 @@ async fn choose(
         return (enabled, Vec::new());
     }
     // What the definitions may take of this model's context.
-    let room = allowance(n_ctx, other_fixed_for_turn(state, chat, history).await);
+    let room = allowance(
+        n_ctx,
+        other_fixed_for_turn(state, chat, history, n_ctx).await,
+    );
     let builtin = tool_catalog::builtin_servers(&state.host);
     let candidates: Vec<Candidate> = enabled
         .iter()

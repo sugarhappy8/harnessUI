@@ -163,13 +163,17 @@ fn names_assistant_package(spec: &str) -> bool {
         .split(['=', '<', '>', '~', '!', '[', ';'])
         .next()
         .unwrap_or(without_version);
-    let name = without_version.rsplit('/').next().unwrap_or(without_version);
+    let name = without_version
+        .rsplit('/')
+        .next()
+        .unwrap_or(without_version);
     if ASSISTANTS.contains(&name) || ASSISTANTS.contains(&program_name(name).as_str()) {
         return true;
     }
-    PACKAGE_SUFFIXES
-        .iter()
-        .any(|suffix| name.strip_suffix(suffix).is_some_and(|stem| ASSISTANTS.contains(&stem)))
+    PACKAGE_SUFFIXES.iter().any(|suffix| {
+        name.strip_suffix(suffix)
+            .is_some_and(|stem| ASSISTANTS.contains(&stem))
+    })
 }
 
 /// The words of a command's arguments: each argument, the words of an argument that holds
@@ -213,7 +217,9 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
     }
     // (c) A script inside an assistant's package.
     if SCRIPT_HOSTS.contains(&name) && args.iter().any(|a| names_package_path(a)) {
-        return Some(format!("{program} is handed a script of a coding assistant"));
+        return Some(format!(
+            "{program} is handed a script of a coding assistant"
+        ));
     }
     // (b) A package runner handed an assistant's package.
     if let Some(rest) = runner_args(name, args)
@@ -271,7 +277,9 @@ fn runner_args<'a>(name: &str, args: &'a [String]) -> Option<&'a [String]> {
     if RUNNERS.contains(&name) {
         return Some(args);
     }
-    let (_, subs) = RUNNER_SUBCOMMANDS.iter().find(|(manager, _)| *manager == name)?;
+    let (_, subs) = RUNNER_SUBCOMMANDS
+        .iter()
+        .find(|(manager, _)| *manager == name)?;
     let at = args.iter().position(|a| !a.starts_with('-'))?;
     subs.contains(&args[at].to_lowercase().as_str())
         .then(|| &args[at + 1..])

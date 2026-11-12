@@ -6,7 +6,7 @@ import type { DiskUsage, ErrorInfo, InstalledModel, ModelLoadInfo, Verdict } fro
 import { formatBytes } from "../../lib/format";
 import { FIT_WORDS, tokensWithWords } from "../../lib/words";
 import { toErrorInfo, useApp } from "../../store/app";
-import { useAddToComparison } from "../../store/compare";
+import { COMPARE_FULL, COMPARE_LIMIT, sameEntry, useAddToComparison, useCompare } from "../../store/compare";
 import { askTooLarge } from "../../store/modelChange";
 import { ErrorBanner } from "../ErrorBanner";
 import { ModelSettings } from "../ModelSettings";
@@ -28,6 +28,11 @@ export function Installed(props: { onClose: () => void }) {
   const [infos, setInfos] = useState<Record<string, ModelLoadInfo>>({});
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
   const pickModel = useApp((s) => s.pickModel);
+  const compared = useCompare((s) => s.entries);
+  // The comparison is full while a model here is not in it: said once, as visible text.
+  const compareFull =
+    compared.length >= COMPARE_LIMIT &&
+    (models ?? []).some((m) => !compared.some((e) => sameEntry(e, { installedPath: m.path })));
 
   async function use(m: InstalledModel) {
     if (markedTooLarge(infos[m.path]) && !(await askTooLarge())) return;
@@ -138,6 +143,7 @@ export function Installed(props: { onClose: () => void }) {
           </button>
         </div>
       </div>
+      {compareFull && <p className="text-xs text-fg-muted">{COMPARE_FULL}</p>}
       <ul className="space-y-2">
         {(models ?? []).map((m) => (
           <Row

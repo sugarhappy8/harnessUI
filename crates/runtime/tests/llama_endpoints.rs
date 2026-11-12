@@ -124,7 +124,12 @@ async fn messages_api_contract() {
     };
     let server = app_server(&bin, &gguf).await;
 
-    let (status, text) = post(&server, "/v1/messages", json!({"model": "claude-x", "max_tokens": 4, "messages": hi()})).await;
+    let (status, text) = post(
+        &server,
+        "/v1/messages",
+        json!({"model": "claude-x", "max_tokens": 4, "messages": hi()}),
+    )
+    .await;
     assert_eq!(status, 200, "{text}");
     let answer = json_of(&text);
     assert_eq!(answer["type"], json!("message"));
@@ -134,37 +139,73 @@ async fn messages_api_contract() {
     assert_eq!(answer["model"], json!(MODEL_ALIAS));
     assert!(!text.contains(&*gguf.to_string_lossy()));
     let usage = &answer["usage"];
-    assert!(usage["input_tokens"].is_u64() && usage["output_tokens"].is_u64(), "{usage}");
+    assert!(
+        usage["input_tokens"].is_u64() && usage["output_tokens"].is_u64(),
+        "{usage}"
+    );
     // The counter the proxy folds back into input_tokens. A second identical request
     // reuses the cached prompt, and input_tokens then counts only the rest: this is the
     // leak the proxy closes.
     assert!(usage.get("cache_read_input_tokens").is_some(), "{usage}");
-    let first_input = usage["input_tokens"].as_u64().unwrap() + usage["cache_read_input_tokens"].as_u64().unwrap();
-    let (_, again) = post(&server, "/v1/messages", json!({"model": "x", "max_tokens": 4, "messages": hi()})).await;
+    let first_input = usage["input_tokens"].as_u64().unwrap()
+        + usage["cache_read_input_tokens"].as_u64().unwrap();
+    let (_, again) = post(
+        &server,
+        "/v1/messages",
+        json!({"model": "x", "max_tokens": 4, "messages": hi()}),
+    )
+    .await;
     let again = json_of(&again)["usage"].clone();
-    assert!(again["cache_read_input_tokens"].as_u64().unwrap() > 0, "{again}");
+    assert!(
+        again["cache_read_input_tokens"].as_u64().unwrap() > 0,
+        "{again}"
+    );
     assert_eq!(
-        again["input_tokens"].as_u64().unwrap() + again["cache_read_input_tokens"].as_u64().unwrap(),
+        again["input_tokens"].as_u64().unwrap()
+            + again["cache_read_input_tokens"].as_u64().unwrap(),
         first_input
     );
 
     // Streaming: the events the proxy cleans one by one.
-    let (status, text) = post(&server, "/v1/messages", json!({"model": "x", "max_tokens": 4, "stream": true, "messages": hi()})).await;
+    let (status, text) = post(
+        &server,
+        "/v1/messages",
+        json!({"model": "x", "max_tokens": 4, "stream": true, "messages": hi()}),
+    )
+    .await;
     assert_eq!(status, 200);
     let (names, data) = events(&text);
     assert_eq!(names.first().map(String::as_str), Some("message_start"));
     assert_eq!(names.last().map(String::as_str), Some("message_stop"));
-    assert!(names.iter().any(|n| n == "content_block_delta"), "{names:?}");
+    assert!(
+        names.iter().any(|n| n == "content_block_delta"),
+        "{names:?}"
+    );
     assert!(names.iter().any(|n| n == "message_delta"), "{names:?}");
     assert_eq!(data[0]["message"]["model"], json!(MODEL_ALIAS));
-    assert!(data[0]["message"]["usage"].get("cache_read_input_tokens").is_some());
-    let delta = data.iter().find(|d| d["type"] == json!("message_delta")).unwrap();
+    assert!(
+        data[0]["message"]["usage"]
+            .get("cache_read_input_tokens")
+            .is_some()
+    );
+    let delta = data
+        .iter()
+        .find(|d| d["type"] == json!("message_delta"))
+        .unwrap();
     assert!(delta["usage"]["output_tokens"].is_u64(), "{delta}");
 
     // Token counting.
-    let (status, text) = post(&server, "/v1/messages/count_tokens", json!({"model": "x", "messages": hi()})).await;
+    let (status, text) = post(
+        &server,
+        "/v1/messages/count_tokens",
+        json!({"model": "x", "messages": hi()}),
+    )
+    .await;
     assert_eq!(status, 200);
-    assert!(json_of(&text)["input_tokens"].as_u64().unwrap() > 0, "{text}");
+    assert!(
+        json_of(&text)["input_tokens"].as_u64().unwrap() > 0,
+        "{text}"
+    );
 
     // Both key headers work; none is refused in the API's error shape.
     let bearer = client()
@@ -186,7 +227,12 @@ async fn messages_api_contract() {
     // A request larger than the context: the error the proxy turns into each client's
     // "too long" wording.
     let long = "word ".repeat(3000);
-    let (status, text) = post(&server, "/v1/messages", json!({"model": "x", "max_tokens": 1, "messages": [{"role": "user", "content": long}]})).await;
+    let (status, text) = post(
+        &server,
+        "/v1/messages",
+        json!({"model": "x", "max_tokens": 1, "messages": [{"role": "user", "content": long}]}),
+    )
+    .await;
     assert_eq!(status, 400, "{text}");
     let error = &json_of(&text)["error"];
     assert_eq!(error["type"], json!("exceed_context_size_error"), "{error}");
@@ -202,15 +248,28 @@ async fn responses_api_contract() {
     };
     let server = app_server(&bin, &gguf).await;
 
-    let (status, text) = post(&server, "/v1/responses", json!({"model": "x", "max_output_tokens": 3, "input": "Count to ten."})).await;
+    let (status, text) = post(
+        &server,
+        "/v1/responses",
+        json!({"model": "x", "max_output_tokens": 3, "input": "Count to ten."}),
+    )
+    .await;
     assert_eq!(status, 200, "{text}");
     let answer = json_of(&text);
     assert_eq!(answer["object"], json!("response"));
     assert_eq!(answer["model"], json!(MODEL_ALIAS));
     assert!(answer["output"].is_array());
     // max_output_tokens is honoured (the proxy caps it).
-    assert!(answer["usage"]["output_tokens"].as_u64().unwrap() <= 3, "{answer}");
-    assert!(answer["usage"]["input_tokens_details"].get("cached_tokens").is_some(), "{answer}");
+    assert!(
+        answer["usage"]["output_tokens"].as_u64().unwrap() <= 3,
+        "{answer}"
+    );
+    assert!(
+        answer["usage"]["input_tokens_details"]
+            .get("cached_tokens")
+            .is_some(),
+        "{answer}"
+    );
 
     // A message list with a function tool, streamed, as Codex sends it.
     let body = json!({
@@ -227,7 +286,11 @@ async fn responses_api_contract() {
     assert_eq!(names.last().map(String::as_str), Some("response.completed"));
     let done = data.last().unwrap();
     assert_eq!(done["response"]["model"], json!(MODEL_ALIAS));
-    assert!(done["response"]["usage"]["input_tokens_details"].get("cached_tokens").is_some());
+    assert!(
+        done["response"]["usage"]["input_tokens_details"]
+            .get("cached_tokens")
+            .is_some()
+    );
     // llama-server adds its timings at the top of the last event; the proxy removes them.
     assert!(done.get("timings").is_some(), "{done}");
     server.stop().await;
@@ -239,14 +302,24 @@ async fn chat_completions_contract() {
         return;
     };
     let server = app_server(&bin, &gguf).await;
-    let (status, text) = post(&server, "/v1/chat/completions", json!({"model": "x", "max_tokens": 3, "messages": hi()})).await;
+    let (status, text) = post(
+        &server,
+        "/v1/chat/completions",
+        json!({"model": "x", "max_tokens": 3, "messages": hi()}),
+    )
+    .await;
     assert_eq!(status, 200, "{text}");
     let answer = json_of(&text);
     assert_eq!(answer["model"], json!(MODEL_ALIAS));
     // The fields the proxy removes or zeroes.
     assert!(answer.get("timings").is_some(), "{answer}");
     assert!(answer.get("system_fingerprint").is_some(), "{answer}");
-    assert!(answer["usage"]["prompt_tokens_details"].get("cached_tokens").is_some(), "{answer}");
+    assert!(
+        answer["usage"]["prompt_tokens_details"]
+            .get("cached_tokens")
+            .is_some(),
+        "{answer}"
+    );
 
     // Streamed, the last chunk carries timings, and usage when asked for.
     let (status, text) = post(
@@ -281,7 +354,12 @@ async fn the_alias_is_the_model_id() {
         .json()
         .await
         .unwrap();
-    let ids: Vec<&str> = models["data"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
+    let ids: Vec<&str> = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
     assert_eq!(ids, [MODEL_ALIAS]);
     let props: Value = client()
         .get(format!("{}/props", server.base_url()))
@@ -308,7 +386,8 @@ async fn several_keys_are_each_accepted() {
     };
     let backend = cpu_backend(&bin);
     let cfg = launch(gguf.clone());
-    let env = runtime::llama::launch::build_env_on(backend.base_env(), &cfg).set(API_KEY_ENV, "appkey111,sharekey222");
+    let env = runtime::llama::launch::build_env_on(backend.base_env(), &cfg)
+        .set(API_KEY_ENV, "appkey111,sharekey222");
     let spec = SpawnSpec::new(&backend.server, &backend.dir)
         .args(build_args(&cfg))
         .env(env)
@@ -331,7 +410,12 @@ async fn several_keys_are_each_accepted() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(ready, "llama-server did not get ready");
-    for (key, expected) in [("appkey111", 200), ("sharekey222", 200), ("wrong", 401), ("appkey111,sharekey222", 401)] {
+    for (key, expected) in [
+        ("appkey111", 200),
+        ("sharekey222", 200),
+        ("wrong", 401),
+        ("appkey111,sharekey222", 401),
+    ] {
         let status = client
             .get(format!("{base}/v1/models"))
             .header("x-api-key", key)
@@ -349,7 +433,11 @@ async fn several_keys_are_each_accepted() {
             .status();
         assert_eq!(status, expected, "{key}");
     }
-    let none = client.get(format!("{base}/v1/models")).send().await.unwrap();
+    let none = client
+        .get(format!("{base}/v1/models"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(none.status(), 401);
     let _ = child.kill().await;
 }

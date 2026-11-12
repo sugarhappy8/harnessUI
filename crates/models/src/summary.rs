@@ -321,7 +321,10 @@ mod tests {
                 .u32_array("lfm2.attention.head_count_kv", &[8, 0, 8, 0])
                 .build(),
         );
-        assert_eq!(hybrid.kv_bytes_per_token_as(KvCacheType::Q8_0), 2 * 2 * 16 * 34);
+        assert_eq!(
+            hybrid.kv_bytes_per_token_as(KvCacheType::Q8_0),
+            2 * 2 * 16 * 34
+        );
         // A row that is not a whole number of blocks is rounded up to one more block.
         assert_eq!(KvCacheType::Q8_0.row_bytes(33), 68);
         assert_eq!(KvCacheType::Q8_0.row_bytes(0), 0);

@@ -290,10 +290,7 @@ impl Sharing {
     }
 
     fn serve(&self, env: &Env, listener: tokio::net::TcpListener) -> AppResult<proxy::Running> {
-        let port = listener
-            .local_addr()
-            .map_err(AppError::internal)?
-            .port();
+        let port = listener.local_addr().map_err(AppError::internal)?.port();
         proxy::serve(listener, self.deps(env, port)).map_err(AppError::internal)
     }
 
@@ -316,9 +313,10 @@ impl Sharing {
             port: saved.map(|s| s.port),
             listening,
             error: if enabled && !listening {
-                inner.error.clone().or_else(|| {
-                    Some("Sharing has stopped. Switch it off and on again.".to_owned())
-                })
+                inner
+                    .error
+                    .clone()
+                    .or_else(|| Some("Sharing has stopped. Switch it off and on again.".to_owned()))
             } else {
                 None
             },
@@ -359,7 +357,14 @@ impl Sharing {
             && let Some(saved) = saved
         {
             if !saved.enabled {
-                self.save(env, ShareSettings { enabled: true, ..saved }).await?;
+                self.save(
+                    env,
+                    ShareSettings {
+                        enabled: true,
+                        ..saved
+                    },
+                )
+                .await?;
             }
             return Ok(());
         }
@@ -373,7 +378,14 @@ impl Sharing {
                 Err(e) => {
                     tracing::warn!(port, "the sharing port could not be opened: {e}");
                     inner.error = Some(port_taken(port));
-                    self.save(env, ShareSettings { enabled: true, port }).await?;
+                    self.save(
+                        env,
+                        ShareSettings {
+                            enabled: true,
+                            port,
+                        },
+                    )
+                    .await?;
                     return Ok(());
                 }
             },
@@ -391,7 +403,14 @@ impl Sharing {
         self.counters.reset_refused();
         inner.running = Some(running);
         inner.error = None;
-        self.save(env, ShareSettings { enabled: true, port }).await?;
+        self.save(
+            env,
+            ShareSettings {
+                enabled: true,
+                port,
+            },
+        )
+        .await?;
         tracing::info!(port, "sharing with other apps is on");
         Ok(())
     }
@@ -403,14 +422,28 @@ impl Sharing {
         if port != 0 && port < LOWEST_PORT {
             return Err(AppError::bad_request("Choose a port from 1024 to 65535."));
         }
+        // The port it already listens on: nothing to move.
+        if port != 0
+            && inner
+                .running
+                .as_ref()
+                .is_some_and(|r| r.port() == port && !r.is_finished())
+        {
+            return Ok(self.status_of(env, &inner).await);
+        }
         let listener = if port == 0 {
-            random_listener().await.ok_or_else(|| {
-                AppError::bad_request("No free port was found. Try again.")
-            })?
+            random_listener()
+                .await
+                .ok_or_else(|| AppError::bad_request("No free port was found. Try again."))?
         } else {
             proxy::bind(port).await.map_err(|e| {
                 tracing::warn!(port, "the chosen sharing port could not be opened: {e}");
-                AppError::new("share_port_taken", port_taken(port), "Choose another port.", e.to_string())
+                AppError::new(
+                    "share_port_taken",
+                    port_taken(port),
+                    "Choose another port.",
+                    e.to_string(),
+                )
             })?
         };
         let port = listener.local_addr().map_err(AppError::internal)?.port();
@@ -503,7 +536,8 @@ async fn random_listener() -> Option<tokio::net::TcpListener> {
 pub fn start_saved(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let (Some(state), Some(sharing)) = (app.try_state::<AppState>(), app.try_state::<Sharing>())
+        let (Some(state), Some(sharing)) =
+            (app.try_state::<AppState>(), app.try_state::<Sharing>())
         else {
             return;
         };

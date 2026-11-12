@@ -2,8 +2,10 @@
 //!
 //! - **Crash while Ready:** restart with the same arguments, up to
 //!   [`RestartPolicy::max_restarts`] times within [`RestartPolicy::window`].
-//! - **Retries on the same backend (0.0.5)**, when a load fails or the crash limit is
-//!   reached, before any step-down, each at most once per load:
+//! - **Retries on the same backend (0.0.5)**, when the server exits while loading or the
+//!   crash limit is reached, before any step-down, each at most once per load (a process
+//!   that could not be created, a load timeout or an unusable `/props` reply changes no
+//!   setting):
 //!   1. **Save memory off** ([`LoadStage::RetryingWithoutSaveMemory`]) when it was on and
 //!      the failure is one it can cause ([`LoadFailure::save_memory_may_be_the_cause`]):
 //!      a device or driver without flash attention for a q8_0 memory fails the context or
@@ -226,7 +228,13 @@ impl<S: Starter> Supervisor<S> {
                 spec.launch.port = free_loopback_port().map_err(StartError::Spawn)?;
                 continue;
             }
-            if let Some(retry) = self.retry_spec(&spec, &failure) {
+            // Only a server that exited while loading can have failed because of a load
+            // setting. A process that could not be created, a load that ran out of time and
+            // an unusable `/props` reply are unknown failures too, but turning a setting
+            // down for them would blame it wrongly (and repeat a whole load timeout).
+            if matches!(error, StartError::Exited { .. })
+                && let Some(retry) = self.retry_spec(&spec, &failure)
+            {
                 spec = retry;
                 port_attempts = 0;
                 continue;
@@ -418,6 +426,12 @@ mod tests {
         Hang,
         /// Refuses the settings before starting anything.
         Invalid,
+        /// The process could not be created (a missing or blocked executable).
+        SpawnFails,
+        /// Did not become ready within the load timeout, nothing recognisable logged.
+        TimesOut,
+        /// Became ready, but `/props` was unusable.
+        PropsFail,
     }
 
     #[derive(Debug, Default)]
@@ -467,6 +481,18 @@ mod tests {
                 }),
                 Script::Hang => std::future::pending().await,
                 Script::Invalid => Err(StartError::InvalidConfig("bad settings".into())),
+                Script::SpawnFails => Err(StartError::Spawn(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                ))),
+                Script::TimesOut => Err(StartError::Timeout {
+                    after: Duration::from_secs(60),
+                    failure: LoadFailure::Unknown,
+                    stderr_tail: vec!["load_tensors: loading".into()],
+                }),
+                Script::PropsFail => Err(StartError::Props {
+                    message: "no model_path".into(),
+                    stderr_tail: Vec::new(),
+                }),
             }
         }
     }
@@ -1040,6 +1066,48 @@ mod tests {
             ]
         );
         assert!(drain(&mut rx).is_empty());
+    }
+
+    /// Only a server that exited while loading can have failed because of a load setting.
+    /// A process that could not be created, a load that ran out of time and an unusable
+    /// `/props` reply are reported as unknown failures too, but retrying them without Save
+    /// memory would tell the user that Save memory does not work with their graphics card
+    /// (and a second timeout would double the wait). They step down as in 0.0.4, with the
+    /// settings unchanged.
+    #[tokio::test(start_paused = true)]
+    async fn errors_that_are_not_a_failed_load_change_no_setting() {
+        for (name, first) in [
+            ("spawn", Script::SpawnFails),
+            ("timeout", Script::TimesOut),
+            ("props", Script::PropsFail),
+        ] {
+            let (mut sup, log, mut rx) = supervisor(vec![first, Script::Run(None)], gpu_cpu());
+            sup.start(spec_with(
+                BackendKind::Vulkan,
+                Some("Vulkan0"),
+                GpuUse::All,
+                true,
+            ))
+            .await
+            .expect("starts on the processor");
+            assert_eq!(
+                attempts(&log),
+                vec![
+                    (BackendKind::Vulkan, GpuUse::All, true),
+                    (BackendKind::Cpu, GpuUse::Off, true),
+                ],
+                "{name}"
+            );
+            assert_eq!(
+                drain(&mut rx),
+                vec![ServerEvent::SteppedDown {
+                    from: BackendKind::Vulkan,
+                    to: BackendKind::Cpu,
+                    reason: LoadFailure::Unknown,
+                }],
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

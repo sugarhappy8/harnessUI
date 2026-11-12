@@ -2895,6 +2895,10 @@ def p_compare_models(c, notes):
             """
         )
         s.wait_text("Estimate for this computer at 32,768 tokens, about 24,000 words", 20)
+        tab = s.execute("return document.querySelector('[role=tab][aria-selected=true]')?.innerText || '';")
+        assert tab.startswith("Compare"), tab
+        # Two painted frames, so the screenshot shows this state on a busy machine.
+        s.execute_async("const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));")
         s.screenshot(str(OUT / "compare-models.png"))
 
         # A model card opens only after the destination-confirm dialog.
@@ -2983,7 +2987,10 @@ def _memory_turns(c, chat, notes, summary_reply):
 
 def _chat_memory(c, notes):
     s = c.s
-    summary = "Goal: hear about the river.\nDecisions: none yet. <b>Plain</b> & simple."
+    # About 1,500 characters: within the summary cap at 4,096 tokens (2,048 characters), over
+    # the one at 2,560 tokens (1,280), for the smaller-context step below.
+    summary = ("Goal: hear about the river.\nDecisions: none yet. <b>Plain</b> & simple.\nWork done: "
+               + "The mill and the sea were described. " * 38).strip()
     chat = new_chat(c, tools=[])
     s.invoke("rename_chat", {"chatId": chat, "title": "Memory"})
     reqs = _memory_turns(c, chat, notes, {"content": summary, "prompt_tokens": 0, "chunk": 200})
@@ -3006,25 +3013,25 @@ def _chat_memory(c, notes):
     last_covered = next(m for m in detail["messages"] if m["id"] == detail["summary"]["lastMessageId"])
     notes.append(f"the summary stands for messages up to {last_covered['id']} ({last_covered['role']}: {last_covered['text'][:20]!r})")
 
-    def check_line():
+    def check_line(expected, covered):
         s.wait_for(lambda: s.execute("return document.querySelectorAll('[data-summary-divider]').length;") == 1, 15, "the summary line")
         # Rows off screen are not laid out (content-visibility): bring the line into view and
         # read text content.
         s.execute("document.querySelector('[data-summary-divider]').scrollIntoView({block: 'center'});")
         time.sleep(0.4)
         row = s.execute("return document.querySelector('[data-summary-divider]').closest('.message-row').textContent;")
-        assert last_covered["text"][:10] in row, (last_covered["text"][:40], row[:300])
+        assert covered["text"][:10] in row, (covered["text"][:40], row[:300])
         line = s.execute("return document.querySelector('[data-summary-divider]').textContent;")
         assert "Above this line, the model sees a summary instead of the messages." in line, line
         assert s.execute("return document.querySelector('[data-summary-text]');") is None
         s.click_button("Show summary")
         s.wait_for(lambda: s.execute("return !!document.querySelector('[data-summary-text]');"), 10, "the summary text")
         shown = s.execute("return document.querySelector('[data-summary-text]').textContent;")
-        assert shown.strip() == summary, shown
+        assert shown.strip() == expected, shown
         # Model output is plain text: no element was made from it.
         assert s.execute("return document.querySelector('[data-summary-text] b');") is None
 
-    check_line()
+    check_line(summary, last_covered)
     s.screenshot(str(OUT / "chat-memory.png"))
     # After a window reload, from what is stored.
     s.execute("window.location.reload();")
@@ -3033,7 +3040,41 @@ def _chat_memory(c, notes):
     s.execute(HOOK)
     s.execute("[...document.querySelectorAll('nav[aria-label=\"Chat history\"] button')].find(b => b.innerText.includes('Memory')).click();")
     time.sleep(0.8)
-    check_line()
+    check_line(summary, last_covered)
+
+    # The same chat with less room (2,560 tokens): the summary, written when the model could
+    # remember more, is longer than this size allows. The Context tab says the next request
+    # has it rewritten shorter; the turn asks the model to fold it first, the app stores the
+    # new one in its place (covering at least the same messages, so the line does not move
+    # up) and the reply goes on. Every scripted reply is the same short text, whether the
+    # turn uses it as the folded summary, a further summary or the answer.
+    s.invoke("set_setting", {"key": "remoteContextLength", "value": 2560})
+    view = s.invoke("inspect_context", {"chatId": chat})
+    assert view["nextDrop"].startswith("The summary of earlier messages was written when the model could remember more."), view["nextDrop"]
+    assert "Too long for this model's memory now" in json.dumps(view), "the summary's row in the Context tab"
+    short = "Goal: hear about the river.\nWork done: the mill, the sea and the bridge."
+    Fake.queue.clear()
+    Fake.queue.extend([{"content": short, "prompt_tokens": 0} for _ in range(8)])
+    Fake.requests.clear()
+    send(s, "And the bridge?")
+    wait_idle(s)
+    Fake.queue.clear()
+    reqs = list(Fake.requests)
+    first = [m for m in reqs[0]["messages"] if m["role"] == "user"][-1]
+    assert "The summary of earlier messages in the system message is too long" in _memory_text(first), _memory_text(first)[:200]
+    assert "The mill and the sea were described." in _memory_text(reqs[0]["messages"][0]), "the fold request carries the old summary"
+    final_system = _memory_text(reqs[-1]["messages"][0])
+    assert short.splitlines()[1] in final_system and "The mill and the sea were described." not in final_system, final_system[-400:]
+    notes.append(f"at 2,560 tokens the turn sent {len(reqs)} requests (fold first)")
+    detail = s.invoke("get_chat", {"chatId": chat})
+    assert detail["summary"] and detail["summary"]["text"] == short, detail.get("summary")
+    assert detail["summary"]["lastMessageId"] >= last_covered["id"], (detail["summary"], last_covered["id"])
+    last = detail["messages"][-1]
+    assert last["role"] == "assistant" and last["status"] == "complete", last
+    s.wait_for(lambda: "Earlier messages were summarised to make room." in s.page_text(), 10, "the stage note")
+    covered = next(m for m in detail["messages"] if m["id"] == detail["summary"]["lastMessageId"])
+    check_line(short, covered)
+    s.invoke("set_setting", {"key": "remoteContextLength", "value": 4096})
 
     # A summary that fails: the reply goes on and the chat says so.
     Fake.queue.clear()
@@ -3268,8 +3309,10 @@ def p_model_settings(c, notes):
         click_in("[role=alertdialog]", "Cancel")
         time.sleep(0.6)
         st = state()
+        before_ctx = st["nCtx"]
         assert question not in s.page_text() and st["state"] == "ready" and not st["reloadWaiting"], st
         assert not idle(s), "Cancel stopped the reply"
+        # Restart when it ends, then Cancel on the waiting line: nothing changes.
         s.click_button("Model menu")
         s.click_menu_item("Reload")
         s.wait_text(question, 10)
@@ -3277,14 +3320,52 @@ def p_model_settings(c, notes):
         s.wait_text("Restarts when the reply ends", 10)
         try:
             s.wait_for(lambda: state()["reloadWaiting"], 10, "reloadWaiting")
+            waits = True
         except WebDriverError:
+            waits = False
             notes.append("integration: the backend did not set reloadWaiting while the reload waited (WP1b)")
+        if waits and not idle(s):
+            click_in("main header", "Cancel")
+            s.wait_for(lambda: "Restarts when the reply ends" not in header() and not state()["reloadWaiting"], 15,
+                       "the wait cancelled")
+            st = state()
+            assert st["state"] == "ready" and st["nCtx"] == before_ctx, st
+            assert not idle(s), "Cancel on the waiting line stopped the reply"
+            notes.append("Cancel on the waiting line: the reload no longer waits and the reply goes on")
+            s.click_button("Model menu")
+            s.click_menu_item("Reload")
+            s.wait_text(question, 10)
+            click_in("[role=alertdialog]", "Restart when it ends")
+            s.wait_text("Restarts when the reply ends", 10)
         assert not idle(s), "Restart when it ends stopped the reply"
-        wait_idle(s, 240)
+        time.sleep(3.0)
+        assert not idle(s) and state()["state"] == "ready", "the model restarted before the reply ended"
+        # The reply ends by itself, or (on a slow, busy computer) with Stop: either way the
+        # restart follows the end of the reply, and the header says the next reply is slower.
+        try:
+            wait_idle(s, 90)
+            notes.append("the reply ended by itself")
+        except WebDriverError:
+            notes.append("the reply was still being written after 90 s; ended with Stop")
+            s.click_button("Stop")
+            wait_idle(s, 60)
         last = messages(s, chat["id"])[-1]
-        assert last["status"] == "complete", last["status"]
-        s.wait_for(lambda: "Restarts when the reply ends" not in s.page_text() and state()["state"] == "ready", 180,
-                   "restarted after the reply")
+        assert last["role"] == "assistant" and last["status"] in ("complete", "stopped"), last["status"]
+        restarted, noted = False, False
+        deadline = time.time() + 240
+        while time.time() < deadline and not (noted and state()["state"] == "ready"):
+            restarted = restarted or state()["state"] == "starting"
+            noted = noted or "The first reply after a restart takes longer" in header()
+            if restarted and state()["state"] == "ready" and not state()["reloadWaiting"]:
+                time.sleep(1.0)
+                noted = noted or "The first reply after a restart takes longer" in header()
+                break
+            time.sleep(0.3)
+        notes.append(f"after the reply: restart seen {restarted}, note about the first reply shown {noted}")
+        assert restarted or noted, "the waiting reload did not restart the model after the reply"
+        s.wait_for(lambda: "Restarts when the reply ends" not in header() and state()["state"] == "ready", 60,
+                   "ready after the restart")
+        assert not state()["reloadWaiting"], state()
         break
     else:
         raise AssertionError("the reply never lasted long enough for the question")
@@ -3315,11 +3396,628 @@ def p_model_settings(c, notes):
         s.invoke("reset_model_load_settings", {"path": model})
 
 
+CODING_TASK = "-p --dangerously-skip-permissions \"quoted\" 'single' 100% $HOME `id`\nsecond line"
+CLAUDE_TEMPLATE = {
+    False: ["-p", "--restricted", "--safe-mode", "--strict-mcp-config", "--permission-mode", "default",
+            "--tools", "Read,Grep,Glob", "--settings",
+            '{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}',
+            "--output-format", "stream-json", "--verbose"],
+}
+CODEX_TEMPLATE = {
+    True: ["exec", "--json", "--sandbox", "workspace-write", "-c", "features.hooks=false", "-"],
+}
+FAKE_OUTPUT = {
+    "claude": [
+        '{"type":"system","subtype":"init","tools":["Glob","Grep","Read"]}',
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"notes.txt"}}]}}',
+        '{"type":"result","subtype":"success","is_error":false,"result":"FAKE-CLAUDE-ANSWER: the word is heron"}',
+    ],
+    "codex": [
+        '{"type":"thread.started","thread_id":"t1"}',
+        '{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"bash -lc ls","status":"in_progress"}}',
+        '{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"FAKE-CODEX-ANSWER"}}',
+        '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}',
+    ],
+}
+
+
+@probe("coding-apps")
+def p_coding_apps(c, notes):
+    """0.0.5 WP6 (item 3, direction B): the local model hands a task to Claude Code or Codex.
+    Fake `claude` and `codex` programs (scripts that record their arguments, standard input
+    and working folder, then print what the real ones print) sit in a folder that the test
+    puts first on PATH, outside every approved folder. The group is off in a new chat;
+    switching it on in the Tools panel finds the fakes (located, never run) and names them by
+    their full paths; a call shows a card with Allow once and Deny only, also in Allow all;
+    Deny runs nothing; Allow once runs the fake with exactly the template, the task on
+    standard input, in the working folder, and its answer comes back. The real programs are
+    never run: the scenario stops before any Allow unless the programs found are the fakes."""
+    s = c.s
+    bin_dir = pathlib.Path(os.path.realpath(c.fakebin))
+    work = os.path.realpath(c.work)
+    for name, lines in FAKE_OUTPUT.items():
+        script = bin_dir / name
+        body = ["#!/bin/sh", 'd="$(dirname "$0")"', f"printf '%s\\n' \"$@\" > \"$d/{name}-args.txt\"",
+                f'cat > "$d/{name}-stdin.txt"', f'pwd -P > "$d/{name}-cwd.txt"']
+        body += [f"printf '%s\\n' '{line}'" for line in lines]
+        script.write_text("\n".join(body) + "\n")
+        script.chmod(0o755)
+        for f in ("args", "stdin", "cwd"):
+            (bin_dir / f"{name}-{f}.txt").unlink(missing_ok=True)
+
+    def ran(name):
+        return (bin_dir / f"{name}-args.txt").exists()
+
+    # Off and unlisted until the user switches the group on.
+    assert not {"ask_claude_code", "ask_codex"} & set(c.all_tools), "listed before the group was switched on"
+    assert s.invoke("coding_apps_status")["checked"] is False
+    chat = new_chat(c)
+    listed = {t["exposed"] for t in s.invoke("list_chat_tools", {"chatId": chat})}
+    assert not {"ask_claude_code", "ask_codex"} & listed, listed
+    s.click_button("Tools")
+    s.wait_text("Coding apps (experimental)", 10)
+    panel = s.page_text()
+    assert "They work online with your own account, and every request asks you first." in panel, panel[-600:]
+    before = s.execute(
+        """
+        const box = [...document.querySelectorAll('input[role="switch"]')].find(i => i.closest('label').innerText.includes('Coding apps'));
+        const was = box.checked;
+        box.click();
+        box.scrollIntoView();
+        return was;
+        """
+    )
+    assert before is False, "the Coding apps group was already on"
+    s.wait_for(lambda: f"{bin_dir}/claude" in s.page_text() and f"{bin_dir}/codex" in s.page_text(), 20,
+               "the programs named by their full paths")
+    time.sleep(0.5)
+    s.screenshot(str(OUT / "coding-apps-panel.png"))
+    status = s.invoke("coding_apps_status")
+    paths = {a["app"]: a["path"] for a in status["apps"]}
+    notes.append("found: " + json.dumps(paths))
+    # Safety: never go on to Allow unless the programs found are the fakes.
+    if paths != {"claudeCode": f"{bin_dir}/claude", "codex": f"{bin_dir}/codex"}:
+        raise AssertionError(f"not the fake programs, so nothing is allowed: {paths}")
+    tools = {t["exposed"]: t for t in s.invoke("list_chat_tools", {"chatId": chat})}
+    assert tools["ask_claude_code"]["enabledInChat"] and tools["ask_codex"]["enabledInChat"], tools.get("ask_codex")
+    assert tools["ask_claude_code"]["server"] == "coding_apps"
+    s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+    time.sleep(0.3)
+
+    # 1. The card names the program and says only what the command line confines; Deny runs nothing.
+    Fake.requests.clear()
+    Fake.queue.append({"tool_calls": [{"name": "ask_claude_code", "arguments": {"task": CODING_TASK}}]})
+    Fake.queue.append({"content": "DENIED-FOLLOW-UP"})
+    send(s, "ask Claude Code what the notes say")
+    s.wait_for(lambda: "Allow once" in s.page_text(), 30, "the approval card")
+    offered = [t["function"]["name"] for t in Fake.requests[0].get("tools", [])]
+    notes.append("offered: " + ", ".join(offered))
+    card = s.page_text()
+    s.screenshot(str(OUT / "coding-apps-card.png"))
+    for line in (f"It can only read files in {work}.",
+                 "It runs online with your Claude Code account and uses your plan or credit. What it reads is sent to Anthropic. It can take several minutes.",
+                 "Experimental.", f"Program: {bin_dir}/claude", "This kind of action always asks"):
+        assert line in card, f"{line!r} not on the card: " + card[-900:]
+    assert "Allow for this chat" not in card, "the card offers Allow for this chat"
+    time.sleep(0.9)
+    s.click_button("Deny")
+    wait_idle(s)
+    assert not ran("claude"), "Deny ran the program"
+
+    # 2. Allow once: exactly the template, the task on standard input, in the working folder.
+    Fake.requests.clear()
+    Fake.queue.append({"tool_calls": [{"name": "ask_claude_code", "arguments": {"task": CODING_TASK}}]})
+    Fake.queue.append({"content": "CLAUDE-FOLLOW-UP"})
+    send(s, "ask Claude Code again")
+    answer_card(s, "Allow once")
+    wait_idle(s)
+    assert ran("claude"), "Allow once did not run the program"
+    assert (bin_dir / "claude-args.txt").read_text().splitlines() == CLAUDE_TEMPLATE[False], \
+        (bin_dir / "claude-args.txt").read_text()
+    assert (bin_dir / "claude-stdin.txt").read_text() == CODING_TASK, (bin_dir / "claude-stdin.txt").read_text()
+    assert (bin_dir / "claude-cwd.txt").read_text().strip() == work
+    back = Fake.requests[-1]["messages"][-1]
+    assert back["role"] == "tool" and "FAKE-CLAUDE-ANSWER: the word is heron" in json.dumps(back), back
+    result = [m for m in messages(s, chat) if m["role"] == "tool"][-1]["toolResult"]
+    assert result["status"] == "ok" and "FAKE-CLAUDE-ANSWER" in result["text"], result
+
+    # 3. Codex with may_edit, in Allow all: still a card with Allow once and Deny only.
+    s.invoke("set_approval_mode", {"chatId": chat, "allowAll": True})
+    try:
+        Fake.requests.clear()
+        Fake.queue.append({"tool_calls": [{"name": "ask_codex", "arguments": {"task": CODING_TASK, "may_edit": True}}]})
+        Fake.queue.append({"content": "CODEX-FOLLOW-UP"})
+        send(s, "ask codex to fix it")
+        s.wait_for(lambda: "Allow once" in s.page_text(), 30, "the approval card in Allow all")
+        card = s.page_text()
+        s.screenshot(str(OUT / "coding-apps-codex-card.png"))
+        for line in ("It can read files elsewhere on this computer that you can read.",
+                     f"It can change files in {work}.",
+                     "It can also change files in the temporary folder and run commands in its sandbox.",
+                     "What it reads is sent to OpenAI.", f"Program: {bin_dir}/codex",
+                     "Allow all is on in this chat, but this still asks"):
+            assert line in card, f"{line!r} not on the card: " + card[-900:]
+        assert "Allow for this chat" not in card
+        time.sleep(0.9)
+        s.click_button("Allow once")
+        wait_idle(s)
+    finally:
+        s.invoke("set_approval_mode", {"chatId": chat, "allowAll": False})
+    assert (bin_dir / "codex-args.txt").read_text().splitlines() == CODEX_TEMPLATE[True]
+    assert (bin_dir / "codex-stdin.txt").read_text() == CODING_TASK
+    assert (bin_dir / "codex-cwd.txt").read_text().strip() == work
+    assert "FAKE-CODEX-ANSWER" in json.dumps(Fake.requests[-1]["messages"][-1])
+
+    # The audit log: the denied call and the two allowed ones, each with the task, never a grant.
+    audit = s.invoke("list_audit", {"filter": {"chatId": chat}})
+    rows = [(a["tool"], a["decision"], a["result_status"]) for a in audit if a["server"] == "coding_apps"]
+    notes.append("audit: " + json.dumps(rows))
+    assert sorted(r[:2] for r in rows) == sorted([("ask_claude_code", "denied"), ("ask_claude_code", "allow_once"),
+                                                 ("ask_codex", "allow_once")]), rows
+
+
+def share_call(port, method, path, body=None, key=None, bearer=False, headers=None, raw=None):
+    """One request to the sharing port (0.0.5 WP5a); returns (status, body text)."""
+    import http.client
+    h = {"Content-Type": "application/json"}
+    if key:
+        h["Authorization" if bearer else "x-api-key"] = f"Bearer {key}" if bearer else key
+    h.update(headers or {})
+    con = http.client.HTTPConnection("127.0.0.1", port, timeout=180)
+    try:
+        data = raw if raw is not None else (json.dumps(body) if body is not None else None)
+        con.request(method, path, body=data, headers=h)
+        r = con.getresponse()
+        return r.status, r.read().decode("utf-8", "replace")
+    finally:
+        con.close()
+
+
+@probe("share-proxy")
+def p_share_proxy(c, notes):
+    """0.0.5 WP5a: other apps use the loaded model through the sharing port, in the real
+    app (the commands and the proxy; the page itself is WP5b's other-apps scenario). The
+    checks before the key, the answers with no model, then the real small model (TEST_GGUF)
+    through all four APIs: answers cleaned, the busy counter held while a reply streams,
+    one audit row per request without its text, the setup text, a new key, switching off."""
+    import re
+    import tomllib
+    s = c.s
+    model = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
+    alias = "harnessui-local"
+    no_model = "No model is loaded in harnessUI. Open harnessUI and load a model."
+    secret_prompt = "SECRET-PROMPT-PELICAN"
+    s.invoke("unload_model", {})
+    st = s.invoke("share_status")
+    assert (st["enabled"], st["listening"], st["refused"]) == (False, False, 0), st
+
+    on = s.invoke("set_share_enabled", {"on": True})
+    port = on["port"]
+    assert on["enabled"] and on["listening"] and on["error"] is None and 49152 <= port <= 65535, on
+    key = s.invoke("reveal_share_key")
+    assert re.fullmatch(r"harnessui-share-[0-9a-f]{32}", key), "the key is not in its form"
+    try:
+        # Refused before the body is read or anything is revealed: no key, a web page, another host.
+        status, body = share_call(port, "GET", "/v1/models")
+        assert status == 401 and alias not in body, (status, body)
+        status, body = share_call(port, "POST", "/v1/messages", {}, key=key, headers={"Origin": "http://example.com"})
+        assert status == 403, (status, body)
+        status, body = share_call(port, "POST", "/v1/messages", {}, key=key, headers={"Host": f"example.com:{port}"})
+        assert status == 403, (status, body)
+        # With the key: the model list from the proxy; tricks on the path match nothing.
+        status, body = share_call(port, "GET", "/v1/models?limit=1000", key=key, bearer=True)
+        assert status == 200 and [m["id"] for m in json.loads(body)["data"]] == [alias], body
+        for path in ("/v1/../v1/messages", "/v1/%6Dessages", "/props", "/v1/messages/"):
+            status, body = share_call(port, "POST", path, {}, key=key)
+            assert status == 404, (path, status, body)
+        # No model loaded: each API's own error shape.
+        status, body = share_call(port, "POST", "/v1/messages", {"messages": []}, key=key)
+        assert status == 503 and json.loads(body)["error"]["message"] == no_model and json.loads(body)["type"] == "error", body
+        status, body = share_call(port, "POST", "/v1/responses", {"input": "x"}, key=key, bearer=True)
+        assert status == 503 and json.loads(body)["error"]["message"] == no_model, body
+        st = s.invoke("share_status")
+        assert st["refused"] == 3 and st["modelCtx"] is None and not st["inUse"], st
+
+        if not os.path.isfile(model):
+            notes.append(f"the model part was skipped: no test model at {model}")
+            return
+        s.execute(
+            """
+            const [path] = arguments;
+            window.__shareLoad = 'pending';
+            window.__TAURI_INTERNALS__.invoke('load_local_model', {path, settings: null})
+              .then(() => { window.__shareLoad = {ok: true}; })
+              .catch(e => { window.__shareLoad = {ok: false, error: e}; });
+            """,
+            model)
+        s.wait_for(lambda: s.execute("return window.__shareLoad !== 'pending';"), 240, "the model load")
+        loaded = s.execute("return window.__shareLoad;")
+        assert loaded.get("ok"), loaded
+        assert s.invoke("runtime_status")["state"] == "ready"
+        ctx = s.invoke("share_status")["modelCtx"]
+        assert isinstance(ctx, int) and ctx > 0, ctx
+        notes.append(f"loaded; the model remembers {ctx} tokens")
+        hidden = [model, os.path.basename(model), "timings", "cache_read_input_tokens", "system_fingerprint", secret_prompt]
+
+        def clean(text):
+            for part in hidden:
+                assert part not in text, f"{part!r} came back: {text[:600]}"
+
+        ask = [{"role": "user", "content": f"Say hi. {secret_prompt}"}]
+        extras = {"cache_prompt": True, "n_probs": 3, "id_slot": 0, "metadata": {"user_id": "someone"}}
+        ua = {"User-Agent": "claude-cli/9.9 (e2e)"}
+        # Messages, whole and streamed.
+        status, body = share_call(port, "POST", "/v1/messages?beta=true",
+                                  {"model": "claude-something", "max_tokens": 8, "messages": ask, **extras}, key=key, headers=ua)
+        assert status == 200, (status, body)
+        answer = json.loads(body)
+        assert answer["model"] == alias and answer["type"] == "message" and answer["usage"]["input_tokens"] > 0, body
+        clean(body)
+        status, body = share_call(port, "POST", "/v1/messages",
+                                  {"model": "x", "max_tokens": 8, "stream": True, "messages": ask}, key=key, bearer=True)
+        assert status == 200 and "event: message_start" in body and "event: message_stop" in body, (status, body[:600])
+        clean(body)
+        # Chat Completions and Responses.
+        status, body = share_call(port, "POST", "/v1/chat/completions", {"model": "x", "max_tokens": 8, "messages": ask, **extras},
+                                  key=key, bearer=True)
+        assert status == 200 and json.loads(body)["model"] == alias, (status, body)
+        clean(body)
+        status, body = share_call(port, "POST", "/v1/responses", {"model": "x", "max_output_tokens": 16, "input": ask},
+                                  key=key, bearer=True)
+        assert status == 200 and json.loads(body)["model"] == alias, (status, body)
+        clean(body)
+        # Token counting (audited at most once a minute) and an image given as a link (refused).
+        for _ in range(2):
+            status, body = share_call(port, "POST", "/v1/messages/count_tokens", {"model": "x", "messages": ask}, key=key)
+            assert status == 200 and json.loads(body)["input_tokens"] > 0, (status, body)
+        link = [{"role": "user", "content": [{"type": "image", "source": {"type": "url", "url": "http://example.com/a.png"}}]}]
+        status, body = share_call(port, "POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": link}, key=key)
+        assert status == 400, (status, body)
+
+        # While a reply streams, the model counts as busy (D3) and the page says it is in use.
+        import http.client
+        con = http.client.HTTPConnection("127.0.0.1", port, timeout=180)
+        con.request("POST", "/v1/chat/completions",
+                    body=json.dumps({"model": "x", "max_tokens": 64, "stream": True,
+                                     "messages": [{"role": "user", "content": "Count from 1 to 100."}]}),
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+        r = con.getresponse()
+        assert r.status == 200, r.status
+        r.readline()
+        busy = s.invoke("model_busy")
+        in_use = s.invoke("share_status")["inUse"]
+        rest = r.read().decode("utf-8", "replace")
+        con.close()
+        assert busy["otherApps"] == 1 and in_use, (busy, in_use)
+        assert "data: [DONE]" in rest, rest[-300:]
+        clean(rest)
+        s.wait_for(lambda: s.invoke("model_busy")["otherApps"] == 0, 10, "the busy counter going back to 0")
+
+        # One audit row per request, never its text; the decision is an existing one (D9).
+        def rows():
+            return [a for a in s.invoke("list_audit", {"filter": {"limit": 500}}) if a["server"] == "other-apps"]
+        s.wait_for(lambda: all(a["result_status"] for a in rows()) and len(rows()) >= 6, 15, "the audit rows")
+        audit = rows()
+        notes.append("audit: " + json.dumps([(a["tool"], a["decision"], a["result_status"], a["result_summary"]) for a in audit]))
+        tools = sorted(a["tool"] for a in audit)
+        assert tools == sorted(["/v1/messages", "/v1/messages", "/v1/chat/completions", "/v1/responses",
+                                "/v1/messages/count_tokens", "/v1/chat/completions"]), tools
+        assert all(a["decision"] == "allowed_without_prompt" and a["result_status"] == "ok" for a in audit), audit
+        assert secret_prompt not in json.dumps(audit)
+        assert any("It says it is claude-cli/9.9 (e2e)." in a["preview"] for a in audit), [a["preview"] for a in audit]
+        assert any("tokens in" in (a["result_summary"] or "") for a in audit), audit
+
+        # The setup text holds the port, the key and what the model remembers.
+        setup = s.invoke("share_setup", {"app": "claudeCode"})
+        env_block = json.loads(next(p["code"] for w in setup["ways"] for p in w["steps"] if p.get("file")))["env"]
+        assert env_block["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{port}" and env_block["ANTHROPIC_AUTH_TOKEN"] == key, env_block
+        assert env_block["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == str(ctx), env_block
+        codex = s.invoke("share_setup", {"app": "codex"})
+        profile = tomllib.loads(codex["ways"][0]["steps"][0]["code"])
+        assert profile["model_context_window"] == ctx and profile["model_providers"]["harnessui"]["base_url"] == f"http://127.0.0.1:{port}/v1"
+
+        # Optional (E2E_REAL_CLAUDE=1, slow on a processor): the real Claude Code, set up only
+        # with the card's variables, for this one run, answers through the sharing port. No
+        # tools and a one-line system prompt keep the request small enough for a small model.
+        real = shutil.which("claude") if os.environ.get("E2E_REAL_CLAUDE") else None
+        if real:
+            claude_home = OUT / "claude-home"
+            shutil.rmtree(claude_home, ignore_errors=True)
+            claude_home.mkdir()
+            run_env = {k: v for k, v in os.environ.items()
+                       if not k.upper().endswith("_PROXY") and not k.upper().startswith(("ANTHROPIC_", "CLAUDE"))}
+            run_env.update(env_block, HOME=str(claude_home), NO_PROXY="127.0.0.1,localhost")
+            # A short answer keeps the run short on a processor (the card's own value stays tested above).
+            run_env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "256"
+            seen = {a["id"] for a in rows()}
+            done = subprocess.run([real, "-p", "--tools", "", "--system-prompt", "Answer in one short sentence.", "Say hello. /no_think"],
+                                  env=run_env, cwd=str(c.other), capture_output=True, text=True, timeout=900,
+                                  stdin=subprocess.DEVNULL)
+            notes.append(f"Claude Code exit {done.returncode}: {done.stdout.strip()[-300:]!r} {done.stderr.strip()[-300:]!r}")
+            assert done.returncode == 0 and done.stdout.strip(), "Claude Code did not answer through the sharing port"
+            s.wait_for(lambda: len(rows()) > len(seen) and all(a["result_status"] for a in rows()), 30, "Claude Code's audit rows")
+            mine = [a for a in rows() if a["id"] not in seen]
+            notes.append("Claude Code's requests: " + json.dumps([(a["tool"], a["result_status"], a["result_summary"]) for a in mine]))
+            assert mine and all(a["result_status"] == "ok" and "It says it is claude-cli" in a["preview"] for a in mine), mine
+
+        # A new key: the old one stops working at once.
+        s.invoke("new_share_key")
+        new_key = s.invoke("reveal_share_key")
+        assert new_key != key
+        assert share_call(port, "GET", "/v1/models", key=key)[0] == 401
+        assert share_call(port, "GET", "/v1/models", key=new_key)[0] == 200
+        keys = (key, new_key)
+    finally:
+        off = s.invoke("set_share_enabled", {"on": False})
+        s.invoke("unload_model", {})
+    assert not off["enabled"] and not off["listening"] and off["port"] == port, off
+    with socket.socket() as probe_socket:
+        probe_socket.settimeout(2)
+        assert probe_socket.connect_ex(("127.0.0.1", port)) != 0, "the port is still open"
+    # The key is in the (in-memory, on Linux) keychain only: never in the settings or the log.
+    con = sqlite3.connect(c.db)
+    settings = json.dumps(con.execute("SELECT key, value FROM settings").fetchall())
+    con.close()
+    log = (OUT / "tauri-driver.log").read_text(errors="replace")
+    for k in keys:
+        assert k not in settings, "a sharing key is in the settings"
+        assert k not in log, "a sharing key is in the log"
+        assert k[-32:] not in log
+
+
+@probe("other-apps")
+def p_other_apps(c, notes):
+    """0.0.5 WP5b: Settings → Other apps in the real app, with WP5a's proxy behind it. The
+    page's switch turns sharing on; the key is read through Show key; requests to the
+    sharing port without the key, from a web page (Origin) and with the key (no model: the
+    API's own error) and the refused count on the page; then the real small model (TEST_GGUF)
+    saved at 8,192 tokens: the context warning with its fit mark, a Messages request answered
+    and its audit row (also on the Audit log page), the Claude Code setup card (Windows tab
+    first off a Mac, the port, key and size in its text, Copy), "Use 32,768 tokens and
+    restart", "Copy the setup again", a new key made on the page (the old one refused); and
+    the page's switch turning sharing off (the port closed, no key in settings or log)."""
+    import re
+    s = c.s
+    model = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
+    switch_label = "Let other apps on this computer use the loaded model"
+    no_model = "No model is loaded in harnessUI. Open harnessUI and load a model."
+    warning = ("Claude Code and Codex send long instructions. Set How much it can remember to at least "
+               "32,768 tokens (about 24,000 words) for this model.")
+    too_much = "This model can't remember that much on this computer. Try Save memory or a smaller model."
+    size_changed = "You changed how much this model can remember. Copy the setup again."
+    old_key_note = "Apps set up with the old key stop working until you copy the new one."
+    copy_step = "Copy step 1 of For this window only"
+    ua = {"User-Agent": "e2e-other-apps/1.0"}
+    ask = [{"role": "user", "content": "Say hi."}]
+    key_re = re.compile(r"harnessui-share-[0-9a-f]{32}")
+    panel = "document.querySelector('[role=dialog] [role=tabpanel][data-state=active]')"
+    keys = []
+
+    def page():
+        return s.execute(f"const p = {panel}; return p ? p.innerText : '';")
+
+    def find_button(label):
+        # A button on the open settings page whose aria-label, or else its text, is `label`.
+        return s.execute(
+            f"""
+            const [label] = arguments;
+            const p = {panel};
+            return (p && [...p.querySelectorAll('button')].find(b => !b.disabled &&
+              ((b.getAttribute('aria-label') || b.innerText.trim()) === label))) || null;
+            """,
+            label) or False
+
+    def real_click(el):
+        try:
+            s.click(next(iter(el.values())))
+        except WebDriverError:
+            s.execute("arguments[0].click();", el)
+
+    def press(label, timeout=20):
+        real_click(s.wait_for(lambda: find_button(label), timeout, f"button {label!r} on the page"))
+
+    def switched_on():
+        return s.execute(f"const p = {panel}; const i = p && p.querySelector('input[role=switch]'); return !!(i && i.checked);")
+
+    def toggle():
+        real_click(s.execute(f"return {panel}.querySelector('input[role=switch]');"))
+
+    def open_page(tab="Other apps"):
+        s.click_button(tab)
+        s.wait_for(lambda: s.execute(
+            "return [...document.querySelectorAll('[role=dialog] [role=tab][aria-selected=true]')]"
+            ".some(t => t.innerText.trim() === arguments[0]);", tab), 10, f"settings page {tab!r}")
+        time.sleep(0.4)
+
+    def copied_shown():
+        return s.execute(
+            f"return [...{panel}.querySelectorAll('button')].some(b => b.getAttribute('aria-label') === arguments[0] "
+            "&& b.innerText.trim() === 'Copied');", copy_step)
+
+    def messages_call(key, extra=None):
+        return share_call(port, "POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": ask}, key=key,
+                          headers={**ua, **(extra or {})})
+
+    def with_model(key):
+        # The model, saved at 8,192 tokens for this file, loaded the 0.0.5 way.
+        info = s.invoke("model_load_info", {"path": model})
+        s.invoke("set_model_load_settings", {"path": model, "overrides": {**info["overrides"], "context": {"fixed": 8192}}})
+        s.execute(
+            """
+            const [path] = arguments;
+            window.__otherAppsLoad = 'pending';
+            window.__TAURI_INTERNALS__.invoke('load_local_model', {path, settings: null, whenIdle: null})
+              .then(() => { window.__otherAppsLoad = {ok: true}; })
+              .catch(e => { window.__otherAppsLoad = {ok: false, error: e}; });
+            """,
+            model)
+        s.wait_for(lambda: s.execute("return window.__otherAppsLoad !== 'pending';"), 240, "the model load")
+        loaded = s.execute("return window.__otherAppsLoad;")
+        assert loaded.get("ok"), loaded
+        assert s.invoke("share_status")["modelCtx"] == 8192, s.invoke("share_status")
+
+        # The context warning, with the fit mark of 32,768 tokens for this model here.
+        s.wait_for(lambda: warning in page(), 15, "the context warning")
+        s.wait_for(lambda: "Use 32,768 tokens and restart" in page() or too_much in page(), 15, "the fit mark")
+        fit = re.search(r"Use 32,768 tokens and restart · ([^\n]+)", page())
+        notes.append("32,768 tokens here: " + (fit.group(1) if fit else "too large"))
+        s.screenshot(str(OUT / "other-apps-warning.png"))
+        # "Model settings…" opens this model's panel over the settings window; Escape closes only the panel.
+        press("Model settings…")
+        s.wait_for(lambda: "Settings for this model" in s.page_text(), 10, "the model's settings panel")
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        s.wait_for(lambda: "Settings for this model" not in s.page_text(), 5, "the panel closed")
+        assert warning in page(), "the settings window closed with the panel"
+
+        # One request answered, and its audit row (never its text), also on the Audit log page.
+        status, body = messages_call(key)
+        assert status == 200 and json.loads(body)["model"] == "harnessui-local", (status, body)
+
+        def rows():
+            return [a for a in s.invoke("list_audit", {"filter": {"limit": 500}})
+                    if a["server"] == "other-apps" and "e2e-other-apps/1.0" in (a["preview"] or "")]
+        s.wait_for(lambda: len(rows()) == 1 and rows()[0]["result_status"], 15, "the audit row")
+        row = rows()[0]
+        assert row["tool"] == "/v1/messages" and row["result_status"] == "ok", row
+        assert row["decision"] == "allowed_without_prompt" and "Say hi." not in json.dumps(row), row
+        open_page("Audit log")
+        s.wait_for(lambda: "It says it is e2e-other-apps/1.0" in page() and "/v1/messages" in page(), 10,
+                   "the row on the Audit log page")
+        open_page()
+
+        # The Claude Code card: Windows first here (not a Mac), with this port, key and size.
+        press("Claude Code")
+        s.wait_for(lambda: "For this window only" in page(), 15, "the Claude Code card")
+        tabs = s.execute(f"return [...{panel}.querySelectorAll('[role=tab][aria-selected=true]')].map(t => t.innerText.trim());")
+        assert tabs == ["Windows"], tabs
+        text = page()
+        assert "Windows PowerShell" in text and "Open Terminal" not in text, text[-800:]
+        assert f"http://127.0.0.1:{port}" in text and key in text, text[-800:]
+        assert "$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = '8192'" in text, text[-800:]
+        assert "This stores the key as plain text in that app's settings." in text
+        press("Mac")
+        s.wait_for(lambda: "Open Terminal" in page() and "~/.claude/settings.json" in page(), 5, "the Mac tab")
+        assert "Windows PowerShell" not in page()
+        press(copy_step)
+        s.wait_for(copied_shown, 5, "Copied")
+        copied = s.execute("return localStorage.getItem('otherApps.copiedSetup');")
+        assert json.loads(copied) == {"ctx": 8192, "port": port}, copied
+        s.screenshot(str(OUT / "other-apps-setup.png"))
+
+        # 32,768 tokens for this model, then a restart (nothing uses the model: no question).
+        if fit:
+            press(f"Use 32,768 tokens and restart · {fit.group(1)}")
+            s.wait_for(lambda: s.invoke("share_status")["modelCtx"] == 32768, 240, "the restart at 32,768 tokens")
+            s.wait_for(lambda: size_changed in page() and warning not in page(), 15, "Copy the setup again")
+            overrides = s.invoke("model_load_info", {"path": model})["overrides"]
+            assert overrides["context"] == {"fixed": 32768}, overrides
+            # The open card was made again for the new size.
+            s.wait_for(lambda: "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='32768'" in page(), 10, "the card at 32,768")
+            s.wait_for(lambda: not copied_shown(), 5, "the Copy button back")
+            press(copy_step)
+            s.wait_for(lambda: size_changed not in page(), 5, "the note gone after copying")
+        else:
+            notes.append("32,768 tokens do not fit here: the restart step was not run")
+
+        # A new key, made on the page: the old one stops working at once.
+        press("Make a new key")
+        s.wait_for(lambda: old_key_note in page(), 5, "the question before a new key")
+        press("Make a new key")
+        s.wait_for(lambda: (m := key_re.search(page())) is not None and m.group(0) != key, 10, "the new key on the page")
+        new_key = key_re.search(page()).group(0)
+        keys.append(new_key)
+        assert new_key == s.invoke("reveal_share_key")
+        assert old_key_note in page()
+        assert share_call(port, "GET", "/v1/models", key=key)[0] == 401
+        assert share_call(port, "GET", "/v1/models", key=new_key)[0] == 200
+        s.wait_for(lambda: page().count(new_key) >= 2 and key not in page(), 10, "the card with the new key")
+
+    s.invoke("unload_model", {})
+    if s.invoke("share_status")["enabled"]:
+        s.invoke("set_share_enabled", {"on": False})
+    s.execute("try { localStorage.removeItem('otherApps.copiedSetup'); } catch (e) {} return true;")
+    s.click_button("Settings")
+    open_page()
+    s.wait_for(lambda: switch_label in page(), 10, "the Other apps page")
+    text = page()
+    assert "Experimental" in text and not switched_on(), text
+    assert find_button("Show key") is False and "Set up an app" not in text, text
+    s.screenshot(str(OUT / "other-apps-off.png"))
+
+    # On, by the page's switch only.
+    toggle()
+    s.wait_for(lambda: re.search(r"On at port (\d+)\.", page()), 15, "sharing on")
+    port = int(re.search(r"On at port (\d+)\.", page()).group(1))
+    st = s.invoke("share_status")
+    assert st["enabled"] and st["listening"] and st["port"] == port and 49152 <= port <= 65535, (st, port)
+    assert switched_on()
+    assert not key_re.search(page()), "the key showed before Show key"
+    off_by_page = False
+    try:
+        press("Show key")
+        s.wait_for(lambda: key_re.search(page()), 10, "the key on the page")
+        key = key_re.search(page()).group(0)
+        keys.append(key)
+        assert key == s.invoke("reveal_share_key"), "the page shows another key"
+        press("Hide key")
+        s.wait_for(lambda: not key_re.search(page()), 5, "the key hidden")
+        press("Show key")
+        s.wait_for(lambda: key_re.search(page()), 10, "the key shown again")
+
+        # Refused before anything is read: no key, a web page. With the key and no model:
+        # the Messages API's own error.
+        status, body = messages_call(None)
+        assert status == 401, (status, body)
+        status, body = messages_call(key, {"Origin": "http://example.com"})
+        assert status == 403, (status, body)
+        status, body = messages_call(key)
+        assert status == 503 and json.loads(body)["error"]["message"] == no_model, (status, body)
+        s.wait_for(lambda: "Requests refused since sharing was switched on: 2" in page(), 10, "the refused count on the page")
+        assert "No model is loaded now." in page(), page()
+        s.screenshot(str(OUT / "other-apps-on.png"))
+
+        if os.path.isfile(model):
+            with_model(key)
+        else:
+            notes.append(f"the model part was skipped: no test model at {model}")
+    finally:
+        # Off, by the page's switch; the commands only clean up after a failure.
+        try:
+            open_page()
+            if switched_on():
+                toggle()
+            s.wait_for(lambda: not s.invoke("share_status")["enabled"], 15, "sharing off")
+            off_by_page = True
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"switching off on the page failed: {e}")
+        if s.invoke("share_status")["enabled"]:
+            s.invoke("set_share_enabled", {"on": False})
+        s.invoke("unload_model", {})
+        if os.path.isfile(model):
+            s.invoke("reset_model_load_settings", {"path": model})
+    assert off_by_page, notes
+    st = s.invoke("share_status")
+    assert not st["enabled"] and not st["listening"] and st["port"] == port, st
+    s.wait_for(lambda: not switched_on() and find_button("Show key") is False, 5, "the page showing sharing off")
+    with socket.socket() as probe_socket:
+        probe_socket.settimeout(2)
+        assert probe_socket.connect_ex(("127.0.0.1", port)) != 0, "the port is still open"
+    s.screenshot(str(OUT / "other-apps-after.png"))
+    # The key is in the keychain only: never in the settings or the log.
+    con = sqlite3.connect(c.db)
+    settings = json.dumps(con.execute("SELECT key, value FROM settings").fetchall())
+    con.close()
+    log = (OUT / "tauri-driver.log").read_text(errors="replace")
+    for k in keys:
+        assert k not in settings, "a sharing key is in the settings"
+        assert k[-32:] not in log, "a sharing key is in the log"
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
           p_tool_selection, p_artifacts, p_search, p_pinned,
           p_tool_errors_output, p_task_state, p_mentions, p_capability_check, p_context_inspector, p_compare_models,
-          p_chat_memory, p_model_settings]
+          p_chat_memory, p_model_settings, p_coding_apps, p_share_proxy, p_other_apps]
 
 
 def main() -> int:
@@ -3334,9 +4032,15 @@ def main() -> int:
         d.mkdir()
     (c.work / "notes.txt").write_text("the secret word is heron\n")
     (c.other / "only-in-other.txt").write_text("x\n")
+    # 0.0.5 coding-apps: a folder for fake `claude` and `codex` programs, first on PATH and
+    # outside every approved folder, so the real programs are never the ones found.
+    c.fakebin = OUT / "fakebin"
+    shutil.rmtree(c.fakebin, ignore_errors=True)
+    c.fakebin.mkdir()
     env = dict(os.environ)
     env.update(HOME=str(home), XDG_DATA_HOME=str(home / "data"), XDG_CONFIG_HOME=str(home / "config"),
                XDG_CACHE_HOME=str(home / "cache"), APP_DEV_LLAMA_DIR=LLAMA_DIR, RUST_LOG="info")
+    env["PATH"] = str(c.fakebin) + os.pathsep + env.get("PATH", "")
     fake_port = free_port()
     fake = ThreadingHTTPServer(("127.0.0.1", fake_port), Fake)
     threading.Thread(target=fake.serve_forever, daemon=True).start()

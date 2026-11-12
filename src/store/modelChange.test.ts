@@ -10,9 +10,9 @@ const ipcMock = vi.hoisted(() => ({
   getLocalModelSettings: vi.fn(async () => {
     throw new Error("the defaults must not be passed to a load any more");
   }),
-  setChatModel: vi.fn(async () => undefined),
+  setChatModel: vi.fn<(chatId: number, modelRef: string | null) => Promise<void>>(async () => undefined),
   createChat: vi.fn(async (modelRef: string | null) => ({ id: 9, modelRef })),
-  getChat: vi.fn(async (id: number) => ({ chat: { id, modelRef: null }, messages: [] })),
+  getChat: vi.fn(async (id: number) => ({ chat: { id, modelRef: null as string | null }, messages: [] })),
   listChats: vi.fn(async () => []),
   listModelOptions: vi.fn(async () => []),
 }));
@@ -242,6 +242,42 @@ describe("pickModel (store): the model's own settings, and D3 before a switch", 
     expect(ipcMock.loadLocalModel).not.toHaveBeenCalled();
     expect(ipcMock.setChatModel).toHaveBeenCalledTimes(2);
     expect(onChatSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("puts the chat back on its model when a waiting switch is cancelled, unless a newer pick replaced it", async () => {
+    let chatModel: string | null = "local:/m/a.gguf";
+    ipcMock.setChatModel.mockImplementation(async (_id, ref) => {
+      chatModel = ref;
+    });
+    ipcMock.getChat.mockImplementation(async (id: number) => ({ chat: { id, modelRef: chatModel }, messages: [] }));
+    await useApp.getState().openChat(3);
+    useApp.setState({ runtime: runtime("ready", "/m/a.gguf") });
+    ipcMock.modelBusy.mockResolvedValue(REPLY);
+
+    // Cancel on the waiting line: the backend ends the wait with load_replaced (false).
+    ipcMock.loadLocalModel.mockResolvedValueOnce(false);
+    const waiting = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Restart when it ends");
+    await waiting;
+    expect(ipcMock.setChatModel).toHaveBeenNthCalledWith(1, 3, "local:/m/b.gguf");
+    expect(ipcMock.setChatModel).toHaveBeenLastCalledWith(3, "local:/m/a.gguf");
+    expect(useApp.getState().detail?.chat.modelRef).toBe("local:/m/a.gguf");
+    expect(useApp.getState().error).toBeNull();
+
+    // A newer pick replaced the wait: the chat keeps the newer model.
+    ipcMock.setChatModel.mockClear();
+    let endWait: (done: boolean) => void = () => undefined;
+    ipcMock.loadLocalModel.mockImplementationOnce(() => new Promise((resolve) => (endWait = resolve)));
+    const first = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Restart when it ends");
+    await flush();
+    const second = useApp.getState().pickModel("local:/m/c.gguf");
+    await answer("Stop and restart");
+    await second;
+    endWait(false);
+    await first;
+    expect(ipcMock.setChatModel).toHaveBeenLastCalledWith(3, "local:/m/c.gguf");
+    expect(useApp.getState().detail?.chat.modelRef).toBe("local:/m/c.gguf");
   });
 
   it("calls onChatSet after the chat has the model and before the load, and shows a failed load", async () => {

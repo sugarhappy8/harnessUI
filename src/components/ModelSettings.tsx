@@ -136,7 +136,8 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
   const [info, setInfo] = useState<ModelLoadInfo | null>(null);
   const [draft, setDraft] = useState<ModelLoadSettings | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
-  const [working, setWorking] = useState(false);
+  // What the panel is doing while a command runs (they can take a while on a busy computer).
+  const [working, setWorking] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const runtime = useApp((s) => s.runtime);
   const apple = isAppleComputer();
@@ -185,31 +186,31 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
     }
   }
 
-  async function run(action: () => Promise<void>) {
-    setWorking(true);
+  async function run(doing: string, action: () => Promise<void>) {
+    setWorking(doing);
     setError(null);
     try {
       await action();
     } catch (err) {
       setError(toErrorInfo(err));
     } finally {
-      setWorking(false);
+      setWorking(null);
     }
   }
 
   const onSave = () =>
-    run(async () => {
+    run("Saving…", async () => {
       if (await save()) setSaved(true);
     });
 
   const onReset = () =>
-    run(async () => {
+    run("Going back to the defaults…", async () => {
       took(await ipc.resetModelLoadSettings(path));
       setSaved(false);
     });
 
   const onApply = () =>
-    run(async () => {
+    run(dirty ? "Saving…" : "Restarting the model…", async () => {
       if (!(await save())) return;
       const state = useApp.getState();
       // The question (when the model is busy) shows over the panel; the panel closes once
@@ -218,7 +219,7 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
     });
 
   const onLoad = () =>
-    run(async () => {
+    run(dirty ? "Saving…" : "Loading the model…", async () => {
       if (!(await save())) return;
       // pickModel asks first when the loaded model is busy, and closes the panel once the
       // chat has the model.
@@ -244,14 +245,21 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
             {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
             {!info && !error && <p className="text-sm text-fg-muted">Reading the model file…</p>}
-            {info && draft && <Controls info={info} draft={draft} apple={apple} onChange={change} />}
+            {info && draft && (
+              <Controls info={info} draft={draft} apple={apple} disabled={working !== null} onChange={change} />
+            )}
           </div>
           {info && draft && (
             <div className="space-y-2 border-t border-border px-5 py-3">
               {loaded && info.olderSettingsLoaded && (
                 <p className="text-xs text-warning">Settings changed. Restart the model to use them.</p>
               )}
-              {saved && !dirty && (
+              {working !== null && (
+                <p className="text-xs text-fg-muted" role="status">
+                  {working}
+                </p>
+              )}
+              {working === null && saved && !dirty && (
                 <p className="text-xs text-fg-muted" role="status">
                   Saved. {loaded ? "They are used from the next restart." : "They are used every time this model loads."}
                 </p>
@@ -260,7 +268,7 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
                 <button
                   type="button"
                   onClick={() => void onReset()}
-                  disabled={working || (same(info.overrides, ALL_DEFAULT) && same(draft, ALL_DEFAULT))}
+                  disabled={working !== null || (same(info.overrides, ALL_DEFAULT) && same(draft, ALL_DEFAULT))}
                   className="text-xs text-fg-muted underline hover:text-fg disabled:no-underline disabled:opacity-40"
                 >
                   Reset to defaults
@@ -269,7 +277,7 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
                 <button
                   type="button"
                   onClick={() => void onSave()}
-                  disabled={working || !dirty}
+                  disabled={working !== null || !dirty}
                   className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-muted disabled:opacity-40"
                 >
                   Save
@@ -278,7 +286,7 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
                   <button
                     type="button"
                     onClick={() => void onApply()}
-                    disabled={working || (!dirty && !info.olderSettingsLoaded)}
+                    disabled={working !== null || (!dirty && !info.olderSettingsLoaded)}
                     title={!dirty && !info.olderSettingsLoaded ? "The model already uses these settings." : undefined}
                     className="btn-primary rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-40"
                   >
@@ -288,7 +296,7 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
                   <button
                     type="button"
                     onClick={() => void onLoad()}
-                    disabled={working}
+                    disabled={working !== null}
                     className="btn-primary rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-40"
                   >
                     Load with these settings
@@ -315,9 +323,11 @@ function Controls(props: {
   info: ModelLoadInfo;
   draft: ModelLoadSettings;
   apple: boolean;
+  /** While a command runs, nothing can be changed. */
+  disabled: boolean;
   onChange: (patch: Partial<ModelLoadSettings>) => void;
 }) {
-  const { info, draft, apple, onChange } = props;
+  const { info, draft, apple, disabled, onChange } = props;
   const d = info.defaults;
 
   // How much it can remember.
@@ -391,6 +401,7 @@ function Controls(props: {
         label="How much it can remember"
         value={contextNow}
         options={contextOptions}
+        disabled={disabled}
         onChange={(v) => onChange({ context: contextChoice(v) })}
         help={
           <>
@@ -407,6 +418,7 @@ function Controls(props: {
           label={gpuLabel(apple)}
           value={draft.gpu}
           options={gpuOptions}
+          disabled={disabled}
           onChange={(v) => onChange({ gpu: v as GpuChoice })}
           help={<p>{gpuHelp(apple)}</p>}
         />
@@ -416,6 +428,7 @@ function Controls(props: {
         label="Save memory"
         value={draft.saveMemory}
         options={toggle(d.saveMemory)}
+        disabled={disabled}
         onChange={(v) => onChange({ saveMemory: v as Toggle })}
         help={<p>{HELP.saveMemory}</p>}
       />
@@ -424,6 +437,7 @@ function Controls(props: {
         label="Keep the model in memory"
         value={draft.keepInMemory}
         options={toggle(d.keepInMemory)}
+        disabled={disabled}
         onChange={(v) => onChange({ keepInMemory: v as Toggle })}
         help={<p>{HELP.keepInMemory}</p>}
       />
@@ -437,6 +451,7 @@ function Controls(props: {
                 label="Which graphics card"
                 value={deviceNow}
                 options={deviceOptions}
+                disabled={disabled}
                 onChange={(v) => onChange({ device: deviceChoice(v) })}
               />
             )}
@@ -446,6 +461,7 @@ function Controls(props: {
                 label="How long it may think"
                 value={draft.thinkingLimit}
                 options={thinkingOptions}
+                disabled={disabled}
                 onChange={(v) => onChange({ thinkingLimit: v as ThinkingChoice })}
                 help={<p>{HELP.thinking}</p>}
               />

@@ -236,6 +236,39 @@ describe("making room in a long chat", () => {
     finishSend();
   });
 
+  it("replaces the note shown while summarising with what happened", async () => {
+    const summarising = "Summarising earlier messages to make room.";
+    const done = "Earlier messages were summarised to make room.";
+    const failed = "Could not summarise earlier messages. The reply goes on, but this chat may run out of room soon.";
+    emit({ type: "note", text: summarising });
+    expect(useApp.getState().generation!.notes).toEqual([summarising]);
+    emit({ type: "compacted", stage: 2 });
+    expect(useApp.getState().generation!.notes).toEqual([done]);
+    // A second summary in the same reply: shown while it is written, then said once.
+    emit({ type: "note", text: summarising });
+    expect(useApp.getState().generation!.notes).toEqual([done, summarising]);
+    emit({ type: "compacted", stage: 2 });
+    expect(useApp.getState().generation!.notes).toEqual([done]);
+    // One that fails takes the place of its "Summarising" note too.
+    emit({ type: "note", text: summarising });
+    emit({ type: "note", text: failed });
+    expect(useApp.getState().generation!.notes).toEqual([done, failed]);
+    // Other notes and other stages leave it alone.
+    emit({ type: "note", text: summarising });
+    emit({ type: "compacted", stage: 1 });
+    emit({ type: "note", text: "Not offered to the model: x." });
+    expect(useApp.getState().generation!.notes).toEqual([
+      done,
+      failed,
+      summarising,
+      "Older tool results were shortened to make room.",
+      "Not offered to the model: x.",
+    ]);
+    emit({ type: "finished", status: "complete", message: null });
+    await flush();
+    finishSend();
+  });
+
   it("shows a summary that failed as the loop words it, and the reply goes on", async () => {
     const failed = "Could not summarise earlier messages. The reply goes on, but this chat may run out of room soon.";
     emit({ type: "note", text: failed });

@@ -522,7 +522,10 @@ pub async fn run_diagnostics(
         let _ = writeln!(report, "\ntimed generation with {path}");
         // The check replaces the loaded model: a reply or model check using it stops
         // first, and a change waiting for the model is cancelled.
-        state.runtime.before_change(&state.model_busy, false).await?;
+        state
+            .runtime
+            .before_change(&state.model_busy, false)
+            .await?;
         let previous = state.runtime.status();
         for (b, p) in backends.iter().filter(|(_, p)| p.error.is_none()) {
             let kind = crate::runtime_manager::kind_name(b.kind).to_string();

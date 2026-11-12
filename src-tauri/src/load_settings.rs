@@ -749,7 +749,10 @@ impl Machine {
 // ---- The resolver -----------------------------------------------------------------------
 
 /// The device a load asks for: the model's own choice, else the default.
-pub fn device_choice(overrides: &ModelLoadSettings, defaults: &LocalModelSettings) -> Option<String> {
+pub fn device_choice(
+    overrides: &ModelLoadSettings,
+    defaults: &LocalModelSettings,
+) -> Option<String> {
     overrides.device.resolve(defaults.device.as_deref())
 }
 
@@ -838,12 +841,19 @@ pub fn context_sizes(trained: Option<u32>) -> Vec<u32> {
 
 /// The fit mark of a fixed size, or of Automatic, in `room`. Unknown (no header) is
 /// yellow: the app cannot say.
-fn mark(facts: &ModelFacts, choice: ContextSize, room: models::fit::Room, save_memory: bool) -> Verdict {
+fn mark(
+    facts: &ModelFacts,
+    choice: ContextSize,
+    room: models::fit::Room,
+    save_memory: bool,
+) -> Verdict {
     let Some(input) = facts.fit_input(save_memory) else {
         return Verdict::Yellow;
     };
     match choice {
-        ContextSize::Auto => models::fit::auto_ctx(&input, room).map_or(Verdict::Red, |a| a.verdict),
+        ContextSize::Auto => {
+            models::fit::auto_ctx(&input, room).map_or(Verdict::Red, |a| a.verdict)
+        }
         ContextSize::Fixed(n) => models::fit::verdict_at(&input, u64::from(n), room),
     }
 }
@@ -889,9 +899,7 @@ pub fn build_info(
             fit: mark(facts, at_resolved, machine.room(gpu), save),
         })
         .collect();
-    let fit = input
-        .as_ref()
-        .map(|_| mark(facts, at_resolved, room, save));
+    let fit = input.as_ref().map(|_| mark(facts, at_resolved, room, save));
     let too_large = input.as_ref().is_some_and(|i| match resolved.ctx_choice {
         ContextSize::Auto => models::fit::auto_ctx(i, room).is_none(),
         ContextSize::Fixed(_) => {
@@ -1280,8 +1288,16 @@ mod tests {
         assert_eq!(d.settings.device.as_deref(), Some("Vulkan1"));
         assert_eq!(d.upgrade_note, None);
         // A value that cannot be read: the same as a fresh install.
-        assert!(defaults_from_stored(Some(&json!({"ctx": "big"}))).settings.context_auto);
-        assert!(defaults_from_stored(Some(&json!([1, 2]))).settings.context_auto);
+        assert!(
+            defaults_from_stored(Some(&json!({"ctx": "big"})))
+                .settings
+                .context_auto
+        );
+        assert!(
+            defaults_from_stored(Some(&json!([1, 2])))
+                .settings
+                .context_auto
+        );
     }
 
     #[test]
@@ -1293,9 +1309,18 @@ mod tests {
         assert_eq!(d.upgrade_note, Some(16_384));
         // Saved by 0.0.5: as stored, 8,192 included, and never a note.
         for (stored, auto) in [
-            (json!({"ctx": 8192, "backend": null, "device": null, "contextAuto": false}), false),
-            (json!({"ctx": 8192, "backend": null, "device": null, "contextAuto": true}), true),
-            (json!({"ctx": 16384, "backend": null, "device": null, "contextAuto": false}), false),
+            (
+                json!({"ctx": 8192, "backend": null, "device": null, "contextAuto": false}),
+                false,
+            ),
+            (
+                json!({"ctx": 8192, "backend": null, "device": null, "contextAuto": true}),
+                true,
+            ),
+            (
+                json!({"ctx": 16384, "backend": null, "device": null, "contextAuto": false}),
+                false,
+            ),
         ] {
             let d = defaults_from_stored(Some(&stored));
             assert_eq!(d.settings.context_auto, auto, "{stored}");
@@ -1335,10 +1360,16 @@ mod tests {
         assert!(stored.get("upgradeNote").is_none());
         assert_eq!(read_defaults(&store).await.upgrade_note, None);
         // Read again in the same run: still shown.
-        assert_eq!(page_defaults_with(&store, &run).await.upgrade_note, Some(16_384));
+        assert_eq!(
+            page_defaults_with(&store, &run).await.upgrade_note,
+            Some(16_384)
+        );
         // The next start: gone.
         let next_run = std::sync::Mutex::new(None);
-        assert_eq!(page_defaults_with(&store, &next_run).await.upgrade_note, None);
+        assert_eq!(
+            page_defaults_with(&store, &next_run).await.upgrade_note,
+            None
+        );
         // Choosing Automatic in the same run hides it too.
         store
             .set_setting(
@@ -1407,10 +1438,17 @@ mod tests {
             (r.ctx, r.ctx_choice, r.ctx_source),
             (8192, ContextSize::Fixed(8192), ContextSource::ModelSetting)
         );
-        assert_eq!((r.gpu, r.save_memory, r.keep_in_memory), (GpuUse::Off, false, true));
+        assert_eq!(
+            (r.gpu, r.save_memory, r.keep_in_memory),
+            (GpuUse::Off, false, true)
+        );
         assert_eq!(r.thinking_limit, ThinkingLimit::Short);
         assert_eq!(r.device, None, "Auto: the app picks");
-        assert_eq!(r.backend.as_deref(), Some("vulkan"), "the backend stays global");
+        assert_eq!(
+            r.backend.as_deref(),
+            Some("vulkan"),
+            "the backend stays global"
+        );
         // A size above the trained length is capped and says why; the choice stays.
         let big = ModelLoadSettings {
             context: ContextChoice::Fixed(65_536),
@@ -1419,7 +1457,11 @@ mod tests {
         let r = resolve(&big, &defaults, None, Some(&facts()), &machine);
         assert_eq!(
             (r.ctx, r.ctx_choice, r.ctx_source),
-            (40_960, ContextSize::Fixed(65_536), ContextSource::TrainedLimit)
+            (
+                40_960,
+                ContextSize::Fixed(65_536),
+                ContextSource::TrainedLimit
+            )
         );
         // Automatic from the model, or from the defaults.
         let auto = ModelLoadSettings {
@@ -1427,7 +1469,10 @@ mod tests {
             ..ModelLoadSettings::default()
         };
         let r = resolve(&auto, &defaults, None, Some(&facts()), &machine);
-        assert_eq!((r.ctx_choice, r.ctx_source), (ContextSize::Auto, ContextSource::Automatic));
+        assert_eq!(
+            (r.ctx_choice, r.ctx_source),
+            (ContextSize::Auto, ContextSource::Automatic)
+        );
         let r = resolve(
             &ModelLoadSettings::default(),
             &auto_defaults(),
@@ -1435,7 +1480,10 @@ mod tests {
             Some(&facts()),
             &machine,
         );
-        assert_eq!((r.ctx_choice, r.ctx_source), (ContextSize::Auto, ContextSource::Automatic));
+        assert_eq!(
+            (r.ctx_choice, r.ctx_source),
+            (ContextSize::Auto, ContextSource::Automatic)
+        );
         // Without a header: a fixed size is used as it is; Automatic falls back to 8,192.
         let no_header = ModelFacts {
             header: None,
@@ -1468,8 +1516,20 @@ mod tests {
         assert_eq!(igpu.gpu_free_bytes, 400 * MIB);
         assert_eq!(resolve_on(&igpu, &auto), 32_768);
         let r = resolve(&auto, &auto_defaults(), None, Some(&facts()), &igpu);
-        let info = build_info("/m", &facts(), auto.clone(), auto_defaults(), r, &igpu, None);
-        assert_eq!(info.fit, Some(Verdict::Yellow), "part runs on the processor");
+        let info = build_info(
+            "/m",
+            &facts(),
+            auto.clone(),
+            auto_defaults(),
+            r,
+            &igpu,
+            None,
+        );
+        assert_eq!(
+            info.fit,
+            Some(Verdict::Yellow),
+            "part runs on the processor"
+        );
         // "Don't use it": the processor with 12 GB available (10 GB after the reserve).
         let off = ModelLoadSettings {
             gpu: GpuChoice::Off,
@@ -1497,7 +1557,10 @@ mod tests {
         // A 16 GB Mac with Apple silicon: a 7.5 GB working set.
         let mac = Machine::from_probes(
             &[
-                probe(runtime::BackendKind::Metal, &[("MTL0", "Apple M2", 10_922, 7_152)]),
+                probe(
+                    runtime::BackendKind::Metal,
+                    &[("MTL0", "Apple M2", 10_922, 7_152)],
+                ),
                 probe(runtime::BackendKind::Cpu, &[("CPU", "CPU", 0, 0)]),
             ],
             None,
@@ -1595,7 +1658,15 @@ mod tests {
             ..small.clone()
         };
         let r = resolve(&fixed, &auto_defaults(), None, Some(&facts()), &roomy);
-        let info = build_info("/m", &facts(), fixed.clone(), auto_defaults(), r, &roomy, None);
+        let info = build_info(
+            "/m",
+            &facts(),
+            fixed.clone(),
+            auto_defaults(),
+            r,
+            &roomy,
+            None,
+        );
         assert!(!info.too_large);
         assert_eq!(info.fit, Some(Verdict::Red), "32,768 itself does not fit");
         let r = resolve(&fixed, &auto_defaults(), None, Some(&facts()), &small);
@@ -1619,10 +1690,19 @@ mod tests {
     #[test]
     fn loads_are_compared_by_their_choices() {
         let m = Machine::from_probes(&pc(), None, None, 16 * GB, &Freed::default());
-        let a = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts()), &m);
+        let a = resolve(
+            &ModelLoadSettings::default(),
+            &auto_defaults(),
+            None,
+            Some(&facts()),
+            &m,
+        );
         let mut b = a.clone();
         b.ctx = 12_288;
-        assert!(a.same_launch(&b), "another Automatic number is the same choice");
+        assert!(
+            a.same_launch(&b),
+            "another Automatic number is the same choice"
+        );
         b.thinking_limit = ThinkingLimit::Short;
         assert!(a.same_launch(&b), "the thinking limit needs no restart");
         b.ctx_source = ContextSource::TrainedLimit;
@@ -1651,7 +1731,11 @@ mod tests {
             Some(&b),
         );
         assert!(info.loaded && !info.older_settings_loaded);
-        assert_eq!(info.auto_ctx, Some(12_288), "the number of the current load");
+        assert_eq!(
+            info.auto_ctx,
+            Some(12_288),
+            "the number of the current load"
+        );
         let saving = ModelLoadSettings {
             save_memory: Toggle::On,
             ..ModelLoadSettings::default()
@@ -1675,7 +1759,13 @@ mod tests {
     #[test]
     fn the_panel_lists_every_choice_with_a_mark() {
         let m = Machine::from_probes(&pc(), None, None, 16 * GB, &Freed::default());
-        let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts()), &m);
+        let r = resolve(
+            &ModelLoadSettings::default(),
+            &auto_defaults(),
+            None,
+            Some(&facts()),
+            &m,
+        );
         let info = build_info(
             "/models/model-Q4_K_M.gguf",
             &facts(),
@@ -1706,7 +1796,11 @@ mod tests {
         assert!(info.context_options.iter().all(|o| o.fit == Verdict::Green));
         let gpus: Vec<GpuUse> = info.gpu_options.iter().map(|o| o.gpu).collect();
         assert_eq!(gpus, [GpuUse::All, GpuUse::Fit, GpuUse::Off]);
-        assert_eq!(info.gpu_options[2].fit, Verdict::Green, "the processor has 14 GB");
+        assert_eq!(
+            info.gpu_options[2].fit,
+            Verdict::Green,
+            "the processor has 14 GB"
+        );
         assert_eq!(info.fit, Some(Verdict::Green));
         assert!(!info.too_large);
         // The devices of the backend, labelled by their own names, the card recommended.
@@ -1743,13 +1837,34 @@ mod tests {
             header: None,
             ..facts()
         };
-        let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&unknown), &m);
-        let info = build_info("/m", &unknown, ModelLoadSettings::default(), auto_defaults(), r, &m, None);
+        let r = resolve(
+            &ModelLoadSettings::default(),
+            &auto_defaults(),
+            None,
+            Some(&unknown),
+            &m,
+        );
+        let info = build_info(
+            "/m",
+            &unknown,
+            ModelLoadSettings::default(),
+            auto_defaults(),
+            r,
+            &m,
+            None,
+        );
         assert_eq!(info.fit, None);
         assert!(!info.too_large);
         assert_eq!(info.context_options[0].tokens, 8192);
-        assert!(info.context_options.iter().all(|o| o.fit == Verdict::Yellow));
-        assert_eq!(*info.context_options.last().map(|o| &o.choice).unwrap(), ContextSize::Fixed(131_072));
+        assert!(
+            info.context_options
+                .iter()
+                .all(|o| o.fit == Verdict::Yellow)
+        );
+        assert_eq!(
+            *info.context_options.last().map(|o| &o.choice).unwrap(),
+            ContextSize::Fixed(131_072)
+        );
     }
 
     #[test]
@@ -1758,7 +1873,10 @@ mod tests {
             context_sizes(Some(40_960)),
             [2048, 4096, 8192, 16_384, 32_768, 40_960]
         );
-        assert_eq!(context_sizes(Some(32_768)), [2048, 4096, 8192, 16_384, 32_768]);
+        assert_eq!(
+            context_sizes(Some(32_768)),
+            [2048, 4096, 8192, 16_384, 32_768]
+        );
         assert_eq!(context_sizes(Some(1000)), [1000]);
         assert_eq!(context_sizes(Some(4_000_000)).last(), Some(&1_048_576));
         assert_eq!(context_sizes(None).last(), Some(&131_072));
@@ -1773,7 +1891,10 @@ mod tests {
             ..ModelLoadSettings::default()
         };
         assert_eq!(validate(&ok, Some(40_960), &m), Ok(()));
-        assert_eq!(validate(&ModelLoadSettings::default(), Some(40_960), &m), Ok(()));
+        assert_eq!(
+            validate(&ModelLoadSettings::default(), Some(40_960), &m),
+            Ok(())
+        );
         for bad in [
             ContextChoice::Fixed(12_345),
             ContextChoice::Fixed(65_536),
@@ -1818,8 +1939,10 @@ mod tests {
         save_overrides(&store, "a.gguf", 10, &ModelLoadSettings::default())
             .await
             .unwrap();
-        let raw: Option<serde_json::Value> =
-            store.get_setting(&settings_key("a.gguf", 10)).await.unwrap();
+        let raw: Option<serde_json::Value> = store
+            .get_setting(&settings_key("a.gguf", 10))
+            .await
+            .unwrap();
         assert_eq!(raw, None, "all defaults deletes the key");
     }
 
@@ -1830,7 +1953,10 @@ mod tests {
         std::fs::write(&path, b"not a real model").unwrap();
         let path_str = path.to_string_lossy().into_owned();
         let store = store::Store::open_in_memory().unwrap();
-        assert_eq!(thinking_with(&store, &path_str).await, ThinkingLimit::NoLimit);
+        assert_eq!(
+            thinking_with(&store, &path_str).await,
+            ThinkingLimit::NoLimit
+        );
         store
             .set_setting(
                 crate::settings::LOCAL_MODEL,
@@ -1841,12 +1967,17 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(thinking_with(&store, &path_str).await, ThinkingLimit::Medium);
+        assert_eq!(
+            thinking_with(&store, &path_str).await,
+            ThinkingLimit::Medium
+        );
         let own = ModelLoadSettings {
             thinking_limit: ThinkingChoice::Short,
             ..ModelLoadSettings::default()
         };
-        save_overrides(&store, "think.gguf", 16, &own).await.unwrap();
+        save_overrides(&store, "think.gguf", 16, &own)
+            .await
+            .unwrap();
         assert_eq!(thinking_with(&store, &path_str).await, ThinkingLimit::Short);
         // A missing file: the default.
         assert_eq!(
@@ -1870,16 +2001,26 @@ mod tests {
         assert_eq!(split_parts("a-00001-of-00001.gguf"), None);
         let dir = Scratch::new();
         for (i, len) in [(1, 100usize), (2, 50), (3, 25)] {
-            std::fs::write(dir.path().join(format!("m-0000{i}-of-00003.gguf")), vec![0u8; len])
-                .unwrap();
+            std::fs::write(
+                dir.path().join(format!("m-0000{i}-of-00003.gguf")),
+                vec![0u8; len],
+            )
+            .unwrap();
         }
         std::fs::write(dir.path().join("p.gguf"), vec![0u8; 7]).unwrap();
         let first = dir.path().join("m-00001-of-00003.gguf");
         let projector = dir.path().join("p.gguf");
         let f = read_facts(&first, projector.to_str()).await.unwrap();
-        assert_eq!((f.size_bytes, f.weights_bytes, f.projector_bytes), (100, 175, 7));
+        assert_eq!(
+            (f.size_bytes, f.weights_bytes, f.projector_bytes),
+            (100, 175, 7)
+        );
         assert_eq!(f.header, None, "not a real header");
-        assert!(read_facts(&dir.path().join("none.gguf"), None).await.is_none());
+        assert!(
+            read_facts(&dir.path().join("none.gguf"), None)
+                .await
+                .is_none()
+        );
     }
 
     /// Header facts are read once per file version: a file replaced by a real model under
@@ -1899,7 +2040,11 @@ mod tests {
             .u32("llama.attention.head_count_kv", 2)
             .build();
         std::fs::write(&path, gguf).unwrap();
-        let header = read_facts(&path, None).await.unwrap().header.expect("read again");
+        let header = read_facts(&path, None)
+            .await
+            .unwrap()
+            .header
+            .expect("read again");
         assert_eq!(header.trained_ctx, Some(8192));
         // 2 layers × 2 rows × 2 heads × 64 values: 2 bytes each, or 4 blocks of 34 bytes.
         assert_eq!(header.kv_f16, 1024);

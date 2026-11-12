@@ -138,8 +138,10 @@ const CUT_NOTE_ROOM: usize = 320;
 
 /// [0.0.5 memory] The characters each attached file of one message may keep with a context
 /// of `n_ctx` tokens, when `shared_by` files (its documents and mentions together) are
-/// attached: a fifth of the context each, and 40% of it shared by them all, as mentions are
-/// cut (`tools::symbols::resolve::cap_chars`, which also caps one mention at 8,000 tokens).
+/// attached: a fifth of the context each, and 40% of it shared by them all, the rule mentions
+/// are cut by (`tools::symbols::resolve::cap_chars`, which also caps one mention at 8,000
+/// tokens, and shares only among the mentions: a message with both documents and mentions
+/// can carry more than 40%; TODO(0.0.6): count documents in the mentions' share too).
 /// The current message is never summarised, so a document larger than this would stop the
 /// chat with "too long" instead.
 pub fn document_cap_chars(n_ctx: usize, shared_by: usize) -> usize {

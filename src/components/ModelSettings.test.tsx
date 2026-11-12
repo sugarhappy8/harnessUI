@@ -211,6 +211,30 @@ describe("ModelSettings: one model's load settings in plain words", () => {
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("says what it is doing while a slow command runs, with the buttons off", async () => {
+    let finish: (info: ModelLoadInfo) => void = () => undefined;
+    ipcMock.setModelLoadSettings.mockImplementation(
+      (path, overrides) => new Promise((resolve) => (finish = () => resolve({ ...sample(path), overrides }))),
+    );
+    await openPanel(sample());
+    await choose("Save memory", "on");
+    await click("Save");
+    expect(screen.getByRole("status").textContent).toBe("Saving…");
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Load with these settings" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((select("Save memory") as HTMLSelectElement).disabled).toBe(true);
+    await act(async () => finish(sample()));
+    expect(screen.getByRole("status").textContent).toContain("Saved.");
+    expect((select("Save memory") as HTMLSelectElement).disabled).toBe(false);
+
+    let reset: (info: ModelLoadInfo) => void = () => undefined;
+    ipcMock.resetModelLoadSettings.mockImplementation((path) => new Promise((resolve) => (reset = () => resolve(sample(path)))));
+    await click("Reset to defaults");
+    expect(screen.getByRole("status").textContent).toBe("Going back to the defaults…");
+    await act(async () => reset(sample()));
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
   it("shows what Automatic chose, the too-large line and the one-time upgrade note", async () => {
     const info = sample();
     info.defaults.upgradeNote = 16_384;
@@ -269,6 +293,34 @@ describe("ModelSettings: one model's load settings in plain words", () => {
     await click("Restart when it ends");
     expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, true);
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("keeps the D3 question current while it is open, asking again what uses the model", async () => {
+    vi.useFakeTimers();
+    try {
+      const info = sample();
+      info.olderSettingsLoaded = true;
+      useApp.setState({ runtime: ready(info.path) });
+      ipcMock.modelBusy.mockResolvedValue({ chatTurns: 1, modelChecks: 0, otherApps: 0 });
+      await openPanel(info);
+      await click("Apply and restart");
+      expect(screen.getByText("A reply is being written. Stop it and restart the model?")).toBeTruthy();
+      ipcMock.modelBusy.mockResolvedValue({ chatTurns: 0, modelChecks: 1, otherApps: 0 });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+      expect(screen.getByText("A model check is running. Stop it and restart the model?")).toBeTruthy();
+      expect(screen.queryByText("A reply is being written. Stop it and restart the model?")).toBeNull();
+      await click("Cancel");
+      // Closed: no more asking.
+      const calls = ipcMock.modelBusy.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(ipcMock.modelBusy.mock.calls.length).toBe(calls);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("Reset to defaults forgets the model's own settings", async () => {

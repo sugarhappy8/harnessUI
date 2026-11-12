@@ -989,3 +989,28 @@ export interface ShareSetup {
   ways: SetupWay[];
   notes: string[];
 }
+
+/** Coding apps (0.0.5, direction B, experimental): Claude Code and Codex on this computer. */
+export type CodingApp = "claudeCode" | "codex";
+
+/** One coding app as the Tools panel shows it (`coding_apps_status`, `find_coding_apps`). */
+export interface CodingAppStatus {
+  app: CodingApp;
+  label: string;
+  /** The tool that asks it: `ask_claude_code` or `ask_codex`. */
+  tool: string;
+  /** The absolute path of the program that runs, as found when the group was turned on. */
+  path: string | null;
+  version: string | null;
+  usable: boolean;
+  /** Why it cannot be used, in plain words. */
+  problem: string | null;
+}
+
+export interface CodingAppsStatus {
+  /** The programs were looked for at least once. */
+  checked: boolean;
+  apps: CodingAppStatus[];
+  /** "Claude Code and Codex are not installed on this computer." when neither was found. */
+  message: string | null;
+}

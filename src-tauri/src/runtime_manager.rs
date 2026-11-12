@@ -293,7 +293,12 @@ impl RuntimeManager {
 
     /// Counts one user of the local model (D3) until the returned guard is dropped;
     /// "Stop and restart" stops it with `stop`.
-    pub fn hold(&self, busy: &Arc<BusyCounter>, kind: BusyKind, stop: CancellationToken) -> ModelUse {
+    pub fn hold(
+        &self,
+        busy: &Arc<BusyCounter>,
+        kind: BusyKind,
+        stop: CancellationToken,
+    ) -> ModelUse {
         let id = self.gate.add_user(stop);
         ModelUse {
             _busy: busy.hold(kind),
@@ -657,11 +662,7 @@ impl RuntimeManager {
 
     /// When `model` is already being loaded with the same choices: waits for that load
     /// and returns how it ended. `None` when no such load is in progress.
-    pub async fn join_load(
-        &self,
-        model: &Path,
-        settings: &ResolvedLoad,
-    ) -> Option<AppResult<()>> {
+    pub async fn join_load(&self, model: &Path, settings: &ResolvedLoad) -> Option<AppResult<()>> {
         let seq = self.loads.same_in_progress(model, settings)?;
         Some(self.wait_for_load(seq, model).await)
     }
@@ -1371,7 +1372,10 @@ mod tests {
             ),
             usable(BackendKind::Cpu, vec![device("CPU", "CPU", 0)]),
         ];
-        assert_eq!(planned_backend(&found, None, None), Some(BackendKind::Vulkan));
+        assert_eq!(
+            planned_backend(&found, None, None),
+            Some(BackendKind::Vulkan)
+        );
         assert_eq!(
             planned_backend(&found, Some("cuda"), None),
             Some(BackendKind::Cuda)

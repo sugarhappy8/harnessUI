@@ -68,7 +68,7 @@ impl LoadFailure {
             Self::PortInUse => "Restart the app.",
             Self::ModelFileInvalid => "Download the model again, or choose a different file.",
             Self::ContextTooLarge => {
-                "In Model settings, lower How much it can remember or turn on Save memory."
+                "In Model settings, lower How much it can remember, or turn on Save memory if it is off."
             }
             Self::Unknown => "Copy the details and check the logs, or try the CPU backend.",
         }
@@ -398,9 +398,11 @@ mod tests {
             LoadFailure::ContextTooLarge.user_message(),
             "The model loaded, but there isn't enough memory left for how much it should remember."
         );
+        // Save memory may already be on in the user's settings: the app turns it off only
+        // for the load that failed with it, so the text must not tell them to turn it on.
         assert_eq!(
             LoadFailure::ContextTooLarge.next_step(),
-            "In Model settings, lower How much it can remember or turn on Save memory."
+            "In Model settings, lower How much it can remember, or turn on Save memory if it is off."
         );
         for failure in [LoadFailure::OutOfMemory, LoadFailure::ContextTooLarge] {
             let text = format!("{} {}", failure.user_message(), failure.next_step());

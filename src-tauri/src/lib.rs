@@ -343,9 +343,9 @@ pub fn run() {
             // 0.0.5: the coding apps found when the user last turned that group on.
             {
                 let handle = handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    outside_agent::register_saved(&handle).await
-                });
+                tauri::async_runtime::spawn(
+                    async move { outside_agent::register_saved(&handle).await },
+                );
             }
             // "Allow all in every chat", if the user switched it on (a saved setting).
             approvals::load_default(&handle);

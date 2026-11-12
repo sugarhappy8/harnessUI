@@ -198,5 +198,7 @@ describe("Models → Installed", () => {
     const add = screen.getByRole("button", { name: "Add to comparison: big.gguf" }) as HTMLButtonElement;
     expect(add.disabled).toBe(true);
     expect(add.title).toBe("You can compare up to 4 models. Remove one first.");
+    // Also as visible text, once for the list, not only as a tooltip.
+    expect(screen.getAllByText("You can compare up to 4 models. Remove one first.")).toHaveLength(1);
   });
 });

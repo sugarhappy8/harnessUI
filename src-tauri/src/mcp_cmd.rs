@@ -1329,10 +1329,15 @@ mod tests {
     #[test]
     fn coding_apps_stay_off_until_the_user_switches_them_on() {
         let server = crate::outside_agent::SERVER_NAME;
-        for tool in [crate::outside_agent::CLAUDE_TOOL, crate::outside_agent::CODEX_TOOL] {
+        for tool in [
+            crate::outside_agent::CLAUDE_TOOL,
+            crate::outside_agent::CODEX_TOOL,
+        ] {
             for (available, context) in [(true, Some(131_072)), (false, None)] {
                 assert!(!default_on(server, available, context));
-                assert!(!Selection::for_chat(None, None, available, context).on(tool, server, true));
+                assert!(
+                    !Selection::for_chat(None, None, available, context).on(tool, server, true)
+                );
             }
             let last = names(&["read_file", tool]);
             let new_chat = Selection::for_chat(None, Some(&last), true, Some(8192));

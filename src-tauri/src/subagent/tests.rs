@@ -1260,7 +1260,10 @@ async fn a_helper_never_gets_the_coding_apps() {
     let names: Vec<String> = host.tools().into_iter().map(|t| t.name).collect();
     assert_eq!(names, ["read_file", "fetch"]);
     let refusal = crate::outside_agent::HELPER_REFUSAL;
-    for tool in [crate::outside_agent::CLAUDE_TOOL, crate::outside_agent::CODEX_TOOL] {
+    for tool in [
+        crate::outside_agent::CLAUDE_TOOL,
+        crate::outside_agent::CODEX_TOOL,
+    ] {
         let task = args(json!({"task": "x"}));
         assert_eq!(
             host.validate(tool, &Value::Object(task.clone())),
@@ -1308,8 +1311,14 @@ async fn a_helper_never_gets_the_coding_apps() {
         schema_error: None,
     };
     let coding = crate::outside_agent::SERVER_NAME;
-    assert!(!offered_to_helper(&registered(coding, crate::outside_agent::CLAUDE_TOOL)));
-    assert!(!offered_to_helper(&registered(coding, crate::outside_agent::CODEX_TOOL)));
+    assert!(!offered_to_helper(&registered(
+        coding,
+        crate::outside_agent::CLAUDE_TOOL
+    )));
+    assert!(!offered_to_helper(&registered(
+        coding,
+        crate::outside_agent::CODEX_TOOL
+    )));
     assert!(!offered_to_helper(&registered(SERVER_NAME, TOOL_NAME)));
     assert!(offered_to_helper(&registered("files", "read_file")));
 }

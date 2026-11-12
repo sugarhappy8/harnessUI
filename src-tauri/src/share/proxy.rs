@@ -164,7 +164,14 @@ impl Api {
                 "tool_choice",
                 "thinking",
             ],
-            Self::CountTokens => &["model", "messages", "system", "tools", "tool_choice", "thinking"],
+            Self::CountTokens => &[
+                "model",
+                "messages",
+                "system",
+                "tools",
+                "tool_choice",
+                "thinking",
+            ],
             Self::Responses => &[
                 "model",
                 "input",
@@ -298,7 +305,10 @@ pub fn key_matches(headers: &HeaderMap, expected: &str) -> bool {
         return false;
     }
     let mut sent = Vec::new();
-    for name in [header::HeaderName::from_static("x-api-key"), header::AUTHORIZATION] {
+    for name in [
+        header::HeaderName::from_static("x-api-key"),
+        header::AUTHORIZATION,
+    ] {
         let mut values = headers.get_all(&name).iter();
         match (values.next(), values.next()) {
             (None, _) => {}
@@ -320,8 +330,9 @@ pub fn key_matches(headers: &HeaderMap, expected: &str) -> bool {
         return false;
     }
     // Every comparison runs, so the time does not tell which header was wrong.
-    sent.iter()
-        .fold(true, |ok, key| constant_time_eq(key, expected.as_bytes()) & ok)
+    sent.iter().fold(true, |ok, key| {
+        constant_time_eq(key, expected.as_bytes()) & ok
+    })
 }
 
 /// The token of `Bearer <token>` (the scheme in any case, one space).
@@ -485,7 +496,8 @@ fn check_part(part: &Value) -> Result<(), BadRequest> {
 }
 
 fn is_data_url(url: &str) -> bool {
-    url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:"))
+    url.get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("data:"))
 }
 
 // ---- Cleaning answers --------------------------------------------------------------
@@ -507,6 +519,8 @@ impl Usage {
     pub fn summary(self) -> Option<String> {
         match (self.input, self.output) {
             (None, None) => None,
+            // Token counting: only what came in.
+            (Some(input), None) => Some(format!("{} tokens in", thousands(input))),
             (input, output) => Some(format!(
                 "{} tokens in, {} out",
                 input.map_or_else(|| "?".to_owned(), thousands),
@@ -716,7 +730,12 @@ impl SseFilter {
 // ---- Error answers -----------------------------------------------------------------
 
 /// An error body in the shape of `api` (OpenAI's when the path is not one of them).
-pub fn error_body(api: Option<Api>, status: StatusCode, message: &str, code: Option<&str>) -> Value {
+pub fn error_body(
+    api: Option<Api>,
+    status: StatusCode,
+    message: &str,
+    code: Option<&str>,
+) -> Value {
     if api.is_some_and(Api::anthropic) {
         let kind = match status.as_u16() {
             400 | 405 | 408 => "invalid_request_error",
@@ -741,17 +760,28 @@ pub fn error_body(api: Option<Api>, status: StatusCode, message: &str, code: Opt
 /// An upstream error rebuilt in the shape of `api`: only its message passes, sanitised,
 /// cut and with the model's path removed. A full context is reported in the wording each
 /// client recognises, so it can shorten its conversation and try again.
-pub fn upstream_error(api: Api, status: StatusCode, body: &[u8], scrub: &Scrub) -> (StatusCode, Value) {
+pub fn upstream_error(
+    api: Api,
+    status: StatusCode,
+    body: &[u8],
+    scrub: &Scrub,
+) -> (StatusCode, Value) {
     let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let error = parsed.get("error").unwrap_or(&parsed);
-    let kind = error.get("type").and_then(Value::as_str).unwrap_or_default();
+    let kind = error
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let status = if status.is_client_error() || status.is_server_error() {
         status
     } else {
         StatusCode::BAD_GATEWAY
     };
     if kind == "exceed_context_size_error" {
-        let prompt = error.get("n_prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let prompt = error
+            .get("n_prompt_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let ctx = error.get("n_ctx").and_then(Value::as_u64).unwrap_or(0);
         let message = if api.anthropic() {
             format!("prompt is too long: {prompt} tokens > {ctx} maximum")
@@ -760,7 +790,12 @@ pub fn upstream_error(api: Api, status: StatusCode, body: &[u8], scrub: &Scrub) 
                 "This model's maximum context length is {ctx} tokens. However, your messages resulted in {prompt} tokens."
             )
         };
-        let body = error_body(Some(api), StatusCode::BAD_REQUEST, &message, Some("context_length_exceeded"));
+        let body = error_body(
+            Some(api),
+            StatusCode::BAD_REQUEST,
+            &message,
+            Some("context_length_exceeded"),
+        );
         return (StatusCode::BAD_REQUEST, body);
     }
     let message = error
@@ -917,16 +952,15 @@ struct Shared {
 
 impl Shared {
     fn key(&self) -> String {
-        self.deps
-            .key
-            .read()
-            .map(|k| k.clone())
-            .unwrap_or_default()
+        self.deps.key.read().map(|k| k.clone()).unwrap_or_default()
     }
 
     /// Counts a refusal and answers it (a bare 429 over the per-second allowance).
     fn refuse(&self, api: Option<Api>, why: Refused) -> Response<Body> {
-        if Counters::due(&self.deps.counters.last_refusal_log, Duration::from_secs(60)) {
+        if Counters::due(
+            &self.deps.counters.last_refusal_log,
+            Duration::from_secs(60),
+        ) {
             tracing::warn!(reason = ?why, "the sharing port refused a request");
         }
         if !self.deps.counters.refuse() {
@@ -1055,11 +1089,17 @@ async fn handle(req: Request<Incoming>, shared: &Shared) -> Response<Body> {
         Route::Api(api) => forward(req, api, shared).await,
         Route::MethodNotAllowed => {
             let status = StatusCode::METHOD_NOT_ALLOWED;
-            json_response(status, &error_body(api, status, "This method is not allowed here.", None))
+            json_response(
+                status,
+                &error_body(api, status, "This method is not allowed here.", None),
+            )
         }
         Route::NotFound => {
             let status = StatusCode::NOT_FOUND;
-            json_response(status, &error_body(api, status, "There is nothing at this address.", None))
+            json_response(
+                status,
+                &error_body(api, status, "There is nothing at this address.", None),
+            )
         }
     }
 }
@@ -1086,13 +1126,28 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
         return fail(StatusCode::PAYLOAD_TOO_LARGE, "The request is too large.");
     }
     let caller = says(req.headers());
-    let body = match tokio::time::timeout(BODY_TIMEOUT, Limited::new(req.into_body(), MAX_BODY).collect()).await {
+    let body = match tokio::time::timeout(
+        BODY_TIMEOUT,
+        Limited::new(req.into_body(), MAX_BODY).collect(),
+    )
+    .await
+    {
         Ok(Ok(collected)) => collected.to_bytes(),
         Ok(Err(e)) if e.is::<http_body_util::LengthLimitError>() => {
             return fail(StatusCode::PAYLOAD_TOO_LARGE, "The request is too large.");
         }
-        Ok(Err(_)) => return fail(StatusCode::BAD_REQUEST, "The request body could not be read."),
-        Err(_) => return fail(StatusCode::REQUEST_TIMEOUT, "The request body took too long to arrive."),
+        Ok(Err(_)) => {
+            return fail(
+                StatusCode::BAD_REQUEST,
+                "The request body could not be read.",
+            );
+        }
+        Err(_) => {
+            return fail(
+                StatusCode::REQUEST_TIMEOUT,
+                "The request body took too long to arrive.",
+            );
+        }
     };
     let (base_url, upstream_key, model, n_ctx) = match shared.deps.model.current().await {
         Upstream::Ready {
@@ -1103,11 +1158,17 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
         } => (base_url, key, model, n_ctx),
         Upstream::Loading => {
             let status = StatusCode::SERVICE_UNAVAILABLE;
-            return json_response(status, &error_body(Some(api), status, LOADING, Some("model_loading")));
+            return json_response(
+                status,
+                &error_body(Some(api), status, LOADING, Some("model_loading")),
+            );
         }
         Upstream::NotLoaded => {
             let status = StatusCode::SERVICE_UNAVAILABLE;
-            return json_response(status, &error_body(Some(api), status, NO_MODEL, Some("model_not_loaded")));
+            return json_response(
+                status,
+                &error_body(Some(api), status, NO_MODEL, Some("model_not_loaded")),
+            );
         }
     };
     let rebuilt = match rebuild_request(api, &body, n_ctx) {
@@ -1139,9 +1200,17 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
     let mut upstream = match sent {
         Ok(response) => response,
         Err(e) => {
-            tracing::warn!("the sharing proxy could not reach the model: {}", without_url(&e));
-            audit.finish("error", Some("The model did not answer.".into())).await;
-            return fail(StatusCode::BAD_GATEWAY, "The model in harnessUI did not answer. Try again.");
+            tracing::warn!(
+                "the sharing proxy could not reach the model: {}",
+                without_url(&e)
+            );
+            audit
+                .finish("error", Some("The model did not answer.".into()))
+                .await;
+            return fail(
+                StatusCode::BAD_GATEWAY,
+                "The model in harnessUI did not answer. Try again.",
+            );
         }
     };
     let status = upstream.status();
@@ -1215,21 +1284,41 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
     drop(busy);
     drop(active);
     if read.is_err() {
-        audit.finish("error", Some("The model's answer was cut off.".into())).await;
-        return fail(StatusCode::BAD_GATEWAY, "The model in harnessUI did not finish its answer. Try again.");
+        audit
+            .finish("error", Some("The model's answer was cut off.".into()))
+            .await;
+        return fail(
+            StatusCode::BAD_GATEWAY,
+            "The model in harnessUI did not finish its answer. Try again.",
+        );
     }
     if !status.is_success() {
         let (status, body) = upstream_error(api, status, &bytes, &scrub);
         audit
-            .finish("error", Some(format!("The model answered with an error ({}).", status.as_u16())))
+            .finish(
+                "error",
+                Some(format!(
+                    "The model answered with an error ({}).",
+                    status.as_u16()
+                )),
+            )
             .await;
         return json_response(status, &body);
     }
     let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
-        audit.finish("error", Some("The model's answer was not JSON.".into())).await;
-        return fail(StatusCode::BAD_GATEWAY, "The model in harnessUI gave an answer that could not be read.");
+        audit
+            .finish("error", Some("The model's answer was not JSON.".into()))
+            .await;
+        return fail(
+            StatusCode::BAD_GATEWAY,
+            "The model in harnessUI gave an answer that could not be read.",
+        );
     };
-    let usage = clean_answer(&mut value);
+    let mut usage = clean_answer(&mut value);
+    if api == Api::CountTokens {
+        // `{"input_tokens": n}`, with no usage object.
+        usage.input = value.get("input_tokens").and_then(Value::as_u64);
+    }
     audit.finish("ok", usage.summary()).await;
     let text = scrub.apply(value.to_string());
     let mut response = Response::new(full(Bytes::from(text)));
@@ -1266,7 +1355,10 @@ impl AuditRow {
         let store = shared.deps.store.clone();
         let started = Instant::now();
         let wanted = api.generates()
-            || Counters::due(&shared.deps.counters.last_count_audit, COUNT_TOKENS_AUDIT_EVERY);
+            || Counters::due(
+                &shared.deps.counters.last_count_audit,
+                COUNT_TOKENS_AUDIT_EVERY,
+            );
         let id = if wanted {
             let says = if caller.is_empty() {
                 "It did not say which program it is.".to_owned()
@@ -1353,12 +1445,18 @@ mod tests {
     #[test]
     fn only_the_exact_paths_route() {
         assert_eq!(route(&Method::GET, "/v1/models"), Route::Models);
-        assert_eq!(route(&Method::POST, "/v1/messages"), Route::Api(Api::Messages));
+        assert_eq!(
+            route(&Method::POST, "/v1/messages"),
+            Route::Api(Api::Messages)
+        );
         assert_eq!(
             route(&Method::POST, "/v1/messages/count_tokens"),
             Route::Api(Api::CountTokens)
         );
-        assert_eq!(route(&Method::POST, "/v1/responses"), Route::Api(Api::Responses));
+        assert_eq!(
+            route(&Method::POST, "/v1/responses"),
+            Route::Api(Api::Responses)
+        );
         assert_eq!(
             route(&Method::POST, "/v1/chat/completions"),
             Route::Api(Api::ChatCompletions)
@@ -1394,7 +1492,11 @@ mod tests {
     fn host_must_be_this_loopback_port() {
         let uri: Uri = "/v1/messages".parse().unwrap();
         for ok in ["127.0.0.1:50000", "localhost:50000", "LocalHost:50000"] {
-            assert_eq!(check_target(&uri, &headers(&[("host", ok)]), 50000), Ok(()), "{ok}");
+            assert_eq!(
+                check_target(&uri, &headers(&[("host", ok)]), 50000),
+                Ok(()),
+                "{ok}"
+            );
         }
         for bad in [
             "127.0.0.1",
@@ -1415,7 +1517,10 @@ mod tests {
             );
         }
         // Missing or repeated.
-        assert_eq!(check_target(&uri, &HeaderMap::new(), 50000), Err(Refused::Host));
+        assert_eq!(
+            check_target(&uri, &HeaderMap::new(), 50000),
+            Err(Refused::Host)
+        );
         assert_eq!(
             check_target(
                 &uri,
@@ -1453,11 +1558,20 @@ mod tests {
     #[test]
     fn the_key_in_either_header() {
         assert!(key_matches(&headers(&[("x-api-key", KEY)]), KEY));
-        assert!(key_matches(&headers(&[("authorization", &format!("Bearer {KEY}"))]), KEY));
-        assert!(key_matches(&headers(&[("authorization", &format!("bearer {KEY}"))]), KEY));
+        assert!(key_matches(
+            &headers(&[("authorization", &format!("Bearer {KEY}"))]),
+            KEY
+        ));
+        assert!(key_matches(
+            &headers(&[("authorization", &format!("bearer {KEY}"))]),
+            KEY
+        ));
         // Both, the same.
         assert!(key_matches(
-            &headers(&[("x-api-key", KEY), ("authorization", &format!("Bearer {KEY}"))]),
+            &headers(&[
+                ("x-api-key", KEY),
+                ("authorization", &format!("Bearer {KEY}"))
+            ]),
             KEY
         ));
     }
@@ -1473,10 +1587,19 @@ mod tests {
             vec![("authorization", KEY)],
             vec![("authorization", "Basic aGFybmVzc3VpOg==")],
             vec![("authorization", "Bearer")],
-            vec![("authorization", "Bearer  harnessui-share-0123456789abcdef0123456789abcdef")],
+            vec![(
+                "authorization",
+                "Bearer  harnessui-share-0123456789abcdef0123456789abcdef",
+            )],
             // One right, one wrong.
             vec![("x-api-key", KEY), ("authorization", "Bearer nope")],
-            vec![("x-api-key", wrong), ("authorization", "Bearer harnessui-share-0123456789abcdef0123456789abcdef")],
+            vec![
+                ("x-api-key", wrong),
+                (
+                    "authorization",
+                    "Bearer harnessui-share-0123456789abcdef0123456789abcdef",
+                ),
+            ],
             // Repeated.
             vec![("x-api-key", KEY), ("x-api-key", KEY)],
         ] {
@@ -1595,7 +1718,10 @@ mod tests {
             json!(50)
         );
         // Added when missing.
-        assert_eq!(limit(Api::Messages, json!({}), 2048).unwrap()["max_tokens"], json!(2048));
+        assert_eq!(
+            limit(Api::Messages, json!({}), 2048).unwrap()["max_tokens"],
+            json!(2048)
+        );
         // Both Chat fields are capped; none is added when one is sent.
         let both = limit(
             Api::ChatCompletions,
@@ -1605,7 +1731,12 @@ mod tests {
         .unwrap();
         assert_eq!(both["max_tokens"], json!(16_384));
         assert_eq!(both["max_completion_tokens"], json!(16_384));
-        let one = limit(Api::ChatCompletions, json!({"max_completion_tokens": 10}), 16_384).unwrap();
+        let one = limit(
+            Api::ChatCompletions,
+            json!({"max_completion_tokens": 10}),
+            16_384,
+        )
+        .unwrap();
         assert_eq!(one.get("max_tokens"), None);
         assert_eq!(
             limit(Api::Responses, json!({"max_output_tokens": 70_000}), 65_536).unwrap()["max_output_tokens"],
@@ -1622,10 +1753,22 @@ mod tests {
 
     #[test]
     fn bodies_that_are_not_json_objects_are_refused() {
-        assert_eq!(rebuild_request(Api::Messages, b"{", 8192), Err(BadRequest::NotJson));
-        assert_eq!(rebuild_request(Api::Messages, b"", 8192), Err(BadRequest::NotJson));
-        assert_eq!(rebuild_request(Api::Messages, b"[1]", 8192), Err(BadRequest::NotAnObject));
-        assert_eq!(rebuild_request(Api::Messages, b"\"x\"", 8192), Err(BadRequest::NotAnObject));
+        assert_eq!(
+            rebuild_request(Api::Messages, b"{", 8192),
+            Err(BadRequest::NotJson)
+        );
+        assert_eq!(
+            rebuild_request(Api::Messages, b"", 8192),
+            Err(BadRequest::NotJson)
+        );
+        assert_eq!(
+            rebuild_request(Api::Messages, b"[1]", 8192),
+            Err(BadRequest::NotAnObject)
+        );
+        assert_eq!(
+            rebuild_request(Api::Messages, b"\"x\"", 8192),
+            Err(BadRequest::NotAnObject)
+        );
         assert_eq!(
             rebuild_request(Api::Messages, br#"{"stream":"yes"}"#, 8192),
             Err(BadRequest::BadStream)
@@ -1641,64 +1784,186 @@ mod tests {
     #[test]
     fn links_to_images_and_files_are_refused_in_chat_completions() {
         let msg = |part: Value| json!({"messages": [{"role": "user", "content": [part]}]});
-        for url in ["http://127.0.0.1:9/x.png", "https://example.com/x.png", "file:///etc/passwd", "ftp://x/y", ""] {
-            assert!(refused(Api::ChatCompletions, msg(json!({"type": "image_url", "image_url": {"url": url}}))), "{url}");
-            assert!(refused(Api::ChatCompletions, msg(json!({"type": "image_url", "image_url": url}))), "{url}");
+        for url in [
+            "http://127.0.0.1:9/x.png",
+            "https://example.com/x.png",
+            "file:///etc/passwd",
+            "ftp://x/y",
+            "",
+        ] {
+            assert!(
+                refused(
+                    Api::ChatCompletions,
+                    msg(json!({"type": "image_url", "image_url": {"url": url}}))
+                ),
+                "{url}"
+            );
+            assert!(
+                refused(
+                    Api::ChatCompletions,
+                    msg(json!({"type": "image_url", "image_url": url}))
+                ),
+                "{url}"
+            );
         }
-        assert!(refused(Api::ChatCompletions, msg(json!({"type": "image_url", "image_url": {}}))));
-        assert!(refused(Api::ChatCompletions, msg(json!({"type": "file", "file": {"file_id": "file-1"}}))));
-        assert!(refused(Api::ChatCompletions, msg(json!({"type": "input_audio", "audio_url": "https://x/a.wav"}))));
+        assert!(refused(
+            Api::ChatCompletions,
+            msg(json!({"type": "image_url", "image_url": {}}))
+        ));
+        assert!(refused(
+            Api::ChatCompletions,
+            msg(json!({"type": "file", "file": {"file_id": "file-1"}}))
+        ));
+        assert!(refused(
+            Api::ChatCompletions,
+            msg(json!({"type": "input_audio", "audio_url": "https://x/a.wav"}))
+        ));
         // Inline data is fine, and so is an address in text or in a tool call.
-        assert!(!refused(Api::ChatCompletions, msg(json!({"type": "image_url", "image_url": {"url": PNG}}))));
-        assert!(!refused(Api::ChatCompletions, msg(json!({"type": "image_url", "image_url": {"url": "DATA:image/png;base64,AA=="}}))));
-        assert!(!refused(Api::ChatCompletions, msg(json!({"type": "file", "file": {"file_data": "data:application/pdf;base64,AA==", "filename": "a.pdf"}}))));
-        assert!(!refused(Api::ChatCompletions, msg(json!({"type": "text", "text": "see https://example.com/x.png"}))));
-        assert!(!refused(Api::ChatCompletions, json!({"messages": [{"role": "assistant", "content": null,
-            "tool_calls": [{"id": "1", "type": "function", "function": {"name": "fetch", "arguments": "{\"url\":\"https://example.com\"}"}}]}]})));
+        assert!(!refused(
+            Api::ChatCompletions,
+            msg(json!({"type": "image_url", "image_url": {"url": PNG}}))
+        ));
+        assert!(!refused(
+            Api::ChatCompletions,
+            msg(json!({"type": "image_url", "image_url": {"url": "DATA:image/png;base64,AA=="}}))
+        ));
+        assert!(!refused(
+            Api::ChatCompletions,
+            msg(
+                json!({"type": "file", "file": {"file_data": "data:application/pdf;base64,AA==", "filename": "a.pdf"}})
+            )
+        ));
+        assert!(!refused(
+            Api::ChatCompletions,
+            msg(json!({"type": "text", "text": "see https://example.com/x.png"}))
+        ));
+        assert!(!refused(
+            Api::ChatCompletions,
+            json!({"messages": [{"role": "assistant", "content": null,
+            "tool_calls": [{"id": "1", "type": "function", "function": {"name": "fetch", "arguments": "{\"url\":\"https://example.com\"}"}}]}]})
+        ));
     }
 
     #[test]
     fn links_to_images_and_files_are_refused_in_responses() {
         let input = |part: Value| json!({"input": [{"role": "user", "content": [part]}]});
-        assert!(refused(Api::Responses, input(json!({"type": "input_image", "image_url": "https://example.com/x.png"}))));
-        assert!(refused(Api::Responses, input(json!({"type": "input_image", "image_url": "http://localhost/x.png"}))));
-        assert!(refused(Api::Responses, input(json!({"type": "input_image", "file_id": "file-1"}))));
-        assert!(refused(Api::Responses, input(json!({"type": "input_file", "file_url": "https://example.com/a.pdf"}))));
-        assert!(refused(Api::Responses, input(json!({"type": "input_file", "file_id": "file-1"}))));
+        assert!(refused(
+            Api::Responses,
+            input(json!({"type": "input_image", "image_url": "https://example.com/x.png"}))
+        ));
+        assert!(refused(
+            Api::Responses,
+            input(json!({"type": "input_image", "image_url": "http://localhost/x.png"}))
+        ));
+        assert!(refused(
+            Api::Responses,
+            input(json!({"type": "input_image", "file_id": "file-1"}))
+        ));
+        assert!(refused(
+            Api::Responses,
+            input(json!({"type": "input_file", "file_url": "https://example.com/a.pdf"}))
+        ));
+        assert!(refused(
+            Api::Responses,
+            input(json!({"type": "input_file", "file_id": "file-1"}))
+        ));
         // In a typed message item, and in a tool's output.
-        assert!(refused(Api::Responses, json!({"input": [{"type": "message", "role": "user",
-            "content": [{"type": "input_image", "image_url": "https://example.com/x.png"}]}]})));
-        assert!(refused(Api::Responses, json!({"input": [{"type": "function_call_output", "call_id": "c",
-            "output": [{"type": "input_image", "image_url": "https://example.com/x.png"}]}]})));
+        assert!(refused(
+            Api::Responses,
+            json!({"input": [{"type": "message", "role": "user",
+            "content": [{"type": "input_image", "image_url": "https://example.com/x.png"}]}]})
+        ));
+        assert!(refused(
+            Api::Responses,
+            json!({"input": [{"type": "function_call_output", "call_id": "c",
+            "output": [{"type": "input_image", "image_url": "https://example.com/x.png"}]}]})
+        ));
         // Inline data, plain text, a string input, and a URL inside function arguments are fine.
-        assert!(!refused(Api::Responses, input(json!({"type": "input_image", "image_url": PNG}))));
-        assert!(!refused(Api::Responses, input(json!({"type": "input_file", "file_data": "data:application/pdf;base64,AA==", "filename": "a.pdf"}))));
-        assert!(!refused(Api::Responses, json!({"input": "look at https://example.com/x.png"})));
-        assert!(!refused(Api::Responses, json!({"input": [{"type": "function_call", "call_id": "c", "name": "fetch",
-            "arguments": "{\"url\":\"https://example.com\"}"}]})));
-        assert!(!refused(Api::Responses, json!({"input": [{"type": "function_call_output", "call_id": "c", "output": "https://example.com"}]})));
+        assert!(!refused(
+            Api::Responses,
+            input(json!({"type": "input_image", "image_url": PNG}))
+        ));
+        assert!(!refused(
+            Api::Responses,
+            input(
+                json!({"type": "input_file", "file_data": "data:application/pdf;base64,AA==", "filename": "a.pdf"})
+            )
+        ));
+        assert!(!refused(
+            Api::Responses,
+            json!({"input": "look at https://example.com/x.png"})
+        ));
+        assert!(!refused(
+            Api::Responses,
+            json!({"input": [{"type": "function_call", "call_id": "c", "name": "fetch",
+            "arguments": "{\"url\":\"https://example.com\"}"}]})
+        ));
+        assert!(!refused(
+            Api::Responses,
+            json!({"input": [{"type": "function_call_output", "call_id": "c", "output": "https://example.com"}]})
+        ));
     }
 
     #[test]
     fn links_to_images_and_files_are_refused_in_messages() {
         let user = |block: Value| json!({"messages": [{"role": "user", "content": [block]}]});
         for api in [Api::Messages, Api::CountTokens] {
-            assert!(refused(api, user(json!({"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}}))));
-            assert!(refused(api, user(json!({"type": "image", "source": {"type": "file", "file_id": "file_1"}}))));
-            assert!(refused(api, user(json!({"type": "document", "source": {"type": "url", "url": "https://example.com/a.pdf"}}))));
+            assert!(refused(
+                api,
+                user(
+                    json!({"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}})
+                )
+            ));
+            assert!(refused(
+                api,
+                user(json!({"type": "image", "source": {"type": "file", "file_id": "file_1"}}))
+            ));
+            assert!(refused(
+                api,
+                user(
+                    json!({"type": "document", "source": {"type": "url", "url": "https://example.com/a.pdf"}})
+                )
+            ));
             assert!(refused(api, user(json!({"type": "image", "source": {}}))));
             // Inside a tool result, inside a document made of content, and in the system prompt.
-            assert!(refused(api, user(json!({"type": "tool_result", "tool_use_id": "t",
-                "content": [{"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}}]}))));
-            assert!(refused(api, user(json!({"type": "document", "source": {"type": "content",
-                "content": [{"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}]}}))));
-            assert!(refused(api, json!({"system": [{"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}], "messages": []})));
+            assert!(refused(
+                api,
+                user(json!({"type": "tool_result", "tool_use_id": "t",
+                "content": [{"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}}]}))
+            ));
+            assert!(refused(
+                api,
+                user(json!({"type": "document", "source": {"type": "content",
+                "content": [{"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}]}}))
+            ));
+            assert!(refused(
+                api,
+                json!({"system": [{"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}], "messages": []})
+            ));
             // Inline data, text, and an address in a tool call's input are fine.
-            assert!(!refused(api, user(json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}))));
-            assert!(!refused(api, user(json!({"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "hello"}}))));
-            assert!(!refused(api, json!({"messages": [{"role": "assistant", "content": [
-                {"type": "tool_use", "id": "t", "name": "WebFetch", "input": {"url": "https://example.com", "image_url": "https://x"}}]}]})));
-            assert!(!refused(api, user(json!({"type": "tool_result", "tool_use_id": "t", "content": "fetched https://example.com"}))));
+            assert!(!refused(
+                api,
+                user(
+                    json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}})
+                )
+            ));
+            assert!(!refused(
+                api,
+                user(
+                    json!({"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "hello"}})
+                )
+            ));
+            assert!(!refused(
+                api,
+                json!({"messages": [{"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t", "name": "WebFetch", "input": {"url": "https://example.com", "image_url": "https://x"}}]}]})
+            ));
+            assert!(!refused(
+                api,
+                user(
+                    json!({"type": "tool_result", "tool_use_id": "t", "content": "fetched https://example.com"})
+                )
+            ));
         }
     }
 
@@ -1708,32 +1973,62 @@ mod tests {
         let mut message = json!({"id": "x", "type": "message", "model": "/home/someone/models/m.gguf",
             "usage": {"cache_read_input_tokens": 9, "input_tokens": 1, "output_tokens": 8}});
         let usage = clean_answer(&mut message);
-        assert_eq!(message["usage"], json!({"input_tokens": 10, "output_tokens": 8}));
+        assert_eq!(
+            message["usage"],
+            json!({"input_tokens": 10, "output_tokens": 8})
+        );
         assert_eq!(message["model"], json!(MODEL_ALIAS));
-        assert_eq!(usage, Usage { input: Some(10), output: Some(8) });
+        assert_eq!(
+            usage,
+            Usage {
+                input: Some(10),
+                output: Some(8)
+            }
+        );
 
         let mut start = json!({"type": "message_start", "message": {"model": "m", "usage":
             {"cache_read_input_tokens": 3, "cache_creation_input_tokens": 2, "cache_creation": {}, "input_tokens": 5, "output_tokens": 0}}});
         clean_answer(&mut start);
-        assert_eq!(start["message"]["usage"], json!({"input_tokens": 10, "output_tokens": 0}));
+        assert_eq!(
+            start["message"]["usage"],
+            json!({"input_tokens": 10, "output_tokens": 0})
+        );
 
         // Chat Completions.
         let mut chat = json!({"model": "m", "system_fingerprint": "b12110-cd959bae9",
             "usage": {"completion_tokens": 8, "prompt_tokens": 10, "total_tokens": 18, "prompt_tokens_details": {"cached_tokens": 9}},
             "timings": {"cache_n": 9, "prompt_n": 1}});
         let usage = clean_answer(&mut chat);
-        assert_eq!(chat, json!({"model": MODEL_ALIAS,
-            "usage": {"completion_tokens": 8, "prompt_tokens": 10, "total_tokens": 18, "prompt_tokens_details": {"cached_tokens": 0}}}));
-        assert_eq!(usage, Usage { input: Some(10), output: Some(8) });
+        assert_eq!(
+            chat,
+            json!({"model": MODEL_ALIAS,
+            "usage": {"completion_tokens": 8, "prompt_tokens": 10, "total_tokens": 18, "prompt_tokens_details": {"cached_tokens": 0}}})
+        );
+        assert_eq!(
+            usage,
+            Usage {
+                input: Some(10),
+                output: Some(8)
+            }
+        );
 
         // Responses, the completed event.
         let mut done = json!({"type": "response.completed", "response": {"model": "m",
             "usage": {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14, "input_tokens_details": {"cached_tokens": 9}}},
             "timings": {"cache_n": 9}});
         let usage = clean_answer(&mut done);
-        assert_eq!(done, json!({"type": "response.completed", "response": {"model": MODEL_ALIAS,
-            "usage": {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14, "input_tokens_details": {"cached_tokens": 0}}}}));
-        assert_eq!(usage, Usage { input: Some(10), output: Some(4) });
+        assert_eq!(
+            done,
+            json!({"type": "response.completed", "response": {"model": MODEL_ALIAS,
+            "usage": {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14, "input_tokens_details": {"cached_tokens": 0}}}})
+        );
+        assert_eq!(
+            usage,
+            Usage {
+                input: Some(10),
+                output: Some(4)
+            }
+        );
     }
 
     /// A key named like a counter inside the model's own output (a tool call's input) is
@@ -1776,10 +2071,12 @@ mod tests {
         // Data lines compared as JSON (key order depends on serde_json's features).
         let lines: Vec<Value> = out
             .split_inclusive('\n')
-            .map(|line| match line.strip_prefix("data: ").filter(|d| !d.starts_with('[')) {
-                Some(data) => serde_json::from_str(data.trim_end()).unwrap(),
-                None => json!(line),
-            })
+            .map(
+                |line| match line.strip_prefix("data: ").filter(|d| !d.starts_with('[')) {
+                    Some(data) => serde_json::from_str(data.trim_end()).unwrap(),
+                    None => json!(line),
+                },
+            )
             .collect();
         assert_eq!(
             lines,
@@ -1796,7 +2093,13 @@ mod tests {
                 json!("\n"),
             ]
         );
-        assert_eq!(filter.usage(), Usage { input: Some(10), output: Some(4) });
+        assert_eq!(
+            filter.usage(),
+            Usage {
+                input: Some(10),
+                output: Some(4)
+            }
+        );
         assert!(!out.contains("Secret-Model"));
         assert!(!out.contains("cache_n"));
     }
@@ -1818,12 +2121,17 @@ mod tests {
     #[test]
     fn the_path_is_scrubbed_from_any_text() {
         let windows = Scrub::new(Path::new(r"C:\Users\Someone\Models\m.gguf"));
-        let text = serde_json::to_string(&json!({"error": r"cannot read C:\Users\Someone\Models\m.gguf"})).unwrap();
+        let text =
+            serde_json::to_string(&json!({"error": r"cannot read C:\Users\Someone\Models\m.gguf"}))
+                .unwrap();
         let out = windows.apply(text);
         assert!(!out.contains("Someone"), "{out}");
         assert!(out.contains(MODEL_ALIAS));
         let unix = Scrub::new(Path::new("/home/someone/m.gguf"));
-        assert_eq!(unix.apply("load m.gguf from /home/someone/m.gguf".into()), "load harnessui-local from harnessui-local");
+        assert_eq!(
+            unix.apply("load m.gguf from /home/someone/m.gguf".into()),
+            "load harnessui-local from harnessui-local"
+        );
     }
 
     #[test]
@@ -1841,7 +2149,12 @@ mod tests {
         assert_eq!(body["error"]["type"], json!("invalid_request_error"));
 
         let other = br#"{"error":{"code":500,"message":"failed to open /home/someone/m.gguf\u202e","type":"server_error","extra":"x"}}"#;
-        let (status, body) = upstream_error(Api::ChatCompletions, StatusCode::INTERNAL_SERVER_ERROR, other, &scrub);
+        let (status, body) = upstream_error(
+            Api::ChatCompletions,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            other,
+            &scrub,
+        );
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             body,
@@ -1849,21 +2162,39 @@ mod tests {
         );
         let (status, body) = upstream_error(Api::Messages, StatusCode::OK, b"<html>", &scrub);
         assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert_eq!(body["error"]["message"], json!("The model could not answer this request."));
+        assert_eq!(
+            body["error"]["message"],
+            json!("The model could not answer this request.")
+        );
     }
 
     #[test]
     fn error_shapes() {
         assert_eq!(
-            error_body(Some(Api::Messages), StatusCode::SERVICE_UNAVAILABLE, NO_MODEL, None),
+            error_body(
+                Some(Api::Messages),
+                StatusCode::SERVICE_UNAVAILABLE,
+                NO_MODEL,
+                None
+            ),
             json!({"type": "error", "error": {"type": "overloaded_error", "message": NO_MODEL}})
         );
         assert_eq!(
-            error_body(Some(Api::CountTokens), StatusCode::UNAUTHORIZED, "Invalid API key.", Some("invalid_api_key")),
+            error_body(
+                Some(Api::CountTokens),
+                StatusCode::UNAUTHORIZED,
+                "Invalid API key.",
+                Some("invalid_api_key")
+            ),
             json!({"type": "error", "error": {"type": "authentication_error", "message": "Invalid API key."}})
         );
         assert_eq!(
-            error_body(Some(Api::ChatCompletions), StatusCode::SERVICE_UNAVAILABLE, LOADING, Some("model_loading")),
+            error_body(
+                Some(Api::ChatCompletions),
+                StatusCode::SERVICE_UNAVAILABLE,
+                LOADING,
+                Some("model_loading")
+            ),
             json!({"error": {"message": LOADING, "type": "server_error", "param": null, "code": "model_loading"}})
         );
         assert_eq!(
@@ -1874,12 +2205,21 @@ mod tests {
 
     #[test]
     fn what_the_caller_says_it_is() {
-        assert_eq!(says(&headers(&[("user-agent", "claude-cli/2.1.322 (external, cli)")])), "claude-cli/2.1.322 (external, cli)");
+        assert_eq!(
+            says(&headers(&[(
+                "user-agent",
+                "claude-cli/2.1.322 (external, cli)"
+            )])),
+            "claude-cli/2.1.322 (external, cli)"
+        );
         assert_eq!(says(&HeaderMap::new()), "");
         let long = says(&headers(&[("user-agent", &"x".repeat(100))]));
         assert_eq!(long.chars().count(), 40);
         let mut map = HeaderMap::new();
-        map.insert(header::USER_AGENT, HeaderValue::from_bytes(b"evil\xe2\x80\xae\tapp").unwrap());
+        map.insert(
+            header::USER_AGENT,
+            HeaderValue::from_bytes(b"evil\xe2\x80\xae\tapp").unwrap(),
+        );
         let s = says(&map);
         assert!(!s.contains('\u{202e}') && !s.contains('\t'), "{s:?}");
     }
@@ -1893,10 +2233,32 @@ mod tests {
         assert_eq!(thousands(1_234_567), "1,234,567");
         assert_eq!(Usage::default().summary(), None);
         assert_eq!(
-            Usage { input: Some(11_088), output: Some(56) }.summary().as_deref(),
+            Usage {
+                input: Some(1_200),
+                output: None
+            }
+            .summary()
+            .as_deref(),
+            Some("1,200 tokens in")
+        );
+        assert_eq!(
+            Usage {
+                input: Some(11_088),
+                output: Some(56)
+            }
+            .summary()
+            .as_deref(),
             Some("11,088 tokens in, 56 out")
         );
-        assert_eq!(Usage { input: None, output: Some(3) }.summary().as_deref(), Some("? tokens in, 3 out"));
+        assert_eq!(
+            Usage {
+                input: None,
+                output: Some(3)
+            }
+            .summary()
+            .as_deref(),
+            Some("? tokens in, 3 out")
+        );
     }
 
     #[test]

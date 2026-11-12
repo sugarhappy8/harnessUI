@@ -131,6 +131,18 @@ export function compactionNote(stage: number): string {
   }
 }
 
+/** [0.0.5 memory] The loop's notes while it writes a summary and when it could not
+ *  (`agent::turn::SUMMARISING_NOTE`, `SUMMARY_FAILED_NOTE`). */
+const SUMMARISING_NOTE = "Summarising earlier messages to make room.";
+const SUMMARY_FAILED_NOTE =
+  "Could not summarise earlier messages. The reply goes on, but this chat may run out of room soon.";
+
+/** [0.0.5 memory] `notes` without the newest "Summarising…" note: what happened takes its place. */
+function withoutSummarising(notes: string[]): string[] {
+  const at = notes.lastIndexOf(SUMMARISING_NOTE);
+  return at < 0 ? notes : [...notes.slice(0, at), ...notes.slice(at + 1)];
+}
+
 /** Turns anything thrown by `invoke` into the four-part error the UI shows. */
 export function toErrorInfo(err: unknown): ErrorInfo {
   if (err && typeof err === "object" && "message" in err && "code" in err) {
@@ -253,12 +265,20 @@ export const useApp = create<AppState>((set, get) => {
         }));
         return;
       case "note":
-        updateGen(chatId, (g) => ({ ...g, notes: [...g.notes, e.text] }));
+        updateGen(chatId, (g) => ({
+          ...g,
+          // [0.0.5 memory] A summary that failed replaces the note shown while it was written.
+          notes: [...(e.text === SUMMARY_FAILED_NOTE ? withoutSummarising(g.notes) : g.notes), e.text],
+        }));
         return;
       case "compacted": {
-        // [0.0.5 memory] What the loop did, once per kind (a stage can run several times).
+        // [0.0.5 memory] What the loop did, once per kind (a stage can run several times); a
+        // summary written replaces the note shown while it was written.
         const note = compactionNote(e.stage);
-        updateGen(chatId, (g) => (g.notes.includes(note) ? g : { ...g, notes: [...g.notes, note] }));
+        updateGen(chatId, (g) => {
+          const notes = e.stage === 2 ? withoutSummarising(g.notes) : g.notes;
+          return { ...g, notes: notes.includes(note) ? notes : [...notes, note] };
+        });
         return;
       }
       case "finished":
@@ -423,9 +443,20 @@ export const useApp = create<AppState>((set, get) => {
         }
         const answer = await askBeforeChange(runtime);
         if (answer === null) return;
+        const chatId = get().activeChatId;
+        const open = get().detail;
+        const before = chatId !== null && open?.chat.id === chatId ? open.chat.modelRef : null;
         await get().setChatModel(modelRef);
         opts?.onChatSet?.();
-        await runChange("switch", answer.whenIdle, () => ipc.loadLocalModel(path, null, answer.whenIdle));
+        const done = await runChange("switch", answer.whenIdle, () => ipc.loadLocalModel(path, null, answer.whenIdle));
+        // A waiting switch that was cancelled changes nothing: the chat goes back to the model
+        // that is still loaded, unless a newer pick has changed it since.
+        const now = get().detail;
+        const unchanged = now?.chat.id === chatId && now.chat.modelRef === modelRef;
+        if (!done && answer.whenIdle && chatId !== null && before !== null && unchanged) {
+          await ipc.setChatModel(chatId, before);
+          await get().openChat(chatId);
+        }
         await get().refreshModelOptions();
       } catch (err) {
         set({ error: toErrorInfo(err) });

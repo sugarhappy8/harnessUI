@@ -44,9 +44,13 @@
 //!   `acceptEdits`. `--verbose` is not in the 0.0.5 specification's template: Claude Code
 //!   2.1.322 refuses `--output-format stream-json` with `-p` without it ("When using
 //!   --print, --output-format=stream-json requires --verbose"), and its documentation
-//!   pairs the two. `--restricted` needs 2.1.248 or later ([`FLAG_SINCE`]); a known older
-//!   version is not offered. `--restricted` also means Claude Code reads no user settings
-//!   file, so only the environment can point it at the sharing port.
+//!   pairs the two. `--restricted` needs 2.1.248 or later and the setting
+//!   `permissions.blockReadsOutsideWorkingDirectories` 2.1.257 or later ([`FLAG_SINCE`]); a
+//!   known older version is not offered. `--permission-mode default`: 2.1.322's `--help`
+//!   lists the mode as `manual`, and its documentation keeps `default` as the mode's value
+//!   (`manual` is the alias); 2.1.322 accepts `default`. `--restricted` also means Claude
+//!   Code reads no user settings file, so only the environment can point it at the sharing
+//!   port.
 //! - Codex: `codex exec --json --sandbox read-only|workspace-write -c features.hooks=false -`
 //!   in the working folder. Codex is not installed on the build machine; every flag is
 //!   from its documentation (`exec`, `--json`, `--sandbox`, `-c key=value`, the `hooks`
@@ -181,8 +185,7 @@ pub fn is_tool_name(name: &str) -> bool {
 
 /// Whether an action is a call of one of these tools.
 pub fn is_action(action: &policy::Action) -> bool {
-    (action.server == SERVER_NAME && is_tool_name(&action.tool))
-        || action.scope.names_coding_app()
+    (action.server == SERVER_NAME && is_tool_name(&action.tool)) || action.scope.names_coding_app()
 }
 
 // ---- The templates ---------------------------------------------------------------------
@@ -246,14 +249,35 @@ pub fn required_flags(app: CodingApp) -> &'static [&'static str] {
     }
 }
 
+/// Whether both templates of an app carry every required flag and no token that turns off
+/// a permission check ([`policy::command::coding_apps::BYPASS_TOKENS`]). A tool whose
+/// template fails this is not offered, and nothing runs with it.
+pub fn template_ok(app: CodingApp) -> bool {
+    [false, true].into_iter().all(|may_edit| {
+        let words = arguments(app, may_edit);
+        required_flags(app)
+            .iter()
+            .all(|flag| words.iter().any(|w| w == flag))
+            && policy::command::coding_apps::bypass_token(&words.join(" ")).is_none()
+    })
+}
+
 /// A version as `major.minor.patch`.
 pub type Version = (u32, u32, u32);
 
-/// The oldest version whose documentation lists each flag of the template, where the
-/// documentation says. Flags not listed here carry no version in the documentation and
-/// are present in Claude Code 2.1.322; Codex's documentation gives no versions.
-pub const FLAG_SINCE: &[(CodingApp, &str, Version)] =
-    &[(CodingApp::ClaudeCode, "--restricted", (2, 1, 248))];
+/// The oldest version whose documentation lists each flag or setting of the template,
+/// where the documentation says. A version without the setting would drop it from
+/// `--settings` without a word, so it counts like a missing flag. Flags not listed here
+/// carry no version in the documentation and are present in Claude Code 2.1.322; Codex's
+/// documentation gives no versions.
+pub const FLAG_SINCE: &[(CodingApp, &str, Version)] = &[
+    (CodingApp::ClaudeCode, "--restricted", (2, 1, 248)),
+    (
+        CodingApp::ClaudeCode,
+        "permissions.blockReadsOutsideWorkingDirectories",
+        (2, 1, 257),
+    ),
+];
 
 /// Reads `2.1.322`, `v2.1.322` or `2.1.322-beta.1`.
 pub fn parse_version(text: &str) -> Option<Version> {
@@ -264,13 +288,15 @@ pub fn parse_version(text: &str) -> Option<Version> {
     parts.next().is_none().then_some(v)
 }
 
-/// A flag of the template that this version of the app does not have yet, if its version
-/// is known and older than the documented first version of that flag.
+/// A flag or setting of the template that this version of the app does not have yet, if
+/// its version is known and older than the documented first version of one: the newest
+/// such requirement, so that updating to its version is enough for all of them.
 pub fn missing_flag(app: CodingApp, version: Option<&str>) -> Option<(&'static str, Version)> {
     let version = parse_version(version?)?;
     FLAG_SINCE
         .iter()
-        .find(|(a, _, since)| *a == app && version < *since)
+        .filter(|(a, _, since)| *a == app && version < *since)
+        .max_by_key(|(_, _, since)| *since)
         .map(|(_, flag, since)| (*flag, *since))
 }
 
@@ -278,7 +304,9 @@ pub fn missing_flag(app: CodingApp, version: Option<&str>) -> Option<(&'static s
 pub fn card_lines(app: CodingApp, may_edit: bool, folder: &str, windows: bool) -> Vec<String> {
     let mut lines = Vec::new();
     match (app, may_edit) {
-        (CodingApp::ClaudeCode, false) => lines.push(format!("It can only read files in {folder}.")),
+        (CodingApp::ClaudeCode, false) => {
+            lines.push(format!("It can only read files in {folder}."))
+        }
         (CodingApp::ClaudeCode, true) => {
             lines.push(format!("It can read and change files only in {folder}."))
         }
@@ -391,9 +419,13 @@ pub enum Problem {
         minimum: String,
     },
     /// It is inside a folder approved for the app's file tools.
-    InsideApprovedFolder { folder: String },
+    InsideApprovedFolder {
+        folder: String,
+    },
     /// It could not be looked at.
-    Unreadable { reason: String },
+    Unreadable {
+        reason: String,
+    },
     /// It is not the file that was found when the group was turned on.
     Changed,
 }
@@ -530,9 +562,8 @@ fn inside_any(path: &str, folders: &[String]) -> Option<String> {
     if folders.is_empty() {
         return None;
     }
-    let (sandbox, _) = PathSandbox::new(Flavor::native(), folders, &[], &RealFs, &|p| {
-        volume_case(p)
-    });
+    let (sandbox, _) =
+        PathSandbox::new(Flavor::native(), folders, &[], &RealFs, &|p| volume_case(p));
     let checked = sandbox.check(path, None, &RealFs).ok()?;
     sandbox
         .roots()
@@ -692,7 +723,13 @@ fn codex_config_uses(file: &Path, port: u16) -> bool {
 // ---- The server --------------------------------------------------------------------------
 
 /// Reads the port the app shares its model on, if sharing was ever set up.
-pub type SharePort = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<u16>> + Send>> + Send + Sync>;
+pub type SharePort =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<u16>> + Send>> + Send + Sync>;
+
+/// Reads every approved folder, of every chat, to refuse a program inside any of them
+/// (also one approved after the programs were found).
+pub type AllApproved =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<String>> + Send>> + Send + Sync>;
 
 /// The "Coding apps" server. It lists the tools of the apps that were found usable when
 /// the group was last turned on; it is registered again each time they are looked for.
@@ -703,6 +740,7 @@ pub struct CodingAppsServer {
     base_env: BTreeMap<String, String>,
     home: Option<PathBuf>,
     share_port: SharePort,
+    all_approved: AllApproved,
     windows: bool,
     max_run: Duration,
     tick: Duration,
@@ -720,10 +758,17 @@ impl CodingAppsServer {
             base_env,
             home,
             share_port,
+            all_approved: Arc::new(|| Box::pin(async { Vec::new() })),
             windows: cfg!(windows),
             max_run: MAX_RUN,
             tick: TICK,
         }
+    }
+
+    /// Where to read every approved folder from (by default, only the chat's are known).
+    pub fn with_all_approved(mut self, all_approved: AllApproved) -> Self {
+        self.all_approved = all_approved;
+        self
     }
 
     /// A server that lists nothing yet: the group before its programs were looked for.
@@ -832,7 +877,11 @@ impl CodingAppsServer {
         Described::Action(policy::Action {
             server: SERVER_NAME.into(),
             tool: app.tool().into(),
-            summary: format!("Ask {}: {}", app.label(), policy::sanitize::one_line(task, 120)),
+            summary: format!(
+                "Ask {}: {}",
+                app.label(),
+                policy::sanitize::one_line(task, 120)
+            ),
             preview: why.clone(),
             scope: policy::Scope::CodingApp {
                 app: app.key().into(),
@@ -848,9 +897,15 @@ impl CodingAppsServer {
         })
     }
 
-    /// The program to run, if it is still the one found and is not inside a folder this
-    /// chat approved.
-    fn program(&self, app: CodingApp, chat: &ChatContext) -> Result<PathBuf, String> {
+    /// The program to run, if it is still the one found and is not inside an approved
+    /// folder (this chat's, its skill folders, or any other chat's).
+    async fn program(&self, app: CodingApp, chat: &ChatContext) -> Result<PathBuf, String> {
+        if !template_ok(app) {
+            return Err(format!(
+                "{} cannot be asked: the app's command line for it is missing a setting it needs.",
+                app.label()
+            ));
+        }
         let Some(saved) = self.saved.get(app).filter(|s| s.usable()) else {
             let problem = self
                 .saved
@@ -862,7 +917,11 @@ impl CodingAppsServer {
         let program = unchanged(saved).map_err(|p| p.words(app))?;
         let mut folders = chat.approved_folders.clone();
         folders.extend(chat.skill_folders.iter().cloned());
-        for candidate in [saved.path.as_deref().unwrap_or_default(), &program.display().to_string()] {
+        folders.extend((self.all_approved)().await);
+        for candidate in [
+            saved.path.as_deref().unwrap_or_default(),
+            &program.display().to_string(),
+        ] {
             if let Some(folder) = inside_any(candidate, &folders) {
                 return Err(Problem::InsideApprovedFolder {
                     folder: policy::sanitize::visible(&folder),
@@ -898,7 +957,11 @@ impl CodingAppsServer {
         }
     }
 
-    fn plan(&self, tool: &str, args: &Map<String, Value>) -> Result<(CodingApp, bool, String), String> {
+    fn plan(
+        &self,
+        tool: &str,
+        args: &Map<String, Value>,
+    ) -> Result<(CodingApp, bool, String), String> {
         let app = CodingApp::from_tool(tool)
             .ok_or_else(|| format!("the Coding apps group has no tool named {tool}"))?;
         let task = args.get("task").and_then(Value::as_str).unwrap_or("");
@@ -914,7 +977,10 @@ impl CodingAppsServer {
                 "task is too long ({chars} characters): keep it under {MAX_TASK_CHARS}"
             ));
         }
-        let may_edit = args.get("may_edit").and_then(Value::as_bool).unwrap_or(false);
+        let may_edit = args
+            .get("may_edit")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         Ok((app, may_edit, task.to_owned()))
     }
 
@@ -943,17 +1009,22 @@ impl BuiltinServer for CodingAppsServer {
     fn tools(&self) -> Vec<ToolDef> {
         CodingApp::ALL
             .into_iter()
-            .filter(|app| self.saved.get(*app).is_some_and(SavedApp::usable))
+            .filter(|app| template_ok(*app) && self.saved.get(*app).is_some_and(SavedApp::usable))
             .map(tool_def)
             .collect()
     }
 
-    async fn describe(&self, tool: &str, args: &Map<String, Value>, chat: &ChatContext) -> Described {
+    async fn describe(
+        &self,
+        tool: &str,
+        args: &Map<String, Value>,
+        chat: &ChatContext,
+    ) -> Described {
         let (app, may_edit, task) = match self.plan(tool, args) {
             Ok(planned) => planned,
             Err(why) => return Described::Invalid(why),
         };
-        let program = match self.program(app, chat) {
+        let program = match self.program(app, chat).await {
             Ok(p) => p,
             Err(why) => return Self::refused(app, &task, why),
         };
@@ -961,7 +1032,12 @@ impl BuiltinServer for CodingAppsServer {
             Ok(c) => c,
             Err(why) => return Self::refused(app, &task, why),
         };
-        let shared = uses_shared_model(app, &self.base_env, self.home.as_deref(), (self.share_port)().await);
+        let shared = uses_shared_model(
+            app,
+            &self.base_env,
+            self.home.as_deref(),
+            (self.share_port)().await,
+        );
         let folder = policy::sanitize::visible(&cwd.canonical);
         let mut preview = card_lines(app, may_edit, &folder, self.windows);
         preview.push(online_line(app, shared));
@@ -978,7 +1054,11 @@ impl BuiltinServer for CodingAppsServer {
         Described::Action(policy::Action {
             server: SERVER_NAME.into(),
             tool: app.tool().into(),
-            summary: format!("Ask {}: {}", app.label(), policy::sanitize::one_line(&task, 120)),
+            summary: format!(
+                "Ask {}: {}",
+                app.label(),
+                policy::sanitize::one_line(&task, 120)
+            ),
             preview,
             scope: policy::Scope::CodingApp {
                 app: app.key().into(),
@@ -1014,21 +1094,20 @@ impl BuiltinServer for CodingAppsServer {
             return ToolOutput::error("cancelled");
         }
         let Some(planned) = Self::planned(action).filter(|p| p.app.tool() == tool) else {
-            return ToolOutput::error("internal error: the approved action has no task; nothing was run");
+            return ToolOutput::error(
+                "internal error: the approved action has no task; nothing was run",
+            );
         };
         let app = planned.app;
         // Everything is checked again immediately before the run (13.4 step 5).
-        let program = match self.program(app, &ctx.chat) {
+        let program = match self.program(app, &ctx.chat).await {
             Ok(p) => p,
             Err(why) => return ToolOutput::error(format!("{why} Nothing was run.")),
         };
         if action.payload.get("program").and_then(Value::as_str)
             != Some(program.display().to_string().as_str())
         {
-            return ToolOutput::error(format!(
-                "{} Nothing was run.",
-                Problem::Changed.words(app)
-            ));
+            return ToolOutput::error(format!("{} Nothing was run.", Problem::Changed.words(app)));
         }
         if let Err(e) = Self::sandbox(&ctx.chat).recheck(&planned.cwd, &RealFs) {
             return ToolOutput::error(format!(
@@ -1042,7 +1121,16 @@ impl BuiltinServer for CodingAppsServer {
             .stdout(runtime::StdioMode::Piped)
             .stderr(runtime::StdioMode::Piped);
         let budget = tools::shorten::budget_bytes(ctx.chat.result_cap_tokens);
-        run(app, spec, planned.task, ctx, self.max_run, self.tick, budget).await
+        run(
+            app,
+            spec,
+            planned.task,
+            ctx,
+            self.max_run,
+            self.tick,
+            budget,
+        )
+        .await
     }
 }
 
@@ -1168,7 +1256,10 @@ async fn run(
         .lock()
         .map(|t| String::from_utf8_lossy(&t).into_owned())
         .unwrap_or_default();
-    let parsed = parsed.lock().map(|p| p.clone()).unwrap_or_else(|_| output::Parsed::new(app));
+    let parsed = parsed
+        .lock()
+        .map(|p| p.clone())
+        .unwrap_or_else(|_| output::Parsed::new(app));
     let minutes = started.elapsed().as_secs_f64() / 60.0;
     tracing::info!(app = label, program = %program, minutes, "a coding app finished");
     output::result(app, &ended_kind(&ended), &parsed, &stderr, budget)
@@ -1282,7 +1373,22 @@ fn server(app: &AppHandle, saved: SavedSetup) -> CodingAppsServer {
                 .map(|s| s.port)
         })
     });
-    CodingAppsServer::new(saved, env, home, share_port)
+    let handle = app.clone();
+    let all_approved: AllApproved = Arc::new(move || {
+        let handle = handle.clone();
+        Box::pin(async move {
+            let Some(state) = handle.try_state::<AppState>() else {
+                return Vec::new();
+            };
+            state
+                .store
+                .list_approved_folders()
+                .await
+                .map(|all| all.into_iter().map(|f| f.path).collect())
+                .unwrap_or_default()
+        })
+    });
+    CodingAppsServer::new(saved, env, home, share_port).with_all_approved(all_approved)
 }
 
 fn now_ms() -> i64 {
@@ -1349,7 +1455,14 @@ pub async fn find_coding_apps(
     let found = tokio::task::spawn_blocking(move || {
         CodingApp::ALL
             .into_iter()
-            .map(|a| find_app(a, path.as_deref().map(OsStr::new), home.as_deref(), &approved))
+            .map(|a| {
+                find_app(
+                    a,
+                    path.as_deref().map(OsStr::new),
+                    home.as_deref(),
+                    &approved,
+                )
+            })
             .collect::<Vec<_>>()
     })
     .await
@@ -1359,6 +1472,8 @@ pub async fn find_coding_apps(
         apps: found,
     };
     state.store.set_setting(SETTINGS_KEY, &saved).await?;
-    state.host.add_builtin(Arc::new(server(&app, saved.clone())));
+    state
+        .host
+        .add_builtin(Arc::new(server(&app, saved.clone())));
     Ok(status_of(&saved))
 }

@@ -53,12 +53,18 @@ window.__TAURI_INTERNALS__.invoke(cmd, args)
 """
 
 # Sends a chat message the way the composer does, with a channel for the streamed events;
-# the events are counted in `window.__events`.
+# the characters of reply text streamed so far are counted in `window.__text`.
 SEND = """
 const [chatId, text] = arguments;
-window.__events = 0;
+window.__text = 0;
 window.__sent = 'pending';
-const id = window.__TAURI_INTERNALS__.transformCallback(() => { window.__events += 1; });
+const id = window.__TAURI_INTERNALS__.transformCallback((raw) => {
+  try {
+    let m = raw && raw.message;
+    if (typeof m === 'string') m = JSON.parse(m);
+    if (m && m.type === 'content') window.__text += (m.text || '').length;
+  } catch (e) { /* not a turn event */ }
+});
 window.__TAURI_INTERNALS__.invoke('send_message', {chatId, text, parentId: null, onEvent: '__CHANNEL__:' + id})
   .then(() => { window.__sent = {ok: true}; })
   .catch(e => { window.__sent = {ok: false, error: e}; });
@@ -310,9 +316,11 @@ def main() -> int:
 
         step("Restart when it ends: waits while a real reply streams; Cancel")
         chat = s.invoke("create_chat", {"modelRef": f"local:{MODEL}"})
+        # No tools: the reply is text, which a stopped reply keeps.
+        s.invoke("set_chat_tools", {"chatId": chat["id"], "enabled": []})
         s.execute(SEND, chat["id"], LONG_REPLY)
         s.wait_for(lambda: busy(s)["chatTurns"] == 1, 120, "the reply to start")
-        s.wait_for(lambda: s.execute("return window.__events") > 3, 300, "the reply to stream")
+        s.wait_for(lambda: s.execute("return window.__text") > 20, 300, "the reply to stream")
         s.execute(FIRE, "__reload1", "reload_local_model", {"force": True, "whenIdle": True})
         s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"], 10, "reloadWaiting")
         time.sleep(1.0)
@@ -341,7 +349,7 @@ def main() -> int:
 
         step("Stop and restart: the reply is stopped first and keeps what it wrote")
         s.execute(SEND, chat["id"], LONG_REPLY)
-        s.wait_for(lambda: s.execute("return window.__events") > 3, 300, "the second reply to stream")
+        s.wait_for(lambda: s.execute("return window.__text") > 20, 300, "the second reply to stream")
         assert busy(s)["chatTurns"] == 1
         call(s, "reload_local_model", {"force": True, "whenIdle": False})
         assert busy(s)["chatTurns"] == 0

@@ -1115,8 +1115,9 @@ impl<'a> Turn<'a> {
             self.truncation_noted = true;
             self.emit(TurnEvent::AppNote {
                 text: format!(
-                    "The server reported a prompt of {} tokens for about {} sent; it may be \
-                     dropping old messages because its context window is too small.",
+                    "The server reported a prompt of {} tokens for about {} sent. It may be \
+                     leaving out older messages because its model remembers less than the app \
+                     expects.",
                     group_digits(u64::from(usage.prompt_tokens)),
                     group_digits(u64::from(self.calibrator.calibrate(baseline)))
                 ),

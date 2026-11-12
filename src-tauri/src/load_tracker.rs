@@ -195,6 +195,7 @@ impl ChangeGate {
                 _ = token.cancelled() => false,
             };
             if !idle {
+                self.waiting_flag_after_replaced(&on_wait);
                 return Err(Replaced);
             }
             let still_mine = self.waiting.lock().is_ok_and(|mut w| {
@@ -206,6 +207,7 @@ impl ChangeGate {
             });
             if !still_mine {
                 // Replaced just as the model became free: the newer change goes ahead.
+                self.waiting_flag_after_replaced(&on_wait);
                 return Err(Replaced);
             }
             on_wait(false);
@@ -232,6 +234,15 @@ impl ChangeGate {
         )
         .await;
         Ok(false)
+    }
+
+    /// After a wait was replaced: the waiting flag goes off unless a newer change waits now.
+    /// (A Cancel that lands between the start of a wait and `on_wait(true)` would otherwise
+    /// leave "Restarts when the reply ends" on with nothing waiting.)
+    fn waiting_flag_after_replaced(&self, on_wait: &impl Fn(bool)) {
+        if self.waiting.lock().is_ok_and(|w| w.is_none()) {
+            on_wait(false);
+        }
     }
 
     /// Registers a user of the model that "Stop and restart" stops with `stop`.
@@ -325,7 +336,10 @@ mod tests {
             })
         };
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!waiter.is_finished(), "went ahead while a reply was written");
+        assert!(
+            !waiter.is_finished(),
+            "went ahead while a reply was written"
+        );
         assert_eq!(*flags.lock().unwrap(), [true]);
         drop(turn);
         let outcome = tokio::time::timeout(Duration::from_secs(2), waiter)
@@ -335,7 +349,43 @@ mod tests {
         assert_eq!(outcome, Ok(true));
         assert_eq!(*flags.lock().unwrap(), [true, false]);
         // Nothing busy: at once, without waiting.
-        assert_eq!(gate.before_change(&busy, true, STOP_WAIT, |_| {}).await, Ok(false));
+        assert_eq!(
+            gate.before_change(&busy, true, STOP_WAIT, |_| {}).await,
+            Ok(false)
+        );
+    }
+
+    /// "Restarts when the reply ends" stays on while a newer change waits, and goes off
+    /// when a Cancel leaves nothing waiting, whatever order the two land in.
+    #[tokio::test]
+    async fn the_waiting_flag_ends_off_only_when_nothing_waits() {
+        let gate = Arc::new(ChangeGate::default());
+        let busy = Arc::new(BusyCounter::default());
+        let _app = busy.hold(BusyKind::OtherApp);
+        let flags = Arc::new(Mutex::new(Vec::new()));
+        let spawn_wait = || {
+            let (gate, busy, flags) = (gate.clone(), busy.clone(), flags.clone());
+            tokio::spawn(async move {
+                gate.before_change(&busy, true, STOP_WAIT, |w| flags.lock().unwrap().push(w))
+                    .await
+            })
+        };
+        let first = spawn_wait();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let second = spawn_wait();
+        assert_eq!(first.await.unwrap(), Err(Replaced));
+        assert_eq!(
+            flags.lock().unwrap().last(),
+            Some(&true),
+            "the newer one waits"
+        );
+        assert!(gate.cancel_waiting());
+        assert_eq!(second.await.unwrap(), Err(Replaced));
+        assert_eq!(
+            flags.lock().unwrap().last(),
+            Some(&false),
+            "nothing waits now"
+        );
     }
 
     /// A newer change, waiting or not, cancels the one that waits; so does Cancel.
@@ -408,12 +458,21 @@ mod tests {
         }
         assert_eq!(gate.user_count(), 2);
         let started = std::time::Instant::now();
-        assert_eq!(gate.before_change(&busy, false, STOP_WAIT, |_| {}).await, Ok(false));
+        assert_eq!(
+            gate.before_change(&busy, false, STOP_WAIT, |_| {}).await,
+            Ok(false)
+        );
         let took = started.elapsed();
         assert!(took >= Duration::from_millis(70), "did not wait: {took:?}");
-        assert!(took < Duration::from_secs(2), "waited for the other app: {took:?}");
+        assert!(
+            took < Duration::from_secs(2),
+            "waited for the other app: {took:?}"
+        );
         let counts = busy.snapshot();
-        assert_eq!((counts.chat_turns, counts.model_checks, counts.other_apps), (0, 0, 1));
+        assert_eq!(
+            (counts.chat_turns, counts.model_checks, counts.other_apps),
+            (0, 0, 1)
+        );
         assert_eq!(gate.user_count(), 0);
         drop(other_app);
         // A user that never winds down holds the change up for `stop_wait` at most.
@@ -421,7 +480,8 @@ mod tests {
         let id = gate.add_user(CancellationToken::new());
         let started = std::time::Instant::now();
         assert_eq!(
-            gate.before_change(&busy, false, Duration::from_millis(100), |_| {}).await,
+            gate.before_change(&busy, false, Duration::from_millis(100), |_| {})
+                .await,
             Ok(false)
         );
         assert!(started.elapsed() < Duration::from_secs(2));

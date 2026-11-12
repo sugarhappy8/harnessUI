@@ -96,18 +96,24 @@ export function problemFromError(err: ErrorInfo): CompareProblem {
 }
 
 // Bidirectional overrides, zero-width and other invisible characters, and control
-// characters, shown as their code instead (the backend does the same; this keeps saved or
-// sample text honest too).
-// eslint-disable-next-line no-control-regex
-const INVISIBLE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+// characters (tabs and new lines kept), shown as their code instead. The same set as the
+// approval cards' sanitiser (crates/policy/src/sanitize.rs); the backend cleans uploader
+// text too, and this keeps saved or sample text honest.
+const INVISIBLE =
+  // eslint-disable-next-line no-control-regex, no-misleading-character-class
+  /[\u{0}-\u{8}\u{B}-\u{1F}\u{7F}-\u{9F}\u{AD}\u{61C}\u{115F}\u{1160}\u{17B4}\u{17B5}\u{180B}-\u{180F}\u{200B}-\u{200F}\u{202A}-\u{202E}\u{2060}-\u{206F}\u{3164}\u{FE00}-\u{FE0F}\u{FEFF}\u{FFA0}\u{FFF9}-\u{FFFB}\u{1D173}-\u{1D17A}\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 
-/** Untrusted text as it is shown: invisible characters made visible, at most `cap` characters. */
+/**
+ * Untrusted text as it is shown: invisible characters made visible, at most `cap`
+ * characters (counted whole, so a character outside the basic plane is never cut in half).
+ */
 export function shown(text: string, cap = 300): string {
   const visible = text.replace(
     INVISIBLE,
     (ch) => `[U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}]`,
   );
-  return visible.length > cap ? `${visible.slice(0, cap - 1)}…` : visible;
+  const chars = Array.from(visible);
+  return chars.length > cap ? `${chars.slice(0, cap - 1).join("")}…` : visible;
 }
 
 /** Text from outside the app: made visible, capped and isolated from the text around it. */

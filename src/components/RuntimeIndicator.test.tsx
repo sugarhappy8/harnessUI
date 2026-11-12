@@ -278,6 +278,8 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
       }),
     );
     expect(text()).toContain("Didn't load");
+    // The reason is visible text, not only a tooltip.
+    expect(screen.getByRole("status").textContent).toBe("This model doesn't fit.");
     expect(screen.getByRole("button", { name: "Model settings…" })).toBeTruthy();
     await click(screen.getByRole("button", { name: "Try again" }));
     expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/a.gguf", null, undefined);

@@ -126,7 +126,10 @@ fn claude_code_env(input: &SetupInput) -> Vec<(&'static str, String)> {
         ("ANTHROPIC_AUTH_TOKEN", input.key.clone()),
         ("ANTHROPIC_MODEL", input.model.clone()),
         ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", input.ctx().to_string()),
-        ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", input.output_tokens().to_string()),
+        (
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            input.output_tokens().to_string(),
+        ),
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".to_owned()),
     ]
 }
@@ -231,7 +234,11 @@ fn codex(input: &SetupInput) -> Vec<SetupWay> {
     let toml = codex_toml(input);
     let run = format!("codex --profile {CODEX_PROFILE}");
     let profile_file = format!("{CODEX_PROFILE}.config.toml");
-    let one_session = |system: SetupSystem, folder: &str, sep: char, key_line: String, shell: &str| SetupWay {
+    let one_session = |system: SetupSystem,
+                       folder: &str,
+                       sep: char,
+                       key_line: String,
+                       shell: &str| SetupWay {
         title: "Only when you ask for it".into(),
         system,
         steps: vec![
@@ -241,7 +248,9 @@ fn codex(input: &SetupInput) -> Vec<SetupWay> {
                 Some(&format!("{folder}{sep}{profile_file}")),
             ),
             step(
-                &format!("Then open {shell} and paste these lines. They give Codex the key for this window only and start it with the profile."),
+                &format!(
+                    "Then open {shell} and paste these lines. They give Codex the key for this window only and start it with the profile."
+                ),
                 Some(format!("{key_line}\n{run}")),
                 None,
             ),
@@ -319,7 +328,11 @@ fn claude_app(input: &SetupInput) -> Vec<SetupWay> {
                 None,
                 None,
             ),
-            step("Set Gateway base URL to:", Some(clean(&input.base_url())), None),
+            step(
+                "Set Gateway base URL to:",
+                Some(clean(&input.base_url())),
+                None,
+            ),
             step("Set Gateway API key to:", Some(clean(&input.key)), None),
             step(
                 "Set Credential kind to Static API key and Gateway auth scheme to Bearer, then save.",
@@ -415,7 +428,8 @@ mod tests {
 
     #[test]
     fn claude_code_settings_parse_and_hold_exactly_the_values() {
-        let json: serde_json::Value = serde_json::from_str(&claude_code_settings_json(&input())).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&claude_code_settings_json(&input())).unwrap();
         assert_eq!(
             json,
             serde_json::json!({"env": {
@@ -460,12 +474,20 @@ mod tests {
         for model in HOSTILE {
             let mut i = input();
             i.model = (*model).to_owned();
-            let json: serde_json::Value = serde_json::from_str(&claude_code_settings_json(&i)).unwrap();
+            let json: serde_json::Value =
+                serde_json::from_str(&claude_code_settings_json(&i)).unwrap();
             let env = json["env"].as_object().unwrap();
             assert_eq!(json.as_object().unwrap().len(), 1, "{model:?}");
             assert_eq!(env.len(), 6, "{model:?}");
-            assert_eq!(env["ANTHROPIC_MODEL"], serde_json::json!(model), "{model:?}");
-            assert_eq!(env["ANTHROPIC_BASE_URL"], serde_json::json!("http://127.0.0.1:51234"));
+            assert_eq!(
+                env["ANTHROPIC_MODEL"],
+                serde_json::json!(model),
+                "{model:?}"
+            );
+            assert_eq!(
+                env["ANTHROPIC_BASE_URL"],
+                serde_json::json!("http://127.0.0.1:51234")
+            );
 
             let parsed: toml::Table = toml::from_str(&codex_toml(&i)).unwrap();
             assert_eq!(parsed.len(), 5, "{model:?}");
@@ -496,10 +518,15 @@ mod tests {
 
     /// Reads back a PowerShell single-quoted string the way PowerShell does.
     fn powershell_unquote(quoted: &str) -> String {
-        let inner = quoted.strip_prefix('\'').unwrap().strip_suffix('\'').unwrap();
+        let inner = quoted
+            .strip_prefix('\'')
+            .unwrap()
+            .strip_suffix('\'')
+            .unwrap();
         let mut out = String::new();
         let mut chars = inner.chars().peekable();
-        let is_quote = |c: char| matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}');
+        let is_quote =
+            |c: char| matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}');
         while let Some(c) = chars.next() {
             if is_quote(c) {
                 let next = chars.next().expect("a lone quote would end the string");
@@ -530,7 +557,12 @@ mod tests {
 
     #[test]
     fn shell_quoting_round_trips() {
-        for value in HOSTILE.iter().copied().chain([KEY, "", "plain", "it's", "''", "a\u{2018}b\u{201B}c"]) {
+        for value in
+            HOSTILE
+                .iter()
+                .copied()
+                .chain([KEY, "", "plain", "it's", "''", "a\u{2018}b\u{201B}c"])
+        {
             let without_controls: String = value.chars().filter(|c| !c.is_control()).collect();
             let ps = powershell_quote(value);
             assert!(!ps.contains('\n') && !ps.contains('\r'));
@@ -549,7 +581,11 @@ mod tests {
         assert_eq!(setup.title, "Claude Code");
         assert!(!setup.not_tried);
         // One-session ways first, Windows and Mac, then the settings files.
-        let ways: Vec<(&str, SetupSystem)> = setup.ways.iter().map(|w| (w.title.as_str(), w.system)).collect();
+        let ways: Vec<(&str, SetupSystem)> = setup
+            .ways
+            .iter()
+            .map(|w| (w.title.as_str(), w.system))
+            .collect();
         assert_eq!(
             ways,
             vec![
@@ -583,10 +619,23 @@ mod tests {
                 "claude"
             ))
         );
-        assert_eq!(setup.ways[2].steps[0].file.as_deref(), Some(r"%USERPROFILE%\.claude\settings.json"));
-        assert_eq!(setup.ways[3].steps[0].file.as_deref(), Some("~/.claude/settings.json"));
-        assert!(setup.ways[2].steps[0].text.contains("If the file already has settings, add only the lines inside \"env\"."));
-        assert_eq!(setup.ways[2].steps[0].code, Some(claude_code_settings_json(&input())));
+        assert_eq!(
+            setup.ways[2].steps[0].file.as_deref(),
+            Some(r"%USERPROFILE%\.claude\settings.json")
+        );
+        assert_eq!(
+            setup.ways[3].steps[0].file.as_deref(),
+            Some("~/.claude/settings.json")
+        );
+        assert!(
+            setup.ways[2].steps[0]
+                .text
+                .contains("If the file already has settings, add only the lines inside \"env\".")
+        );
+        assert_eq!(
+            setup.ways[2].steps[0].code,
+            Some(claude_code_settings_json(&input()))
+        );
     }
 
     #[test]
@@ -594,24 +643,45 @@ mod tests {
         let setup = build(ShareApp::Codex, &input());
         assert_eq!(setup.title, "Codex");
         let windows = &setup.ways[0];
-        assert_eq!((windows.title.as_str(), windows.system), ("Only when you ask for it", SetupSystem::Windows));
-        assert_eq!(windows.steps[0].file.as_deref(), Some(r"%USERPROFILE%\.codex\harnessui.config.toml"));
+        assert_eq!(
+            (windows.title.as_str(), windows.system),
+            ("Only when you ask for it", SetupSystem::Windows)
+        );
+        assert_eq!(
+            windows.steps[0].file.as_deref(),
+            Some(r"%USERPROFILE%\.codex\harnessui.config.toml")
+        );
         assert_eq!(
             windows.steps[1].code.as_deref(),
-            Some("$env:HARNESSUI_SHARE_KEY = 'harnessui-share-0123456789abcdef0123456789abcdef'\ncodex --profile harnessui")
+            Some(
+                "$env:HARNESSUI_SHARE_KEY = 'harnessui-share-0123456789abcdef0123456789abcdef'\ncodex --profile harnessui"
+            )
         );
         let mac = &setup.ways[1];
-        assert_eq!(mac.steps[0].file.as_deref(), Some("~/.codex/harnessui.config.toml"));
+        assert_eq!(
+            mac.steps[0].file.as_deref(),
+            Some("~/.codex/harnessui.config.toml")
+        );
         assert_eq!(
             mac.steps[1].code.as_deref(),
-            Some("export HARNESSUI_SHARE_KEY='harnessui-share-0123456789abcdef0123456789abcdef'\ncodex --profile harnessui")
+            Some(
+                "export HARNESSUI_SHARE_KEY='harnessui-share-0123456789abcdef0123456789abcdef'\ncodex --profile harnessui"
+            )
         );
-        assert_eq!(setup.ways[2].steps[0].file.as_deref(), Some(r"%USERPROFILE%\.codex\config.toml"));
+        assert_eq!(
+            setup.ways[2].steps[0].file.as_deref(),
+            Some(r"%USERPROFILE%\.codex\config.toml")
+        );
         assert_eq!(
             setup.ways[2].steps[1].code.as_deref(),
-            Some("[Environment]::SetEnvironmentVariable('HARNESSUI_SHARE_KEY', 'harnessui-share-0123456789abcdef0123456789abcdef', 'User')")
+            Some(
+                "[Environment]::SetEnvironmentVariable('HARNESSUI_SHARE_KEY', 'harnessui-share-0123456789abcdef0123456789abcdef', 'User')"
+            )
         );
-        assert_eq!(setup.ways[3].steps[0].file.as_deref(), Some("~/.codex/config.toml"));
+        assert_eq!(
+            setup.ways[3].steps[0].file.as_deref(),
+            Some("~/.codex/config.toml")
+        );
         assert_eq!(setup.ways[3].steps[1].file.as_deref(), Some("~/.zshrc"));
         for way in &setup.ways {
             assert_eq!(way.steps[0].code, Some(codex_toml(&input())));
@@ -626,7 +696,10 @@ mod tests {
         assert_eq!(setup.ways.len(), 1);
         assert_eq!(setup.ways[0].system, SetupSystem::Any);
         let codes = all_codes(&setup);
-        assert_eq!(codes, vec!["http://127.0.0.1:51234".to_owned(), KEY.to_owned()]);
+        assert_eq!(
+            codes,
+            vec!["http://127.0.0.1:51234".to_owned(), KEY.to_owned()]
+        );
     }
 
     #[test]
@@ -648,7 +721,12 @@ mod tests {
                 ]
             );
             assert!(setup.notes[0].starts_with("Experimental"));
-            for text in setup.notes.iter().chain(setup.ways.iter().flat_map(|w| w.steps.iter().map(|s| &s.text))) {
+            for text in setup.notes.iter().chain(
+                setup
+                    .ways
+                    .iter()
+                    .flat_map(|w| w.steps.iter().map(|s| &s.text)),
+            ) {
                 assert!(!text.contains('!'), "{text}");
             }
         }
@@ -658,20 +736,38 @@ mod tests {
     fn the_context_follows_the_loaded_model() {
         let mut small = input();
         small.ctx = Some(8192);
-        let json: serde_json::Value = serde_json::from_str(&claude_code_settings_json(&small)).unwrap();
-        assert_eq!(json["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], serde_json::json!("8192"));
-        assert_eq!(json["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], serde_json::json!("2048"));
+        let json: serde_json::Value =
+            serde_json::from_str(&claude_code_settings_json(&small)).unwrap();
+        assert_eq!(
+            json["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+            serde_json::json!("8192")
+        );
+        assert_eq!(
+            json["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
+            serde_json::json!("2048")
+        );
         let parsed: toml::Table = toml::from_str(&codex_toml(&small)).unwrap();
         assert_eq!(parsed["model_context_window"].as_integer(), Some(8192));
-        assert_eq!(parsed["model_auto_compact_token_limit"].as_integer(), Some(6552));
+        assert_eq!(
+            parsed["model_auto_compact_token_limit"].as_integer(),
+            Some(6552)
+        );
 
         // None loaded: 32,768 is assumed and the card says so.
         let mut none = input();
         none.ctx = None;
         let setup = build(ShareApp::ClaudeCode, &none);
-        assert!(setup.notes[1].contains("32,768 tokens (about 24,000 words)"), "{:?}", setup.notes);
-        let json: serde_json::Value = serde_json::from_str(&claude_code_settings_json(&none)).unwrap();
-        assert_eq!(json["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], serde_json::json!("32768"));
+        assert!(
+            setup.notes[1].contains("32,768 tokens (about 24,000 words)"),
+            "{:?}",
+            setup.notes
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&claude_code_settings_json(&none)).unwrap();
+        assert_eq!(
+            json["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+            serde_json::json!("32768")
+        );
         // A tiny context still leaves the answer some room.
         let mut tiny = input();
         tiny.ctx = Some(2048);

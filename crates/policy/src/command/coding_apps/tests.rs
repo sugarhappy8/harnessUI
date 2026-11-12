@@ -68,7 +68,10 @@ fn assert_asks(shell: Shell, line: &str) {
         verdict.always_ask.is_some(),
         "{shell:?} {line:?}: not always-ask"
     );
-    assert!(verdict.keep_asking.is_some(), "{shell:?} {line:?}: no keep-asking");
+    assert!(
+        verdict.keep_asking.is_some(),
+        "{shell:?} {line:?}: no keep-asking"
+    );
     assert!(verdict.network, "{shell:?} {line:?}: not online");
     assert!(!verdict.read_only, "{shell:?} {line:?}: read-only");
     let action = command_action(shell, line);
@@ -397,8 +400,66 @@ fn deep_nesting_stays_bounded() {
 #[test]
 fn the_reason_names_what_was_found() {
     let why = |line: &str| find(line, &parse(SH, line)).unwrap_or_default();
-    assert!(why("claude -p x").contains("claude is a coding assistant"), "{}", why("claude -p x"));
+    assert!(
+        why("claude -p x").contains("claude is a coding assistant"),
+        "{}",
+        why("claude -p x")
+    );
     assert!(why("npx @openai/codex exec").contains("@openai/codex"));
     assert!(why("x --yolo").contains("--yolo"));
     assert!(why("timeout 9 codex exec").contains("codex"));
+}
+
+/// Sensitive places (0.0.5): a command that writes the settings of Claude Code or Codex (a
+/// project's `.claude/` and `.mcp.json`, the user's `~/.claude/`, `~/.claude.json` and
+/// `~/.codex/`) keeps asking in Allow all, the same rule as `.git`; names that only look
+/// alike, and plain reads, do not.
+#[test]
+fn writing_their_settings_keeps_asking() {
+    use crate::engine::KeepAsking;
+    let kind =
+        |shell: Shell, line: &str| command_facts(shell, line, &parse(shell, line)).keep_asking;
+    for (shell, line) in [
+        (SH, "cp hooks.json .claude/settings.json"),
+        (SH, "echo '{}' > .claude/settings.local.json"),
+        (SH, "tee .mcp.json"),
+        (SH, "mv servers.json sub/.mcp.json"),
+        (SH, "cp x ~/.claude.json"),
+        (SH, "cp x /home/u/.claude/settings.json"),
+        (SH, "echo 'model = \"x\"' >> ~/.codex/config.toml"),
+        (SH, "mkdir -p .codex"),
+        (PS, "Set-Content -Path .claude\\settings.json -Value x"),
+        (PS, "Copy-Item x C:\\Users\\me\\.codex\\config.toml"),
+        (PS, "Copy-Item x C:\\Users\\me\\.claude.json"),
+    ] {
+        let found = kind(shell, line);
+        assert!(
+            matches!(found, Some((KeepAsking::Sensitive, _))),
+            "{shell:?} {line:?}: {found:?}"
+        );
+        let action = command_action(shell, line);
+        assert!(
+            matches!(
+                evaluate(&action, &turn(true, false), &Everything),
+                Decision::Ask {
+                    reason: AskReason::StillAsksInAllowAll,
+                    ..
+                }
+            ),
+            "{line:?} did not ask in Allow all"
+        );
+    }
+    for (shell, line) in [
+        (SH, "cat .claude/settings.json"),
+        (SH, "ls .codex"),
+        (SH, "cp notes.md claude/notes.md"),
+        (SH, "cp a .claudeignore"),
+        (SH, "cp a docs/claude.json"),
+        (SH, "cp a mcp.json"),
+        (SH, "cp a .mcp.json.example"),
+        (SH, "cp a CLAUDE.md"),
+        (PS, "Get-Content .claude\\settings.json"),
+    ] {
+        assert_eq!(kind(shell, line), None, "{shell:?} {line:?}");
+    }
 }

@@ -436,3 +436,9 @@ export function onEvalProgress(
 ): Promise<UnlistenFn> {
   return listen<import("../components/evals/types").EvalProgress>("eval-progress", (e) => handler(e.payload));
 }
+
+// 0.0.5 Coding apps (direction B, experimental): what the Tools panel shows, and looking
+// for Claude Code and Codex when the user turns the group on (the files are located,
+// never run).
+export const codingAppsStatus = () => invoke<import("./types").CodingAppsStatus>("coding_apps_status");
+export const findCodingApps = () => invoke<import("./types").CodingAppsStatus>("find_coding_apps");

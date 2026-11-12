@@ -300,7 +300,11 @@ mod tests {
             "/Users/u/.CLAUDE/Settings.json",
         ] {
             assert!(always_ask_reason(p, WriteKind::Create, P).is_some(), "{p}");
-            assert_eq!(keep_asking(p, WriteKind::Edit, P), Some(KeepAsking::Sensitive), "{p}");
+            assert_eq!(
+                keep_asking(p, WriteKind::Edit, P),
+                Some(KeepAsking::Sensitive),
+                "{p}"
+            );
         }
         for p in [
             "C:\\Users\\me\\proj\\.claude\\settings.json",

@@ -210,7 +210,9 @@ pub struct AutoCtx {
 /// there is the partial room used. `None` when not even the floor fits at all.
 /// `input.ctx` is not used; `input.max_ctx` is the trained length.
 pub fn auto_ctx(input: &FitInput, room: Room) -> Option<AutoCtx> {
-    let floor = input.max_ctx.map_or(AUTO_FLOOR_CTX, |m| m.min(AUTO_FLOOR_CTX));
+    let floor = input
+        .max_ctx
+        .map_or(AUTO_FLOOR_CTX, |m| m.min(AUTO_FLOOR_CTX));
     let cap = input.max_ctx.map_or(AUTO_CAP_CTX, |m| m.min(AUTO_CAP_CTX));
     // The largest context that leaves the spare free in `available`, if it reaches the
     // floor.
@@ -542,7 +544,10 @@ mod tests {
             })
         );
         // No system memory to spill into either: not even the floor fits.
-        assert_eq!(auto_ctx(&eight_b(F16), Room::graphics_card(4 * GB, GB)), None);
+        assert_eq!(
+            auto_ctx(&eight_b(F16), Room::graphics_card(4 * GB, GB)),
+            None
+        );
     }
 
     /// Apple unified memory: a 16 GB Mac whose Metal working set is about 11 GB.

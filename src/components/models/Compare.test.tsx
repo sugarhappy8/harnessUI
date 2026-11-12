@@ -552,4 +552,19 @@ describe("Compare: uploader text is shown as text", () => {
     expect(shown("a​b⁦c", 300)).toBe("a[U+200B]b[U+2066]c");
     expect(shown("x".repeat(400))).toHaveLength(300);
   });
+
+  it("makes every invisible character the approval cards escape visible, and never cuts a character in half", () => {
+    // The same set as the approval cards' sanitiser (crates/policy/src/sanitize.rs):
+    // hidden tag characters, variation selectors, fillers, interlinear annotations.
+    const hidden = String.fromCodePoint(0xe0041, 0xe0042);
+    expect(shown(`a${hidden}b`)).toBe("a[U+E0041][U+E0042]b");
+    expect(shown("a️bㅤc￹d᠋eᅟf")).toBe("a[U+FE0F]b[U+3164]c[U+FFF9]d[U+180B]e[U+115F]f");
+    expect(shown(`x${String.fromCodePoint(0xe0100)}`)).toBe("x[U+E0100]");
+    // Tabs and new lines stay as they are.
+    expect(shown("a\tb\nc")).toBe("a\tb\nc");
+    // The cap counts characters, so a character outside the basic plane is kept whole.
+    const capped = shown(`${"x".repeat(298)}😀😀😀`, 300);
+    expect(capped).toBe(`${"x".repeat(298)}😀…`);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(capped)).toBe(false);
+  });
 });

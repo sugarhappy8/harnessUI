@@ -3452,3 +3452,28 @@ async fn the_preview_cuts_an_oversized_summary_and_names_the_next_summary() {
         .count();
     assert_eq!(replaced, messages);
 }
+
+/// A server that reports far fewer prompt tokens than were sent is probably leaving out
+/// older messages. The turn says so once, in plain words (0.0.5: no "context window"), and
+/// goes on.
+#[tokio::test]
+async fn a_server_that_seems_to_drop_messages_is_named_in_plain_words() {
+    // About 3,400 tokens sent; the reply's usage says 100.
+    let h = Harness::new(vec![reply_text(sse::text("Hello."))]).await;
+    let outcome = h.run(input(&"word ".repeat(2_000))).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    let notes: Vec<String> = app_notes(&h)
+        .into_iter()
+        .filter(|n| n.starts_with("The server reported a prompt of 100 tokens"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].ends_with(
+            "sent. It may be leaving out older messages because its model remembers less \
+             than the app expects."
+        ),
+        "{}",
+        notes[0]
+    );
+    assert!(!notes[0].contains("context"), "{}", notes[0]);
+}

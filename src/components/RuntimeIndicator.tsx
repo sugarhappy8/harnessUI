@@ -260,27 +260,37 @@ function Status() {
   }
 
   if (runtime.state === "failed") {
+    // Why, as visible text: the error, else what the load had to change before it gave up.
+    const why =
+      runtime.error?.message ||
+      runtime.adjustments.map(adjustmentWords).find((t): t is string => t !== null) ||
+      null;
     return (
-      <span className="flex min-w-0 items-center gap-1.5 text-xs whitespace-nowrap">
-        <span className="text-danger" title={runtime.error?.message}>
-          Didn't load
-        </span>
-        <span aria-hidden className="text-fg-muted">
-          ·
-        </span>
-        <button type="button" onClick={settings} className="text-fg-muted underline hover:text-fg">
-          Model settings…
-        </button>
-        {runtime.modelPath && (
-          <button
-            type="button"
-            onClick={() => runtime.modelPath && void switchModel(runtime, runtime.modelPath).catch(fail)}
-            className="text-fg-muted underline hover:text-fg"
-          >
-            Try again
+      <div className="flex min-w-0 flex-col justify-center gap-0.5 text-xs leading-tight">
+        <span className="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
+          <span className="text-danger">Didn't load</span>
+          <span aria-hidden className="text-fg-muted">
+            ·
+          </span>
+          <button type="button" onClick={settings} className="text-fg-muted underline hover:text-fg">
+            Model settings…
           </button>
+          {runtime.modelPath && (
+            <button
+              type="button"
+              onClick={() => runtime.modelPath && void switchModel(runtime, runtime.modelPath).catch(fail)}
+              className="text-fg-muted underline hover:text-fg"
+            >
+              Try again
+            </button>
+          )}
+        </span>
+        {why && (
+          <span className="line-clamp-2 max-w-[34rem] text-[11px] text-fg-muted" role="status" title={why}>
+            {why}
+          </span>
         )}
-      </span>
+      </div>
     );
   }
 

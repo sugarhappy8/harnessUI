@@ -876,7 +876,10 @@ mod tests {
             folder: "/p".into(),
         };
         let granted: BTreeSet<Scope> = [scope.clone()].into();
-        assert!(!granted.covers(&scope), "a grant for exactly it must not cover it");
+        assert!(
+            !granted.covers(&scope),
+            "a grant for exactly it must not cover it"
+        );
         let both = Scope::Commands {
             parts: vec![scope.clone()],
         };
@@ -897,7 +900,9 @@ mod tests {
         // A describer that forgot every fact: the scope alone decides.
         let bare = action(scope.clone(), Risk::Normal, true, false);
         for a in [&full, &bare] {
-            for (untrusted, recovered) in [(false, false), (true, false), (false, true), (true, true)] {
+            for (untrusted, recovered) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
                 let ask = TurnContext {
                     untrusted_in_turn: untrusted,
                     recovered_from_text: recovered,

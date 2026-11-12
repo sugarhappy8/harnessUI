@@ -290,12 +290,17 @@ pub(super) fn result(
 ) -> ToolOutput {
     let label = app.label();
     let so_far = || match parsed.last_text.as_deref().or(parsed.answer.as_deref()) {
-        Some(text) if !text.trim().is_empty() => format!("\n\nWhat it had so far:\n{}", text.trim()),
+        Some(text) if !text.trim().is_empty() => {
+            format!("\n\nWhat it had so far:\n{}", text.trim())
+        }
         _ => String::new(),
     };
     match end {
         End::Stopped => {
-            return ToolOutput::error(format!("{label} was stopped before it finished.{}", so_far()));
+            return ToolOutput::error(format!(
+                "{label} was stopped before it finished.{}",
+                so_far()
+            ));
         }
         End::TimedOut => {
             return ToolOutput::error(format!(
@@ -327,9 +332,14 @@ pub(super) fn result(
     {
         return ToolOutput::error(not_signed_in(app));
     }
-    if ["unknown option", "unexpected argument", "unrecognized option", "unknown argument"]
-        .iter()
-        .any(|n| lower.contains(n))
+    if [
+        "unknown option",
+        "unexpected argument",
+        "unrecognized option",
+        "unknown argument",
+    ]
+    .iter()
+    .any(|n| lower.contains(n))
     {
         return ToolOutput::error(with_stderr(
             format!(
@@ -339,7 +349,8 @@ pub(super) fn result(
         ));
     }
     if app == CodingApp::Codex
-        && (lower.contains("skip-git-repo-check") || lower.contains("not inside a trusted directory"))
+        && (lower.contains("skip-git-repo-check")
+            || lower.contains("not inside a trusted directory"))
     {
         return ToolOutput::error(
             "Codex works only in a folder that is a Git repository or that you trust in Codex. Choose such a working folder for this chat, or open this folder in Codex once and trust it.",

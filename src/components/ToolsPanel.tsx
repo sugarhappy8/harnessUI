@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Popover } from "radix-ui";
 import { AlertTriangle, FolderPlus, Trash2, Wrench } from "lucide-react";
 import * as ipc from "../lib/ipc";
-import type { ApprovedFolder, ToolDto } from "../lib/types";
+import type { ApprovedFolder, CodingAppsStatus, ToolDto } from "../lib/types";
 import { useApp, toErrorInfo } from "../store/app";
 
 const SERVER_LABEL: Record<string, string> = {
@@ -25,6 +25,25 @@ const SERVER_NOTE: Record<string, string> = {
 
 /** Groups shown after every other group. */
 const LAST_GROUPS = ["subagents"];
+
+/**
+ * The Coding apps group (0.0.5, experimental): the local model hands a task to Claude Code
+ * or Codex. It has a section of its own after the other groups: switching it on looks for
+ * the programs (their files are located, never run) and names each by its full path.
+ */
+const CODING_APPS = "coding_apps";
+const CODING_NOTE =
+  "Lets the model hand a task to Claude Code or Codex on this computer. They work online with your own account, and every request asks you first.";
+
+/** The chat's switched-on tools after turning `names` on or off. */
+function switched(list: ToolDto[], names: string[], on: boolean): string[] {
+  const current = new Set(list.filter((t) => t.enabledInChat && !t.companion).map((t) => t.exposed));
+  for (const n of names) {
+    if (on) current.add(n);
+    else current.delete(n);
+  }
+  return [...current];
+}
 
 /** What the small mark next to a tool that is on says, and its tooltip. */
 const MARK = {
@@ -57,6 +76,9 @@ export function ToolsPanel(props: {
   const [gitFallback, setGitFallback] = useState<string | null>(null);
   // "Choose tools for each task automatically" (a setting for every chat). On until read.
   const [auto, setAuto] = useState(true);
+  // Coding apps (0.0.5): what was found when the group was last switched on.
+  const [coding, setCoding] = useState<CodingAppsStatus | null>(null);
+  const [finding, setFinding] = useState(false);
   const showError = useApp((s) => s.showError);
   const openChat = useApp((s) => s.openChat);
 
@@ -81,6 +103,10 @@ export function ToolsPanel(props: {
     ipc
       .getToolSelection()
       .then((s) => setAuto(s.auto))
+      .catch((e) => showError(toErrorInfo(e)));
+    ipc
+      .codingAppsStatus()
+      .then(setCoding)
       .catch((e) => showError(toErrorInfo(e)));
   }, [props.chatId, showError]);
 
@@ -109,7 +135,9 @@ export function ToolsPanel(props: {
   const cost = tools.filter((t) => t.shown).reduce((n, t) => n + t.tokenEstimate, 0);
   const groups = useMemo(() => {
     const m = new Map<string, ToolDto[]>();
-    for (const t of tools) if (!t.companion) m.set(t.server, [...(m.get(t.server) ?? []), t]);
+    for (const t of tools) {
+      if (!t.companion && t.server !== CODING_APPS) m.set(t.server, [...(m.get(t.server) ?? []), t]);
+    }
     const all = [...m.entries()];
     return [...all.filter(([s]) => !LAST_GROUPS.includes(s)), ...all.filter(([s]) => LAST_GROUPS.includes(s))];
   }, [tools]);
@@ -124,12 +152,34 @@ export function ToolsPanel(props: {
   }
 
   function toggle(names: string[], on: boolean) {
-    const current = new Set(tools.filter((t) => t.enabledInChat && !t.companion).map((t) => t.exposed));
-    for (const n of names) {
-      if (on) current.add(n);
-      else current.delete(n);
+    void save(switched(tools, names, on));
+  }
+
+  const codingTools = tools.filter((t) => t.server === CODING_APPS && !t.companion);
+  const codingNames = codingTools.filter((t) => t.available && !t.schemaError).map((t) => t.exposed);
+  const codingOn =
+    codingNames.length > 0 && codingNames.every((n) => codingTools.find((t) => t.exposed === n)?.enabledInChat);
+
+  /** On: look for the programs again, then turn on the tools of the ones found. Off: turn them off here. */
+  async function switchCodingApps(on: boolean) {
+    if (!on) {
+      toggle(codingNames, false);
+      return;
     }
-    void save([...current]);
+    setFinding(true);
+    try {
+      setCoding(await ipc.findCodingApps());
+      const list = await ipc.listChatTools(props.chatId);
+      setTools(list);
+      const names = list
+        .filter((t) => t.server === CODING_APPS && !t.companion && t.available && !t.schemaError)
+        .map((t) => t.exposed);
+      if (names.length > 0) await save(switched(list, names, true));
+    } catch (e) {
+      showError(toErrorInfo(e));
+    } finally {
+      setFinding(false);
+    }
   }
 
   async function chooseAutomatically(on: boolean) {
@@ -327,6 +377,56 @@ export function ToolsPanel(props: {
               </section>
             );
           })}
+          <section className="mb-3" aria-label="Coding apps">
+            <div>
+              <label className="flex items-center gap-2 font-medium">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={codingOn}
+                  disabled={finding}
+                  onChange={(e) => void switchCodingApps(e.target.checked)}
+                />
+                Coding apps (experimental)
+              </label>
+            </div>
+            <p className="mt-0.5 pl-6 text-xs text-fg-muted">{CODING_NOTE}</p>
+            {finding && <p className="mt-0.5 pl-6 text-xs text-fg-muted">Looking for Claude Code and Codex…</p>}
+            {!finding && coding?.message && (
+              <p className="mt-1 flex items-start gap-1 pl-6 text-xs text-warning">
+                <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden />
+                {coding.message}
+              </p>
+            )}
+            {coding?.checked && !coding.message && (
+              <ul className="mt-1 space-y-1 pl-6">
+                {coding.apps.map((a) => {
+                  const t = codingTools.find((x) => x.original === a.tool);
+                  return (
+                    <li key={a.app}>
+                      <label className="flex items-start gap-2" title={t?.description}>
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          aria-label={`Let the model ask ${a.label} in this chat`}
+                          checked={!!t && t.enabledInChat && t.available}
+                          disabled={!t || !t.available || t.schemaError !== null}
+                          onChange={(e) => t && toggle([t.exposed], e.target.checked)}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span>{a.label}</span>
+                          {a.version && <span className="ml-1 text-xs text-fg-muted">{a.version}</span>}
+                          {a.path && <span className="block font-mono text-xs break-all text-fg-muted">{a.path}</span>}
+                          {a.problem && <span className="block text-xs text-warning">{a.problem}</span>}
+                        </span>
+                        {t && <span className="text-xs text-fg-muted">~{t.tokenEstimate}</span>}
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
           {companions.length > 0 && (
             <p className="mb-3 text-xs text-fg-muted">
               Always included with the tools above:{" "}
