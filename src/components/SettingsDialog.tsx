@@ -26,6 +26,7 @@ import { Benchmarks } from "./evals/Benchmarks";
 import { ModelCheck } from "./evals/ModelCheck";
 import { LocalModels } from "./settings/LocalModels";
 import { OtherApps } from "./settings/OtherApps";
+import { Reverse } from "./settings/Reverse";
 import type { ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -782,6 +783,7 @@ export function SettingsDialog(props: {
             <Tabs.List className="flex w-44 flex-col gap-1 border-r border-border p-3" aria-label="Settings sections">
               <Tabs.Trigger value="general" className={tabClass}>General</Tabs.Trigger>
               <Tabs.Trigger value="runtime" className={tabClass}>Local models</Tabs.Trigger>
+              <Tabs.Trigger value="reverse" className={tabClass}>Reverse engineering</Tabs.Trigger>
               <Tabs.Trigger value="otherApps" className={tabClass}>Other apps</Tabs.Trigger>
               <Tabs.Trigger value="endpoints" className={tabClass}>Endpoints</Tabs.Trigger>
               <Tabs.Trigger value="huggingface" className={tabClass}>Hugging Face</Tabs.Trigger>
@@ -798,6 +800,7 @@ export function SettingsDialog(props: {
             <div className="min-w-0 flex-1 overflow-y-auto p-5">
               <Tabs.Content value="general"><General /></Tabs.Content>
               <Tabs.Content value="runtime"><LocalModels /><ModelCheck /></Tabs.Content>
+              <Tabs.Content value="reverse"><Reverse /></Tabs.Content>
               <Tabs.Content value="otherApps"><OtherApps /></Tabs.Content>
               <Tabs.Content value="endpoints"><Endpoints /></Tabs.Content>
               <Tabs.Content value="huggingface"><HuggingFace /></Tabs.Content>

@@ -460,3 +460,24 @@ export function onEvalProgress(
 // never run).
 export const codingAppsStatus = () => invoke<import("./types").CodingAppsStatus>("coding_apps_status");
 export const findCodingApps = () => invoke<import("./types").CodingAppsStatus>("find_coding_apps");
+
+// 0.0.6 item 5: Settings → Reverse engineering. Downloads start only after the owner
+// accepts the licences in the tab's dialog; `force` answers "Stop and continue" when rea is
+// working on a file (otherwise the command answers with the code `busy`).
+type RevComponent = import("./types").ReverseComponent;
+type RevStatus = import("./types").ReverseStatus;
+export const reverseStatus = () => invoke<RevStatus>("reverse_status");
+export const reverseDownload = (component: RevComponent, acceptLicense: boolean) =>
+  invoke<void>("reverse_download", { component, acceptLicense });
+export const reverseCancel = (component: RevComponent) => invoke<void>("reverse_cancel", { component });
+export const reverseDiscardPartial = (component: RevComponent) =>
+  invoke<RevStatus>("reverse_discard_partial", { component });
+export const reverseRemove = (component: RevComponent, force: boolean) =>
+  invoke<RevStatus>("reverse_remove", { component, force });
+export const reverseSetDecompiler = (decompiler: import("./types").ReverseDecompiler, force: boolean) =>
+  invoke<RevStatus>("reverse_set_decompiler", { decompiler, force });
+export const reverseClearCache = (force: boolean) => invoke<RevStatus>("reverse_clear_cache", { force });
+export const reverseInstallAppleTools = () => invoke<void>("reverse_install_apple_tools");
+export function onReverseProgress(handler: (p: import("./types").ReverseProgress) => void): Promise<UnlistenFn> {
+  return listen<import("./types").ReverseProgress>("reverse-progress", (e) => handler(e.payload));
+}

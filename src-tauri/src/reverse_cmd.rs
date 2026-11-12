@@ -688,7 +688,8 @@ pub(crate) fn apple_tools_spec() -> runtime::spawn::SpawnSpec {
 #[tauri::command]
 pub async fn reverse_status(window: tauri::WebviewWindow, app: AppHandle) -> AppResult<ReverseTab> {
     crate::commands::only_main_window(window.label())?;
-    Ok(tab(&server(&app)?))
+    let server = server(&app)?;
+    Ok(tab(&server))
 }
 
 /// Starts a download (rea first when a decompiler is chosen and rea is missing). Returns at

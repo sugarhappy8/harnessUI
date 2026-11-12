@@ -1014,3 +1014,70 @@ export interface CodingAppsStatus {
   /** "Claude Code and Codex are not installed on this computer." when neither was found. */
   message: string | null;
 }
+
+/** 0.0.6 item 5: Settings → Reverse engineering (`reverse_status`; `src-tauri/src/reverse_cmd.rs`). */
+export type ReverseComponent = "rea" | "kuna" | "ghidra";
+export type ReverseDecompiler = "kuna" | "ghidra";
+export type ReverseDownloadStage = "downloading" | "checking" | "unpacking";
+export type ReverseUpdateWhy = { kind: "securityFix"; part: string } | { kind: "notAccepted"; need: string };
+export type ReverseComponentState =
+  | { kind: "notInstalled" }
+  | { kind: "partial"; bytes: number }
+  | { kind: "downloading"; done: number; total: number; stage: ReverseDownloadStage }
+  | { kind: "installed" }
+  | { kind: "broken"; why: "missing" | "blocked" }
+  | { kind: "needsUpdate"; why: ReverseUpdateWhy };
+
+export interface ReverseComponentStatus {
+  component: ReverseComponent;
+  /** Whether this computer can install it; `reason` says why not. */
+  available: boolean;
+  reason: string | null;
+  state: ReverseComponentState;
+  installedVersion: string | null;
+  pinnedVersion: string;
+  /** `rea`, `node`, `kuna`, `ghidra` or `java`, with the installed (else pinned) version. */
+  parts: { name: string; version: string }[];
+  /** This row's own parts (a decompiler's download adds rea's when rea is missing). */
+  downloadBytes: number;
+  diskBytes: number;
+  update: { part: string; from: string; to: string; downloadBytes: number } | null;
+  licenses: { part: string; name: string; url: string }[];
+}
+
+export type ReverseRunState =
+  | { kind: "stopped" }
+  | { kind: "starting" }
+  | { kind: "ready" }
+  | { kind: "busy"; chatId: number }
+  | { kind: "failed"; reason: string };
+
+export interface ReverseStatus {
+  /** rea, Kuna and Ghidra, in that order. */
+  components: ReverseComponentStatus[];
+  /** The decompiler rea uses (installed and chosen). */
+  decompiler: ReverseDecompiler | null;
+  /** The owner's choice, also when it cannot be used right now. */
+  chosen: ReverseDecompiler | null;
+  appleTools: "notNeeded" | "present" | "missing";
+  running: ReverseRunState;
+  /** Kuna's saved analysis, in bytes. */
+  cacheBytes: number;
+  memoryGb: number | null;
+  os: "windows" | "macos" | "linux" | "other";
+  partSizes: { component: ReverseComponent; name: string; downloadBytes: number; unpackedBytes: number }[];
+}
+
+/** The `reverse-progress` event. */
+export interface ReverseProgress {
+  component: ReverseComponent;
+  part: string;
+  /** All parts of the download together while downloading; this step's bytes otherwise. */
+  done: number;
+  total: number;
+  stage: ReverseDownloadStage;
+  partDone: number;
+  partTotal: number;
+  finished: boolean;
+  error: ErrorInfo | null;
+}

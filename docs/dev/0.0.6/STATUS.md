@@ -91,6 +91,10 @@ one starts from this file and `README.md`.
   Checking fixes: WP1b, WP3a. Fixing: WP5a; WP2 and WP5b fixed, checks queued. Developing:
   WP9b, WP9c (then WP9g, WP9d, WP9h, then WP9e). Waiting: WP8 (after WP1b/WP2), WP10a, WP10b,
   WP10d, WP10e (after the models run).
+- 23:51 UTC check: WP6 done (four rounds; limits listed in coding_apps.rs). WP1b, WP2,
+  WP3b, WP5a, WP5b checked; WP1a final check running (then WP8 starts); WP3a second fix
+  round. Item 5: WP9a done, WP9b and WP9c developed (in review next), WP9g and WP9d in
+  development. Item 6: run wf_1cc5cb57-517 started (WP10a + WP10b, then WP10d + WP10e).
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
