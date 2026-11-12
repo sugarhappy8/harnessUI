@@ -1165,6 +1165,9 @@ fn sample_facts(item: crate::dto::CompareItem, ctx: u32) -> crate::dto::CompareF
         vision: false,
         moe: false,
         quantization: Some("Q4_K_M".into()),
+        expert_count: None,
+        expert_used_count: None,
+        active_parameters: None,
     };
     let base = CompareFacts {
         item: item.clone(),

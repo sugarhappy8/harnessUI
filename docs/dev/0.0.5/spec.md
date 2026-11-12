@@ -256,6 +256,33 @@ each), `src/components/ModelsDialog.tsx` (one tab each), `Cargo.toml`, `src-taur
 
 ---------------------------------------------------------------------------------------
 
+### Amendments after WP0 (binding)
+- **The contract** is the section "CONTRACT (updated)" of `docs/dev/0.0.5/report-WP0-fix.md`
+  (types, fields, command signatures, sample data). Build against it; do not change a
+  contract type or signature without the lead.
+- **Owners of files WP0 added:** `crates/runtime/src/llama/stage.rs` → WP1a;
+  `crates/agent/src/thinking.rs` → WP3a; `src-tauri/src/load_settings.rs` → WP1b;
+  `src-tauri/src/share/mod.rs` → WP5a; `src/components/models/Installed.tsx`,
+  `src/components/settings/LocalModels.tsx`, `src/lib/words.ts` → WP2;
+  `src/components/models/Browse.tsx`, `RepoDetail.tsx`, `src/store/compare.ts` → WP4b;
+  `src/components/models/Badge.tsx`, `Downloads.tsx` → lead; `src/lib/ipc.test.ts` → whoever
+  changes the load, unload or reload wrappers.
+- **Fresh install:** with no stored `localModel` key the resolver uses Automatic (the same as
+  a stored 0.0.4 default of 8,192), so new and upgrading users get the same default.
+  `LocalModelSettings::default()` stays as it is.
+- **`when_idle`** applies to `load_local_model`, `unload_model` and `reload_local_model` (one
+  waiting change at a time; a newer one cancels it; a cancelled wait ends with `load_replaced`;
+  `cancel_pending_reload` cancels it). WP1b implements it; WP2 uses it for D3.
+- **No push event for busy counts:** the UI polls `model_busy` / `share_status` while a
+  question or a status line needs them (every 1 to 2 seconds, only while visible).
+- **Dev server for end-to-end runs:** the lead keeps `npm run dev` running on port 1420. Check
+  it answers (`curl -s -o /dev/null -w '%{http_code}' http://localhost:1420/` gives 200); if it
+  does not, start it once with `(nohup npm run dev > /dev/null 2>&1 &)` from the repository
+  root. Never stop it.
+- **Busy guard in chat turns** (WP1b): one line where a chat turn registers with
+  `state.generation` (in `src-tauri/src/chat.rs`), coordinated with WP3b's edits there.
+- **`e2e/m2_models.py`** has a stale drop target since 0.0.4 (the lead fixes it).
+
 ## Part 3. Work packages
 
 ### WP0. Groundwork (one developer, before everyone else)

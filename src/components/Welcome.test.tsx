@@ -32,6 +32,7 @@ const ready: RuntimeStatus = {
   ctxSource: null,
   settingsChanged: false,
   reloadWaiting: false,
+  unloadedPath: null,
 };
 
 describe("the welcome screen", () => {

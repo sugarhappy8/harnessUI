@@ -521,11 +521,7 @@ impl RuntimeManager {
             // used to be reported as "Loading was cancelled".
             Err(why) => loader_stopped_error(why, self.tail_text()),
         };
-        self.update(|s| {
-            s.state = RuntimeStateDto::Failed;
-            s.progress = None;
-            s.error = Some(err.clone());
-        });
+        self.update(|s| mark_failed(s, err.clone()));
         Err(err)
     }
 
@@ -626,11 +622,7 @@ impl RuntimeManager {
             }),
             ServerEvent::State(ServerState::Failed(failure)) => {
                 let err = load_error(&failure, self.tail_text());
-                self.update(|s| {
-                    s.state = RuntimeStateDto::Failed;
-                    s.progress = None;
-                    s.error = Some(err);
-                });
+                self.update(|s| mark_failed(s, err));
             }
             ServerEvent::State(_) | ServerEvent::Exited { .. } => {}
         }
@@ -658,6 +650,15 @@ impl RuntimeManager {
             let _ = tokio::time::timeout(Duration::from_secs(5), session.task).await;
         }
     }
+}
+
+/// Marks the status as a failed load. The stage is cleared, as on Ready; the adjustments
+/// stay, since they explain the failure.
+fn mark_failed(s: &mut RuntimeStatusDto, err: AppError) {
+    s.state = RuntimeStateDto::Failed;
+    s.progress = None;
+    s.load_stage = None;
+    s.error = Some(err);
 }
 
 /// The code of the error a load ends with when a newer load replaced it. The UI shows
@@ -1083,5 +1084,29 @@ mod tests {
                 "{os} {arch}"
             );
         }
+    }
+
+    /// A failed load shows no stage any more (a stale "Reading the model" would look like a
+    /// load in progress); the adjustments stay, since they explain the failure.
+    #[test]
+    fn a_failed_load_clears_its_stage_and_keeps_its_adjustments() {
+        let step = LoadStage::SteppingDown {
+            from: BackendKind::Vulkan,
+            to: BackendKind::Cpu,
+            reason: LoadFailure::OutOfMemory,
+        };
+        let mut s = RuntimeStatusDto {
+            state: RuntimeStateDto::Starting,
+            progress: Some(0.4),
+            load_stage: Some(LoadStage::ReadingModel),
+            adjustments: vec![step.clone()],
+            ..Default::default()
+        };
+        mark_failed(&mut s, AppError::internal("sample"));
+        assert_eq!(s.state, RuntimeStateDto::Failed);
+        assert_eq!(s.progress, None);
+        assert_eq!(s.load_stage, None);
+        assert_eq!(s.adjustments, vec![step]);
+        assert!(s.error.is_some());
     }
 }

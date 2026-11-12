@@ -130,20 +130,35 @@ export const resolveMentions = (chatId: number, mentions: MentionInput[]) =>
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");
 export const listBackends = (reprobe: boolean) => invoke<BackendInfo[]>("list_backends", { reprobe });
 /**
- * Loads a local model and resolves when it is ready. Resolves to `false` when another
- * model was picked meanwhile: that load replaced this one, which is not an error.
- * Without `settings` (0.0.5) the model loads with its own saved settings.
+ * Runs a change of what is loaded. Resolves to `false` when it was replaced or cancelled
+ * before it happened (error code `load_replaced`), which is not an error.
  */
-export async function loadLocalModel(path: string, settings?: LocalModelSettings | null): Promise<boolean> {
+async function unlessReplaced(change: Promise<void>): Promise<boolean> {
   try {
-    await invoke<void>("load_local_model", { path, settings: settings ?? null });
+    await change;
     return true;
   } catch (err) {
     if (err && typeof err === "object" && (err as { code?: unknown }).code === "load_replaced") return false;
     throw err;
   }
 }
-export const unloadModel = () => invoke<void>("unload_model");
+/**
+ * Loads a local model and resolves when it is ready. Resolves to `false` when another
+ * model was picked meanwhile: that load replaced this one, which is not an error.
+ * Without `settings` (0.0.5) the model loads with its own saved settings. `whenIdle`
+ * (0.0.5, D3): wait until nothing uses the model ("Restart when it ends"; `false` when
+ * the wait is cancelled); without it, load now and stop whatever uses the model.
+ */
+export const loadLocalModel = (path: string, settings?: LocalModelSettings | null, whenIdle?: boolean) =>
+  unlessReplaced(
+    invoke<void>("load_local_model", { path, settings: settings ?? null, whenIdle: whenIdle ?? null }),
+  );
+/**
+ * Unloads the model. `whenIdle` as for `loadLocalModel`; resolves to `false` when a
+ * waiting unload was cancelled or replaced.
+ */
+export const unloadModel = (whenIdle?: boolean) =>
+  unlessReplaced(invoke<void>("unload_model", { whenIdle: whenIdle ?? null }));
 export const listModelOptions = () => invoke<ModelOption[]>("list_model_options");
 export const getLocalModelSettings = () =>
   invoke<LocalModelSettings>("get_local_model_settings");
@@ -164,10 +179,11 @@ export const resetModelLoadSettings = (path: string) =>
 /**
  * Restarts the loaded model with its current settings (Reload, Apply and restart). `force`
  * restarts even when nothing changed; `whenIdle` waits until nothing uses the model.
+ * Resolves to `false` when a waiting reload was cancelled or replaced.
  */
 export const reloadLocalModel = (force: boolean, whenIdle: boolean) =>
-  invoke<void>("reload_local_model", { force, whenIdle });
-/** Cancels a reload that waits for the model to be free. */
+  unlessReplaced(invoke<void>("reload_local_model", { force, whenIdle }));
+/** Cancels the reload, load or unload that waits for the model to be free. */
 export const cancelPendingReload = () => invoke<void>("cancel_pending_reload");
 export const modelBusy = () => invoke<ModelBusy>("model_busy");
 

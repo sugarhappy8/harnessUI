@@ -183,8 +183,14 @@ export interface RuntimeStatus {
   ctxSource: ContextSource | null;
   /** 0.0.5: the loaded copy uses older settings than the saved ones. */
   settingsChanged: boolean;
-  /** 0.0.5: a reload waits for the model to be free ("Restarts when the reply ends · Cancel"). */
+  /**
+   * 0.0.5: a reload, a load of another model or an unload waits for the model to be free
+   * (called with `whenIdle`; "Restarts when the reply ends · Cancel"). The other fields
+   * still describe the model loaded now.
+   */
   reloadWaiting: boolean;
+  /** 0.0.5: the model the user unloaded ("Unloaded to free memory · Load"); null after any load. */
+  unloadedPath: string | null;
 }
 
 export interface DeviceInfo {
@@ -882,6 +888,11 @@ export interface FileFacts {
   vision: boolean;
   moe: boolean;
   quantization: string | null;
+  /** Mixture of experts only: experts in the file, and experts used per token. */
+  expertCount: number | null;
+  expertUsedCount: number | null;
+  /** Mixture of experts only: parameters used at a time, when known. */
+  activeParameters: number | null;
 }
 
 export type YourResultKind = "modelCheck" | "benchmark";

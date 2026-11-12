@@ -29,16 +29,23 @@ pub async fn list_backends(
 }
 
 /// Loads a local model. `settings` absent (0.0.5) means the model's own saved settings;
-/// the 0.0.4 shape `{ctx, backend, device}` still works.
+/// the 0.0.4 shape `{ctx, backend, device}` still works. `when_idle` (0.0.5, D3) as for
+/// `reload_local_model`: `true` waits until nothing uses the model (cancellable, ending
+/// with `load_replaced`); absent or `false` loads now and stops whatever uses the model
+/// first.
 #[tauri::command]
 pub async fn load_local_model(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
     settings: Option<LocalModelSettings>,
+    when_idle: Option<bool>,
 ) -> AppResult<()> {
     // TODO(WP1b): resolve the model's saved settings (load_settings) when absent; for now
     // the defaults for all models, which is what every caller passed before.
+    // TODO(WP1b): `when_idle` (wait, or stop the users first); ignored for now, so the load
+    // starts at once as in 0.0.4.
+    let _ = when_idle;
     let mut settings = match settings {
         Some(s) => s,
         None => settings::local_model_settings(&app).await,
@@ -101,8 +108,15 @@ pub async fn load_local_model(
     Ok(())
 }
 
+/// Unloads the model ("Unload to free memory"). `when_idle` (0.0.5, D3) as for
+/// `reload_local_model`: `true` waits until nothing uses the model (cancellable, ending
+/// with `load_replaced`); absent or `false` unloads now and stops whatever uses the model
+/// first. WP1b also sets `unloaded_path` on the status.
 #[tauri::command]
-pub async fn unload_model(state: State<'_, AppState>) -> AppResult<()> {
+pub async fn unload_model(state: State<'_, AppState>, when_idle: Option<bool>) -> AppResult<()> {
+    // TODO(WP1b): `when_idle` (wait, or stop the users first) and `unloaded_path`; for now
+    // the model unloads at once as in 0.0.4.
+    let _ = when_idle;
     state.runtime.unload().await;
     Ok(())
 }
@@ -151,9 +165,18 @@ pub async fn reset_model_load_settings(
 }
 
 /// Restarts the loaded model with its current resolved settings (Reload, Apply and
-/// restart). `force` restarts even when nothing changed (and retries the chosen backend
-/// after a step-down); `when_idle` waits until nothing uses the model, cancellable with
-/// `cancel_pending_reload`. Stub: does nothing.
+/// restart). `force`: restart even when the loaded copy already uses the current settings
+/// (Reload; it also retries the chosen backend after a step-down); without it, nothing
+/// happens when nothing changed. `when_idle`: wait until nothing uses the model (the busy
+/// counter is zero), with `reload_waiting` set on the status, cancellable with
+/// `cancel_pending_reload`; without it, restart now: whatever uses the model is stopped
+/// first (D3 "Stop and restart").
+///
+/// The same `when_idle` rules apply to `load_local_model` and `unload_model`. At most one
+/// change waits at a time: a newer load, unload or reload (waiting or not) cancels the one
+/// that waits. The call returns when the change is over; a wait that was cancelled ends
+/// with the error code `load_replaced` (the UI shows nothing for it) and changes nothing.
+/// Stub: does nothing.
 #[tauri::command]
 pub async fn reload_local_model(
     window: tauri::WebviewWindow,
@@ -166,8 +189,10 @@ pub async fn reload_local_model(
     Ok(())
 }
 
-/// Cancels a reload that waits for the model to be free ("Restarts when the reply ends ·
-/// Cancel"). Nothing waiting is not an error. Stub: does nothing.
+/// Cancels the change that waits for the model to be free ("Restarts when the reply ends
+/// · Cancel"): a reload, a load of another model or an unload called with `when_idle`. The
+/// waiting call then ends with `load_replaced`. Nothing waiting is not an error. Stub: does
+/// nothing.
 #[tauri::command]
 pub async fn cancel_pending_reload(
     window: tauri::WebviewWindow,
@@ -198,6 +223,8 @@ pub async fn set_local_model_settings(
     mut settings: LocalModelSettings,
 ) -> AppResult<()> {
     settings.mmproj = None;
+    // A response-only field (the one-time upgrade note); never stored.
+    settings.upgrade_note = None;
     if !(512..=1_048_576).contains(&settings.ctx) {
         return Err(AppError::bad_request(
             "The context size must be between 512 and 1,048,576 tokens.",

@@ -141,9 +141,16 @@ pub struct RuntimeStatusDto {
     /// 0.0.5: the loaded copy uses older settings than the ones saved now (D3: "Settings
     /// changed. Restart the model to use them.").
     pub settings_changed: bool,
-    /// 0.0.5: a reload waits for the model to be free (`reload_local_model(when_idle)`),
-    /// shown as "Restarts when the reply ends · Cancel".
+    /// 0.0.5: a change of what is loaded waits for the model to be free (D3 "Restart when
+    /// it ends"): a reload (`reload_local_model`), a load of another model
+    /// (`load_local_model`) or an unload (`unload_model`), each called with `when_idle`.
+    /// Shown as "Restarts when the reply ends · Cancel"; `cancel_pending_reload` cancels
+    /// it. The status still describes the model loaded now.
     pub reload_waiting: bool,
+    /// 0.0.5: the model the user unloaded (`unload_model`), for "Unloaded to free memory ·
+    /// Load". Cleared by the next load and by any other unload (removing the model or its
+    /// backend). `None` until WP1b sets it.
+    pub unloaded_path: Option<String>,
 }
 
 impl Default for RuntimeStatusDto {
@@ -171,6 +178,7 @@ impl Default for RuntimeStatusDto {
             ctx_source: None,
             settings_changed: false,
             reload_waiting: false,
+            unloaded_path: None,
         }
     }
 }
@@ -476,6 +484,13 @@ pub struct FileFacts {
     pub moe: bool,
     /// The quantisation name (`Q4_K_M`).
     pub quantization: Option<String>,
+    /// 0.0.5: for a mixture of experts, how many experts it has and how many it uses for
+    /// each token (from the header); `None` for other models.
+    pub expert_count: Option<u64>,
+    pub expert_used_count: Option<u64>,
+    /// 0.0.5: for a mixture of experts, the parameters used at a time ("35 billion, using
+    /// 3 billion at a time"), when they can be worked out from the file; `None` otherwise.
+    pub active_parameters: Option<u64>,
 }
 
 /// Which kind of local result.
@@ -705,6 +720,33 @@ mod tests {
         }
     }
 
+    /// Facts saved before 0.0.5 (without the expert fields) still read; the new fields are
+    /// camelCase.
+    #[test]
+    fn file_facts_expert_fields() {
+        let saved = json!({
+            "architecture": "sample", "parameters": 4000000000u64, "contextLength": 32768,
+            "tools": true, "thinking": false, "vision": false, "moe": false,
+            "quantization": "Q4_K_M"
+        });
+        let f: FileFacts = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            (f.expert_count, f.expert_used_count, f.active_parameters),
+            (None, None, None)
+        );
+        let moe = FileFacts {
+            moe: true,
+            expert_count: Some(128),
+            expert_used_count: Some(8),
+            active_parameters: Some(3_000_000_000),
+            ..f
+        };
+        let v = serde_json::to_value(&moe).unwrap();
+        assert_eq!(v["expertCount"], json!(128));
+        assert_eq!(v["expertUsedCount"], json!(8));
+        assert_eq!(v["activeParameters"], json!(3_000_000_000u64));
+    }
+
     #[test]
     fn busy_snapshot_shape() {
         let b = ModelBusy {
@@ -729,6 +771,7 @@ mod tests {
         assert_eq!(v["ctxSource"], json!(null));
         assert_eq!(v["settingsChanged"], json!(false));
         assert_eq!(v["reloadWaiting"], json!(false));
+        assert_eq!(v["unloadedPath"], json!(null));
         assert_eq!(v["stage"], json!(null));
     }
 }
