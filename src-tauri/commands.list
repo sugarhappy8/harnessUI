@@ -153,3 +153,5 @@ list_bench_runs
 get_bench_run
 search_mentions
 resolve_mentions
+pin_message
+inspect_context

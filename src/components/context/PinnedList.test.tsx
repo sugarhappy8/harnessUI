@@ -10,6 +10,9 @@ const apiMock = vi.hoisted(() => ({
   movePin: vi.fn<(chatId: number, id: number, up: boolean) => Promise<PinList>>(),
   setPinScope: vi.fn<(chatId: number, id: number, everyChat: boolean) => Promise<PinList>>(),
   onPinsChanged: vi.fn<(handler: (chatId: number | null) => void) => Promise<() => void>>(),
+  inspectContext: vi.fn(() => new Promise(() => undefined)),
+  onTaskChanged: vi.fn(async () => () => undefined),
+  onToolServersChanged: vi.fn(async () => () => undefined),
 }));
 vi.mock("./api", () => apiMock);
 

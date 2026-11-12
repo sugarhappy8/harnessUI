@@ -2687,10 +2687,20 @@ async fn the_preview_is_the_first_request_of_the_turn() {
     assert_eq!(sent.len(), 1);
     assert_eq!(serde_json::to_value(&preview.request).unwrap(), sent[0]);
     // The blocks of the system message are the system message.
-    let joined: Vec<&str> = preview.system_blocks.iter().map(|b| b.text.as_str()).collect();
-    assert_eq!(joined.join("\n\n"), sent[0]["messages"][0]["content"].as_str().unwrap());
-    let kinds: Vec<agent::SystemBlockKind> =
-        preview.system_blocks.iter().map(|b| b.kind.clone()).collect();
+    let joined: Vec<&str> = preview
+        .system_blocks
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect();
+    assert_eq!(
+        joined.join("\n\n"),
+        sent[0]["messages"][0]["content"].as_str().unwrap()
+    );
+    let kinds: Vec<agent::SystemBlockKind> = preview
+        .system_blocks
+        .iter()
+        .map(|b| b.kind.clone())
+        .collect();
     assert_eq!(
         kinds,
         [
@@ -2725,7 +2735,10 @@ async fn the_preview_applies_stage_one_and_names_what_goes_next() {
     );
     h.run(input).await;
     assert_eq!(compacted_stages(&h), [1]);
-    assert_eq!(serde_json::to_value(&preview.request).unwrap(), h.chats()[0]);
+    assert_eq!(
+        serde_json::to_value(&preview.request).unwrap(),
+        h.chats()[0]
+    );
     // Without the need, the preview only names stage 1 as next.
     let h = Harness::new(vec![]).await;
     let mut small = self::input("unused");
@@ -2734,7 +2747,10 @@ async fn the_preview_applies_stage_one_and_names_what_goes_next() {
     small.history = history;
     let preview = preview_of(&h, small).await;
     assert!(preview.applied.is_empty());
-    assert_eq!(preview.next, agent::NextCompaction::ShortenEarlierResults { results: 1 });
+    assert_eq!(
+        preview.next,
+        agent::NextCompaction::ShortenEarlierResults { results: 1 }
+    );
 }
 
 /// Messages covered by the stored summary are left out, and the summary is a block of the
@@ -2753,15 +2769,21 @@ async fn the_preview_lists_what_the_summary_replaces() {
     let preview = preview_of(&h, input).await;
     let left: Vec<Option<i64>> = preview.left_out.iter().map(|(m, _)| m.id).collect();
     assert!(left.len() >= 3, "{left:?}");
-    assert!(left.iter().all(|id| id.is_some_and(|id| (1..=4).contains(&id))), "{left:?}");
-    assert!(preview.kept.iter().all(|(m, _)| m.id.is_none_or(|id| id > 4)));
-    assert!(preview.left_out.iter().all(|(_, tokens)| *tokens > 0));
+    assert!(
+        left.iter()
+            .all(|id| id.is_some_and(|id| (1..=4).contains(&id))),
+        "{left:?}"
+    );
     assert!(
         preview
-            .system_blocks
+            .kept
             .iter()
-            .any(|b| b.kind == agent::SystemBlockKind::Summary && b.text.contains("talked about files"))
+            .all(|(m, _)| m.id.is_none_or(|id| id > 4))
     );
+    assert!(preview.left_out.iter().all(|(_, tokens)| *tokens > 0));
+    assert!(preview.system_blocks.iter().any(
+        |b| b.kind == agent::SystemBlockKind::Summary && b.text.contains("talked about files")
+    ));
 }
 
 /// A turn that would not start: the preview carries the loop's own refusal, and still
@@ -2775,7 +2797,9 @@ async fn the_preview_carries_the_loops_refusal() {
     let preview = preview_of(&h, input.clone()).await;
     let outcome = h.run(input).await;
     assert_eq!(preview.refusal, Some(outcome.status.clone()));
-    assert!(matches!(outcome.status, TurnStatus::Failed { ref code, .. } if code == "pinned_do_not_fit"));
+    assert!(
+        matches!(outcome.status, TurnStatus::Failed { ref code, .. } if code == "pinned_do_not_fit")
+    );
     assert!(preview.pinned_tokens > preview.pinned_allowance);
     assert!(h.chats().is_empty());
 }

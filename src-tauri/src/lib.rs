@@ -11,6 +11,7 @@ mod chat;
 mod children;
 mod commands;
 mod computer_cmd;
+mod context_cmd;
 mod diagnostics;
 mod downloads;
 mod dto;
@@ -238,6 +239,8 @@ pub fn run() {
             pinned::remove_pin,
             pinned::move_pin,
             pinned::set_pin_scope,
+            pinned::pin_message,
+            context_cmd::inspect_context,
             task::get_task,
             task::edit_task,
             task::set_task_status,

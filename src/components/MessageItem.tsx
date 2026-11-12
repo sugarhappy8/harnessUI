@@ -6,6 +6,7 @@ import { Markdown } from "./Markdown";
 import { useCitations } from "./sources/useCitations";
 import { ErrorBanner } from "./ErrorBanner";
 import { getAttachment, isTauri } from "../lib/ipc";
+import { PinMessageButton } from "./context/PinMessageButton";
 
 /** An attached image, loaded from the backend as a data: URI. */
 function AttachedImage(props: { id: number }) {
@@ -172,6 +173,8 @@ export const MessageItem = memo(function MessageItem(props: Props) {
               <Pencil size={13} aria-hidden />
             </button>
           )}
+          {/* [0.0.4 pinned] Pins this message's stored text for the chat. */}
+          {!editing && m.text && <PinMessageButton messageId={m.id} />}
         </div>
       </div>
     );

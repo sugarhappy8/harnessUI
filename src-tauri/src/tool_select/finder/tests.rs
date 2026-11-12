@@ -141,7 +141,7 @@ async fn call_tool_is_described_exactly_as_the_tool_it_names() {
         // What the tool's own describer refuses is refused the same way.
         (
             "edit_file",
-            json!({"path": "notes.txt", "old_text": "one", "new_text": "1", "occurrence": 9}),
+            json!({"path": "notes.txt", "old_text": "one", "new_text": "one"}),
         ),
         // An edit that needs the file's lines to explain why it fails is described as a
         // read of the file (0.0.4), through call_tool too.

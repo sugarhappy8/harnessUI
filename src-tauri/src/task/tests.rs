@@ -1119,6 +1119,28 @@ fn only_the_main_window_edits_the_task() {
     }
 }
 
+/// Every command of the Task tab, reading included, checks the calling window first.
+#[test]
+fn every_task_command_checks_the_window() {
+    let source = include_str!("../task.rs");
+    let commands: Vec<&str> = source.split("#[tauri::command]").skip(1).collect();
+    assert_eq!(
+        commands.len(),
+        4,
+        "get_task, edit_task, set_task_status, clear_task"
+    );
+    for command in commands {
+        let name = command
+            .split("pub async fn ")
+            .nth(1)
+            .and_then(|rest| rest.split('(').next())
+            .unwrap_or("?");
+        let body = command.split_once('{').map_or("", |(_, b)| b);
+        let first = body.trim_start().lines().next().unwrap_or("");
+        assert_eq!(first, "only_main_window(window.label())?;", "{name}");
+    }
+}
+
 /// The edit the window sends: camelCase, and nothing but the four fields.
 #[test]
 fn the_windows_edit_has_four_fields_and_no_others() {

@@ -179,6 +179,8 @@
     "allow-list-bench-runs",
     "allow-get-bench-run",
     "allow-search-mentions",
-    "allow-resolve-mentions"
+    "allow-resolve-mentions",
+    "allow-pin-message",
+    "allow-inspect-context"
   ]
 }

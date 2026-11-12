@@ -157,6 +157,18 @@ async fn context_for(
     })
 }
 
+/// Only the main window may search or read mentions (the capability files grant these
+/// commands to it alone; this is the same rule checked again here).
+fn only_main_window(label: &str) -> AppResult<()> {
+    if label == crate::MAIN_WINDOW {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "Only the main window can search or read mentions.",
+        ))
+    }
+}
+
 /// The approved folders as the sandbox resolved them.
 fn roots_of(ctx: &ChatContext) -> Vec<String> {
     resolve::sandbox(ctx)
@@ -168,12 +180,14 @@ fn roots_of(ctx: &ChatContext) -> Vec<String> {
 
 #[tauri::command]
 pub async fn search_mentions(
+    window: tauri::WebviewWindow,
     app: AppHandle,
     state: State<'_, AppState>,
     chat_id: Option<store::ChatId>,
     query: String,
     limit: Option<usize>,
 ) -> AppResult<MentionSearch> {
+    only_main_window(window.label())?;
     let ctx = context_for(&app, &state, chat_id).await?;
     let query: String = query.chars().take(200).collect();
     let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, 100);
@@ -255,11 +269,13 @@ fn too_many(n: usize) -> AppResult<()> {
 
 #[tauri::command]
 pub async fn resolve_mentions(
+    window: tauri::WebviewWindow,
     app: AppHandle,
     state: State<'_, AppState>,
     chat_id: store::ChatId,
     mentions: Vec<MentionRequest>,
 ) -> AppResult<Vec<MentionCheck>> {
+    only_main_window(window.label())?;
     too_many(mentions.len())?;
     let ctx = context_for(&app, &state, Some(chat_id)).await?;
     let n_ctx = crate::settings::DEFAULT_REMOTE_CONTEXT as usize;
@@ -384,6 +400,29 @@ mod tests {
             total_lines: 9,
             truncated: false,
             text: text.into(),
+        }
+    }
+
+    /// The two commands are granted to the main window only, and each one checks the
+    /// calling window again.
+    #[test]
+    fn the_commands_are_for_the_main_window_only() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let read = |p: std::path::PathBuf| std::fs::read_to_string(&p).unwrap();
+        let caps = manifest.join("capabilities");
+        let main = read(caps.join("main.json"));
+        let list = read(manifest.join("commands.list"));
+        for command in ["search_mentions", "resolve_mentions"] {
+            let grant = format!("\"allow-{}\"", command.replace('_', "-"));
+            assert!(main.contains(&grant), "main.json lacks {grant}");
+            assert!(list.lines().any(|l| l.trim() == command), "{command}");
+        }
+        for other in ["overlay.json", "indicator.json"] {
+            assert!(!read(caps.join(other)).contains("mention"), "{other}");
+        }
+        assert!(only_main_window(crate::MAIN_WINDOW).is_ok());
+        for label in ["overlay", "indicator", "artifact", ""] {
+            assert_eq!(only_main_window(label).expect_err(label).code, "bad_request");
         }
     }
 

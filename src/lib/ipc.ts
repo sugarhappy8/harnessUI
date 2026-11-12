@@ -243,7 +243,10 @@ export const setAllowAllDefault = (on: boolean) => invoke<void>("set_allow_all_d
 // Tools and MCP servers
 export const listChatTools = (chatId: number) => invoke<ToolDto[]>("list_chat_tools", { chatId });
 export const setChatTools = (chatId: number, enabled: string[]) =>
-  invoke<void>("set_chat_tools", { chatId, enabled });
+  invoke<void>("set_chat_tools", { chatId, enabled }).then(() => {
+    // [0.0.4 context] The Context tab reads the next request again.
+    window.dispatchEvent(new CustomEvent("chat-tools-changed", { detail: chatId }));
+  });
 // Adaptive tool selection: which of the tools that are on a turn shows the model.
 export const getToolSelection = () => invoke<import("./types").ToolSelection>("get_tool_selection");
 export const setToolSelection = (auto: boolean) =>

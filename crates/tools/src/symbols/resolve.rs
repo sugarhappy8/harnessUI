@@ -175,7 +175,10 @@ pub fn resolve(req: &MentionRequest, chat: &ChatContext, cap: usize) -> Result<R
         return Err(format!("{shown} was not found."));
     }
     let path = Path::new(&checked.canonical);
-    let meta = std::fs::metadata(path).map_err(|e| format!("{shown} could not be read: {e}."))?;
+    // The canonical path itself, not what a link at its end points to: the file the open
+    // below must find again.
+    let meta =
+        std::fs::symlink_metadata(path).map_err(|e| format!("{shown} could not be read: {e}."))?;
     if meta.is_dir() {
         return Err(format!("{shown} is a folder. Mention a file inside it."));
     }
@@ -193,9 +196,17 @@ pub fn resolve(req: &MentionRequest, chat: &ChatContext, cap: usize) -> Result<R
     // Resolve again right before opening: a link swapped in since the check is refused.
     sb.recheck(&checked, &RealFs)
         .map_err(|e| format!("{shown} cannot be mentioned: {e}."))?;
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
-    std::fs::File::open(path)
-        .and_then(|f| f.take(RAW_LIMIT + 1).read_to_end(&mut bytes))
+    // Then open without following a link, and read only from that handle.
+    let (file, opened) =
+        open_checked(path, &meta).map_err(|e| format!("{shown} could not be read: {e}."))?;
+    if opened.len() > RAW_LIMIT {
+        return Err(format!(
+            "{shown} is too large to mention (over 1 MB). The file tools can read parts of it."
+        ));
+    }
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    file.take(RAW_LIMIT + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| format!("{shown} could not be read: {e}."))?;
     if bytes.len() as u64 > RAW_LIMIT {
         return Err(format!(
@@ -219,10 +230,13 @@ pub fn resolve(req: &MentionRequest, chat: &ChatContext, cap: usize) -> Result<R
                 "File: {abs} ({total} line{})\n",
                 if total == 1 { "" } else { "s" }
             );
-            let (body, last) = numbered(&lines, 1, total, cap.saturating_sub(header.len()));
-            let truncated = last < total;
+            let (body, last, cut) = numbered(&lines, 1, total, cap.saturating_sub(header.len()));
+            let truncated = cut || last < total;
             let mut out = header + &body;
-            if truncated {
+            if cut {
+                out.push_str(&line_cut(last));
+            }
+            if last < total {
                 out.push_str(&left_out(last + 1, total, "of the file"));
             }
             if total == 0 {
@@ -254,10 +268,13 @@ pub fn resolve(req: &MentionRequest, chat: &ChatContext, cap: usize) -> Result<R
                 "File: {abs}, lines {start}-{end} ({} {qualified})\n",
                 sym.kind.as_str()
             );
-            let (body, last) = numbered(&lines, start, end, cap.saturating_sub(header.len()));
-            let truncated = last < end;
+            let (body, last, cut) = numbered(&lines, start, end, cap.saturating_sub(header.len()));
+            let truncated = cut || last < end;
             let mut out = header + &body;
-            if truncated {
+            if cut {
+                out.push_str(&line_cut(last));
+            }
+            if last < end {
                 out.push_str(&left_out(last + 1, end, "of this definition"));
             }
             Ok(Resolved {
@@ -274,6 +291,61 @@ pub fn resolve(req: &MentionRequest, chat: &ChatContext, cap: usize) -> Result<R
             })
         }
     }
+}
+
+/// Opens the file the sandbox checked, without following a link at the last part of the
+/// path, and returns the handle with its own metadata (size and kind are taken from the
+/// handle from here on, never from the path again). Refused: a link or reparse point, not
+/// a regular file, and on Unix a file other than the one `checked` describes (another
+/// device or inode: the path was swapped after the check). The error is for the user.
+pub(super) fn open_checked(
+    path: &Path,
+    checked: &std::fs::Metadata,
+) -> Result<(std::fs::File, std::fs::Metadata), String> {
+    let swapped = "the file changed while it was being read; try again".to_string();
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A FIFO swapped in must not block the read either.
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = opts.open(path).map_err(|e| {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return swapped.clone();
+        }
+        e.to_string()
+    })?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(swapped);
+        }
+    }
+    if !meta.is_file() {
+        return Err("it is not a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (meta.dev(), meta.ino()) != (checked.dev(), checked.ino()) {
+            return Err(swapped);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = checked;
+    Ok((file, meta))
 }
 
 fn one(s: &str) -> String {
@@ -300,8 +372,8 @@ fn pick<'a>(all: &'a [Symbol], wanted: &str, req: &MentionRequest) -> Option<&'a
 }
 
 /// Lines `from..=to` (1-based) in `read_file`'s format, as many as fit in `room`
-/// characters, and the last line given.
-fn numbered(lines: &[&str], from: u32, to: u32, room: usize) -> (String, u32) {
+/// characters, the last line given, and whether that line was cut (it alone did not fit).
+fn numbered(lines: &[&str], from: u32, to: u32, room: usize) -> (String, u32, bool) {
     let mut out = String::new();
     let mut last = from.saturating_sub(1);
     // Room for the note about what was left out.
@@ -321,13 +393,18 @@ fn numbered(lines: &[&str], from: u32, to: u32, room: usize) -> (String, u32) {
                 cut -= 1;
             }
             out.push_str(&format!("{n:>6}\t{}…\n", &line[..cut]));
-            last = n;
-            break;
+            return (out, n, true);
         }
         out.push_str(&numbered);
         last = n;
     }
-    (out, last)
+    (out, last, false)
+}
+
+fn line_cut(n: u32) -> String {
+    format!(
+        "[Line {n} is longer than a mention can hold, so only its start is shown. The file tools can read the file: call read_file with offset={n}.]\n"
+    )
 }
 
 fn left_out(first: u32, last: u32, what: &str) -> String {

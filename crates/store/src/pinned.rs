@@ -396,8 +396,7 @@ fn pin_message(conn: &mut Connection, chat: ChatId, message: i64) -> Result<Pin,
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some(("user", content)) = row.as_ref().map(|(role, c)| (role.as_str(), c.as_str()))
-    else {
+    let Some(("user", content)) = row.as_ref().map(|(role, c)| (role.as_str(), c.as_str())) else {
         return Err(StoreError::not_found("message", message));
     };
     let text = clean_pin_text(&message_text(content));
@@ -899,7 +898,12 @@ mod tests {
         assert_eq!(pin(&store, a, false, markup).await.text, markup);
     }
 
-    async fn message(store: &Store, chat: ChatId, role: crate::Role, content: serde_json::Value) -> i64 {
+    async fn message(
+        store: &Store,
+        chat: ChatId,
+        role: crate::Role,
+        content: serde_json::Value,
+    ) -> i64 {
         store
             .insert_message(crate::NewMessage {
                 chat_id: chat,
@@ -934,17 +938,30 @@ mod tests {
         )
         .await;
         let pinned = store.pin_message(a, mine).await.expect("pinned");
-        assert_eq!(pinned.text, "Always cite the file and line.\n\nKeep it short.");
+        assert_eq!(
+            pinned.text,
+            "Always cite the file and line.\n\nKeep it short."
+        );
         assert_eq!(pinned.chat_id, Some(a));
         assert_eq!(texts(&store, a).await, [pinned.text.clone()]);
         assert!(texts(&store, b).await.is_empty());
         let not_found = |r: Result<Pin, StoreError>| {
             assert!(
-                matches!(r, Err(StoreError::NotFound { what: "message", .. })),
+                matches!(
+                    r,
+                    Err(StoreError::NotFound {
+                        what: "message",
+                        ..
+                    })
+                ),
                 "{r:?}"
             );
         };
-        for role in [crate::Role::Assistant, crate::Role::Tool, crate::Role::System] {
+        for role in [
+            crate::Role::Assistant,
+            crate::Role::Tool,
+            crate::Role::System,
+        ] {
             let theirs = message(
                 &store,
                 a,
@@ -993,7 +1010,10 @@ mod tests {
             serde_json::json!("z".repeat(1_000)),
         )
         .await;
-        assert_eq!(store.pin_message(a, fits).await.expect("fits").text.len(), 1_000);
+        assert_eq!(
+            store.pin_message(a, fits).await.expect("fits").text.len(),
+            1_000
+        );
         let image_only = message(
             &store,
             a,

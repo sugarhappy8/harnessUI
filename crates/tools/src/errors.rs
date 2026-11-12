@@ -362,24 +362,22 @@ fn read_call(path: &str, around: Option<usize>) -> String {
     format!("read_file {args}")
 }
 
-/// Whether an edit problem can only be explained with the file's own text (the matching
-/// lines, the closest lines). Such a problem must not be answered before the gate: the
-/// tool describes it as a read of the file and explains it from `call`, inside the markers
-/// that say "this is data". The other problems are explained with numbers alone.
+/// Whether an edit problem depends on what the file holds (whether old_text is there, how
+/// often, on which lines). Such a problem must not be answered before the gate, not even
+/// by the kind of answer: the tool describes it as a read of the file and explains it from
+/// `call`, inside the markers that say "this is data". Only [`EditProblem::NoChange`] does
+/// not, and the tool refuses that from the arguments alone, before it reads the file.
 pub fn needs_file_text(problem: &EditProblem) -> bool {
-    matches!(
-        problem,
-        EditProblem::NotFound | EditProblem::Ambiguous { .. }
-    )
+    !matches!(problem, EditProblem::NoChange)
 }
 
 /// The message for an edit that cannot be made: what is wrong, the candidates, and the
 /// argument or call that fixes it.
 ///
-/// For [`EditProblem::Ambiguous`] and [`EditProblem::NotFound`] it quotes lines of the
-/// file (each cut and made visible), so it is file content: it may only be returned as a
-/// tool result, after the gate let the call read the file ([`needs_file_text`]). The other
-/// problems name line numbers only. `ctx.known` adds the reminder to read the file first.
+/// Every message but [`EditProblem::NoChange`] is file content (quoted lines, or how often
+/// and where old_text occurs): it may only be returned as a tool result, after the gate
+/// let the call read the file ([`needs_file_text`]). `ctx.known` adds the reminder to read
+/// the file first.
 pub fn edit_problem_message(problem: &EditProblem, ctx: &EditContext<'_>) -> String {
     let shown = policy::sanitize::visible(ctx.path);
     let quoted = |lines: &[usize]| -> String {
@@ -721,20 +719,19 @@ mod tests {
         );
     }
 
-    /// The messages that quote the file are the ones that need its text; the others name
-    /// numbers only, so they may be answered before the gate.
+    /// Everything but "no change" depends on the file, so it is answered after the gate.
     #[test]
-    fn only_not_found_and_ambiguous_need_the_file_text() {
+    fn only_no_change_can_be_answered_without_the_file() {
         assert!(needs_file_text(&EditProblem::NotFound));
         assert!(needs_file_text(&EditProblem::Ambiguous {
             lines: vec![2, 7]
         }));
-        assert!(!needs_file_text(&EditProblem::NoChange));
-        assert!(!needs_file_text(&EditProblem::OutOfRange {
+        assert!(needs_file_text(&EditProblem::OutOfRange {
             asked: 3,
             lines: vec![2, 7]
         }));
-        // And those two really carry no line of the file, whatever was read.
+        assert!(!needs_file_text(&EditProblem::NoChange));
+        // Neither quotes a line of the file, whatever was read.
         for known in [Known::Yes, Known::Stale, Known::No] {
             for problem in [
                 EditProblem::NoChange,

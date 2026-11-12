@@ -315,3 +315,53 @@ async fn whatever_a_mention_reads_read_file_may_read_too() {
         }
     }
 }
+
+/// A file of one line longer than the cap: its start is sent, the mention is marked cut,
+/// and the note says so.
+#[test]
+fn a_single_line_longer_than_the_cap_is_marked_cut_with_a_note() {
+    let s = setup();
+    let c = chat(&s);
+    std::fs::write(
+        s.root.join("big.rs"),
+        format!("fn big() {{ {} }}\n", "x".repeat(50_000)),
+    )
+    .unwrap();
+    let r = resolve(&file("big.rs"), &c, 2_000).unwrap();
+    assert!(r.truncated);
+    assert!(r.text.len() <= 2_000, "{}", r.text.len());
+    assert!(r.text.contains("     1\tfn big() { xxx"), "{}", r.text);
+    assert!(
+        r.text.ends_with(
+            "…\n[Line 1 is longer than a mention can hold, so only its start is shown. The file tools can read the file: call read_file with offset=1.]\n"
+        ),
+        "{}",
+        &r.text[r.text.len() - 300..]
+    );
+}
+
+/// The open itself refuses a link as the last part of the path, even when the earlier
+/// check passed (a swap between the check and the open).
+#[cfg(unix)]
+#[test]
+fn the_open_refuses_a_link_swapped_in_after_the_check() {
+    let s = setup();
+    let real = s.root.join("notes.txt");
+    let before = std::fs::symlink_metadata(&real).unwrap();
+    // Kept open, so the file system cannot give its inode number to the file swapped in.
+    let _keep = std::fs::File::open(&real).unwrap();
+    // Swapped: notes.txt is now a link to a file outside.
+    std::fs::remove_file(&real).unwrap();
+    std::os::unix::fs::symlink(s.outside.join("secret.txt"), &real).unwrap();
+    let err = open_checked(&real, &before).unwrap_err();
+    assert!(!err.contains("do not read"), "{err}");
+    // Swapped for another regular file: not the file that was checked.
+    std::fs::remove_file(&real).unwrap();
+    std::fs::write(&real, "another file\n").unwrap();
+    assert!(open_checked(&real, &before).is_err());
+    // The file that was checked opens, and its size and kind come from the handle.
+    let now = std::fs::symlink_metadata(&real).unwrap();
+    let (_, meta) = open_checked(&real, &now).unwrap();
+    assert!(meta.is_file());
+    assert_eq!(meta.len(), "another file\n".len() as u64);
+}

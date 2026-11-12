@@ -215,11 +215,14 @@ fn shape(full: &str, budget: usize, how: &Shape<'_>) -> Option<View> {
         head.push('\n');
         head_n += 1;
     }
+    // A line shown only in part is in the view, but it does not count as shown.
+    let mut head_cut = false;
     if head_n == 0 && head_room > 0 {
         // One very long line: show its start.
         head.push_str(cut_to(all[0], head_room.saturating_sub(4)));
         head.push_str("…\n");
         head_n = 1;
+        head_cut = true;
     }
     // Last lines.
     let mut tail_n = 0;
@@ -232,12 +235,14 @@ fn shape(full: &str, budget: usize, how: &Shape<'_>) -> Option<View> {
         tail_n += 1;
     }
     let mut tail = String::new();
+    let mut tail_cut = false;
     if tail_n == 0 && tail_room > 0 && head_n < total {
         // One very long line: show its end.
         tail.push('…');
         tail.push_str(end_of(all[total - 1], tail_room.saturating_sub(4)));
         tail.push('\n');
         tail_n = 1;
+        tail_cut = true;
     } else {
         for line in &all[total - tail_n..] {
             tail.push_str(line);
@@ -292,11 +297,15 @@ fn shape(full: &str, budget: usize, how: &Shape<'_>) -> Option<View> {
         text.push('\n');
     }
     let text = text.trim_end_matches('\n').to_string();
+    let shown = head_n + tail_n - usize::from(head_cut) - usize::from(tail_cut);
+    // What to read next starts at the first line not wholly shown.
+    let first_needed = if head_cut { 1 } else { first_hidden };
+    let last_needed = if tail_cut { total } else { last_hidden };
     Some(View {
         text,
         shown: Shown {
-            lines: head_n + tail_n,
-            next: Shown::next_range(first_hidden, head_n + tail_n, last_hidden),
+            lines: shown,
+            next: Shown::next_range(first_needed, shown, last_needed),
         },
     })
 }
@@ -518,8 +527,16 @@ mod tests {
             &view.text[..60]
         );
         assert!(view.text.len() <= 1500);
+        // Lines 1 and 5 are only partly shown: they do not count as shown, and the range
+        // to read next starts at line 1.
+        assert_eq!(view.shown.lines, 0);
+        assert_eq!(view.shown.next, Some((1, 5)));
+        // A long line cut at the start only: the lines after it that are whole count.
+        let full = format!("{}\nend 1\nend 2", "x".repeat(1900));
+        let view = head_and_tail(&full, 1500, 50).expect("shortened");
+        assert!(view.text.ends_with("end 1\nend 2"), "{}", view.text);
         assert_eq!(view.shown.lines, 2);
-        assert_eq!(view.shown.next, Some((2, 4)));
+        assert_eq!(view.shown.next, Some((1, 1)));
     }
 
     #[test]

@@ -16,13 +16,14 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 
-const COMMANDS: [&str; 6] = [
+const COMMANDS: [&str; 7] = [
     "list_pins",
     "add_pin",
     "edit_pin",
     "remove_pin",
     "move_pin",
     "set_pin_scope",
+    "pin_message",
 ];
 
 fn manifest() -> PathBuf {
@@ -117,6 +118,7 @@ fn only_this_module_writes_a_pin_and_no_tool_does() {
         ".remove_pin(",
         ".move_pin(",
         ".set_pin_scope(",
+        ".pin_message(",
     ];
     for file in files.iter().filter(|f| !mine.contains(f)) {
         let text = read(file);
@@ -223,9 +225,14 @@ fn the_turn_sets_the_pins_before_the_helpers_copy_and_explains_a_refusal() {
     let set = turns.find(line).expect("turns.rs sets the pins");
     assert_eq!(turns.matches("input.pinned").count(), 1);
     // In the shared assembly, which a real turn runs before it copies the input for helpers.
-    let assemble = turns.find("pub(crate) async fn assemble(").expect("the assembly");
+    let assemble = turns
+        .find("pub(crate) async fn assemble(")
+        .expect("the assembly");
     let run = turns.find("pub async fn run(").expect("run");
-    assert!(assemble < set && set < run, "the pins are not set in the assembly");
+    assert!(
+        assemble < set && set < run,
+        "the pins are not set in the assembly"
+    );
     let body = &turns[run..];
     let assembled = body
         .find("assemble(app, &req, Assembly::Turn).await?")
@@ -233,7 +240,10 @@ fn the_turn_sets_the_pins_before_the_helpers_copy_and_explains_a_refusal() {
     let copy = body
         .find("let mut helper_input = input.clone();")
         .expect("the helper's copy");
-    assert!(assembled < copy, "the helper's copy is made before the pins are set");
+    assert!(
+        assembled < copy,
+        "the helper's copy is made before the pins are set"
+    );
     assert!(
         turns.contains("(\"pinned_do_not_fit\", _) => crate::pinned::next_step(local),"),
         "failure_next_step has no arm for pinned_do_not_fit"
@@ -413,4 +423,27 @@ async fn a_helpers_request_carries_the_chats_pins() {
         );
         assert!(!request.to_string().contains("PARENT-QUESTION"));
     }
+}
+
+/// Pinning a message takes its id, never its text: the command has no text argument, the
+/// store reads the stored message, and the window is told so the Context tab lists it.
+#[test]
+fn pinning_a_message_takes_its_id_and_tells_the_window() {
+    let source = read(&manifest().join("src").join("pinned.rs"));
+    let start = source.find("pub async fn pin_message(").expect("the command");
+    let end = start + source[start..].find("\n}\n").expect("its end");
+    let body = &source[start..end];
+    let params = &body[..body.find(") -> AppResult").expect("signature")];
+    assert!(params.contains("message_id: i64"), "{params}");
+    assert!(!params.contains("text"), "the command takes text: {params}");
+    assert!(body.contains(".pin_message(store::ChatId(chat_id), message_id)"));
+    assert!(body.contains("tell_window(&app, Some(chat_id))"));
+    let refused = shown(store::StoreError::NotFound {
+        what: "message",
+        id: 3,
+    });
+    assert_eq!(
+        refused.message,
+        "Only a message you wrote in this chat can be pinned."
+    );
 }

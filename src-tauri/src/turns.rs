@@ -1592,7 +1592,12 @@ pub(crate) async fn assemble(
     let state = app.state::<AppState>();
     let chat_id = req.chat.id;
     let turn = mode == Assembly::Turn;
-    let path = state.store.path_to(chat_id, req.reply_to).await?;
+    // A turn answers `reply_to`; the preview shows the branch the chat shows now.
+    let path = if turn {
+        state.store.path_to(chat_id, req.reply_to).await?
+    } else {
+        state.store.current_path(chat_id).await?
+    };
     let history = history_of(&state, &path).await?;
     // [0.0.4 artifacts] A page the model writes after content from outside the
     // conversation entered the chat runs no script until the user allows it.
@@ -1642,8 +1647,7 @@ pub(crate) async fn assemble(
         .await
         .ok()
         .flatten();
-    let mut input =
-        agent::turn::TurnInput::new(history, req.caps, req.template.clone());
+    let mut input = agent::turn::TurnInput::new(history, req.caps, req.template.clone());
     let stored_steps: Option<serde_json::Value> = state
         .store
         .get_setting(crate::settings::STEPS_PER_TURN)

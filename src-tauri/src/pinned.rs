@@ -79,6 +79,9 @@ fn shown(error: store::StoreError) -> AppError {
         store::StoreError::NotFound { what: "chat", .. } => {
             AppError::bad_request("That chat no longer exists.")
         }
+        store::StoreError::NotFound {
+            what: "message", ..
+        } => AppError::bad_request("Only a message you wrote in this chat can be pinned."),
         store::StoreError::NotFound { .. } => AppError::not_found("pinned instruction"),
         other => other.into(),
     }
@@ -187,6 +190,29 @@ pub async fn add_pin(
         .map_err(shown)?;
     tracing::info!(chat_id, every_chat, "an instruction was pinned by the user");
     tell_window(&app, (!every_chat).then_some(chat_id));
+    listing(&state.store, chat_id).await
+}
+
+/// Pins one of the user's own messages for this chat. Takes the message's id only: the text
+/// is read from the database, and the store refuses a message that is not the user's or
+/// not in this chat, so nothing but the user's own stored words can become a pin. Returns
+/// the chat's pins.
+#[tauri::command]
+pub async fn pin_message(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    chat_id: i64,
+    message_id: i64,
+) -> AppResult<PinsDto> {
+    only_main_window(window.label())?;
+    state
+        .store
+        .pin_message(store::ChatId(chat_id), message_id)
+        .await
+        .map_err(shown)?;
+    tracing::info!(chat_id, "a message was pinned by the user");
+    tell_window(&app, Some(chat_id));
     listing(&state.store, chat_id).await
 }
 

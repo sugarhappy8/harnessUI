@@ -2,7 +2,7 @@
 // returns the chat's pins as they now are.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { PinList } from "./types";
+import type { ContextView, PinList } from "./types";
 
 export const listPins = (chatId: number) => invoke<PinList>("list_pins", { chatId });
 
@@ -25,4 +25,21 @@ export const setPinScope = (chatId: number, id: number, everyChat: boolean) =>
 /** Pins changed: those of one chat (its id), or those for every chat (null). */
 export function onPinsChanged(handler: (chatId: number | null) => void): Promise<UnlistenFn> {
   return listen<number | null>("pinned-changed", (e) => handler(e.payload));
+}
+
+/** What the next request of a chat would contain, built by the code a turn uses; nothing is sent. */
+export const inspectContext = (chatId: number) => invoke<ContextView>("inspect_context", { chatId });
+
+/** Pins one of the user's own messages for the chat. Only the id goes over: the text is read from the database. */
+export const pinMessage = (chatId: number, messageId: number) =>
+  invoke<PinList>("pin_message", { chatId, messageId });
+
+/** A chat's task changed. */
+export function onTaskChanged(handler: (chatId: number) => void): Promise<UnlistenFn> {
+  return listen<number>("task-changed", (e) => handler(e.payload));
+}
+
+/** The tool servers changed (one was added, removed, restarted or switched). */
+export function onToolServersChanged(handler: () => void): Promise<UnlistenFn> {
+  return listen("mcp-changed", () => handler());
 }

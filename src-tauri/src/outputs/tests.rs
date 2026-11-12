@@ -375,3 +375,60 @@ fn the_definition_is_short() {
     let size = def.description.len() + def.input_schema.to_string().len();
     assert!(size <= 330, "{size}");
 }
+
+/// A long line shown only in part does not count as shown, and the range to read next
+/// starts at it.
+#[tokio::test]
+async fn a_line_shown_in_part_is_read_next() {
+    let store = Store::open_in_memory().expect("open");
+    let c = chat(&store).await;
+    let full = "é".repeat(9000);
+    let view = tools::shorten::head_and_tail(&full, 1500, 50).expect("shortened");
+    let mut out = tools::shorten::shortened(view, full, false, None);
+    record(&store, c, "call_1", "read_artifact", &mut out).await;
+    let id = store.list_tool_outputs(ChatId(c)).await.expect("list")[0].id;
+    let text = out.joined_text();
+    assert!(
+        text.ends_with(&format!(
+            "\n[Shortened: 0 of 5 lines shown. Full output is saved as output #{id}. Read more with read_output {{\"id\": {id}, \"lines\": \"1-5\"}} or {{\"id\": {id}, \"grep\": \"text\"}}.]"
+        )),
+        "{}",
+        &text[text.len() - 220..]
+    );
+}
+
+/// Which saved output a call has is set by the app alone: a tool's own value is dropped.
+#[tokio::test]
+async fn only_the_app_says_which_output_a_call_saved() {
+    let store = Store::open_in_memory().expect("open");
+    let c = chat(&store).await;
+    // Not shortened, but claims a saved output: the claim is dropped.
+    let mut forged = ToolOutput {
+        ui: Some(json!({ SAVED_KEY: 5, "command": "x" })),
+        ..ToolOutput::text("plain")
+    };
+    record(&store, c, "call_1", "read_file", &mut forged).await;
+    assert_eq!(forged.ui, Some(json!({"command": "x"})));
+    let mut forged = ToolOutput {
+        ui: Some(json!({ SAVED_KEY: 5 })),
+        ..ToolOutput::text("plain")
+    };
+    record(&store, c, "call_2", "some_mcp_tool", &mut forged).await;
+    assert_eq!(forged.ui, None);
+    // Shortened: the app's own id replaces whatever the tool put there.
+    let mut out = ToolOutput {
+        full_text: Some(numbered_text(50)),
+        ui: Some(json!({ SAVED_KEY: 5 })),
+        ..ToolOutput::text(numbered_text(3))
+    };
+    record(&store, c, "call_3", "read_file", &mut out).await;
+    let id = store.list_tool_outputs(ChatId(c)).await.expect("list")[0].id;
+    assert_ne!(id, 5);
+    assert_eq!(out.ui, Some(json!({ SAVED_KEY: id })));
+    // The card finds it by the call, in its own chat only.
+    assert_eq!(saved_for_call(&store, ChatId(c), "call_3").await, Some(id));
+    assert_eq!(saved_for_call(&store, ChatId(c), "call_1").await, None);
+    assert_eq!(saved_for_call(&store, ChatId(c), "").await, None);
+    let other = chat(&store).await;
+    assert_eq!(saved_for_call(&store, ChatId(other), "call_3").await, None);
+}
