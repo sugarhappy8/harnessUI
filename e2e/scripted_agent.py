@@ -1228,6 +1228,209 @@ def p_allow_all(c, notes):
         s.invoke("set_approval_mode", {"chatId": chat, "allowAll": False})
 
 
+@probe("full-access")
+def p_full_access(c, notes):
+    """Owner's request for 0.0.5: "stop asking me to allow everything ... name it full access",
+    and "the ability for the models to create their own folders and navigate the pc on their
+    own and stuff even delete and organize but this only works with full access on". Nothing
+    asks; the file tools reach the whole computer; the app's own folders stay out of reach."""
+    s = c.s
+    wanted = ["read_file", "list_dir", "search_files", "write_file", "edit_file", "delete_file",
+              "make_folder", "move_path", "delete_folder", "run_command"]
+    chat = new_chat(c, tools=[t for t in wanted if t in c.all_tools])
+    assert "make_folder" in c.all_tools, c.all_tools
+    inside = c.work / "full-access"
+    outside = c.other / "full-access"
+    for d in (inside, outside):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir()
+    (outside / "report.txt").write_text("quarterly numbers\n")
+    (outside / "trash").mkdir()
+    (outside / "trash" / "old.log").write_text("old\n")
+    doomed = inside / "doomed.txt"
+    doomed.write_text("bye\n")
+    home = c.db.parents[2]  # <home>/data/<identifier>/app.db
+
+    def offered():
+        return [t.get("function", {}).get("name") for t in (Fake.requests[-1].get("tools") or [])] if Fake.requests else []
+
+    def call(name, arguments):
+        # A tool that is on but not shown this turn is run through call_tool (tool selection).
+        if name in offered() or "call_tool" not in offered():
+            return {"tool_calls": [{"name": name, "arguments": arguments}]}
+        return {"tool_calls": [{"name": "call_tool", "arguments": {"name": name, "arguments": arguments}}]}
+
+    def card_or_done():
+        s.wait_for(lambda: "Allow once" in s.page_text() or idle(s), 30, "card or done")
+        return "Allow once" in s.page_text()
+
+    def no_card_until_done():
+        time.sleep(0.4)
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            assert "Allow once" not in s.page_text(), "a card was shown in Full access"
+            if idle(s):
+                return
+            time.sleep(0.2)
+        raise AssertionError("the turn did not finish")
+
+    def click_in_confirmation(label):
+        time.sleep(0.9)
+        done = s.execute(
+            """
+            const d = document.querySelector('[role=alertdialog][data-state=open]');
+            const b = d && [...d.querySelectorAll('button')].find(x => x.innerText.trim() === arguments[0]);
+            if (b) b.click();
+            return !!b;
+            """,
+            label,
+        )
+        assert done, f"no {label!r} in the confirmation"
+        time.sleep(0.4)
+
+    def header(label):
+        return s.execute(
+            "return !!document.querySelector('button[aria-label=\"' + arguments[0] + '\"]');", label)
+
+    def choose(current, label):
+        # The chat header's mode menu: open it, then pick a mode.
+        s.click_button(current)
+        el = s.wait_for(lambda: s.execute(
+            """
+            const l = arguments[0];
+            return [...document.querySelectorAll('[role=menuitemradio]')]
+              .find(e => (e.innerText || '').trim().startsWith(l)) || null;
+            """, label) or False, 10, f"the menu item {label!r}")
+        s.click(next(iter(el.values())))
+        time.sleep(0.4)
+
+    def mode():
+        return s.invoke("get_chat_approval_mode", {"chatId": chat})
+
+    def audit():
+        return s.invoke("list_audit", {"filter": {"chatId": chat}})
+
+    try:
+        assert s.invoke("get_default_approval_mode") == "ask", "a fresh install does not start in Ask first"
+        assert mode() == "ask"
+        # Outside Full access the folder tools are not offered at all.
+        Fake.queue.append({"content": "ready"})
+        send(s, "hello")
+        wait_idle(s)
+        assert not {"make_folder", "move_path", "delete_folder"} & set(offered()), offered()
+        assert "Full access is on" not in json.dumps(Fake.requests[-1]["messages"][0])
+
+        # Only the user's own command switches the mode: the generic settings command cannot.
+        for key in ("approvalModeDefault", "allowAllDefault"):
+            try:
+                s.invoke("set_setting", {"key": key, "value": "fullAccess"})
+                raise AssertionError(f"set_setting accepted {key}")
+            except WebDriverError as e:
+                assert "cannot be changed this way" in str(e), e
+
+        # 1. The header menu: Full access asks first with a plain warning; Cancel changes nothing.
+        s.wait_for(lambda: header("Ask first"), 10, "the Ask first button")
+        choose("Ask first", "Full access")
+        s.wait_text("Full access in this chat?", 10)
+        dialog = s.execute(
+            "const d = document.querySelector('[role=alertdialog][data-state=open]'); return d ? d.innerText : null;")
+        (OUT / "full-access-dialog.txt").write_text(dialog or "")
+        s.screenshot(str(OUT / "full-access-dialog.png"))
+        for needle in ("delete", "trash", "trick", "app's own data", "Cancel", "Turn on Full access"):
+            assert needle in dialog, (needle, dialog)
+        assert mode() == "ask", "opening the confirmation switched the mode"
+        click_in_confirmation("Cancel")
+        assert mode() == "ask", "Cancel switched the mode"
+        choose("Ask first", "Full access")
+        s.wait_text("Full access in this chat?", 10)
+        click_in_confirmation("Turn on Full access")
+        s.wait_for(lambda: mode() == "fullAccess", 10, "the chat in Full access")
+        s.wait_for(lambda: header("Full access"), 10, "the Full access button")
+        s.screenshot(str(OUT / "full-access-on.png"))
+
+        # 2. Nothing asks: a read outside the approved folders, a new folder, a move into it, a
+        #    delete, a command, and a whole folder deleted, all without a card.
+        Fake.queue.append(call("read_file", {"path": str(outside / "report.txt")}))
+        Fake.queue.append(call("make_folder", {"path": str(outside / "sorted" / "2026")}))
+        Fake.queue.append(call("move_path", {"from": str(outside / "report.txt"), "to": str(outside / "sorted" / "2026")}))
+        Fake.queue.append(call("delete_file", {"path": str(doomed)}))
+        Fake.queue.append(call("run_command", {"command": "echo made-by-command > made.txt", "cwd": str(outside)}))
+        Fake.queue.append(call("delete_folder", {"path": str(outside / "trash")}))
+        Fake.queue.append({"content": "organised"})
+        send(s, "organise that folder")
+        no_card_until_done()
+        req = Fake.requests[-1]
+        system = json.dumps(req["messages"][0])
+        assert "Full access is on" in system, system[:2000]
+        assert (outside / "sorted" / "2026" / "report.txt").read_text() == "quarterly numbers\n"
+        assert not (outside / "report.txt").exists()
+        assert not doomed.exists(), "the delete did not run"
+        assert (outside / "made.txt").read_text().strip() == "made-by-command"
+        assert not (outside / "trash").exists(), "delete_folder did not run"
+        rows = audit()
+        notes.append("audit: " + json.dumps([(r["tool"], r["decision"], r.get("note")) for r in rows[:8]]))
+        for tool in ("read_file", "make_folder", "move_path", "delete_file", "run_command", "delete_folder"):
+            assert any(r["tool"] == tool and r["decision"] == "allowed_by_mode" and r.get("note") == "Full access"
+                       for r in rows), (tool, rows[:8])
+
+        # 3. The app's own folders stay out of reach, and so does the folder that holds them.
+        Fake.queue.append(call("read_file", {"path": str(c.db)}))
+        Fake.queue.append(call("delete_folder", {"path": str(home)}))
+        Fake.queue.append(call("list_dir", {"path": str(c.db.parents[1]), "depth": 2}))
+        Fake.queue.append({"content": "refused"})
+        send(s, "go on")
+        no_card_until_done()
+        assert c.db.exists() and home.exists()
+        rows = audit()
+        assert any(r["tool"] == "read_file" and r["decision"] == "denied" and str(c.db) in json.dumps(r["arguments"])
+                   for r in rows), rows[:4]
+        assert any(r["tool"] == "delete_folder" and r["decision"] == "denied" for r in rows), rows[:4]
+        listing = [m for m in messages(s, chat) if m["role"] == "tool"][-1]
+        text = json.dumps(listing)
+        assert "not reachable" in text and "app.db" not in text, text[:2000]
+
+        # The audit log in Settings words it for people.
+        s.click_button("Settings")
+        s.click_button("Audit log")
+        s.wait_text("allowed by Full access", 10)
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.4)
+
+        # 4. Back to Ask first: one click, no confirmation, and a write asks again.
+        choose("Full access", "Ask first")
+        s.wait_for(lambda: mode() == "ask", 10, "the chat back in Ask first")
+        assert "Full access in this chat?" not in s.page_text()
+        Fake.queue.append(call("write_file", {"path": str(outside / "after.txt"), "content": "x"}))
+        Fake.queue.append({"tool_calls": [{"name": "make_folder", "arguments": {"path": str(inside / "nope")}}]})
+        Fake.queue.append({"content": "refused"})
+        send(s, "go on")
+        wait_idle(s)
+        assert "Allow once" not in s.page_text()
+        assert not (outside / "after.txt").exists(), "a path outside the approved folders was written after Full access ended"
+        assert not (inside / "nope").exists(), "a folder tool ran outside Full access"
+        assert not {"make_folder", "move_path", "delete_folder"} & set(offered()), offered()
+
+        # 5. Settings: the mode every chat starts in, saved, with the same confirmation.
+        s.click_button("Settings")
+        s.click_button("Permissions")
+        s.wait_text("Approvals", 10)
+        s.click_button("Full access")
+        s.wait_text("Full access in every chat?", 10)
+        assert s.invoke("get_default_approval_mode") == "ask"
+        click_in_confirmation("Turn on Full access")
+        s.wait_for(lambda: s.invoke("get_default_approval_mode") == "fullAccess", 10, "the default in Full access")
+        assert mode() == "fullAccess", "an open chat did not follow the default"
+        assert s.invoke("get_setting", {"key": "approvalModeDefault"}) == "fullAccess"
+        assert s.invoke("get_setting", {"key": "allowAllDefault"}) is True
+        s.click_button("Ask first")
+        s.wait_for(lambda: s.invoke("get_default_approval_mode") == "ask", 10, "the default back in Ask first")
+        assert mode() == "ask", "switching the default back left a chat in Full access"
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+    finally:
+        s.invoke("set_default_approval_mode", {"mode": "ask"})
+        s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
+
+
 @probe("tool-selection")
 def p_tool_selection(c, notes):
     """Adaptive tool selection: a turn shows the model a small set of the tools that are on,
@@ -2794,7 +2997,7 @@ def p_context_inspector(c, notes):
 
 
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
-          p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all,
+          p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all, p_full_access,
           p_tool_selection, p_artifacts, p_search, p_pinned,
           p_tool_errors_output, p_task_state, p_mentions, p_capability_check, p_context_inspector]
 

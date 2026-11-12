@@ -246,6 +246,40 @@ fn last_lines(tail: &[u8], cut_at_start: bool) -> String {
     lines[from..].join("\n")
 }
 
+/// Why `command` is refused when its text names one of the app's own folders (the
+/// database, logs and install folder, 13.4 step 1), in every mode. The file tools never reach
+/// those folders; this keeps an obvious command (`sqlite3 <data>/app.db`, `cat <logs>/…`)
+/// from reaching them either. It reads text, so a command that builds the path from pieces
+/// is not caught: the folders bind the app's tools, not the programs a command starts.
+fn names_app_folder(command: &str, forbidden: &[String]) -> Option<String> {
+    let text = command.to_lowercase().replace('\\', "/");
+    let mut marks: Vec<String> = Vec::new();
+    for f in forbidden {
+        let mut forms = vec![f.clone()];
+        if let Ok(c) = dunce::canonicalize(f) {
+            forms.push(c.display().to_string());
+        }
+        for form in forms {
+            let form = form.to_lowercase().replace('\\', "/");
+            let form = form.trim_end_matches('/').to_string();
+            // The app's identifier (`io.github.<owner>.<app>`) names its data and log folders
+            // on every system, also when written from `~` or an environment variable.
+            if let Some(last) = form.rsplit('/').next()
+                && last.matches('.').count() >= 2
+                && last.len() >= 12
+            {
+                marks.push(last.to_string());
+            }
+            if form.len() > 3 {
+                marks.push(form);
+            }
+        }
+    }
+    marks.iter().any(|m| text.contains(m.as_str())).then(|| {
+        "The command names the app's own folders (its database, logs or program files), which tools never reach. Nothing was run.".to_string()
+    })
+}
+
 fn arg_looks_like_path(a: &str) -> bool {
     !a.starts_with('-')
         && (a.contains('/') || a.contains('\\') || a.starts_with('.') || a.starts_with('~'))
@@ -327,6 +361,9 @@ impl BuiltinServer for TerminalServer {
                 payload: Value::Null,
             })
         };
+        if let Some(why) = names_app_folder(&command, &chat.forbidden_folders) {
+            return deny(why);
+        }
         let Some(cwd_arg) = cwd_arg else {
             return deny("No folder is approved for this chat, so commands have nowhere to run. The user can approve a folder in the Tools panel.".into());
         };
@@ -898,6 +935,41 @@ mod tests {
         assert!(matches!(a.scope, Scope::Commands { .. }));
         let a = describe(&s, &c, json!({"command": "echo $(whoami)"})).await;
         assert_eq!(a.risk, Risk::AlwaysAsk);
+    }
+
+    /// A command that names the app's own folders is refused before anything else, in every
+    /// mode and with the whole computer approved (Full access): by its path, written either
+    /// way round, in any letter case, or by the app's identifier.
+    #[tokio::test]
+    async fn a_command_that_names_the_app_folders_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let data = root.join("io.github.someone.someapp");
+        std::fs::create_dir_all(data.join("logs")).unwrap();
+        let s = server(&[]);
+        let c = ChatContext {
+            forbidden_folders: vec![data.display().to_string()],
+            full_access: true,
+            ..chat(&root)
+        };
+        let db = data.join("app.db").display().to_string();
+        for command in [
+            format!("sqlite3 {db} .dump"),
+            format!("cat {}", db.to_uppercase()),
+            format!("python3 -c \"open('{}')\"", db.replace('/', "\\\\")),
+            "cat ~/.local/share/io.github.someone.someapp/app.db".to_string(),
+            "Get-Content $env:APPDATA\\io.github.someone.someapp\\app.db".to_string(),
+        ] {
+            let a = describe(&s, &c, json!({ "command": command })).await;
+            let why = a
+                .hard_limit
+                .unwrap_or_else(|| panic!("{command} was let through"));
+            assert!(why.contains("app's own folders"), "{why}");
+        }
+        for command in ["cargo build", "ls io.github", "cat notes.txt"] {
+            let a = describe(&s, &c, json!({ "command": command })).await;
+            assert!(a.hard_limit.is_none(), "{command}: {:?}", a.hard_limit);
+        }
     }
 
     /// The file and git tools do not write in skill folders; the terminal still runs there

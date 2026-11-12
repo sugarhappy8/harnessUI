@@ -139,7 +139,7 @@ export function Welcome() {
         </h1>
         <p className="max-w-md text-sm text-fg-muted">
           Start a new chat or pick one from the list. The model runs on this computer. It asks before it changes
-          anything, unless you switch a chat to Allow all.
+          anything, unless you switch a chat to Allow all or Full access.
         </p>
       </div>
       <ModelCard onOpenModels={openModels} />

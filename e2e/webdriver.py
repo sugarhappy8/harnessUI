@@ -142,7 +142,7 @@ class Session:
                 """
                 const label = arguments[0];
                 const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-                return [...document.querySelectorAll('button,[role=menuitem],[role=radio],[role=option]')]
+                return [...document.querySelectorAll('button,[role=menuitem],[role=menuitemradio],[role=radio],[role=option]')]
                   .find(b => visible(b) && ((b.innerText || '').includes(label) || (b.getAttribute('aria-label') || '') === label)) || null;
                 """,
                 label,

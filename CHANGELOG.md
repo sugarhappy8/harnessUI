@@ -12,6 +12,7 @@ The owner asked for the app to "stop asking me to allow everything", named *Full
 
 ### Changed
 - `list_dir` and `search_files` no longer go into the app's own folders when they lie inside the folder being listed or searched (in every mode); a listing names such a folder and marks it "not reachable".
+- A terminal command whose text names the app's own folders (its database, logs or program files, or the app's identifier) is refused, in every mode.
 
 ## 0.0.4 (2026-11-12)
 

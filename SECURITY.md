@@ -94,15 +94,16 @@ can reach it.
   move and delete any file or folder on the computer (deleted files do not go to the
   trash), and use the browser and the accounts you are logged in to. Only the hard limits
   remain: a tool that is off stays off, and the app's own folders (its database, logs and
-  install folder) stay out of reach of its file tools. Your saved keys stay in the system
+  install folder) stay out of reach of its tools. Your saved keys stay in the system
   keychain, which no tool reads.
 
 What Full access means for safety, plainly: prompt injection is no longer stopped by an
 approval card. A web page, a file or a tool result that tricks the model can make it do
 anything your account can do, without asking. The app still marks such content as data,
-but a model that follows it anyway is not stopped. A command, unlike the file tools, is
-not held away from the app's folders: a program the model runs could read the app's
-database. Use Full access for a task you watch, with a model you trust, and switch it off
+but a model that follows it anyway is not stopped. A command whose text names the app's
+folders is refused, in every mode, but the app reads only the command line: a program the
+model runs, or a command that builds the path from pieces, can still read the app's
+database or ask the system keychain for your keys, as any program you run can. Use Full access for a task you watch, with a model you trust, and switch it off
 afterwards (one click). Calls that ran this way are in the audit log as "allowed by Full
 access".
 
