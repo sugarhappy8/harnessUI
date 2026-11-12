@@ -2263,9 +2263,9 @@ def p_tool_errors_output(c, notes):
 @probe("task-state")
 def p_task_state(c, notes):
     """Visible, resumable task state (0.0.4): a scripted update_task sets the goal and
-    steps, a write_file shows under changed files, Pause during a streamed reply stops it,
-    the task survives a reload, and Resume sends the continue message with the task note,
-    which is in the request once."""
+    steps, a write_file shows under changed files, an ordinary follow-up turn carries no
+    task note, Pause during a streamed reply stops it, the task survives a reload, and
+    Resume sends the continue message with the task note, which is in the request once."""
     s = c.s
     aside = 'aside[aria-label="Workbench"]'
     header = "Task state, from the app's record of the work in this chat."
@@ -2340,8 +2340,11 @@ def p_task_state(c, notes):
     assert "Paused" in tab_text()
     assert s.invoke("get_task", {"chatId": chat})["status"] == "paused"
     assert len(Fake.requests) == 1, len(Fake.requests)
-    first_note = user_text(Fake.requests[0])
-    assert header in first_note and goal in first_note, first_note[-900:]
+    # Nothing changed since the model recorded the task in this conversation: an ordinary
+    # follow-up turn carries no task note (its cached prompt stays valid).
+    follow_up = json.dumps(Fake.requests[0].get("messages", []))
+    assert "go on with it" in follow_up
+    assert "Task state, from the app" not in follow_up, user_text(Fake.requests[0])[-900:]
     reply = [m for m in messages(s, chat) if m["role"] == "assistant"][-1]["text"]
     assert len(reply) < len("Working on the switch now. " * 30), "the reply was not stopped"
 

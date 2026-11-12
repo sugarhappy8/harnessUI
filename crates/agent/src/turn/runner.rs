@@ -50,6 +50,10 @@ const MAX_SUMMARY_ROUNDS: u32 = 4;
 /// Candidate summary requests counted before a round gives up on finding one that fits.
 const MAX_SUMMARY_FIT_TRIES: usize = 6;
 
+mod preview;
+
+pub(super) use preview::preview;
+
 /// What to do after a response was handled.
 enum Next {
     /// Make the next model call.
@@ -726,22 +730,9 @@ impl<'a> Turn<'a> {
         if self.stub_earlier {
             stub_results(&mut earlier, |_| true, cpt);
         }
-        let calibrate = |message: &HistoryMessage| -> u32 {
-            if self.exact_counting {
-                estimate_message(message)
-            } else {
-                self.calibrator.calibrate(estimate_message(message))
-            }
-        };
-        let turn_tokens: u32 = self.turn.iter().map(calibrate).sum();
+        let calibrate = |message: &HistoryMessage| self.calibrated(message);
         let summary_cap = self.budget.summary_max_tokens();
-        let keep = self
-            .budget
-            .trigger
-            .saturating_sub(self.budget.fixed_overhead)
-            .saturating_sub(turn_tokens)
-            .saturating_sub(summary_cap);
-        let wanted = summarisable_prefix(&earlier, keep, calibrate);
+        let wanted = self.summarisable(&earlier);
         if wanted == 0 {
             return Ok(false);
         }
@@ -827,6 +818,29 @@ impl<'a> Turn<'a> {
             budget: self.budget,
         });
         Ok(true)
+    }
+
+    /// A stored message's estimate as this turn counts: calibrated unless the server
+    /// counts exactly.
+    fn calibrated(&self, message: &HistoryMessage) -> u32 {
+        if self.exact_counting {
+            estimate_message(message)
+        } else {
+            self.calibrator.calibrate(estimate_message(message))
+        }
+    }
+
+    /// Stage 2: how many of the oldest `earlier` messages a summary would replace, so that
+    /// the rest, this turn and the summary fit under the trigger.
+    fn summarisable(&self, earlier: &[HistoryMessage]) -> usize {
+        let turn_tokens: u32 = self.turn.iter().map(|m| self.calibrated(m)).sum();
+        let keep = self
+            .budget
+            .trigger
+            .saturating_sub(self.budget.fixed_overhead)
+            .saturating_sub(turn_tokens)
+            .saturating_sub(self.budget.summary_max_tokens());
+        summarisable_prefix(earlier, keep, |m| self.calibrated(m))
     }
 
     /// The stage-2 summary request for `messages` (the oldest earlier messages): the same

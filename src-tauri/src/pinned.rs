@@ -117,13 +117,18 @@ fn tell_window(app: &AppHandle, chat_id: Option<i64>) {
 /// then the chat's own.
 ///
 /// Fails closed: if the database cannot be read, the turn does not start (nothing has been
-/// sent yet), rather than going on without instructions the user relies on. The turn's
-/// end-of-turn clean-up (`computer_cmd::end_turn`) is done here on that path, because the
-/// caller returns at once.
-pub async fn for_turn(app: &AppHandle, chat_id: store::ChatId) -> AppResult<Vec<String>> {
+/// sent yet), rather than going on without instructions the user relies on. For a real
+/// turn (`turn` true) the end-of-turn clean-up (`computer_cmd::end_turn`) is done here on
+/// that path, because the caller returns at once; the Context tab's preview (`turn` false)
+/// began nothing and changes nothing.
+pub async fn for_turn(
+    app: &AppHandle,
+    chat_id: store::ChatId,
+    turn: bool,
+) -> AppResult<Vec<String>> {
     let state = app.state::<AppState>();
     let pins = texts(state.store.pins_for_chat(chat_id).await);
-    if pins.is_err() {
+    if pins.is_err() && turn {
         crate::computer_cmd::end_turn(app);
     }
     pins

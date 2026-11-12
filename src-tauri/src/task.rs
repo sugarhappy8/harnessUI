@@ -28,6 +28,7 @@ mod checks;
 mod edits;
 mod note;
 mod server;
+mod when;
 
 use mcp_host::ToolOutput;
 use serde::Serialize;
@@ -191,26 +192,78 @@ pub async fn after_call(
 
 // ---- The note at the start of a turn -------------------------------------------------------
 
-/// The task note the next turn of a chat would start with, or `None` when there is
-/// nothing to tell. Read-only: for the Context inspector, and the same text
-/// [`begin_turn`] gives the turn.
+/// The task note the next real turn of a chat would start with, or `None` when it would
+/// start without one: no task, nothing to tell, or the model already has the task state
+/// from the conversation (`when.rs`). Read-only: for the Context inspector, and the same
+/// text [`begin_turn`] gives the turn.
 #[allow(
     dead_code,
     reason = "for the Context inspector (feature I), which calls it"
 )]
 pub async fn note_for_turn(state: &AppState, chat_id: i64) -> Option<String> {
-    note_in(&state.store, chat_id).await
+    let summary = summary_marker(&state.store, chat_id).await;
+    note_in(&state.store, &when::MEMORY, chat_id, summary).await
 }
 
-async fn note_in(store: &Store, chat_id: i64) -> Option<String> {
-    note_from(store.get_task(ChatId(chat_id)).await)
+/// For the Context inspector: `None` when the chat has no task, otherwise one plain
+/// sentence saying whether the task state goes with the next message, and why.
+/// Read-only.
+#[allow(
+    dead_code,
+    reason = "for the Context inspector (feature I), which calls it"
+)]
+pub async fn note_status_for_turn(state: &AppState, chat_id: i64) -> Option<String> {
+    let summary = summary_marker(&state.store, chat_id).await;
+    status_in(&state.store, &when::MEMORY, chat_id, summary).await
 }
 
-/// The note for a task as it was read. A task that cannot be read sends no note: the
-/// Task tab says so and offers to clear it.
-fn note_from(loaded: Result<Option<Task>, StoreError>) -> Option<String> {
+/// The chat's summary of earlier messages that the next turn uses (its row id), read the
+/// way `turns::run` reads it: the latest summary on the branch the chat shows.
+async fn summary_marker(store: &Store, chat_id: i64) -> Option<i64> {
+    let path = store.current_path(ChatId(chat_id)).await.ok()?;
+    let ids: Vec<store::MessageId> = path.iter().map(|m| m.id).collect();
+    let summary = store
+        .latest_summary_on_path(ChatId(chat_id), &ids)
+        .await
+        .ok()
+        .flatten()?;
+    Some(summary.id.0)
+}
+
+async fn note_in(
+    store: &Store,
+    memory: &when::TurnMemory,
+    chat_id: i64,
+    summary: Option<i64>,
+) -> Option<String> {
+    note_from(
+        store.get_task(ChatId(chat_id)).await,
+        memory.get(chat_id),
+        summary,
+    )
+}
+
+async fn status_in(
+    store: &Store,
+    memory: &when::TurnMemory,
+    chat_id: i64,
+    summary: Option<i64>,
+) -> Option<String> {
+    let task = store.get_task(ChatId(chat_id)).await.ok().flatten()?;
+    Some(when::status_sentence(&task, memory.get(chat_id), summary))
+}
+
+/// The note for a task as it was read, if one is due. A task that cannot be read sends no
+/// note: the Task tab says so and offers to clear it.
+fn note_from(
+    loaded: Result<Option<Task>, StoreError>,
+    seen: Option<when::Seen>,
+    summary: Option<i64>,
+) -> Option<String> {
     match loaded {
-        Ok(task) => task.as_ref().and_then(note::for_turn),
+        Ok(task) => task
+            .as_ref()
+            .and_then(|t| when::note_if_due(t, seen, summary)),
         Err(e) => {
             tracing::debug!("the task note was left out: {e}");
             None
@@ -219,30 +272,42 @@ fn note_from(loaded: Result<Option<Task>, StoreError>) -> Option<String> {
 }
 
 /// For `turns::run`: the task note for the turn that starts now (exactly what
-/// [`note_for_turn`] returns at this moment), and the record that the model has been
-/// sent it: what the user changed is not announced again, and a paused task is active
-/// again, because a turn is the work going on.
+/// [`note_for_turn`] returns at this moment, often nothing), and the record that the turn
+/// started: what the user changed is not announced again, a paused task is active again,
+/// and the chat's memory of notes moves on.
 pub async fn begin_turn(app: &AppHandle, chat_id: i64) -> Option<String> {
     let state = app.try_state::<AppState>()?;
-    let (note, stored) = start_turn(&state.store, chat_id).await;
+    let summary = summary_marker(&state.store, chat_id).await;
+    let (note, stored) = start_turn(&state.store, &when::MEMORY, chat_id, summary).await;
     if stored {
         changed(app, chat_id);
     }
     note
 }
 
-/// The note, and whether the stored task changed.
-async fn start_turn(store: &Store, chat_id: i64) -> (Option<String>, bool) {
+/// The note, and whether the stored task changed. Updates `memory` for the chat.
+async fn start_turn(
+    store: &Store,
+    memory: &when::TurnMemory,
+    chat_id: i64,
+    summary: Option<i64>,
+) -> (Option<String>, bool) {
+    let seen = memory.get(chat_id);
     let result = store
-        .change_task(ChatId(chat_id), |slot| {
-            // The same renderer as `note_in`, over the same record, before it changes.
-            let note = slot.as_ref().and_then(note::for_turn);
+        .change_task(ChatId(chat_id), move |slot| {
+            // The same decision and renderer as `note_in`, over the same record, before it
+            // changes.
+            let note = slot
+                .as_ref()
+                .and_then(|t| when::note_if_due(t, seen, summary));
             let before = slot.clone();
             edits::turn_started(slot);
             (note, *slot != before)
         })
         .await;
-    turn_start_from(result.map(|(_, r)| r))
+    let (note, stored) = turn_start_from(result.map(|(_, r)| r));
+    memory.set(chat_id, when::after_turn(seen, note.is_some(), summary));
+    (note, stored)
 }
 
 /// The note and whether the record changed; nothing at all when the task cannot be read.
@@ -510,6 +575,8 @@ pub async fn clear_task(
     chat_id: i64,
 ) -> AppResult<()> {
     only_main_window(window.label())?;
+    // The next turn starts as if the app had just started.
+    when::MEMORY.forget(chat_id);
     if state.store.delete_task(ChatId(chat_id)).await? {
         changed(&app, chat_id);
     }

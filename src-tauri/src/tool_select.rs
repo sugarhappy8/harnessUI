@@ -942,6 +942,29 @@ pub async fn for_turn(
     enabled: Vec<RegisteredTool>,
     n_ctx: u32,
 ) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
+    choose(state, chat, history, enabled, n_ctx, true).await
+}
+
+/// [`for_turn`] without remembering anything: the same choice from the same inputs, for
+/// the Context tab's view of the next request (0.0.4).
+pub async fn preview_for_turn(
+    state: &AppState,
+    chat: &store::Chat,
+    history: &[HistoryMessage],
+    enabled: Vec<RegisteredTool>,
+    n_ctx: u32,
+) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
+    choose(state, chat, history, enabled, n_ctx, false).await
+}
+
+async fn choose(
+    state: &AppState,
+    chat: &store::Chat,
+    history: &[HistoryMessage],
+    enabled: Vec<RegisteredTool>,
+    n_ctx: u32,
+    remember: bool,
+) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
     let setting = settings(state).await;
     if !setting.auto || enabled.is_empty() {
         return (enabled, Vec::new());
@@ -972,6 +995,9 @@ pub async fn for_turn(
         max: setting.max,
         allowance: Some(room),
     });
+    if !remember {
+        return split(enabled, &shown);
+    }
     let stored = crate::mcp_cmd::change_selection_memory(state, chat.id, |was_shown, found| {
         *was_shown = remembered(was_shown, &shown);
         // What waited had its turn.

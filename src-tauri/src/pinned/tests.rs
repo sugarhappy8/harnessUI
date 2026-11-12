@@ -213,18 +213,27 @@ fn a_turn_whose_pins_cannot_be_read_does_not_start() {
     );
 }
 
-/// `turns::run` sets the pins with `?` (a failed read stops the turn) BEFORE it copies the
-/// turn's input for helpers, and a turn the pins do not fit gets this module's advice.
+/// The shared assembly sets the pins with `?` (a failed read stops the turn), and
+/// `turns::run` assembles BEFORE it copies the turn's input for helpers; a turn the pins do
+/// not fit gets this module's advice.
 #[test]
 fn the_turn_sets_the_pins_before_the_helpers_copy_and_explains_a_refusal() {
     let turns = read(&manifest().join("src").join("turns.rs"));
-    let line = "input.pinned = crate::pinned::for_turn(app, chat_id).await?;";
+    let line = "input.pinned = crate::pinned::for_turn(app, chat_id, turn).await?;";
     let set = turns.find(line).expect("turns.rs sets the pins");
     assert_eq!(turns.matches("input.pinned").count(), 1);
-    let copy = turns
-        .find("let helper_input = input.clone();")
+    // In the shared assembly, which a real turn runs before it copies the input for helpers.
+    let assemble = turns.find("pub(crate) async fn assemble(").expect("the assembly");
+    let run = turns.find("pub async fn run(").expect("run");
+    assert!(assemble < set && set < run, "the pins are not set in the assembly");
+    let body = &turns[run..];
+    let assembled = body
+        .find("assemble(app, &req, Assembly::Turn).await?")
+        .expect("run assembles");
+    let copy = body
+        .find("let mut helper_input = input.clone();")
         .expect("the helper's copy");
-    assert!(set < copy, "the pins are set after the helper's copy");
+    assert!(assembled < copy, "the helper's copy is made before the pins are set");
     assert!(
         turns.contains("(\"pinned_do_not_fit\", _) => crate::pinned::next_step(local),"),
         "failure_next_step has no arm for pinned_do_not_fit"

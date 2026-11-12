@@ -485,6 +485,124 @@ pub struct TurnOutcome {
     pub calibrator: TokenCalibrator,
 }
 
+/// One block of the system message, as it appears in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemBlock {
+    /// Which part of the system message it is.
+    pub kind: SystemBlockKind,
+    /// Its text, exactly as in the system message.
+    pub text: String,
+    /// About how many tokens it takes.
+    pub tokens: u32,
+}
+
+/// The parts of the system message ([`crate::prompt::system_message`]), in their order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SystemBlockKind {
+    /// The chat's system prompt.
+    Prompt,
+    /// The user's pinned instructions.
+    Pinned,
+    /// The agent preamble (tools on).
+    Preamble,
+    /// The skills index.
+    SkillsIndex,
+    /// The text of one loaded skill.
+    LoadedSkill {
+        /// The skill's name.
+        name: String,
+    },
+    /// The summary of earlier messages.
+    Summary,
+}
+
+/// What the loop's context stages would remove next, in their order (ARCHITECTURE.md 8.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NextCompaction {
+    /// Stage 1: the results of tool calls in earlier turns become one-line notes.
+    ShortenEarlierResults {
+        /// How many results.
+        results: usize,
+    },
+    /// Stage 2: the oldest earlier messages are replaced by a summary the model writes.
+    SummariseEarlier {
+        /// How many of the oldest messages the loop would choose (while everything fits,
+        /// the oldest whole turn: the least a summary replaces).
+        messages: usize,
+    },
+    /// Stage 3: older tool results of the turn itself become one-line notes.
+    ShortenTurnResults,
+    /// Nothing is left to remove.
+    Nothing,
+}
+
+/// The first request of a turn, built by the loop's own code and not sent: for showing the
+/// user what the model would receive. Building it sends nothing to the model and changes
+/// nothing; the local model server may be asked to count tokens, as a turn does.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnPreview {
+    /// The request as the turn's first model call would send it (`max_tokens` set).
+    pub request: crate::types::ChatRequest,
+    /// The blocks of its system message, in order; joined with a blank line they are the
+    /// system message.
+    pub system_blocks: Vec<SystemBlock>,
+    /// The context numbers (fixed overhead measured as the turn measures it).
+    pub budget: ContextBudget,
+    /// The request's size in tokens as the loop counts it.
+    pub prompt_tokens: u32,
+    /// True when that count is the model server's own (local), not an estimate.
+    pub exact: bool,
+    /// The turn would not start: pinned instructions or tools do not fit (the loop's own
+    /// status and message).
+    pub refusal: Option<TurnStatus>,
+    /// Tools are offered.
+    pub tools_on: bool,
+    /// Tools left out because their settings contain chat markup.
+    pub withheld_tools: Vec<String>,
+    /// What the tool definitions take of the fixed overhead.
+    pub tool_tokens: u32,
+    /// The most the fixed overhead may be, pins left out, with tools on (40% of the budget).
+    pub tools_allowance: u32,
+    /// The fixed overhead without the pinned instructions (what the tools' share is checked
+    /// against).
+    pub unpinned_overhead: u32,
+    /// What the pinned instructions take.
+    pub pinned_tokens: u32,
+    /// The most they may take (25% of the budget).
+    pub pinned_allowance: u32,
+    /// The messages sent after the system message, before projection (stage-1 notes in
+    /// place when the request needs them), with their token estimates.
+    pub kept: Vec<(HistoryMessage, u32)>,
+    /// Stored messages replaced by the summary of earlier messages, with their estimates.
+    pub left_out: Vec<(HistoryMessage, u32)>,
+    /// Stages this request already needs that the preview can apply (stage 1).
+    pub applied: Vec<u8>,
+    /// The request is over the compaction trigger even so: [`TurnPreview::next`] happens
+    /// before it is sent.
+    pub over_trigger: bool,
+    /// The request is over the whole budget.
+    pub over_budget: bool,
+    /// What the context stages would remove next.
+    pub next: NextCompaction,
+}
+
+/// Builds the first request of a turn exactly as [`run_turn`] would, with the same
+/// counting, fit checks and context stages, and sends nothing: stage 2 (a summary written
+/// by the model) is reported in [`TurnPreview::next`], never run. `tools` is only listed,
+/// never described or run.
+pub async fn preview_turn(
+    client: &OpenAiClient,
+    tools: &dyn ToolHost,
+    sanitizer: &Sanitizer,
+    input: TurnInput,
+) -> TurnPreview {
+    runner::preview(client, tools, sanitizer, input).await
+}
+
 /// Runs one turn. Never panics on bad input from the model, the server or a tool; every
 /// failure ends in a [`TurnStatus`].
 pub async fn run_turn(

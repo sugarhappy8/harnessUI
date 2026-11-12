@@ -534,6 +534,9 @@ pub async fn start_benchmark(
         audit: audit.calls(),
     };
     let results = bench::run_all(&setup, &all, &cancel, progress_fn(&app, "bench")).await;
+    // The setup holds a sender of the audit writer: drop it, or closing the audit below
+    // would wait for the writer forever.
+    drop(setup);
     let cancelled = cancel.is_cancelled();
     let run = BenchRun {
         id: bench::new_id(),

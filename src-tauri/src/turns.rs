@@ -832,17 +832,7 @@ impl AppTools {
 #[async_trait]
 impl ToolHost for AppTools {
     fn tools(&self) -> Vec<ToolInfo> {
-        self.enabled
-            .iter()
-            .filter(|t| t.schema_error.is_none())
-            .map(|t| ToolInfo {
-                name: t.exposed.clone(),
-                description: t.def.description.clone(),
-                input_schema: t.def.input_schema.clone(),
-                read_only_hint: t.def.read_only,
-                destructive_hint: t.def.destructive,
-            })
-            .collect()
+        tool_infos(&self.enabled)
     }
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
         // [0.0.4 tool selection] A `call_tool` call is checked as the tool it names, against
@@ -1550,6 +1540,172 @@ pub struct TurnRequest {
     pub template: agent::turn::RequestTemplate,
 }
 
+/// The tools a turn offers, as the loop sees them: the shown tools whose schema is usable,
+/// in order. The Context tab lists them with this too.
+pub(crate) fn tool_infos(shown: &[mcp_host::RegisteredTool]) -> Vec<ToolInfo> {
+    shown
+        .iter()
+        .filter(|t| t.schema_error.is_none())
+        .map(|t| ToolInfo {
+            name: t.exposed.clone(),
+            description: t.def.description.clone(),
+            input_schema: t.def.input_schema.clone(),
+            read_only_hint: t.def.read_only,
+            destructive_hint: t.def.destructive,
+        })
+        .collect()
+}
+
+/// Whether an assembly is for a turn that starts now, or only shows what it would send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Assembly {
+    /// A real turn: what starting a turn changes is changed (the chat's "outside content"
+    /// mark for artifacts, the computer-use profile, the tools the chat was shown, the
+    /// skills server's turn settings, the task's record that its note was sent).
+    Turn,
+    /// The Context tab's view of the next request: the same reads, and nothing changed.
+    Preview,
+}
+
+/// What a turn sends, as [`assemble`] builds it.
+pub(crate) struct Assembled {
+    /// The turn's input: history, system prompt, pins, preamble, skills, summary, app
+    /// notes, thinking and request settings.
+    pub input: agent::turn::TurnInput,
+    /// The tools shown to the model this turn, in order (`run_subagent` last).
+    pub shown: Vec<mcp_host::RegisteredTool>,
+    /// The tools that are on but kept back (reachable through `find_tools`).
+    pub hidden: Vec<mcp_host::RegisteredTool>,
+    /// The chat's approved folders.
+    pub folders: Vec<String>,
+}
+
+/// Builds what a turn in this chat sends: the one place both a real turn ([`run`]) and the
+/// Context tab (`context_cmd`) get it from, so the tab shows exactly what the next turn
+/// would send. In [`Assembly::Preview`] nothing is changed; in [`Assembly::Turn`] the
+/// turn's start is recorded where it always was.
+pub(crate) async fn assemble(
+    app: &AppHandle,
+    req: &TurnRequest,
+    mode: Assembly,
+) -> AppResult<Assembled> {
+    let state = app.state::<AppState>();
+    let chat_id = req.chat.id;
+    let turn = mode == Assembly::Turn;
+    let path = state.store.path_to(chat_id, req.reply_to).await?;
+    let history = history_of(&state, &path).await?;
+    // [0.0.4 artifacts] A page the model writes after content from outside the
+    // conversation entered the chat runs no script until the user allows it.
+    if turn {
+        crate::artifacts::note_history(chat_id.0, &history);
+    }
+
+    // Tools enabled for this chat.
+    if turn {
+        crate::computer_cmd::prepare_turn(app, chat_id.0, &req.model_ref).await;
+    }
+    let enabled = crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
+    // [0.0.4 tool selection] Of the tools that are on in the chat, the ones shown to the
+    // model this turn. The rest stay reachable through `find_tools` and `call_tool`.
+    let (mut enabled, hidden) = if turn {
+        crate::tool_select::for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx).await
+    } else {
+        crate::tool_select::preview_for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx)
+            .await
+    };
+    // `run_subagent` goes last, so a helper's tool list (the same without it) is a prefix
+    // of the turn's and the model server can reuse more of its cached prompt (8.5).
+    enabled.sort_by_key(crate::subagent::is_tool);
+    let folders: Vec<String> = state
+        .store
+        .approved_folders_for_chat(chat_id)
+        .await?
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    let skills_srv = state.skills.clone();
+    if turn {
+        // One turn runs at a time, so the skills server's per-turn settings are global.
+        skills_srv.set_context_tokens(req.caps.n_ctx as usize);
+        // [0.0.4 tool selection] On in the chat, whether or not this turn shows it.
+        skills_srv.set_terminal_enabled(
+            enabled
+                .iter()
+                .chain(&hidden)
+                .any(|t| t.server == "terminal"),
+        );
+    }
+
+    let default_prompt: Option<String> = state
+        .store
+        .get_setting(crate::settings::DEFAULT_SYSTEM_PROMPT)
+        .await
+        .ok()
+        .flatten();
+    let mut input =
+        agent::turn::TurnInput::new(history, req.caps, req.template.clone());
+    let stored_steps: Option<serde_json::Value> = state
+        .store
+        .get_setting(crate::settings::STEPS_PER_TURN)
+        .await
+        .ok()
+        .flatten();
+    input.step_cap = crate::settings::steps_per_turn(stored_steps.as_ref());
+    let chat_prefs: ChatTools =
+        serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
+    input.thinking = !chat_prefs.thinking_off;
+    crate::evals::profile::apply_to_turn(&state, &req.model_ref, &chat_prefs, &mut input).await; // [0.0.4 profile]
+    input.system_prompt = req
+        .chat
+        .system_prompt
+        .clone()
+        .or(default_prompt)
+        .unwrap_or_else(|| "You are a helpful assistant.".into());
+    input.preamble = Some(agent::prompt::Preamble {
+        approved_folders: folders.clone(),
+        os: if cfg!(windows) {
+            "Windows".into()
+        } else {
+            "macOS".into()
+        },
+        path_separator: if cfg!(windows) {
+            "\\".into()
+        } else {
+            "/".into()
+        },
+    });
+    let enabled_skills = skills_srv.enabled();
+    if !enabled_skills.is_empty() {
+        let refs: Vec<&tools::Skill> = enabled_skills.iter().collect();
+        input.skills_index = Some(tools::skills::index_block(&refs));
+    }
+    input.loaded_skills = skills_srv
+        .loaded_in(chat_id.0)
+        .into_iter()
+        .map(|s| agent::prompt::LoadedSkill {
+            name: s.name.clone(),
+            text: s.body.clone(),
+        })
+        .collect();
+    input.pinned = crate::pinned::for_turn(app, chat_id, turn).await?; // [0.0.4 pinned]
+    input.summary = latest_summary(&state, chat_id, &path).await;
+    if turn {
+        input
+            .app_notes
+            .extend(crate::task::begin_turn(app, chat_id.0).await); // [0.0.4 task]
+    } else {
+        input
+            .app_notes
+            .extend(crate::task::note_for_turn(&state, chat_id.0).await);
+    }
+    Ok(Assembled {
+        input,
+        shown: enabled,
+        hidden,
+        folders,
+    })
+}
+
 /// Runs one agent turn for a chat and streams it to `channel`.
 pub async fn run(
     app: &AppHandle,
@@ -1559,23 +1715,16 @@ pub async fn run(
 ) -> AppResult<()> {
     let state = app.state::<AppState>();
     let chat_id = req.chat.id;
-    let path = state.store.path_to(chat_id, req.reply_to).await?;
-    let history = history_of(&state, &path).await?;
-    // [0.0.4 artifacts] A page the model writes after content from outside the
-    // conversation entered the chat runs no script until the user allows it.
-    crate::artifacts::note_history(chat_id.0, &history);
+    let local_endpoint = req.caps.local;
+    // Everything the turn sends, built where the Context tab builds it.
+    let Assembled {
+        input,
+        shown: enabled,
+        hidden,
+        folders,
+    } = assemble(app, &req, Assembly::Turn).await?;
 
-    // Tools enabled for this chat.
     let host = state.host.clone();
-    crate::computer_cmd::prepare_turn(app, chat_id.0, &req.model_ref).await;
-    let enabled = crate::mcp_cmd::enabled_for_chat(&state, &req.chat, Some(req.caps.n_ctx)).await;
-    // [0.0.4 tool selection] Of the tools that are on in the chat, the ones shown to the
-    // model this turn. The rest stay reachable through `find_tools` and `call_tool`.
-    let (mut enabled, hidden) =
-        crate::tool_select::for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx).await;
-    // `run_subagent` goes last, so a helper's tool list (the same without it) is a prefix
-    // of the turn's and the model server can reuse more of its cached prompt (8.5).
-    enabled.sort_by_key(crate::subagent::is_tool);
     let mut tool_prefs = HashMap::new();
     // [0.0.4 tool selection] Also for the tools that are kept back: one run through
     // `call_tool` is decided with the user's switches for it ("always ask", "any
@@ -1586,27 +1735,11 @@ pub async fn run(
             crate::mcp_cmd::tool_prefs_for(&state, &t.server, &t.original).await,
         );
     }
-    let folders: Vec<String> = state
-        .store
-        .approved_folders_for_chat(chat_id)
-        .await?
-        .into_iter()
-        .map(|f| f.path)
-        .collect();
     let skills_srv = state.skills.clone();
-    // One turn runs at a time, so the skills server's per-turn settings are global.
-    skills_srv.set_context_tokens(req.caps.n_ctx as usize);
-    // [0.0.4 tool selection] On in the chat, whether or not this turn shows it.
-    skills_srv.set_terminal_enabled(
-        enabled
-            .iter()
-            .chain(&hidden)
-            .any(|t| t.server == "terminal"),
-    );
     let chat_ctx = ChatContext {
         chat_id: chat_id.0,
         working_folder: working_folder_for(req.chat.working_folder.as_deref(), &folders),
-        approved_folders: folders.clone(),
+        approved_folders: folders,
         forbidden_folders: crate::permissions::forbidden_for_tools(app),
         skill_folders: skills_srv
             .enabled()
@@ -1692,65 +1825,15 @@ pub async fn run(
         prx,
     ));
 
-    let default_prompt: Option<String> = state
-        .store
-        .get_setting(crate::settings::DEFAULT_SYSTEM_PROMPT)
-        .await
-        .ok()
-        .flatten();
-    let local_endpoint = req.caps.local;
-    let mut input = agent::turn::TurnInput::new(history, req.caps, req.template);
-    let stored_steps: Option<serde_json::Value> = state
-        .store
-        .get_setting(crate::settings::STEPS_PER_TURN)
-        .await
-        .ok()
-        .flatten();
-    input.step_cap = crate::settings::steps_per_turn(stored_steps.as_ref());
-    let chat_prefs: ChatTools =
-        serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
-    input.thinking = !chat_prefs.thinking_off;
-    crate::evals::profile::apply_to_turn(&state, &req.model_ref, &chat_prefs, &mut input).await; // [0.0.4 profile]
-    input.system_prompt = req
-        .chat
-        .system_prompt
-        .clone()
-        .or(default_prompt)
-        .unwrap_or_else(|| "You are a helpful assistant.".into());
-    input.preamble = Some(agent::prompt::Preamble {
-        approved_folders: folders,
-        os: if cfg!(windows) {
-            "Windows".into()
-        } else {
-            "macOS".into()
-        },
-        path_separator: if cfg!(windows) {
-            "\\".into()
-        } else {
-            "/".into()
-        },
-    });
-    let enabled_skills = skills_srv.enabled();
-    if !enabled_skills.is_empty() {
-        let refs: Vec<&tools::Skill> = enabled_skills.iter().collect();
-        input.skills_index = Some(tools::skills::index_block(&refs));
-    }
-    input.loaded_skills = skills_srv
-        .loaded_in(chat_id.0)
-        .into_iter()
-        .map(|s| agent::prompt::LoadedSkill {
-            name: s.name.clone(),
-            text: s.body.clone(),
-        })
-        .collect();
     let sanitizer = agent::prompt::Sanitizer::for_endpoint(&req.client).await;
-    input.pinned = crate::pinned::for_turn(app, chat_id).await?; // [0.0.4 pinned]
     if subagents_on {
-        // A helper gets the same system prompt, preamble and skills, the same model and
-        // request settings, and none of the chat: no history and no summary.
-        let history = std::mem::take(&mut input.history);
-        let helper_input = input.clone();
-        input.history = history;
+        // A helper gets the same system prompt, pins, preamble and skills, the same model
+        // and request settings, and none of the chat: no history, no summary and no app
+        // notes (the task note is the chat's).
+        let mut helper_input = input.clone();
+        helper_input.history = Vec::new();
+        helper_input.summary = None;
+        helper_input.app_notes.clear();
         tools.helper = Some(HelperSetup {
             app: app.clone(),
             client: req.client.clone(),
@@ -1762,10 +1845,6 @@ pub async fn run(
             shared: shared.clone(),
         });
     }
-    input.summary = latest_summary(&state, chat_id, &path).await;
-    input
-        .app_notes
-        .extend(crate::task::begin_turn(app, chat_id.0).await); // [0.0.4 task]
     let _ = channel.send(TurnStreamEvent::Started {
         user_message_id: req.user_message_id.map(|m| m.0),
     });

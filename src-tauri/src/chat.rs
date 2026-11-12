@@ -431,15 +431,26 @@ pub async fn regenerate(
 }
 
 /// Where a request goes.
-struct Target {
-    client: OpenAiClient,
+pub(crate) struct Target {
+    pub(crate) client: OpenAiClient,
     model: String,
-    model_ref: String,
-    local: bool,
+    pub(crate) model_ref: String,
+    pub(crate) local: bool,
     n_ctx: Option<u32>,
 }
 
 async fn resolve_target(state: &AppState, model_ref: Option<&str>) -> AppResult<Target> {
+    target_for(state, model_ref, true).await
+}
+
+/// Where a turn's requests would go. `remember` false (the Context tab's view of the next
+/// request) asks the same questions and records nothing: what a remote endpoint reports
+/// is not kept for the Tools panel.
+pub(crate) async fn target_for(
+    state: &AppState,
+    model_ref: Option<&str>,
+    remember: bool,
+) -> AppResult<Target> {
     let Some(model_ref) = model_ref else {
         return Err(AppError::new(
             "no_model",
@@ -486,7 +497,9 @@ async fn resolve_target(state: &AppState, model_ref: Option<&str>) -> AppResult<
         // A model that reports no context (or a failed check) gets the user's setting,
         // 4,096 by default (8.4).
         let reported = client.context_length(model).await.ok().flatten();
-        crate::mcp_cmd::remember_context(model_ref, reported);
+        if remember {
+            crate::mcp_cmd::remember_context(model_ref, reported);
+        }
         let n_ctx = match reported {
             Some(n) => n,
             None => {
@@ -530,6 +543,26 @@ async fn generate(
             String::new(),
         ));
     };
+    let (caps, template) = turn_settings(state, &target);
+    let req = crate::turns::TurnRequest {
+        chat: chat.clone(),
+        reply_to,
+        user_message_id,
+        client: target.client,
+        model_ref: target.model_ref,
+        caps,
+        template,
+    };
+    let result = crate::turns::run(app, req, on_event, cancel).await;
+    state.generation.finish(generation_id);
+    result
+}
+
+/// What the model can do and the request template, for a turn sent to `target`.
+pub(crate) fn turn_settings(
+    state: &AppState,
+    target: &Target,
+) -> (agent::ModelCaps, agent::RequestTemplate) {
     let status = state.runtime.status();
     let caps = agent::ModelCaps {
         tools: if target.local {
@@ -553,18 +586,7 @@ async fn generate(
     if target.local {
         template.extra.insert("cache_prompt".into(), json!(true));
     }
-    let req = crate::turns::TurnRequest {
-        chat: chat.clone(),
-        reply_to,
-        user_message_id,
-        client: target.client,
-        model_ref: target.model_ref,
-        caps,
-        template,
-    };
-    let result = crate::turns::run(app, req, on_event, cancel).await;
-    state.generation.finish(generation_id);
-    result
+    (caps, template)
 }
 
 #[cfg(test)]

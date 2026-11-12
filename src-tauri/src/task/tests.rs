@@ -58,6 +58,12 @@ fn failed(text: &str) -> ToolOutput {
     ToolOutput::error(text)
 }
 
+/// A memory with nothing in it: as on the first turn after the app started, so a note is
+/// due whenever the task has something to tell.
+fn cold() -> when::TurnMemory {
+    when::TurnMemory::new()
+}
+
 async fn store_with_chat() -> (Store, i64) {
     let store = Store::open_in_memory().expect("open");
     let chat = store
@@ -653,8 +659,8 @@ fn written_task() -> Task {
 async fn a_turn_starts_with_the_task_note_and_records_that_it_was_sent() {
     let (store, chat) = store_with_chat().await;
     // No task: no note, and nothing is created.
-    assert_eq!(note_in(&store, chat).await, None);
-    assert_eq!(start_turn(&store, chat).await, (None, false));
+    assert_eq!(note_in(&store, &cold(), chat, None).await, None);
+    assert_eq!(start_turn(&store, &cold(), chat, None).await, (None, false));
     assert_eq!(store.get_task(ChatId(chat)).await.expect("get"), None);
 
     // The user paused the task and corrected the goal.
@@ -672,14 +678,14 @@ async fn a_turn_starts_with_the_task_note_and_records_that_it_was_sent() {
         .expect("seed");
 
     // What the Context inspector would show is what the turn gets.
-    let preview = note_in(&store, chat).await.expect("a note");
+    let preview = note_in(&store, &cold(), chat, None).await.expect("a note");
     let stored_before = store.get_task(ChatId(chat)).await.expect("get");
     assert_eq!(
         stored_before.as_ref().map(|t| t.status),
         Some(TaskStatus::Paused),
         "reading the note changes nothing"
     );
-    let (note, stored) = start_turn(&store, chat).await;
+    let (note, stored) = start_turn(&store, &cold(), chat, None).await;
     assert_eq!(note.as_deref(), Some(preview.as_str()));
     assert!(stored);
     assert!(preview.starts_with(note::HEADER));
@@ -707,7 +713,7 @@ async fn a_turn_starts_with_the_task_note_and_records_that_it_was_sent() {
     assert_eq!(task.updated_at, 10);
 
     // The next turn gets the state without the news, and writes nothing.
-    let (note, stored) = start_turn(&store, chat).await;
+    let (note, stored) = start_turn(&store, &cold(), chat, None).await;
     let note = note.expect("a note");
     assert!(!stored);
     assert!(!note.contains("since you last saw this"), "{note}");
@@ -721,14 +727,14 @@ async fn a_turn_starts_with_the_task_note_and_records_that_it_was_sent() {
     user_status(&store, chat, TaskStatus::Done, 20)
         .await
         .expect("done");
-    let (note, stored) = start_turn(&store, chat).await;
+    let (note, stored) = start_turn(&store, &cold(), chat, None).await;
     assert!(stored);
     assert!(
         note.expect("a note")
             .contains("- status: done (the user marked this task done)")
     );
-    assert_eq!(start_turn(&store, chat).await, (None, false));
-    assert_eq!(note_in(&store, chat).await, None);
+    assert_eq!(start_turn(&store, &cold(), chat, None).await, (None, false));
+    assert_eq!(note_in(&store, &cold(), chat, None).await, None);
 }
 
 /// `note_for_turn` (the Context inspector) and `begin_turn` (a real turn) wrap `note_in`
@@ -758,19 +764,117 @@ async fn the_inspector_and_the_turn_get_the_same_note() {
     facts.state.record_file("/work/a.rs", FileChange::Edited, 1);
     states.push(facts);
 
-    for task in states {
-        let (store, chat) = store_with_chat().await;
-        let seeded = task.clone();
-        store
-            .change_task(ChatId(chat), move |slot| *slot = Some(seeded))
-            .await
-            .expect("seed");
-        let inspector = note_in(&store, chat).await;
-        let again = note_in(&store, chat).await;
-        let (turn, _) = start_turn(&store, chat).await;
-        assert_eq!(inspector, again, "reading twice gives the same text");
-        assert_eq!(inspector, turn, "{:?} {:?}", task.status, task.state.user);
+    // The memory of the chat: none (first turn since the start), seen recently with the
+    // same summary, seen before another summary, and seen 8 turns ago.
+    let memories = [
+        None,
+        Some(when::Seen {
+            summary: Some(3),
+            turns: 2,
+        }),
+        Some(when::Seen {
+            summary: Some(2),
+            turns: 2,
+        }),
+        Some(when::Seen {
+            summary: Some(3),
+            turns: when::REFRESH_TURNS,
+        }),
+    ];
+    let mut sent = 0;
+    let mut silent = 0;
+    for task in &states {
+        for seen in memories {
+            let (store, chat) = store_with_chat().await;
+            let seeded = task.clone();
+            store
+                .change_task(ChatId(chat), move |slot| *slot = Some(seeded))
+                .await
+                .expect("seed");
+            let memory = cold();
+            if let Some(seen) = seen {
+                memory.set(chat, seen);
+            }
+            let record_before = store.get_task(ChatId(chat)).await.expect("get");
+            let inspector = note_in(&store, &memory, chat, Some(3)).await;
+            let status = status_in(&store, &memory, chat, Some(3)).await;
+            let again = note_in(&store, &memory, chat, Some(3)).await;
+            // Looking changes neither the memory nor the record.
+            assert_eq!(memory.get(chat), seen);
+            assert_eq!(
+                store.get_task(ChatId(chat)).await.expect("get"),
+                record_before
+            );
+            assert_eq!(inspector, again, "reading twice gives the same text");
+            let status = status.expect("a sentence");
+            assert_eq!(
+                status.starts_with("Sent with the next message"),
+                inspector.is_some(),
+                "{status}"
+            );
+            let (turn, _) = start_turn(&store, &memory, chat, Some(3)).await;
+            assert_eq!(
+                inspector, turn,
+                "{:?} {:?} {seen:?}",
+                task.status, task.state.user
+            );
+            // The turn moved the memory on.
+            assert_eq!(
+                memory.get(chat),
+                Some(when::after_turn(seen, turn.is_some(), Some(3)))
+            );
+            if turn.is_some() {
+                sent += 1;
+            } else {
+                silent += 1;
+            }
+        }
     }
+    // Both outcomes were covered.
+    assert!(sent > 0 && silent > 0, "{sent} {silent}");
+}
+
+/// A chat whose task the model wrote in this conversation: no note on the following turns
+/// until the user changes something, and then exactly once.
+#[tokio::test]
+async fn an_ordinary_turn_carries_no_note() {
+    let (store, chat) = store_with_chat().await;
+    let memory = cold();
+    // The first turn: no task yet.
+    assert_eq!(start_turn(&store, &memory, chat, None).await, (None, false));
+    // The model records the task during that turn.
+    store
+        .change_task(ChatId(chat), |slot| *slot = Some(written_task()))
+        .await
+        .expect("seed");
+    for _ in 0..3 {
+        assert_eq!(start_turn(&store, &memory, chat, None).await.0, None);
+    }
+    assert!(
+        status_in(&store, &memory, chat, None)
+            .await
+            .expect("a sentence")
+            .starts_with("Not sent with the next message: the model already has")
+    );
+    // The user pauses and resumes: the next turn carries it, the one after does not.
+    user_status(&store, chat, TaskStatus::Paused, 30)
+        .await
+        .expect("pause");
+    user_status(&store, chat, TaskStatus::Active, 31)
+        .await
+        .expect("resume");
+    let (note, _) = start_turn(&store, &memory, chat, None).await;
+    assert!(
+        note.expect("a note")
+            .contains("paused this task and has now resumed it")
+    );
+    assert_eq!(start_turn(&store, &memory, chat, None).await.0, None);
+    // Earlier messages summarised: once.
+    assert!(start_turn(&store, &memory, chat, Some(7)).await.0.is_some());
+    assert_eq!(start_turn(&store, &memory, chat, Some(7)).await.0, None);
+    // No task: no sentence.
+    let (other_store, other) = store_with_chat().await;
+    assert_eq!(status_in(&other_store, &memory, other, None).await, None);
 }
 
 #[tokio::test]
@@ -787,8 +891,8 @@ async fn a_record_of_facts_only_sends_no_note() {
     )
     .await
     .expect("record");
-    assert_eq!(note_in(&store, chat).await, None);
-    assert_eq!(start_turn(&store, chat).await, (None, false));
+    assert_eq!(note_in(&store, &cold(), chat, None).await, None);
+    assert_eq!(start_turn(&store, &cold(), chat, None).await, (None, false));
     // Once the user writes a goal it is a task to tell the model about.
     user_edit(
         &store,
@@ -801,7 +905,7 @@ async fn a_record_of_facts_only_sends_no_note() {
     )
     .await
     .expect("edit");
-    let note = note_in(&store, chat).await.expect("a note");
+    let note = note_in(&store, &cold(), chat, None).await.expect("a note");
     assert!(
         note.contains("- goal (the user wrote it): \"Tidy up\""),
         "{note}"
@@ -820,7 +924,7 @@ fn a_task_that_cannot_be_read_sends_no_note_and_can_be_cleared() {
         )
     };
     // No note, and the turn start stores nothing.
-    assert_eq!(note_from(Err(unreadable())), None);
+    assert_eq!(note_from(Err(unreadable()), None, None), None);
     assert_eq!(turn_start_from(Err(unreadable())), (None, false));
     // The tab is told what happened and what to do: Clear task, which deletes the row
     // without reading it (`Store::delete_task`).
@@ -1092,7 +1196,7 @@ async fn the_task_is_written_tracked_corrected_and_resumed() {
         .expect("record");
 
     // The first turn after that gets it all. (Turns start here; the note is not stored.)
-    let (note, _) = start_turn(&store, chat).await;
+    let (note, _) = start_turn(&store, &cold(), chat, None).await;
     let note = note.expect("a note");
     assert!(note.contains("created \"Switch.tsx\""), "{note}");
     assert!(note.contains("failed \"npm test\" (exit code 1)"), "{note}");
@@ -1119,7 +1223,7 @@ async fn the_task_is_written_tracked_corrected_and_resumed() {
     user_status(&store, chat, TaskStatus::Active, 150)
         .await
         .expect("resume");
-    let (note, stored) = start_turn(&store, chat).await;
+    let (note, stored) = start_turn(&store, &cold(), chat, None).await;
     let note = note.expect("a note");
     assert!(stored);
     assert!(note.contains("- status: active"), "{note}");

@@ -2664,3 +2664,118 @@ async fn an_attachment_in_the_user_message_marks_the_turn_untrusted() {
         "{first}"
     );
 }
+
+// ---- the preview of a turn's first request (the Context tab) ------------------------------
+
+async fn preview_of(h: &Harness, input: TurnInput) -> agent::TurnPreview {
+    agent::preview_turn(&h.client, &h.tools, &h.sanitizer, input).await
+}
+
+/// The preview is the request the turn's first model call sends, byte for byte: the same
+/// system message, tools, messages and limits. Building it sends nothing to the model.
+#[tokio::test]
+async fn the_preview_is_the_first_request_of_the_turn() {
+    let h = Harness::new(vec![reply_text(sse::text("ok"))]).await;
+    let mut input = input("Read /p/a.txt please");
+    input.pinned = two_pins();
+    input.app_notes = vec!["The task note.".into()];
+    let preview = preview_of(&h, input.clone()).await;
+    assert!(h.chats().is_empty(), "the preview sent a request");
+    let outcome = h.run(input).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    let sent = h.chats();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(serde_json::to_value(&preview.request).unwrap(), sent[0]);
+    // The blocks of the system message are the system message.
+    let joined: Vec<&str> = preview.system_blocks.iter().map(|b| b.text.as_str()).collect();
+    assert_eq!(joined.join("\n\n"), sent[0]["messages"][0]["content"].as_str().unwrap());
+    let kinds: Vec<agent::SystemBlockKind> =
+        preview.system_blocks.iter().map(|b| b.kind.clone()).collect();
+    assert_eq!(
+        kinds,
+        [
+            agent::SystemBlockKind::Prompt,
+            agent::SystemBlockKind::Pinned,
+            agent::SystemBlockKind::Preamble
+        ]
+    );
+    assert!(preview.tools_on && preview.refusal.is_none());
+    assert!(preview.tool_tokens > 0 && preview.pinned_tokens > 0);
+    assert_eq!(outcome.budget, Some(preview.budget));
+    assert_eq!(preview.next, agent::NextCompaction::Nothing);
+    assert!(!preview.over_trigger);
+}
+
+/// When the request needs stage 1, the preview applies it as the turn does, and names
+/// stage 2 as what goes next; its request is again exactly the turn's first.
+#[tokio::test]
+async fn the_preview_applies_stage_one_and_names_what_goes_next() {
+    let h = Harness::new(vec![reply_text(sse::text("Here is the answer."))]).await;
+    let mut input = input("unused");
+    let mut history = earlier_turns(5, 5, 3_300);
+    history.push(HistoryMessage::user("And now?"));
+    input.history = history;
+    let preview = preview_of(&h, input.clone()).await;
+    assert_eq!(preview.applied, [1]);
+    assert!(!preview.over_trigger);
+    assert!(
+        matches!(preview.next, agent::NextCompaction::SummariseEarlier { messages } if messages > 0),
+        "{:?}",
+        preview.next
+    );
+    h.run(input).await;
+    assert_eq!(compacted_stages(&h), [1]);
+    assert_eq!(serde_json::to_value(&preview.request).unwrap(), h.chats()[0]);
+    // Without the need, the preview only names stage 1 as next.
+    let h = Harness::new(vec![]).await;
+    let mut small = self::input("unused");
+    let mut history = earlier_turns(1, 5, 600);
+    history.push(HistoryMessage::user("And now?"));
+    small.history = history;
+    let preview = preview_of(&h, small).await;
+    assert!(preview.applied.is_empty());
+    assert_eq!(preview.next, agent::NextCompaction::ShortenEarlierResults { results: 1 });
+}
+
+/// Messages covered by the stored summary are left out, and the summary is a block of the
+/// system message.
+#[tokio::test]
+async fn the_preview_lists_what_the_summary_replaces() {
+    let h = Harness::new(vec![]).await;
+    let mut input = input("unused");
+    let mut history = earlier_turns(2, 5, 100);
+    history.push(HistoryMessage::user("And now?"));
+    input.history = history;
+    input.summary = Some(CompactionSummary {
+        text: "They talked about files.".into(),
+        covered_ids: vec![1, 2, 3, 4],
+    });
+    let preview = preview_of(&h, input).await;
+    let left: Vec<Option<i64>> = preview.left_out.iter().map(|(m, _)| m.id).collect();
+    assert!(left.len() >= 3, "{left:?}");
+    assert!(left.iter().all(|id| id.is_some_and(|id| (1..=4).contains(&id))), "{left:?}");
+    assert!(preview.kept.iter().all(|(m, _)| m.id.is_none_or(|id| id > 4)));
+    assert!(preview.left_out.iter().all(|(_, tokens)| *tokens > 0));
+    assert!(
+        preview
+            .system_blocks
+            .iter()
+            .any(|b| b.kind == agent::SystemBlockKind::Summary && b.text.contains("talked about files"))
+    );
+}
+
+/// A turn that would not start: the preview carries the loop's own refusal, and still
+/// sends nothing.
+#[tokio::test]
+async fn the_preview_carries_the_loops_refusal() {
+    let h = Harness::new(vec![]).await;
+    let mut input = input("Hi");
+    input.caps.n_ctx = 4_096;
+    input.pinned = twenty_full_pins();
+    let preview = preview_of(&h, input.clone()).await;
+    let outcome = h.run(input).await;
+    assert_eq!(preview.refusal, Some(outcome.status.clone()));
+    assert!(matches!(outcome.status, TurnStatus::Failed { ref code, .. } if code == "pinned_do_not_fit"));
+    assert!(preview.pinned_tokens > preview.pinned_allowance);
+    assert!(h.chats().is_empty());
+}
