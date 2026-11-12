@@ -85,8 +85,8 @@ pub struct ChangedFile {
     pub at: i64,
 }
 
-/// A test, build, lint or type check that ran to its end. Recorded by the app from the
-/// command's result, never by the model.
+/// A test, build, lint or type check that was run. Recorded by the app from the command's
+/// result, never by the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskCheck {
     /// The command line as it was run.
@@ -99,7 +99,8 @@ pub struct TaskCheck {
     /// is never sent to the model outside a tool result.
     #[serde(default)]
     pub summary: String,
-    /// The exit code, when the command reported one.
+    /// The exit code, when the command reported one. A check that did not pass and has no
+    /// exit code did not run to its end (it timed out, was stopped or could not start).
     #[serde(default)]
     pub exit_code: Option<i32>,
 }
@@ -131,6 +132,8 @@ pub struct UserMarks {
     pub changed: Vec<String>,
     /// The user paused the task since the model was last sent the task state.
     pub paused: bool,
+    /// The user marked the task done since the model was last sent the task state.
+    pub done: bool,
 }
 
 /// The JSON `state` of a task. Every field has a default, so a state written by an older
@@ -371,6 +374,7 @@ mod tests {
                 steps: vec!["Run the tests".into()],
                 changed: vec!["goal".into(), "steps".into()],
                 paused: true,
+                done: false,
             },
             ..TaskState::default()
         };

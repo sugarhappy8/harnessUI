@@ -20,6 +20,7 @@ mod error;
 mod ids;
 mod models;
 mod outputs;
+mod pinned;
 mod schema;
 pub mod secrets;
 mod sources;
@@ -56,6 +57,7 @@ pub use outputs::{
     MAX_LINE_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUTS_PER_CHAT, NewToolOutput, OutputLine,
     StoredToolOutput, ToolOutputInfo, output_lines,
 };
+pub use pinned::{MAX_PIN_CHARS, MAX_PINS_PER_CHAT, Pin, clean_pin_text};
 pub use schema::MIGRATIONS;
 pub use secrets::{
     ChunkedSecretStore, KeychainSecretStore, MemorySecretStore, SecretError, SecretRef,

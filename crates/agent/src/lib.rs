@@ -38,7 +38,7 @@ pub mod turn;
 pub mod types;
 
 pub use client::{ChatStream, ClientConfig, ModelInfo, OpenAiClient, ProviderKind, Token};
-pub use context::{ContextBudget, ToolsDoNotFit, truncate_head_tail};
+pub use context::{ContextBudget, PinnedDoNotFit, ToolsDoNotFit, truncate_head_tail};
 pub use error::ProviderError;
 pub use estimate::{TokenCalibrator, estimate_tokens};
 pub use history::{CallRecord, CallStatus, HistoryMessage, Part, ResultRecord, normalize};

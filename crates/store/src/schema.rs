@@ -316,11 +316,12 @@ CREATE TABLE tasks (
 );
 -- [/task]
 
--- [pinned] Instructions the user pinned. chat_id NULL: every chat.
+-- [pinned] Instructions the user pinned. chat_id NULL: every chat. The text is plain text,
+-- 1 to 1,000 characters (pinned.rs checks it first and says why; this is the backstop).
 CREATE TABLE pinned_instructions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id     INTEGER REFERENCES chats(id) ON DELETE CASCADE,
-    text        TEXT    NOT NULL,
+    text        TEXT    NOT NULL CHECK (length(text) BETWEEN 1 AND 1000),
     position    INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL
 );

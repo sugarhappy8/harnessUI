@@ -1,8 +1,8 @@
 //! Prompt assembly (ARCHITECTURE.md 8.5).
 //!
-//! - **One system message**, always first: the chat's system prompt, then (when tools are on)
-//!   the agent preamble, the skills index, loaded skill text and the compaction summary, each
-//!   as a marked block ([`system_message`]).
+//! - **One system message**, always first: the chat's system prompt, then the user's pinned
+//!   instructions, then (when tools are on) the agent preamble, the skills index, loaded
+//!   skill text and the compaction summary, each as a marked block ([`system_message`]).
 //! - **Tool results** go back as tool-role messages wrapped in a `<tool_output>` delimiter that
 //!   carries a per-result unpredictable value, the tool's name and the source path or URL
 //!   ([`render_result`]). App notes follow the closing delimiter, outside it.
@@ -38,10 +38,16 @@ pub const BREAK: char = '\u{200B}';
 /// The tag of the untrusted-data delimiter around tool results and attachments.
 pub const DELIMITER_TAG: &str = "tool_output";
 
+/// The tag of the block that holds the user's pinned instructions.
+pub const PINNED_TAG: &str = "pinned_instructions";
+/// The line the pinned block starts with.
+pub const PINNED_HEADING: &str = "The user pinned these instructions. Follow them in every reply:";
+
 /// Tags of the blocks the app itself writes into prompts. Text shaped like one of them inside
 /// untrusted content is escaped, so the content cannot close or forge a block.
 pub const RESERVED_TAGS: &[&str] = &[
     DELIMITER_TAG,
+    PINNED_TAG,
     "agent_instructions",
     "skills_index",
     "skill_content",
@@ -476,6 +482,9 @@ pub struct LoadedSkill {
 pub struct SystemParts<'a> {
     /// The chat's system prompt (written by the user; not sanitised).
     pub chat_prompt: &'a str,
+    /// The user's pinned instructions, in order (written by the user; cleaned by
+    /// [`pinned_for_prompt`]).
+    pub pinned: &'a [String],
     /// The agent preamble, present when tools are on.
     pub preamble: Option<&'a Preamble>,
     /// The skills index (untrusted: sanitised).
@@ -486,6 +495,61 @@ pub struct SystemParts<'a> {
     pub summary: Option<&'a str>,
 }
 
+/// A character that is dropped from a pinned instruction: a control character other than a
+/// line break or a tab, a character that reorders the text around it, or one of the
+/// invisible "tag" characters that can spell out text nobody sees.
+fn is_hidden_in_pin(c: char) -> bool {
+    (c.is_control() && c != '\n' && c != '\t')
+        || matches!(
+            u32::from(c),
+            0x202A..=0x202E // bidirectional embeddings and overrides
+            | 0x2066..=0x2069 // bidirectional isolates
+            | 0xE0000..=0xE007F // tag characters
+        )
+}
+
+/// The pinned instructions as they go into the prompt, in order: line ends made `\n`,
+/// control and hidden characters dropped, chat-template control tokens broken up and text
+/// shaped like one of the app's blocks escaped ([`Sanitizer::clean`]), surrounding space
+/// trimmed. A pin with nothing left is left out.
+///
+/// A pin is the user's own text, as the system prompt is. It is cleaned all the same,
+/// because it sits inside a block it must not be able to close, and because the user may
+/// have pasted it from somewhere.
+pub fn pinned_for_prompt(pinned: &[String], sanitizer: &Sanitizer) -> Vec<String> {
+    pinned
+        .iter()
+        .filter_map(|pin| {
+            let visible: String = pin
+                .replace("\r\n", "\n")
+                .chars()
+                .map(|c| if c == '\r' { '\n' } else { c })
+                .filter(|c| !is_hidden_in_pin(*c))
+                .collect();
+            let clean = sanitizer.clean(visible.trim());
+            (!clean.is_empty()).then_some(clean)
+        })
+        .collect()
+}
+
+/// The block of pinned instructions: the heading, then one numbered item per pin, later
+/// lines of a pin set in under its first. `None` without pins.
+fn pinned_block(pinned: &[String], sanitizer: &Sanitizer) -> Option<String> {
+    let pins = pinned_for_prompt(pinned, sanitizer);
+    if pins.is_empty() {
+        return None;
+    }
+    let items = pins
+        .iter()
+        .enumerate()
+        .map(|(i, pin)| format!("{}. {}", i + 1, pin.replace('\n', "\n   ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "<{PINNED_TAG}>\n{PINNED_HEADING}\n{items}\n</{PINNED_TAG}>"
+    ))
+}
+
 /// Assembles the one system message from its parts, as marked blocks.
 pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
     let mut blocks: Vec<String> = Vec::new();
@@ -493,6 +557,9 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
     if !prompt.is_empty() {
         blocks.push(prompt.to_owned());
     }
+    // Right after the system prompt: part of the fixed start of every request, before
+    // anything that changes during a chat (folders, skills, the summary).
+    blocks.extend(pinned_block(parts.pinned, sanitizer));
     if let Some(preamble) = parts.preamble {
         let folders = if preamble.approved_folders.is_empty() {
             "- (none yet: file tools work only inside folders the user approves)".to_owned()

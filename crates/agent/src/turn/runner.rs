@@ -14,9 +14,9 @@ use super::{
 };
 use crate::client::ProviderKind;
 use crate::context::{
-    ContextBudget, KEPT_RESULT_IMAGES, ToolsDoNotFit, call_groups, drop_old_result_images,
-    estimate_message, estimate_request, group_digits, stub_results, summarisable_prefix,
-    summary_instruction, truncate_head_tail, turn_starts,
+    ContextBudget, KEPT_RESULT_IMAGES, PinnedDoNotFit, ToolsDoNotFit, call_groups,
+    drop_old_result_images, estimate_message, estimate_request, group_digits, pinned_allowance,
+    stub_results, summarisable_prefix, summary_instruction, truncate_head_tail, turn_starts,
 };
 use crate::error::ProviderError;
 use crate::estimate::{BASELINE_CHARS_PER_TOKEN, TokenCalibrator};
@@ -29,8 +29,8 @@ use crate::parse::{
     strip_tool_markup,
 };
 use crate::prompt::{
-    Preamble, Projection, SystemParts, append_result_note, project, sanitize_schema,
-    schema_has_raw_control_tokens, system_message,
+    Preamble, Projection, SystemParts, append_result_note, pinned_for_prompt, project,
+    sanitize_schema, schema_has_raw_control_tokens, system_message,
 };
 use crate::stream::{
     AccumulatedToolCall, ArgumentsStatus, FinishReason, StreamEvent, Timings, ToolCallAccumulator,
@@ -412,22 +412,30 @@ impl<'a> Turn<'a> {
     }
 
     fn rebuild_system(&mut self) {
+        self.system = self.system_text(true);
+    }
+
+    /// The system message, with the user's pinned instructions or (to measure what they
+    /// take) without them.
+    fn system_text(&self, with_pinned: bool) -> String {
         let preamble = self.tools_on.then(|| {
             self.input
                 .preamble
                 .clone()
                 .unwrap_or_else(|| Preamble::for_this_os(Vec::new()))
         });
-        self.system = system_message(
+        let pinned: &[String] = if with_pinned { &self.input.pinned } else { &[] };
+        system_message(
             &SystemParts {
                 chat_prompt: &self.input.system_prompt,
+                pinned,
                 preamble: preamble.as_ref(),
                 skills_index: self.input.skills_index.as_deref(),
                 loaded_skills: &self.input.loaded_skills,
                 summary: self.summary.as_ref().map(|s| s.text.as_str()),
             },
             self.deps.sanitizer,
-        );
+        )
     }
 
     fn projection(&self) -> Projection {
@@ -531,11 +539,15 @@ impl<'a> Turn<'a> {
         Ok((scale(count, self.overflow_scale), baseline))
     }
 
-    /// Measures the fixed overhead F and checks that the tools fit (ARCHITECTURE.md 8.4).
+    /// Measures the fixed overhead F and checks that the pinned instructions and the tools
+    /// fit (ARCHITECTURE.md 8.4).
     async fn measure(&mut self) -> Result<(), TurnStatus> {
         let fixed = self.fixed_overhead(true).await?;
         self.budget = ContextBudget::new(self.input.caps.n_ctx, fixed);
-        if self.tools_on && !self.budget.tools_fit() {
+        // The pins are in F, so the budget above counts them; they are checked against a
+        // share of their own, and the tools against theirs without the pins.
+        let unpinned = self.check_pinned(fixed).await?;
+        if self.tools_on && !ContextBudget::new(self.budget.n_ctx, unpinned).tools_fit() {
             let without = self.fixed_overhead(false).await?;
             let refusal = ToolsDoNotFit {
                 tool_count: self.tools.len(),
@@ -552,13 +564,37 @@ impl<'a> Turn<'a> {
         Ok(())
     }
 
+    /// Checks that the user's pinned instructions fit their share of the context, and
+    /// returns the fixed overhead without them (`fixed` when nothing is pinned, without
+    /// another count). Pins are never shortened or left out to make a turn fit: one that
+    /// cannot carry them does not start, and says how much they take.
+    async fn check_pinned(&self, fixed: u32) -> Result<u32, TurnStatus> {
+        let plain = self.system_text(false);
+        if plain == self.system {
+            return Ok(fixed);
+        }
+        let unpinned = self.fixed_overhead_of(plain, true).await?;
+        let refusal = PinnedDoNotFit {
+            pin_count: pinned_for_prompt(&self.input.pinned, self.deps.sanitizer).len(),
+            pinned_tokens: fixed.saturating_sub(unpinned),
+            allowed_tokens: pinned_allowance(&self.budget),
+            n_ctx: self.budget.n_ctx,
+        };
+        if refusal.pinned_tokens > refusal.allowed_tokens {
+            return Err(failed("pinned_do_not_fit", refusal.message()));
+        }
+        Ok(unpinned)
+    }
+
     async fn fixed_overhead(&self, with_tools: bool) -> Result<u32, TurnStatus> {
+        self.fixed_overhead_of(self.system.clone(), with_tools)
+            .await
+    }
+
+    async fn fixed_overhead_of(&self, system: String, with_tools: bool) -> Result<u32, TurnStatus> {
         // Some templates refuse a conversation without a user message; a one-character one
         // costs a token or two.
-        let messages = vec![
-            ChatMessage::system(self.system.clone()),
-            ChatMessage::user("."),
-        ];
+        let messages = vec![ChatMessage::system(system), ChatMessage::user(".")];
         let mut probe = self.build_request(messages, ToolChoice::Auto, false);
         if !with_tools {
             probe.tools.clear();

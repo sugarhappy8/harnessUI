@@ -1,9 +1,16 @@
-//! Definitions in source files, for file and symbol mentions in the message box.
+//! File and symbol mentions in the message box (ARCHITECTURE.md 9.3).
 //!
-//! TODO(0.0.5): only the first step exists. `lex` blanks comments and string contents so
-//! that line patterns and bracket counts are not fooled by them. Still to write: the
-//! definition finder per language, the folder index and the mention resolver.
+//! - [`find_symbols`] is a light definition finder: line patterns over text whose comments
+//!   and strings were blanked first ([`lex`]), not a parser. It gives each definition a
+//!   name, a kind and a line range.
+//! - [`index`] walks approved folders in the background and answers the picker's searches
+//!   over file paths and definitions.
+//! - [`resolve`] turns a chosen mention into the text the model gets. It reads the file
+//!   through the path sandbox, exactly as `read_file` does.
 
-// Used only by its own tests until the definition finder is written.
-#[allow(dead_code)]
+mod find;
+pub mod index;
 mod lex;
+pub mod resolve;
+
+pub use find::{Lang, MAX_SYMBOLS_PER_FILE, Symbol, SymbolKind, find_symbols};

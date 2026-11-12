@@ -20,6 +20,9 @@
 //!
 //! Rules (8.2, 8.3):
 //!
+//! - the user's pinned instructions ([`TurnInput::pinned`]) are part of the system message
+//!   of every request, the summary requests included; a turn whose pins do not fit their
+//!   share of the context does not start;
 //! - `parallel_tool_calls: false` and `max_tokens` on every request; calls run one at a time,
 //!   in order; a denied or cancelled call stops the rest of that response (`not run`);
 //! - step cap (default 25 model calls): calls in the response that reaches it are not run,
@@ -356,6 +359,10 @@ pub struct TurnInput {
     pub history: Vec<HistoryMessage>,
     /// The chat's system prompt.
     pub system_prompt: String,
+    /// The user's pinned instructions that apply to this chat, in order. They follow the
+    /// system prompt in every request of the turn and are never trimmed or summarised
+    /// away; a turn whose pins do not fit does not start (`pinned_do_not_fit`).
+    pub pinned: Vec<String>,
     /// What the preamble says (approved folders, OS); used when tools are on. `None` uses
     /// this OS and no folders.
     pub preamble: Option<Preamble>,
@@ -380,11 +387,12 @@ pub struct TurnInput {
 }
 
 impl TurnInput {
-    /// Defaults: no system prompt, no skills, 25 steps, thinking on.
+    /// Defaults: no system prompt, no pinned instructions, no skills, 25 steps, thinking on.
     pub fn new(history: Vec<HistoryMessage>, caps: ModelCaps, template: RequestTemplate) -> Self {
         Self {
             history,
             system_prompt: String::new(),
+            pinned: Vec::new(),
             preamble: None,
             skills_index: None,
             loaded_skills: Vec::new(),
@@ -432,8 +440,8 @@ pub enum TurnStatus {
     LoopDetected,
     /// The turn could not continue.
     Failed {
-        /// A stable code (`no_answer`, `tools_do_not_fit`, `context_full`, `output_limit`,
-        /// or a provider error code).
+        /// A stable code (`no_answer`, `tools_do_not_fit`, `pinned_do_not_fit`,
+        /// `context_full`, `output_limit`, or a provider error code).
         code: String,
         /// A plain-language message for the UI.
         message: String,
