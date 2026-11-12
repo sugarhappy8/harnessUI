@@ -164,6 +164,7 @@ and every TODO.
     Long. Help: "Longer thinking can give better answers but takes more time." This is a
     **per-request** limit applied by the agent loop (`limit_thinking`), not a launch flag.
   - Never shown: threads, batch sizes, slots, rope, tensor split, free-text arguments, paths.
+    (Amended for 0.0.6 by item 6, Part 3b: some of these move under Fine control.)
     Every setting is a typed value from a fixed list. The backend stays one global choice
     (shown in plain words, see `words.ts`).
 - **D5 Item 3 is experimental in both directions** and says so. Both are off by default.
@@ -660,6 +661,72 @@ scenario `coding-apps`: fake `claude` and `codex` programs (scripts that record 
 arguments and stdin) in a folder put on PATH by the test, outside any approved folder; turn
 the group on, the card appears, Deny runs nothing, Allow once runs the fake with the
 expected arguments and the task on stdin and returns its output.
+
+---------------------------------------------------------------------------------------
+
+## Part 3b. Items 5 to 8 (added in revision 3)
+
+### Item 5. rea with a free decompiler
+Research only so far: `item5-rea-research.md` (what rea is, its licence and needs, free
+decompilers and their licences, options and questions). Not designed until the owner chooses
+the decompiler and how it ships. Whatever is chosen: rea is an MCP server, so it runs through
+the existing MCP client and policy gate (D12), starts as a process through `crates/runtime`,
+and its files and any decompiler or runtime it needs are listed in the notices.
+
+### Item 6. Usage view and finer offloading controls
+Sketch, research and open questions: `item6-usage-offloading.md`. **D4 is amended (proposed,
+the owner confirms where the line goes):** the plain controls stay the default, unchanged;
+layers on the graphics card, expert parts on the processor, conversation memory on the
+graphics card, processor threads, fast attention and the memory to leave free appear only
+under a closed **Fine control** section, each a typed value from a fixed list or range;
+batch sizes, slots, rope, tensor overrides, free text and paths stay never shown. Live usage
+is read on this computer only and says "Not available" where the system gives nothing.
+
+### Item 7. Show which folders the chat can use (WP7, small, frontend)
+**Owns:** a new `src/components/FolderChip.tsx` (+ test), one mount in the chat header of
+`src/components/ChatView.tsx` (beside `ApprovalModeMenu`), and nothing in the backend (it
+uses the folder commands the Tools panel already uses).
+**Build:**
+- A chip in the chat header, always visible when a chat is open: a folder icon and the
+  working folder's last name ("harnessUI"), the full path in its menu, never truncated in
+  the menu. With more than one approved folder: "harnessUI + 2 more".
+- No folder: "No folder · Choose" (the file tools have nowhere to work).
+- Full access: "Whole computer" in the warning colour of the mode menu; the menu says "Full
+  access is on, so the file and terminal tools can reach every folder on this computer
+  except harnessUI's own. Working folder: <path>."
+- The menu lists the approved folders with the working one marked, **Make this the working
+  folder**, **Add a folder…** (the existing folder picker and approval command), **Remove**,
+  and **Open in Tools panel**. Every change goes through the same main-window commands as
+  the Tools panel; nothing new is reachable by a tool or the model.
+- The message box's placeholder names the working folder when there is one ("Ask anything.
+  Files: harnessUI").
+**Tests:** chip text for none / one / several / Full access; menu actions call the existing
+wrappers; a path with right-to-left or zero-width characters is shown escaped. **e2e:** a
+line in an existing scenario that reads the chip after the Tools panel approves a folder.
+
+### Item 8. New downloads appear in the chat's model list (WP8, small)
+**Cause** (README item 8): `list_model_options` (`src-tauri/src/models_cmd.rs`) lists only
+`recentLocalModels`, the files loaded recently; a finished download is not added.
+**Owns:** `list_model_options` in `src-tauri/src/models_cmd.rs`, `remember_local_model` in
+`src-tauri/src/settings.rs`, `src/components/ModelPicker.tsx`, the `download-progress`
+listener in `src/store/app.ts`.
+**Build:**
+- "On this computer" lists every installed model (`store.list_models()`, the same rows as
+  Installed), recently used first, then the rest by name; files that no longer exist are
+  left out.
+- The list is read again when a download finishes (`download-progress` with every file
+  done) and when Installed imports or deletes a model, not only when the menu opens.
+- Duplicates: entries are keyed by the file's canonical path (case-insensitive on Windows
+  and macOS); `remember_local_model` stores the canonical path and drops older spellings of
+  the same file. When two different files have the same name, each shows the end of its
+  folder in small text ("Q8_0.gguf · Downloads\\models" vs "… · harnessUI\\models"). Which of
+  the two the owner's screenshot shows is unknown (two spellings of one path, or two
+  copies); the build covers both and a test pins each.
+**Tests:** Rust: a registered model never loaded is listed; a missing file is not; two
+spellings of one path give one entry (Windows-style case test that does not assume the build
+system's case rules); two copies give two entries with folder hints. Frontend: the picker
+refreshes on a finished download event. **e2e:** a line in the downloads or model-settings
+scenario: register a model, open the picker, see it without loading it first.
 
 ---------------------------------------------------------------------------------------
 
