@@ -82,7 +82,7 @@ export const FULL_ACCESS_RISKS: readonly string[] = [
   "Deleted files do not go to the trash. They are gone.",
   "It can use the browser and the accounts you are logged in to.",
   "Something it reads, such as a web page, a file or a tool result, could trick it into doing something harmful.",
-  "Only the app's own data (its database and logs) and your saved keys stay protected.",
+  "The app's own data (its database and logs) and your saved keys stay out of reach of its tools. A program it runs has your full rights, so this is a guard, not a lock.",
 ];
 
 type Tone = "warning" | "danger";
