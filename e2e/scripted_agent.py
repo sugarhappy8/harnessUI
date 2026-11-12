@@ -3185,9 +3185,12 @@ def p_model_settings(c, notes):
     for words in ("How much of the chat the model can see at once.",
                   "Lets the model remember more in the same memory.",
                   "Not recommended with 16 GB or less.",
-                  "Same as default (",
                   "Apply and restart"):
         assert words in page, (words, page[-900:])
+    # Option text is not part of innerText: read what each select shows.
+    shown = s.execute("return [...document.querySelectorAll('[role=dialog] select')].map(e => e.selectedOptions[0].textContent);")
+    notes.append("panel shows: " + " | ".join(shown))
+    assert shown and all(t.startswith("Same as default (") for t in shown), shown
     options = s.execute("return [...document.querySelectorAll('#model-context option')].map(o => o.value);")
     size = "fixed:4096" if "fixed:4096" in options else next(o for o in options if o.startswith("fixed:"))
     set_select("#model-context", size)
