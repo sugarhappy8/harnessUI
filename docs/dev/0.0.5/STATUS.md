@@ -3,7 +3,7 @@
 Kept up to date by the lead so the work can be picked up after an interruption (for example
 when the account's usage limit pauses the session).
 
-## Where things are (2026-11-12, 09:50 UTC)
+## Where things are (2026-11-12, 12:30 UTC)
 - Design: done. `spec.md` (revision 2 plus "Amendments after WP0"), `critique.md`, `map.md`,
   `map-details.md`.
 - WP0 groundwork: done and independently checked (`report-WP0-*.md`; the contract is the
@@ -18,6 +18,10 @@ when the account's usage limit pauses the session).
   | wf_40f806d9-784 | WP2, WP4b, WP5b |
   Script: `/root/.claude/projects/-home-user-harnissUI/23ef2267-cb6f-5325-b082-a4b40b3ccb19/workflows/scripts/v005-packages-wf_d8cbef87-693.js`
   (the package briefs are the `args` of each run; they are also in this session's record).
+- 10:40 UTC: the usage limit stopped every builder about 50 minutes in (only WP4b's build
+  finished). 12:28 UTC: all four runs resumed with `resume: true` for every unfinished package
+  (WP4b's build replays from cache; its reviews run). Resume arguments:
+  `scratchpad/v005/resume-args.json`.
 - Work in progress is committed with `[skip ci]` about every hour; the builders never commit.
 - Shared dev server for end-to-end runs: `npm run dev` on port 1420 (restart it if it is gone).
 
