@@ -48,7 +48,23 @@ one starts from this file and `README.md`.
   optionally from its own Settings tab like the ROCm pack, files only (no running
   programs); item 6 = Fine control in each model's settings, live usage always visible;
   item 4 = publisher quotes, reviewed by the owner before release.
-- Waiting for the owner's go before the long build.
+- 2026-11-12 17:50 UTC: the owner said go (with workflows). Running, all in this one tree:
+  | Run | Packages |
+  |---|---|
+  | wf_abb8586c-a87 | WP1a, WP1b, WP2, then WP8 |
+  | wf_48eea688-ae5 | WP3a, WP3b, WP5a, WP5b |
+  | wf_612d61cb-2dd | WP6, WP7 |
+  | wf_da155c8a-e67 | WP4a, WP4c, then WP4b |
+  | wf_4aac3ffd-edc | design of items 5 and 6 (writes item5-spec.md, item6-spec.md) |
+  Each package: develop (finish or build) → security and correctness reviews → fix → an
+  independent check (up to two fix rounds). Script and briefs: the run's script under
+  /root/.claude/projects/-home-user-harnessUI/<session>/workflows/scripts/; packages'
+  notes are the runs' args. The developers never commit; an hourly check commits
+  work in progress with [skip ci].
+- Container set-up done here (needed again in a fresh container): Tauri system libraries
+  (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
+  `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
+  `python3 scripts/fetch_test_model.py .cache/models`, dev server on port 1420.
 
 ## Next
 README "How to pick it up". The new session's first job: check this state, update the spec,
