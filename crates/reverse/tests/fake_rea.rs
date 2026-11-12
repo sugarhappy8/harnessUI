@@ -919,7 +919,6 @@ mod calls {
         p.ok("open_binary", open_args("hello-linux-x64"), &a).await;
         let listed = p.ok("list_procedures", json!({}), &a).await;
         let id = own_id(&listed);
-        eprintln!("DEBUG A now: {:?}", p.describe("inspect_analysis_view", view(&id), &a).await);
         assert_eq!(
             p.invalid("inspect_analysis_view", view(&id), &b).await,
             m::UNKNOWN_ID
