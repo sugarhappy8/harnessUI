@@ -2,9 +2,10 @@
 //!
 //! Where each fact comes from (D6), and the rules that keep them honest:
 //! - **The signed catalog** (`From the publisher's model card`): attached to a column only
-//!   on an *exact* match: the same SHA-256, the same repository and file path, or the
-//!   catalog id (an id saved at download counts, unless the file's SHA-256 says it is
-//!   another file). A Hugging Face repository whose uploader names a catalog model's
+//!   on an *exact* match: the same SHA-256 for every file (every shard of a split model),
+//!   the same repository and file path, or the catalog id (an id saved at download
+//!   counts, unless the file's SHA-256 says it is another file). An installed model keeps
+//!   only its first file's SHA-256, which decides alone only against a single file. A Hugging Face repository whose uploader names a catalog model's
 //!   source as its base model gets that entry's text only as [`BaseModelFacts`], shown
 //!   under "The uploader says this is made from …", stripped of the capabilities, sizes and
 //!   licence, and never used for the fit.
@@ -117,16 +118,46 @@ fn sha_differs(a: Option<&str>, b: Option<&str>) -> bool {
     matches!((a, b), (Some(a), Some(b)) if !a.eq_ignore_ascii_case(b))
 }
 
-/// The same file of the same repository: equal SHA-256 when both are known (the same
-/// bytes, wherever they were uploaded), else the same repository and path.
-fn same_remote_file(
-    (repo_a, file_a, sha_a): (&str, &str, Option<&str>),
-    (repo_b, file_b, sha_b): (&str, &str, Option<&str>),
-) -> bool {
-    if let (Some(a), Some(b)) = (sha_a, sha_b) {
-        return a.eq_ignore_ascii_case(b);
+/// The SHA-256 values of a model's files, in order (every shard of a split model), each
+/// `None` when not known.
+type Shas<'a> = [Option<&'a str>];
+
+/// What the SHA-256 values of two models' files say: `Some(true)` every file the same
+/// bytes, `Some(false)` certainly other bytes (the first files differ, or every value is
+/// known and they differ), `None` not known (a value missing on either side).
+fn same_bytes(a: &Shas, b: &Shas) -> Option<bool> {
+    let (first_a, first_b) = (a.first().copied().flatten(), b.first().copied().flatten());
+    if sha_differs(first_a, first_b) {
+        return Some(false);
     }
-    repo_a.eq_ignore_ascii_case(repo_b) && file_a == file_b
+    let all_known = |s: &Shas| !s.is_empty() && s.iter().all(Option::is_some);
+    if !(all_known(a) && all_known(b)) {
+        return None;
+    }
+    let sorted = |s: &Shas| {
+        let mut v: Vec<String> = s.iter().flatten().map(|x| x.to_ascii_lowercase()).collect();
+        v.sort();
+        v
+    };
+    Some(sorted(a) == sorted(b))
+}
+
+/// The same file of the same repository: equal SHA-256 for every file when all are
+/// known (the same bytes, wherever they were uploaded), else the same repository and the
+/// same path of the first file.
+fn same_remote_files(
+    (repo_a, file_a, shas_a): (&str, &str, &Shas),
+    (repo_b, file_b, shas_b): (&str, &str, &Shas),
+) -> bool {
+    match same_bytes(shas_a, shas_b) {
+        Some(same) => same,
+        None => repo_a.eq_ignore_ascii_case(repo_b) && file_a == file_b,
+    }
+}
+
+/// The SHA-256 values of a catalog entry's files (the catalog checks every one is there).
+fn entry_shas(e: &Entry) -> Vec<Option<&str>> {
+    e.files.iter().map(|f| f.sha256.as_deref()).collect()
 }
 
 /// `path` ends with `/<owner>/<name>/<file>`, the place downloads put a repository's file.
@@ -138,10 +169,19 @@ fn path_is_download_of(path: &str, repo: &str, file: &str) -> bool {
         && path[path.len() - tail.len()..].eq_ignore_ascii_case(&tail)
 }
 
-/// Whether an installed model is exactly this repository file.
-fn installed_is(rec: &Installed, repo: &str, file: &str, sha: Option<&str>) -> bool {
-    if let (Some(a), Some(b)) = (rec.sha256.as_deref(), sha) {
-        return a.eq_ignore_ascii_case(b);
+/// Whether an installed model is exactly this repository file, whose files have the
+/// SHA-256 values `shas` (empty when not known). The installed list keeps only the
+/// first file's SHA-256: different, it is another model; the same, it decides alone only
+/// against a single file (a split model's other files could differ). Otherwise the
+/// repository and the path decide.
+fn installed_is(rec: &Installed, repo: &str, file: &str, shas: &Shas) -> bool {
+    if let (Some(a), Some(b)) = (rec.sha256.as_deref(), shas.first().copied().flatten()) {
+        if !a.eq_ignore_ascii_case(b) {
+            return false;
+        }
+        if shas.len() == 1 {
+            return true;
+        }
     }
     let Some(own_repo) = rec.repo.as_deref() else {
         return false;
@@ -158,7 +198,7 @@ fn installed_is(rec: &Installed, repo: &str, file: &str, sha: Option<&str>) -> b
 /// Whether an installed model is exactly this catalog entry.
 fn installed_is_entry(rec: &Installed, id: &str, e: &Entry) -> bool {
     let first = &e.files[0];
-    installed_is(rec, &e.repo, &first.path, first.sha256.as_deref())
+    installed_is(rec, &e.repo, &first.path, &entry_shas(e))
         || (rec.stored.catalog_id.as_deref() == Some(id)
             && !sha_differs(rec.sha256.as_deref(), first.sha256.as_deref()))
 }
@@ -172,22 +212,22 @@ impl Known {
         self.installed.iter().find(|r| installed_is_entry(r, id, e))
     }
 
-    fn installed_for_file(&self, repo: &str, file: &str, sha: Option<&str>) -> Option<&Installed> {
+    fn installed_for_file(&self, repo: &str, file: &str, shas: &Shas) -> Option<&Installed> {
         self.installed
             .iter()
-            .find(|r| installed_is(r, repo, file, sha))
+            .find(|r| installed_is(r, repo, file, shas))
     }
 
-    /// The catalog entry that is exactly this repository file.
-    fn entry_for_file(&self, repo: &str, file: &str, sha: Option<&str>) -> Option<(&str, &Entry)> {
+    /// The catalog entry that is exactly this repository file, whose files (every shard)
+    /// have the SHA-256 values `shas` (empty when not known).
+    fn entry_for_file(&self, repo: &str, file: &str, shas: &Shas) -> Option<(&str, &Entry)> {
         self.catalog
             .models
             .iter()
             .find(|(_, e)| {
-                let first = &e.files[0];
-                same_remote_file(
-                    (&e.repo, &first.path, first.sha256.as_deref()),
-                    (repo, file, sha),
+                same_remote_files(
+                    (&e.repo, &e.files[0].path, &entry_shas(e)),
+                    (repo, file, shas),
                 )
             })
             .map(|(id, e)| (id.as_str(), e))
@@ -588,6 +628,26 @@ pub fn hub_facts(d: &RepoDetail, card_url: String) -> HubFacts {
     }
 }
 
+/// How long a catalog download waits for the uploader's facts before it starts without
+/// them.
+const DOWNLOAD_FACTS_WAIT: Duration = Duration::from_secs(15);
+
+/// What the uploader lists for a catalog entry about to be downloaded, to save with the
+/// model for comparing it offline (and Hugging Face's parameter count): read earlier in
+/// this session, else one listing request at the catalog's pinned commit (the same
+/// request a download from Browse makes). `None` when it cannot be read: the download
+/// goes ahead without it.
+pub async fn catalog_download_facts(hub: &impl Hub, e: &Entry) -> Option<(HubFacts, Option<u64>)> {
+    let d = tokio::time::timeout(DOWNLOAD_FACTS_WAIT, hub.listing(&e.repo, Some(&e.revision)))
+        .await
+        .ok()?
+        .ok()?;
+    Some((
+        hub_facts(&d, hub.page_url(&e.repo)),
+        d.gguf.as_ref().and_then(|g| g.parameters),
+    ))
+}
+
 /// `"7B"` → 7,000,000,000; `"0.6B"`, `"596M"`, `"1.2T"` alike; anything else `None`.
 fn label_number(s: &str) -> Option<u64> {
     let s = s.trim();
@@ -895,8 +955,8 @@ async fn repo_item(
             None
         }
     };
-    // The file in the listing: its variant (all shards), SHA-256 and projector.
-    let mut sha: Option<String> = None;
+    // The file in the listing: its variant (all shards), their SHA-256 and the projector.
+    let mut shas: Vec<Option<String>> = Vec::new();
     let mut variant_size = None;
     let mut projector_bytes = 0;
     let mut smallest: Option<String> = None;
@@ -914,7 +974,7 @@ async fn repo_item(
             });
         match variant {
             Some(v) => {
-                sha = v.first_file().sha256.clone();
+                shas = v.files.iter().map(|x| x.sha256.clone()).collect();
                 variant_size = Some(v.total_size);
                 f.file = Some(v.first_file().path.clone());
             }
@@ -931,7 +991,8 @@ async fn repo_item(
     let file = f.file.clone().unwrap_or_else(|| file.to_string());
 
     // Exact matches need no network: the catalog and the installed list.
-    let entry = known.entry_for_file(repo, &file, sha.as_deref());
+    let shas: Vec<Option<&str>> = shas.iter().map(Option::as_deref).collect();
+    let entry = known.entry_for_file(repo, &file, &shas);
     if let Some((id, e)) = entry {
         f.catalog = Some(catalog_facts(id, e));
         f.title = e.name.clone();
@@ -942,12 +1003,13 @@ async fn repo_item(
         .as_ref()
         .and_then(|d| d.files.iter().find(|x| x.path == file).map(|x| x.size))
         .or_else(|| entry.map(|(_, e)| e.files[0].size));
-    f.size_bytes = variant_size.or_else(|| entry.map(|(_, e)| e.total_bytes()));
+    // The repository's file without a projector, as the listing counts it online.
+    f.size_bytes = variant_size.or_else(|| entry.map(|(_, e)| e.weights_bytes()));
     if let Some(size) = first_size {
         f.results = known.results_for(&file, size);
     }
 
-    if let Some(rec) = known.installed_for_file(repo, &file, sha.as_deref()) {
+    if let Some(rec) = known.installed_for_file(repo, &file, &shas) {
         if f.results.is_empty() {
             f.results = known.results_for(&rec.file_name, rec.first_file_size());
         }

@@ -278,41 +278,65 @@ fn is_invisible_or_control(c: char) -> bool {
 /// become one space), every invisible or control character written as `[U+XXXX]`, and
 /// at most `cap` characters with `…` at the end when it was cut. An escape is never cut
 /// in half. Empty text gives an empty string.
+///
+/// Reading stops as soon as the text is known to be longer than `cap`, so a hostile
+/// string of many megabytes costs no more than its first few hundred characters.
 pub fn uploader_text(text: &str, cap: usize) -> String {
-    let mut pieces: Vec<String> = Vec::new();
+    let mut t = Capped {
+        out: String::new(),
+        used: 0,
+        cut_at: None,
+        cap,
+    };
     let mut space = false;
+    let mut buf = [0u8; 4];
     for c in text.trim().chars() {
         if c.is_whitespace() {
             space = true;
             continue;
         }
-        if space {
-            pieces.push(" ".into());
-            space = false;
-        }
-        if is_invisible_or_control(c) {
-            pieces.push(format!("[U+{:04X}]", c as u32));
-        } else {
-            pieces.push(c.to_string());
+        let fits = (!space || t.push(" ", 1))
+            && if is_invisible_or_control(c) {
+                let escape = format!("[U+{:04X}]", c as u32);
+                t.push(&escape, escape.len())
+            } else {
+                t.push(c.encode_utf8(&mut buf), 1)
+            };
+        space = false;
+        if !fits {
+            // Too long: cut after the last whole piece that leaves room for `…`.
+            let mut out = t.out;
+            out.truncate(t.cut_at.unwrap_or(0));
+            out.truncate(out.trim_end().len());
+            out.push('…');
+            return out;
         }
     }
-    let len = |p: &String| p.chars().count();
-    if pieces.iter().map(len).sum::<usize>() <= cap {
-        return pieces.concat();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for p in &pieces {
-        let n = len(p);
-        if used + n > cap.saturating_sub(1) {
-            break;
+    t.out
+}
+
+/// Text being built by [`uploader_text`], one piece (a character, a space or an escape)
+/// at a time.
+struct Capped {
+    out: String,
+    /// Characters in `out`.
+    used: usize,
+    /// The end of the last whole piece that fits in `cap - 1` characters, leaving room
+    /// for `…`; where `out` is cut when the text turns out longer than `cap`.
+    cut_at: Option<usize>,
+    cap: usize,
+}
+
+impl Capped {
+    /// Adds a piece of `chars` characters; false once the text is longer than the cap.
+    fn push(&mut self, piece: &str, chars: usize) -> bool {
+        if self.cut_at.is_none() && self.used + chars > self.cap.saturating_sub(1) {
+            self.cut_at = Some(self.out.len());
         }
-        out.push_str(p);
-        used += n;
+        self.out.push_str(piece);
+        self.used += chars;
+        self.used <= self.cap
     }
-    out.truncate(out.trim_end().len());
-    out.push('…');
-    out
 }
 
 /// A string, or the strings of a list (other values dropped).
@@ -1400,6 +1424,100 @@ mod tests {
         // An escape is never cut in half.
         let cut = uploader_text(&format!("{}\u{202E}tail", "a".repeat(295)), 300);
         assert_eq!(cut, format!("{}…", "a".repeat(295)));
+    }
+
+    /// The rules of [`uploader_text`] as first written: every character expanded, then
+    /// cut. The real one must give the same text without expanding past the cap.
+    fn uploader_text_reference(text: &str, cap: usize) -> String {
+        let mut pieces: Vec<String> = Vec::new();
+        let mut space = false;
+        for c in text.trim().chars() {
+            if c.is_whitespace() {
+                space = true;
+                continue;
+            }
+            if space {
+                pieces.push(" ".into());
+                space = false;
+            }
+            if is_invisible_or_control(c) {
+                pieces.push(format!("[U+{:04X}]", c as u32));
+            } else {
+                pieces.push(c.to_string());
+            }
+        }
+        let len = |p: &String| p.chars().count();
+        if pieces.iter().map(len).sum::<usize>() <= cap {
+            return pieces.concat();
+        }
+        let mut out = String::new();
+        let mut used = 0;
+        for p in &pieces {
+            let n = len(p);
+            if used + n > cap.saturating_sub(1) {
+                break;
+            }
+            out.push_str(p);
+            used += n;
+        }
+        out.truncate(out.trim_end().len());
+        out.push('…');
+        out
+    }
+
+    /// Hostile uploader text of many megabytes (a licence name, a GGUF architecture)
+    /// costs no more than its first few hundred characters, and the result is the same
+    /// as the rules give.
+    #[test]
+    fn uploader_text_stops_at_the_cap() {
+        let huge = "a".repeat(16 << 20);
+        let invisible = "\u{200B}".repeat(4 << 20);
+        for (text, cap) in [(&huge, 300), (&invisible, 300), (&huge, 64)] {
+            let started = std::time::Instant::now();
+            let cut = uploader_text(text, cap);
+            let took = started.elapsed();
+            assert!(
+                took < std::time::Duration::from_millis(200),
+                "took {took:?} for {} bytes",
+                text.len()
+            );
+            assert!(cut.chars().count() <= cap && cut.ends_with('…'));
+        }
+
+        // The same text as the rules, on edge cases and on many made-up strings.
+        let alphabet = ['a', ' ', '\n', '\t', 'é', '\u{202E}', '\u{200B}', '…', '\u{7}', '中'];
+        let mut cases: Vec<String> = vec![
+            String::new(),
+            "   ".into(),
+            "a".into(),
+            " a ".into(),
+            "\u{202E}".into(),
+            format!("{}\u{202E}", "a".repeat(287)),
+            format!("{}\u{202E}", "a".repeat(288)),
+            format!("{} b", "a".repeat(298)),
+            format!("{} b", "a".repeat(299)),
+            format!("{}  \n b", "a".repeat(297)),
+        ];
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        for _ in 0..3000 {
+            let mut s = String::new();
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let len = (seed >> 33) % 40;
+            for _ in 0..len {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s.push(alphabet[((seed >> 33) % alphabet.len() as u64) as usize]);
+            }
+            cases.push(s);
+        }
+        for text in &cases {
+            for cap in [0, 1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 20, 25, 300] {
+                assert_eq!(
+                    uploader_text(text, cap),
+                    uploader_text_reference(text, cap),
+                    "{text:?} at {cap}"
+                );
+            }
+        }
     }
 
     #[test]

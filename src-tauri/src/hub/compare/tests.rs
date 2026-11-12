@@ -45,6 +45,8 @@ struct FakeHub {
     cached_heads: HashMap<String, ModelSummary>,
     listing_calls: AtomicUsize,
     head_calls: AtomicUsize,
+    /// Every listing asked for: the repository and the revision.
+    asked: std::sync::Mutex<Vec<(String, Option<String>)>>,
 }
 
 impl FakeHub {
@@ -74,9 +76,13 @@ impl Hub for FakeHub {
     async fn listing(
         &self,
         repo: &str,
-        _revision: Option<&str>,
+        revision: Option<&str>,
     ) -> Result<Arc<RepoDetail>, HfError> {
         self.listing_calls.fetch_add(1, Ordering::SeqCst);
+        self.asked
+            .lock()
+            .unwrap()
+            .push((repo.to_string(), revision.map(str::to_string)));
         match self.listings.get(repo) {
             Some(Ok(d)) => Ok(Arc::new(d.clone())),
             Some(Err(f)) => Err(error(*f)),
@@ -536,6 +542,206 @@ async fn the_spoofed_base_model() {
     assert_eq!(f.base_catalog, None);
 }
 
+// ---- Split models ---------------------------------------------------------------------
+
+/// The SHA-256 values of the fixture catalog's split model (`sample-moe-q4km`).
+const SHA_MOE_1: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const SHA_MOE_2: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const SHA_OTHER: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const MOE_REPO: &str = "example-quants/Sample-MoE-30B-GGUF";
+const MOE_FIRST: &str = "Q4_K_M/Sample-MoE-30B-Q4_K_M-00001-of-00002.gguf";
+
+/// A listing of `repo` holding the catalog split model's two files (same paths and
+/// sizes) with these SHA-256 values.
+fn split_listing(repo: &str, sha_1: &str, sha_2: &str) -> String {
+    serde_json::json!({
+        "id": repo,
+        "sha": "5555555555555555555555555555555555555555",
+        "cardData": {"base_model": "example-labs/Sample-MoE-30B"},
+        "siblings": [
+            {"rfilename": MOE_FIRST, "size": 9_000_000_000u64,
+             "lfs": {"sha256": sha_1, "size": 9_000_000_000u64}},
+            {"rfilename": "Q4_K_M/Sample-MoE-30B-Q4_K_M-00002-of-00002.gguf",
+             "size": 9_500_000_000u64,
+             "lfs": {"sha256": sha_2, "size": 9_500_000_000u64}}
+        ]
+    })
+    .to_string()
+}
+
+/// A split model is the catalog's only when every file is: a stranger who uploads the
+/// catalog's first file beside another second file gets no catalog text (only the
+/// uploader's claim), and neither does the catalog's own repository once its second file
+/// changed. All files the same bytes are the same model wherever they were uploaded.
+#[tokio::test]
+async fn a_split_model_matches_only_when_every_file_matches() {
+    let k = known(Vec::new(), Vec::new());
+    let stranger = "stranger/Sample-MoE-30B-GGUF";
+    for (repo, sha_2, matches) in [
+        (stranger, SHA_OTHER, false),
+        (MOE_REPO, SHA_OTHER, false),
+        (stranger, SHA_MOE_2, true),
+        (MOE_REPO, SHA_MOE_2, true),
+    ] {
+        let hub = FakeHub::default()
+            .with_listing(&split_listing(repo, SHA_MOE_1, sha_2))
+            .with_head(repo, summary(&moe_bytes()));
+        let f = facts_for(&hub, &k, repo_item(repo, MOE_FIRST), CTX).await;
+        let case = format!("{repo} {sha_2}");
+        if matches {
+            assert_eq!(
+                f.catalog.map(|c| c.id).as_deref(),
+                Some("sample-moe-q4km"),
+                "{case}"
+            );
+            assert_eq!(f.title, "Sample MoE 30B", "{case}");
+            assert_eq!(f.base_catalog, None, "{case}");
+        } else {
+            assert_eq!(f.catalog, None, "{case}");
+            assert_eq!(f.title, repo, "{case}");
+            // Only the uploader's claim, without the catalog's capabilities or sizes.
+            let b = f.base_catalog.expect(&case);
+            assert_eq!(b.catalog.id, "sample-moe-q4km");
+            assert!(b.catalog.capabilities.is_empty() && b.catalog.parameters.is_none());
+        }
+        assert_eq!(f.size_bytes, Some(18_500_000_000), "{case}");
+    }
+}
+
+/// An installed split model keeps only its first file's SHA-256, so that alone never
+/// makes it a split catalog model: its repository and path, or the catalog id it was
+/// downloaded with, must say so. A repository column is not "installed" because of an
+/// installed copy whose first file only is the same.
+#[tokio::test]
+async fn an_installed_split_model_needs_more_than_its_first_file() {
+    let k0 = known(Vec::new(), Vec::new());
+    let e = &k0.catalog.models["sample-moe-q4km"];
+    let stranger = "stranger/Sample-MoE-30B-GGUF";
+    let from_stranger = installed(
+        &format!("/models/{stranger}/{MOE_FIRST}"),
+        Some(stranger),
+        18_500_000_000,
+        Some(SHA_MOE_1),
+        StoredSummary {
+            repo_file: Some(MOE_FIRST.into()),
+            ..StoredSummary::default()
+        },
+    );
+    assert!(!installed_is_entry(&from_stranger, "sample-moe-q4km", e));
+    let from_catalog = installed(
+        &format!("/models/{MOE_REPO}/{MOE_FIRST}"),
+        Some(MOE_REPO),
+        18_500_000_000,
+        Some(SHA_MOE_1),
+        StoredSummary {
+            repo_file: Some(MOE_FIRST.into()),
+            catalog_id: Some("sample-moe-q4km".into()),
+            ..StoredSummary::default()
+        },
+    );
+    assert!(installed_is_entry(&from_catalog, "sample-moe-q4km", e));
+    let by_id_only = installed(
+        "/m/renamed-00001-of-00002.gguf",
+        None,
+        18_500_000_000,
+        Some(SHA_MOE_1),
+        StoredSummary {
+            catalog_id: Some("sample-moe-q4km".into()),
+            ..StoredSummary::default()
+        },
+    );
+    assert!(installed_is_entry(&by_id_only, "sample-moe-q4km", e));
+    let other_first = installed(
+        "/m/renamed-00001-of-00002.gguf",
+        None,
+        18_500_000_000,
+        Some(SHA_OTHER),
+        StoredSummary {
+            catalog_id: Some("sample-moe-q4km".into()),
+            ..StoredSummary::default()
+        },
+    );
+    assert!(!installed_is_entry(&other_first, "sample-moe-q4km", e));
+    // A single-file catalog model with the same bytes still matches by SHA-256 alone.
+    let single = installed(
+        "/elsewhere/renamed.gguf",
+        None,
+        1,
+        Some(SHA_7B),
+        StoredSummary::default(),
+    );
+    assert!(installed_is_entry(
+        &single,
+        "sample-7b-q4km",
+        &k0.catalog.models["sample-7b-q4km"]
+    ));
+
+    // The stranger's copy, compared as installed: no catalog text.
+    let k = known(vec![from_stranger.clone()], Vec::new());
+    let f = facts_for(
+        &FakeHub::default(),
+        &k,
+        CompareItem::Installed {
+            installed_path: from_stranger.path.clone(),
+        },
+        CTX,
+    )
+    .await;
+    assert_eq!(f.catalog, None);
+    assert_eq!(f.title, "Sample-MoE-30B-Q4_K_M-00001-of-00002.gguf");
+
+    // The stranger's repository (second file changed) while the catalog's copy is
+    // installed: not that installed copy.
+    let k = known(vec![from_catalog.clone()], Vec::new());
+    let hub = FakeHub::default()
+        .with_listing(&split_listing(stranger, SHA_MOE_1, SHA_OTHER))
+        .with_head(stranger, summary(&moe_bytes()));
+    let f = facts_for(&hub, &k, repo_item(stranger, MOE_FIRST), CTX).await;
+    assert_eq!(f.installed_path, None);
+    assert_eq!(f.catalog, None);
+    // The catalog's own repository and files: that installed copy.
+    let hub = FakeHub::default()
+        .with_listing(&split_listing(MOE_REPO, SHA_MOE_1, SHA_MOE_2))
+        .with_head(MOE_REPO, summary(&moe_bytes()));
+    let f = facts_for(&hub, &k, repo_item(MOE_REPO, MOE_FIRST), CTX).await;
+    assert_eq!(f.installed_path.as_deref(), Some(from_catalog.path.as_str()));
+    assert_eq!(f.catalog.map(|c| c.id).as_deref(), Some("sample-moe-q4km"));
+}
+
+// ---- Catalog downloads ------------------------------------------------------------------
+
+/// A catalog download saves the uploader's facts even when the comparison never read
+/// them: one listing request at the catalog's pinned commit, and no file is read. When
+/// it fails the download goes ahead without them.
+#[tokio::test]
+async fn a_catalog_download_reads_the_uploader_facts_once() {
+    let k = known(Vec::new(), Vec::new());
+    let e = &k.catalog.models["sample-7b-q4km"];
+    let hub = FakeHub::default().with_listing(FULL);
+    let (facts, parameters) = catalog_download_facts(&hub, e).await.unwrap();
+    assert_eq!(facts.repo, "example-quants/Sample-7B-GGUF");
+    assert_eq!(facts.downloads, Some(123_456));
+    assert_eq!(
+        facts.card_url,
+        "https://huggingface.co/example-quants/Sample-7B-GGUF"
+    );
+    assert_eq!(parameters, Some(7_241_732_096));
+    assert_eq!(
+        *hub.asked.lock().unwrap(),
+        [(
+            "example-quants/Sample-7B-GGUF".to_string(),
+            Some("1111111111111111111111111111111111111111".to_string())
+        )]
+    );
+    assert_eq!(hub.head_calls.load(Ordering::SeqCst), 0);
+
+    for fail in [Fail::Offline, Fail::Busy, Fail::Gated, Fail::Missing] {
+        let hub = FakeHub::default().failing_listing("example-quants/Sample-7B-GGUF", fail);
+        assert_eq!(catalog_download_facts(&hub, e).await, None, "{fail:?}");
+        assert_eq!(hub.requests(), 1, "{fail:?}");
+    }
+}
+
 /// Offline, a repository file keeps what needs no network: an exact catalog match by
 /// repository and path. Rate limits, gated repositories and missing files are named.
 #[tokio::test]
@@ -545,7 +751,11 @@ async fn repo_item_problems() {
     let f = facts_for(&FakeHub::default(), &k, item.clone(), CTX).await;
     assert_eq!(f.problem, Some(CompareProblem::Offline));
     assert_eq!(f.catalog.map(|c| c.id), Some("sample-7b-q4km".to_string()));
-    assert_eq!(f.size_bytes, Some(5_000_000_000));
+    assert_eq!(
+        f.size_bytes,
+        Some(4_400_000_000),
+        "the same as online (a_repo_item_that_is_a_catalog_file): the file, not its projector"
+    );
     assert!(f.hub.is_none() && f.fit.is_none());
 
     let busy = FakeHub::default().failing_listing("example-quants/Sample-7B-GGUF", Fail::Busy);

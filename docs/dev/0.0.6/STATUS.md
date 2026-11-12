@@ -74,6 +74,10 @@ one starts from this file and `README.md`.
   wf_a08f0014-543 (script v006-packages-v2.js): group 1 WP9a + WP10c, group 2 WP9b, WP9c,
   WP9g, WP9d, WP9h, group 3 WP9e. Still to start: WP10a, WP10b (after WP1a/WP1b are done),
   then WP10d, WP10e.
+- 19:51 UTC check: WP7 done (reviewed, fixed, checked; two minor follow-ups in
+  `integration-todo.md`); WP4c done; WP6, WP4a in fixing; WP1a reviewed, WP1b in review,
+  WP2 developed; WP3a in review, WP3b and WP5b developed, WP5a in development; WP9a and
+  WP10c in development.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

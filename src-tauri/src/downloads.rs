@@ -28,8 +28,13 @@ pub struct GroupMeta {
     pub projector: Option<String>,
     pub catalog_id: Option<String>,
     /// 0.0.6: what the uploader listed when the download started, saved with the model
-    /// for comparing it offline (absent in groups saved before).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// for comparing it offline (absent in groups saved before; dropped on its own when
+    /// this version cannot read it).
+    #[serde(
+        default,
+        deserialize_with = "crate::hub::lenient_hub",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub hub: Option<crate::dto::HubFacts>,
     /// 0.0.6: the parameter count Hugging Face gave for the repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -678,5 +683,15 @@ mod tests {
         let saved = saved_facts(&back);
         assert_eq!(saved.hub, Some(hub));
         assert_eq!(saved.parameters, Some(7_000_000_000));
+
+        // Saved uploader facts this version cannot read (a field missing) are dropped on
+        // their own: the group still reads, so it can still resume and be registered.
+        let mut json = serde_json::to_value(&new).unwrap();
+        json["hub"].as_object_mut().unwrap().remove("cardUrl");
+        let partial: GroupMeta = serde_json::from_value(json).unwrap();
+        assert!(partial.hub.is_none());
+        assert_eq!(partial.catalog_id.as_deref(), Some("sample-7b-q4km"));
+        assert_eq!(partial.parameters, Some(7_000_000_000));
+        assert_eq!(partial.model_files.len(), 2);
     }
 }

@@ -572,17 +572,11 @@ pub async fn download_catalog_entry(app: AppHandle, entry_id: String) -> AppResu
         .models
         .get(&entry_id)
         .ok_or_else(|| AppError::not_found("catalog entry"))?;
-    // 0.0.6: the uploader's facts when the comparison already read them (nothing is
-    // fetched for this; the catalog id is saved either way).
+    // 0.0.6: the uploader's facts, saved with the model for comparing it offline: from
+    // this session's cache, else one listing request at the pinned commit. The download
+    // goes ahead without them when that fails; the catalog id is saved either way.
     let live = LiveHub::new(hf_client(&app).await.ok());
-    let facts = live
-        .cached_listing(&entry.repo, Some(&entry.revision))
-        .map(|d| {
-            (
-                compare::hub_facts(&d, live.page_url(&entry.repo)),
-                d.gguf.as_ref().and_then(|g| g.parameters),
-            )
-        });
+    let facts = compare::catalog_download_facts(&live, entry).await;
     start_group(
         &app,
         &entry.repo,
@@ -661,8 +655,24 @@ struct StoredSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repo_file: Option<String>,
     /// What the uploader listed when it was downloaded (already made safe to show).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_hub",
+        skip_serializing_if = "Option::is_none"
+    )]
     hub: Option<crate::dto::HubFacts>,
+}
+
+/// Reads saved uploader facts leniently: facts this version cannot read (a field missing
+/// or of another type, written by a later version or edited by hand) are dropped on their
+/// own, instead of making the whole saved value unreadable (the model's summary in
+/// `gguf_summary`, a download group's [`GroupMeta`]).
+pub(crate) fn lenient_hub<'de, D>(d: D) -> Result<Option<crate::dto::HubFacts>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = <Option<serde_json::Value> as serde::Deserialize>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// What a download knows about a model besides its file (0.0.6 item 4), saved with it.
@@ -1353,6 +1363,43 @@ mod tests {
         let json = serde_json::to_value(&old).unwrap();
         for key in ["hub", "catalogId", "repoFile", "parameters", "expertCount"] {
             assert!(json.get(key).is_none(), "{key}");
+        }
+    }
+
+    /// Saved uploader facts that this version cannot read (a field missing, written by a
+    /// later version or edited by hand) are dropped on their own: the rest of the saved
+    /// summary (the Installed badges, the catalog id) stays.
+    #[test]
+    fn a_saved_hub_this_version_cannot_read_loses_only_itself() {
+        let hub = serde_json::json!({
+            "repo": "example-quants/Sample-7B-GGUF", "author": "example-quants",
+            "pipelineTag": null, "baseModel": null, "languages": [], "license": null,
+            "tags": [], "downloads": 1, "likes": 2, "lastModified": null, "gated": false,
+            "cardUrl": "https://huggingface.co/example-quants/Sample-7B-GGUF"
+        });
+        let summary = |hub: serde_json::Value| {
+            serde_json::json!({
+                "architecture": "sample", "quantization": "Q4_K_M", "isMoe": true,
+                "catalogId": "sample-7b-q4km", "repoFile": "Sample-7B-Q4_K_M.gguf",
+                "hub": hub
+            })
+        };
+        let whole: StoredSummary = serde_json::from_value(summary(hub.clone())).unwrap();
+        assert_eq!(whole.hub.as_ref().map(|h| h.downloads), Some(Some(1)));
+
+        let mut partial = hub.clone();
+        partial.as_object_mut().unwrap().remove("cardUrl");
+        let mut wrong_type = hub.clone();
+        wrong_type["tags"] = serde_json::json!("code");
+        for bad in [partial, wrong_type, serde_json::json!("text"), serde_json::Value::Null] {
+            let s: StoredSummary = serde_json::from_value(summary(bad.clone()))
+                .unwrap_or_else(|e| panic!("{bad}: {e}"));
+            assert!(s.hub.is_none(), "{bad}");
+            assert_eq!(s.architecture.as_deref(), Some("sample"));
+            assert_eq!(s.quantization.as_deref(), Some("Q4_K_M"));
+            assert!(s.is_moe);
+            assert_eq!(s.catalog_id.as_deref(), Some("sample-7b-q4km"));
+            assert_eq!(s.repo_file.as_deref(), Some("Sample-7B-Q4_K_M.gguf"));
         }
     }
 
