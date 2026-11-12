@@ -1486,7 +1486,11 @@ def p_tool_selection(c, notes):
         # Files, terminal and git on; everything else off.
         chat = new_chat(c, tools=[])
         registered = listing(chat)
-        wanted = [n for n, t in registered.items() if t["server"] in ("files", "terminal", "git")]
+        # The folder tools work only in Full access (0.0.5): the panel marks them so outside it.
+        folder_tools = {"make_folder", "move_path", "delete_folder"}
+        for n in folder_tools:
+            assert not registered[n]["available"] and "Full access" in (registered[n]["schemaError"] or ""), registered[n]
+        wanted = [n for n, t in registered.items() if t["server"] in ("files", "terminal", "git") and n not in folder_tools]
         assert len(wanted) == 14, wanted
         s.invoke("set_chat_tools", {"chatId": chat, "enabled": wanted + ["find_tools", "call_tool"]})
         tools = listing(chat)
