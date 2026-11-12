@@ -1,19 +1,27 @@
-const fs = require("node:fs");
+// Prints the raw results of the project's code for fixed inputs, as one line
+// "RESULT <json>". It decides nothing: the app compares the values with what it
+// expects. It runs in its own process; the app never loads the project's code.
 const path = require("node:path");
-const assert = require("node:assert");
-
-const nonce = fs.readFileSync(0, "utf8").split("\n")[0].trim();
 const load = (name) => require(path.join(process.cwd(), name));
+const caseOf = (fn) => {
+  try {
+    return { value: fn() };
+  } catch (e) {
+    return { error: (e && e.name) || "Error" };
+  }
+};
 
+let results;
 try {
   const { slugify } = load("slugify.js");
-  assert.strictEqual(slugify("Hello World"), "hello-world");
-  assert.strictEqual(slugify("  Many   spaces  "), "many-spaces");
-  assert.strictEqual(slugify("Ready? Go!"), "ready-go");
-  assert.strictEqual(slugify("--Already-Slugged--"), "already-slugged");
-  assert.strictEqual(slugify("plain"), "plain");
+  results = {
+    hello: caseOf(() => slugify("Hello World")),
+    spaces: caseOf(() => slugify("  Many   spaces  ")),
+    ready: caseOf(() => slugify("Ready? Go!")),
+    slugged: caseOf(() => slugify("--Already-Slugged--")),
+    plain: caseOf(() => slugify("plain")),
+  };
 } catch (e) {
-  console.error(e && e.message ? e.message : String(e));
-  process.exit(1);
+  results = { failedToLoad: String((e && e.name) || e) };
 }
-console.log("VERIFIED " + nonce);
+console.log("RESULT " + JSON.stringify(results));

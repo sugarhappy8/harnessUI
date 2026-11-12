@@ -6,7 +6,35 @@
   "checks": [
     {
       "type": "run",
-      "script": "verify.py"
+      "script": "verify.py",
+      "expect": {
+        "start": {
+          "value": [
+            "a",
+            "b",
+            "c"
+          ]
+        },
+        "completeB": "ok",
+        "afterB": {
+          "value": [
+            "a",
+            "c"
+          ]
+        },
+        "titles": {
+          "value": [
+            "a",
+            "b",
+            "c"
+          ]
+        },
+        "completeRest": "ok",
+        "allDone": {
+          "value": []
+        },
+        "missing": "KeyError"
+      }
     }
   ],
   "parse": [

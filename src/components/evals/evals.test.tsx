@@ -5,6 +5,9 @@ import type { BenchRun, ModelProfile, ProfileView } from "./types";
 
 const ipcMock = vi.hoisted(() => ({
   listModelOptions: vi.fn<() => Promise<ModelOption[]>>(),
+  listProviders: vi.fn(async () => [
+    { id: 1, name: "Fake", kind: "generic", baseUrl: "http://models.example.com:8080/v1", hasApiKey: false, enabled: true },
+  ]),
   getModelProfile: vi.fn<(ref: string) => Promise<ProfileView>>(),
   forgetModelProfile: vi.fn<(key: string) => Promise<boolean>>(),
   startCapabilityCheck: vi.fn<(ref: string) => Promise<ModelProfile>>(),
@@ -22,7 +25,8 @@ vi.mock("../../lib/ipc", () => ipcMock);
 
 const { ModelCheck, chosenWords } = await import("./ModelCheck");
 const { Benchmarks, RunTable, CompareTable } = await import("./Benchmarks");
-const { BENCH_CONFIRM, CHECK_CONFIRM, CONFIRM_INPUT_DELAY_MS } = await import("./shared");
+const { benchConfirm, checkConfirm, CONFIRM_INPUT_DELAY_MS } = await import("./shared");
+const { useApp } = await import("../../store/app");
 
 const MODEL: ModelOption = { ref: "remote:1:fake-model", label: "fake-model", source: "provider", contextLength: null };
 
@@ -88,9 +92,9 @@ describe("model check", () => {
       fireEvent.click(screen.getByRole("button", { name: "Check this model" }));
     });
     const dialog = screen.getByRole("alertdialog");
-    for (const line of CHECK_CONFIRM) expect(dialog.textContent).toContain(line);
-    expect(dialog.textContent).toContain("temporary folder");
-    expect(dialog.textContent).toContain("Nothing is asked while it runs");
+    for (const line of checkConfirm("models.example.com")) expect(dialog.textContent).toContain(line);
+    expect(dialog.textContent).toContain("go to models.example.com.");
+    expect(dialog.textContent).not.toContain("Nothing leaves this computer");
     // The start button ignores a click that comes right away.
     fireEvent.click(screen.getByRole("button", { name: "Start the check" }));
     expect(ipcMock.startCapabilityCheck).not.toHaveBeenCalled();
@@ -201,8 +205,9 @@ describe("benchmarks", () => {
       fireEvent.click(screen.getByRole("button", { name: "Run the benchmark" }));
     });
     const dialog = screen.getByRole("alertdialog");
-    for (const line of BENCH_CONFIRM) expect(dialog.textContent).toContain(line);
-    expect(dialog.textContent).toContain("commands that delete, go online or cannot be understood are refused");
+    for (const line of benchConfirm("models.example.com")) expect(dialog.textContent).toContain(line);
+    expect(dialog.textContent).toContain("with your rights");
+    expect(dialog.textContent).toContain("Run the benchmark only with a model you trust.");
     expect(ipcMock.startBenchmark).not.toHaveBeenCalled();
     for (const label of buttonLabels()) {
       for (const bad of FORBIDDEN_LABELS) expect(label).not.toContain(bad);
@@ -221,5 +226,60 @@ describe("benchmarks", () => {
     const compare = screen.getByRole("table", { name: "Benchmark comparison" });
     expect(compare.textContent).toContain("1 of 2 completed");
     expect(compare.textContent).toContain("2 of 2 completed");
+  });
+});
+
+describe("what the user is told before a run", () => {
+  afterEach(() => {
+    cleanup();
+    useApp.setState({ runtime: null });
+  });
+
+  it("says exactly this before a check, for a local model and for an endpoint", () => {
+    expect(checkConfirm(null)).toEqual([
+      "The app gives the model three short tasks and tries each with a few settings.",
+      "The model gets only tools to read and change files, and only in a temporary folder made for the check. It cannot run commands, and the app runs nothing the model writes. The folder is removed afterwards.",
+      "Nothing is asked while it runs: anything that would need your approval is refused.",
+      "The settings that work best are saved for this model and used in your chats, unless you chose a setting yourself.",
+      "It can take a few minutes. Nothing leaves this computer.",
+    ]);
+    expect(checkConfirm("models.example.com").at(-1)).toBe(
+      "It can take a few minutes. The tasks and the model's replies go to models.example.com.",
+    );
+  });
+
+  it("says exactly this before a benchmark, and promises no confinement", () => {
+    const local = benchConfirm(null);
+    expect(local).toEqual([
+      "The app gives the model a fixed set of small coding tasks, one at a time, each in a temporary folder that is removed afterwards.",
+      "The model writes code, and the app runs it on this computer with your rights: the task's tests, the model's scripts, and the app's own checks of the result.",
+      "The app lets the model run only the task's tests and scripts and commands that look at files, and refuses everything else. Nothing is asked while it runs.",
+      "The app cannot see inside code the model writes. Such code could read or change files elsewhere on this computer, or go online.",
+      "Run the benchmark only with a model you trust.",
+      "Tasks that need Python or Node.js are skipped when they are not installed.",
+      "It can take a long time. The results stay on this computer.",
+    ]);
+    expect(benchConfirm("models.example.com").at(-1)).toBe(
+      "It can take a long time. The tasks and the model's replies go to models.example.com. The results stay on this computer.",
+    );
+    for (const line of local) {
+      expect(line).not.toMatch(/nowhere else|cannot leave|refused: commands that/);
+    }
+  });
+
+  it("shows the local wording for the loaded local model", async () => {
+    vi.clearAllMocks();
+    ipcMock.listModelOptions.mockResolvedValue([]);
+    ipcMock.getModelProfile.mockResolvedValue({ available: true, reason: null, label: "m.gguf (cpu)", key: "modelProfile:0123456789abcdef", profile: null });
+    useApp.setState({ runtime: { modelPath: "/models/m.gguf", modelName: "m.gguf" } as never });
+    await act(async () => {
+      render(<ModelCheck />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check this model" }));
+    });
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog.textContent).toContain("Nothing leaves this computer.");
+    expect(ipcMock.listProviders).not.toHaveBeenCalled();
   });
 });

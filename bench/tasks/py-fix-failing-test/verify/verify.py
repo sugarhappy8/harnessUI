@@ -1,28 +1,42 @@
+# Prints the raw results of the project's code for fixed inputs, as one line
+# "RESULT <json>". It decides nothing: the app compares the values with what it
+# expects. It runs in its own process; the app never loads the project's code.
+import json
 import os
 import sys
-import unittest
 
-NONCE = sys.stdin.readline().strip()
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.getcwd())
 
-class Check(unittest.TestCase):
-    def test_mean(self):
-        from stats import mean
 
-        self.assertEqual(mean([2, 4, 6]), 4)
-        self.assertEqual(mean([5]), 5)
-        self.assertEqual(mean([1, 2]), 1.5)
+def case(fn):
+    try:
+        return {"value": fn()}
+    except Exception as e:  # noqa: BLE001
+        return {"error": type(e).__name__}
 
-    def test_median_still_works(self):
-        from stats import median
 
-        self.assertEqual(median([4, 1, 3, 2]), 2.5)
-        self.assertEqual(median([7]), 7)
+def done(fn):
+    try:
+        fn()
+        return "ok"
+    except Exception as e:  # noqa: BLE001
+        return type(e).__name__
+
+
+def run():
+    from stats import mean, median
+
+    return {
+        "mean246": case(lambda: mean([2, 4, 6])),
+        "mean5": case(lambda: mean([5])),
+        "mean12": case(lambda: mean([1, 2])),
+        "median4132": case(lambda: median([4, 1, 3, 2])),
+        "median7": case(lambda: median([7])),
+    }
 if __name__ == "__main__":
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(Check)
-    result = unittest.TextTestRunner(stream=sys.stderr, verbosity=1).run(suite)
-    if result.wasSuccessful():
-        print("VERIFIED " + NONCE)
-        sys.exit(0)
-    sys.exit(1)
+    try:
+        results = run()
+    except Exception as e:  # noqa: BLE001
+        results = {"failedToLoad": type(e).__name__}
+    print("RESULT " + json.dumps(results, default=repr), flush=True)

@@ -6,7 +6,24 @@
   "checks": [
     {
       "type": "run",
-      "script": "verify.cjs"
+      "script": "verify.cjs",
+      "expect": {
+        "total": {
+          "value": 25.5
+        },
+        "total10": {
+          "value": 22.95
+        },
+        "total100": {
+          "value": 0
+        },
+        "empty": {
+          "value": 0
+        },
+        "count": {
+          "value": 3
+        }
+      }
     }
   ],
   "parse": [

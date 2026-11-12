@@ -1,13 +1,17 @@
 //! Verification of a benchmark task, run by the app after the model finished.
 //!
 //! Nothing the model says decides a result. Checks are shipped data ([`super::tasks`]):
-//! built-in content checks read the run's folder; a script check copies the task's
-//! verification script into a separate folder the model never saw, and runs it with a
-//! fixed command through `runtime::spawn` (the one way the app starts processes), with a
-//! time limit and the run's folder as working folder. The script passes only with exit
-//! code 0 and a last line `VERIFIED <nonce>`, where the nonce is new for every check and
-//! reaches the script on its standard input, which the script reads before it loads any
-//! of the model's code.
+//! built-in content checks read the run's folder. A script check copies the task's script
+//! into a separate folder the model never saw and runs it with a fixed command through
+//! `runtime::spawn` (the one way the app starts processes), with a time limit, the run's
+//! folder as working folder, and the run's cancellation. The script only loads the
+//! project's code and prints its raw results for fixed inputs as one line `RESULT <json>`;
+//! the app (which never loads the project's code) compares those values with the ones it
+//! expects. Code that tampers with its own process (patches an assertion, prints a fake
+//! success line) cannot change what the app compares.
+//!
+//! The script does run code the model wrote, with the user's rights: it is not confined.
+//! Each script run is written to the audit log under the run's row.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,7 +20,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
+use super::harness::AuditFn;
 use super::tasks::{Check, Task, Toolchain};
 use super::workspace::Workspace;
 
@@ -24,6 +30,9 @@ use super::workspace::Workspace;
 const SCRIPT_TIME: Duration = Duration::from_secs(60);
 /// How long a parse check or a version check may run.
 const SHORT_TIME: Duration = Duration::from_secs(20);
+/// How long the app waits for a program's output once it has ended (a process it left
+/// behind in another session may hold the pipes open).
+const DRAIN_TIME: Duration = Duration::from_secs(2);
 /// Parse checks per run, at most.
 const MAX_PARSE_CHECKS: usize = 50;
 
@@ -49,8 +58,16 @@ impl Toolchains {
                     continue;
                 };
                 let cwd = std::env::temp_dir();
-                let ran =
-                    run_program(&program, &["--version"], &cwd, None, SHORT_TIME, &path).await;
+                let ran = run_program(
+                    &program,
+                    &["--version"],
+                    &cwd,
+                    None,
+                    SHORT_TIME,
+                    &path,
+                    &CancellationToken::new(),
+                )
+                .await;
                 if ran.is_ok_and(|r| r.code == Some(0)) {
                     found.insert(toolchain, program);
                     break;
@@ -86,12 +103,22 @@ fn lf(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 
-/// Runs every check of `task` against the run's folder.
-pub async fn verify(task: &Task, ws: &Workspace, toolchains: &Toolchains) -> Vec<CheckOutcome> {
+/// Runs every check of `task` against the run's folder. Each script run gets an audit
+/// row through `audit`. Ends promptly when `cancel` fires (the remaining checks fail as
+/// not run).
+pub async fn verify(
+    task: &Task,
+    ws: &Workspace,
+    toolchains: &Toolchains,
+    cancel: &CancellationToken,
+    audit: &AuditFn,
+) -> Vec<CheckOutcome> {
     let mut out = Vec::new();
     for check in &task.spec.checks {
         out.push(match check {
-            Check::Run { script } => run_script(task, script, ws, toolchains).await,
+            Check::Run { script, expect } => {
+                run_script(task, script, expect, ws, toolchains, cancel, audit).await
+            }
             other => builtin(task, other, ws),
         });
     }
@@ -121,8 +148,8 @@ pub fn builtin(task: &Task, check: &Check, ws: &Workspace) -> CheckOutcome {
             .ok_or(format!("{file} is missing or not text"))
     };
     match check {
-        Check::Run { script } => outcome(
-            format!("{script} passes"),
+        Check::Run { script, .. } => outcome(
+            format!("{script} gives the expected results"),
             Err("a script check is not a built-in check".into()),
         ),
         Check::Json {
@@ -228,20 +255,66 @@ pub fn ini_value(text: &str, section: &str, key: &str) -> Option<String> {
     found
 }
 
-/// Runs a task's verification script, from a folder of its own, on the run's folder.
+/// Whether two JSON values are the same, numbers compared as numbers (`4.0` is `4`).
+pub fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(x), Some(y)) => (x - y).abs() <= 1e-9 * x.abs().max(y.abs()).max(1.0),
+            _ => x == y,
+        },
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
+/// The first result that differs from what is expected, in words.
+fn first_difference(found: &Value, expect: &Value) -> String {
+    if let (Value::Object(found), Value::Object(expect)) = (found, expect) {
+        for (key, wanted) in expect {
+            match found.get(key) {
+                None => return format!("{key} is missing"),
+                Some(got) if !same(got, wanted) => {
+                    return policy::sanitize::one_line(
+                        &format!("{key} is {got}, expected {wanted}"),
+                        300,
+                    );
+                }
+                _ => {}
+            }
+        }
+        if let Some(key) = found.keys().find(|k| !expect.contains_key(*k)) {
+            return policy::sanitize::one_line(&format!("unexpected result {key}"), 300);
+        }
+    }
+    policy::sanitize::one_line(&format!("the results are {found}"), 300)
+}
+
+/// Runs a task's script, from a folder of its own, on the run's folder, and compares the
+/// results it prints with the expected ones.
 async fn run_script(
     task: &Task,
     script: &str,
+    expect: &Value,
     ws: &Workspace,
     toolchains: &Toolchains,
+    cancel: &CancellationToken,
+    audit: &AuditFn,
 ) -> CheckOutcome {
-    let check = format!("{script} passes");
+    let check = format!("{script} gives the expected results");
     let Some(toolchain) = task.spec.needs else {
         return outcome(check, Err("the task names no toolchain".into()));
     };
     let Some(program) = toolchains.get(toolchain) else {
         return outcome(check, Err(format!("{} is not installed", toolchain.name())));
     };
+    if cancel.is_cancelled() {
+        return outcome(check, Err("not run: the run was stopped".into()));
+    }
     let private = match Workspace::create_private() {
         Ok(folder) => folder,
         Err(e) => {
@@ -265,34 +338,72 @@ async fn run_script(
         args.extend(["-I", "-B"]);
     }
     args.push(&script_path);
-    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let started = std::time::Instant::now();
     let ran = run_program(
         program,
         &args,
         ws.path(),
-        Some(format!("{nonce}\n")),
+        None,
         SCRIPT_TIME,
         &toolchains.path,
+        cancel,
     )
     .await;
     drop(private);
     let result = match ran {
         Err(e) => Err(format!("could not run it: {e}")),
+        Ok(r) if r.cancelled => Err("not finished: the run was stopped".into()),
         Ok(r) if r.timed_out => Err(format!(
             "it did not finish within {} seconds",
             SCRIPT_TIME.as_secs()
         )),
         Ok(r) => {
-            let last = r.stdout.lines().rev().find(|l| !l.trim().is_empty());
-            if r.code == Some(0)
-                && last.map(str::trim) == Some(format!("VERIFIED {nonce}").as_str())
-            {
-                Ok(())
-            } else {
-                Err(tail(&r.stderr, &r.stdout))
+            let printed = r
+                .stdout
+                .lines()
+                .rev()
+                .find_map(|l| l.trim().strip_prefix("RESULT "))
+                .map(|json| serde_json::from_str::<Value>(json.trim()));
+            match printed {
+                Some(Ok(found)) if same(&found, expect) => Ok(()),
+                Some(Ok(found)) => Err(first_difference(&found, expect)),
+                Some(Err(_)) | None => Err(tail(&r.stderr, &r.stdout)),
             }
         }
     };
+    let command = format!(
+        "{} {}",
+        program.display(),
+        args.iter()
+            .map(|a| if a.contains(' ') {
+                format!("\"{a}\"")
+            } else {
+                (*a).to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    audit(store::AuditEntry {
+        ts: None,
+        chat_id: None,
+        server: "evals".into(),
+        tool: "verify".into(),
+        arguments: serde_json::json!({"task": task.name, "command": command, "cwd": ws.display()}),
+        preview: format!(
+            "Runs the check of {} on the model's code: {command}",
+            task.name
+        ),
+        risk: "normal".into(),
+        decision: store::AuditDecision::AllowedWithoutPrompt,
+        decided_by: "app".into(),
+        note: None,
+        parent_audit_id: None,
+        result: Some(store::AuditResult {
+            status: if result.is_ok() { "ok" } else { "failed" }.into(),
+            summary: result.as_ref().err().cloned(),
+            duration_ms: Some(started.elapsed().as_millis() as u64),
+        }),
+    });
     outcome(check, result)
 }
 
@@ -315,7 +426,12 @@ fn tail(stderr: &str, stdout: &str) -> String {
 
 /// The files of the types the task names that no longer parse (a broken edit that a
 /// parser can see). Types whose parser is not installed are not checked.
-pub async fn unparsable(task: &Task, ws: &Workspace, toolchains: &Toolchains) -> Vec<String> {
+pub async fn unparsable(
+    task: &Task,
+    ws: &Workspace,
+    toolchains: &Toolchains,
+    cancel: &CancellationToken,
+) -> Vec<String> {
     let mut broken = Vec::new();
     let files: Vec<String> = ws
         .files()
@@ -329,6 +445,9 @@ pub async fn unparsable(task: &Task, ws: &Workspace, toolchains: &Toolchains) ->
         .take(MAX_PARSE_CHECKS)
         .collect();
     for file in files {
+        if cancel.is_cancelled() {
+            break;
+        }
         let Ok(path) = ws.inside(&file) else {
             continue;
         };
@@ -363,9 +482,11 @@ pub async fn unparsable(task: &Task, ws: &Workspace, toolchains: &Toolchains) ->
                 None,
                 SHORT_TIME,
                 &toolchains.path,
+                cancel,
             )
             .await
             {
+                Ok(r) if r.cancelled => break,
                 Ok(r) => r.code == Some(0),
                 Err(_) => continue,
             }
@@ -384,14 +505,18 @@ pub struct Ran {
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
+    /// The run was stopped while the program ran; it was killed.
+    pub cancelled: bool,
 }
 
 /// Output kept per stream.
 const MAX_OUTPUT: usize = 64 * 1024;
 
-/// Runs a fixed program through `runtime::spawn`, with a minimal environment, `stdin` (if
-/// any) written and closed, and a time limit after which its whole process tree is
-/// killed.
+/// Runs a fixed program through `runtime::spawn`, with a minimal environment and `stdin`
+/// (if any) written and closed. Its process group is killed when it ends, when the time
+/// limit passes and when `cancel` fires. Its output is read for at most [`DRAIN_TIME`]
+/// after that, so a process that left the group and holds the pipes cannot keep the app
+/// waiting.
 pub async fn run_program(
     program: &Path,
     args: &[&str],
@@ -399,6 +524,7 @@ pub async fn run_program(
     stdin: Option<String>,
     limit: Duration,
     path: &Option<String>,
+    cancel: &CancellationToken,
 ) -> std::io::Result<Ran> {
     let mut env = runtime::EnvSpec::minimal()
         .set("PYTHONDONTWRITEBYTECODE", "1")
@@ -446,22 +572,123 @@ pub async fn run_program(
             Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>
         })));
     let mut ran = Ran::default();
-    match tokio::time::timeout(limit, child.wait()).await {
-        Ok(status) => ran.code = status?.code(),
-        Err(_) => {
-            ran.timed_out = true;
-            let _ = child.kill().await;
-        }
+    tokio::select! {
+        status = tokio::time::timeout(limit, child.wait()) => match status {
+            Ok(status) => ran.code = status?.code(),
+            Err(_) => ran.timed_out = true,
+        },
+        _ = cancel.cancelled() => ran.cancelled = true,
     }
+    // The whole group, also after a normal exit: nothing it started stays behind in it.
+    let _ = child.start_kill();
     drop(child);
-    ran.stdout = stdout.await.unwrap_or_default();
-    ran.stderr = stderr.await.unwrap_or_default();
+    let drain = |task: tokio::task::JoinHandle<String>| async move {
+        let abort = task.abort_handle();
+        match tokio::time::timeout(DRAIN_TIME, task).await {
+            Ok(text) => text.unwrap_or_default(),
+            Err(_) => {
+                abort.abort();
+                String::new()
+            }
+        }
+    };
+    ran.stdout = drain(stdout).await;
+    ran.stderr = drain(stderr).await;
     Ok(ran)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn python() -> Option<PathBuf> {
+        runtime::resolve_program("python3", None)
+    }
+
+    /// A program whose child keeps the output pipe open from another session does not
+    /// keep the app waiting once the program has ended.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_left_holding_the_pipe_does_not_hang_the_check() {
+        let Some(python) = python() else {
+            eprintln!("python3 is missing; skipped");
+            return;
+        };
+        let started = std::time::Instant::now();
+        let ran = run_program(
+            &python,
+            &[
+                "-c",
+                "import subprocess; subprocess.Popen(['sleep', '40'], start_new_session=True); print('done', flush=True)",
+            ],
+            &std::env::temp_dir(),
+            None,
+            Duration::from_secs(30),
+            &None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(ran.code, Some(0));
+        assert!(!ran.timed_out && !ran.cancelled);
+    }
+
+    /// Stop during a check ends it within about two seconds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_ends_a_running_check() {
+        let Some(python) = python() else {
+            eprintln!("python3 is missing; skipped");
+            return;
+        };
+        let cancel = CancellationToken::new();
+        let stopper = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            stopper.cancel();
+        });
+        let started = std::time::Instant::now();
+        let ran = run_program(
+            &python,
+            &["-c", "import time; time.sleep(30)"],
+            &std::env::temp_dir(),
+            None,
+            Duration::from_secs(60),
+            &None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(ran.cancelled);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn results_compare_as_values() {
+        use serde_json::json;
+        assert!(same(
+            &json!({"a": {"value": 4.0}}),
+            &json!({"a": {"value": 4}})
+        ));
+        assert!(same(&json!([22.950000000000003]), &json!([22.95])));
+        assert!(!same(&json!({"a": 1}), &json!({"a": 1, "b": 2})));
+        assert!(!same(&json!({"a": 1, "b": 2}), &json!({"a": 1})));
+        assert!(!same(&json!("4"), &json!(4)));
+        assert!(!same(&json!([1, 2]), &json!([2, 1])));
+        assert_eq!(
+            first_difference(&json!({"a": 3}), &json!({"a": 4})),
+            "a is 3, expected 4"
+        );
+    }
 
     #[test]
     fn ini_values_are_read_per_section() {

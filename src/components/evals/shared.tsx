@@ -2,30 +2,70 @@ import { useEffect, useState } from "react";
 import { AlertDialog } from "radix-ui";
 import { FlaskConical } from "lucide-react";
 import * as ipc from "../../lib/ipc";
-import type { ModelOption } from "../../lib/types";
+import type { ModelOption, Provider } from "../../lib/types";
 import { useApp } from "../../store/app";
 import type { EvalProgress } from "./types";
 
 /** Clicks on the start button are ignored for this long after the dialog opens. */
 export const CONFIRM_INPUT_DELAY_MS = 700;
 
-/** What starting a capability check does, in the words the user reads before it starts. */
-export const CHECK_CONFIRM: readonly string[] = [
-  "The app gives the model three short tasks and tries each with a few settings.",
-  "The model will read and change files in a temporary folder made for the check, and nowhere else. The folder is removed afterwards.",
-  "Nothing is asked while it runs: anything that would need your approval is refused.",
-  "The settings that work best are saved for this model and used in your chats, unless you chose a setting yourself.",
-  "It can take a few minutes. Nothing leaves this computer.",
-];
+/** What starting a capability check does, in the words the user reads before it starts.
+ *  `host` is the endpoint's host for a model of an endpoint, `null` for a local model. */
+export function checkConfirm(host: string | null): string[] {
+  return [
+    "The app gives the model three short tasks and tries each with a few settings.",
+    "The model gets only tools to read and change files, and only in a temporary folder made for the check. It cannot run commands, and the app runs nothing the model writes. The folder is removed afterwards.",
+    "Nothing is asked while it runs: anything that would need your approval is refused.",
+    "The settings that work best are saved for this model and used in your chats, unless you chose a setting yourself.",
+    host === null
+      ? "It can take a few minutes. Nothing leaves this computer."
+      : `It can take a few minutes. The tasks and the model's replies go to ${host}.`,
+  ];
+}
 
-/** What starting a benchmark does. */
-export const BENCH_CONFIRM: readonly string[] = [
-  "The app gives the model a fixed set of small coding tasks, one at a time.",
-  "For each task the model will read and change files and run commands in a temporary folder made for that task. The folder is removed afterwards.",
-  "Nothing is asked while it runs: commands that delete, go online or cannot be understood are refused.",
-  "Tasks that need Python or Node.js are skipped when they are not installed.",
-  "It can take a long time. The results stay on this computer.",
-];
+/** What starting a benchmark does. There is no sandbox around the code the model writes,
+ *  and the text says so. */
+export function benchConfirm(host: string | null): string[] {
+  return [
+    "The app gives the model a fixed set of small coding tasks, one at a time, each in a temporary folder that is removed afterwards.",
+    "The model writes code, and the app runs it on this computer with your rights: the task's tests, the model's scripts, and the app's own checks of the result.",
+    "The app lets the model run only the task's tests and scripts and commands that look at files, and refuses everything else. Nothing is asked while it runs.",
+    "The app cannot see inside code the model writes. Such code could read or change files elsewhere on this computer, or go online.",
+    "Run the benchmark only with a model you trust.",
+    "Tasks that need Python or Node.js are skipped when they are not installed.",
+    host === null
+      ? "It can take a long time. The results stay on this computer."
+      : `It can take a long time. The tasks and the model's replies go to ${host}. The results stay on this computer.`,
+  ];
+}
+
+/** The host a model's requests go to: `null` for a local model, else its endpoint's host. */
+export function useEndpointHost(modelRef: string | null): string | null {
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const remote = modelRef?.startsWith("remote:") ?? false;
+  useEffect(() => {
+    if (!remote) return;
+    let alive = true;
+    ipc
+      .listProviders()
+      .then((all) => {
+        if (alive) setProviders(all);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [remote]);
+  if (!modelRef || !remote) return null;
+  const id = Number(modelRef.split(":")[1]);
+  const provider = providers.find((p) => p.id === id);
+  if (!provider) return "its endpoint";
+  try {
+    return new URL(provider.baseUrl).hostname || provider.baseUrl;
+  } catch {
+    return provider.baseUrl;
+  }
+}
 
 /** The models a run can use: the loaded local model first, then the endpoints' models. */
 export function useModelChoice() {

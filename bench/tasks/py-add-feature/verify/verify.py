@@ -1,37 +1,48 @@
+# Prints the raw results of the project's code for fixed inputs, as one line
+# "RESULT <json>". It decides nothing: the app compares the values with what it
+# expects. It runs in its own process; the app never loads the project's code.
+import json
 import os
 import sys
-import unittest
 
-NONCE = sys.stdin.readline().strip()
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.getcwd())
 
-class Check(unittest.TestCase):
-    def test_pending_and_complete(self):
-        from todo import TodoList
 
-        todos = TodoList()
-        for title in ["a", "b", "c"]:
-            todos.add(title)
-        self.assertEqual(todos.pending(), ["a", "b", "c"])
-        todos.complete("b")
-        self.assertEqual(todos.pending(), ["a", "c"])
-        self.assertEqual(todos.titles(), ["a", "b", "c"])
-        todos.complete("a")
-        todos.complete("c")
-        self.assertEqual(todos.pending(), [])
+def case(fn):
+    try:
+        return {"value": fn()}
+    except Exception as e:  # noqa: BLE001
+        return {"error": type(e).__name__}
 
-    def test_unknown_title(self):
-        from todo import TodoList
 
-        todos = TodoList()
-        todos.add("a")
-        with self.assertRaises(KeyError):
-            todos.complete("missing")
+def done(fn):
+    try:
+        fn()
+        return "ok"
+    except Exception as e:  # noqa: BLE001
+        return type(e).__name__
+
+
+def run():
+    from todo import TodoList
+
+    todos = TodoList()
+    for title in ["a", "b", "c"]:
+        todos.add(title)
+    out = {"start": case(todos.pending)}
+    out["completeB"] = done(lambda: todos.complete("b"))
+    out["afterB"] = case(todos.pending)
+    out["titles"] = case(todos.titles)
+    out["completeRest"] = done(lambda: (todos.complete("a"), todos.complete("c")))
+    out["allDone"] = case(todos.pending)
+    other = TodoList()
+    other.add("a")
+    out["missing"] = done(lambda: other.complete("missing"))
+    return out
 if __name__ == "__main__":
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(Check)
-    result = unittest.TextTestRunner(stream=sys.stderr, verbosity=1).run(suite)
-    if result.wasSuccessful():
-        print("VERIFIED " + NONCE)
-        sys.exit(0)
-    sys.exit(1)
+    try:
+        results = run()
+    except Exception as e:  # noqa: BLE001
+        results = {"failedToLoad": type(e).__name__}
+    print("RESULT " + json.dumps(results, default=repr), flush=True)

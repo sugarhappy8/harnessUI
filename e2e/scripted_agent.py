@@ -2543,6 +2543,9 @@ def p_capability_check(c, notes):
         s.wait_for(lambda: "Start the check" in s.page_text(), 10, "the confirmation")
         page = s.page_text()
         assert "temporary folder" in page and "Nothing is asked while it runs" in page, page[-800:]
+        # The model is an endpoint: the text names where the tasks go, not "nothing leaves".
+        assert "The tasks and the model's replies go to 127.0.0.1." in page, page[-800:]
+        assert "Nothing leaves this computer" not in page, page[-800:]
         time.sleep(0.9)
         s.click_button("Start the check")
         s.wait_for(lambda: "(chosen)" in s.page_text(), 180, "the results table")
@@ -2578,7 +2581,7 @@ def p_capability_check(c, notes):
         assert all(r["preview"].startswith("Model check: ") for r in calls), calls[0]["preview"]
         notes.append(f"audit: 1 run row, {len(calls)} call rows")
         # The temporary folders are gone.
-        assert runs_left() == before, (before, runs_left())
+        assert set(runs_left()) <= set(before), (before, runs_left())
         # A chat with this model now asks for the tested temperature.
         Fake.queue = []
         s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
@@ -2616,7 +2619,7 @@ def p_capability_check(c, notes):
         s.click_button("Run the benchmark")
         s.wait_for(lambda: "Start the benchmark" in s.page_text(), 10, "the benchmark confirmation")
         page = s.page_text()
-        assert "commands that delete, go online or cannot be understood are refused" in page, page[-800:]
+        assert "with your rights" in page and "Run the benchmark only with a model you trust." in page, page[-800:]
         time.sleep(0.9)
         s.click_button("Start the benchmark")
         s.wait_for(lambda: s.execute("return document.querySelector('table[aria-label=\"Benchmark results\"]') !== null;"), 300, "the benchmark table")
@@ -2630,7 +2633,7 @@ def p_capability_check(c, notes):
         assert all(t["status"] in ("failed", "skipped") for t in run["tasks"]), [t["status"] for t in run["tasks"]]
         saved = list((c.db.parent / "benchmarks").glob("*.json"))
         assert len(saved) == 1, saved
-        assert runs_left() == before, (before, runs_left())
+        assert set(runs_left()) <= set(before), (before, runs_left())
         bench_rows = [r for r in s.invoke("list_audit", {"filter": {"limit": 500}}) if r["server"] == "evals" and r["tool"] == "benchmark"]
         assert len(bench_rows) == 1 and bench_rows[0]["result_status"] == "ok", bench_rows
     finally:

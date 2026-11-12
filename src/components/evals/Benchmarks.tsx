@@ -4,7 +4,8 @@ import type { ErrorInfo } from "../../lib/types";
 import { toErrorInfo } from "../../store/app";
 import { ErrorBanner } from "../ErrorBanner";
 import {
-  BENCH_CONFIRM,
+  benchConfirm,
+  useEndpointHost,
   ModelSelect,
   ProgressLine,
   RunConfirm,
@@ -202,6 +203,7 @@ export function Benchmarks() {
   const skipped = tasks.filter((t) => !t.runnable);
   const missing = [...new Set(skipped.map((t) => t.needs).filter(Boolean))];
   const label = options.find((o) => o.ref === value)?.label ?? "";
+  const host = useEndpointHost(value);
   return (
     <section aria-label="Benchmarks" className="mt-6 space-y-3 border-t border-border pt-5">
       <div>
@@ -278,7 +280,7 @@ export function Benchmarks() {
       <RunConfirm
         open={confirm}
         title="Run the benchmark?"
-        lines={BENCH_CONFIRM}
+        lines={benchConfirm(host)}
         model={label}
         startLabel="Start the benchmark"
         onOpenChange={setConfirm}

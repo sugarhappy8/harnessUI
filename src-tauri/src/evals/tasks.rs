@@ -175,10 +175,10 @@ impl Toolchain {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Check {
-    /// Runs `verify/<script>` with the task's toolchain; passes on exit code 0 and a last
-    /// line `VERIFIED <nonce>`, where the nonce is new for every run and reaches only the
-    /// script (on its standard input).
-    Run { script: String },
+    /// Runs `verify/<script>` with the task's toolchain in its own process. The script
+    /// prints the raw results of the project's code for fixed inputs as one line
+    /// `RESULT <json>`; the check passes when they are the same as `expect`.
+    Run { script: String, expect: Value },
     /// The value at a JSON pointer of a JSON file.
     Json {
         file: String,
@@ -347,7 +347,7 @@ mod tests {
             );
             // A script check has its script, and a toolchain to run it with.
             for check in &task.spec.checks {
-                if let Check::Run { script } = check {
+                if let Check::Run { script, .. } = check {
                     assert!(
                         task.verify.iter().any(|(p, _)| p == script),
                         "{}",

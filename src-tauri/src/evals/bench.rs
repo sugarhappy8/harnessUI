@@ -225,8 +225,13 @@ pub async fn run_task(setup: &Setup<'_>, task: &Task, cancel: &CancellationToken
     }
     // Verified whatever way the turn ended: a model that ran out of steps may still have
     // finished the work.
-    result.checks = verify::verify(task, &ws, setup.toolchains).await;
-    result.unparsable = verify::unparsable(task, &ws, setup.toolchains).await;
+    result.checks = verify::verify(task, &ws, setup.toolchains, cancel, &setup.audit).await;
+    result.unparsable = verify::unparsable(task, &ws, setup.toolchains, cancel).await;
+    if cancel.is_cancelled() {
+        result.status = "stopped".into();
+        result.note = "Stopped while its result was being checked.".into();
+        return result;
+    }
     result.broken_edits = result.failed_edits + result.unparsable.len() as u32;
     let passed = result.checks.iter().all(|c| c.passed);
     result.status = if passed { "passed" } else { "failed" }.into();

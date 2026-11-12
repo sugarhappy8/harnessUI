@@ -6,7 +6,19 @@
   "checks": [
     {
       "type": "run",
-      "script": "verify.py"
+      "script": "verify.py",
+      "expect": {
+        "getUser": {
+          "value": "Ada"
+        },
+        "oldNameGone": true,
+        "greeting2": {
+          "value": "Hello, Grace"
+        },
+        "greeting5": {
+          "value": "Hello, stranger"
+        }
+      }
     },
     {
       "type": "absent",

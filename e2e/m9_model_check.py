@@ -161,7 +161,7 @@ def main() -> int:
                       f"blocked={p['blocked']} steps={p['steps']} status={p['status']} {p['timeMs'] // 1000} s: {p['note']}")
 
         step("after the check: folders and audit")
-        assert runs_left(temp) == temp_before, (temp_before, runs_left(temp))
+        assert set(runs_left(temp)) <= set(temp_before), (temp_before, runs_left(temp))
         assert tree(work) == work_before, "the approved folder changed"
         home_after = tree(home, own)
         assert home_after == home_before, sorted(set(home_after) ^ set(home_before))
@@ -183,6 +183,8 @@ def main() -> int:
         time.sleep(0.5)
         s.click_button("Run the benchmark")
         s.wait_text("Start the benchmark", 10)
+        page = s.page_text()
+        assert "with your rights" in page and "Run the benchmark only with a model you trust." in page, page[-800:]
         time.sleep(0.9)
         started = time.time()
         s.click_button("Start the benchmark")
@@ -215,7 +217,7 @@ def main() -> int:
         for t in run["tasks"]:
             print(f"    {t['name']:<24} {t['status']:<8} brokenEdits={t['brokenEdits']} failures={t['toolFailures']} "
                   f"blocked={t['blocked']} steps={t['steps']} calls={t['arrival']} turn={t['runStatus']} {t['timeMs'] // 1000} s: {t['note'][:160]}")
-        assert runs_left(temp) == temp_before, (temp_before, runs_left(temp))
+        assert set(runs_left(temp)) <= set(temp_before), (temp_before, runs_left(temp))
         assert tree(work) == work_before, "the approved folder changed"
         assert tree(home, own) == home_before
         audit = s.invoke("list_audit", {"filter": {"limit": 2000}})

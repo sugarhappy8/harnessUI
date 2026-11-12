@@ -6,7 +6,21 @@
   "checks": [
     {
       "type": "run",
-      "script": "verify.cjs"
+      "script": "verify.cjs",
+      "expect": {
+        "ada": {
+          "value": "Ada"
+        },
+        "noProfile": {
+          "value": "(no name)"
+        },
+        "noName": {
+          "value": "(no name)"
+        },
+        "grace": {
+          "value": "Grace"
+        }
+      }
     },
     {
       "type": "unchanged",

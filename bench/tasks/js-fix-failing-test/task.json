@@ -6,7 +6,24 @@
   "checks": [
     {
       "type": "run",
-      "script": "verify.cjs"
+      "script": "verify.cjs",
+      "expect": {
+        "hello": {
+          "value": "hello-world"
+        },
+        "spaces": {
+          "value": "many-spaces"
+        },
+        "ready": {
+          "value": "ready-go"
+        },
+        "slugged": {
+          "value": "already-slugged"
+        },
+        "plain": {
+          "value": "plain"
+        }
+      }
     },
     {
       "type": "unchanged",

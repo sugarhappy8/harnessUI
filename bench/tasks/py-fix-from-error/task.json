@@ -6,7 +6,18 @@
   "checks": [
     {
       "type": "run",
-      "script": "verify.py"
+      "script": "verify.py",
+      "expect": {
+        "mixed": {
+          "value": "3 orders, total 3.25"
+        },
+        "empty": {
+          "value": "0 orders, total 0.00"
+        },
+        "file": {
+          "value": "3 orders, total 20.00"
+        }
+      }
     },
     {
       "type": "unchanged",

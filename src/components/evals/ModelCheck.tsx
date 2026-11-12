@@ -4,7 +4,8 @@ import type { ErrorInfo } from "../../lib/types";
 import { toErrorInfo } from "../../store/app";
 import { ErrorBanner } from "../ErrorBanner";
 import {
-  CHECK_CONFIRM,
+  checkConfirm,
+  useEndpointHost,
   ModelSelect,
   ProgressLine,
   RunConfirm,
@@ -87,6 +88,7 @@ export function ModelCheck() {
   const current = value ? view : null;
   const profile = current?.profile ?? null;
   const label = options.find((o) => o.ref === value)?.label ?? "";
+  const host = useEndpointHost(value);
   return (
     <section aria-label="Model check" className="mt-6 space-y-3 border-t border-border pt-5">
       <div>
@@ -175,7 +177,7 @@ export function ModelCheck() {
       <RunConfirm
         open={confirm}
         title="Check this model?"
-        lines={CHECK_CONFIRM}
+        lines={checkConfirm(host)}
         model={label}
         startLabel="Start the check"
         onOpenChange={setConfirm}

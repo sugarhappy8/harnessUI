@@ -186,6 +186,20 @@ async fn model_for(state: &AppState, model_ref: &str) -> AppResult<(Model, Ident
     ))
 }
 
+/// Where the model's requests go, for the run's audit row.
+fn where_it_goes(identity: &Identity) -> String {
+    match identity {
+        Identity::Local { .. } => "The model runs on this computer.".into(),
+        Identity::Remote { url, .. } => format!(
+            "The tasks and the model's replies go to {}.",
+            url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_else(|| url.clone())
+        ),
+    }
+}
+
 // ---- Audit ------------------------------------------------------------------------
 
 /// The run's own audit row and a writer for the rows of its calls, which point at it.
@@ -358,6 +372,10 @@ pub async fn start_capability_check(
     only_main_window(window.label())?;
     let (model, identity) = model_for(&state, &model_ref).await?;
     let (_running, cancel) = start_run()?;
+    let left = super::workspace::remove_leftovers();
+    if left > 0 {
+        tracing::info!(left, "removed folders left by earlier runs");
+    }
     let label = identity.label();
     let audit = RunAudit::open(
         &state,
@@ -365,7 +383,8 @@ pub async fn start_capability_check(
         "Model check: ",
         json!({"modelRef": model_ref}),
         format!(
-            "Model check of {label}: the model reads and changes files in a temporary folder made for the check. Nothing is asked while it runs."
+            "Model check of {label}: the model gets only the file tools, in a temporary folder made for the check, and the app runs nothing the model writes. Nothing is asked while it runs. {}",
+            where_it_goes(&identity)
         ),
     )
     .await;
@@ -498,6 +517,10 @@ pub async fn start_benchmark(
     let (model, identity) = model_for(&state, &model_ref).await?;
     let dir = bench_dir(&app)?;
     let (_running, cancel) = start_run()?;
+    let left = super::workspace::remove_leftovers();
+    if left > 0 {
+        tracing::info!(left, "removed folders left by earlier runs");
+    }
     let label = identity.label();
     // The model's tested settings, when it has them.
     let settings = match profile::load(&state.store, &identity)
@@ -518,7 +541,8 @@ pub async fn start_benchmark(
         "Benchmark: ",
         json!({"modelRef": model_ref}),
         format!(
-            "Benchmark of {label}: the model reads and changes files and runs commands in a temporary folder made for each task. Nothing is asked while it runs; commands that delete, go online or cannot be understood are refused."
+            "Benchmark of {label}: the model writes code and the app runs it on this computer with the user's rights, in a temporary folder for each task (the task's tests, the model's scripts and the app's checks of the result). The app lets the model run only the task's tests and scripts and commands that look at files, and refuses everything else, but it cannot see inside code the model writes: such code could read or change files elsewhere or go online. Nothing is asked while it runs. {}",
+            where_it_goes(&identity)
         ),
     )
     .await;
@@ -617,13 +641,47 @@ mod tests {
     }
 
     #[test]
+    fn the_audit_says_where_requests_go() {
+        let remote = Identity::Remote {
+            url: "https://models.example.com:8443/v1".into(),
+            model: "m".into(),
+        };
+        assert_eq!(
+            where_it_goes(&remote),
+            "The tasks and the model's replies go to models.example.com."
+        );
+        let local = Identity::Local {
+            file: "m.gguf".into(),
+            size: 1,
+            backend: "cpu".into(),
+        };
+        assert_eq!(where_it_goes(&local), "The model runs on this computer.");
+    }
+
+    #[test]
     fn only_the_main_window_starts_a_run() {
         assert!(only_main_window(crate::MAIN_WINDOW).is_ok());
         assert!(only_main_window("overlay").is_err());
     }
 
+    /// The run slot is one static: the tests that use it take turns.
+    static SLOT_TESTS: Mutex<()> = Mutex::new(());
+
+    /// A run that panics still releases the run slot.
+    #[test]
+    fn a_panicking_run_releases_the_slot() {
+        let _turn = SLOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let caught = std::panic::catch_unwind(|| {
+            let (_guard, _token) = start_run().unwrap();
+            panic!("the run failed");
+        });
+        assert!(caught.is_err());
+        let (_again, _) = start_run().expect("the slot was released");
+    }
+
     #[test]
     fn one_run_at_a_time() {
+        let _turn = SLOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let (guard, token) = start_run().unwrap();
         assert!(start_run().is_err());
         token.cancel();

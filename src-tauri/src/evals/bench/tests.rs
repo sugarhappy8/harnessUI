@@ -286,3 +286,80 @@ fn runs_are_saved_listed_and_loaded_by_safe_ids_only() {
         "the oldest run was kept"
     );
 }
+
+/// The review's cheats (finding 2): code that patches the assertions, prints the success
+/// line, or patches Node's assert does not pass, because the app compares values.
+#[tokio::test]
+async fn tampering_with_the_checking_process_does_not_pass() {
+    let toolchains = Toolchains::detect(None).await;
+    let all = tasks::all();
+    let task = |name: &str| all.iter().find(|t| t.name == name).unwrap();
+    let fixture =
+        |t: &Task, file: &str| String::from_utf8(t.fixture(file).unwrap().to_vec()).unwrap();
+    let mut cases = Vec::new();
+    if toolchains.get(Toolchain::Python).is_some() {
+        let t = task("py-fix-failing-test");
+        let buggy = fixture(t, "stats.py");
+        cases.push((
+            t,
+            "stats.py",
+            format!(
+                "{buggy}\nimport unittest as _u; _u.TestCase.assertEqual = lambda *a, **k: None\n"
+            ),
+        ));
+        cases.push((t, "stats.py", format!(
+            "{buggy}\nimport __main__, os, sys\nprint('VERIFIED ' + str(getattr(__main__, 'NONCE', 'x')))\nprint('RESULT ' + '{{}}')\nsys.stdout.flush()\nos._exit(0)\n"
+        )));
+    }
+    if toolchains.get(Toolchain::Node).is_some() {
+        let t = task("js-fix-failing-test");
+        let buggy = fixture(t, "slugify.js");
+        cases.push((
+            t,
+            "slugify.js",
+            format!("{buggy}\nrequire(\"node:assert\").strictEqual = () => {{}};\n"),
+        ));
+    }
+    for (t, file, content) in cases {
+        let result = play(t, vec![(file.to_owned(), content)], &toolchains).await;
+        assert_eq!(result.status, "failed", "{}: {result:#?}", t.name);
+    }
+}
+
+/// Each script check is written to the audit log: the fixed command and its result.
+#[tokio::test]
+async fn every_script_check_gets_an_audit_row() {
+    let toolchains = Toolchains::detect(None).await;
+    if toolchains.get(Toolchain::Python).is_none() {
+        eprintln!("python is missing; skipped");
+        return;
+    }
+    let task = tasks::all()
+        .into_iter()
+        .find(|t| t.name == "py-fix-failing-test")
+        .unwrap();
+    let endpoint = Endpoint::playing(vec![]).await;
+    let model = model(&endpoint);
+    let (audit, rows) = audit_rows();
+    let setup = Setup {
+        model: &model,
+        settings: Settings::default(),
+        toolchains: &toolchains,
+        terminal: tools::TerminalConfig::default(),
+        forbidden: &[],
+        audit,
+    };
+    let result = run_task(&setup, &task, &CancellationToken::new()).await;
+    assert_eq!(result.status, "failed");
+    let rows = rows.lock().unwrap();
+    let verify: Vec<_> = rows.iter().filter(|r| r.tool == "verify").collect();
+    assert_eq!(verify.len(), 1, "{rows:#?}");
+    assert_eq!(verify[0].server, "evals");
+    assert!(
+        verify[0].preview.contains("verify.py"),
+        "{}",
+        verify[0].preview
+    );
+    assert_eq!(verify[0].result.as_ref().unwrap().status, "failed");
+    assert!(verify[0].chat_id.is_none());
+}

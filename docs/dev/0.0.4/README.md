@@ -1,15 +1,17 @@
 # 0.0.4: plan, steps and handoff
 
 The owner asked for thirteen features in 0.0.4 and then split the work into steps: the
-parts where a mistake is a safety problem first, the rest afterwards by another model.
-This folder is what the next developer needs to continue.
+parts where a mistake is a safety problem first, the rest afterwards. All three steps
+are built. This folder holds the plan, each developer's report and the two independent
+reviews of steps 2 and 3.
 
 - `spec.md`: the full spec for all thirteen features (rules, shared decisions, one
   section per feature). It was written for several agents working at once; where it
   talks about "other agents" and "files you own", read it as "keep changes small and in
   the feature's own files".
-- `handoff-*.md`: notes left by the developers of three step 2 features that were
-  started and then stopped: what exists, what is left, and decisions to keep.
+- `handoff-*.md`: notes left by the first developers of three step 2 features, which
+  were started, stopped and later finished. History only; the reports below replace them.
+- `report-*.md` and `review-*.md`: listed under each step's status below.
 
 ## Steps
 
@@ -19,12 +21,12 @@ This folder is what the next developer needs to continue.
 | 1 | 1, 9 | Artifacts beside the chat, isolated previews, render feedback (C) | done |
 | 1 | 2, 10 | Web search with verifiable sources, version-aware (D) | done |
 | 1 | 4 | Adaptive tool selection (E) | done |
-| 2 | 7, 8 | Helpful tool errors, manageable tool output (B) | started: `handoff-B-tool-errors-output.md` |
-| 2 | 6 | Visible, resumable task state (G) | started: `handoff-G-task-state.md` |
-| 2 | 11 | File and symbol mentions (H) | started: `handoff-H-mentions.md` |
-| 2 | 12 | Pinned instructions and a context inspector (I) | not started |
-| 3 | 5 | Tested settings per model (F, first half) | not started |
-| 3 | 13 | Coding benchmarks (F, second half) | not started |
+| 2 | 7, 8 | Helpful tool errors, manageable tool output (B) | done |
+| 2 | 6 | Visible, resumable task state (G) | done |
+| 2 | 11 | File and symbol mentions (H) | done |
+| 2 | 12 | Pinned instructions and a context inspector (I) | done |
+| 3 | 5 | Tested settings per model (F, first half) | done; review fixes being finished |
+| 3 | 13 | Coding benchmarks (F, second half) | done; review fixes being finished |
 
 Groundwork that all steps build on is in place (see the spec's Part 2): schema version 2
 with every new table, the panel beside the chat with four tabs
@@ -89,18 +91,11 @@ What the lead changed after the four reports (so the reports are out of date on 
    `Object.hasOwn` for tool card extras, the welcome text, `E2E_TRACE=1` for a line
    number when a scripted scenario fails.
 
-For whoever builds steps 2 and 3, the places where step 1 expects you to do something:
-- `artifacts/outside.rs`, `OWN_DATA_TOOLS`: the tools whose results are the app's own data
-  and do not count as outside content. `update_task` is already there. `read_output` must
-  stay out (it returns another tool's result).
-- `tool_select`: `read_output` and `update_task` are companions and always shown. Each
-  costs room in a small context: run `e2e/m1_chat.py` (a 0.6B model at 4,096 tokens)
-  after adding them, and look at `select_by_size` if a turn is refused again.
-- `tool_catalog.rs` has entries for `read_output` and `update_task` checked against the
-  agreed shapes only; `tool_catalog_problems` (first assertion of the `tool-selection`
-  scenario) checks them against the real servers once those are registered.
-- The after-call hooks in `turns.rs` (`outputs::after_call`, `task::after_call`) are still
-  the no-op stubs.
+Step 1 left four things for steps 2 and 3 (`OWN_DATA_TOOLS`, the companion tools in
+`tool_select`, the catalog entries for `read_output` and `update_task`, and the
+after-call hooks in `turns.rs`); all four are done. `read_output` stays out of
+`OWN_DATA_TOOLS`, and since the review attached and mentioned files and pictures count
+as outside content too.
 
 Checked at the end of step 1 (Linux): `cargo fmt --all --check`; `cargo +1.99 clippy
 --workspace --all-targets -- -D warnings`; `cargo +1.99 test --workspace` (about 1,400
@@ -122,12 +117,77 @@ Not verified, and not hidden:
   (`tool_select/finder.rs`, covered by mutation-checked tests), and the search crate's
   extraction and ranking under hostile pages (covered by its own limits and tests).
 
-## For steps 2 and 3
+## Steps 2 and 3 status
 
-Suggested order: B, G, H, I, then F. I depends on G (the inspector shows the task note)
-and needs `turns.rs::run` split so one function assembles what a turn sends; do it when
-nothing else is changing that function. F builds on Allow all's rules (its sandbox
-policy answers cards by rule) and on B's error accounting.
+**Built and tested on Linux; F's review fixes are being finished.** B, G, H and I are in
+the tree with their tests and their end-to-end scenarios pass. F (model check and
+benchmarks) is built and its scenario passes; the fixes the lead decided after the second
+review (an allow-list for the benchmark terminal, honest confirmation and audit texts,
+verification in a child process that cannot hang and is audited) are being implemented
+now. `ARCHITECTURE.md` has the result: 8.4 (saved outputs, the pins' share), 8.5, 8.6,
+8.7 (task), 8.8 (pins and the inspector), 8.9 (model check and benchmarks), 9.3 (the
+`outputs` and `task` servers, mentions), 12 (tables), 13.3 (Allow all changes) and the
+security subsections 13.9 to 13.14. `CHANGELOG.md` says it for users.
+
+Read first, per feature (later reports override earlier ones where they differ):
+- `report-B-tool-errors-output.md`: tool errors, `read_output`, the Full output button;
+  a failing edit that needs the file's text becomes a read.
+- `report-B-review-fixes.md`: B's answers to the first review (nothing before approval
+  depends on the file's text, non-UTF-8 files refused, the card's id from the app's record).
+- `report-G-task-state.md`: the task record, `update_task`, the Task tab, the check
+  recogniser, the task note.
+- `report-G-task-note-timing.md`: the note is sent only when needed (`task/when.rs`), and
+  the exact sentences the inspector shows about it.
+- `report-H-mentions.md`: the picker, the definition finder for eleven languages, the
+  index, how a mention is stored and sent, timings.
+- `report-H-review-fixes.md`: H's answers to the first review (the checked open, the note
+  for a cut long line, window checks) and what stays open.
+- `report-I-pinned.md`: pinned instructions, their share of the context, the Context tab.
+- `report-I-context-inspector.md`: the inspector, `turns::assemble`, the Pin button on a
+  user message.
+- `report-F-model-check-benchmarks.md`: the harness, the rule, probes, profiles, the
+  eleven tasks. Written before the second review; the lead's decisions above replace its
+  rule table and its confirmation texts.
+- `review-steps-2-3-part1.md`: independent review of B, G, H and I: two confirmed defects
+  in `edit_file`, four smaller ones; all fixed.
+- `review-steps-2-3-part2-benchmarks.md`: independent review of F: the benchmark did not
+  confine the model, verification could be cheated and could hang, a wrong "nothing
+  leaves this computer"; answered by the lead's decisions.
+
+What the lead changed after the reports:
+1. Nothing `describe` says depends on a file's text; a failing edit that needs it is a read
+   with `read_file`'s policy facts, answered after the gate (also in B's second report).
+2. The Full output button takes the saved output's id from the app's record for the call.
+3. Attached files, mentions and pictures count as outside content for previews
+   (`artifacts/outside.rs`).
+4. The task note goes only when the model's picture may be out of date (G's second report).
+5. Allow all keeps asking when `awk`, `sed`, `tar`, `zip` or an editor runs a command of
+   its own (`allow_all/own_command.rs`), treats `busybox`/`toybox` as wrappers, counts
+   `python -m http.server` as going online, and reads `node --test`, `--version` and
+   `--help` on an interpreter as plain commands.
+6. Benchmarks: the allow-list, the honest texts and the verification above.
+
+Not verified, and not hidden (steps 2 and 3):
+- Windows and macOS: nothing of steps 2 and 3 has run there. Windows paths of mentions
+  (labels, case-insensitive volumes, the reparse-point open) are compile-checked at most;
+  the PowerShell forms of the check recogniser have unit tests only.
+- The model check and benchmarks never ran against a real model, only the scripted
+  endpoint. F's final code was still changing when these documents were written.
+- The inspector's token numbers were seen only with the fake remote endpoint, not with a
+  local model's exact count.
+- The mention index timings are from the unoptimised debug build; the largest tree was
+  timed before a change that removed a quadratic copy and not re-timed.
+- Mentions: a swapped parent folder on Unix, hard links, and no file identity check on
+  Windows (`report-H-review-fixes.md`).
+- `update_task` marks the turn as holding untrusted content (D9), so in Ask first a granted
+  command asks again after it. A turn that carries the task note makes a local server
+  process the previous turn again.
+- No switchable "tool calls from text" request mode (a `TODO(0.0.5)` in F's report).
+- The full end-to-end suite was not run by any one developer after the last changes; each
+  ran its own scenario and a few others. `e2e/m1_chat.py` (a 0.6B model at 4,096 tokens)
+  after the companion tools were added is not recorded in the reports.
+
+## Rules for further work
 
 Rules that matter most (the full list is the spec's Part 1):
 - Tests are part of the work. Path sandboxing, permission rules and tool-call parsing
@@ -146,17 +206,15 @@ Rules that matter most (the full list is the spec's Part 1):
 - End-to-end: `e2e/README.md`. One scenario per feature in `e2e/scripted_agent.py`
   (names are in the spec). Needs `npm run dev` and `cargo build -p app`.
 
-Two findings from the stopped work that the next developer must keep:
-1. **Tool errors (B).** An `edit_file` error is produced in `describe`, before the
-   policy gate, and reaches the model as an app note outside the untrusted-data
-   markers. Quoting file lines in such an error would let a failing edit read lines of
-   any file in an approved folder with no approval. Quote lines only for a file the
-   model has already read in this chat; otherwise give line numbers and the `read_file`
-   call to make. (Details in `handoff-B-tool-errors-output.md`.)
-2. **Mentions (H).** Store a mention as a copy of the excerpt in the app's attachments
-   folder, never with the user's file path in `attachments.bytes_path`:
+Two findings from the stopped work, both kept in the finished code:
+1. **Tool errors (B).** A message from `describe` reaches the model before the policy
+   gate, as an app note outside the untrusted-data markers. The handoff's first answer
+   (quote lines only for a file the model already read) was replaced: no message from
+   `describe` holds anything from a file, and an edit that needs the file's text to
+   explain its failure is a read (ARCHITECTURE.md 13.9).
+2. **Mentions (H).** A mention is stored as a copy of the excerpt in the app's
+   attachments folder, never with the user's file path in `attachments.bytes_path`:
    `Store::delete_chat` returns unreferenced `bytes_path`s for deletion.
-   (Details in `handoff-H-mentions.md`.)
 
 Commits: work-in-progress commits on this branch carry `[skip ci]` in the message so CI
 does not run on unfinished states; the commit that completes a step must not. The

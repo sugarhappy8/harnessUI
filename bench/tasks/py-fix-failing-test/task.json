@@ -6,7 +6,24 @@
   "checks": [
     {
       "type": "run",
-      "script": "verify.py"
+      "script": "verify.py",
+      "expect": {
+        "mean246": {
+          "value": 4
+        },
+        "mean5": {
+          "value": 5
+        },
+        "mean12": {
+          "value": 1.5
+        },
+        "median4132": {
+          "value": 2.5
+        },
+        "median7": {
+          "value": 7
+        }
+      }
     },
     {
       "type": "unchanged",
