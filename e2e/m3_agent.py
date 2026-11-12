@@ -52,6 +52,9 @@ def main() -> int:
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir()
     (work / "notes.txt").write_text("The secret word is PELICAN.\n")
+    # A second file, so the second read asks for something the model has not seen yet: a
+    # small model otherwise answers from the conversation and calls no tool.
+    (work / "more.txt").write_text("The second word is HERON.\n")
     env = dict(os.environ)
     env.update(
         HOME=str(home),
@@ -129,7 +132,7 @@ def main() -> int:
                 if card_shown():
                     return True
                 said = [m for m in messages() if m["role"] == "assistant"]
-                text = json.dumps(said[-1].get("content") if said else None)[:300]
+                text = json.dumps(said[-1].get("text") if said else None)[:300]
                 print(f"    attempt {i + 1}: the model answered without a tool call; asking again. It said: {text}")
             return False
 
@@ -156,7 +159,7 @@ def main() -> int:
         assert audit[0]["tool"] == "read_file" and audit[0]["result_status"] == "ok", audit[0]
 
         step("Allow for this chat, then the same read runs without a card")
-        assert ask_until_card("Read notes.txt again with read_file and repeat the secret word. /no_think"), "no tool call"
+        assert ask_until_card("Use the read_file tool to read more.txt, then tell me the second word. /no_think"), "no tool call"
         time.sleep(0.9)
         s.click_button("Allow for this chat")
         s.wait_for(idle, 240, "turn finished")
