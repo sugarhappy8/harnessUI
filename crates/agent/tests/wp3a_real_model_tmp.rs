@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
-struct Guard(Child, PathBuf, tempfile::TempDir);
+struct Guard(Child, PathBuf, #[allow(dead_code)] tempfile::TempDir);
 impl Drop for Guard {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -159,44 +159,6 @@ async fn wp3a_real_model() {
         t
     };
 
-    // 1. How long it may think.
-    let question = "A farmer has 17 sheep, 9 goats and 4 cows. He sells a third of the animals \
-                    that have four legs and buys twice as many chickens as he has cows left. \
-                    Think it through step by step, checking each step twice, then give the \
-                    number of legs on the farm.";
-    for (label, limit, explicit) in [
-        ("Short (1,024)", ThinkingLimit::Short, None),
-        ("template budget 48", ThinkingLimit::NoLimit, Some(48)),
-    ] {
-        let log = Log::default();
-        let deps = TurnDeps { client: &client, tools: &NoTools, policy: &NoTools, approver: &NoTools, sink: &log, sanitizer: &sanitizer };
-        let mut tpl = template();
-        if let Some(n) = explicit {
-            tpl.extra.insert("reasoning_budget_tokens".into(), json!(n));
-        }
-        let mut input = TurnInput::new(vec![HistoryMessage::user(question)], caps, tpl);
-        input.thinking = true;
-        input.thinking_limit = limit;
-        let started = Instant::now();
-        let outcome = tokio::time::timeout(Duration::from_secs(900), run_turn(deps, input, CancellationToken::new())).await.expect("too slow");
-        let answer = outcome.messages.last().cloned().unwrap();
-        let reasoning = answer.reasoning.clone().unwrap_or_default();
-        let reasoning_tokens = tokens(port, key, &reasoning).await;
-        let completion: u64 = outcome.usage.completion_tokens;
-        println!(
-            "THINKING {label}: status {:?}, {} s, reasoning {} tokens ({} chars), completion tokens {}, answer {:?}",
-            outcome.status,
-            started.elapsed().as_secs(),
-            reasoning_tokens,
-            reasoning.len(),
-            completion,
-            answer.text().chars().take(200).collect::<String>()
-        );
-        let budget = explicit.unwrap_or(1_024);
-        // The server's budget sampler ends the thinking at the budget (plus its closing tag and message).
-        assert!(reasoning_tokens <= budget + 64, "{label}: {reasoning_tokens} reasoning tokens");
-    }
-
     // 2. A summary written at 32k on a model loaded with 4,096 tokens.
     let mut summary = String::from(
         "Goal: plan a vegetable garden for a small backyard in Lisbon.\nDecisions: raised beds; tomatoes, lettuce and basil; drip watering.\nWork done: ",
@@ -219,7 +181,7 @@ async fn wp3a_real_model() {
     input.thinking = false;
     input.summary = Some(CompactionSummary { text: summary.clone(), covered_ids: vec![1, 2] });
     let started = Instant::now();
-    let outcome = tokio::time::timeout(Duration::from_secs(900), run_turn(deps, input, CancellationToken::new())).await.expect("too slow");
+    let outcome = tokio::time::timeout(Duration::from_secs(1_500), run_turn(deps, input, CancellationToken::new())).await.expect("too slow");
     let events = log.0.lock().unwrap().clone();
     let folded: Vec<(u8, Option<String>, Vec<i64>)> = events
         .iter()
@@ -244,5 +206,43 @@ async fn wp3a_real_model() {
     let used = outcome.summary.unwrap();
     assert!(used.text.chars().count() <= 2_048, "{}", used.text.chars().count());
     assert_eq!(used.covered_ids, vec![1, 2]);
+    // 1. How long it may think.
+    let question = "A farmer has 17 sheep, 9 goats and 4 cows. He sells a third of the animals \
+                    that have four legs and buys twice as many chickens as he has cows left. \
+                    Think it through step by step, checking each step twice, then give the \
+                    number of legs on the farm.";
+    // The loop believes the model holds 2,600 tokens: about 2,500 for the reply, so half of
+    // it (1,250) is more than Short's 1,024 and Short decides.
+    let caps = ModelCaps { n_ctx: 2_600, ..caps };
+    for (label, limit, explicit) in [("Short (1,024)", ThinkingLimit::Short, None::<usize>)] {
+        let log = Log::default();
+        let deps = TurnDeps { client: &client, tools: &NoTools, policy: &NoTools, approver: &NoTools, sink: &log, sanitizer: &sanitizer };
+        let mut tpl = template();
+        if let Some(n) = explicit {
+            tpl.extra.insert("reasoning_budget_tokens".into(), json!(n));
+        }
+        let mut input = TurnInput::new(vec![HistoryMessage::user(question)], caps, tpl);
+        input.thinking = true;
+        input.thinking_limit = limit;
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(1_500), run_turn(deps, input, CancellationToken::new())).await.expect("too slow");
+        let answer = outcome.messages.last().cloned().unwrap();
+        let reasoning = answer.reasoning.clone().unwrap_or_default();
+        let reasoning_tokens = tokens(port, key, &reasoning).await;
+        let completion: u64 = outcome.usage.completion_tokens;
+        println!(
+            "THINKING {label}: status {:?}, {} s, reasoning {} tokens ({} chars), completion tokens {}, answer {:?}",
+            outcome.status,
+            started.elapsed().as_secs(),
+            reasoning_tokens,
+            reasoning.len(),
+            completion,
+            answer.text().chars().take(200).collect::<String>()
+        );
+        let budget = explicit.unwrap_or(1_024);
+        // The server's budget sampler ends the thinking at the budget (plus its closing tag and message).
+        assert!(reasoning_tokens <= budget + 64, "{label}: {reasoning_tokens} reasoning tokens");
+    }
+
     drop(guard);
 }

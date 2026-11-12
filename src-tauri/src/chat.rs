@@ -695,7 +695,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let summary = earlier_summary(&store, chat, &path).await.expect("a summary");
+        let summary = earlier_summary(&store, chat, &path)
+            .await
+            .expect("a summary");
         assert_eq!(summary.last_message_id, ids[1]);
         let dto = ChatDetailDto {
             chat: chat_dto(&store.get_chat(chat).await.unwrap().unwrap()),
@@ -705,7 +707,10 @@ mod tests {
         let v = serde_json::to_value(&dto).unwrap();
         assert_eq!(v["summary"]["lastMessageId"], json!(ids[1].0));
         // The text as the model wrote it: escaping is the webview's (plain text).
-        assert_eq!(v["summary"]["text"], json!("Goal: <b>answer</b> two questions."));
+        assert_eq!(
+            v["summary"]["text"],
+            json!("Goal: <b>answer</b> two questions.")
+        );
         // Another branch from the first question has no summary.
         let other = store
             .insert_message(store::NewMessage {
@@ -726,6 +731,9 @@ mod tests {
             summary: None,
             ..dto
         };
-        assert_eq!(serde_json::to_value(&none).unwrap()["summary"], serde_json::Value::Null);
+        assert_eq!(
+            serde_json::to_value(&none).unwrap()["summary"],
+            serde_json::Value::Null
+        );
     }
 }

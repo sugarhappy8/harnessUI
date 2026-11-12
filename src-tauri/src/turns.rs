@@ -750,7 +750,7 @@ impl AppTools {
             enabled: self
                 .enabled
                 .iter()
-                .filter(|t| !crate::subagent::is_tool(t))
+                .filter(|t| crate::subagent::offered_to_helper(t))
                 .cloned()
                 .collect(),
             chat: self.chat.clone(),
@@ -763,7 +763,7 @@ impl AppTools {
             hidden: self
                 .hidden
                 .iter()
-                .filter(|t| !crate::subagent::is_tool(t))
+                .filter(|t| crate::subagent::offered_to_helper(t))
                 .cloned()
                 .collect(),
             shared: Arc::default(),

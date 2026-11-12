@@ -1879,9 +1879,9 @@ mod tests {
         let long = says(&headers(&[("user-agent", &"x".repeat(100))]));
         assert_eq!(long.chars().count(), 40);
         let mut map = HeaderMap::new();
-        map.insert(header::USER_AGENT, HeaderValue::from_bytes(b"evil\xe2\x80\xae\x01app").unwrap());
+        map.insert(header::USER_AGENT, HeaderValue::from_bytes(b"evil\xe2\x80\xae\tapp").unwrap());
         let s = says(&map);
-        assert!(!s.contains('\u{202e}') && !s.contains('\u{1}'), "{s:?}");
+        assert!(!s.contains('\u{202e}') && !s.contains('\t'), "{s:?}");
     }
 
     #[test]

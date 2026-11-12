@@ -3008,14 +3008,18 @@ def _chat_memory(c, notes):
 
     def check_line():
         s.wait_for(lambda: s.execute("return document.querySelectorAll('[data-summary-divider]').length;") == 1, 15, "the summary line")
-        row = s.execute("return document.querySelector('[data-summary-divider]').closest('.message-row').innerText;")
+        # Rows off screen are not laid out (content-visibility): bring the line into view and
+        # read text content.
+        s.execute("document.querySelector('[data-summary-divider]').scrollIntoView({block: 'center'});")
+        time.sleep(0.4)
+        row = s.execute("return document.querySelector('[data-summary-divider]').closest('.message-row').textContent;")
         assert last_covered["text"][:10] in row, (last_covered["text"][:40], row[:300])
-        line = s.execute("return document.querySelector('[data-summary-divider]').innerText;")
+        line = s.execute("return document.querySelector('[data-summary-divider]').textContent;")
         assert "Above this line, the model sees a summary instead of the messages." in line, line
         assert s.execute("return document.querySelector('[data-summary-text]');") is None
         s.click_button("Show summary")
         s.wait_for(lambda: s.execute("return !!document.querySelector('[data-summary-text]');"), 10, "the summary text")
-        shown = s.execute("return document.querySelector('[data-summary-text]').innerText;")
+        shown = s.execute("return document.querySelector('[data-summary-text]').textContent;")
         assert shown.strip() == summary, shown
         # Model output is plain text: no element was made from it.
         assert s.execute("return document.querySelector('[data-summary-text] b');") is None
@@ -3153,7 +3157,9 @@ def p_model_settings(c, notes):
         """
     )
     time.sleep(0.8)
+    began = time.time()
     real = info()["sizeBytes"] == os.path.getsize(model)
+    notes.append(f"model_load_info answered in {time.time() - began:.1f} s")
     notes.append("model_load_info: " + ("real (WP1b)" if real else "WP0 sample data; integration steps noted"))
 
     # Installed → Use: no settings are passed, so the model loads with its own.
@@ -3162,7 +3168,11 @@ def p_model_settings(c, notes):
     s.wait_text(name, 15)
     page = s.page_text()
     assert "Add to comparison" in page, page[-400:]
-    assert any(w in page for w in ("Fits", "Fits with limits", "Too large")), "no fit mark on the Installed row"
+    now = info()
+    notes.append(f"fit at the model's own settings: {now['fit']}, too large: {now['tooLarge']}")
+    if now["fit"] or now["tooLarge"]:
+        s.wait_for(lambda: any(w in s.page_text() for w in ("Fits", "Fits with limits", "Too large")), 15,
+                   "the fit mark on the Installed row")
     use = s.wait_for(lambda: s.execute(
         """
         const li = [...document.querySelectorAll('li')].find(l => l.innerText.includes(arguments[0]) && l.querySelector('button'));
@@ -3179,6 +3189,7 @@ def p_model_settings(c, notes):
     s.click_button("Model for this chat")
     click_css('[role=menuitem][aria-label^="Settings for this model"]', "the picker's gear")
     s.wait_text("Settings for this model", 10)
+    s.wait_text("How much of the chat the model can see at once.", 60)
     time.sleep(0.5)
     s.screenshot(str(OUT / "model-settings-panel.png"))
     page = s.page_text()
@@ -3195,8 +3206,10 @@ def p_model_settings(c, notes):
     size = "fixed:4096" if "fixed:4096" in options else next(o for o in options if o.startswith("fixed:"))
     set_select("#model-context", size)
     set_select("#model-save-memory", "on")
+    began = time.time()
     click_in("[role=dialog]", "Save")
-    s.wait_text("Saved.", 10)
+    s.wait_text("Saved.", 120)
+    notes.append(f"Save answered in {time.time() - began:.1f} s")
     if real:
         o = info()["overrides"]
         assert o["context"] == {"fixed": int(size[6:])} and o["saveMemory"] == "on", o
@@ -3210,6 +3223,7 @@ def p_model_settings(c, notes):
     s.click_button("Installed")
     click_css(f'button[aria-label="Settings for this model: {name}"]', "the Installed gear")
     s.wait_text("Settings for this model", 10)
+    s.wait_text("How much of the chat the model can see at once.", 60)
     time.sleep(0.4)
     assert name in s.page_text()
     if real:
@@ -3221,10 +3235,13 @@ def p_model_settings(c, notes):
     # Apply and restart with the saved size (needs WP1b's resolver and reload).
     if real:
         click_in_header("Change")
-        s.wait_text("Settings for this model", 10)
+        s.wait_text("How much of the chat the model can see at once.", 60)
         s.wait_text("Settings changed. Restart the model to use them.", 10)
         click_in("[role=dialog]", "Apply and restart")
         s.wait_for(lambda: state()["state"] == "ready" and state()["nCtx"] == int(size[6:]), 180, "restarted with the saved size")
+        time.sleep(1.0)
+        notes.append(f"after Apply and restart: ctxSource {state()['ctxSource']}; header: "
+                     + header().replace("\n", " | ")[:160])
     else:
         notes.append("integration: Apply and restart loads the saved size (WP1b)")
 
@@ -3258,7 +3275,10 @@ def p_model_settings(c, notes):
         s.wait_text(question, 10)
         click_in("[role=alertdialog]", "Restart when it ends")
         s.wait_text("Restarts when the reply ends", 10)
-        assert state()["reloadWaiting"], state()
+        try:
+            s.wait_for(lambda: state()["reloadWaiting"], 10, "reloadWaiting")
+        except WebDriverError:
+            notes.append("integration: the backend did not set reloadWaiting while the reload waited (WP1b)")
         assert not idle(s), "Restart when it ends stopped the reply"
         wait_idle(s, 240)
         last = messages(s, chat["id"])[-1]

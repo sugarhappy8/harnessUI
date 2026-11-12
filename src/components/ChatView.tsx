@@ -7,6 +7,7 @@ import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { ModelPicker } from "./ModelPicker";
 import { RuntimeIndicator } from "./RuntimeIndicator";
+import { openModelSettings } from "./ModelSettings";
 import { SystemPromptDialog } from "./SystemPromptDialog";
 import { ErrorBanner } from "./ErrorBanner";
 import { ToolCallCard, type ToolCallView } from "./ToolCallCard";
@@ -114,11 +115,6 @@ export function SummaryDivider(props: { text: string }) {
 /** [0.0.5 memory] Errors about the chat no longer fitting the model's memory, which Model
  *  settings can help with. */
 const MEMORY_ERRORS = new Set(["context_full", "context_overflow", "tools_do_not_fit"]);
-
-/** [0.0.5 memory] Asks for one local model's settings panel (the model settings of 0.0.5 D1). */
-export function openModelSettings(path: string) {
-  window.dispatchEvent(new CustomEvent("app:open-model-settings", { detail: path }));
-}
 
 /** [0.0.5 memory] The button under a "too long" error of a chat on a local model. */
 export function ModelSettingsAction(props: { path: string }) {

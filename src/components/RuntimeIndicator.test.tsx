@@ -138,13 +138,22 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
 
   it("shows the ready line with its reason and opens the panel from Change", async () => {
     const opened = vi.fn();
-    window.addEventListener("app:model-settings", opened);
+    window.addEventListener("app:open-model-settings", opened);
     await show(status());
     expect(text()).toContain("Remembers about 24,000 words (Automatic)");
     expect(text()).not.toMatch(/vulkan|Vulkan0|context/);
     await click(screen.getByRole("button", { name: "Change" }));
     expect((opened.mock.calls[0]?.[0] as CustomEvent).detail).toBe("/models/a.gguf");
-    window.removeEventListener("app:model-settings", opened);
+    window.removeEventListener("app:open-model-settings", opened);
+  });
+
+  it("hosts the settings panel for anything that asks for it, even with an endpoint chat", async () => {
+    await show(status(), chat("provider:1:x"));
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("app:open-model-settings", { detail: "/models/b.gguf" }));
+    });
+    expect(screen.getByText("Settings for this model")).toBeTruthy();
+    expect(ipcMock.modelLoadInfo).toHaveBeenCalledWith("/models/b.gguf");
   });
 
   it("has a menu with Reload, Model settings… and Unload to free memory", async () => {

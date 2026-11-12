@@ -88,6 +88,10 @@ describe("ContextInspector", () => {
     expect(within(row("tools")).getByText("300 tokens")).toBeTruthy();
     expect(within(row("tools")).getByText("2 shown: read_file, list_dir")).toBeTruthy();
     expect(screen.getByText("About 1,234 of 8,192 tokens")).toBeTruthy();
+    // [0.0.5 memory] Tokens come with words, and making room is said plainly.
+    const totals = document.querySelector("[data-inspector-totals]")!.textContent!;
+    expect(totals).toContain("about 900 of 6,000 words");
+    expect(totals).toMatch(/older parts are shortened or summarised from \d/);
     expect(screen.getByText(/Pinned instructions: 40 of 1,512 tokens allowed/)).toBeTruthy();
     expect(screen.getByText(/Fixed part without pins: 900 of 2,419/)).toBeTruthy();
     expect(screen.getByText("Nothing is left out now.")).toBeTruthy();

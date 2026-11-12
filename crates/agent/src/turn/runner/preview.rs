@@ -3,8 +3,11 @@
 //! The same [`Turn`] is set up from the same input; the fixed overhead is measured and the
 //! fit checks run as in [`Turn::measure`]; the request is built as [`Turn::prepare`] builds
 //! it, applying stage 1 when the request needs it (that only changes the copy being built).
-//! Stage 2 needs the model to write a summary, so it is reported, never run. Policy,
-//! approvals and the sink are inert: nothing is decided, asked or recorded.
+//! Stage 2 needs the model to write a summary, so it is reported, never run; what it would
+//! summarise next is chosen by the loop's own code ([`Turn::plan_summary`]). A stored summary
+//! too long for this context, which the turn has the model rewrite first, is cut to the cap
+//! instead, the form the turn falls back to (`applied` gets 2). Policy, approvals and the
+//! sink are inert: nothing is decided, asked or recorded.
 
 use std::collections::HashSet;
 

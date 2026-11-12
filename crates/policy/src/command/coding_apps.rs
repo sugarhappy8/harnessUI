@@ -243,6 +243,15 @@ fn command(program: &str, args: &[String], depth: usize) -> Option<String> {
             return Some(why);
         }
     }
+    // A shell handed a command as separate words after its flag (`cmd /c claude -p x`,
+    // `powershell -Command codex exec x`): the first word after a flag is a program.
+    if SHELLS.contains(&name)
+        && let Some(at) = (1..args.len())
+            .find(|&i| args[i - 1].starts_with(['-', '/']) && !args[i].starts_with(['-', '/']))
+        && let Some(why) = command(&args[at], &args[at + 1..], depth + 1)
+    {
+        return Some(why);
+    }
     // The first program among the arguments that can run another one: a runner, a script
     // host, a shell or another wrapper (`env npx …`, `timeout 9 node …`).
     let at = args.iter().position(|a| {
@@ -285,7 +294,7 @@ fn in_text(line: &str, depth: usize) -> Option<String> {
         .collect();
     for text in [lower.as_str(), unquoted.as_str()] {
         for segment in text.split([';', '\n', '(', ')', '{', '}', '|', '&', '`']) {
-            let mut words: Vec<String> = segment.split_whitespace().map(str::to_owned).collect();
+            let mut words = shell_words(segment);
             // Keywords and settings in front of a program are not its name.
             while let Some(first) = words.first() {
                 let keyword = matches!(
@@ -312,6 +321,36 @@ fn in_text(line: &str, depth: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// The words of a piece of a command line: split at white space, except inside quotes,
+/// with the quotes taken away (`'C:\Program Files\x.exe' -p` is two words).
+fn shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for c in text.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => word.push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                started = true;
+            }
+            None if c.is_whitespace() => {
+                if started || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+                started = false;
+            }
+            None => word.push(c),
+        }
+    }
+    if started || !word.is_empty() {
+        words.push(word);
+    }
+    words
 }
 
 #[cfg(test)]

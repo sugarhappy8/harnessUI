@@ -743,7 +743,11 @@ mod tests {
         let last = started.last().expect("last");
         assert_eq!(last.backend.kind, BackendKind::Cpu);
         assert_eq!(last.launch.device, None);
-        assert_eq!(last.launch.gpu, GpuUse::Off, "the processor uses no graphics card");
+        assert_eq!(
+            last.launch.gpu,
+            GpuUse::Off,
+            "the processor uses no graphics card"
+        );
         assert!(drain(&mut rx).contains(&ServerEvent::SteppedDown {
             from: BackendKind::Vulkan,
             to: BackendKind::Cpu,
@@ -795,7 +799,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn save_memory_failure_retries_once_without_it_on_the_same_backend() {
-        let script = vec![Script::Fail(LoadFailure::ContextTooLarge), Script::Run(None)];
+        let script = vec![
+            Script::Fail(LoadFailure::ContextTooLarge),
+            Script::Run(None),
+        ];
         let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
         let (_server, running) = sup
             .start(spec_with(
@@ -920,7 +927,11 @@ mod tests {
             .await
             .expect("starts");
         assert_eq!(
-            (running.backend.kind, running.launch.gpu, running.launch.save_memory),
+            (
+                running.backend.kind,
+                running.launch.gpu,
+                running.launch.save_memory
+            ),
             (BackendKind::Vulkan, GpuUse::Fit, true)
         );
         assert_eq!(attempts(&log).len(), 2);
@@ -1212,10 +1223,7 @@ mod tests {
             )
             .await;
         assert_eq!(exit, SupervisorExit::Stopped);
-        assert_eq!(
-            attempts(&log)[4],
-            (BackendKind::Vulkan, GpuUse::Fit, false)
-        );
+        assert_eq!(attempts(&log)[4], (BackendKind::Vulkan, GpuUse::Fit, false));
         assert!(drain(&mut rx).contains(&with_less_gpu(BackendKind::Vulkan)));
     }
 

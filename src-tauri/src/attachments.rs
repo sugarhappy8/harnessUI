@@ -365,7 +365,8 @@ pub async fn save_documents(
                 extracted_text: Some(text),
             })
             .await?;
-        let mut part = serde_json::json!({ "type": "document", "attachment_id": id.0, "name": name });
+        let mut part =
+            serde_json::json!({ "type": "document", "attachment_id": id.0, "name": name });
         if let Some(cut) = cut {
             part["cut"] = serde_json::json!(cut);
         }
@@ -546,7 +547,9 @@ mod tests {
     }
 
     fn numbered_lines(n: usize) -> String {
-        (1..=n).map(|i| format!("line {i} of the report\n")).collect()
+        (1..=n)
+            .map(|i| format!("line {i} of the report\n"))
+            .collect()
     }
 
     /// [0.0.5 memory] A document larger than its share is cut at a line end, with a note
@@ -568,7 +571,10 @@ mod tests {
         assert!(out[..cut.kept].ends_with('\n'));
         let first = out[..cut.kept].matches('\n').count() + 1;
         let note = &out[cut.kept..];
-        assert!(note.starts_with("[The rest of this file was left out"), "{note}");
+        assert!(
+            note.starts_with("[The rest of this file was left out"),
+            "{note}"
+        );
         assert!(note.contains(&format!("lines {first}-1000")), "{note}");
         assert!(
             note.contains(&format!(

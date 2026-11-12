@@ -196,6 +196,8 @@
     "allow-set-share-port",
     "allow-reveal-share-key",
     "allow-new-share-key",
-    "allow-share-setup"
+    "allow-share-setup",
+    "allow-coding-apps-status",
+    "allow-find-coding-apps"
   ]
 }

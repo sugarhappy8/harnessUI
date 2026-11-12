@@ -48,7 +48,7 @@ FIRE = """
 const [slot, cmd, args] = arguments;
 window[slot] = 'pending';
 window.__TAURI_INTERNALS__.invoke(cmd, args)
-  .then(() => { window[slot] = {ok: true}; })
+  .then(v => { window[slot] = {ok: true, value: v === undefined ? null : v}; })
   .catch(e => { window[slot] = {ok: false, error: e}; });
 """
 
@@ -79,16 +79,8 @@ def step(name):
 
 def error_of(s, cmd, args):
     """Calls `cmd` and returns its error object; fails if it succeeds."""
-    result = s.execute_async(
-        """
-        const [cmd, args, done] = arguments;
-        window.__TAURI_INTERNALS__.invoke(cmd, args)
-          .then(v => done({ok: true, value: v}))
-          .catch(e => done({ok: false, error: e}));
-        """,
-        cmd,
-        args,
-    )
+    s.execute(FIRE, "__refused", cmd, args)
+    result = fired(s, "__refused", 120)
     assert not result.get("ok"), f"{cmd} {args} was accepted: {result}"
     return result.get("error")
 
@@ -133,7 +125,7 @@ def flag(args, name):
     return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else None
 
 
-def ready(s, timeout=180):
+def ready(s, timeout=600):
     return s.wait_for(lambda: (st := s.invoke("runtime_status"))["state"] == "ready" and st, timeout, "the model to be ready")
 
 
@@ -143,6 +135,21 @@ def fired(s, slot, timeout=180):
 
 def busy(s):
     return s.invoke("model_busy")
+
+
+CALLS = [0]
+
+
+def call(s, cmd, args=None, timeout=600):
+    """Calls a command that can take longer than a WebDriver script may (loads on a busy
+    computer): fires it and waits for its end. Raises when it fails."""
+    CALLS[0] += 1
+    slot = f"__call{CALLS[0]}"
+    s.execute(FIRE, slot, cmd, args or {})
+    r = fired(s, slot, timeout)
+    if not r.get("ok"):
+        raise WebDriverError(f"{cmd} failed: {json.dumps(r.get('error'))[:800]}")
+    return r.get("value")
 
 
 def main() -> int:
@@ -207,19 +214,26 @@ def main() -> int:
         assert stored_setting("localModel")["contextAuto"] is True
 
         step("model_load_info for the real model")
-        info = s.invoke("model_load_info", {"path": MODEL})
+        info = call(s, "model_load_info", {"path": MODEL})
         print("    trainedCtx:", info["trainedCtx"], "thinking:", info["thinking"], "Automatic:", info["contextOptions"][0],
               "resolved:", info["resolved"]["ctx"], info["resolved"]["ctxChoice"], "fit:", info["fit"])
         assert info["fileName"] == os.path.basename(MODEL) and info["sizeBytes"] == os.path.getsize(MODEL), info
         assert info["trainedCtx"] and info["trainedCtx"] >= 32768, info["trainedCtx"]
         assert info["contextOptions"][0]["choice"] == "auto", info["contextOptions"]
-        auto_tokens = info["contextOptions"][0]["tokens"]
-        assert 4096 <= auto_tokens <= 32768, auto_tokens
+        # Automatic depends on the memory free right now, which other programs on a shared
+        # computer change: check that the answer is consistent, whichever it is.
+        auto = info["contextOptions"][0]
+        if info["tooLarge"]:
+            print("    NOTE: too little memory free right now for Automatic's floor; it would load with 4,096")
+            assert (auto["tokens"], auto["fit"], info["fit"], info["resolved"]["ctx"]) == (0, "red", "red", 4096), info
+        else:
+            assert 4096 <= auto["tokens"] <= 32768 and auto["fit"] in ("green", "yellow"), auto
+            assert info["resolved"]["ctx"] == auto["tokens"] and info["fit"] == auto["fit"], info
         sizes = [o["choice"]["fixed"] for o in info["contextOptions"][1:]]
         assert sizes[0] == 2048 and sizes[-1] == info["trainedCtx"] and 8192 in sizes, sizes
         assert [g["gpu"] for g in info["gpuOptions"]] == ["all", "fit", "off"], info["gpuOptions"]
-        assert info["resolved"]["ctxChoice"] == "auto" and info["resolved"]["ctx"] == auto_tokens, info["resolved"]
-        assert info["loaded"] is False and info["tooLarge"] is False and info["fit"] in ("green", "yellow"), info
+        assert info["resolved"]["ctxChoice"] == "auto" and info["resolved"]["ctxSource"] == "automatic", info["resolved"]
+        assert info["loaded"] is False, info
         assert all(v == "default" for v in info["overrides"].values()), info["overrides"]
 
         step("overrides outside the fixed lists are refused")
@@ -230,16 +244,16 @@ def main() -> int:
         print("    gpu 'half':", str(e)[:120])
         e = error_of(s, "model_load_info", {"path": str(OUT / "missing.gguf")})
         assert e.get("code") == "model_missing", e
-        assert all(v == "default" for v in s.invoke("model_load_info", {"path": MODEL})["overrides"].values())
+        assert all(v == "default" for v in call(s, "model_load_info", {"path": MODEL})["overrides"].values())
 
         step("save a per-model context and Save memory")
-        info = s.invoke("set_model_load_settings", {"path": MODEL, "overrides": {"context": {"fixed": 8192}, "saveMemory": "on"}})
+        info = call(s, "set_model_load_settings", {"path": MODEL, "overrides": {"context": {"fixed": 8192}, "saveMemory": "on"}})
         assert info["overrides"]["context"] == {"fixed": 8192} and info["overrides"]["saveMemory"] == "on", info["overrides"]
         r = info["resolved"]
         assert (r["ctx"], r["ctxChoice"], r["ctxSource"], r["saveMemory"]) == (8192, {"fixed": 8192}, "modelSetting", True), r
 
         step("load with no settings: the model's own")
-        s.invoke("load_local_model", {"path": MODEL})
+        call(s, "load_local_model", {"path": MODEL})
         st = ready(s)
         print("    backend:", st["backend"], "nCtx:", st["nCtx"], "ctxSource:", st["ctxSource"])
         assert st["nCtx"] == 8192 and st["ctxSource"] == "modelSetting", st
@@ -251,25 +265,25 @@ def main() -> int:
             print("    Save memory reached the launch: q8_0 cache")
         else:
             print("    NOTE: the launch arguments do not carry Save memory yet (WP1a's build_args)")
-        info = s.invoke("model_load_info", {"path": MODEL})
+        info = call(s, "model_load_info", {"path": MODEL})
         assert info["loaded"] is True and info["olderSettingsLoaded"] is False and info["autoCtx"] is None, info
         assert st["settingsChanged"] is False
 
         step("picking the loaded model again with the same settings is a no-op")
-        s.invoke("load_local_model", {"path": MODEL})
+        call(s, "load_local_model", {"path": MODEL})
         assert the_server(home)[0] == pid
 
         step("change to Automatic: Settings changed, nothing restarts")
-        s.invoke("set_model_load_settings", {"path": MODEL, "overrides": {"context": "auto", "saveMemory": "on"}})
+        call(s, "set_model_load_settings", {"path": MODEL, "overrides": {"context": "auto", "saveMemory": "on"}})
         st = s.invoke("runtime_status")
         assert st["settingsChanged"] is True and st["nCtx"] == 8192, st
-        assert s.invoke("model_load_info", {"path": MODEL})["olderSettingsLoaded"] is True
+        assert call(s, "model_load_info", {"path": MODEL})["olderSettingsLoaded"] is True
         assert the_server(home)[0] == pid
 
         step("Apply and restart")
-        s.invoke("reload_local_model", {"force": False, "whenIdle": False})
+        call(s, "reload_local_model", {"force": False, "whenIdle": False})
         st = ready(s)
-        info = s.invoke("model_load_info", {"path": MODEL})
+        info = call(s, "model_load_info", {"path": MODEL})
         print("    Automatic chose", st["nCtx"], "tokens; ctxSource", st["ctxSource"])
         assert st["ctxSource"] == "automatic" and 4096 <= st["nCtx"] <= 32768, st
         assert info["autoCtx"] == st["nCtx"] and info["olderSettingsLoaded"] is False, info
@@ -279,16 +293,16 @@ def main() -> int:
         pid = new_pid
 
         step("Apply and restart with nothing changed does nothing")
-        s.invoke("reload_local_model", {"force": False, "whenIdle": False})
+        call(s, "reload_local_model", {"force": False, "whenIdle": False})
         assert the_server(home)[0] == pid
 
         step("the thinking limit applies to the next reply without a restart")
-        s.invoke("set_model_load_settings", {"path": MODEL, "overrides": {"context": "auto", "saveMemory": "on", "thinkingLimit": "short"}})
+        call(s, "set_model_load_settings", {"path": MODEL, "overrides": {"context": "auto", "saveMemory": "on", "thinkingLimit": "short"}})
         assert s.invoke("runtime_status")["settingsChanged"] is False
-        assert s.invoke("model_load_info", {"path": MODEL})["resolved"]["thinkingLimit"] == "short"
+        assert call(s, "model_load_info", {"path": MODEL})["resolved"]["thinkingLimit"] == "short"
 
         step("Reload")
-        s.invoke("reload_local_model", {"force": True, "whenIdle": False})
+        call(s, "reload_local_model", {"force": True, "whenIdle": False})
         ready(s)
         new_pid, _ = the_server(home)
         assert new_pid != pid
@@ -297,8 +311,8 @@ def main() -> int:
         step("Restart when it ends: waits while a real reply streams; Cancel")
         chat = s.invoke("create_chat", {"modelRef": f"local:{MODEL}"})
         s.execute(SEND, chat["id"], LONG_REPLY)
-        s.wait_for(lambda: busy(s)["chatTurns"] == 1, 60, "the reply to start")
-        s.wait_for(lambda: s.execute("return window.__events") > 3, 120, "the reply to stream")
+        s.wait_for(lambda: busy(s)["chatTurns"] == 1, 120, "the reply to start")
+        s.wait_for(lambda: s.execute("return window.__events") > 3, 300, "the reply to stream")
         s.execute(FIRE, "__reload1", "reload_local_model", {"force": True, "whenIdle": True})
         s.wait_for(lambda: s.invoke("runtime_status")["reloadWaiting"], 10, "reloadWaiting")
         time.sleep(1.0)
@@ -316,22 +330,22 @@ def main() -> int:
         time.sleep(0.5)
         assert s.execute("return window.__reload2") == "pending"
         s.invoke("stop_generation")
-        r = fired(s, "__reload2", 180)
-        assert r == {"ok": True}, r
+        r = fired(s, "__reload2", 600)
+        assert r.get("ok") is True, r
         st = ready(s)
         assert st["reloadWaiting"] is False and busy(s)["chatTurns"] == 0, (st, busy(s))
         new_pid, _ = the_server(home)
         assert new_pid != pid
         pid = new_pid
-        fired(s, "__sent", 30)
+        fired(s, "__sent", 120)
 
         step("Stop and restart: the reply is stopped first and keeps what it wrote")
         s.execute(SEND, chat["id"], LONG_REPLY)
-        s.wait_for(lambda: s.execute("return window.__events") > 3, 120, "the second reply to stream")
+        s.wait_for(lambda: s.execute("return window.__events") > 3, 300, "the second reply to stream")
         assert busy(s)["chatTurns"] == 1
-        s.invoke("reload_local_model", {"force": True, "whenIdle": False})
+        call(s, "reload_local_model", {"force": True, "whenIdle": False})
         assert busy(s)["chatTurns"] == 0
-        sent = fired(s, "__sent", 30)
+        sent = fired(s, "__sent", 120)
         print("    the stopped reply's call ended with:", sent)
         st = ready(s)
         new_pid, _ = the_server(home)
@@ -342,34 +356,34 @@ def main() -> int:
         assert len(replies) == 2 and all(m["text"] for m in replies), replies
 
         step("Unload remembers the model; Load again uses its saved settings")
-        s.invoke("unload_model")
+        call(s, "unload_model")
         st = s.invoke("runtime_status")
         assert st["state"] == "stopped" and st["unloadedPath"] == MODEL, st
         assert server_processes(home) == []
-        s.invoke("load_local_model", {"path": MODEL})
+        call(s, "load_local_model", {"path": MODEL})
         st = ready(s)
         assert st["unloadedPath"] is None and st["ctxSource"] == "automatic", st
         pid, _ = the_server(home)
 
         step("Unload when idle with nothing running is at once")
-        s.invoke("unload_model", {"whenIdle": True})
+        call(s, "unload_model", {"whenIdle": True})
         assert s.invoke("runtime_status")["unloadedPath"] == MODEL
-        s.invoke("load_local_model", {"path": MODEL, "settings": None, "whenIdle": True})
+        call(s, "load_local_model", {"path": MODEL, "settings": None, "whenIdle": True})
         ready(s)
 
         step("Reset to defaults")
-        info = s.invoke("reset_model_load_settings", {"path": MODEL})
+        info = call(s, "reset_model_load_settings", {"path": MODEL})
         assert all(v == "default" for v in info["overrides"].values()), info["overrides"]
         assert info["resolved"]["saveMemory"] is False and info["olderSettingsLoaded"] is True, info["resolved"]
         assert s.invoke("runtime_status")["settingsChanged"] is True
 
         step("the 0.0.4 command shape still loads exactly as given")
         old = {"ctx": 4096, "backend": None, "device": None}
-        s.invoke("load_local_model", {"path": MODEL, "settings": old})
+        call(s, "load_local_model", {"path": MODEL, "settings": old})
         st = ready(s)
         assert st["nCtx"] == 4096 and st["ctxSource"] == "defaultSetting", st
         assert flag(the_server(home)[1], "-c") == "4096"
-        s.invoke("unload_model")
+        call(s, "unload_model")
         s.screenshot(str(OUT / "m10-end.png"))
         print("PASS")
         return 0

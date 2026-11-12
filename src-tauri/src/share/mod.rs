@@ -479,7 +479,8 @@ impl Sharing {
         }
     }
 
-    /// Stops listening (the app is quitting).
+    /// Stops listening (tests; at exit the process ends and the port closes with it).
+    #[cfg(test)]
     pub async fn shutdown(&self) {
         if let Some(running) = self.inner.lock().await.running.take() {
             running.stop().await;

@@ -561,8 +561,18 @@ fn split_parts(file_name: &str) -> Option<Vec<String>> {
     })
 }
 
+/// A model file as its header facts are remembered: path, size and modification time.
+type HeaderKey = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+
+/// Header facts already read. Reading a large model's header takes about a second on a
+/// busy computer, and the panel, the Tools panel and every load ask again; a file that
+/// changes gets another size or modification time, so it is read again.
+static HEADER_CACHE: std::sync::Mutex<Vec<(HeaderKey, Option<HeaderFacts>)>> =
+    std::sync::Mutex::new(Vec::new());
+const HEADER_CACHE_LEN: usize = 32;
+
 /// Reads what the resolver needs from the file at `path` (its header on a blocking
-/// thread). `None` when the file is not there.
+/// thread, once per file version). `None` when the file is not there.
 pub async fn read_facts(path: &std::path::Path, mmproj: Option<&str>) -> Option<ModelFacts> {
     let (file_name, size_bytes) = file_identity(path)?;
     let weights_bytes = match (split_parts(&file_name), path.parent()) {
@@ -577,15 +587,36 @@ pub async fn read_facts(path: &std::path::Path, mmproj: Option<&str>) -> Option<
     let projector_bytes = mmproj
         .and_then(|p| std::fs::metadata(p).ok())
         .map_or(0, |m| m.len());
-    let header_path = path.to_path_buf();
-    let header = tokio::task::spawn_blocking(move || {
-        models::read_file(&header_path)
+    let key: HeaderKey = (
+        path.to_path_buf(),
+        size_bytes,
+        std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+    );
+    let cached = HEADER_CACHE
+        .lock()
+        .ok()
+        .and_then(|c| c.iter().find(|(k, _)| *k == key).map(|(_, h)| h.clone()));
+    let header = match cached {
+        Some(header) => header,
+        None => {
+            let header_path = path.to_path_buf();
+            let header = tokio::task::spawn_blocking(move || {
+                models::read_file(&header_path)
+                    .ok()
+                    .map(|h| HeaderFacts::from_summary(&models::ModelSummary::from_header(&h)))
+            })
+            .await
             .ok()
-            .map(|h| HeaderFacts::from_summary(&models::ModelSummary::from_header(&h)))
-    })
-    .await
-    .ok()
-    .flatten();
+            .flatten();
+            if let Ok(mut c) = HEADER_CACHE.lock() {
+                if c.len() >= HEADER_CACHE_LEN {
+                    c.remove(0);
+                }
+                c.push((key, header.clone()));
+            }
+            header
+        }
+    };
     Some(ModelFacts {
         file_name,
         size_bytes,
@@ -1849,5 +1880,29 @@ mod tests {
         assert_eq!((f.size_bytes, f.weights_bytes, f.projector_bytes), (100, 175, 7));
         assert_eq!(f.header, None, "not a real header");
         assert!(read_facts(&dir.path().join("none.gguf"), None).await.is_none());
+    }
+
+    /// Header facts are read once per file version: a file replaced by a real model under
+    /// the same name is read again.
+    #[tokio::test]
+    async fn a_changed_file_is_read_again() {
+        let dir = Scratch::new();
+        let path = dir.path().join("swap.gguf");
+        std::fs::write(&path, b"not a model").unwrap();
+        assert_eq!(read_facts(&path, None).await.unwrap().header, None);
+        let gguf = models::gguf::testing::Writer::new()
+            .str("general.architecture", "llama")
+            .u32("llama.context_length", 8192)
+            .u32("llama.block_count", 2)
+            .u32("llama.embedding_length", 256)
+            .u32("llama.attention.head_count", 4)
+            .u32("llama.attention.head_count_kv", 2)
+            .build();
+        std::fs::write(&path, gguf).unwrap();
+        let header = read_facts(&path, None).await.unwrap().header.expect("read again");
+        assert_eq!(header.trained_ctx, Some(8192));
+        // 2 layers × 2 rows × 2 heads × 64 values: 2 bytes each, or 4 blocks of 34 bytes.
+        assert_eq!(header.kv_f16, 1024);
+        assert_eq!(header.kv_q8, 2 * 2 * 4 * 34);
     }
 }

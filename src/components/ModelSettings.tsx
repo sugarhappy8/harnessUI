@@ -459,7 +459,7 @@ function Controls(props: {
 
 // ---- Hosts ----------------------------------------------------------------------------------
 
-const OPEN_EVENT = "app:model-settings";
+const OPEN_EVENT = "app:open-model-settings";
 
 /** Opens the settings panel of a model file (the chat's model list, the runtime indicator, a chat error). */
 export function openModelSettings(path: string): void {

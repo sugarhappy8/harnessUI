@@ -173,7 +173,9 @@ function Status() {
     const top = notes[0] ?? null;
     const run = (action: NoteAction) =>
       action === "reload" ? reload(true) : action === "apply" ? reload(false) : settings();
-    const line = runtime.nCtx ? readyLine(runtime.nCtx, runtime.ctxSource) : "Ready";
+    // "Remembers about N words" stays whole in a narrow header; only the reason shortens.
+    const line = runtime.nCtx ? readyLine(runtime.nCtx, null) : "Ready";
+    const reason = runtime.nCtx && runtime.ctxSource ? readyLine(runtime.nCtx, runtime.ctxSource).slice(line.length) : "";
     return (
       <div className="enter-fade flex min-w-0 flex-col justify-center gap-0.5 text-xs leading-tight">
         <div className="flex min-w-0 items-center gap-1.5 whitespace-nowrap text-fg-muted">
@@ -186,7 +188,8 @@ function Status() {
                 title={runtime.modelPath ?? undefined}
                 className="flex min-w-0 items-center gap-1 rounded hover:text-fg"
               >
-                <span className="truncate">{line}</span>
+                <span className="shrink-0">{line}</span>
+                {reason && <span className="min-w-0 truncate">{reason}</span>}
                 <ChevronDown size={12} className="shrink-0" aria-hidden />
               </button>
             </DropdownMenu.Trigger>

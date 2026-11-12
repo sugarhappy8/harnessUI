@@ -40,7 +40,7 @@ describe("ModelPicker: a gear on each local model", () => {
 
   it("opens Settings for this model from the gear, without picking the model", async () => {
     const opened = vi.fn();
-    window.addEventListener("app:model-settings", opened);
+    window.addEventListener("app:open-model-settings", opened);
     await openMenu();
     const gears = screen.getAllByRole("menuitem", { name: /^Settings for this model/ });
     expect(gears).toHaveLength(1);
@@ -50,7 +50,7 @@ describe("ModelPicker: a gear on each local model", () => {
     });
     expect((opened.mock.calls[0]?.[0] as CustomEvent).detail).toBe("/models/b.gguf");
     expect(pickModel).not.toHaveBeenCalled();
-    window.removeEventListener("app:model-settings", opened);
+    window.removeEventListener("app:open-model-settings", opened);
   });
 
   it("still picks a model by its name", async () => {

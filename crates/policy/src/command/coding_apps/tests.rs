@@ -283,9 +283,10 @@ fn d_a_permission_bypass_token_anywhere() {
 /// it, and a script inside an assistant's package anywhere.
 #[test]
 fn lines_that_cannot_be_broken_down() {
+    // A pipe between plain commands is still plain; the rest are not.
+    assert_asks(SH, "echo task | claude -p");
+    assert_asks(SH, "cat task.txt | codex exec -");
     for line in [
-        "echo task | claude -p",
-        "cat task.txt | codex exec -",
         "claude -p \"$TASK\"",
         "FOO=1 claude -p x > out.txt",
         "claude -p x 2>&1 | tee log.txt",

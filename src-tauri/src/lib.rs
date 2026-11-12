@@ -29,6 +29,7 @@ mod mentions;
 mod models_cmd;
 mod navigation;
 mod outputs;
+mod outside_agent;
 mod overlay;
 mod packs_cmd;
 mod permissions;
@@ -270,6 +271,8 @@ pub fn run() {
             share::reveal_share_key,
             share::new_share_key,
             share::share_setup,
+            outside_agent::coding_apps_status,
+            outside_agent::find_coding_apps,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -337,6 +340,13 @@ pub fn run() {
             // user left it on.
             app.manage(share::Sharing::default());
             share::start_saved(&handle);
+            // 0.0.5: the coding apps found when the user last turned that group on.
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    outside_agent::register_saved(&handle).await
+                });
+            }
             // "Allow all in every chat", if the user switched it on (a saved setting).
             approvals::load_default(&handle);
             // Before the startup check below, which records what it finds here.

@@ -18,9 +18,9 @@ use runtime::llama::launch::build_env_on;
 use runtime::llama::protocol::CHILD_STATE_PREFIX;
 use runtime::llama::server::loopback_client_builder;
 use runtime::{
-    Backend, BackendKind, GpuUse, LaunchConfig, LoadFailure, LoadStage, MODEL_ALIAS,
-    RuntimeLayout, ServerEvent, ServerState, SpawnSpec, StartError, StartSpec, StdioMode,
-    build_args, discover, free_loopback_port, probe, process_alive, random_api_key, start,
+    Backend, BackendKind, GpuUse, LaunchConfig, LoadFailure, LoadStage, MODEL_ALIAS, RuntimeLayout,
+    ServerEvent, ServerState, SpawnSpec, StartError, StartSpec, StdioMode, build_args, discover,
+    free_loopback_port, probe, process_alive, random_api_key, start,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -475,13 +475,14 @@ async fn save_memory_starts_and_allocates_a_q8_0_memory() {
     assert!(reply["choices"][0]["message"].is_object(), "{reply}");
     server.stop().await;
 
-    // The memory it allocated: q8_0 takes 34 bytes where f16 takes 64.
+    // The memory it allocated: q8_0 takes 34 bytes where f16 takes 64, plus a little
+    // padding (b12110 with Qwen3 0.6B at 2,048 tokens: 127,074,304 against 234,881,024
+    // bytes, 54.1 %).
     let plain = context_bytes(&ready_payload(&bin, &launch(gguf.clone())).await);
     let saved = context_bytes(&ready_payload(&bin, &save(launch(gguf))).await);
     assert!(plain > 0, "the ready line reports the conversation memory");
-    assert_eq!(
-        u128::from(saved) * 64,
-        u128::from(plain) * 34,
+    assert!(
+        saved * 100 >= plain * 53 && saved * 100 <= plain * 56,
         "Save memory should allocate a q8_0 memory: {saved} bytes against {plain} bytes of f16"
     );
 }

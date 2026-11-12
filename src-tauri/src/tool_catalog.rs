@@ -161,6 +161,12 @@ pub const GROUPS: &[Group] = &[
         weak: &[],
     },
     Group {
+        server: "coding_apps",
+        label: "Coding apps",
+        strong: &["claude code", "codex", "coding app"],
+        weak: &["claude"],
+    },
+    Group {
         server: "artifacts",
         label: "Artifacts",
         strong: &[
@@ -403,6 +409,29 @@ pub const ENTRIES: &[Entry] = &[
         rank: 1,
         examples: &[
             r#"{"task": "Read every file in docs and list the ones that mention the old API.", "context": "The project is in the working folder."}"#,
+        ],
+    },
+    // ---- coding apps (0.0.5) ----
+    Entry {
+        name: "ask_claude_code",
+        group: "coding_apps",
+        purpose: "Ask Claude Code on this computer to do a task in the working folder; it works online and the user approves each time.",
+        keywords: &["claude code", "claude", "coding app", "second opinion"],
+        rank: 1,
+        examples: &[
+            r#"{"task": "Find why the tests in tests/test_calc.py fail and explain the cause."}"#,
+            r#"{"task": "Fix the failing test in tests/test_calc.py.", "may_edit": true}"#,
+        ],
+    },
+    Entry {
+        name: "ask_codex",
+        group: "coding_apps",
+        purpose: "Ask Codex on this computer to do a task in the working folder; it works online and the user approves each time.",
+        keywords: &["codex", "coding app", "second opinion"],
+        rank: 1,
+        examples: &[
+            r#"{"task": "Review src/main.rs and list likely bugs."}"#,
+            r#"{"task": "Add a unit test for parse_args in src/cli.rs.", "may_edit": true}"#,
         ],
     },
     // ---- toolfinder ----
@@ -976,6 +1005,7 @@ pub(crate) mod tests {
         })));
         host.add_builtin(Arc::new(tools::SkillsServer::new()));
         host.add_builtin(Arc::new(crate::subagent::SubagentsServer));
+        host.add_builtin(Arc::new(crate::outside_agent::listing_both()));
         host.add_builtin(Arc::new(crate::tool_select::ToolFinderServer));
         host.add_builtin(Arc::new(browser::BrowserServer::new(
             browser::BrowserConfig::new(std::env::temp_dir().join("catalog-test-profile")),

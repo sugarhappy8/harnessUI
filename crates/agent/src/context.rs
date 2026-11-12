@@ -21,6 +21,11 @@
 //! 3. [`stub_results`] over this turn's own results, oldest first, keeping the user's message
 //!    and the latest call and result.
 //!
+//! A summary is cut to [`ContextBudget::summary_max_chars`]. One written when the model had a
+//! larger context can be longer than a smaller context allows; before the turn measures
+//! anything it is folded again under the smaller cap ([`fold_instruction`]), or, when the
+//! model cannot do that, cut to it ([`cut_summary`]).
+//!
 //! A stubbed call keeps its name and arguments (long string values shortened) and its result
 //! becomes a note with the status, the size and "call again to re-read"; a call and its
 //! result are always replaced together. Independently, only the newest

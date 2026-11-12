@@ -170,3 +170,5 @@ set_share_port
 reveal_share_key
 new_share_key
 share_setup
+coding_apps_status
+find_coding_apps

@@ -289,10 +289,7 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
     if cfg.keep_in_memory {
         args.extend(["-lm", KEEP_IN_MEMORY_LOAD_MODE].map(str::to_owned));
     }
-    args.extend([
-        "--cache-ram".to_owned(),
-        cfg.cache_ram_mib.to_string(),
-    ]);
+    args.extend(["--cache-ram".to_owned(), cfg.cache_ram_mib.to_string()]);
     if let Some(budget) = cfg.reasoning_budget {
         args.push("--reasoning-budget".to_owned());
         args.push(budget.to_string());
@@ -463,7 +460,10 @@ mod tests {
     fn choice_args(cfg: &LaunchConfig) -> Vec<String> {
         let args = build_args(cfg);
         let from = args.iter().position(|a| a == "--device").expect("--device");
-        let to = args.iter().position(|a| a == "--cache-ram").expect("--cache-ram");
+        let to = args
+            .iter()
+            .position(|a| a == "--cache-ram")
+            .expect("--cache-ram");
         args[from..to].to_vec()
     }
 
@@ -483,10 +483,7 @@ mod tests {
             gpu: GpuUse::Fit,
             ..config()
         };
-        assert_eq!(
-            choice_args(&fit),
-            ["--device", "Vulkan0", "--fit", "on"]
-        );
+        assert_eq!(choice_args(&fit), ["--device", "Vulkan0", "--fit", "on"]);
         assert!(!build_args(&fit).iter().any(|a| a == "-ngl"));
         // Don't use it: nothing on the graphics card, and no graphics card at all, so
         // llama.cpp does not move work there behind the user's back.
@@ -510,8 +507,8 @@ mod tests {
         assert_eq!(
             choice_args(&save),
             [
-                "--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-fa", "on", "-ctk",
-                "q8_0", "-ctv", "q8_0"
+                "--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-fa", "on", "-ctk", "q8_0",
+                "-ctv", "q8_0"
             ]
         );
         let keep = LaunchConfig {
@@ -665,7 +662,10 @@ mod tests {
         ] {
             assert_eq!(alias_of(odd), MODEL_ALIAS, "{odd:?}");
         }
-        assert_eq!(build_args(&config()).iter().filter(|a| *a == "-a").count(), 1);
+        assert_eq!(
+            build_args(&config()).iter().filter(|a| *a == "-a").count(),
+            1
+        );
     }
 
     #[test]
