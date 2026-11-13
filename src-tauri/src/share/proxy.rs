@@ -2250,6 +2250,7 @@ mod tests {
         let early_t = (0..3).map(|_| time(&early)).min().unwrap();
         let late_t = (0..3).map(|_| time(&late)).min().unwrap();
         let ratio = late_t.as_secs_f64() / early_t.as_secs_f64().max(1e-9);
+        eprintln!("early {early_t:?}, late {late_t:?}, ratio {ratio:.2}");
         assert!(
             (0.25..4.0).contains(&ratio),
             "early {early_t:?}, late {late_t:?}"
