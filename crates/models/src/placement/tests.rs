@@ -868,17 +868,17 @@ fn auto_ctx_placed_matches_auto_ctx_on_one_device() {
                 let (floor, cap) = floor_cap(max_ctx);
                 let expected = fit::auto_ctx(&fit_input, room);
                 assert_eq!(
-                    auto_ctx_placed(&at, room, floor, cap),
+                    auto_ctx_placed(at, room, floor, cap),
                     expected,
                     "{room:?} {max_ctx:?} {projector}"
                 );
                 assert_eq!(
-                    auto_ctx_placed_in(&at, room, floor, cap, MemoryKind::Separate, false),
+                    auto_ctx_placed_in(at, room, floor, cap, MemoryKind::Separate, false),
                     expected
                 );
                 // Everything on the card: As much as fits gives the same answer.
                 assert_eq!(
-                    auto_ctx_placed_in(&at, room, floor, cap, MemoryKind::Separate, true),
+                    auto_ctx_placed_in(at, room, floor, cap, MemoryKind::Separate, true),
                     expected
                 );
             }
@@ -1239,5 +1239,52 @@ fn auto_ctx_with_as_much_as_fits_and_memory_in_the_computer() {
     assert_eq!(
         auto_ctx_placed(at(short), short, 4096, 32_768).map(|a| a.ctx),
         Some(32_768)
+    );
+}
+
+/// The pinned test model (CI's `TEST_GGUF`, Qwen3 0.6B at Q8_0) against what llama-server
+/// b12110 reported allocating for it on the processor at 4,096 tokens (the ready line's
+/// memory report, `crates/runtime/tests/fixtures/managed_stdout.txt`): Host 165,568,512
+/// bytes of model and 469,762,048 of conversation memory, and 707,731,456 bytes of
+/// repacked weights (the `AMX` buffer type of this build machine's processor).
+#[test]
+fn real_model_estimate_against_llama_servers_report() {
+    let Ok(path) = std::env::var("TEST_GGUF") else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    let pinned = path
+        .file_name()
+        .is_some_and(|n| n == "Qwen3-0.6B-Q8_0.gguf")
+        && std::fs::metadata(path).is_ok_and(|m| m.len() == 639_446_688);
+    if !pinned {
+        return;
+    }
+    let (header, table) = crate::gguf::read_file_with_tensors(path).unwrap();
+    let summary = ModelSummary::from_header(&header);
+    let s = LayerSizes::from_tables(&[table], summary.block_count);
+    let kv = kv_per_layer(&summary, 4096, KvCacheType::F16);
+    let r = split(
+        &input(&s, kv, 0, 0, 0),
+        &Where {
+            graphics: false,
+            layers: Layers::All,
+            experts_on_cpu: ExpertsPick::None,
+            kv_on_gpu: true,
+        },
+    );
+    // The conversation memory is exact.
+    assert_eq!(r.cpu.context, 469_762_048);
+    // The input layer is the Host buffer less the norms, which stay there too (0.2%).
+    assert_eq!(s.input_bytes, 165_306_368);
+    assert!(165_568_512 - s.input_bytes < 165_568_512 / 500);
+    // Everything else (the blocks and the tied output, 633,495,552 bytes in the file) is
+    // repacked for AMX here, which takes about 12% more; graphics cards and processors
+    // without AMX keep the file's layout (owner checklist).
+    let rest = r.cpu.model - s.input_bytes;
+    assert_eq!(rest, 633_495_552);
+    assert!(
+        rest < 707_731_456 && 707_731_456 - rest < rest / 8,
+        "{rest}"
     );
 }

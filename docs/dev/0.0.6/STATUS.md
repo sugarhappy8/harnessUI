@@ -103,6 +103,11 @@ one starts from this file and `README.md`.
   it; it starts a second copy from its transcript (six copies were started and stopped again).
   Never message workflow agents. If it happens again: commit, restart the dev server,
   resume each run the same way (args are in the session record and this file's run table).
+- 00:51 UTC check: in progress after the restart: WP8 (developing), WP3a (fix round 2),
+  WP9g and WP9d (developing; WP9b and WP9c developed, reviews after), WP10a and WP10b
+  (developing). Disk filled up once (00:40); freed to 11 GB; a disk guard
+  (scratchpad/diskguard.py, every 5 min below 8 GB free) now removes target/debug/incremental
+  and superseded test binaries.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

@@ -5339,7 +5339,7 @@ def p_reverse_settings(c, notes):
         put("ghidra", "java")
         s.wait_for(lambda: "Installed" in (row("rea") or "") and "Use for decompiling:" in panel(), 15, "installed rows")
         assert "rea is not running." in panel()
-        assert "To use it, ask about a program file in one of the chat's folders" in panel()
+        assert "To use it, turn on Reverse engineering in a chat's Tools panel." in panel()
         assert "Saved analysis: 0 MB." in panel()
         choose("Kuna")
         s.wait_for(lambda: s.invoke("get_setting", {"key": "reverseDecompiler"}) == "kuna", 10, "the choice saved")

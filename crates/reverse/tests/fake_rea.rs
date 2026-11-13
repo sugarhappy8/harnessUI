@@ -1793,14 +1793,19 @@ mod calls {
                 "{tool} after the live check"
             );
         }
+        // Lists come back as a summary with an id to page through (`detail: summary`).
         let listed = call("list_procedures", json!({}), a.clone()).await;
         assert!(!listed.is_error);
         no_root(&listed);
-        assert!(
-            listed.joined_text().contains("main"),
-            "{}",
-            listed.joined_text()
-        );
+        let ids = results::evidence_ids(&listed);
+        assert!(!ids.is_empty(), "{}", listed.joined_text());
+        // The summary is a receipt; its parent (the list itself) is what views page through.
+        let receipt: Value = serde_json::from_str(&listed.joined_text()).expect("rea's JSON");
+        let parent = receipt["parameters"]["parent_evidence_id"]
+            .as_str()
+            .expect("the list's id")
+            .to_string();
+        assert!(ids.contains(&parent), "{ids:?}");
         let pseudo = call(
             "procedure_pseudo_code",
             json!({"procedure": "main"}),
@@ -1809,18 +1814,23 @@ mod calls {
         .await;
         assert!(!pseudo.is_error);
         no_root(&pseudo);
-        assert!(pseudo.joined_text().len() > 20);
-        let ids = results::evidence_ids(&listed);
-        println!("fake_rea: real ids in list_procedures: {ids:?}");
+        assert!(
+            pseudo.joined_text().contains("main"),
+            "{}",
+            pseudo.joined_text()
+        );
         let session = call("binary_session", json!({}), a.clone()).await;
         assert!(!session.is_error);
         no_root(&session);
+        // File checks need no decompiler; another chat may run them while chat A holds
+        // its file.
         let check = call(
             "inspect_pe_imports",
             json!({"path": "hello-win-x64.exe"}),
             b.clone(),
         )
         .await;
+        assert!(!check.is_error);
         no_root(&check);
         let managed = call(
             "inspect_managed_members",
@@ -1829,19 +1839,18 @@ mod calls {
         )
         .await;
         no_root(&managed);
-        if let Some(id) = ids.first() {
-            let view =
-                json!({"source": {"kind": "retained-evidence", "evidence_id": id}, "view": {}});
-            match server
-                .describe("inspect_analysis_view", view.as_object().unwrap(), &b)
-                .await
-            {
-                Described::Invalid(why) => assert_eq!(why, m::UNKNOWN_ID),
-                Described::Action(a) => panic!("chat B read chat A's id: {a:?}"),
-            }
-            let out = call("inspect_analysis_view", view, a.clone()).await;
-            no_root(&out);
+        // Chat A's id reads for chat A only.
+        let view = json!({"source": {"kind": "retained-evidence", "evidence_id": parent}, "view": {"kind": "summary"}});
+        match server
+            .describe("inspect_analysis_view", view.as_object().unwrap(), &b)
+            .await
+        {
+            Described::Invalid(why) => assert_eq!(why, m::UNKNOWN_ID),
+            Described::Action(a) => panic!("chat B read chat A's id: {a:?}"),
         }
+        let out = call("inspect_analysis_view", view, a.clone()).await;
+        assert!(!out.is_error);
+        no_root(&out);
         // Chat B's open clears rea first, and rea confirms the reset.
         let out = call("open_binary", json!({"path": "hello-linux-x64"}), b.clone()).await;
         assert!(!out.is_error);
@@ -1853,9 +1862,23 @@ mod calls {
             Described::Invalid(why) => assert_eq!(why, m::CLOSED_OTHER_CHAT),
             Described::Action(a) => panic!("chat A still has a file: {a:?}"),
         }
+        // rea forgot chat A's results with the reset.
+        let view = json!({"source": {"kind": "retained-evidence", "evidence_id": parent}, "view": {"kind": "summary"}});
+        match server
+            .describe("inspect_analysis_view", view.as_object().unwrap(), &a)
+            .await
+        {
+            Described::Invalid(why) => assert_eq!(why, m::UNKNOWN_ID),
+            Described::Action(a) => panic!("chat A's id outlived the reset: {a:?}"),
+        }
         // After a stop, chat B's next step opens its file again by itself.
         server.process().stop(Duration::from_secs(3)).await;
-        let again = call("list_procedures", json!({}), b.clone()).await;
+        let again = call(
+            "procedure_pseudo_code",
+            json!({"procedure": "main"}),
+            b.clone(),
+        )
+        .await;
         assert!(!again.is_error);
         assert!(again.joined_text().contains("main"));
         let closed = call("close_binary", json!({}), b.clone()).await;

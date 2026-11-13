@@ -46,8 +46,10 @@ const APPLE_ASKED = "Follow Apple's window to install them. This page updates wh
 const APPLE_FIRST = "Can't be used until Apple's command line tools are installed (step 1 above).";
 const NO_DECOMPILER =
   "Install a decompiler to open programs. Checks that need none (for example, which functions a Windows program uses from other libraries) work with rea alone.";
+// The owner's answer Q4 = B: the group is off in new chats until turned on in a chat's Tools
+// panel; after that, new chats follow the last choice. So the first step is turning it on.
 const HOW_TO_USE =
-  "To use it, ask about a program file in one of the chat's folders, or drop the file on the message box. If the model doesn't use rea, turn on Reverse engineering in the chat's Tools panel.";
+  "To use it, turn on Reverse engineering in a chat's Tools panel. New chats then follow your last choice. Ask about a program file in one of the chat's folders, or drop the file on the message box.";
 const BUSY_QUESTION = "rea is working on a file in a chat. Stop it and continue?";
 const KUNA_INTRO = "Small and fast; its makers call it an experiment.";
 const KUNA_MAC =
@@ -663,9 +665,9 @@ export function Reverse() {
           ) : decompilersOnDisk.length === 1 ? (
             // The owner's choice, also while it is broken or needs an update (its row says so).
             <p>{`Decompiling uses ${label(status.chosen ?? status.decompiler ?? decompilersOnDisk[0] ?? "kuna")}.`}</p>
-          ) : (
+          ) : offered.length > 0 ? (
             <p className="text-fg-muted">{NO_DECOMPILER}</p>
-          )}
+          ) : null}
           {onDisk(row("kuna")) && (
             <div className="flex items-center gap-2">
               <p className="flex-1 text-xs text-fg-muted">

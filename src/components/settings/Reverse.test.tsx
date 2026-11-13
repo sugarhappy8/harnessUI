@@ -42,7 +42,7 @@ const REACH =
 const NO_DECOMPILER =
   "Install a decompiler to open programs. Checks that need none (for example, which functions a Windows program uses from other libraries) work with rea alone.";
 const HOW_TO_USE =
-  "To use it, ask about a program file in one of the chat's folders, or drop the file on the message box. If the model doesn't use rea, turn on Reverse engineering in the chat's Tools panel.";
+  "To use it, turn on Reverse engineering in a chat's Tools panel. New chats then follow your last choice. Ask about a program file in one of the chat's folders, or drop the file on the message box.";
 const BUSY_QUESTION = "rea is working on a file in a chat. Stop it and continue?";
 const GHIDRA_ROW =
   "Ghidra 12.1.4, with Java 21 (Eclipse Temurin). Made by the NSA and widely used. Slower: each file can take a few minutes to open, and it uses up to about 3 GB of memory while it works.";
@@ -665,10 +665,15 @@ describe("what each computer offers", () => {
     expect(screen.getByText(`${KUNA_MAC} Ghidra can open Mac apps.`)).toBeTruthy();
   });
 
-  it("an unsupported computer greys rea with its reason", async () => {
-    await show(status({ os: "other" }, { rea: { available: false, reason: "Not available for this computer." } }));
-    expect(within(rowOf("rea")).getByText("Not available for this computer.")).toBeTruthy();
-    expect(within(rowOf("rea")).queryByRole("button")).toBeNull();
+  it("an unsupported computer greys every row with its reason and never says to install one", async () => {
+    const no = { available: false, reason: "Not available for this computer." };
+    await show(status({ os: "other" }, { rea: no, kuna: no, ghidra: no }));
+    for (const name of ["rea", "Kuna", "Ghidra"]) {
+      expect(within(rowOf(name)).getByText("Not available for this computer.")).toBeTruthy();
+      expect(within(rowOf(name)).queryByRole("button")).toBeNull();
+    }
+    expect(screen.getByText("No decompiler is offered for this computer.")).toBeTruthy();
+    expect(screen.queryByText(NO_DECOMPILER)).toBeNull();
   });
 });
 
