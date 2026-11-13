@@ -497,8 +497,12 @@ export function ToolsPanel(props: {
                         />
                         <span className="min-w-0 flex-1">
                           <span>{a.label}</span>
-                          {a.version && <span className="ml-1 text-xs text-fg-muted">{a.version}</span>}
-                          {a.path && <span className="block font-mono text-xs break-all text-fg-muted">{a.path}</span>}
+                          {a.version && <span className="ml-1 text-xs text-fg-muted">{visiblePath(a.version)}</span>}
+                          {a.path && (
+                            <span className="block font-mono text-xs break-all text-fg-muted">
+                              <bdi dir="ltr">{visiblePath(a.path)}</bdi>
+                            </span>
+                          )}
                           {a.problem && <span className="block text-xs text-warning">{a.problem}</span>}
                         </span>
                         {t && <span className="text-xs text-fg-muted">~{t.tokenEstimate}</span>}

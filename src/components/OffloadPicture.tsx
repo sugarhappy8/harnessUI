@@ -10,6 +10,7 @@ import {
   pictureLayerWords,
   pictureSourceWords,
 } from "../lib/words";
+import { visiblePath } from "./FolderChip";
 
 /** The colour of each part of a bar; every part also has its word and number in the legend. */
 const PART_CLASS: Record<ReturnType<typeof barLegend>[number]["part"], string> = {
@@ -28,7 +29,7 @@ const PART_CLASS: Record<ReturnType<typeof barLegend>[number]["part"], string> =
  */
 function Bar(props: { bar: MemoryBar; kind: "graphics" | "computer" | "shared"; limitBytes?: number | null }) {
   const { bar, kind, limitBytes } = props;
-  const title = barTitle(bar, kind);
+  const title = visiblePath(barTitle(bar, kind));
   const legend = barLegend(bar);
   const whole = Math.max(
     bar.totalBytes > 0 ? bar.totalBytes : 0,

@@ -41,14 +41,16 @@ pub mod messages {
     /// Inside the app's own folders (or a system key store).
     pub const APP_FOLDERS: &str =
         "That file is in harnessUI's own folders, which tools can't reach.";
-    /// A link out of reach inside a folder (the link's path follows, then a full stop).
-    pub const LINK_OUT: &str = "That folder contains a link to a place this chat can't reach: ";
+    /// A link out of reach inside a folder. Like every walk refusal, it names nothing
+    /// inside the folder (13.9): the entry's path is only on the card's preview and in the
+    /// audit row.
+    pub const LINK_OUT: &str = "That folder contains a link to a place this chat can't reach.";
     /// A folder over the walk's limits.
     pub const TOO_LARGE: &str =
         "This folder is too large for rea to check. Point at the program file or a smaller folder.";
-    /// A device or pipe inside a folder (its path follows, then a full stop).
+    /// A device or pipe inside a folder (its path only on the card's preview).
     pub const DEVICE_IN_FOLDER: &str =
-        "That folder contains a device or pipe, which rea doesn't read: ";
+        "That folder contains a device or pipe, which rea doesn't read.";
     /// A session call with no file open for this chat.
     pub const NO_FILE_OPEN: &str =
         "No file is open in rea for this chat. Open one with open_binary first.";
@@ -80,9 +82,10 @@ pub mod messages {
     pub const NETWORK: &str = "That file is on a network or device path, which rea doesn't open. Ask the user to copy it into one of this chat's folders.";
     /// (WP9c) The path itself is a device, pipe or socket (its path follows, then a full stop).
     pub const DEVICE: &str = "That is a device or pipe, which rea doesn't read: ";
-    /// (WP9c) A folder the walk could not read (its path follows, then a full stop).
+    /// (WP9c) A folder the walk could not read, or a name in it that is not valid text
+    /// (the folder's path only on the card's preview).
     pub const UNREADABLE: &str =
-        "rea can't check everything in that folder, so it won't look inside it: ";
+        "rea can't check everything in that folder, so it won't look inside it.";
     /// (WP9c) Nothing at the path (the path follows, then a full stop).
     pub const NOT_FOUND: &str = "There is no file at ";
     /// (WP9c) A folder where a file is needed (the path follows, then a full stop).
@@ -107,9 +110,9 @@ pub mod messages {
     pub const SOURCE_PATH: &str =
         "source_paths must be relative to the app's folder, without .. or a drive: ";
     /// (WP9c, review round 1) A folder holding harnessUI's own folders or a key store (the
-    /// folder inside follows, then a full stop).
+    /// folder inside only on the card's preview).
     pub const HOLDS_APP_FOLDERS: &str =
-        "That folder contains harnessUI's own folders, which tools can't reach: ";
+        "That folder contains harnessUI's own folders, which tools can't reach.";
     /// (WP9c, review round 1) A tool rea cannot run with Kuna, where Ghidra is offered.
     pub const KUNA_CANNOT: &str = "rea can't do this with Kuna. With Ghidra it can: the user can install Ghidra or switch to it in Settings → Reverse engineering. The other rea tools still work on the open file.";
     /// (WP9c, review round 1) A tool rea cannot run with Kuna, on a Mac (no Ghidra there in
@@ -394,11 +397,23 @@ impl Cx<'_, '_> {
 
     /// A refusal the policy engine turns into "denied, no card" in every mode.
     fn denied(&self, path: &str, why: String) -> Described {
+        self.denied_in_folder(path, why, None)
+    }
+
+    /// A refusal of a folder for something inside it. `why` (the model's note) names
+    /// nothing inside the folder (13.9); `detail`, which names the entry, goes only on the
+    /// card's preview, and so into the audit row.
+    fn denied_in_folder(&self, path: &str, why: String, detail: Option<String>) -> Described {
+        let mut preview = policy::sanitize::visible(path);
+        if let Some(detail) = detail {
+            preview.push('\n');
+            preview.push_str(&detail);
+        }
         Described::Action(Action {
             server: SERVER.into(),
             tool: self.t.name.into(),
             summary: policy::sanitize::one_line(path, 200),
-            preview: policy::sanitize::visible(path),
+            preview,
             scope: Scope::FileAnalysis {
                 folder: String::new(),
             },
@@ -526,15 +541,21 @@ impl Cx<'_, '_> {
                 &self.chat.forbidden_folders,
                 self.flavor,
             ) {
-                return self.denied(
+                let refusal = walk::WalkRefusal::Forbidden { path: inside };
+                return self.denied_in_folder(
                     &canonical,
-                    format!("{}{}.", m::HOLDS_APP_FOLDERS, shown(&inside)),
+                    refusal.message(),
+                    Some(refusal.detail()),
                 );
             }
             if let Err(refusal) =
                 walk::walk_folder(self.env.fs, &canonical, &sandbox, self.chat.full_access)
             {
-                return self.denied(&canonical, refusal.message());
+                return self.denied_in_folder(
+                    &canonical,
+                    refusal.message(),
+                    Some(refusal.detail()),
+                );
             }
             None
         } else {

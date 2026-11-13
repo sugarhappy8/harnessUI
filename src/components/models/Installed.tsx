@@ -9,6 +9,7 @@ import { toErrorInfo, useApp } from "../../store/app";
 import { COMPARE_FULL, COMPARE_LIMIT, sameEntry, useAddToComparison, useCompare } from "../../store/compare";
 import { askTooLarge, isLoadedNow, unloadModel } from "../../store/modelChange";
 import { ErrorBanner } from "../ErrorBanner";
+import { visiblePath } from "../FolderChip";
 import { ModelSettings } from "../ModelSettings";
 import { Badge } from "./Badge";
 
@@ -106,9 +107,10 @@ export function Installed(props: { onClose: () => void }) {
 
   async function remove(m: InstalledModel) {
     const files = m.source === "download";
+    const shown = visiblePath(m.fileName);
     const question = files
-      ? `Delete ${m.fileName}? This removes ${formatBytes(m.sizeBytes)} from disk.`
-      : `Remove ${m.fileName} from the list? The file itself stays where it is.`;
+      ? `Delete ${shown}? This removes ${formatBytes(m.sizeBytes)} from disk.`
+      : `Remove ${shown} from the list? The file itself stays where it is.`;
     if (!window.confirm(question)) return;
     try {
       // The loaded model is unloaded first, the way Unload does it: when something uses it,
@@ -192,16 +194,19 @@ function Row(props: {
   const { model: m, info } = props;
   const compare = useAddToComparison({ installedPath: m.path });
   const verdict: Verdict | null = info ? (info.tooLarge ? "red" : info.fit) : null;
+  // File names, folders and what the file says about itself can hold any character: shown
+  // with invisible and direction-changing characters as codes, so one file cannot pose as another.
+  const name = visiblePath(m.fileName);
   return (
     <li className="flex items-center gap-3 rounded-md border border-border px-3 py-2 text-sm">
       <div className="min-w-0 flex-1">
-        <p className="truncate font-medium" title={m.path}>
-          {m.fileName}
+        <p className="truncate font-medium" title={visiblePath(m.path)}>
+          <bdi dir="ltr">{name}</bdi>
         </p>
         <div className="mt-1 flex flex-wrap items-center gap-1">
-          {m.repo && <Badge>{m.repo}</Badge>}
+          {m.repo && <Badge>{visiblePath(m.repo)}</Badge>}
           <Badge>{formatBytes(m.sizeBytes)}</Badge>
-          {m.summary?.quantization && <Badge>{m.summary.quantization}</Badge>}
+          {m.summary?.quantization && <Badge>{visiblePath(m.summary.quantization)}</Badge>}
           {m.summary?.contextLength && (
             <Badge title="The most this model can remember">remembers up to {tokensWithWords(m.summary.contextLength)}</Badge>
           )}
@@ -216,7 +221,7 @@ function Row(props: {
           {m.source === "import" && <Badge>imported</Badge>}
           {m.architectureSupported === false && (
             <span className="text-xs text-danger">
-              The bundled llama.cpp cannot load {m.summary?.architecture ?? "this model"}.
+              The bundled llama.cpp cannot load {visiblePath(m.summary?.architecture ?? "this model")}.
             </span>
           )}
         </div>
@@ -234,7 +239,7 @@ function Row(props: {
             <button
               type="button"
               onClick={compare.remove}
-              aria-label={`Remove from comparison: ${m.fileName}`}
+              aria-label={`Remove from comparison: ${name}`}
               className="flex items-center gap-1 underline hover:text-fg"
             >
               <Check size={12} aria-hidden /> Remove from comparison
@@ -245,7 +250,7 @@ function Row(props: {
               onClick={() => void compare.add()}
               disabled={compare.full}
               title={compare.full ? "You can compare up to 4 models. Remove one first." : undefined}
-              aria-label={`Add to comparison: ${m.fileName}`}
+              aria-label={`Add to comparison: ${name}`}
               className="flex items-center gap-1 underline hover:text-fg disabled:no-underline disabled:opacity-50"
             >
               <Plus size={12} aria-hidden /> Add to comparison
@@ -256,7 +261,7 @@ function Row(props: {
       <button
         type="button"
         onClick={props.onSettings}
-        aria-label={`Settings for this model: ${m.fileName}`}
+        aria-label={`Settings for this model: ${name}`}
         title="Settings for this model"
         className="text-fg-muted hover:text-fg"
       >
@@ -272,7 +277,7 @@ function Row(props: {
       </button>
       <button
         type="button"
-        aria-label={`Delete ${m.fileName}`}
+        aria-label={`Delete ${name}`}
         onClick={props.onRemove}
         className="text-fg-muted hover:text-danger"
       >

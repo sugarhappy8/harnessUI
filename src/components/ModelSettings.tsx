@@ -48,6 +48,7 @@ import {
 } from "../store/modelChange";
 import { ErrorBanner } from "./ErrorBanner";
 import { FINE_AUTO, FineControl, fineIsAuto, hasCustomPlacement } from "./FineControl";
+import { visiblePath } from "./FolderChip";
 import { OffloadPicture } from "./OffloadPicture";
 
 // ---- Shared controls (also used by Settings → Local models) ------------------------------
@@ -427,8 +428,8 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
           <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-3">
             <div className="min-w-0">
               <Dialog.Title className="font-semibold">Settings for this model</Dialog.Title>
-              <Dialog.Description className="truncate text-xs text-fg-muted" title={path}>
-                {name}
+              <Dialog.Description className="truncate text-xs text-fg-muted" title={visiblePath(path)}>
+                <bdi dir="ltr">{visiblePath(name)}</bdi>
               </Dialog.Description>
             </div>
             <Dialog.Close aria-label="Close" className="mt-0.5 text-fg-muted hover:text-fg">
@@ -634,12 +635,12 @@ function Controls(props: {
       ? "Automatic"
       : (() => {
           const found = info.devices.find((x) => x.name === d.device);
-          return found ? deviceLabel({ ...found, recommended: false }) : "a graphics card that is not connected now";
+          return found ? visiblePath(deviceLabel({ ...found, recommended: false })) : "a graphics card that is not connected now";
         })();
   const deviceOptions: Option[] = [
     { value: "default", label: sameAs(defaultDevice) },
     { value: "auto", label: "Automatic" },
-    ...info.devices.map((x) => ({ value: `named:${x.name}`, label: deviceLabel(x) })),
+    ...info.devices.map((x) => ({ value: `named:${x.name}`, label: visiblePath(deviceLabel(x)) })),
   ];
   const deviceNow = deviceValue(draft.device);
   if (!deviceOptions.some((o) => o.value === deviceNow)) {

@@ -5,6 +5,7 @@ import type { DownloadGroup, ErrorInfo } from "../../lib/types";
 import { formatBytes, formatEta } from "../../lib/format";
 import { toErrorInfo } from "../../store/app";
 import { ErrorBanner } from "../ErrorBanner";
+import { visiblePath } from "../FolderChip";
 
 /** Models → Downloads: progress, pause, resume and cancel. */
 export function Downloads() {
@@ -59,7 +60,9 @@ export function Downloads() {
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">
-                    {g.repo} · {g.label}
+                    <bdi dir="ltr">
+                      {visiblePath(g.repo)} · {visiblePath(g.label)}
+                    </bdi>
                   </p>
                   <p className="text-xs text-fg-muted">
                     {formatBytes(g.bytesDone)} of {formatBytes(g.bytesTotal)} · {g.status}

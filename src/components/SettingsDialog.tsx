@@ -701,7 +701,7 @@ function HuggingFace() {
   );
 }
 
-function Diagnostics() {
+export function Diagnostics() {
   const [report, setReport] = useState<string | null>(null);
   const [savedTo, setSavedTo] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

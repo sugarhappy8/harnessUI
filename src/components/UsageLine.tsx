@@ -17,6 +17,7 @@ import {
   usageLine,
 } from "../lib/words";
 import { useApp } from "../store/app";
+import { visiblePath } from "./FolderChip";
 import { openModelSettings } from "./ModelSettings";
 
 /** The usage line asks every 1.5 seconds while the window is visible (I6-9). */
@@ -54,7 +55,7 @@ function UsageMenu(props: { now: UsageNow; localPath: string | null }) {
   const graphics =
     g.kind === "notAvailable" && g.why === "noGraphicsCard" ? null : g.kind === "value" ? (
       <>
-        <Row text={g.value.name.trim() ? `${graphicsName} · ${g.value.name}` : graphicsName} />
+        <Row text={g.value.name.trim() ? `${graphicsName} · ${visiblePath(g.value.name)}` : graphicsName} />
         <Row
           indent
           text={`Busy: ${percentWords(g.value.busyPercent)}`}

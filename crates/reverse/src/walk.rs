@@ -107,16 +107,32 @@ pub enum WalkRefusal {
 }
 
 impl WalkRefusal {
-    /// The message the model reads (section 6), with paths made safe to show.
+    /// The message the model reads (section 6). It never names the entry: the model has
+    /// not read the folder, the name is whatever its author chose, and this message reaches
+    /// the model as an app note before anything is approved (13.9).
     pub fn message(&self) -> String {
         use crate::describe::messages as m;
         match self {
-            WalkRefusal::TooLarge => m::TOO_LARGE.to_string(),
-            WalkRefusal::LinkOut { link } => format!("{}{}.", m::LINK_OUT, shown(link)),
-            WalkRefusal::Device { path } => format!("{}{}.", m::DEVICE_IN_FOLDER, shown(path)),
-            WalkRefusal::Unreadable { path } => format!("{}{}.", m::UNREADABLE, shown(path)),
-            WalkRefusal::Forbidden { path } => {
-                format!("{}{}.", m::HOLDS_APP_FOLDERS, shown(path))
+            WalkRefusal::TooLarge => m::TOO_LARGE,
+            WalkRefusal::LinkOut { .. } => m::LINK_OUT,
+            WalkRefusal::Device { .. } => m::DEVICE_IN_FOLDER,
+            WalkRefusal::Unreadable { .. } => m::UNREADABLE,
+            WalkRefusal::Forbidden { .. } => m::HOLDS_APP_FOLDERS,
+        }
+        .to_string()
+    }
+
+    /// The same message with the entry's path made safe to show, for the card's preview
+    /// and the audit row only: never for the model.
+    pub fn detail(&self) -> String {
+        let message = self.message();
+        match self {
+            WalkRefusal::TooLarge => message,
+            WalkRefusal::LinkOut { link: path }
+            | WalkRefusal::Device { path }
+            | WalkRefusal::Unreadable { path }
+            | WalkRefusal::Forbidden { path } => {
+                format!("{}: {}.", message.trim_end_matches('.'), shown(path))
             }
         }
     }
@@ -1180,8 +1196,16 @@ mod tests {
             WalkRefusal::LinkOut {
                 link: "/w/a\u{202E}b".into()
             }
-            .message(),
+            .detail(),
             "That folder contains a link to a place this chat can't reach: /w/a\\u{202E}b."
+        );
+        // The model's note names nothing inside the folder (13.9).
+        assert_eq!(
+            WalkRefusal::LinkOut {
+                link: "/w/a\u{202E}b".into()
+            }
+            .message(),
+            "That folder contains a link to a place this chat can't reach."
         );
     }
 
@@ -1239,8 +1263,15 @@ mod tests {
             WalkRefusal::Forbidden {
                 path: "/home/u/.local/share/keyrings".into()
             }
-            .message(),
+            .detail(),
             "That folder contains harnessUI's own folders, which tools can't reach: /home/u/.local/share/keyrings."
+        );
+        assert_eq!(
+            WalkRefusal::Forbidden {
+                path: "/home/u/.local/share/keyrings".into()
+            }
+            .message(),
+            "That folder contains harnessUI's own folders, which tools can't reach."
         );
         // Found without listing anything, as written and where it resolves.
         let fs = tree().link(
