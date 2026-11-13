@@ -12,6 +12,18 @@
 //! `REA_ANALYSIS_PROVIDER` is always set, never `auto`: rea's automatic search would look
 //! for Hopper, IDA and other decompilers on the computer (R10). With no decompiler it is
 //! `ghidra` with no Ghidra configured, so rea uses none.
+//!
+//! On Linux with Ghidra, `TMPDIR` is the private folder under `XDG_RUNTIME_DIR` when the
+//! layout has one ([`ReverseLayout::run_tmp`]), else `reverse/tmp`, from which rea moves
+//! Ghidra's session to `/tmp` because the path has a folder starting with a dot
+//! (`~/.local/share`).
+//!
+//! Known limit (Linux): outside Windows rea empties every Java option variable for Ghidra's
+//! Java and takes its options only from Ghidra's own `launch.properties`, so the app cannot
+//! pass `-XX:-UsePerfData` (rea passes it itself on Windows). Java keeps a 32 KB performance
+//! file in `/tmp/hsperfdata_<user>/` while it runs, whatever its temporary folder is, and
+//! removes it when it ends; after a Java ended by force (a stop that outlasts rea's grace),
+//! the file stays until the next Java of that user starts and removes it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -202,6 +214,14 @@ pub fn run_config_with(
         Flavor::Linux => LINUX_PATH.to_owned(),
     };
     env = env.set("PATH", path);
+    let kuna = match decompiler {
+        Some(Decompiler::Kuna) => installed.kuna_program(),
+        _ => None,
+    };
+    let ghidra = match decompiler {
+        Some(Decompiler::Ghidra) => installed.ghidra_dir().zip(installed.java_home.clone()),
+        _ => None,
+    };
     let home = layout.home();
     env = env.set("HOME", text(&home));
     match flavor {
@@ -214,12 +234,19 @@ pub fn run_config_with(
                 .set("TMP", text(&layout.tmp()));
         }
         Flavor::Linux => {
+            // With Ghidra, the private folder under XDG_RUNTIME_DIR when there is one: the
+            // reverse folder is under ~/.local/share, and from a temporary folder there rea
+            // would move Ghidra's session to /tmp (module documentation of `layout`).
+            let tmp = match (&ghidra, layout.run_tmp()) {
+                (Some(_), Some(_run_tmp)) => layout.tmp(), // TEMP-BEFORE-FIX
+                _ => layout.tmp(),
+            };
             env = env
                 .set("XDG_CONFIG_HOME", text(&home.join(".config")))
                 .set("XDG_CACHE_HOME", text(&home.join(".cache")))
                 .set("XDG_DATA_HOME", text(&home.join(".local").join("share")))
                 .set("XDG_STATE_HOME", text(&home.join(".local").join("state")))
-                .set("TMPDIR", text(&layout.tmp()));
+                .set("TMPDIR", text(&tmp));
         }
         Flavor::Macos => {
             env = env.set("TMPDIR", text(&layout.tmp()));
@@ -231,14 +258,6 @@ pub fn run_config_with(
         .set("REA_MCP_INPUT_SCHEMA_PROFILE", "compact")
         .set("REA_MCP_OUTPUT_SCHEMA_PROFILE", "off")
         .set("REA_LOG_LEVEL", "error");
-    let kuna = match decompiler {
-        Some(Decompiler::Kuna) => installed.kuna_program(),
-        _ => None,
-    };
-    let ghidra = match decompiler {
-        Some(Decompiler::Ghidra) => installed.ghidra_dir().zip(installed.java_home.clone()),
-        _ => None,
-    };
     if let Some(kuna) = kuna {
         env = env
             .set("REA_ANALYSIS_PROVIDER", "kuna")
@@ -568,6 +587,50 @@ mod tests {
                 assert!(!literal.contains('/'), "{}", line.trim());
             }
         }
+    }
+
+    /// On Linux with Ghidra, a usable runtime folder replaces `reverse/tmp` as `TMPDIR` (the
+    /// golden test above is the case without one): rea then keeps Ghidra's session there
+    /// instead of moving it to /tmp. Nothing else changes, in no other case.
+    #[test]
+    fn on_linux_ghidra_gets_the_private_runtime_folder_when_there_is_one() {
+        const RUN: &str = "/run/user/1000/app-reverse";
+        let layout = ReverseLayout::new(ROOT).with_run_tmp(Some(RUN.into()));
+        for flavor in [Flavor::Windows, Flavor::Macos, Flavor::Linux] {
+            for d in [None, Some(Decompiler::Kuna), Some(Decompiler::Ghidra)] {
+                let with = run_config_with(
+                    &lock(),
+                    &layout,
+                    &everything(),
+                    d,
+                    flavor,
+                    false,
+                    &app_env,
+                );
+                let mut want = set(&build(d, flavor, false));
+                if flavor == Flavor::Linux && d == Some(Decompiler::Ghidra) {
+                    want.insert("TMPDIR".into(), RUN.into());
+                }
+                assert_eq!(set(&with), want, "{flavor:?} {d:?}");
+                assert_eq!(with.env.inherit, build(d, flavor, false).env.inherit);
+                // Created by rea's process itself (private, outside the reverse folder).
+                assert!(!folders(&with, &layout).contains(&PathBuf::from(RUN)));
+            }
+        }
+        // Ghidra chosen but not installed counts as none: reverse/tmp.
+        let mut only_rea = everything();
+        only_rea.ghidra = None;
+        only_rea.java_home = None;
+        let config = run_config_with(
+            &lock(),
+            &layout,
+            &only_rea,
+            Some(Decompiler::Ghidra),
+            Flavor::Linux,
+            false,
+            &app_env,
+        );
+        assert_eq!(set(&config)["TMPDIR"], p("tmp"));
     }
 
     #[test]

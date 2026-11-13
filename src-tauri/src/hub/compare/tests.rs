@@ -1194,7 +1194,10 @@ fn installed_answers_follow_the_one_verdict() {
     ));
     assert_eq!(fit.verdict, Verdict::Yellow);
     assert!(fit.partial_offload, "part of it on the processor");
-    assert_eq!(fit.suggested_ctx, None, "no size puts all of it on the card");
+    assert_eq!(
+        fit.suggested_ctx, None,
+        "no size puts all of it on the card"
+    );
     let bar = info.picture.graphics.unwrap();
     assert_eq!(
         (fit.needed_bytes, fit.available_bytes),
@@ -1208,7 +1211,10 @@ fn installed_answers_follow_the_one_verdict() {
     );
     let (fit, _) = check(&small);
     assert_eq!(fit.verdict, Verdict::Yellow);
-    assert!(fit.partial_offload, "the step-down would put part on the processor");
+    assert!(
+        fit.partial_offload,
+        "the step-down would put part on the processor"
+    );
     let shorter = fit.suggested_ctx.expect("a shorter memory that fits");
     assert!(shorter < u64::from(CTX), "{shorter}");
     let at_shorter = crate::offload::Placer::new(&facts, &small.machine, false)
@@ -1251,7 +1257,10 @@ fn installed_answers_follow_the_one_verdict() {
         None
     );
     assert_eq!(
-        installed_fit(&plan_with(None, card(16 * GB), ModelLoadSettings::default()), CTX),
+        installed_fit(
+            &plan_with(None, card(16 * GB), ModelLoadSettings::default()),
+            CTX
+        ),
         None,
         "the file is gone"
     );
@@ -1300,7 +1309,11 @@ fn catalog_list_fetches_nothing() {
     let plain = by_id("sample-plain-q8");
     assert_eq!(plain.installed_path.as_deref(), Some(path.as_str()));
     assert!(plain.fit.is_some());
-    assert_eq!(plain.fit, installed_fit(&plan, CTX), "as Installed judges it");
+    assert_eq!(
+        plain.fit,
+        installed_fit(&plan, CTX),
+        "as Installed judges it"
+    );
     assert_eq!(plain.results, vec![mine.result]);
     assert_eq!(plain.quant, "Q8_0");
     assert_eq!(plain.catalog.source, None, "an http link is not shown");

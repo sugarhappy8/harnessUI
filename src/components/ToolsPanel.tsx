@@ -4,6 +4,7 @@ import { AlertTriangle, FolderPlus, Trash2, Wrench } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import type { ApprovedFolder, CodingAppsStatus, ToolDto } from "../lib/types";
 import { useApp, toErrorInfo } from "../store/app";
+import { useChatMode } from "../lib/approvalMode";
 import { visiblePath } from "./FolderChip";
 
 const SERVER_LABEL: Record<string, string> = {
@@ -23,8 +24,15 @@ const SERVER_LABEL: Record<string, string> = {
 const SERVER_NOTE: Record<string, string> = {
   subagents:
     "Lets the model hand a task to a helper that works in its own context with the same tools and the same approvals.",
+  // In Ask first and Allow all; Full access has its own line below.
   reverse: "Lets the model look inside program files in this chat's folders with rea. It never runs them.",
 };
+
+/** The Reverse engineering note in Full access, where rea may open any file but those the
+ *  path sandbox keeps from every mode, harnessUI's own among them (item5-spec.md, the
+ *  per-mode table). */
+const REVERSE_NOTE_FULL_ACCESS =
+  "Lets the model look inside any program file on this computer except harnessUI's own, with rea. It never runs them.";
 
 /**
  * The Reverse engineering group (0.0.6 item 5). Its 37 tools are always listed; the ones that
@@ -123,6 +131,9 @@ export function ToolsPanel(props: {
   const [finding, setFinding] = useState(false);
   const showError = useApp((s) => s.showError);
   const openChat = useApp((s) => s.openChat);
+  // The mode the header's approval menu reads and keeps up to date ("ask" until read, so a
+  // note never says more than the chat allows); the Reverse engineering note follows it.
+  const mode = useChatMode(props.chatId);
 
   const refresh = useCallback(() => {
     ipc
@@ -380,7 +391,11 @@ export function ToolsPanel(props: {
                     </span>
                   )}
                 </label>
-                {SERVER_NOTE[server] && <p className="mt-0.5 pl-6 text-xs text-fg-muted">{SERVER_NOTE[server]}</p>}
+                {SERVER_NOTE[server] && (
+                  <p className="mt-0.5 pl-6 text-xs text-fg-muted">
+                    {server === REVERSE && mode === "fullAccess" ? REVERSE_NOTE_FULL_ACCESS : SERVER_NOTE[server]}
+                  </p>
+                )}
                 {noBrowser && (
                   <div className="mt-1 pl-6 text-xs">
                     <p className="flex items-start gap-1 text-warning">

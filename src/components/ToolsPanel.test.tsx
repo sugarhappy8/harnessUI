@@ -54,6 +54,7 @@ const ipcMock = vi.hoisted(() => ({
 vi.mock("../lib/ipc", () => ipcMock);
 
 const { ToolsPanel } = await import("./ToolsPanel");
+const { useApprovalMode } = await import("../lib/approvalMode");
 
 async function openPanel(workingFolder: string | null = null) {
   await act(async () => {
@@ -636,6 +637,56 @@ describe("ToolsPanel: the Reverse engineering group (0.0.6)", () => {
     expect(screen.queryByRole("button", { name: "Set up reverse engineering" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Open Reverse engineering settings" })).toBeNull();
     expect(screen.queryByText(DECOMPILER_LINE)).toBeNull();
+  });
+
+  // The note says what rea can reach, which follows the chat's approval mode (the mode the
+  // header's menu and the folder chip read): the chat's folders in Ask first and Allow all,
+  // every file but harnessUI's own in Full access (item5-spec.md, the per-mode table).
+  describe("its note follows the chat's approval mode", () => {
+    const FULL_ACCESS_NOTE =
+      "Lets the model look inside any program file on this computer except harnessUI's own, with rea. It never runs them.";
+
+    beforeEach(() => {
+      ipcMock.listChatTools.mockImplementation(async () => reverse({}));
+    });
+    afterEach(() => {
+      cleanup();
+      useApprovalMode.setState({ modes: {}, defaultMode: "ask" });
+    });
+
+    it.each([
+      ["Ask first", "ask"],
+      ["Allow all", "allowAll"],
+    ] as const)("in %s says rea works only in this chat's folders", async (_name, mode) => {
+      useApprovalMode.setState({ modes: { [CHAT]: mode }, defaultMode: "ask" });
+      await openPanel();
+      expect(screen.getAllByText(NOTE)).toHaveLength(1);
+      expect(screen.queryByText(FULL_ACCESS_NOTE)).toBeNull();
+    });
+
+    it("in Full access says rea can look inside any program file except harnessUI's own", async () => {
+      useApprovalMode.setState({ modes: { [CHAT]: "fullAccess" }, defaultMode: "ask" });
+      await openPanel();
+      expect(screen.getAllByText(FULL_ACCESS_NOTE)).toHaveLength(1);
+      expect(screen.queryByText(NOTE)).toBeNull();
+    });
+
+    it("changes while the panel is open when the chat's mode changes, and says the chat's folders until the mode is read", async () => {
+      // Another chat in Full access does not widen this chat's note.
+      useApprovalMode.setState({ modes: { [CHAT + 1]: "fullAccess" }, defaultMode: "fullAccess" });
+      await openPanel();
+      expect(screen.getByText(NOTE)).toBeTruthy();
+      await act(async () => {
+        useApprovalMode.setState({ modes: { [CHAT]: "fullAccess" } });
+      });
+      expect(screen.getByText(FULL_ACCESS_NOTE)).toBeTruthy();
+      expect(screen.queryByText(NOTE)).toBeNull();
+      await act(async () => {
+        useApprovalMode.setState({ modes: { [CHAT]: "allowAll" } });
+      });
+      expect(screen.getByText(NOTE)).toBeTruthy();
+      expect(screen.queryByText(FULL_ACCESS_NOTE)).toBeNull();
+    });
   });
 
   it("before rea is set up says so once on the group, and Set up reverse engineering opens its Settings tab", async () => {

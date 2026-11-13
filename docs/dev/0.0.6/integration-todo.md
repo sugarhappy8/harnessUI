@@ -152,3 +152,10 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   lock, release.yml gate, lock flipped from that record), rea-linux-tmp (Ghidra's session in
   /tmp on Linux because the app folder is under a dot folder; private runtime folder or a
   documented limit; Java perf file), arch-todo-lead (the ARCHITECTURE.md TODO(lead) markers).
+- **Batch d (wf_728c1760-d70, 07:40 UTC):** mcp-rename-settings (renamed server keeps its
+  chats' tool choices, last choice and grants, or the note says what to switch on; keychain
+  failure during the rename), canonical-in-notes (pre-approval messages name the path the model
+  gave, never a resolved link target; rea describe and files tools), names-raw-sidebar-welcome.
+  Still to queue after the header refix ends: backend-check waiting line (scratchpad
+  open-backend-check-d3.json: register the wait before the backend probes; the waiting line
+  only while the backend waits).

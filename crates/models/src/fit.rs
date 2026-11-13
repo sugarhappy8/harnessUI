@@ -795,7 +795,10 @@ mod tests {
             (cpu.device, cpu.available_bytes, cpu.verdict),
             (FitDevice::Processor, 6 * GB, Verdict::Red)
         );
-        assert!(cpu.sentence.ends_with("only 4.0 GB. Too large for this computer."));
+        assert!(
+            cpu.sentence
+                .ends_with("only 4.0 GB. Too large for this computer.")
+        );
         assert_eq!(
             serde_json::to_value(&gpu).unwrap()["device"],
             serde_json::json!("graphicsCard")

@@ -33,12 +33,17 @@ verifier is missing):
   the workflow's read-only `GITHUB_TOKEN` and saves GitHub's release record it read with
   `--save-release`); `--record` writes `github-digest` into the lock, online, or offline
   with `--from-release <file>`, the record a CI run saved, which goes through the same
-  checks as GitHub's answer.
+  checks as GitHub's answer. Beside it goes `github_digest_run`, the CI run of THIS_REPO
+  that read GitHub's answer (the run in the saved record, or the current one online);
+  `--record` refuses without one and `--check` refuses `github-digest` without it. A pin
+  outside CI keeps the mark only where the old lock recorded the same file with its run.
+  The release workflow runs `github-digest --part ghidra` before every release build.
 
 Every part's builds must carry their own publisher's checks (REQUIRED_CHECKS). Ghidra alone
-may carry `first-download-only` in place of `github-digest` while 0.0.6 is developed:
-`--check` passes and names it, `--check --release` fails, and a release build of the app does
-not offer such a part (crates/reverse `lock::release_checks`, `platform::RELEASE_RULES`).
+may carry `first-download-only` in place of `github-digest` (as it did until CI run
+43380365172's record was recorded): `--check` passes and names it, `--check --release` fails,
+and a release build of the app does not offer such a part (crates/reverse
+`lock::release_checks`, `platform::RELEASE_RULES`).
 
 The new lock and fixture are written only after they pass `--check`. A part's minimum
 version moves only with `--minimum <part>=<version> --reason <text>` (R15), or for Node.js,
@@ -334,6 +339,8 @@ CI_RUN = re.compile(r"https://github\.com/" + re.escape(THIS_REPO) + r"/actions/
 def is_ci_run(run: object) -> bool:
     """Whether `run` is the address of a GitHub Actions run of THIS_REPO."""
     return isinstance(run, str) and CI_RUN.fullmatch(run) is not None
+
+
 RELEASE_ASSET_URL = re.compile(
     r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/releases/download/([A-Za-z0-9_.+-]+)/([A-Za-z0-9_.+-]+)$"
 )
@@ -1233,9 +1240,14 @@ def settle_digest_runs(parts: list[dict], old: dict | None) -> None:
         dropped = False
         for b in p["builds"]:
             o = old_builds.get((p["name"], b["platform"]), {})
+            recorded = (
+                o.get("file") == b["file"]
+                and "github-digest" in o.get("verified_by", [])
+                and is_ci_run(o.get("github_digest_run"))
+            )
             if "github-digest" not in b["verified_by"]:
                 b.pop("github_digest_run", None)
-            elif o.get("file") == b["file"] and "github-digest" in o.get("verified_by", []) and is_ci_run(o.get("github_digest_run")):
+            elif recorded:
                 b["github_digest_run"] = o["github_digest_run"]
             elif is_ci_run(run):
                 b["github_digest_run"] = run

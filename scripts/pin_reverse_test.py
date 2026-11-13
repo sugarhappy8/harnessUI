@@ -2,9 +2,10 @@
 """Tests for scripts/pin_reverse.py that run offline on any computer.
 
 Pinning needs the network and the publishers' verifiers; these tests check what does not:
-the committed `reverse.lock.json` passes `--check`, and `--check` catches each kind of bad
-lock (a host outside the part's set, a missing check, Kuna offered on Windows or Ghidra on
-a Mac, a minimum above the pin, an unsafe folder or path, a missing fixture); plus the
+the committed `reverse.lock.json` passes `--check --release`, and `--check` catches each kind
+of bad lock (a host outside the part's set, a missing check, Kuna offered on Windows or Ghidra
+on a Mac, a minimum above the pin, an unsafe folder or path, a missing fixture, GitHub's
+digest without the CI run that read it); plus the
 version, engine-range and path-name helpers, and the archive survey on small fake archives.
 
     python3 -I scripts/pin_reverse_test.py
@@ -38,6 +39,16 @@ def committed() -> dict:
 
 def part(lock: dict, name: str) -> dict:
     return next(p for p in lock["parts"] if p["name"] == name)
+
+
+def waiting() -> dict:
+    """The committed lock with Ghidra as it was pinned before CI run 43380365172's record
+    was recorded: `first-download-only`, no run."""
+    lock = committed()
+    for b in part(lock, "ghidra")["builds"]:
+        b["verified_by"] = ["first-download-only"]
+        b.pop("github_digest_run", None)
+    return lock
 
 
 class CommittedLock(unittest.TestCase):
@@ -497,7 +508,8 @@ class GithubDigest(unittest.TestCase):
     """`github-digest` (WP9e): CI compares GitHub's published digest of the pinned Ghidra
     asset with the lock and saves the release record it read; `--record` flips the lock to
     `github-digest`, online, or offline from that saved record (never from the lock's own
-    values)."""
+    values), and names beside it the CI run of sugarhappy8/harnessUI that read GitHub's
+    answer (`github_digest_run`); without such a run it records nothing."""
 
     def release(self, lock=None, **asset_changes):
         a = pr.pinned_assets(lock or committed(), "ghidra")[0]
@@ -554,13 +566,13 @@ class GithubDigest(unittest.TestCase):
             pr.pinned_assets(lock, "ghidra")
 
     def test_a_matching_digest_passes_and_says_what_it_read(self):
-        code, out, lock, sent = self.run_cmd(env=CI_RUN_ENV)
+        code, out, lock, sent = self.run_cmd(env=CI_RUN_ENV, lock=waiting())
         self.assertEqual(code, 0, out)
         self.assertIn("GitHub publishes sha256:ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db "
                       "and 569649598 bytes for ghidra_12.1.4_PUBLIC_20260921.zip", out)
         self.assertIn("run this command again with --record", out)
         self.assertNotIn("--confirmed", out)
-        self.assertEqual(lock, committed(), "nothing is written without --record")
+        self.assertEqual(lock, waiting(), "nothing is written without --record")
         # One request, to the release by tag, with the token as a bearer header; the token is
         # never printed.
         self.assertEqual([u for u, _ in sent],
@@ -586,7 +598,7 @@ class GithubDigest(unittest.TestCase):
             self.assertEqual(lock, committed(), f"{change}: the lock was written")
 
     def test_record_online_flips_ghidra_to_githubs_digest(self):
-        code, out, lock, _ = self.run_cmd(record=True, env=CI_RUN_ENV)
+        code, out, lock, _ = self.run_cmd(record=True, env=CI_RUN_ENV, lock=waiting())
         self.assertEqual(code, 0, out)
         for b in part(lock, "ghidra")["builds"]:
             self.assertEqual(b["verified_by"], ["github-digest"])
@@ -603,7 +615,7 @@ class GithubDigest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             saved = str(Path(d) / "ghidra-release.json")
             # CI: online, saves what GitHub answered, and says how to record it from there.
-            code, out, lock, sent = self.run_cmd(save_release=saved, env=run)
+            code, out, lock, sent = self.run_cmd(save_release=saved, env=run, lock=waiting())
             self.assertEqual(code, 0, out)
             self.assertEqual(len(sent), 1)
             self.assertIn(f"download the record this run saved ({CI_RUN})", out)
@@ -612,7 +624,7 @@ class GithubDigest(unittest.TestCase):
             self.assertEqual(record["run"], CI_RUN)
             self.assertNotIn("ghs_secret-token-value", Path(saved).read_text())
             # The lead, offline: the saved record goes through GitHub's checks; nothing is asked.
-            code, out, lock, sent = self.run_cmd(record=True, from_release=saved)
+            code, out, lock, sent = self.run_cmd(record=True, from_release=saved, lock=waiting())
             self.assertEqual(code, 0, out)
             self.assertEqual(sent, [], "the offline form asks nothing of the network")
             self.assertIn(f"saved by {CI_RUN} gives sha256:ddac49f9", out)
@@ -620,7 +632,7 @@ class GithubDigest(unittest.TestCase):
             self.assertTrue(all(b["verified_by"] == ["github-digest"] for b in part(lock, "ghidra")["builds"]))
             self.assertTrue(all(b["github_digest_run"] == CI_RUN for b in part(lock, "ghidra")["builds"]))
             # An offline run without --record prints no ready command.
-            code, out, lock, _ = self.run_cmd(from_release=saved)
+            code, out, lock, _ = self.run_cmd(from_release=saved, lock=waiting())
             self.assertEqual(code, 0, out)
             self.assertNotIn("--record", out)
 
@@ -676,25 +688,26 @@ class GithubDigest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for i, run in enumerate([None, "", 43380365172, ["x"]]):
                 saved = self.saved_record(d, f"r{i}.json", run=run)
-                code, out, lock, sent = self.run_cmd(record=True, from_release=saved, env=CI_RUN_ENV)
+                code, out, lock, sent = self.run_cmd(record=True, from_release=saved, env=CI_RUN_ENV, lock=waiting())
                 self.assertEqual(code, 1, (run, out))
                 self.assertIn("names no CI run of sugarhappy8/harnessUI", out, run)
-                self.assertEqual(lock, committed(), f"{run!r}: the lock was written")
+                self.assertEqual(lock, waiting(), f"{run!r}: the lock was written")
                 self.assertEqual(sent, [])
 
     def test_a_run_of_another_repository_records_nothing(self):
         with tempfile.TemporaryDirectory() as d:
             for i, run in enumerate(OTHER_RUNS):
                 saved = self.saved_record(d, f"r{i}.json", run=run)
-                code, out, lock, sent = self.run_cmd(record=True, from_release=saved, env=CI_RUN_ENV)
+                code, out, lock, sent = self.run_cmd(record=True, from_release=saved, env=CI_RUN_ENV, lock=waiting())
                 self.assertEqual(code, 1, (run, out))
                 self.assertIn("is not a CI run of sugarhappy8/harnessUI", out, run)
-                self.assertEqual(lock, committed(), f"{run!r}: the lock was written")
+                self.assertEqual(lock, waiting(), f"{run!r}: the lock was written")
+                self.assertEqual(sent, [])
 
     def test_a_good_record_is_recorded_with_its_run(self):
         with tempfile.TemporaryDirectory() as d:
             saved = self.saved_record(d, "ghidra-release-record.json")
-            code, out, lock, sent = self.run_cmd(record=True, from_release=saved)
+            code, out, lock, sent = self.run_cmd(record=True, from_release=saved, lock=waiting())
             self.assertEqual(code, 0, out)
             self.assertEqual(sent, [])
             self.assertIn(f"Name this run in the commit that records it: {CI_RUN}", out)
@@ -704,16 +717,16 @@ class GithubDigest(unittest.TestCase):
             self.assertEqual(pr.check(lock, release=True), [])
             for p in lock["parts"]:
                 if p["name"] != "ghidra":
-                    self.assertEqual(p, part(committed(), p["name"]))
+                    self.assertEqual(p, part(waiting(), p["name"]))
 
     def test_record_online_needs_a_ci_run_of_this_repository(self):
         for env in [{}, {**CI_RUN_ENV, "GITHUB_REPOSITORY": "o/harnessUI"}, {**CI_RUN_ENV, "GITHUB_RUN_ID": "1x"}]:
-            code, out, lock, _ = self.run_cmd(record=True, env=env)
+            code, out, lock, _ = self.run_cmd(record=True, env=env, lock=waiting())
             self.assertEqual(code, 1, (env, out))
             self.assertIn("CI run of sugarhappy8/harnessUI", out, env)
-            self.assertEqual(lock, committed(), f"{env}: the lock was written")
+            self.assertEqual(lock, waiting(), f"{env}: the lock was written")
         # Outside CI the hint is the CI path, not a --record that would be refused.
-        code, out, _, _ = self.run_cmd()
+        code, out, _, _ = self.run_cmd(lock=waiting())
         self.assertEqual(code, 0, out)
         self.assertNotIn("run this command again with --record", out)
         self.assertIn("--save-release <file>", out)

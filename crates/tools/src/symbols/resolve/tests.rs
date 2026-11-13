@@ -294,6 +294,8 @@ fn the_share_of_the_context_is_capped() {
     assert_eq!(cap_chars(8_192, 1), 1_638 * 3);
     // 40% shared by the mentions.
     assert_eq!(cap_chars(8_192, 4), 819 * 3);
+    // [0.0.6] And by the message's documents: 2 mentions and 8 documents share it by ten.
+    assert_eq!(cap_chars(65_536, 2 + 8), 2_621 * 3);
     // Never nothing.
     assert_eq!(cap_chars(100, 8), 600);
 }

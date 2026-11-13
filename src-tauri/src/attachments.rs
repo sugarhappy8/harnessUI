@@ -653,11 +653,8 @@ const CUT_NOTE_ROOM: usize = 320;
 /// of `n_ctx` tokens, when `shared_by` files (its documents and mentions together) are
 /// attached: a fifth of the context each, and 40% of it shared by them all, the rule mentions
 /// are cut by (`tools::symbols::resolve::cap_chars`, which also caps one mention at 8,000
-/// tokens, and shares only among the mentions: a message with both documents and mentions
-/// can carry more than 40%, at most 72% with 8 documents and 2 mentions).
-/// TODO(0.0.6): count documents in the mentions' share too. That is the mentions' cap, in
-/// `crates/tools/src/symbols/resolve.rs` and `src-tauri/src/mentions.rs`, which no 0.0.6
-/// package owns (WP3b owns the documents' side, which already counts the mentions).
+/// tokens). [0.0.6] The mentions' share counts the documents too (`mentions::attach`), so
+/// together they carry at most 40% of the context, apart from the 600-character floor.
 /// The current message is never summarised, so a document larger than this would stop the
 /// chat with "too long" instead.
 /// [0.0.6] At most a quarter of the storage guard in characters (524,288, about 175,000

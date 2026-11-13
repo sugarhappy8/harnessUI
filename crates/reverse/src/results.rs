@@ -28,6 +28,7 @@ use mcp_host::{Content, MAX_RESULT_BYTES, ToolOutput};
 use serde_json::{Map, Value};
 
 use crate::Component;
+use crate::layout::ReverseLayout;
 use crate::platform::{self, Os, Platform};
 
 /// What the reverse folder reads as in anything rea says.
@@ -104,14 +105,16 @@ impl Masker {
     /// The masker for `root` on `platform`: the root as written, as resolved on disk, and
     /// (Windows) its 8.3 short form, each in every spelling.
     pub fn new(root: &Path, platform: Platform) -> Self {
-        let mut spellings = vec![root.to_string_lossy().into_owned()];
-        if let Ok(resolved) = std::fs::canonicalize(root) {
-            spellings.push(resolved.to_string_lossy().into_owned());
+        Self::from_spellings(&spellings_of(root), platform)
+    }
+
+    /// The masker for a layout: the reverse folder and, on Linux with Ghidra, rea's
+    /// temporary folder outside it ([`ReverseLayout::run_tmp`]); both read as [`MASK`].
+    pub fn for_layout(layout: &ReverseLayout, platform: Platform) -> Self {
+        let mut spellings = spellings_of(layout.root());
+        if let Some(run_tmp) = layout.run_tmp() {
+            spellings.extend(spellings_of(run_tmp));
         }
-        if let Ok(resolved) = dunce::canonicalize(root) {
-            spellings.push(resolved.to_string_lossy().into_owned());
-        }
-        spellings.extend(short_names(root));
         Self::from_spellings(&spellings, platform)
     }
 
@@ -274,6 +277,19 @@ fn is_drive_path(s: &str) -> bool {
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
 }
 
+/// A folder as written, as resolved on disk and (Windows) in its 8.3 short form.
+fn spellings_of(root: &Path) -> Vec<String> {
+    let mut spellings = vec![root.to_string_lossy().into_owned()];
+    if let Ok(resolved) = std::fs::canonicalize(root) {
+        spellings.push(resolved.to_string_lossy().into_owned());
+    }
+    if let Ok(resolved) = dunce::canonicalize(root) {
+        spellings.push(resolved.to_string_lossy().into_owned());
+    }
+    spellings.extend(short_names(root));
+    spellings
+}
+
 /// The 8.3 short forms of `root` (Windows; empty elsewhere and when the volume has none).
 #[cfg(windows)]
 fn short_names(root: &Path) -> Vec<String> {
@@ -297,10 +313,16 @@ fn short_names(_root: &Path) -> Vec<String> {
     Vec::new()
 }
 
-/// `text` with the reverse folder masked, as on this computer (the process's stderr tail
-/// uses this; results use a [`Masker`] built once).
+/// `text` with the reverse folder masked, as on this computer (results use a [`Masker`]
+/// built once).
 pub fn mask(text: &str, root: &Path) -> String {
     Masker::new(root, Platform::current()).mask(text)
+}
+
+/// `text` with the reverse folder and rea's temporary folder outside it masked, as on this
+/// computer (the process's stderr tail uses this).
+pub fn mask_layout(text: &str, layout: &ReverseLayout) -> String {
+    Masker::for_layout(layout, Platform::current()).mask(text)
 }
 
 /// One string cleaned: masked, then made visible.
@@ -573,6 +595,30 @@ mod tests {
         assert_eq!(
             m.mask(r"open C:\Users\Ann\AppData\Local\com.harnessui.app\reverse."),
             format!("open {MASK}.")
+        );
+    }
+
+    #[test]
+    fn the_temporary_folder_outside_the_reverse_folder_is_masked_too() {
+        let layout = ReverseLayout::new("/home/ann/.local/share/app/reverse")
+            .with_run_tmp(Some("/run/user/1000/app-reverse".into()));
+        let m = Masker::for_layout(&layout, Platform::LinuxX64);
+        assert_eq!(
+            m.mask(
+                "project /run/user/1000/app-reverse/rea-ghidra-AbC123/p.gpr, \
+                 /home/ann/.local/share/app/reverse/tmp"
+            ),
+            format!("project {MASK}/rea-ghidra-AbC123/p.gpr, {MASK}/tmp")
+        );
+        assert_eq!(
+            mask_layout("in /run/user/1000/app-reverse", &layout),
+            format!("in {MASK}")
+        );
+        // Without one, only the reverse folder.
+        let plain = Masker::for_layout(&ReverseLayout::new("/x/reverse"), Platform::LinuxX64);
+        assert_eq!(
+            plain.mask("/run/user/1000/app-reverse/a /x/reverse/b"),
+            format!("/run/user/1000/app-reverse/a {MASK}/b")
         );
     }
 

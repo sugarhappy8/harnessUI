@@ -242,13 +242,17 @@ pub async fn search_mentions(
 }
 
 /// Reads the mentions for `ctx` in a blocking task, each cut to its share of `n_ctx`.
+/// [0.0.6] The share counts the message's `documents` too (`resolve::cap_chars`), as a
+/// document's share counts the mentions (`attachments::document_cap_chars`): together
+/// they carry at most 40% of the context.
 async fn read_all(
     ctx: ChatContext,
     mentions: Vec<MentionRequest>,
     n_ctx: usize,
+    documents: usize,
 ) -> AppResult<Vec<Result<Resolved, String>>> {
     tokio::task::spawn_blocking(move || {
-        let cap = resolve::cap_chars(n_ctx, mentions.len());
+        let cap = resolve::cap_chars(n_ctx, mentions.len() + documents);
         mentions
             .iter()
             .map(|m| resolve::resolve(m, &ctx, cap))
@@ -280,7 +284,7 @@ pub async fn resolve_mentions(
     too_many(mentions.len())?;
     let ctx = context_for(&app, &state, Some(chat_id)).await?;
     let n_ctx = crate::settings::DEFAULT_REMOTE_CONTEXT as usize;
-    Ok(read_all(ctx, mentions, n_ctx)
+    Ok(read_all(ctx, mentions, n_ctx, 0)
         .await?
         .into_iter()
         .map(|r| match r {
@@ -308,13 +312,15 @@ pub async fn resolve_mentions(
 
 /// Reads the chips the user chose for a message and stores each excerpt as a text
 /// document of the chat. Returns the content parts for the message. Any mention that
-/// cannot be read fails the send with the reason, before anything is stored.
+/// cannot be read fails the send with the reason, before anything is stored. [0.0.6] Each
+/// excerpt's share of `n_ctx` counts the message's `documents` (attached files) too.
 pub async fn attach(
     app: &AppHandle,
     state: &AppState,
     chat_id: store::ChatId,
     mentions: Vec<MentionRequest>,
     n_ctx: usize,
+    documents: usize,
 ) -> AppResult<Vec<Value>> {
     if mentions.is_empty() {
         return Ok(Vec::new());
@@ -322,7 +328,7 @@ pub async fn attach(
     too_many(mentions.len())?;
     let ctx = context_for(app, state, Some(chat_id)).await?;
     let mut resolved = Vec::new();
-    for r in read_all(ctx, mentions, n_ctx).await? {
+    for r in read_all(ctx, mentions, n_ctx, documents).await? {
         resolved.push(r.map_err(|why| {
             AppError::new(
                 "mention_unreadable",
@@ -426,6 +432,74 @@ mod tests {
             assert_eq!(
                 only_main_window(label).expect_err(label).code,
                 "bad_request"
+            );
+        }
+    }
+
+    /// [0.0.6] The documents and the mentions of one message share 40% of the context: with
+    /// 8 documents and 2 mentions, each mention is cut to the same share as each document,
+    /// not to a share of the mentions alone (the current message is never summarised, so a
+    /// larger one would stop the chat with "too long").
+    #[tokio::test]
+    async fn documents_and_mentions_share_forty_percent_of_the_context() {
+        let base = std::env::temp_dir().join(format!(
+            "mention-share-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let base = dunce::canonicalize(&base).unwrap();
+        // Removed also when an assertion fails.
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _gone = Gone(base.clone());
+        // Two files far larger than any share (about 780 KB each, under the 1 MB limit).
+        let long: String = (0..20_000)
+            .map(|n| format!("line {n:>6} of a long file to mention\n"))
+            .collect();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(base.join(name), &long).unwrap();
+        }
+        let folder = base.display().to_string();
+        let ctx = ChatContext {
+            chat_id: 1,
+            approved_folders: vec![folder.clone()],
+            working_folder: Some(folder),
+            result_cap_tokens: 2000,
+            ..Default::default()
+        };
+        let mentions: Vec<MentionRequest> = ["a.txt", "b.txt"]
+            .into_iter()
+            .map(|p| MentionRequest {
+                path: p.into(),
+                ..Default::default()
+            })
+            .collect();
+        for n_ctx in [8_192, 16_384, 32_768, 65_536, 131_072, 262_144] {
+            let read = read_all(ctx.clone(), mentions.clone(), n_ctx, 8)
+                .await
+                .unwrap();
+            let mentioned: usize = read
+                .iter()
+                .map(|r| {
+                    let r = r.as_ref().unwrap();
+                    assert!(r.truncated, "{n_ctx}: {} was not cut", r.label);
+                    r.text.chars().count()
+                })
+                .sum();
+            let documents = 8 * crate::attachments::document_cap_chars(n_ctx, 8 + 2);
+            // 40% of the context, at 3 characters per token.
+            let share = n_ctx * 2 / 5 * 3;
+            assert!(
+                mentioned + documents <= share,
+                "{n_ctx}: mentions {mentioned} + documents {documents} > {share}"
             );
         }
     }

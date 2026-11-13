@@ -654,6 +654,17 @@ Coding apps switch in `src/components/ToolsPanel.tsx`.
   app's environment or the outside app's user settings point it at the sharing port (WP5),
   say so on the card ("Claude Code is set up to use the model in harnessUI, so this task
   goes to your local model, not online.").
+  *Lead decision (release fix round):* that line needs sharing switched on and listening on
+  that port now (Sharing's live state, not the saved port); otherwise the call is refused
+  before any card ("<App> is set up to use the model in harnessUI, and sharing is off, so
+  <App> was not asked. The user can turn on sharing in Settings → Other apps, then ask
+  again.", or "…but sharing is not working now…" when it is on but not listening). When it
+  listens, the run gets exactly one extra variable: the sharing key, read from where the app
+  keeps it (never from the owner's environment), under the name the outside app's own setup
+  reads it from (`ANTHROPIC_AUTH_TOKEN` when Claude Code's `ANTHROPIC_BASE_URL` is the live
+  address; the chosen Codex provider's `env_key` when its `base_url` is, and only if that
+  name looks like a secret's). Everything else stays stripped. Both checks run again before
+  the run, and a run whose destination no longer matches the card does not start.
 **Tests:** argument building per template and mode, the forbidden-token and required-flag
 test, task on stdin with quotes, `%` and line breaks, task starting with `-`, program inside
 an approved folder refused, swapped file refused, always asks in Ask first and Allow all, with

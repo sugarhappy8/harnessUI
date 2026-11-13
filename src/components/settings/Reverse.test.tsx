@@ -443,6 +443,35 @@ describe("downloads", () => {
     expect(within(alert).getByText(error.nextStep)).toBeTruthy();
   });
 
+  it("a server that refuses the file is named with its error number; the technical line stays in the details", async () => {
+    await show(status({}, { rea: INSTALLED }));
+    await act(async () =>
+      progress?.(
+        event({
+          component: "ghidra",
+          finished: true,
+          error: {
+            code: "server_error",
+            message: "github.com didn't send the file (error 404).",
+            nextStep: "Try again later. If it keeps failing, report it.",
+            details: "github.com answered HTTP 404",
+          },
+        }),
+      ),
+    );
+    const alert = screen.getByRole("alert");
+    expect(within(alert).getByText("github.com didn't send the file (error 404).")).toBeTruthy();
+    expect(within(alert).getByText("Try again later. If it keeps failing, report it.")).toBeTruthy();
+    expect(within(alert).queryByText(/answered HTTP/)).toBeNull();
+    // Nothing on this computer to repair: no Repair button, and the details are one click away.
+    expect(within(alert).queryByRole("button", { name: "Repair" })).toBeNull();
+    fireEvent.click(within(alert).getByRole("button", { name: "Copy details" }));
+    await act(async () => {});
+    expect(browserClipboard).toHaveBeenCalledWith(expect.stringContaining("github.com answered HTTP 404"));
+    // The row reads the disk again and is still not installed, ready to try again.
+    expect(within(rowOf("Ghidra")).getByRole("button", { name: "Download" })).toBeTruthy();
+  });
+
   it("a cancelled download shows nothing", async () => {
     await show(status());
     await act(async () =>
@@ -517,6 +546,49 @@ describe("installed rows", () => {
     fireEvent.click(within(rowOf("rea")).getByRole("button", { name: "Update" }));
     await act(async () => {});
     expect(ipcMock.reverseDownload).toHaveBeenCalledWith("rea", true);
+  });
+
+  it("an update of Node.js or Java alone names that part, never rea or Ghidra at a version they don't have", async () => {
+    await show(
+      status(
+        {},
+        {
+          rea: {
+            ...INSTALLED,
+            parts: [
+              { name: "rea", version: "6.9.0" },
+              { name: "node", version: "24.22.2" },
+            ],
+            update: { part: "node", from: "24.22.2", to: "24.22.3", downloadBytes: 38e6 },
+          },
+          ghidra: {
+            ...INSTALLED,
+            parts: [
+              { name: "ghidra", version: "12.1.4" },
+              { name: "java", version: "21.0.12+7" },
+            ],
+            update: { part: "java", from: "21.0.12+7", to: "21.0.13+9", downloadBytes: 190e6 },
+          },
+        },
+      ),
+    );
+    const rea = rowOf("rea");
+    expect(
+      within(rea).getByText(
+        "Update available: Node.js 24.22.2 → 24.22.3. 38 MB. The version you have keeps working until you update.",
+      ),
+    ).toBeTruthy();
+    expect(within(rea).queryByText(/Update available: (rea|node) /)).toBeNull();
+    const ghidra = rowOf("Ghidra");
+    expect(
+      within(ghidra).getByText(
+        "Update available: Java 21.0.12+7 → 21.0.13+9. 190 MB. The version you have keeps working until you update.",
+      ),
+    ).toBeTruthy();
+    expect(within(ghidra).queryByText(/Update available: (Ghidra|java) /)).toBeNull();
+    fireEvent.click(within(ghidra).getByRole("button", { name: "Update" }));
+    await act(async () => {});
+    expect(ipcMock.reverseDownload).toHaveBeenCalledWith("ghidra", true);
   });
 
   it("both needs-update texts, each with Update", async () => {

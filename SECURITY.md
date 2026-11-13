@@ -245,7 +245,9 @@ new chat, and helpers (subagents) never get it.
   card names the program, the folder, what the app may read or change, that the task runs
   online with your account and uses your plan or credit, and that what the program reads is
   sent to Anthropic (Claude Code) or OpenAI (Codex). When the program is set up to use the
-  model in harnessUI, the card says the task goes to your local model instead.
+  model in harnessUI, the card says the task goes to your local model instead. That needs
+  sharing switched on and working now; if it is not, the program is not asked, so it cannot
+  connect to a port that another program may have taken.
 - **Full access:** it runs without a card. The checks above still apply, and the working
   folder must be one you approved.
 - The task is handed to the program privately, never on its command line, where other
@@ -257,6 +259,10 @@ new chat, and helpers (subagents) never get it.
   the temporary folder and run commands inside that sandbox. No switch that turns off their
   permission checks can be added. On Windows, Codex's sandbox has not been tried.
 - Their answer is outside content, shortened like any other tool result.
+- Secret-looking environment variables (keys, tokens, passwords) are not passed to them,
+  with one exception: a program set up to use the model in harnessUI on the port sharing
+  uses now gets the sharing key, from where harnessUI keeps it, in the one variable its own
+  setup reads it from, and nothing else.
 - Writing to the settings of Claude Code or Codex asks in Ask first and Allow all, whichever
   tool does it (see *Always ask* above).
 
@@ -279,10 +285,11 @@ program that other users of the computer could change. Where the publisher signs
 check is the checksum GitHub publishes. Kuna's releases are not signed, so its checksum
 comes from the file as first downloaded. A release build offers a part only when every check
 its publisher offers has been recorded. Ghidra's checksum on GitHub could not be read where
-0.0.6 was built, so until it is confirmed a release build shows Ghidra as "Not available in
-this version of harnessUI." and Windows has no decompiler. A CI step compares Ghidra's
-download with the checksum GitHub publishes before it may be recorded.
-<!-- TODO(lead): confirm after WP9e -->
+0.0.6 was built, so a CI run of this project (run 43380365172) read it and saved what GitHub
+answered; it matched, and it is recorded with that run's address, so a release build offers
+Ghidra. A check is recorded only from a record that names a CI run of this project. Every
+release build reads Ghidra's checksum on GitHub again before anything is built, and stops if
+it no longer matches.
 
 **Files only.** The model gets 37 rea tools. Each reads one file or folder the model names
 (in Ask first you approve it on a card; in Allow all and Full access it opens without one,

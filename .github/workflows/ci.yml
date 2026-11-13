@@ -94,9 +94,11 @@ jobs:
   # where it was pinned, and a release build does not offer Ghidra until the digest GitHub
   # publishes for the asset is checked. This reads it with the workflow's read-only token and
   # fails if it or the size differs from the lock. GitHub's release record it read is kept as
-  # the artifact "ghidra-release-record"; the log says how to record the check in the lock
-  # from it (scripts/pin_reverse.py github-digest --from-release <file> --record). A job of
-  # its own, so an answer from GitHub's API never hides the other checks.
+  # the artifact "ghidra-release-record", with this run's address; the lock records the check
+  # from such a record (scripts/pin_reverse.py github-digest --from-release <file> --record),
+  # naming the run beside it. Run 43380365172's record is recorded; release.yml reads the
+  # digest again before every release build. A job of its own, so an answer from GitHub's
+  # API never hides the other checks.
   ghidra-digest:
     name: Ghidra's release digest on GitHub
     runs-on: ubuntu-24.04

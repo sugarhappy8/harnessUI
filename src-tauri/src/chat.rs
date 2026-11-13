@@ -396,11 +396,13 @@ pub async fn send_message(
     let n_ctx = target
         .n_ctx
         .unwrap_or(crate::settings::DEFAULT_REMOTE_CONTEXT) as usize;
-    // [0.0.5 memory] A document's share of the context counts the message's mentions too.
+    // [0.0.5 memory] A document's share of the context counts the message's mentions too,
+    // and [0.0.6] a mention's share counts its documents: 40% of the context for them all.
     let shared_by = documents.len() + mentions.len();
     // [0.0.6] A local model's server counts each share in its own tokens.
     let counter = target.local.then_some(&target.client);
-    let mention_parts = crate::mentions::attach(&app, &state, chat_id, mentions, n_ctx).await?;
+    let mention_parts =
+        crate::mentions::attach(&app, &state, chat_id, mentions, n_ctx, documents.len()).await?;
     let mut content = text_content(&text);
     if let Some(parts) = content.as_array_mut() {
         parts.extend(crate::attachments::save_images(&app, &state, chat_id, &images).await?);

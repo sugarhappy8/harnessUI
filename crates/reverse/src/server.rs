@@ -1136,7 +1136,7 @@ impl BuiltinServer for ReverseServer {
         };
         // Built for each call: the folder's resolved and 8.3 spellings exist only once
         // something is installed in it.
-        let masker = Masker::new(self.layout.root(), self.platform);
+        let masker = Masker::for_layout(&self.layout, self.platform);
         results::clean_with(output, &masker, self.platform, &notes)
     }
 }

@@ -1554,6 +1554,128 @@ mod tests {
         assert_eq!(last["error"]["code"], "mismatch");
     }
 
+    /// A host that answers every file with an error status, like the real download does
+    /// (`reverse::install`'s `from_pack_error`): the host is the file's own.
+    struct RefusingFetch(u16);
+
+    #[async_trait::async_trait]
+    impl reverse::Fetch for RefusingFetch {
+        async fn fetch(
+            &self,
+            file: &runtime::PackFile,
+            _dest: &std::path::Path,
+            _hosts: &'static [&'static str],
+            _cancel: &CancellationToken,
+            _on_bytes: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<(), ReverseError> {
+            let host = reqwest::Url::parse(&file.url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_default();
+            Err(ReverseError::ServerError {
+                host,
+                status: self.0,
+            })
+        }
+    }
+
+    /// The tab's last event names the server that refused the file and its error number in
+    /// plain words; the technical line stays behind "Copy details".
+    #[tokio::test]
+    async fn a_server_that_refuses_a_file_is_named_with_its_error_number() {
+        for (status, component, host) in [
+            (404, Component::Rea, "registry.npmjs.org"),
+            (503, Component::Ghidra, "github.com"),
+        ] {
+            let dir = scratch("refused");
+            let root = dir.0.join("reverse");
+            if component != Component::Rea {
+                put_rea(&root);
+            }
+            let server = ReverseServer::with_installer(
+                Installer::new(ReverseLayout::new(&root), Platform::LinuxX64)
+                    .with_release_rules(false)
+                    .with_free_space(Arc::new(|_| Some(u64::MAX)))
+                    .with_fetch(Arc::new(RefusingFetch(status))),
+            );
+            let token = CancellationToken::new();
+            let result = run_download(&server, component, &token, &|_| {}).await;
+            assert_eq!(
+                result,
+                Err(ReverseError::ServerError {
+                    host: host.into(),
+                    status,
+                })
+            );
+            let error = finish_error(&result).unwrap();
+            let last =
+                serde_json::to_value(ReverseProgressDto::finished(component, Some(error))).unwrap();
+            assert_eq!(last["finished"], true);
+            assert_eq!(
+                last["error"],
+                serde_json::json!({
+                    "code": "server_error",
+                    "message": format!("{host} didn't send the file (error {status})."),
+                    "nextStep": "Try again later. If it keeps failing, report it.",
+                    "details": format!("{host} answered HTTP {status}"),
+                })
+            );
+        }
+    }
+
+    /// An update of Node.js or Java alone names that part (the tab says "Update available:
+    /// Node.js 24.22.2 → 24.22.3"), never the row's main part at a version it does not have.
+    #[test]
+    fn the_tab_names_the_part_an_update_is_for() {
+        let dir = scratch("part-update");
+        put_part(&dir.0, "rea", "rea", "6.9.0");
+        put_part(&dir.0, "rea", "node", "24.22.2");
+        put_part(&dir.0, "ghidra", "ghidra", "12.1.4");
+        put_part(&dir.0, "ghidra", "java", "21.0.12+7");
+        let server = linux_server(&dir.0);
+        let v = serde_json::to_value(tab(&server)).unwrap();
+        let row = |name: &str| {
+            v["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["component"] == name)
+                .unwrap()
+                .clone()
+        };
+        let lock = server.installer().lock().clone();
+        let size = |part: &str| {
+            lock.part(part)
+                .unwrap()
+                .build_for(Platform::LinuxX64)
+                .unwrap()
+                .file
+                .size
+        };
+        let rea = row("rea");
+        assert_eq!(rea["state"]["kind"], "installed", "{rea}");
+        assert_eq!(
+            rea["update"],
+            serde_json::json!({
+                "part": "node",
+                "from": "24.22.2",
+                "to": "24.22.3",
+                "downloadBytes": size("node"),
+            })
+        );
+        let ghidra = row("ghidra");
+        assert_eq!(ghidra["state"]["kind"], "installed", "{ghidra}");
+        assert_eq!(
+            ghidra["update"],
+            serde_json::json!({
+                "part": "java",
+                "from": "21.0.12+7",
+                "to": "21.0.13+9",
+                "downloadBytes": size("java"),
+            })
+        );
+    }
+
     #[tokio::test]
     async fn a_cancelled_download_ends_without_an_error_and_stays_paused() {
         let dir = scratch("cancel");

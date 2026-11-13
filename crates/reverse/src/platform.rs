@@ -324,6 +324,31 @@ mod tests {
         );
     }
 
+    /// The committed lock carries every publisher check, Ghidra's GitHub digest included
+    /// (recorded from CI run 43380365172): a release build offers what a debug build offers,
+    /// so Windows has Ghidra.
+    #[test]
+    fn a_release_build_offers_every_row_a_debug_build_offers() {
+        let lock = embedded();
+        assert_eq!(lock.release_blockers(), Vec::<String>::new());
+        for p in Platform::SHIPPED {
+            for c in [Component::Rea, Component::Kuna, Component::Ghidra] {
+                assert_eq!(
+                    availability_with(lock, c, p, true),
+                    availability_with(lock, c, p, false),
+                    "{c:?} on {}",
+                    p.key()
+                );
+            }
+        }
+        for p in [Platform::WindowsX64, Platform::LinuxX64] {
+            assert_eq!(
+                availability_with(lock, Component::Ghidra, p, true),
+                (true, None)
+            );
+        }
+    }
+
     /// Q1 = A: the Kuna row turns on by itself when a later pinned rea offers it.
     #[test]
     fn kuna_on_windows_turns_on_when_the_lock_offers_it() {

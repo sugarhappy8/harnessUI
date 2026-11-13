@@ -526,6 +526,192 @@ fn programs_are_found_on_path_then_in_the_users_bin_and_never_run() {
     assert!(!none.usable());
 }
 
+/// A file the search takes for a program, never run: executable on Unix; on Windows any
+/// file whose extension is in `PATHEXT` (here `.exe` and `.cmd`). Run, it would leave
+/// `<name>.was-run` beside itself.
+#[cfg(unix)]
+fn program_file(dir: &Path, name: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    script(dir, name, "#!/bin/sh\ntouch \"$0.was-run\"\n")
+}
+
+#[cfg(windows)]
+fn program_file(dir: &Path, name: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, "@type nul > \"%~f0.was-run\"\r\n").unwrap();
+    path
+}
+
+/// The files in `dirs` that say a program was run ([`program_file`]).
+fn runs_left(dirs: &[&Path]) -> Vec<PathBuf> {
+    dirs.iter()
+        .flat_map(|d| std::fs::read_dir(d).unwrap())
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".was-run"))
+        .collect()
+}
+
+/// [0.0.6 release review] `locate` as it runs on Windows (`windows: true`), on every
+/// system, so the order the owner's PC gets is tested everywhere: `<name>.exe` anywhere on
+/// `PATH` comes before the shim's name earlier on `PATH` (on Windows `PATHEXT` makes that
+/// name npm's `<name>.cmd`; elsewhere the search sees the file of that name), `PATH` comes
+/// before the user's bin, and there only `<home>/.local/bin/<name>.exe` is looked for,
+/// where Claude Code's installer puts it on Windows. Nothing is run.
+#[test]
+fn locate_as_on_windows_takes_the_exe_then_the_shim_then_the_users_bin() {
+    let shim_name = |app: CodingApp| {
+        if cfg!(windows) {
+            format!("{}.cmd", app.program())
+        } else {
+            app.program().to_owned()
+        }
+    };
+    let shims = temp("win-shims");
+    let exes = temp("win-exes");
+    let empty = temp("win-empty");
+    let home = temp("win-home");
+    let bin = home.join(".local").join("bin");
+    let both = std::env::join_paths([&shims, &exes]).unwrap();
+    let reversed = std::env::join_paths([&exes, &shims]).unwrap();
+    for app in CodingApp::ALL {
+        let name = app.program();
+        let exe_name = format!("{name}.exe");
+        let shim = program_file(&shims, &shim_name(app));
+        let exe = program_file(&exes, &exe_name);
+        // The .exe wherever it is on PATH, also after the shim.
+        for path in [&both, &reversed] {
+            assert_eq!(
+                locate(app, Some(path), Some(&home), true),
+                Some(exe.clone()),
+                "{name} {path:?}"
+            );
+        }
+        // No .exe on PATH: the shim.
+        assert_eq!(
+            locate(app, Some(shims.as_os_str()), Some(&home), true),
+            Some(shim.clone()),
+            "{name}"
+        );
+        // PATH before the user's bin.
+        let in_bin = program_file(&bin, &exe_name);
+        assert_eq!(
+            locate(app, Some(shims.as_os_str()), Some(&home), true),
+            Some(shim.clone()),
+            "{name}"
+        );
+        // Not on PATH (or no PATH, or an empty one): <home>/.local/bin/<name>.exe.
+        for path in [Some(empty.as_os_str()), Some(OsStr::new("")), None] {
+            assert_eq!(
+                locate(app, path, Some(&home), true),
+                Some(in_bin.clone()),
+                "{name} {path:?}"
+            );
+        }
+        assert_eq!(locate(app, Some(empty.as_os_str()), None, true), None);
+        // Only the .exe is looked for there, not the shim or the plain name.
+        std::fs::remove_file(&in_bin).unwrap();
+        program_file(&bin, name);
+        program_file(&bin, &shim_name(app));
+        assert_eq!(
+            locate(app, Some(empty.as_os_str()), Some(&home), true),
+            None,
+            "{name}"
+        );
+        // The Unix rules, for contrast: the first on PATH, then <home>/.local/bin/<name>.
+        if cfg!(unix) {
+            assert_eq!(
+                locate(app, Some(&both), Some(&home), false),
+                Some(shim.clone())
+            );
+            assert_eq!(
+                locate(app, Some(empty.as_os_str()), Some(&home), false),
+                Some(bin.join(name))
+            );
+        }
+    }
+    // A relative PATH entry (the current folder) is never searched.
+    let rel = std::ffi::OsString::from(".");
+    assert_eq!(locate(CodingApp::ClaudeCode, Some(&rel), None, true), None);
+    assert_eq!(runs_left(&[&shims, &exes, &bin]), Vec::<PathBuf>::new());
+}
+
+/// [0.0.6 release review] Windows, with the files laid out as npm and Claude Code's
+/// installer lay them out: npm's folder holds `claude` (a shell script), `claude.cmd`,
+/// `claude.ps1` and the package under `node_modules`; the installer puts `claude.exe` in
+/// `<home>\.local\bin`. A `claude.exe` on `PATH` is used before the shim earlier on
+/// `PATH`; without one, the `.cmd` shim (never the script beside it), with the version
+/// from its package; with neither on `PATH`, `<home>\.local\bin\claude.exe`. The same for
+/// Codex. A shim inside an approved folder is refused. Nothing is run.
+#[cfg(windows)]
+#[test]
+fn on_windows_the_exe_then_the_npm_shim_then_the_users_bin_are_used() {
+    let npm = temp("win-npm");
+    let other = temp("win-other");
+    let empty = temp("win-none");
+    let home = temp("win-profile");
+    let bin = home.join(".local").join("bin");
+    for (app, version) in [
+        (CodingApp::ClaudeCode, "2.1.322"),
+        (CodingApp::Codex, "0.130.0"),
+    ] {
+        let name = app.program();
+        std::fs::write(
+            npm.join(name),
+            "#!/bin/sh\nbasedir=$(dirname \"$0\")\nexec node \"$basedir/node_modules/x/cli.js\" \"$@\"\n",
+        )
+        .unwrap();
+        let shim = program_file(&npm, &format!("{name}.cmd"));
+        std::fs::write(npm.join(format!("{name}.ps1")), "#!/usr/bin/env pwsh\r\n").unwrap();
+        let mut package = npm.join("node_modules");
+        for part in app.package().split('/') {
+            package = package.join(part);
+        }
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            format!(r#"{{"name":"{}","version":"{version}"}}"#, app.package()),
+        )
+        .unwrap();
+        let exe = program_file(&other, &format!("{name}.exe"));
+        let in_bin = program_file(&bin, &format!("{name}.exe"));
+        let text = |p: &Path| p.display().to_string();
+
+        let both = std::env::join_paths([&npm, &other]).unwrap();
+        let found = find_app(app, Some(&both), Some(&home), &[]);
+        assert_eq!(found.path, Some(text(&exe)), "{name}");
+        assert_eq!(found.program, Some(text(&exe)), "{name}");
+        assert!(found.usable(), "{name}: {found:?}");
+
+        let found = find_app(app, Some(npm.as_os_str()), Some(&home), &[]);
+        assert_eq!(found.path, Some(text(&shim)), "{name}");
+        assert_eq!(found.program, Some(text(&shim)), "{name}");
+        assert_eq!(found.version.as_deref(), Some(version), "{name}");
+        assert!(found.usable(), "{name}: {found:?}");
+
+        let found = find_app(app, Some(empty.as_os_str()), Some(&home), &[]);
+        assert_eq!(found.path, Some(text(&in_bin)), "{name}");
+        assert!(found.usable(), "{name}: {found:?}");
+
+        let found = find_app(app, Some(npm.as_os_str()), Some(&home), &[text(&npm)]);
+        assert!(
+            matches!(
+                found.problem,
+                Some(Problem::InsideApprovedFolder {
+                    holds_home: false,
+                    ..
+                })
+            ),
+            "{name}: {found:?}"
+        );
+        assert!(!found.usable());
+
+        let found = find_app(app, Some(empty.as_os_str()), None, &[]);
+        assert_eq!(found.problem, Some(Problem::NotFound), "{name}");
+    }
+    assert_eq!(runs_left(&[&npm, &other, &bin]), Vec::<PathBuf>::new());
+}
+
 #[cfg(unix)]
 #[test]
 fn a_link_is_followed_and_the_version_read_from_the_files_beside_it() {

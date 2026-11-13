@@ -11,13 +11,19 @@
 //!   must be the pack's `node` and the arguments exactly `[<rea>/scripts/rea.mjs, "mcp"]`,
 //!   both inside the reverse folder (R9). Then `reverse/tmp` is emptied, the folders the
 //!   environment names are created and rea is started through [`mcp_host::ManagedServer`].
+//!   On Linux with Ghidra, rea's temporary folder outside the reverse folder
+//!   ([`ReverseLayout::run_tmp`]) is made afresh first, open to this user only (mode 0700),
+//!   and checked to be a real folder of this user's.
 //! - **Generation:** grows at every start, so WP9g can tell that rea lost the chat's open
 //!   file (R21). A running rea whose configuration differs from the one asked for (another
 //!   decompiler) is stopped and started again, never reused.
 //! - **Stopping:** [`ReaProcess::stop`] does not wait for a call that runs: rea's standard
 //!   input is closed at once, rea gets the grace to end Kuna or Java itself, then its tree is
 //!   killed, and the call ends as [`ReverseError::Stopped`]. A start that finishes after a
-//!   stop is undone. After [`RestartReason::Quit`] nothing starts again.
+//!   stop is undone. After [`RestartReason::Quit`] nothing starts again. After a stop (and
+//!   the idle stop), the temporary folder outside the reverse folder is removed unless rea
+//!   was started again meanwhile; it is also removed when the app starts
+//!   ([`ReaProcess::new`]), in case the app ended without a stop.
 //! - **A caller that stops waiting** (the agent loop drops a cancelled tool's future 250 ms
 //!   after Stop): the call runs in a task of its own, so the managed server's cancel, its
 //!   5 s grace and the stop after it still run to their end, and that call still counts as
@@ -243,6 +249,10 @@ struct Shared {
     launch: Launch,
     /// Where Apple's tools are looked for ("/"; tests use a fake tree).
     apple_root: PathBuf,
+    /// The starts that prepared rea's temporary folder outside the reverse folder
+    /// ([`ReverseLayout::run_tmp`]); held while it is prepared or removed, so a stop removes
+    /// it only when no start has prepared it since the stop began.
+    run_tmp_starts: StdMutex<u64>,
 }
 
 impl Shared {
@@ -257,10 +267,17 @@ impl Shared {
             .clone()
     }
 
-    /// Text from rea for the tab: the reverse folder masked, invisible characters made
-    /// visible, capped.
+    fn run_tmp_starts(&self) -> u64 {
+        *self
+            .run_tmp_starts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Text from rea for the tab: the reverse folder (and rea's temporary folder outside it)
+    /// masked, invisible characters made visible, capped.
     fn clean(&self, text: &str) -> String {
-        let masked = crate::results::mask(text, self.layout.root());
+        let masked = crate::results::mask_layout(text, &self.layout);
         let visible = policy::sanitize::visible(&masked);
         let count = visible.chars().count();
         if count <= MAX_DETAILS_CHARS {
@@ -366,7 +383,9 @@ pub struct ReaGuard {
 }
 
 impl ReaProcess {
-    /// Nothing runs until the first call.
+    /// Nothing runs until the first call. The app makes its one rea process when it starts:
+    /// a temporary folder outside the reverse folder left by an app that ended without a stop
+    /// is removed here.
     pub fn new(layout: ReverseLayout, platform: Platform) -> Self {
         Self::build(layout, platform, launch_managed(), PathBuf::from("/"))
     }
@@ -377,6 +396,9 @@ impl ReaProcess {
         launch: Launch,
         apple_root: PathBuf,
     ) -> Self {
+        if let Some(run_tmp) = layout.run_tmp() {
+            remove_private_dir(run_tmp);
+        }
         Self {
             shared: Arc::new(Shared {
                 installer: StdMutex::new(Arc::new(Installer::new(layout.clone(), platform))),
@@ -389,6 +411,7 @@ impl ReaProcess {
                 log_file: StdMutex::new(None),
                 launch,
                 apple_root,
+                run_tmp_starts: StdMutex::new(0),
             }),
         }
     }
@@ -500,7 +523,8 @@ impl ReaProcess {
     }
 }
 
-async fn stop_shared(shared: &Shared, grace: Duration) {
+async fn stop_shared(shared: &Arc<Shared>, grace: Duration) {
+    let starts = shared.run_tmp_starts();
     let (running, starting) = {
         let mut s = shared.status();
         s.stops += 1;
@@ -517,6 +541,31 @@ async fn stop_shared(shared: &Shared, grace: Duration) {
     if let Some(running) = running {
         running.server.stop(grace).await;
     }
+    remove_run_tmp_after_stop(shared, starts).await;
+}
+
+/// After a stop: removes rea's temporary folder outside the reverse folder
+/// ([`ReverseLayout::run_tmp`]), unless rea runs or is starting, or a start has prepared it
+/// since `starts`. Best effort: the next start empties it, and so does the next app start.
+async fn remove_run_tmp_after_stop(shared: &Arc<Shared>, starts: u64) {
+    let Some(run_tmp) = shared.layout.run_tmp().map(Path::to_path_buf) else {
+        return;
+    };
+    let shared = shared.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let now = shared
+            .run_tmp_starts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let idle = {
+            let s = shared.status();
+            s.running.is_none() && s.starting.is_none()
+        };
+        if *now == starts && idle {
+            remove_private_dir(&run_tmp);
+        }
+    })
+    .await;
 }
 
 impl ReaGuard {
@@ -573,7 +622,24 @@ impl ReaGuard {
         }
         let folders = crate::env::folders(&config, &shared.layout);
         let tmp = shared.layout.tmp();
-        let prepared = tokio::task::spawn_blocking(move || prepare_folders(&tmp, &folders)).await;
+        // rea's temporary folder outside the reverse folder, when this configuration uses it.
+        let run_tmp = shared
+            .layout
+            .run_tmp()
+            .filter(|r| config.var("TMPDIR").map(Path::new) == Some(*r))
+            .map(Path::to_path_buf);
+        let prepared = tokio::task::spawn_blocking({
+            let shared = shared.clone();
+            move || {
+                let mut starts = shared
+                    .run_tmp_starts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                *starts += 1;
+                prepare_folders(&tmp, run_tmp.as_deref(), &folders)
+            }
+        })
+        .await;
         match prepared {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(ReverseError::from(e)),
@@ -770,9 +836,10 @@ fn check_before_start(shared: &Shared, config: &RunConfig) -> Result<(), Reverse
     Ok(())
 }
 
-/// Empties `reverse/tmp` (best effort: a file another program still holds is left) and
-/// creates the folders rea's environment names.
-fn prepare_folders(tmp: &Path, folders: &[PathBuf]) -> std::io::Result<()> {
+/// Empties `reverse/tmp` (best effort: a file another program still holds is left), makes
+/// rea's temporary folder outside the reverse folder afresh when the configuration uses one
+/// (`run_tmp`, [`prepare_private_dir`]) and creates the folders rea's environment names.
+fn prepare_folders(tmp: &Path, run_tmp: Option<&Path>, folders: &[PathBuf]) -> std::io::Result<()> {
     // Does not follow links: a link inside is removed, not its target.
     match std::fs::remove_dir_all(tmp) {
         Ok(()) => {}
@@ -780,10 +847,54 @@ fn prepare_folders(tmp: &Path, folders: &[PathBuf]) -> std::io::Result<()> {
         Err(e) => tracing::warn!(error = %e, "could not empty rea's temporary folder"),
     }
     std::fs::create_dir_all(tmp)?;
+    if let Some(run_tmp) = run_tmp {
+        prepare_private_dir(run_tmp)?;
+    }
     for folder in folders {
         std::fs::create_dir_all(folder)?;
     }
     Ok(())
+}
+
+/// Makes `dir` afresh for rea: whatever is there is removed without following links, then
+/// the folder is created (its parent must exist) open to this user only, mode 0700, and
+/// checked to be a real folder of this user's with that mode. Its parent is the system's
+/// own private runtime folder, so only this user's programs could put something else there;
+/// if one did, rea does not start.
+fn prepare_private_dir(dir: &Path) -> std::io::Result<()> {
+    remove_private_dir(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().mode(0o700).create(dir)?;
+        // Whatever the umask: exactly 0700.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::DirBuilder::new().create(dir)?;
+    }
+    if cfg!(unix) && !crate::layout::private_folder(dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "rea's temporary folder could not be made private",
+        ));
+    }
+    Ok(())
+}
+
+/// Removes `dir` and everything in it without following links: a link or a file in its
+/// place is removed itself. Best effort (a warning in the log).
+fn remove_private_dir(dir: &Path) {
+    let removed = match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(dir),
+        Ok(_) => std::fs::remove_file(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = removed {
+        tracing::warn!(error = %e, "could not remove rea's private temporary folder");
+    }
 }
 
 /// Stops rea [`IDLE_STOP`] after its last use. Never during a call: it waits for the lock,
@@ -824,9 +935,12 @@ fn spawn_idle_stop(weak: Weak<Shared>, generation: u64) -> JoinHandle<()> {
                 s.idle_task = None;
                 s.running.take()
             };
+            // No start while the lock is held.
+            let starts = shared.run_tmp_starts();
             if let Some(running) = running {
                 running.server.stop(STOP_GRACE).await;
             }
+            remove_run_tmp_after_stop(&shared, starts).await;
             return;
         }
     })
@@ -1143,6 +1257,153 @@ mod tests {
         ] {
             assert!(f.is_dir(), "{}", f.display());
         }
+    }
+
+    /// A Linux bench with rea, Ghidra and Java installed and a private runtime folder
+    /// (`<temp>/run`, mode 0700) holding rea's temporary folder outside the reverse folder,
+    /// with a file left in it by an earlier run.
+    #[cfg(unix)]
+    fn bench_ghidra_with_run_tmp() -> (Bench, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let run_tmp = run.join("app-reverse");
+        std::fs::create_dir(&run_tmp).unwrap();
+        std::fs::write(run_tmp.join("left-by-a-crash"), b"x").unwrap();
+        let layout =
+            ReverseLayout::new(dir.path().join("reverse")).with_run_tmp(Some(run_tmp.clone()));
+        write_part(layout.root(), "rea", &["scripts/rea.mjs"]);
+        write_part(layout.root(), "node", &["bin/node"]);
+        write_part(
+            layout.root(),
+            "ghidra",
+            &[
+                "support/analyzeHeadless",
+                "Ghidra/Features/Decompiler/os/linux_x86_64/decompile",
+                "Ghidra/application.properties",
+            ],
+        );
+        write_part(layout.root(), "java", &["bin/java", "bin/javac"]);
+        let launched: Arc<StdMutex<Vec<Arc<FakeRea>>>> = Arc::default();
+        let record = launched.clone();
+        let launch: Launch = Arc::new(move |spec, _lifecycle| -> Arc<dyn Rea> {
+            let rea = Arc::new(FakeRea::default());
+            *rea.spec.lock().unwrap() = Some(spec);
+            record.lock().unwrap().push(rea.clone());
+            rea
+        });
+        let process = ReaProcess::build(
+            layout.clone(),
+            Platform::LinuxX64,
+            launch,
+            PathBuf::from("/"),
+        );
+        process.set_installer(Arc::new(
+            Installer::new(layout.clone(), Platform::LinuxX64).with_release_rules(false),
+        ));
+        let bench = Bench {
+            _dir: dir,
+            layout,
+            launched,
+            process,
+        };
+        (bench, run_tmp)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn with_ghidra_the_runtime_folder_is_made_private_at_each_start_and_removed_at_each_stop()
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let (b, run_tmp) = bench_ghidra_with_run_tmp();
+        // The app's start removed what an earlier run left.
+        assert!(!run_tmp.exists(), "left from an earlier run");
+        let config = b.config(Some(Decompiler::Ghidra));
+        assert_eq!(config.var("TMPDIR"), run_tmp.to_str());
+        // Something else in its place (a link to another folder): removed, never followed.
+        let elsewhere = run_tmp.parent().unwrap().with_file_name("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep"), b"x").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &run_tmp).unwrap();
+        let mut g = b.process.lock().await;
+        g.ensure_started(config.clone()).await.unwrap();
+        let meta = std::fs::symlink_metadata(&run_tmp).unwrap();
+        assert!(meta.is_dir(), "not a real folder");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        assert_eq!(meta.uid(), unsafe { libc::geteuid() });
+        assert!(elsewhere.join("keep").exists(), "the link was followed");
+        assert_eq!(std::fs::read_dir(&run_tmp).unwrap().count(), 0);
+        drop(g);
+        // rea writes Ghidra's session there; a stop removes it.
+        std::fs::create_dir(run_tmp.join("rea-ghidra-AbC123")).unwrap();
+        std::fs::write(run_tmp.join("rea-ghidra-AbC123/copy"), b"x").unwrap();
+        b.process.stop(STOP_GRACE).await;
+        assert!(!run_tmp.exists(), "still there after the stop");
+        // So does a restart, and quitting.
+        run_call(&b.process, config.clone(), "open_binary")
+            .await
+            .unwrap();
+        assert!(run_tmp.is_dir());
+        b.process.restart(RestartReason::Updated).await;
+        assert!(!run_tmp.exists(), "still there after a restart");
+        run_call(&b.process, config.clone(), "open_binary")
+            .await
+            .unwrap();
+        b.process.restart(RestartReason::Quit).await;
+        assert!(!run_tmp.exists(), "still there after quitting");
+        // Kuna, or no decompiler, never uses it.
+        for d in [None, Some(Decompiler::Kuna)] {
+            let other = b.config(d);
+            assert_eq!(other.var("TMPDIR"), b.layout.tmp().to_str(), "{d:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_removes_the_runtime_folder_only_when_no_start_came_since() {
+        let (b, run_tmp) = bench_ghidra_with_run_tmp();
+        let config = b.config(Some(Decompiler::Ghidra));
+        let shared = b.process.shared.clone();
+        let mut g = b.process.lock().await;
+        g.ensure_started(config.clone()).await.unwrap();
+        // While rea runs: kept.
+        remove_run_tmp_after_stop(&shared, shared.run_tmp_starts()).await;
+        assert!(run_tmp.is_dir(), "removed while rea runs");
+        drop(g);
+        b.process.stop(STOP_GRACE).await;
+        assert!(!run_tmp.exists());
+        // A start prepared it after the stop began (the count moved on): kept.
+        std::fs::create_dir(&run_tmp).unwrap();
+        let before = shared.run_tmp_starts();
+        *shared.run_tmp_starts.lock().unwrap() += 1;
+        remove_run_tmp_after_stop(&shared, before).await;
+        assert!(run_tmp.is_dir(), "removed under a newer start");
+        remove_run_tmp_after_stop(&shared, shared.run_tmp_starts()).await;
+        assert!(!run_tmp.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn the_idle_stop_removes_the_runtime_folder_too() {
+        let (b, run_tmp) = bench_ghidra_with_run_tmp();
+        run_call(&b.process, b.config(Some(Decompiler::Ghidra)), "open_binary")
+            .await
+            .unwrap();
+        assert!(run_tmp.is_dir());
+        tokio::time::sleep(IDLE_STOP + Duration::from_secs(60)).await;
+        assert_eq!(b.process.state(), RunState::Stopped);
+        // The removal runs on a blocking thread; give it a moment (real time).
+        for _ in 0..400 {
+            if !run_tmp.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!run_tmp.exists(), "still there after the idle stop");
     }
 
     #[tokio::test]

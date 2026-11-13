@@ -542,7 +542,11 @@ space, file identity, short names; already in the lock). Runs `cargo deny check`
   `scripts/keys/nodejs.gpg`; fetches the Temurin build through Adoptium's API and checks its
   `.sig` with `gpgv` against `scripts/keys/adoptium.gpg`; Ghidra and Kuna assets with the
   SHA-256 digest GitHub publishes (same origin as the asset, recorded as such; Kuna is trusted
-  on first download only, recorded as `first-download-only`); stops if any check fails or a
+  on first download only, recorded as `first-download-only`; `github-digest` needs beside it
+  `github_digest_run`, the CI run of this repository that read GitHub's answer, so Ghidra
+  12.1.4, pinned `first-download-only` where GitHub's API could not be read, was recorded
+  from the release record CI run 43380365172 saved, and `release.yml` reads the digest again
+  before every release build); stops if any check fails or a
   verifier is missing; computes size, SHA-256, entries, longest path and unpacked size; writes
   the full tool name list and the input schemas of the allow-listed tools (from
   `dist/mcp-catalog.json`) to `crates/reverse/tests/fixtures/rea-<ver>-catalog.json`; prints a
