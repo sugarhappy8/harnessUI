@@ -121,8 +121,9 @@ access".
 What the 0.0.6 features reach in each mode is in their own sections below: [other apps
 using the loaded model](#other-apps-using-the-loaded-model), [Claude Code and Codex from a
 chat](#claude-code-and-codex-from-a-chat) and [reverse engineering](#reverse-engineering).
-Model settings, Fine control, the usage line and the folder chip are not tool actions: they
-work the same in every mode, and no tool or model output can change them.
+Model settings, Fine control, the usage line and the folder chip are not tool actions: no
+approval mode lets a tool change them through the app (a program the terminal runs has your
+rights, as above).
 
 ## Files
 
@@ -152,7 +153,9 @@ a security boundary, and the app says so when you turn the terminal on.
 
 The parser reads a line the way the shell runs it (0.0.6): a backslash at the end of a line
 joins it to the next, and a line with a carriage return in it counts as one the parser
-cannot fully understand, so Ask first always asks and Allow all searches all of its text.
+cannot fully understand, so Ask first always asks and Allow all searches all of its text for
+the things it always asks about (a harmless line with a carriage return runs there without a
+card).
 Before 0.0.6, `echo \` followed by a Windows line ending and `rm -rf x` read as a single
 `echo` command: a grant for `echo` covered it, and Allow all ran it without a card.
 
@@ -207,13 +210,15 @@ the port or the key, in any approval mode.
   model.
 - Requests are rebuilt, not passed through: only the fields each API defines, at most
   32 MB, a capped answer length, and pictures, audio, video and files only inline, never as
-  a link the model server would fetch. At most 64 connections at once; one that never sent
-  the key gives way first.
+  a link the model server would fetch. WebP pictures are turned into JPEG or PNG by the same
+  separate helper as in chats, at most 32 in one request. At most 64 connections at once; one
+  that never sent the key gives way first.
 - Answers have their timing and cache figures removed, because those could show how much
   of a request matches what your own chats sent. The model file's path never appears.
-- Every request that carries the key is one row in the audit log (server `other-apps`),
-  with what the app says it is and the token counts, never the request text. Requests
-  without the key are only counted on the page.
+- Every request that asks the model for an answer is one row in the audit log (server
+  `other-apps`), with what the app says it is and the token counts, never the request text.
+  Token counting writes at most one row a minute, and the list of models, which harnessUI
+  answers itself, writes none. Requests without the key are only counted on the page.
 - The approval mode does not change sharing: it is not a tool action. What the other app
   then does is up to that app and its own permission settings; harnessUI's approval cards
   do not cover its tools.
@@ -237,51 +242,57 @@ new chat, and helpers (subagents) never get it.
   put it there), and before each run the file must still be the same file.
 - **Ask first and Allow all:** every hand-off shows a card with *Allow once* and *Deny*,
   even after *Allow for this chat* and whether or not the model read outside content. The
-  card names the program, the folder, what the app may read or change, and that the task
-  runs online with your account and uses your plan or credit.
+  card names the program, the folder, what the app may read or change, that the task runs
+  online with your account and uses your plan or credit, and that what the program reads is
+  sent to Anthropic (Claude Code) or OpenAI (Codex). When the program is set up to use the
+  model in harnessUI, the card says the task goes to your local model instead.
 - **Full access:** it runs without a card. The checks above still apply, and the working
   folder must be one you approved.
-- The task goes to the program on its standard input, never on its command line, and the
-  command line is fixed. Claude Code may only read files in the chat's working folder (or
-  read and change them there, if the model asks to edit), with hooks and its own commands
-  off. Codex runs in its own sandbox, which can read files elsewhere on this computer that
-  you can read. No flag that turns off their permission checks can appear. On Windows,
-  Codex's sandbox has not been tried.
+- The task is handed to the program privately, never on its command line, where other
+  programs could see it, and the command line itself is fixed. Claude Code may only read
+  files in the chat's working folder (or read and change them there, if the model asks to
+  edit), and its own commands and the scripts it can be set up to run by itself are
+  switched off. Codex runs in its own sandbox: it can read files elsewhere on this computer
+  that you can read and, when the model asks to edit, change files in the working folder and
+  the temporary folder and run commands inside that sandbox. No switch that turns off their
+  permission checks can be added. On Windows, Codex's sandbox has not been tried.
 - Their answer is outside content, shortened like any other tool result.
 - Writing to the settings of Claude Code or Codex asks in Ask first and Allow all, whichever
   tool does it (see *Always ask* above).
 
 Once started, Claude Code and Codex keep their own limits; harnessUI only chooses the
-command line. Codex was never run while this feature was built. Stop ends the program's
-process group (or job, on Windows); a process it started in a new session can outlive it.
+command line. Codex was never run while this feature was built. Stop ends the program and
+what it started; something it started to run on its own in the background can keep running.
 
 ## Reverse engineering
 
-*Settings → Reverse engineering* (0.0.6) downloads rea, an MCP server that looks inside
+*Settings → Reverse engineering* (0.0.6) downloads rea, a free tool that looks inside
 program files, with Node.js to run it and a decompiler: Ghidra with Java on Windows, Kuna
 on a Mac. Nothing comes with the installer, and nothing is downloaded until you click
 *Download* there, after the licences are shown. After that it works without the internet.
 
-**Downloads are pinned and checked.** The address, size and SHA-256 of every archive are
-built into the app (`reverse.lock.json`), and each download is checked against them before
-anything is unpacked. Unpacking refuses paths that leave the folder, devices and, on
-Windows, links, and leaves no program writable by other users. Each pin also records its
-publisher's own check: npm's integrity, provenance and registry signatures for rea, and the
-release signatures of Node.js and Eclipse Temurin, all confirmed; for Ghidra, the digest
-GitHub publishes. Kuna's releases carry no signature, so its pin rests on the file as first
-downloaded. A release build offers a part only when its check is recorded. Ghidra's digest
-could not be read where 0.0.6 was built, so until it is confirmed a release build shows
-Ghidra as "Not available in this version of harnessUI." A CI step compares Ghidra's pinned
-file with the digest GitHub publishes, before the pin may record it.
+**Every download is checked.** Each download's address, size and checksum are built into
+the app (`reverse.lock.json`) and checked before anything is unpacked. Unpacking refuses
+files that would land outside the folder, devices and, on Windows, links, and leaves no
+program that other users of the computer could change. Where the publisher signs its files
+(rea, Node.js, Java), the signature was checked too when the app was built; for Ghidra the
+check is the checksum GitHub publishes. Kuna's releases are not signed, so its checksum
+comes from the file as first downloaded. A release build offers a part only when every check
+its publisher offers has been recorded. Ghidra's checksum on GitHub could not be read where
+0.0.6 was built, so until it is confirmed a release build shows Ghidra as "Not available in
+this version of harnessUI." and Windows has no decompiler. A CI step compares Ghidra's
+download with the checksum GitHub publishes before it may be recorded.
 <!-- TODO(lead): confirm after WP9e -->
 
-**Files only.** The model gets 37 rea tools, each of which reads a file you point at: what a
-program is made of, its text and functions, and readable code worked out by the decompiler.
-None runs the file, attaches to a running program, debugs, records the screen or the
-network, or writes outside rea's own folder. rea has about 140 more tools that do some of
-those things; only the app's list keeps them from the model, and it is checked twice before
-anything reaches rea. rea, its programs, its cache and its home folder sit inside harnessUI's
-own data folder, which no tool reaches in any mode.
+**Files only.** The model gets 37 rea tools. Each reads one file or folder the model names
+(in Ask first you approve it on a card; in Allow all and Full access it opens without one,
+see below): what a program is made of, its text and functions, and readable code worked out
+by the decompiler. None runs the file, attaches to a running program, debugs, records the
+screen or the network, or writes outside rea's own folder. rea has about 140 more tools that
+do some of those things; only the app's list keeps them from the model, and it is checked
+twice before anything reaches rea. rea, its programs, its cache and its home folder sit
+inside harnessUI's own data folder, which the file tools never reach and no rea tool may be
+pointed at, in any mode.
 
 **What it reaches in each mode:**
 
@@ -298,9 +309,9 @@ own data folder, which no tool reaches in any mode.
   entries and 32 levels) before rea sees it. Reading outside content adds no card, because
   no rea tool sends anything out.
 
-Dropping a program file on the message box only puts its path in your message: for a file
-inside the chat's folders, or anywhere but harnessUI's own folders in Full access. A path
-with hidden characters is never put in.
+Dropping a program file on the message box only writes its path into your message. This
+works for a file in the chat's folders, and in Full access for any file outside harnessUI's
+own folders. A path with hidden characters is never put in.
 
 **Each chat keeps to its own file.** The file open in rea, and the results it gave, belong
 to the chat that opened it; another chat cannot read them. Right before rea reads a file,
@@ -308,20 +319,21 @@ the app checks once more that it is the same file and still inside the chat's fo
 rea's output is outside content: it is marked as data, shortened like other tool output,
 and the paths of harnessUI's own folders in it are hidden.
 
-**rea is kept quiet.** It starts with an environment built from nothing (no proxy settings;
-its home and temporary folders inside harnessUI's data folder). It never runs its own setup,
+**rea is kept quiet.** It starts with almost none of your settings: no proxy settings, and
+its home and temporary folders inside harnessUI's data folder. It never runs its own setup,
 so it writes nothing into the settings of Claude Code, Codex or other apps. Ghidra's
 analyser that looks up debugging-symbol files is turned off. On a Mac it never starts before
 Apple's command line tools are installed, so Apple's install window cannot appear in the
-middle of a chat. CI runs rea with the real Kuna and Ghidra on Linux, Windows and macOS and
-fails if any of their processes tries to reach anything but this computer.
+middle of a chat. CI runs rea with the real decompilers (Ghidra on Windows, Kuna on macOS,
+both on Linux) and fails if any of their processes tries to reach anything but this
+computer.
 <!-- TODO(lead): confirm after WP9e -->
 
 **Limits:**
 
-- rea, Node.js, Kuna, Ghidra and Java run with your rights, like any MCP server. The app
-  decides which rea tools exist and which files they are given, not what those programs
-  could do.
+- rea, Node.js, Kuna, Ghidra and Java run with your rights, like any tool server you add.
+  The app decides which rea tools exist and which files they are given, not what those
+  programs could do.
 - A decompiler reads a hostile file in full. A file made to attack Kuna or Ghidra could take
   it over, and it would then have your rights and network access. Open programs from people
   you don't trust only on a computer you can wipe.
@@ -340,9 +352,11 @@ fails if any of their processes tries to reach anything but this computer.
   operating system's keychain, never in plain files. The database stores only references.
 - No telemetry, no crash upload, no account. With no model downloaded and nothing
   clicked, the app makes no network request. Every network use is listed in
-  ARCHITECTURE.md 13.6. 0.0.6 adds two, both only when you ask: Compare looks up the
-  models you add on Hugging Face, and Settings → Reverse engineering downloads what you
-  click.
+  ARCHITECTURE.md 13.6. 0.0.6 adds two of its own, both only when you ask: Compare looks
+  up the models you add on Hugging Face, and Settings → Reverse engineering downloads what
+  you click. A task you let the model hand to Claude Code or Codex also leaves this
+  computer: that program sends the task and the files it reads to its company (Anthropic or
+  OpenAI) with your account, unless it is set up to use the model in harnessUI.
 - The usage line under the model name (0.0.6) is read from this computer's own counters,
   only while the window is visible. Nothing is sent anywhere, and the model is never told
   the figures.
@@ -380,7 +394,9 @@ Since 0.0.6:
 - llama-server never starts another program: its video helper (ffmpeg) is pointed at a
   folder that does not exist, so a crafted picture or video cannot make it run one. WebP
   pictures, which it then cannot read, are turned into JPEG or PNG by a separate helper
-  process with a memory and time limit, so a crafted picture cannot take the app down.
+  process with a memory and time limit, so a crafted picture cannot take the app down. This
+  covers pictures you attach, pictures from tools, and pictures other apps send through
+  sharing (at most 32 in one request).
 - No llama.cpp program the app starts can launch a debugger when it crashes. On Linux a
   crash used to start one found on `PATH`, a program the app did not choose.
 - *Where the model goes* is measured with llama.cpp's own `llama-fit-params`, only for the
