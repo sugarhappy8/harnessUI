@@ -122,6 +122,9 @@ pub struct ReverseServer {
 /// What the live check of the running rea found.
 #[derive(Clone, Debug)]
 struct Live {
+    /// The rea version it checked: an update or a removal makes it stale (the next start
+    /// checks again).
+    version: Option<String>,
     /// Allow-listed tools whose schema differs in the installed rea (or that it lacks).
     changed: Vec<String>,
     /// Whether `close_binary` and `reset_investigation` are as reviewed: without them no
@@ -132,6 +135,7 @@ struct Live {
 impl Default for Live {
     fn default() -> Self {
         Self {
+            version: None,
             changed: Vec::new(),
             housekeeping_ok: true,
         }
@@ -210,6 +214,26 @@ impl ReverseServer {
         self.live.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// The last live check, while it is about the rea installed now: after an update (or a
+    /// removal) the marks of the old version no longer apply, and the next start checks
+    /// the new one.
+    fn live_now(&self) -> Live {
+        let live = self.live();
+        if live.changed.is_empty() && live.housekeeping_ok {
+            return live;
+        }
+        let installed = self
+            .installer
+            .usable(Component::Rea)
+            .ok()
+            .map(|r| r.version);
+        if installed.is_some() && installed == live.version {
+            live
+        } else {
+            Live::default()
+        }
+    }
+
     /// Re-reads the install state (after installs, removals, a switch, Apple's tools): the
     /// next start of rea gets the longer limit of a first start, and a chat's open file
     /// whose decompiler is no longer the one rea uses is closed ("closed after a change in
@@ -280,7 +304,7 @@ impl ReverseServer {
             decompiler: self.decompiler(),
             apple_tools: platform::apple_tools(self.platform),
             needs_update,
-            changed_tools: self.live().changed,
+            changed_tools: self.live_now().changed,
         }
     }
 
@@ -417,6 +441,7 @@ impl ReverseServer {
                 );
             }
             *self.live.lock().unwrap_or_else(|e| e.into_inner()) = Live {
+                version: Some(version),
                 changed: check.switched_off(),
                 housekeeping_ok: check.housekeeping_ok(),
             };
@@ -619,7 +644,15 @@ impl ReverseServer {
                     .binding_of(chat)
                     .cloned()
                     .ok_or_else(|| m::NO_FILE_OPEN.to_string())?;
-                if !self.intact(&b, &ctx.chat) {
+                if t.name == "close_binary" {
+                    // Closing reads nothing, so a changed file does not matter; a rea that
+                    // no longer holds the file (an idle stop, a crash) is neither started
+                    // nor made to open it again just to close it.
+                    if !self.holds(&b) {
+                        self.session().closed_by_model();
+                        return Ok(ToolOutput::text(closed_line(&b.view.canonical, self.path_flavor())));
+                    }
+                } else if !self.intact(&b, &ctx.chat) {
                     self.drop_binding(&mut guard, &b, &config, chat, &ctx.cancel, notes)
                         .await?;
                     return Err(refusals::OPEN_FILE_CHANGED.into());
@@ -651,10 +684,12 @@ impl ReverseServer {
                 let decompiler = payload
                     .decompiler
                     .ok_or_else(|| describe::no_decompiler_message(self.platform).to_string())?;
-                // 6. Clear rea when another chat used it.
-                let must_clear = self
-                    .session()
-                    .must_clear_before_open(chat, started.generation);
+                // 6. Clear rea when another chat used it (a rea started for this call
+                // holds nothing yet).
+                let must_clear = !started.fresh
+                    && self
+                        .session()
+                        .must_clear_before_open(chat, started.generation);
                 if must_clear {
                     self.clear(
                         &mut guard,
@@ -666,7 +701,7 @@ impl ReverseServer {
                     )
                     .await?;
                 }
-                let name = walk::file_name(&target.canonical, self.path_flavor()).to_string();
+                let name = shown_name(&target.canonical, self.path_flavor());
                 let line = format!("rea is reading {name} with {}…", decompiler.label());
                 let result = self
                     .forward(&mut guard, t, payload.args.clone(), ctx, line)
@@ -694,7 +729,7 @@ impl ReverseServer {
                     .target
                     .clone()
                     .ok_or_else(|| refusals::NOT_DESCRIBED.to_string())?;
-                let name = walk::file_name(&target.canonical, self.path_flavor()).to_string();
+                let name = shown_name(&target.canonical, self.path_flavor());
                 let result = self
                     .forward(
                         &mut guard,
@@ -720,13 +755,16 @@ impl ReverseServer {
                     .cloned()
                     .ok_or_else(|| m::NO_FILE_OPEN.to_string())?;
                 if b.view.generation != guard.generation() {
-                    match self.reopen(&mut guard, b, &config, ctx, notes).await? {
+                    match self
+                        .reopen(&mut guard, b, &config, started.fresh, ctx, notes)
+                        .await?
+                    {
                         Reopened::Bound(again) => b = again,
                         // rea's own error, cleaned by the caller, after the app's line.
                         Reopened::Failed(out) => return Ok(out),
                     }
                 }
-                let name = walk::file_name(&b.view.canonical, self.path_flavor()).to_string();
+                let name = shown_name(&b.view.canonical, self.path_flavor());
                 let line = format!("rea is reading {name} with {}…", b.view.decompiler.label());
                 let result = self
                     .forward(&mut guard, t, payload.args.clone(), ctx, line)
@@ -754,7 +792,7 @@ impl ReverseServer {
                 if !current {
                     return Err(m::UNKNOWN_ID.into());
                 }
-                let name = walk::file_name(&evidence.canonical, self.path_flavor()).to_string();
+                let name = shown_name(&evidence.canonical, self.path_flavor());
                 let line = match availability.decompiler {
                     Some(d) => format!("rea is reading {name} with {}…", d.label()),
                     None => format!("rea is checking {name}…"),
@@ -773,6 +811,16 @@ impl ReverseServer {
         }
     }
 
+    /// Whether the running rea still holds the binding's file: the same process (no start
+    /// since the open) and running now.
+    fn holds(&self, b: &Binding) -> bool {
+        self.process.generation() == b.view.generation
+            && matches!(
+                self.process.state(),
+                RunState::Ready | RunState::Busy { .. }
+            )
+    }
+
     /// Ends this chat's binding whose file left the chat's folders or changed: when rea
     /// still holds it (running, same generation), `close_binary` and
     /// `reset_investigation` first.
@@ -785,12 +833,7 @@ impl ReverseServer {
         cancel: &CancellationToken,
         notes: &mut Vec<String>,
     ) -> Result<(), Refusal> {
-        let holds = self.process.generation() == b.view.generation
-            && matches!(
-                self.process.state(),
-                RunState::Ready | RunState::Busy { .. }
-            );
-        if holds {
+        if self.holds(b) {
             // The chat itself holds the file: no other chat is told anything.
             self.clear(guard, config, chat, ClosedReason::OtherChat, cancel, notes)
                 .await
@@ -808,18 +851,19 @@ impl ReverseServer {
         guard: &mut ReaGuard,
         b: Binding,
         config: &RunConfig,
+        fresh: bool,
         ctx: &CallContext,
         notes: &mut Vec<String>,
     ) -> Result<Reopened, Refusal> {
         let chat = ctx.chat.chat_id;
-        let name = walk::file_name(&b.view.canonical, self.path_flavor()).to_string();
+        let name = shown_name(&b.view.canonical, self.path_flavor());
         if let Some(progress) = &ctx.progress {
             progress(format!(
                 "rea is opening {name} again with {}…\n",
                 b.view.decompiler.label()
             ));
         }
-        let others = {
+        let others = !fresh && {
             let session = self.session();
             session.last_open().is_some_and(|(c, _)| c != chat) || session.others_hold_ids(chat)
         };
@@ -889,6 +933,20 @@ enum Reopened {
     Bound(Binding),
     /// rea refused: its error result.
     Failed(ToolOutput),
+}
+
+/// A file's name as the app's own lines show it: hidden and control characters made
+/// visible, on one line, at most 120 characters.
+fn shown_name(canonical: &str, flavor: PathFlavor) -> String {
+    policy::sanitize::one_line(walk::file_name(canonical, flavor), 120)
+}
+
+/// What the model reads after `close_binary` when rea had already let go of the file.
+fn closed_line(canonical: &str, flavor: PathFlavor) -> String {
+    format!(
+        "{} is closed in rea for this chat.",
+        shown_name(canonical, flavor)
+    )
 }
 
 /// The top of the drive holding `path`: `/`, or `C:\`.

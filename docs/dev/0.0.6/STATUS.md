@@ -99,7 +99,9 @@ one starts from this file and `README.md`.
   tools survived; the dev server was restarted. All four runs were resumed with the same
   scripts and arguments (resumeFromRunId): finished agents came back from cache; the six that
   were mid-way (WP8, WP3a fix round 2, WP9g, WP9d, WP10a, WP10b) started again and were told
-  their earlier work is in the tree. If it happens again: commit, restart the dev server,
+  their earlier work is in the tree. Lesson: SendMessage to a workflow's agent does not reach
+  it; it starts a second copy from its transcript (six copies were started and stopped again).
+  Never message workflow agents. If it happens again: commit, restart the dev server,
   resume each run the same way (args are in the session record and this file's run table).
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,

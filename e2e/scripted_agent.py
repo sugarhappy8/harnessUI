@@ -5408,6 +5408,172 @@ PROBES.append(p_folder_chip)  # [0.0.6 item 7]
 PROBES.append(p_reverse_settings)  # [0.0.6 item 5, WP9d]
 
 
+@probe("model-list")
+def p_model_list(c, notes):
+    """Owner's request for 0.0.6 (item 8, WP8): "when i download a new model it doesnt auto
+    show up here". The chat's model menu, "On this computer": a registered model that was
+    never loaded is listed (registered the way a finished download leaves it: in the model
+    table, not in the recent list); two copies of one name each show the end of their
+    folder; a finished download (its `download-progress` event, every file done) shows up
+    in the open menu without reopening it, while progress does not; a deleted file is left
+    out; a link to a listed file is one entry and is remembered by its real path; recently
+    used first, then by name; Remove in Installed takes it off the list. Copies are hard
+    links of the test model (or its first 64 MB), with names no other scenario uses, all
+    removed again at the end."""
+    s = c.s
+    src = any_gguf()
+    if src is None:
+        notes.append("skipped: no model file to copy (TEST_GGUF)")
+        return
+    root = OUT / "model-list"
+    shutil.rmtree(root, ignore_errors=True)
+    name = "Model-List-Q8_0.gguf"
+    fresh_name = "Fresh-Download-Q4_K_M.gguf"
+    a = root / "Downloads" / "models" / name
+    b = root / "harnessUI" / "models" / name
+    fresh = root / "Downloads" / "models" / fresh_name
+    link = root / "link" / name
+
+    def place(dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(src, dest)
+            return "hard link"
+        except OSError:
+            with open(src, "rb") as f, open(dest, "wb") as g:
+                g.write(f.read(64 << 20))
+            return "first 64 MB"
+
+    notes.append("copies: " + ", ".join(sorted({place(p) for p in (a, b, fresh)})))
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(a)
+    ids = []
+
+    def recent():
+        return s.invoke("get_setting", {"key": "recentLocalModels"}) or []
+
+    def ours(p):
+        return any(os.path.realpath(p) == os.path.realpath(q) or p == str(q) for q in (a, b, fresh, link))
+
+    def forget():
+        """Takes our files off the recent list, as a download never puts them there."""
+        con = sqlite3.connect(c.db)
+        con.execute("UPDATE settings SET value = ?, updated_at = ? WHERE key = 'recentLocalModels'",
+                    (json.dumps([p for p in recent() if not ours(p)]), int(time.time() * 1000)))
+        con.commit()
+        con.close()
+
+    def register(p):
+        ids.append(s.invoke("import_model", {"path": str(p)})["id"])
+        forget()
+
+    def escape():
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.4)
+
+    def entries():
+        """The menu's local entries: their text and their tooltip (the full path)."""
+        return s.execute(
+            """
+            return [...document.querySelectorAll('[role=menu] [role=menuitem][title]')]
+              .filter(e => !e.hasAttribute('aria-label'))
+              .map(e => [e.innerText.replace(/\\s+/g, ' ').trim(), e.title]);
+            """)
+
+    def open_menu(until=lambda e: True, what="the model menu"):
+        s.click_button("Model for this chat")
+        return s.wait_for(lambda: s.execute("return !!document.querySelector('[role=menu]');") and until(entries())
+                          and entries(), 10, what)
+
+    def named(es, n):
+        return [t for t, _ in es if t.startswith(n)]
+
+    def emit(status):
+        s.invoke("plugin:event|emit", {"event": "download-progress", "payload": {
+            "id": "e2e-model-list", "repo": "e2e-uploader/Fresh-GGUF", "label": "Q4_K_M", "fileCount": 1,
+            "bytesDone": 10, "bytesTotal": 10, "status": status, "error": None, "bytesPerSecond": None,
+            "unverified": False}})
+
+    try:
+        new_chat(c)
+        s.click_button("Model for this chat")
+        s.wait_for(lambda: s.execute("return !!document.querySelector('[role=menu]');"), 10, "the model menu")
+        time.sleep(0.6)
+        assert not named(entries(), name), entries()
+        escape()
+
+        # Registered, never loaded, not on the recent list: listed, and two copies of one
+        # name each with the end of its folder.
+        register(a)
+        register(b)
+        assert not any(ours(p) for p in recent()), recent()
+        shown = open_menu(lambda e: len(named(e, name)) == 2, "both copies in the menu")
+        assert "On this computer" in s.execute("return document.querySelector('[role=menu]').innerText;")
+        assert named(shown, name) == [f"{name} · Downloads/models", f"{name} · harnessUI/models"], shown
+        assert [p for t, p in shown if t.startswith(name)] == [str(a), str(b)], shown
+        notes.append(f"two copies: {named(shown, name)}")
+
+        # A finished download shows up in the open menu; progress does not read the list.
+        register(fresh)
+        for status in ("downloading", "verifying"):
+            emit(status)
+        time.sleep(1.5)
+        assert not named(entries(), fresh_name), entries()
+        began = time.time()
+        emit("done")
+        s.wait_for(lambda: named(entries(), fresh_name), 10, "the finished download in the open menu")
+        notes.append(f"the finished download showed up in the open menu after {time.time() - began:.1f} s")
+        escape()
+
+        # A deleted file is left out; the copy left has no folder hint; by name.
+        os.remove(b)
+        shown = open_menu(lambda e: len(named(e, name)) == 1, "one copy left")
+        assert named(shown, name) == [name], shown
+        order = [t for t, _ in shown]
+        assert order.index(fresh_name) < order.index(name), order
+        escape()
+
+        # A link to a listed file: one entry, remembered by its real path, used most recently
+        # so it comes first, in the spelling Installed uses.
+        ids.append(s.invoke("import_model", {"path": str(link)})["id"])
+        r = recent()
+        assert r and r[0] == os.path.realpath(a) and str(link) not in r, r
+        shown = open_menu(lambda e: e and e[0][0] == name, "the remembered model first")
+        assert named(shown, name) == [name] and shown[0] == [name, str(a)], shown
+        notes.append(f"recent list starts with the real path; menu: {[t for t, _ in shown][:4]}")
+        escape()
+
+        # Remove in Installed takes it off the list.
+        s.execute("window.confirm = () => true;")
+        s.click_button("Models")
+        s.click_button("Installed")
+        el = s.wait_for(lambda: s.execute("return document.querySelector(arguments[0]);",
+                                          f'button[aria-label="Delete {fresh_name}"]') or False, 15, "Delete on the row")
+        s.click(next(iter(el.values())))
+        s.wait_for(lambda: not s.execute("return document.querySelector(arguments[0]);",
+                                         f'button[aria-label="Delete {fresh_name}"]'), 15, "the row removed")
+        escape()
+        s.wait_for(lambda: s.execute("return !document.querySelector('[role=dialog]');"), 10, "the dialog closed")
+        shown = open_menu(lambda e: not named(e, fresh_name), "the removed model gone")
+        assert named(shown, name) == [name], shown
+        escape()
+    finally:
+        escape()
+        for i in ids:
+            try:
+                s.invoke("delete_model", {"id": i, "deleteFiles": False})
+            except WebDriverError:
+                pass
+        try:
+            forget()
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"could not tidy the recent list: {e}")
+        shutil.rmtree(root, ignore_errors=True)
+
+
+PROBES.append(p_model_list)  # [0.0.6 item 8, WP8]
+
+
 def main() -> int:
     home = OUT / "home"
     shutil.rmtree(home, ignore_errors=True)

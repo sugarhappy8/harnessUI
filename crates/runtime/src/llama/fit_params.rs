@@ -469,6 +469,25 @@ async fn run(
     result
 }
 
+/// Whether a run that ended normally printed fit-params' plain measurement line
+/// (`Host 157 448 312 `, always the last plain line, after any device lines) without its
+/// JSON record: the measurement was done and only the record went missing. llama.cpp
+/// queues the record for its log thread and then prints the plain lines and exits, so the
+/// process can end before that thread writes it (llama.cpp leaks its logger on purpose
+/// and says logs may be lost at exit; seen in 2 runs in 160 on the build machine with four
+/// runs side by side). The figures of the plain line are never used: it leaves out
+/// repacked weights.
+fn record_was_lost(stdout: &[String]) -> bool {
+    stdout.iter().any(|line| {
+        let words: Vec<&str> = line.trim_end().split(' ').collect();
+        words.len() == 4
+            && words[0] == "Host"
+            && words[1..]
+                .iter()
+                .all(|w| !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
 /// What one run leaves for the log (section 4.3): the last [`LOG_LINES_KEPT`] records of
 /// `stdout` whose `type` is `log` and whose `level` is `warn` or `error`, their messages
 /// escaped and cut to [`MAX_LOG_MESSAGE_CHARS`] characters, and the last
@@ -1203,5 +1222,124 @@ mod tests {
         let seen = std::fs::read_to_string(dir.path().join("args.txt")).expect("args");
         let seen: Vec<&str> = seen.lines().collect();
         assert_eq!(seen, build_measure_args(&cfg));
+    }
+
+    /// The plain line fit-params prints after it queued its record, as the pinned build
+    /// writes it (with a trailing space), is the sign that only the record went missing.
+    #[test]
+    fn the_plain_host_line_means_the_record_was_lost() {
+        assert!(record_was_lost(&lines("Host 157 448 312 ")));
+        assert!(record_was_lost(&lines(
+            "{\"type\":\"log\",\"level\":\"info\",\"msg\":\"x\"}\nVulkan0 10137 1229 614 \nHost 4199 0 306 "
+        )));
+        assert!(record_was_lost(&lines("Host 0 0 0\r")));
+        for not in [
+            "",
+            "Host 1 2",
+            "Host 1 2 3 4",
+            "Host 1 2 3 x",
+            "Host 1  2 3",
+            "Host a b c",
+            "Hostile 1 2 3",
+            " Host 1 2 3",
+            "Host -1 2 3",
+            "Vulkan0 1 2 3",
+            r#"{"type":"log","msg":"Host 1 2 3"}"#,
+        ] {
+            assert!(!record_was_lost(&lines(not)), "{not:?}");
+        }
+    }
+
+    /// llama.cpp queues the record for its log thread and then prints the plain lines and
+    /// exits; under load the process can end before the record is written (2 runs in 160
+    /// on the build machine). A run that printed the plain line but no record is measured
+    /// once more within the same timeout; a second loss, a silent run and a failed run are
+    /// not retried.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lost_record_is_measured_once_more() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tag = lock::embedded().llama_cpp.tag.clone();
+        let runs = dir.path().join("runs");
+        let script = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho x >> '{}'\n{body}\n", runs.display()),
+            )
+            .expect("write");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            Backend {
+                dir: dir.path().to_path_buf(),
+                fit_params: Some(path),
+                ..backend(&tag, BackendSource::Installed, true)
+            }
+        };
+        let count_runs = || {
+            let n = std::fs::read_to_string(&runs).map_or(0, |s| s.lines().count());
+            let _ = std::fs::remove_file(&runs);
+            n
+        };
+        let good = record(r#"{"kind":"host","name":"Host","model":1,"context":2,"compute":3}"#);
+
+        // Lost on the first run, written on the second.
+        let flaky = script(
+            "flaky",
+            &format!(
+                "if [ \"$(wc -l < '{}')\" -ge 2 ]; then echo '{good}'; fi\necho 'Host 1 2 3 '",
+                runs.display()
+            ),
+        );
+        let rows = measure(&flaky, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new())
+            .await
+            .expect("the second run's record");
+        assert_eq!(rows[0].context_bytes, 2 * MIB);
+        assert_eq!(count_runs(), 2);
+
+        // Lost twice: no report, after two runs.
+        let lost = script("lost", "echo 'Host 1 2 3 '");
+        assert_eq!(
+            measure(&lost, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await,
+            Err(FitParamsError::NoReport)
+        );
+        assert_eq!(count_runs(), 2);
+
+        // No plain line, a failed exit, or a record that is there: one run each.
+        let silent = script("silent", "echo 'plain line'");
+        assert_eq!(
+            measure(&silent, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await,
+            Err(FitParamsError::NoReport)
+        );
+        assert_eq!(count_runs(), 1);
+        let failing = script("failing", "echo 'Host 1 2 3 '\nexit 1");
+        assert_eq!(
+            measure(&failing, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await,
+            Err(FitParamsError::Failed { code: Some(1) })
+        );
+        assert_eq!(count_runs(), 1);
+        let fine = script("fine", &format!("echo '{good}'\necho 'Host 1 2 3 '"));
+        measure(&fine, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new())
+            .await
+            .expect("rows");
+        assert_eq!(count_runs(), 1);
+
+        // The second run gets only what is left of the timeout.
+        let slow = script(
+            "slow",
+            &format!(
+                "if [ \"$(wc -l < '{}')\" -ge 2 ]; then sleep 30; fi\nsleep 0.4\necho 'Host 1 2 3 '",
+                runs.display()
+            ),
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(
+            measure(&slow, &config(), Duration::from_secs(2), CancellationToken::new()).await,
+            Err(FitParamsError::Timeout)
+        );
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        assert_eq!(count_runs(), 2);
     }
 }

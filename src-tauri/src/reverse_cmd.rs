@@ -1349,6 +1349,57 @@ mod tests {
         assert_eq!(server.process().state(), RunState::Stopped);
     }
 
+    /// An Update or a Repair of what rea uses stops an idle rea first (its files may be open);
+    /// a fresh download, or a row rea does not use, leaves rea alone.
+    #[tokio::test]
+    async fn only_an_update_or_repair_of_what_rea_uses_stops_rea_first() {
+        let dir = scratch("replaces");
+        let server = linux_server(&dir.0);
+        let store = store::Store::open_in_memory().unwrap();
+        for c in Component::ALL {
+            assert!(!replaces_files_rea_uses(&server, c), "{c:?} not installed");
+        }
+        put_rea(&dir.0);
+        put_kuna(&dir.0);
+        put_ghidra(&dir.0);
+        reconcile(&server, &store).await.unwrap();
+        assert_eq!(server.chosen_decompiler(), Some(Decompiler::Kuna));
+        for c in Component::ALL {
+            assert!(
+                !replaces_files_rea_uses(&server, c),
+                "{c:?} installed, current"
+            );
+        }
+        // A file of each decompiler is gone: only the one rea uses counts.
+        for (part, version, program) in
+            [("kuna", "1.990", "kuna"), ("java", "21.0.13+9", "bin/java")]
+        {
+            let marker = dir.0.join(format!("{part}-{version}/.complete"));
+            let mut m: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+            m["programs"] = serde_json::json!([{ "path": program, "size": 5 }]);
+            std::fs::write(&marker, m.to_string()).unwrap();
+        }
+        assert!(matches!(
+            server.installer().state(Component::Ghidra),
+            ComponentState::Broken { .. }
+        ));
+        assert!(replaces_files_rea_uses(&server, Component::Kuna));
+        assert!(!replaces_files_rea_uses(&server, Component::Ghidra));
+        // An outdated part of rea.
+        std::fs::remove_dir_all(dir.0.join("node-24.22.3")).unwrap();
+        put_part(&dir.0, "rea", "node", "24.0.0");
+        assert!(matches!(
+            server.installer().state(Component::Rea),
+            ComponentState::NeedsUpdate { .. }
+        ));
+        assert!(replaces_files_rea_uses(&server, Component::Rea));
+        // rea is not running: nothing to stop, and nothing waits, even while a call holds it.
+        assert!(!stop_if_idle(&server).await);
+        let _guard = server.process().lock().await;
+        assert!(!stop_if_idle(&server).await);
+    }
+
     #[tokio::test]
     async fn a_download_reports_each_part_and_ends_with_the_plain_error() {
         let dir = scratch("download");

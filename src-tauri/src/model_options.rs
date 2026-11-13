@@ -139,23 +139,35 @@ fn canonical(path: &str) -> Option<String> {
 /// table's paths) as stored; `locate` gives an existing file's canonical path and `None`
 /// for a file that is gone. Files used recently come first, then the other installed
 /// models by name (ignoring case), then by path. One file is one entry; an installed one
-/// keeps the spelling Models → Installed uses, so picking it here or there loads the same
-/// path. Same-looking names (ignoring case) carry folder hints.
+/// keeps the spelling of a row of Models → Installed, so picking it here or there loads
+/// the same path: of two rows for one file, the one spelled as its real path, else the
+/// first by path. Same-looking names (ignoring case) carry folder hints.
 pub fn local_entries(
     recent: &[String],
     installed: &[String],
     rule: PathRule,
     locate: impl Fn(&str) -> Option<String>,
 ) -> Vec<ModelOptionEntry> {
-    let mut installed: Vec<(String, String)> = installed
-        .iter()
-        .filter_map(|p| locate(p).map(|c| (rule.key(&c), p.clone())))
-        .collect();
-    installed.sort_by_cached_key(|(_, p)| (rule.file_name(p).to_lowercase(), p.clone()));
-    let mut row_path: HashMap<&str, &str> = HashMap::new();
-    for (key, path) in &installed {
-        row_path.entry(key.as_str()).or_insert(path.as_str());
+    // One row per file: (is it spelled as the real path, its path), the better one kept.
+    let mut rows: HashMap<String, (bool, String)> = HashMap::new();
+    for p in installed {
+        let Some(c) = locate(p) else { continue };
+        let row = (*p == c, p.clone());
+        let better = |old: &(bool, String)| row.0 > old.0 || (row.0 == old.0 && row.1 < old.1);
+        match rows.get(&rule.key(&c)) {
+            Some(old) if !better(old) => {}
+            _ => {
+                rows.insert(rule.key(&c), row);
+            }
+        }
     }
+    let mut installed: Vec<(String, String)> =
+        rows.into_iter().map(|(key, (_, p))| (key, p)).collect();
+    installed.sort_by_cached_key(|(_, p)| (rule.file_name(p).to_lowercase(), p.clone()));
+    let row_path: HashMap<&str, &str> = installed
+        .iter()
+        .map(|(key, path)| (key.as_str(), path.as_str()))
+        .collect();
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut paths: Vec<String> = Vec::new();
@@ -165,7 +177,11 @@ pub fn local_entries(
         if seen.contains(&key) {
             continue;
         }
-        paths.push(row_path.get(key.as_str()).map_or_else(|| path.clone(), |p| (*p).to_owned()));
+        paths.push(
+            row_path
+                .get(key.as_str())
+                .map_or_else(|| path.clone(), |p| (*p).to_owned()),
+        );
         seen.insert(key);
     }
     for (key, path) in &installed {
@@ -320,12 +336,7 @@ mod tests {
 
     #[test]
     fn a_model_installed_but_never_loaded_is_listed() {
-        let out = local_entries(
-            &[],
-            &strings(&["/m/fresh.gguf"]),
-            PathRule::Unix,
-            all_there,
-        );
+        let out = local_entries(&[], &strings(&["/m/fresh.gguf"]), PathRule::Unix, all_there);
         assert_eq!(refs(&out), ["local:/m/fresh.gguf"]);
         let e = &out[0];
         assert_eq!(
@@ -389,7 +400,8 @@ mod tests {
     #[test]
     fn two_spellings_of_one_file_give_one_entry_on_windows_and_macos() {
         let recent = strings(&[r"c:/users/me/downloads/MODELS/ornith-1.5-9b-uncensored.q8_0.GGUF"]);
-        let installed = strings(&[r"C:\Users\Me\Downloads\models\Ornith-1.5-9B-uncensored.Q8_0.gguf"]);
+        let installed =
+            strings(&[r"C:\Users\Me\Downloads\models\Ornith-1.5-9B-uncensored.Q8_0.gguf"]);
         let out = local_entries(&recent, &installed, PathRule::Windows, all_there);
         assert_eq!(
             shown(&out),
@@ -422,6 +434,46 @@ mod tests {
                 ("ornith.q8_0.gguf".to_owned(), Some("me/models".to_owned())),
             ]
         );
+    }
+
+    /// One file in two rows of Installed (a link and the file itself, or one path in two
+    /// cases on Windows): one entry, the row spelled as the file's real path, whatever the
+    /// link is called; without such a row, the first by path, the same every time.
+    #[test]
+    fn one_file_in_two_rows_is_listed_by_its_real_path() {
+        let canonical = |p: &str| Some(p.replace("/m/alias.gguf", "/m/real/z.gguf"));
+        let out = local_entries(
+            &[],
+            &strings(&["/m/alias.gguf", "/m/real/z.gguf"]),
+            PathRule::Unix,
+            canonical,
+        );
+        assert_eq!(shown(&out), [("z.gguf".to_owned(), None)]);
+        assert_eq!(refs(&out), ["local:/m/real/z.gguf"]);
+        // Used recently under the link's name: still the real path, first.
+        let out = local_entries(
+            &strings(&["/m/alias.gguf"]),
+            &strings(&["/m/other.gguf", "/m/real/z.gguf", "/m/alias.gguf"]),
+            PathRule::Unix,
+            canonical,
+        );
+        assert_eq!(refs(&out), ["local:/m/real/z.gguf", "local:/m/other.gguf"]);
+
+        let real = |_: &str| Some(r"C:\m\A.gguf".to_owned());
+        let out = local_entries(
+            &[],
+            &strings(&[r"c:\m\a.gguf", r"C:\m\A.gguf", r"C:\M\A.GGUF"]),
+            PathRule::Windows,
+            real,
+        );
+        assert_eq!(refs(&out), [r"local:C:\m\A.gguf"]);
+        for rows in [
+            [r"c:\m\a.gguf", r"C:\M\A.GGUF"],
+            [r"C:\M\A.GGUF", r"c:\m\a.gguf"],
+        ] {
+            let out = local_entries(&[], &strings(&rows), PathRule::Windows, real);
+            assert_eq!(refs(&out), [r"local:C:\M\A.GGUF"]);
+        }
     }
 
     /// Two spellings that only the file system can tell are one file (a link, `..`): the
@@ -519,8 +571,14 @@ mod tests {
     /// Case folding is one letter for one letter, so it never merges different names.
     #[test]
     fn case_folding_keeps_every_letter() {
-        assert_eq!(PathRule::Windows.key(r"c:/Straße/model.gguf"), r"C:\STRAßE\MODEL.GGUF");
-        assert_ne!(PathRule::Mac.key("/m/strasse.gguf"), PathRule::Mac.key("/m/straße.gguf"));
+        assert_eq!(
+            PathRule::Windows.key(r"c:/Straße/model.gguf"),
+            r"C:\STRAßE\MODEL.GGUF"
+        );
+        assert_ne!(
+            PathRule::Mac.key("/m/strasse.gguf"),
+            PathRule::Mac.key("/m/straße.gguf")
+        );
         assert_eq!(PathRule::Mac.key("/Ä/b"), PathRule::Mac.key("/ä/B"));
         assert_ne!(PathRule::Unix.key("/A/b"), PathRule::Unix.key("/a/b"));
         // A backslash is part of a name on Linux and macOS.
@@ -586,7 +644,8 @@ mod tests {
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("model-options-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
-        d
+        // Its real path (on macOS the temporary folder is reached through a link).
+        dunce::canonicalize(&d).unwrap()
     }
 
     async fn register(store: &store::Store, path: &std::path::Path) {
@@ -655,8 +714,15 @@ mod tests {
 
         remember(&store, &dotted.to_string_lossy()).await;
         remember(&store, &file.to_string_lossy()).await;
-        let recent: Vec<String> = store.get_setting(RECENT_LOCAL_MODELS).await.unwrap().unwrap();
-        let canonical = dunce::canonicalize(&file).unwrap().to_string_lossy().into_owned();
+        let recent: Vec<String> = store
+            .get_setting(RECENT_LOCAL_MODELS)
+            .await
+            .unwrap()
+            .unwrap();
+        let canonical = dunce::canonicalize(&file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(recent, [canonical.clone()]);
 
         #[cfg(unix)]
@@ -665,20 +731,19 @@ mod tests {
             std::os::unix::fs::symlink(&file, &link).unwrap();
             register(&store, &link).await;
             remember(&store, &link.to_string_lossy()).await;
-            let recent: Vec<String> =
-                store.get_setting(RECENT_LOCAL_MODELS).await.unwrap().unwrap();
+            let recent: Vec<String> = store
+                .get_setting(RECENT_LOCAL_MODELS)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(recent, [canonical.clone()]);
         }
         let out = local_options(&store).await.unwrap();
         assert_eq!(out.len(), 1, "{:?}", refs(&out));
         assert_eq!(out[0].hint, None);
-        // The spelling Installed uses for that file.
-        assert!(
-            refs(&out)[0] == format!("local:{}", file.display())
-                || refs(&out)[0] == format!("local:{}", dir.join("link.gguf").display()),
-            "{:?}",
-            refs(&out)
-        );
+        // The row spelled as the file's real path, not the link's.
+        assert_eq!(refs(&out), [format!("local:{}", file.display())]);
+        assert_eq!(out[0].option.label, "m.gguf");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -697,7 +762,11 @@ mod tests {
         let out = local_options(&store).await.unwrap();
         assert_eq!(refs(&out), [format!("local:{}", file.display())]);
         remember(&store, &file.to_string_lossy()).await;
-        let recent: Vec<String> = store.get_setting(RECENT_LOCAL_MODELS).await.unwrap().unwrap();
+        let recent: Vec<String> = store
+            .get_setting(RECENT_LOCAL_MODELS)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(recent.len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
