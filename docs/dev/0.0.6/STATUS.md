@@ -121,6 +121,11 @@ one starts from this file and `README.md`.
 - 02:51 UTC check: done: WP9d, WP10a, WP10b (plus everything earlier). Fixing: WP9b (being
   checked), WP9c, WP9g, WP9h. Developing: WP10d, WP10e. Leftover fixes run wf_c6b8dca9-052:
   1 of 6 done. Still to start: WP9e (after WP9b-WP9h), then integration.
+- 03:51 UTC check: done: WP9b, WP9d, WP9g, WP9h. WP9c fixing; WP10d/WP10e in review; leftover
+  fixes 5 of 6 written, in review. An orphaned Xvfb (parent gone after a `timeout` killed its
+  xvfb-run) held /tmp/harness-e2e.lock for 38 minutes and blocked three e2e runs; stopped with
+  the owner's permission. Use `flock -o` (the lock is not inherited by the children) from now
+  on (spec Part 1 and the v3 script updated).
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

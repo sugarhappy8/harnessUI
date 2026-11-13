@@ -54,7 +54,7 @@ are summarised in Part 5.
   (`e2e/scripted_agent.py`; read `e2e/README.md` and one short scenario first). The runner
   starts its own dev server when port 1420 is free. Runs take turns through a lock:
   `cargo +1.99 build -p app` then
-  `flock /tmp/harness-e2e.lock env PROBES=<name> E2E_OUT=<your own scratch folder> timeout 1200 xvfb-run -a python3 -I e2e/scripted_agent.py`.
+  `flock -o /tmp/harness-e2e.lock env PROBES=<name> E2E_OUT=<your own scratch folder> timeout 1200 xvfb-run -a python3 -I e2e/scripted_agent.py`.
   Add `E2E_TRACE=1` to see what the app did. The pinned llama-server is in
   `.cache/llama-linux/` and a real small model in `.cache/models/` (fetched by
   `scripts/fetch_llama.py linux` and `scripts/fetch_test_model.py .cache/models`); the
