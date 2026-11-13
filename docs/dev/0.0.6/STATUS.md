@@ -95,6 +95,12 @@ one starts from this file and `README.md`.
   WP3b, WP5a, WP5b checked; WP1a final check running (then WP8 starts); WP3a second fix
   round. Item 5: WP9a done, WP9b and WP9c developed (in review next), WP9g and WP9d in
   development. Item 6: run wf_1cc5cb57-517 started (WP10a + WP10b, then WP10d + WP10e).
+- 2026-11-13 ~00:20 UTC: the container restarted and stopped four runs. Files, toolchain and
+  tools survived; the dev server was restarted. All four runs were resumed with the same
+  scripts and arguments (resumeFromRunId): finished agents came back from cache; the six that
+  were mid-way (WP8, WP3a fix round 2, WP9g, WP9d, WP10a, WP10b) started again and were told
+  their earlier work is in the tree. If it happens again: commit, restart the dev server,
+  resume each run the same way (args are in the session record and this file's run table).
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
