@@ -111,7 +111,7 @@ python3 scripts/fetch_llama.py linux
 APP_DEV_LLAMA_DIR="$PWD/.cache/llama-linux" npx tauri dev
 ```
 
-Contract tests against the real llama-server run when `LLAMA_SERVER_BIN` and `TEST_GGUF` are set (`python3 scripts/fetch_test_model.py` downloads the pinned test model). Tests against the real rea, Kuna and Ghidra run when `REVERSE_PACK_CACHE` names a folder filled by `python3 -I scripts/pin_reverse.py --download-to DIR`. <!-- TODO(lead): confirm after WP9e --> End-to-end tests that drive the real app are described in [e2e/README.md](e2e/README.md).
+Contract tests against the real llama-server run when `LLAMA_SERVER_BIN` and `TEST_GGUF` are set (`python3 scripts/fetch_test_model.py` downloads the pinned test model). Tests against the real rea, Kuna and Ghidra run when `REVERSE_PACK_CACHE` names a folder filled by `python3 -I scripts/pin_reverse.py --download-to DIR`. End-to-end tests that drive the real app are described in [e2e/README.md](e2e/README.md).
 
 ## Architecture in one paragraph
 

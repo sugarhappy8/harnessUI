@@ -30,6 +30,7 @@ const fit: FitResult = {
   suggestedCtx: null,
   partialOffload: false,
   device: "graphicsCard",
+  computerBytes: 0,
   sentence: "Fits easily.",
 };
 

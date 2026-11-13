@@ -58,6 +58,7 @@ function fit(verdict: Verdict, over: Partial<FitResult> = {}): FitResult {
     suggestedCtx: null,
     partialOffload: false,
     device: "graphicsCard",
+    computerBytes: 0,
     sentence: "Needs about 4.4 GB; your GPU has 15.2 GB free. Fits.",
     ...over,
   };
@@ -826,6 +827,29 @@ describe("Compare: columns as the backend fills them", () => {
     );
     expect(answer).not.toMatch(/GPU|context|16384/);
     expect(answer!.match(/Fits/g)).toHaveLength(1);
+  });
+
+  // compare-fit-minors (1, 2): the whole need and its split, and no "would run" for a model
+  // that is too large.
+  it("gives an installed column's whole need and its split, and never says a model too large would run", async () => {
+    factsFor = (item, ctx) =>
+      facts(item, ctx, {
+        ctx: 16384,
+        fit:
+          "installedPath" in item && item.installedPath === "/models/a.gguf"
+            ? fit("yellow", { neededBytes: 2.7 * GIB, availableBytes: 3.7 * GIB, computerBytes: 1.9 * GIB, partialOffload: true })
+            : fit("red", { device: "processor", neededBytes: 12.5 * GIB, availableBytes: 11.2 * GIB }),
+      });
+    useCompare.setState({ entries: [{ installedPath: "/models/a.gguf" }, { installedPath: "/models/b.gguf" }] });
+    await show();
+    expect(cell("Will it fit on this computer?", 0).textContent).toBe(
+      "Fits with limits. Needs about 4.6 GB in all: 2.7 GB on the graphics card, which has 3.7 GB free, " +
+        `and 1.9 GB in the computer's memory. Part of it would run on the processor, which is slower.${fitSource(16384)}`,
+    );
+    expect(cell("Will it fit on this computer?", 1).textContent).toBe(
+      "Too large. Needs about 12.5 GB; this computer has 11.2 GB free. " +
+        `There is not enough memory free to run it on the processor.${fitSource(16384)}`,
+    );
   });
 
   it("names the catalog's publisher model as what a matched file is made from, over the uploader's claim", async () => {

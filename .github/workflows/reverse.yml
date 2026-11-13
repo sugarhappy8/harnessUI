@@ -258,8 +258,9 @@ jobs:
           python3 -I "$RUNNER_TEMP/check_strace.py" "$RUNNER_TEMP/strace.log" "$REAL_REA_DIR" "$PWD" "$REAL_REA_BIN"
       # The same tests with no network at all: everything works offline once downloaded. Here
       # also the pack under a folder whose name starts with a dot (the app's folder on Linux,
-      # ~/.local/share), where rea moves Ghidra's session to /tmp (the test prints it and
-      # checks it is gone after the stop), and a larger program for Ghidra's memory figure.
+      # ~/.local/share), with the private folder under XDG_RUNTIME_DIR the app then gives rea
+      # for Ghidra (nothing of rea's may appear in /tmp, and the folder must be gone after the
+      # stop), and a larger program for Ghidra's memory figure.
       - name: Kuna and Ghidra with no network (a network namespace of their own)
         run: |
           sudo unshare --net -- sudo -E -u "$(id -un)" env REVERSE_PACK_CACHE="$PWD/.cache/reverse" \

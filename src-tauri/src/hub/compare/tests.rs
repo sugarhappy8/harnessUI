@@ -1275,8 +1275,8 @@ fn installed_answers_follow_the_one_verdict() {
 
 /// The catalog list asks nothing of the network: a fit where the header is known
 /// (installed, or read earlier this session), none otherwise.
-#[test]
-fn catalog_list_fetches_nothing() {
+#[tokio::test]
+async fn catalog_list_fetches_nothing() {
     let dir = scratch("catalog-list");
     let path = gguf_file(&dir, "Sample-Plain-Q8_0.gguf", &dense_bytes());
     let rec = installed(
@@ -1302,7 +1302,7 @@ fn catalog_list_fetches_nothing() {
         "example-quants/Sample-MoE-30B-GGUF".into(),
         summary(&moe_bytes()),
     );
-    let list = catalog_list(&hub, &k, CTX);
+    let list = catalog_list(&hub, &k, CTX).await;
     assert_eq!(hub.requests(), 0);
     let ids: Vec<&str> = list.iter().map(|e| e.catalog.id.as_str()).collect();
     // The entries that fit 16 GB first (by the catalog's own estimate), then the rest.
@@ -1739,4 +1739,230 @@ fn the_session_cache_keeps_at_most_its_limit() {
     let live = LiveHub::new(None);
     assert!(live.cached_head("a/b", &"a".repeat(40), "f.gguf").is_none());
     assert_eq!(live.page_url("a/b"), "https://huggingface.co/a/b");
+}
+
+// ---- compare-fit-minors ---------------------------------------------------------------
+
+/// With part of the model in the computer's memory on a graphics card, an installed answer
+/// carries that part too (the settings panel's second bar), so the screen gives the whole
+/// need and how it is split, never only the card's share. All of it on the card leaves only
+/// its input part there; on the processor `needed_bytes` counts everything.
+#[test]
+fn an_installed_answer_says_what_goes_in_the_computers_memory() {
+    let facts = sized_facts();
+    // As much as fits on a 4 GB card (`installed_answers_follow_the_one_verdict`).
+    let plan = plan_with(
+        Some(facts.clone()),
+        card(4 * GB),
+        fixed(CTX, GpuChoice::Fit),
+    );
+    let fit = installed_fit(&plan, CTX).unwrap();
+    let info = settings_panel(&plan);
+    let graphics = info.picture.graphics.as_ref().unwrap();
+    assert!(fit.partial_offload);
+    assert_eq!(fit.needed_bytes, graphics.need.total());
+    assert_eq!(fit.computer_bytes, info.picture.computer.need.total());
+    let split = crate::offload::Placer::new(&facts, &plan.machine, false)
+        .unwrap()
+        .work(u64::from(CTX), plan.resolved.gpu, &plan.resolved.fine)
+        .split;
+    assert_eq!(
+        fit.needed_bytes + fit.computer_bytes,
+        split.gpu.total() + split.cpu.total(),
+        "the whole need"
+    );
+    assert!(fit.needed_bytes + fit.computer_bytes > fit.available_bytes);
+
+    // All of it on the card: only the input part (300 MB) stays in the computer's memory.
+    let roomy = plan_with(
+        Some(facts.clone()),
+        card(16 * GB),
+        fixed(CTX, GpuChoice::All),
+    );
+    let fit = installed_fit(&roomy, CTX).unwrap();
+    assert_eq!(fit.verdict, Verdict::Green);
+    assert_eq!(fit.computer_bytes, 300_000_000);
+    assert_eq!(
+        fit.computer_bytes,
+        settings_panel(&roomy).picture.computer.need.total()
+    );
+
+    // The processor, and a file without its sizes: everything is in `needed_bytes`.
+    let cpu = plan_with(
+        Some(facts),
+        processor(12 * GB),
+        fixed(CTX, GpuChoice::Default),
+    );
+    let fit = installed_fit(&cpu, CTX).unwrap();
+    assert_eq!(fit.computer_bytes, 0);
+    assert_eq!(
+        fit.needed_bytes,
+        settings_panel(&cpu).picture.computer.need.total()
+    );
+    let plain = plan_with(
+        Some(header_facts(
+            "Sample-7B-Q4_K_M.gguf",
+            &dense_bytes(),
+            4_440_000_000,
+        )),
+        card(4 * GB),
+        fixed(CTX, GpuChoice::Fit),
+    );
+    assert_eq!(installed_fit(&plain, CTX).unwrap().computer_bytes, 0);
+}
+
+/// The repository page, and Compare's Change menu which lists the page's files, judge an
+/// installed file as its column does (the same plan, the same judge), so one column never
+/// gives two verdicts for one file. A file that is not installed keeps the page's estimate.
+#[tokio::test]
+async fn the_repository_page_judges_an_installed_file_as_its_column() {
+    let facts = sized_facts();
+    let plan = plan_with(
+        Some(facts.clone()),
+        card(7_700_000_000),
+        fixed(CTX, GpuChoice::Default),
+    );
+    let path = "/models/example-quants/Sample-7B-GGUF/Sample-7B-Q4_K_M.gguf";
+    let stored = StoredSummary {
+        repo_file: Some("Sample-7B-Q4_K_M.gguf".into()),
+        ..StoredSummary::default()
+    };
+    let rec = installed(
+        path,
+        Some("example-quants/Sample-7B-GGUF"),
+        facts.weights_bytes,
+        Some(SHA_7B),
+        stored,
+    );
+    let mut k = known(vec![rec], Vec::new());
+    k.plans.insert(path.into(), plan.clone());
+    let hub = FakeHub::default()
+        .with_listing(FULL)
+        .with_head("example-quants/Sample-7B-GGUF", summary(&dense_bytes()));
+    let row = facts_for(
+        &hub,
+        &k,
+        repo_item("example-quants/Sample-7B-GGUF", "Sample-7B-Q4_K_M.gguf"),
+        CTX,
+    )
+    .await;
+    assert_eq!(row.installed_path.as_deref(), Some(path));
+    let row_fit = row.fit.expect("a fit");
+    assert_eq!(row_fit.verdict, Verdict::Green);
+
+    // The page's files, each with the estimate `hub_repo` makes for it.
+    let d = detail(FULL);
+    let target = Target::Gpu {
+        name: "Test graphics card".into(),
+        free_bytes: 7_700_000_000,
+        ram_free_bytes: 32 * GB,
+    };
+    let mut page = Vec::new();
+    for v in &models::classify(&d.files).variants {
+        let estimate = Some(fit_for(
+            &summary(&dense_bytes()),
+            v.total_size,
+            0,
+            CTX,
+            &target,
+        ));
+        let fit = variant_fit(&k.installed, &k.plans, &d.id, v, CTX, estimate.clone()).await;
+        page.push((v.first_file().path.clone(), estimate, fit));
+    }
+    let file = |name: &str| page.iter().find(|(p, ..)| p == name).unwrap().clone();
+    let (_, estimate, q4) = file("Sample-7B-Q4_K_M.gguf");
+    assert_eq!(
+        estimate.unwrap().verdict,
+        Verdict::Yellow,
+        "the estimate alone says otherwise"
+    );
+    assert_eq!(q4, Some(row_fit));
+    let (_, estimate, q8) = file("Sample-7B-Q8_0.gguf");
+    assert_eq!(q8, estimate);
+}
+
+/// Plans as the test made them, with every file they were asked for.
+struct CountingPlans {
+    plans: HashMap<String, Plan>,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl Plans for CountingPlans {
+    async fn plan(&self, path: &str) -> Option<Plan> {
+        self.asked.lock().unwrap().push(path.to_string());
+        self.plans.get(path).cloned()
+    }
+}
+
+/// With 40 installed models (more than the 32 headers the app remembers for Settings for
+/// this model), a comparison and Suggested models ask for the plans of the installed files
+/// they show and no others: changing "Compare at" no longer reads every model's header.
+#[tokio::test]
+async fn forty_installed_models_plan_only_what_is_shown() {
+    let dir = scratch("forty");
+    let mut list = Vec::new();
+    let mut plans = HashMap::new();
+    for n in 0..40u32 {
+        let name = format!("Local-{n:02}-Q4_K_M.gguf");
+        let path = gguf_file(&dir, &name, &dense_bytes());
+        let sha = format!("{n:064x}");
+        list.push(installed(
+            &path,
+            None,
+            4_400_000_000,
+            Some(&sha),
+            StoredSummary::default(),
+        ));
+        let facts = header_facts(&name, &dense_bytes(), 4_400_000_000);
+        plans.insert(path, plan_for(facts, card(16 * GB)));
+    }
+    // One of them is the catalog's 7B file: the same SHA-256.
+    list[7].sha256 = Some(SHA_7B.into());
+    let paths: Vec<String> = list.iter().map(|r| r.path.clone()).collect();
+    let base = known(list, Vec::new());
+    let k = Known {
+        catalog: base.catalog,
+        installed: base.installed,
+        target: base.target,
+        usable_bytes: base.usable_bytes,
+        results: base.results,
+        plans: CountingPlans {
+            plans,
+            asked: Default::default(),
+        },
+    };
+    let hub = FakeHub::default();
+    let items = [
+        CompareItem::Installed {
+            installed_path: paths[3].clone(),
+        },
+        CompareItem::Installed {
+            installed_path: paths[30].clone(),
+        },
+        catalog_item("sample-7b-q4km"),
+    ];
+    for item in items {
+        let f = facts_for(&hub, &k, item, CTX).await;
+        assert!(f.fit.is_some(), "{:?}", f.item);
+    }
+    assert_eq!(
+        *k.plans.asked.lock().unwrap(),
+        [paths[3].clone(), paths[30].clone(), paths[7].clone()]
+    );
+
+    k.plans.asked.lock().unwrap().clear();
+    let suggested = catalog_list(&hub, &k, CTX).await;
+    assert_eq!(*k.plans.asked.lock().unwrap(), [paths[7].clone()]);
+    let seven = suggested
+        .iter()
+        .find(|e| e.catalog.id == "sample-7b-q4km")
+        .unwrap();
+    assert_eq!(seven.installed_path.as_deref(), Some(paths[7].as_str()));
+    assert_eq!(
+        seven.fit,
+        installed_fit(&k.plans.plans[&paths[7]], CTX),
+        "as Installed judges it"
+    );
+    assert_eq!(hub.requests(), 1, "only the installed 7B's own listing");
+    std::fs::remove_dir_all(dir).ok();
 }

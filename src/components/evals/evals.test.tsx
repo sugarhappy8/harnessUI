@@ -311,3 +311,60 @@ describe("failed commands", () => {
     expect(totals[compareHeaders.indexOf("Failed commands, second")]).toBe("2");
   });
 });
+
+// A GGUF named with a right-to-left override reads reversed unless the name is escaped, as
+// the header's model menu does it.
+describe("model names with hidden and right-to-left characters", () => {
+  const ODD = "X-\u202Efuug.Q4_K_M.gguf\u200B";
+  const SHOWN = "X-\\u{202E}fuug.Q4_K_M.gguf\\u{200B}";
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listModelOptions.mockResolvedValue([]);
+    useApp.setState({ runtime: { modelPath: `/models/${ODD}`, modelName: ODD } as never });
+  });
+  afterEach(() => {
+    cleanup();
+    useApp.setState({ runtime: null });
+  });
+
+  it("shows them as codes in the model list, the confirmation and the saved check", async () => {
+    ipcMock.getModelProfile.mockResolvedValue({
+      available: true,
+      reason: null,
+      label: `${ODD} (cpu)`,
+      key: "modelProfile:0123456789abcdef",
+      profile: profile({ label: `${ODD} (cpu)` }),
+    });
+    await act(async () => {
+      render(<ModelCheck />);
+    });
+    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    expect(select.options[0]!.textContent).toBe(`${SHOWN} (loaded)`);
+    expect(screen.getByText(`${SHOWN} (cpu)`).tagName).toBe("BDI");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check this model" }));
+    });
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog.textContent).toContain(`Model: ${SHOWN}`);
+    const name = dialog.querySelector('bdi[dir="ltr"]');
+    expect(name?.textContent).toBe(SHOWN);
+    // Only the option's value (the model's reference, never shown) keeps the name as it is.
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
+  });
+
+  it("shows them as codes in the list of saved benchmark runs", async () => {
+    const saved = run("20261112-100000-aaaa", ["passed"]);
+    ipcMock.listBenchRuns.mockResolvedValue([
+      { id: saved.id, startedAt: saved.startedAt, model: `${ODD} (cpu)`, cancelled: false, totals: saved.totals },
+    ] as never);
+    await act(async () => {
+      render(<Benchmarks />);
+    });
+    const runs = screen.getByLabelText("Run") as HTMLSelectElement;
+    expect([...runs.options].map((o) => o.textContent).join("\n")).toContain(`${SHOWN} (cpu)`);
+    const model = document.getElementById("bench-model") as HTMLSelectElement;
+    expect(model.options[0]!.textContent).toBe(`${SHOWN} (loaded)`);
+    // Only the option's value (the model's reference, never shown) keeps the name as it is.
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
+  });
+});

@@ -332,4 +332,15 @@ describe("Models → Installed", () => {
     expect(new XMLSerializer().serializeToString(document.body)).not.toContain("\u202E");
     confirm.mockRestore();
   });
+
+  it("shows the models folder with hidden and right-to-left characters as codes", async () => {
+    ipcMock.diskUsage.mockResolvedValueOnce({ modelsDir: "/home/u/X-\u202Esledom", totalBytes: 2_000_000_000 });
+    await show();
+    const folder = screen.getByText("/home/u/X-\\u{202E}sledom");
+    expect(folder.tagName).toBe("BDI");
+    expect(folder.getAttribute("dir")).toBe("ltr");
+    expect(folder.parentElement?.textContent).toBe("2.0 GB in /home/u/X-\\u{202E}sledom");
+    expect(folder.parentElement?.getAttribute("title")).toBe("/home/u/X-\\u{202E}sledom");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("\u202E");
+  });
 });

@@ -118,6 +118,12 @@ reverse/
   .tmp-<dir>/         unpacking; renamed to <dir> only when complete
 ```
 
+On Linux with Ghidra, `TMPDIR` is `<XDG_RUNTIME_DIR>/<app id>-reverse` instead of `tmp/`
+(WP9b `env.rs`, R8): the app's folder is under `~/.local/share`, and rea's
+`GhidraSessionRoot.js` moves Ghidra's session (project, logs, a copy of the opened file, the
+bridge socket) to `/tmp` when its temporary folder has a folder whose name starts with a dot,
+because Ghidra refuses such project paths.
+
 **How it runs:** the app has its own built-in tool server `reverse`. It always lists the same
 allow-listed rea tools (37), with the app's own short descriptions and narrowed schemas; the
 Tools panel marks the ones that cannot run yet and says why. When one is first called, the app
@@ -176,7 +182,12 @@ minutes without use; the chat's open file is opened again by itself when the cha
   every rea tool's path check keep rea, its programs, its cache and its home out of reach in
   every mode. A program that the terminal runs is not limited by this (ARCHITECTURE 13.3, Full
   access limits). rea's `HOME`, temp and caches are redirected there, so rea writes nothing
-  into the owner's own home folder or other apps' settings.
+  into the owner's own home folder or other apps' settings. The one exception is Linux with
+  Ghidra: rea's temporary folder is `<XDG_RUNTIME_DIR>/<app id>-reverse` (above), private
+  (mode 0700), added to `forbidden_folders` (`reverse::layout::run_tmp_forbidden`) and masked
+  in rea's output like `reverse/`. Without a usable `XDG_RUNTIME_DIR` it is `reverse/tmp`, and
+  rea puts Ghidra's session in a private `/tmp/rea-ghidra-…` folder it removes at the stop (a
+  documented Linux limit).
 - **R9 rea runs only as `node <rea>/scripts/rea.mjs mcp`, spawned through `crates/runtime`.**
   Fixed argument list, absolute paths, working folder `reverse/work`, the exact environment of
   WP9b. The app never runs `rea setup`, `update`, `doctor`, `mcp add` or `npx`, so rea's own
@@ -453,9 +464,10 @@ offers):
 - A link out: "That folder contains a link to a place this chat can't reach."
 - Too large: "This folder is too large for rea to check. Point at the program file or a smaller folder."
 - A device or pipe: "That folder contains a device or pipe, which rea doesn't read."
-- A folder rea can't check (one it can't list, or a name in it that is not valid text): "rea can't check everything in that folder, so it won't look inside it."
+- A folder rea can't check (one it can't list, a name in it that is not valid text, or an entry in it the system will not let the app look at): "rea can't check everything in that folder, so it won't look inside it."
 - harnessUI's own folders or a key store inside: "That folder contains harnessUI's own folders, which tools can't reach."
 - These four name nothing inside the folder: the model has not read it, and the message reaches it as an app note before anything is approved (ARCHITECTURE 13.9). The entry's path, escaped, is on the card's preview and in the audit row only. (Changed at integration after the release review: the first version named the entry.)
+- A message about the path given (a folder where a file is needed or the reverse, nothing there, a device or pipe, a file rea can't read) names the path as the model gave it, made absolute against the working folder, with "(through a link)" after it when it is a link or goes through one; it never names where the path leads (ARCHITECTURE 13.9). Where it leads is on the card's preview of a refusal ("That path leads to …") and in the audit row. (Changed in the final fix round: the first version named the resolved path.)
 - No file open: "No file is open in rea for this chat. Open one with open_binary first."
 - No longer reachable: "The file open in rea for this chat is no longer in this chat's folders. Open a file that is."
 - Closed by another chat: "rea closed this file because another chat opened one. Open it again with open_binary."
@@ -678,7 +690,12 @@ No other package edits mcp-host.
   - `PATH`: Windows `%SYSTEMROOT%\System32;%SYSTEMROOT%;%SYSTEMROOT%\System32\Wbem`; macOS
     `/usr/bin:/bin:/usr/sbin:/sbin`; Linux `/usr/local/bin:/usr/bin:/bin`;
   - `HOME`, and on Windows `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, on Linux `XDG_*`: folders
-    under `reverse/home`; `TEMP`, `TMP` or `TMPDIR`: `reverse/tmp`;
+    under `reverse/home`; `TEMP`, `TMP` or `TMPDIR`: `reverse/tmp`, except on Linux with
+    Ghidra when the layout has a runtime folder (`ReverseLayout::run_tmp`): then `TMPDIR` is
+    `<XDG_RUNTIME_DIR>/<app id>-reverse`. That folder is chosen when the app starts, only when
+    `XDG_RUNTIME_DIR` is an absolute path to a real folder (not a link) of the user's with mode
+    0700 and at least 1 GiB free, and the folder, as written and as resolved, has no folder
+    starting with a dot and is at most 76 bytes (the bridge socket's 106-byte limit);
   - `REA_MCP_TOOL_FAMILIES` (section 5), `REA_MCP_TOOL_CATALOG_PROFILE=full`,
     `REA_MCP_INPUT_SCHEMA_PROFILE=compact`, `REA_MCP_OUTPUT_SCHEMA_PROFILE=off`,
     `REA_LOG_LEVEL=error`;
@@ -694,7 +711,10 @@ No other package edits mcp-host.
 - `process.rs`, `ReaProcess`: one for the whole app; every call holds its lock (`ReaGuard`),
   so calls run one at a time and WP9g's checks run while nothing else can reach rea.
   `ensure_started` refuses on a Mac without Apple's tools (fresh check), when the marker is
-  missing, `Broken` or `NeedsUpdate`; empties `reverse/tmp`; starts; grows `generation`; returns
+  missing, `Broken` or `NeedsUpdate`; empties `reverse/tmp` (and on Linux with Ghidra makes the
+  runtime folder afresh, mode 0700, checked to be a real folder of the user's; it is removed
+  after every stop and idle stop unless rea started again, and when the app starts); starts;
+  grows `generation`; returns
   rea's tool list for the live check. Stopped after 15 minutes without a call, on `restart()`
   and at app quit; `state()` for the tab (`Failed` carries the masked, sanitised stderr tail
   for "Show details").
@@ -702,6 +722,10 @@ No other package edits mcp-host.
   groups of their own. If the app itself crashes, those can outlive it until they notice the
   closed pipe. Stop, the timeout, the idle stop and quitting all give rea time to end them
   first. On Windows the app's Job Object ends them in every case.
+- **Known limit (Linux):** rea empties every Java option variable outside Windows, so the app
+  cannot pass `-XX:-UsePerfData`; Java's 32 KB performance file in `/tmp/hsperfdata_<user>/`
+  stays after a Java ended by force until the next Java of that user starts. The runtime
+  folder is kept in memory (usually a tenth of it), so a very large program may not fit.
 
 **Tests:** in `managed_e2e.rs`, with the fake server: the child's environment holds exactly the
 given variables (a canary set in the test process does not leak), `PATH` is the fixed one, the
@@ -1037,7 +1061,10 @@ a program file only when rea is installed.
   `procedure_pseudo_code main` is not empty; with Ghidra (when installed) the same, and
   `inspect_pe_imports hello-win-x64.exe`, `inspect_managed_members hello-dotnet.dll`;
   `binary_session` names no path outside the pack and the fixtures; everything rea wrote is
-  under the pack's `home`, `tmp`, `cache` and `work`, and the runner's `~/.cache/rea`,
+  under the pack's `home`, `tmp`, `cache` and `work` (on Linux, with the pack under
+  `.local/share`, Ghidra's session is in the private runtime folder, a stand-in when the runner
+  has no `XDG_RUNTIME_DIR`, nothing of rea's appears in `/tmp`, and the folder is gone after
+  the stop), and the runner's `~/.cache/rea`,
   `~/Library/Caches/rea`, `~/.claude`, `~/.claude.json`, `~/.codex`, `~/.cursor` and `~/.gemini`
   are unchanged; records the first and second start times and Ghidra's peak memory. The test
   starts no process itself (`check-spawn.sh`); process and network checks are the workflow's.
@@ -1152,7 +1179,9 @@ workflow) and says where to put it: a folder approved for a chat.
 11. If Windows or your antivirus blocks part of rea or Ghidra, note the message shown, then try
     **Repair**.
 12. With the lead: while Ghidra works, Resource Monitor → Network → Listening Ports shows
-    `java.exe` only on 127.0.0.1 (or nothing).
+    `java.exe` only on 127.0.0.1 (or nothing). Also with the lead, with harnessUI's
+    connections and name lookups recorded from its start: a chat, then step 5. Nothing is
+    recorded beyond the exceptions in ARCHITECTURE.md 13.6.
 13. Full access: a file on the Desktop opens without a card (note whether a OneDrive Desktop
     works); a file on a USB stick (note the message); a file inside harnessUI's own data folder
     is refused.
@@ -1166,7 +1195,9 @@ workflow) and says where to put it: a folder approved for a chat.
 2. Click **Install** beside Apple's command line tools and follow Apple's window. When it
    finishes, the tab says "Installed" **without restarting harnessUI**.
 3. Ask the model to open `hello-macos-arm64` and show `main`: card, Allow once, code;
-   follow-up questions show no card. Repeat with Wi-Fi off after a restart.
+   follow-up questions show no card. Repeat with Wi-Fi off after a restart. With the lead,
+   once more with harnessUI's connections and name lookups recorded from its start: nothing
+   is recorded beyond the exceptions in ARCHITECTURE.md 13.6.
 4. Ask it to open `hello-macos-universal` (built for both chips): the reply says Kuna can't
    open this kind of file and what to do.
 5. If Q2 = A: **Download** Ghidra and Java, switch to Ghidra, open `hello-macos-universal`:

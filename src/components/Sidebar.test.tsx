@@ -72,4 +72,21 @@ describe("the sidebar's model chip, in plain words", () => {
     show(status({ state: "failed" }));
     expect(chip()).toBe("The model did not loadRuns on this computer");
   });
+
+  // A GGUF named with a right-to-left override reads reversed unless the name is escaped
+  // (the header's model menu does the same).
+  it("shows the model's name and path with hidden and right-to-left characters as codes", () => {
+    show(status({ modelName: "X-\u202Efuug.Q4_K_M.gguf\u200B", modelPath: "/models/X-\u202Efuug.Q4_K_M.gguf\u200B" }));
+    const name = screen.getByText("X-\\u{202E}fuug.Q4_K_M.gguf\\u{200B}");
+    expect(name.tagName).toBe("BDI");
+    expect(name.getAttribute("dir")).toBe("ltr");
+    expect(name.closest("button")?.title).toBe("/models/X-\\u{202E}fuug.Q4_K_M.gguf\\u{200B}");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
+    cleanup();
+    show(status({ state: "stopped", modelPath: null, modelName: null, unloadedPath: "/models/X-\u202Efuug.Q4_K_M.gguf" }));
+    const unloaded = screen.getByText("X-\\u{202E}fuug.Q4_K_M.gguf");
+    expect(unloaded.tagName).toBe("BDI");
+    expect(unloaded.getAttribute("dir")).toBe("ltr");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
+  });
 });

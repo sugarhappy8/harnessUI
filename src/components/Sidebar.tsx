@@ -6,6 +6,7 @@ import { APP_NAME } from "../lib/app";
 import { dayGroup } from "../lib/format";
 import { backendWords } from "../lib/words";
 import { BrandMark } from "./Brand";
+import { visiblePath } from "./FolderChip";
 
 /** What is loaded right now, at the bottom of the list. Opens the model manager. */
 function RuntimeChip(props: { onOpenModels: () => void }) {
@@ -14,13 +15,16 @@ function RuntimeChip(props: { onOpenModels: () => void }) {
   const loaded = state === "ready" || state === "starting";
   // Plain words (D4): "Graphics card (Vulkan)", never "vulkan · Vulkan0".
   const where = runtime?.backend ? backendWords(runtime.backend) : "";
-  const unloaded = state === "stopped" && runtime?.unloadedPath ? runtime.unloadedPath.split(/[\\/]/).pop() : null;
+  // File names and paths with their hidden and right-to-left characters as codes, like the
+  // header's model menu (a GGUF named "X-\u{202E}fuug.gguf" must not read reversed).
+  const unloaded =
+    state === "stopped" && runtime?.unloadedPath ? visiblePath(runtime.unloadedPath.split(/[\\/]/).pop() ?? "") : null;
   return (
     <button
       type="button"
       onClick={props.onOpenModels}
       title={
-        loaded ? (runtime?.modelPath ?? undefined) : "Open the model manager"
+        loaded ? (runtime?.modelPath ? visiblePath(runtime.modelPath) : undefined) : "Open the model manager"
       }
       className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-bg-muted"
     >
@@ -39,11 +43,15 @@ function RuntimeChip(props: { onOpenModels: () => void }) {
       />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-xs font-medium">
-          {loaded
-            ? (runtime?.modelName ?? "Local model")
-            : state === "failed"
-              ? "The model did not load"
-              : (unloaded ?? "No model loaded")}
+          {loaded ? (
+            <bdi dir="ltr">{visiblePath(runtime?.modelName ?? "Local model")}</bdi>
+          ) : state === "failed" ? (
+            "The model did not load"
+          ) : unloaded ? (
+            <bdi dir="ltr">{unloaded}</bdi>
+          ) : (
+            "No model loaded"
+          )}
         </span>
         <span className="block truncate text-[11px] text-fg-muted">
           {state === "ready"

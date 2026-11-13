@@ -702,6 +702,7 @@ describe("compare-fit-words: \"Will it fit on this computer?\" in plain words", 
     suggestedCtx: null,
     partialOffload: false,
     device: "graphicsCard",
+    computerBytes: 0,
     sentence: "Needs about 4.4 GB; your GPU has 15.7 GB free. Fits.",
     ...over,
   });
@@ -725,11 +726,14 @@ describe("compare-fit-words: \"Will it fit on this computer?\" in plain words", 
       `Needs about 18.3 GB; ${card} Part of it would run on the processor, which is slower.`,
     );
     expect(fitLine(fit({ verdict: "yellow", neededBytes: 14 * GIB }))).toBe(`Needs about 14 GB; ${card} It only just fits.`);
-    expect(fitLine(fit({ verdict: "red", neededBytes: 48 * GIB }))).toBe(`Needs about 48 GB; ${card}`);
+    expect(fitLine(fit({ verdict: "red", neededBytes: 48 * GIB }))).toBe(
+      `Needs about 48 GB; ${card} There is not enough memory free for it, even with part of it in the computer's memory.`,
+    );
     // On the processor some memory is kept for other programs, so "has more free than it
-    // needs" can still be too large: said, not left as a puzzle.
+    // needs" can still be too large: said, not left as a puzzle. A model too large to run
+    // is never said to run on the processor (compare-fit-minors).
     expect(fitLine(fit({ verdict: "red", device: "processor", neededBytes: 10.5 * GIB, availableBytes: 11.2 * GIB }))).toBe(
-      "Needs about 10.5 GB; this computer has 11.2 GB free. It would run on the processor. Part of that memory is kept free for other programs.",
+      "Needs about 10.5 GB; this computer has 11.2 GB free. There is not enough memory free to run it on the processor. Part of that memory is kept free for other programs.",
     );
     for (const verdict of Object.keys(VERDICTS) as Verdict[]) {
       for (const device of ["graphicsCard", "appleGraphics", "processor"] as const) {
@@ -742,6 +746,68 @@ describe("compare-fit-words: \"Will it fit on this computer?\" in plain words", 
           expect(line.endsWith(".")).toBe(true);
         }
       }
+    }
+  });
+
+  // compare-fit-minors (2): "It would run on the processor" only when it would run.
+  it("says a model runs on the processor only when it would, and what is short when it is too large", () => {
+    const cpu = { device: "processor" as const, availableBytes: 11.2 * GIB };
+    expect(fitLine(fit({ ...cpu, verdict: "red", neededBytes: 12.5 * GIB }))).toBe(
+      "Needs about 12.5 GB; this computer has 11.2 GB free. There is not enough memory free to run it on the processor.",
+    );
+    expect(fitLine(fit({ ...cpu, verdict: "red", neededBytes: 12.5 * GIB, suggestedCtx: 8192 }))).toBe(
+      "Needs about 12.5 GB; this computer has 11.2 GB free. There is not enough memory free to run it on the processor. " +
+        "It has room if it remembers up to 8,192 tokens, about 6,000 words.",
+    );
+    expect(fitLine(fit({ ...cpu, verdict: "yellow", neededBytes: 9 * GIB, suggestedCtx: 8192 }))).toBe(
+      "Needs about 9 GB; this computer has 11.2 GB free. It would run on the processor. " +
+        "It has room if it remembers up to 8,192 tokens, about 6,000 words.",
+    );
+    expect(fitLine(fit({ device: "appleGraphics", availableBytes: 10.7 * GIB, verdict: "red", neededBytes: 30 * GIB }))).toBe(
+      "Needs about 30 GB; Apple graphics can use up to 10.7 GB on this Mac. There is not enough memory free for it on this Mac.",
+    );
+    for (const device of ["graphicsCard", "appleGraphics", "processor"] as const) {
+      for (const extra of [{}, { suggestedCtx: 8192 }, { neededBytes: 9 * GIB }, { computerBytes: 3 * GIB }]) {
+        const red = fitLine(fit({ verdict: "red", device, ...extra }));
+        expect(red).not.toMatch(/would run|It only just fits|which is slower/);
+        expect(red).toMatch(/There is not enough memory free/);
+        expect(fitLine(fit({ verdict: "green", device, ...extra })).includes("It would run on the processor.")).toBe(device === "processor");
+      }
+    }
+  });
+
+  // compare-fit-minors (1): with part of the model in the computer's memory, the line
+  // gives the whole need and how it is split, never only the card's share.
+  it("gives the whole need and how it is split when part of it is in the computer's memory", () => {
+    // `installed_answers_follow_the_one_verdict`: As much as fits on a 4 GB card.
+    const partial = fit({ verdict: "yellow", neededBytes: 2.7 * GIB, availableBytes: 3.7 * GIB, computerBytes: 1.9 * GIB, partialOffload: true });
+    expect(fitLine(partial)).toBe(
+      "Needs about 4.6 GB in all: 2.7 GB on the graphics card, which has 3.7 GB free, and 1.9 GB in the computer's memory. " +
+        "Part of it would run on the processor, which is slower.",
+    );
+    // All of it on the card but its input part, which stays in the computer's memory.
+    expect(fitLine(fit({ neededBytes: 4.1 * GIB, computerBytes: 0.3 * GIB }))).toBe(
+      "Needs about 4.4 GB in all: 4.1 GB on the graphics card, which has 14.6 GB free, and 0.3 GB in the computer's memory.",
+    );
+    // A computer's part too small to show is left out; on Apple graphics and the processor
+    // the amount already counts all of it.
+    expect(fitLine(fit({ computerBytes: 0.01 * GIB }))).toBe("Needs about 4.1 GB; this computer has 14.6 GB free on the graphics card.");
+    expect(fitLine(fit({ device: "appleGraphics", availableBytes: 10.7 * GIB, computerBytes: 2 * GIB }))).toBe(
+      "Needs about 4.1 GB; Apple graphics can use up to 10.7 GB on this Mac.",
+    );
+    // Whenever part of it would run on the processor on a graphics card, the line names
+    // the computer's part, so "needs less than is free" never stands alone.
+    const splits: [number, number, number][] = [
+      [2.7, 3.7, 1.9],
+      [13.6, 14.6, 6.4],
+      [6.6, 6.5, 0.3],
+    ];
+    for (const [needed, free, computer] of splits) {
+      const line = fitLine(fit({ verdict: "yellow", neededBytes: needed * GIB, availableBytes: free * GIB, computerBytes: computer * GIB, partialOffload: true }));
+      expect(line).toContain(`${computer} GB in the computer's memory`);
+      expect(line).toContain(`Needs about ${Math.round((needed + computer) * 10) / 10} GB in all`);
+      plain(line);
+      expect(line).not.toMatch(/Fits|GPU|CPU|context|layer|your /);
     }
   });
 });

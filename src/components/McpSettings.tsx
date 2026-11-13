@@ -5,6 +5,7 @@ import * as ipc from "../lib/ipc";
 import type { McpImportPreview, McpServerDto, ToolDto } from "../lib/types";
 import { toErrorInfo } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
+import { visiblePath } from "./FolderChip";
 import type { ErrorInfo } from "../lib/types";
 
 /** What to install when a server's runtime is missing (section 15). */
@@ -110,8 +111,9 @@ function ServerRow(props: { server: McpServerDto; onChange: () => void; onError:
           <div className="font-medium">
             {s.name} {s.builtin && <span className="text-xs font-normal text-fg-muted">built in</span>}
           </div>
-          <div className="truncate font-mono text-xs text-fg-muted" title={s.summary}>
-            {s.summary}
+          {/* The program and its arguments with hidden and right-to-left characters as codes. */}
+          <div className="truncate font-mono text-xs text-fg-muted" title={visiblePath(s.summary)}>
+            <bdi dir="ltr">{visiblePath(s.summary)}</bdi>
           </div>
         </div>
         <span className={`text-xs ${st.tone}`}>{st.text}</span>
@@ -265,7 +267,9 @@ function AddServers(props: { onDone: () => void; onError: (e: ErrorInfo) => void
                     <span className="font-medium">{p.name}</span>{" "}
                     <span className="text-xs text-fg-muted">{p.kind}</span>
                     {p.exists && <span className="ml-2 text-xs text-warning">a server with this name exists</span>}
-                    <span className="block font-mono text-xs break-all text-fg-muted">{p.summary}</span>
+                    <bdi dir="ltr" className="block font-mono text-xs break-all text-fg-muted">
+                      {visiblePath(p.summary)}
+                    </bdi>
                     {p.findings.length > 0 && (
                       <span className="block text-xs text-warning">
                         Looks like credentials: {p.findings.map((f) => f.what).join("; ")}

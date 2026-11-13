@@ -64,13 +64,20 @@ def probes() -> set[str]:
 
 
 def jobs(workflow: str) -> set[str]:
-    return set(re.findall(r"^  ([a-z0-9-]+):\s*$", (WORKFLOWS / workflow).read_text(encoding="utf-8"), re.MULTILINE))
+    """The job ids of a workflow: the keys one level under `jobs:`."""
+    text = (WORKFLOWS / workflow).read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+    return set(re.findall(r"^  ([a-z0-9-]+):\s*$", text, re.MULTILINE))
 
 
 class NoMarkersLeft(unittest.TestCase):
     def test_architecture_holds_no_lead_markers(self):
         left = [f"line {n}: {line[:120]}" for n, line in enumerate(architecture(), 1) if "TODO(lead)" in line]
         self.assertEqual(left, [], "confirm each sentence against the code, then drop its marker")
+
+    def test_no_release_document_waits_for_wp9e(self):
+        for doc in ("SECURITY.md", "README.md", "CHANGELOG.md"):
+            left = [n for n, line in enumerate(read(doc).splitlines(), 1) if "confirm after WP9e" in line]
+            self.assertEqual(left, [], f"{doc}: lines still waiting for WP9e")
 
 
 class NamedFilesExist(unittest.TestCase):

@@ -306,10 +306,19 @@ pub async fn hub_repo(
     let (target, _) = detect(&state).await;
     let dir = models_dir(&app).await;
     let projector = classified.projectors.first().cloned();
+    // An installed file is judged as its Compare column judges it (compare-fit-minors).
+    let on_computer: Vec<compare::Installed> = state
+        .store
+        .list_models()
+        .await?
+        .iter()
+        .map(compare::Installed::from_record)
+        .collect();
+    let fit_ctx = u32::try_from(fit_context).unwrap_or(u32::MAX);
 
     let mut variants = Vec::new();
     for v in &classified.variants {
-        let fit = summary.as_ref().map(|s| {
+        let estimate = summary.as_ref().map(|s| {
             // Every field is set today; the update keeps this call site unchanged when
             // fields are added (0.0.6 WP1b).
             #[allow(clippy::needless_update)]
@@ -326,6 +335,15 @@ pub async fn hub_repo(
             };
             models::check(&input, &target)
         });
+        let fit = compare::variant_fit(
+            &on_computer,
+            &StatePlans(&state),
+            &detail.id,
+            v,
+            fit_ctx,
+            estimate,
+        )
+        .await;
         let installed = match models::download::destination(&dir, &detail.id, &v.first_file().path)
         {
             Ok(dest) => state
@@ -1245,10 +1263,23 @@ async fn compare_ctx(state: &AppState, ctx: Option<u32>) -> u32 {
     }
 }
 
-/// What a comparison needs from this computer: the catalog, the installed models with how
-/// a load of each would go now (the plan Installed and Settings for this model judge), the
-/// hardware and the user's results.
-async fn compare_known(app: &AppHandle, state: &AppState) -> AppResult<compare::Known> {
+/// How a load of an installed model would go now, with its own settings (the plan Installed
+/// and Settings for this model judge), made when a column, a suggestion or a repository
+/// page shows the file, never for every installed model (compare-fit-minors).
+struct StatePlans<'a>(&'a AppState);
+
+impl compare::Plans for StatePlans<'_> {
+    async fn plan(&self, path: &str) -> Option<crate::load_settings::Plan> {
+        Some(crate::load_settings::plan(self.0, path, None).await)
+    }
+}
+
+/// What a comparison needs from this computer: the catalog, the installed models (a plan
+/// for each is made only when it is shown), the hardware and the user's results.
+async fn compare_known<'a>(
+    app: &AppHandle,
+    state: &'a AppState,
+) -> AppResult<compare::Known<StatePlans<'a>>> {
     let catalog = current_catalog(app).await;
     let installed: Vec<compare::Installed> = state
         .store
@@ -1257,11 +1288,6 @@ async fn compare_known(app: &AppHandle, state: &AppState) -> AppResult<compare::
         .iter()
         .map(compare::Installed::from_record)
         .collect();
-    let mut plans = std::collections::HashMap::new();
-    for rec in &installed {
-        let plan = crate::load_settings::plan(state, &rec.path, None).await;
-        plans.insert(rec.path.clone(), plan);
-    }
     let (target, hardware) = detect(state).await;
     let profiles = crate::evals::commands::list_profiles(&state.store).await;
     let app2 = app.clone();
@@ -1287,7 +1313,7 @@ async fn compare_known(app: &AppHandle, state: &AppState) -> AppResult<compare::
         target,
         usable_bytes: hardware.usable_bytes,
         results: compare::local_results(&profiles, &bench),
-        plans,
+        plans: StatePlans(state),
     })
 }
 
@@ -1305,7 +1331,7 @@ pub async fn catalog_list(
     let ctx = compare_ctx(&state, ctx).await;
     let known = compare_known(&app, &state).await?;
     let hub = LiveHub::new(hf_client(&app).await.ok());
-    Ok(compare::catalog_list(&hub, &known, ctx))
+    Ok(compare::catalog_list(&hub, &known, ctx).await)
 }
 
 /// Facts for each model to compare, in the order given, with one fit verdict per item at

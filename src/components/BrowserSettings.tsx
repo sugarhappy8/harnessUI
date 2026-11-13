@@ -5,6 +5,7 @@ import type { AgentBrowserProgress, BrowserSettings as Settings, BrowserStatus, 
 import { formatBytes } from "../lib/format";
 import { toErrorInfo } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
+import { visiblePath } from "./FolderChip";
 
 /** "about 200 MB": the download size to the nearest 10 MB. */
 function roughSize(bytes: number): string {
@@ -108,10 +109,13 @@ export function BrowserSettings() {
         {status.found ? (
           <>
             <p>{status.kind}</p>
-            <p className="font-mono text-xs break-all text-fg-muted">{status.found}</p>
+            <p className="font-mono text-xs break-all text-fg-muted">
+              <bdi dir="ltr">{visiblePath(status.found)}</bdi>
+            </p>
           </>
         ) : (
-          <p className="text-warning">{status.unavailable}</p>
+          // The reason can name the browser chosen in Settings: its path with hidden characters as codes.
+          <p className="text-warning">{status.unavailable && visiblePath(status.unavailable)}</p>
         )}
         <div className="flex gap-2">
           <button

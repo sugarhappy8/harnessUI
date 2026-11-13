@@ -325,27 +325,48 @@ export function amountGb(bytes: number): string {
 const FIT_HAS: Record<FitDevice, (free: string) => string> = {
   graphicsCard: (free) => `this computer has ${free} free on the graphics card.`,
   appleGraphics: (free) => `Apple graphics can use up to ${free} on this Mac.`,
-  processor: (free) => `this computer has ${free} free. It would run on the processor.`,
+  processor: (free) => `this computer has ${free} free.`,
+};
+
+/** What is short for a model that is too large, by where it would run (compare-fit-minors). */
+const FIT_SHORT: Record<FitDevice, string> = {
+  graphicsCard: "There is not enough memory free for it, even with part of it in the computer's memory.",
+  appleGraphics: "There is not enough memory free for it on this Mac.",
+  processor: "There is not enough memory free to run it on the processor.",
 };
 
 /**
  * The line after the verdict word of "Will it fit on this computer?" (Compare, the repository
  * page; compare-fit-words): what the model needs and what is free where it would run, counted
- * the way Task Manager counts memory (I6-10), then what a yellow or red verdict means: a
- * shorter memory that leaves room (tokens with words), part of it on the processor, or only
- * just. It never repeats the verdict word and never shows the backend's 0.0.4 sentence.
+ * the way Task Manager counts memory (I6-10); on a graphics card with part of the model in the
+ * computer's memory, the whole need and how it is split (compare-fit-minors). Then what the
+ * verdict means: "It would run on the processor" only when it would; for a model too large,
+ * what is short; a shorter memory that leaves room (tokens with words), part of it on the
+ * processor, or only just. It never repeats the verdict word and never shows the backend's
+ * 0.0.4 sentence.
  */
 export function fitLine(fit: FitResult): string {
-  const parts = [`Needs about ${amountGb(fit.neededBytes)}; ${(FIT_HAS[fit.device] ?? FIT_HAS.processor)(amountGb(fit.availableBytes))}`];
+  const device = FIT_HAS[fit.device] ? fit.device : "processor";
+  const computer = device === "graphicsCard" && fit.computerBytes > 0 && amountNumber(fit.computerBytes) !== "0";
+  const parts = [
+    computer
+      ? `Needs about ${amountGb(fit.neededBytes + fit.computerBytes)} in all: ${amountGb(fit.neededBytes)} on the graphics card, ` +
+        `which has ${amountGb(fit.availableBytes)} free, and ${amountGb(fit.computerBytes)} in the computer's memory.`
+      : `Needs about ${amountGb(fit.neededBytes)}; ${FIT_HAS[device](amountGb(fit.availableBytes))}`,
+  ];
+  if (fit.verdict === "red") {
+    parts.push(FIT_SHORT[device]);
+    if (device === "processor" && fit.neededBytes <= fit.availableBytes) {
+      parts.push("Part of that memory is kept free for other programs.");
+    }
+  } else if (device === "processor") {
+    parts.push("It would run on the processor.");
+  }
   if (fit.verdict !== "green") {
     if (fit.suggestedCtx !== null && fit.suggestedCtx > 0) {
       parts.push(`It has room if it remembers up to ${tokensWithWords(fit.suggestedCtx)}.`);
-    } else if (fit.partialOffload) {
-      parts.push("Part of it would run on the processor, which is slower.");
     } else if (fit.verdict === "yellow") {
-      parts.push("It only just fits.");
-    } else if (fit.device === "processor" && fit.neededBytes <= fit.availableBytes) {
-      parts.push("Part of that memory is kept free for other programs.");
+      parts.push(fit.partialOffload ? "Part of it would run on the processor, which is slower." : "It only just fits.");
     }
   }
   return parts.join(" ");

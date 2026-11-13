@@ -1144,7 +1144,9 @@ mod calls {
             && std::fs::read_link(&probe).is_ok_and(|t| t.into_os_string().into_string().is_err());
         let _ = std::fs::remove_file(&probe);
         if !can_make {
-            eprintln!("skipped (not text): this system cannot make a link whose text is not valid text");
+            eprintln!(
+                "skipped (not text): this system cannot make a link whose text is not valid text"
+            );
         }
         for full in [false, true] {
             let a = if full {
@@ -1152,7 +1154,10 @@ mod calls {
             } else {
                 p.chat(1, &[&p.files])
             };
-            for (what, target) in [("network text", OsStr::new(&network)), ("not text", not_text)] {
+            for (what, target) in [
+                ("network text", OsStr::new(&network)),
+                ("not text", not_text),
+            ] {
                 if what == "not text" && !can_make {
                     continue;
                 }

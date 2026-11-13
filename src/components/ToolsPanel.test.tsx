@@ -163,6 +163,66 @@ describe("ToolsPanel: folders and loaded skills", () => {
     expect(ipcMock.removeApprovedFolder).toHaveBeenCalledWith(3);
   });
 
+  // The line under "Folders for this chat" says what the file tools can reach, which follows
+  // the chat's approval mode (the mode the header's menu and the folder chip read): these
+  // folders in Ask first and Allow all; in Full access every folder but those the path
+  // sandbox keeps from every mode, harnessUI's own and the system's saved keys
+  // (`permissions::forbidden_for_tools`, `approvals::widen`).
+  describe("its note follows the chat's approval mode", () => {
+    const NOTE =
+      "File tools work only inside these folders. The selected one is the working folder, where relative paths start.";
+    const FULL_ACCESS_NOTE =
+      "Full access is on, so file tools can reach every folder on this computer except harnessUI's own and the folders where the system keeps saved keys. The selected one is the working folder, where relative paths start. With no folder here, they start in your home folder.";
+
+    afterEach(() => {
+      cleanup();
+      useApprovalMode.setState({ modes: {}, defaultMode: "ask" });
+    });
+
+    it.each([
+      ["Ask first", "ask"],
+      ["Allow all", "allowAll"],
+    ] as const)("in %s says file tools work only inside these folders", async (_name, mode) => {
+      useApprovalMode.setState({ modes: { [CHAT]: mode }, defaultMode: "ask" });
+      await openPanel();
+      expect(screen.getAllByText(NOTE)).toHaveLength(1);
+      expect(screen.queryByText(FULL_ACCESS_NOTE)).toBeNull();
+    });
+
+    it("in Full access says file tools reach every folder but harnessUI's own and the saved keys", async () => {
+      useApprovalMode.setState({ modes: { [CHAT]: "fullAccess" }, defaultMode: "ask" });
+      await openPanel();
+      expect(screen.getAllByText(FULL_ACCESS_NOTE)).toHaveLength(1);
+      expect(screen.queryByText(NOTE)).toBeNull();
+      // The chat's folders and its working folder are still listed and chosen as before.
+      expect(radio("/home/u/all").checked).toBe(true);
+      expect(screen.getByText("/home/u/proj")).toBeTruthy();
+      cleanup();
+      // With no folder the working folder is the home folder, which the line says.
+      folders = [];
+      await openPanel();
+      expect(screen.getByText("No folders approved yet.")).toBeTruthy();
+      expect(screen.getAllByText(FULL_ACCESS_NOTE)).toHaveLength(1);
+    });
+
+    it("changes while the panel is open when the chat's mode changes, and says only these folders until the mode is read", async () => {
+      // Another chat in Full access does not widen this chat's line.
+      useApprovalMode.setState({ modes: { [CHAT + 1]: "fullAccess" }, defaultMode: "fullAccess" });
+      await openPanel();
+      expect(screen.getByText(NOTE)).toBeTruthy();
+      await act(async () => {
+        useApprovalMode.setState({ modes: { [CHAT]: "fullAccess" } });
+      });
+      expect(screen.getByText(FULL_ACCESS_NOTE)).toBeTruthy();
+      expect(screen.queryByText(NOTE)).toBeNull();
+      await act(async () => {
+        useApprovalMode.setState({ modes: { [CHAT]: "ask" } });
+      });
+      expect(screen.getByText(NOTE)).toBeTruthy();
+      expect(screen.queryByText(FULL_ACCESS_NOTE)).toBeNull();
+    });
+  });
+
   it("unloads a loaded skill from this chat", async () => {
     loaded = ["pdf-forms", "release-notes"];
     await openPanel();

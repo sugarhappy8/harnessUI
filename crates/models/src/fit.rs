@@ -120,7 +120,8 @@ pub enum Verdict {
 #[serde(rename_all = "camelCase")]
 pub struct FitResult {
     pub verdict: Verdict,
-    /// What the model needs in the memory that holds it.
+    /// What the model needs in the memory that holds it (on a graphics card, the card's
+    /// share).
     pub needed_bytes: u64,
     /// The free memory there as the system reports it: the graphics card's, the Metal
     /// working set, or the computer's (the verdict also keeps [`RAM_RESERVE_BYTES`] of the
@@ -132,6 +133,10 @@ pub struct FitResult {
     pub partial_offload: bool,
     /// Where the model would run.
     pub device: FitDevice,
+    /// On a graphics card, what the model needs besides in the computer's memory when its
+    /// placement is known (an installed file); 0 otherwise: on Apple graphics and the
+    /// processor [`Self::needed_bytes`] counts all of it, and this estimate does not split.
+    pub computer_bytes: u64,
     /// The 0.0.4 sentence (logs and scripts). The 0.0.6 screens word the figures instead
     /// (`fitLine` in src/lib/words.ts); empty when the placement judge made the result.
     pub sentence: String,
@@ -289,6 +294,7 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
         suggested_ctx,
         partial_offload,
         device: target.device(),
+        computer_bytes: 0,
         sentence,
     };
 

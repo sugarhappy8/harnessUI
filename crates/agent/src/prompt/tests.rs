@@ -1049,3 +1049,34 @@ fn a_split_block_tag_is_escaped_whatever_hidden_character_ends_its_name() {
         assert_eq!(defang(longer), longer);
     }
 }
+
+/// The default-ignorable code points assigned to nothing (U+2065, U+FFF0..FFF8, U+E0000,
+/// U+E0002..E001F, U+E0080..E00FF, U+E01F0..E0FFF) are no part of any writing, so they are
+/// shown as visible escapes wherever they are; their assigned neighbours (an invisible
+/// operator, the bidi isolates, the last variation selector) are passed on as written away
+/// from a marker or a split tag (0.0.6).
+#[test]
+fn default_ignorable_code_points_assigned_to_nothing_are_escaped_anywhere() {
+    let sanitizer = Sanitizer::generic();
+    let defang = |text: &str| defang_app_notes(text, &sanitizer);
+    let reserved = [
+        '\u{2065}',
+        '\u{FFF0}',
+        '\u{FFF8}',
+        '\u{E0000}',
+        '\u{E0002}',
+        '\u{E001F}',
+        '\u{E0080}',
+        '\u{E00FF}',
+        '\u{E01F0}',
+        '\u{E0FFF}',
+    ];
+    for c in reserved {
+        let want = format!("a\\u{{{:04X}}}b", c as u32);
+        assert_eq!(defang(&format!("a{c}b")), want, "{c:?}");
+        assert_eq!(defang(&want), want, "{c:?}");
+    }
+    for text in ["x\u{2064}y", "\u{2066}שלום\u{2069}", "葛\u{E01EF}城市"] {
+        assert_eq!(defang(text), text, "{text:?}");
+    }
+}

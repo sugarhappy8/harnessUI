@@ -629,7 +629,8 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
 /// are broken and block tags escaped ([`Sanitizer::clean`]); every "[App note]" marker gets
 /// round brackets and a block tag split by hidden characters is escaped too, with the hidden
 /// characters in them and right next to them shown as visible escapes; control and tag
-/// characters are shown as escapes wherever they are (`defang_markers`). Everything else is
+/// characters and the default-ignorable code points assigned to nothing are shown as
+/// escapes wherever they are (`defang_markers`). Everything else is
 /// passed on as written, hidden characters included, so words in any script (joiners in
 /// Persian or Indic words, emoji sequences, right-to-left marks, soft hyphens) reach the
 /// model word for word.
@@ -675,11 +676,13 @@ fn hidden_in_summary(c: char) -> bool {
 /// A character that is no part of ordinary writing, shown as a visible escape wherever it
 /// is: a control character other than a line break or a tab, a tag character (invisible
 /// ASCII, which can spell out text a person cannot see) and a default-ignorable code point
-/// that is assigned to nothing.
+/// that is assigned to nothing (Unicode 15.1: U+2065, U+FFF0..FFF8, U+E0000, U+E0002..E001F,
+/// U+E0080..E00FF and U+E01F0..E0FFF).
 fn never_in_writing(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(c as u32,
-            0xFFF0..=0xFFF8      // reserved
+            0x2065               // reserved (among the invisible operators and bidi isolates)
+            | 0xFFF0..=0xFFF8    // reserved
             | 0xE0000..=0xE00FF  // tag characters, then reserved
             | 0xE01F0..=0xE0FFF) // reserved (after the variation selectors)
 }
@@ -701,8 +704,9 @@ const FLAG_TAGS: [&str; 3] = [
 /// brackets, "(App note)", and the start of a block tag split by hidden characters
 /// ([`split_tag_len`]) gets `&lt;`, as [`Sanitizer::clean`] gives a plain one; the hidden
 /// characters ([`is_hidden`]) inside either and right next to it are shown as visible
-/// escapes. Control and tag characters ([`never_in_writing`]) are shown as escapes anywhere,
-/// except the tags of a subdivision flag. The rest is unchanged; the stored summary is
+/// escapes. Control and tag characters and the default-ignorable code points assigned to
+/// nothing ([`never_in_writing`]) are shown as escapes anywhere, except the tags of a
+/// subdivision flag. The rest is unchanged; the stored summary is
 /// never changed.
 fn defang_markers(text: &str) -> String {
     const OPEN: [char; 2] = ['[', '\u{FF3B}'];

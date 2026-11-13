@@ -34,6 +34,18 @@ const SERVER_NOTE: Record<string, string> = {
 const REVERSE_NOTE_FULL_ACCESS =
   "Lets the model look inside any program file on this computer except harnessUI's own, with rea. It never runs them.";
 
+/** The line under "Folders for this chat" in Ask first and Allow all, where the file tools'
+ *  path sandbox holds them to the chat's approved folders. */
+const FOLDERS_NOTE =
+  "File tools work only inside these folders. The selected one is the working folder, where relative paths start.";
+
+/** The same line in Full access: `approvals::widen` adds the whole computer, with the home
+ *  folder as the working folder when the chat has none, and the path sandbox still refuses
+ *  the folders it refuses in every mode (`permissions::forbidden_for_tools`: harnessUI's
+ *  data, logs, install folder and browser profile, and the system's saved keys). */
+const FOLDERS_NOTE_FULL_ACCESS =
+  "Full access is on, so file tools can reach every folder on this computer except harnessUI's own and the folders where the system keeps saved keys. The selected one is the working folder, where relative paths start. With no folder here, they start in your home folder.";
+
 /**
  * The Reverse engineering group (0.0.6 item 5). Its 37 tools are always listed; the ones that
  * can't run yet carry the backend's reason (`ReverseServer::unavailable_reason`, pinned in
@@ -132,7 +144,8 @@ export function ToolsPanel(props: {
   const showError = useApp((s) => s.showError);
   const openChat = useApp((s) => s.openChat);
   // The mode the header's approval menu reads and keeps up to date ("ask" until read, so a
-  // note never says more than the chat allows); the Reverse engineering note follows it.
+  // note never says more than the chat allows); the Reverse engineering note and the
+  // folders' line follow it.
   const mode = useChatMode(props.chatId);
 
   const refresh = useCallback(() => {
@@ -565,10 +578,7 @@ export function ToolsPanel(props: {
             <h3 id={`chat-folders-${props.chatId}`} className="font-medium">
               Folders for this chat
             </h3>
-            <p className="text-xs text-fg-muted">
-              File tools work only inside these folders. The selected one is the working folder, where relative paths
-              start.
-            </p>
+            <p className="text-xs text-fg-muted">{mode === "fullAccess" ? FOLDERS_NOTE_FULL_ACCESS : FOLDERS_NOTE}</p>
             <div role="radiogroup" aria-label="Working folder">
               <ul className="mt-1 space-y-1">
                 {folders.map((f) => (

@@ -20,9 +20,11 @@
 //!   bytes of one file of the repository (the same file the repository page reads).
 //! - **The fit** (one verdict per column at the chosen size): an installed file is judged
 //!   as Installed and Settings for this model judge it ([`installed_fit`]: its own
-//!   settings, `placement::judge_in`, the settings panel's amounts); a file that is not
-//!   downloaded gets the same estimate as the repository page, from that column's own
-//!   file only. The screen words the figures (`fitLine` in src/lib/words.ts).
+//!   settings, `placement::judge_in`, the settings panel's amounts), and so is it on the
+//!   repository page and in Change ([`variant_fit`]); a file that is not downloaded gets
+//!   the same estimate as the repository page, from that column's own file only. A plan
+//!   is made only for the installed files a call shows ([`Plans`]). The screen words the
+//!   figures (`fitLine` in src/lib/words.ts).
 //! - **Your results**: saved model checks and benchmark runs with the same file name and
 //!   size as the column's file.
 //!
@@ -111,16 +113,34 @@ pub struct LocalResult {
 }
 
 /// Everything a comparison needs that is on this computer.
-pub struct Known {
+pub struct Known<P = HashMap<String, Plan>> {
     pub catalog: Catalog,
     pub installed: Vec<Installed>,
     pub target: Target,
     /// Memory the model may use, for the order of Suggested models.
     pub usable_bytes: u64,
     pub results: Vec<LocalResult>,
-    /// How a load of each installed model would go now, with its own settings, by path:
-    /// what Installed and Settings for this model judge ([`installed_fit`]).
-    pub plans: HashMap<String, Plan>,
+    /// How a load of an installed model would go now, with its own settings: what
+    /// Installed and Settings for this model judge ([`installed_fit`]). Asked only for the
+    /// installed files a column or a suggestion shows.
+    pub plans: P,
+}
+
+/// How a load of the installed model at a path would go now, with its own settings
+/// (`load_settings::plan` in the app; plans made beforehand in tests). Asked only for the
+/// installed files a comparison, a suggestion or a repository page shows (compare-fit-minors):
+/// a plan reads the file's header, and the app remembers only the last 32 headers it read,
+/// which Settings for this model relies on too.
+pub trait Plans {
+    /// `None` when no plan can be made for the file.
+    async fn plan(&self, path: &str) -> Option<Plan>;
+}
+
+/// Plans made beforehand, by path.
+impl Plans for HashMap<String, Plan> {
+    async fn plan(&self, path: &str) -> Option<Plan> {
+        self.get(path).cloned()
+    }
 }
 
 /// Two SHA-256 values that are both known and differ: certainly not the same file.
@@ -213,7 +233,18 @@ fn installed_is_entry(rec: &Installed, id: &str, e: &Entry) -> bool {
             && !sha_differs(rec.sha256.as_deref(), first.sha256.as_deref()))
 }
 
-impl Known {
+/// The installed model that is exactly this repository file (Compare's rule, [`installed_is`]),
+/// whose files have the SHA-256 values `shas` (empty when not known).
+fn installed_file<'a>(
+    installed: &'a [Installed],
+    repo: &str,
+    file: &str,
+    shas: &Shas,
+) -> Option<&'a Installed> {
+    installed.iter().find(|r| installed_is(r, repo, file, shas))
+}
+
+impl<P> Known<P> {
     fn installed_by_path(&self, path: &str) -> Option<&Installed> {
         self.installed.iter().find(|r| r.path == path)
     }
@@ -223,9 +254,7 @@ impl Known {
     }
 
     fn installed_for_file(&self, repo: &str, file: &str, shas: &Shas) -> Option<&Installed> {
-        self.installed
-            .iter()
-            .find(|r| installed_is(r, repo, file, shas))
+        installed_file(&self.installed, repo, file, shas)
     }
 
     /// The catalog entry that is exactly this repository file, whose files (every shard)
@@ -604,7 +633,7 @@ fn claimed_base_facts(id: &str, e: &Entry) -> CatalogFacts {
 }
 
 /// The uploader's base-model claim, when it names a catalog model's publisher card.
-fn base_claim(known: &Known, hub: &HubFacts) -> Option<BaseModelFacts> {
+fn base_claim<P>(known: &Known<P>, hub: &HubFacts) -> Option<BaseModelFacts> {
     let bases = hub.base_model.as_deref()?;
     bases.split(", ").find_map(|base| {
         let (id, e) = known.entry_with_source(base)?;
@@ -748,7 +777,8 @@ fn stored_file_facts(st: &StoredSummary, vision: bool) -> Option<FileFacts> {
 /// Fine control), through `placement::judge_in` when the model's sizes are known, else
 /// fit.rs's rule on the same memory. The amounts are the settings panel's picture's: what
 /// the model needs in the memory that holds it (a graphics card's own memory, else all of
-/// it) and what is free there. The smaller size that leaves room is Automatic's pick, when
+/// it) and what is free there, and on a graphics card the part in the computer's memory
+/// (its second bar). The smaller size that leaves room is Automatic's pick, when
 /// the same judge marks it green. `None` without the file's header: Settings for this
 /// model shows no mark then either.
 pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
@@ -763,18 +793,21 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
         Some(p) => p.judge(n, gpu, fine).0,
         None => models::fit::verdict_at(&input, n, machine.room(gpu)),
     };
-    let (verdict, partial_offload, needed_bytes) = match &placer {
+    let (verdict, partial_offload, needed_bytes, computer_bytes) = match &placer {
         Some(p) => {
             let split = p.work(tokens, gpu, fine).split;
             let (verdict, fits) = p.judge_split(&split, gpu, fine);
-            let needed = match kind {
-                MemoryKind::Separate => split.gpu.total(),
+            // On a graphics card, the card's share and, as the panel's second bar, the part
+            // in the computer's memory (compare-fit-minors: the screen gives both and the
+            // whole, never only the card's share).
+            let (needed, computer) = match kind {
+                MemoryKind::Separate => (split.gpu.total(), split.cpu.total()),
                 MemoryKind::Unified | MemoryKind::Processor => {
-                    split.gpu.total().saturating_add(split.cpu.total())
+                    (split.gpu.total().saturating_add(split.cpu.total()), 0)
                 }
             };
             let partial = matches!(fits, Fits::Partial | Fits::WontFitGraphics);
-            (verdict, partial, needed)
+            (verdict, partial, needed, computer)
         }
         // The picture without the model's sizes (`offload::not_readable`): everything on the
         // device that holds it; yellow is part on the processor with As much as fits or when
@@ -785,7 +818,7 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
             let fit_choice = gpu == runtime::GpuUse::Fit && !fine.custom_placement();
             let partial =
                 verdict == Verdict::Yellow && (fit_choice || needed > machine.room(gpu).whole);
-            (verdict, partial, needed)
+            (verdict, partial, needed, 0)
         }
     };
     let suggested_ctx = if verdict == Verdict::Green {
@@ -807,6 +840,7 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
         suggested_ctx,
         partial_offload,
         device,
+        computer_bytes,
         sentence: String::new(),
     })
 }
@@ -890,7 +924,12 @@ fn empty_facts(item: CompareItem, ctx: u32, title: String) -> CompareFacts {
 
 /// Fills what an installed model gives a column: its path, its file's facts and fit,
 /// and its saved Hugging Face facts.
-fn fill_from_installed(f: &mut CompareFacts, rec: &Installed, known: &Known, ctx: u32) {
+async fn fill_from_installed<P: Plans>(
+    f: &mut CompareFacts,
+    rec: &Installed,
+    known: &Known<P>,
+    ctx: u32,
+) {
     f.installed_path = Some(rec.path.clone());
     let vision = installed_projector_bytes(rec) > 0;
     let quant = rec
@@ -900,8 +939,9 @@ fn fill_from_installed(f: &mut CompareFacts, rec: &Installed, known: &Known, ctx
         .or_else(|| models::quant_label(&rec.file_name));
     f.fit = known
         .plans
-        .get(&rec.path)
-        .and_then(|p| installed_fit(p, ctx));
+        .plan(&rec.path)
+        .await
+        .and_then(|p| installed_fit(&p, ctx));
     f.file_facts = match local_header(rec) {
         Some(s) => Some(file_facts(&s, rec.stored.parameters, vision, quant)),
         None => stored_file_facts(&rec.stored, vision),
@@ -913,7 +953,12 @@ fn fill_from_installed(f: &mut CompareFacts, rec: &Installed, known: &Known, ctx
 
 /// Everything known about one model to compare, at `ctx`. Never fails: what cannot be
 /// found is left out and named in `problem`.
-pub async fn facts_for(hub: &impl Hub, known: &Known, item: CompareItem, ctx: u32) -> CompareFacts {
+pub async fn facts_for<P: Plans>(
+    hub: &impl Hub,
+    known: &Known<P>,
+    item: CompareItem,
+    ctx: u32,
+) -> CompareFacts {
     match item.clone() {
         CompareItem::Catalog { catalog_id } => {
             catalog_item(hub, known, item, &catalog_id, ctx).await
@@ -925,9 +970,9 @@ pub async fn facts_for(hub: &impl Hub, known: &Known, item: CompareItem, ctx: u3
     }
 }
 
-async fn catalog_item(
+async fn catalog_item<P: Plans>(
     hub: &impl Hub,
-    known: &Known,
+    known: &Known<P>,
     item: CompareItem,
     id: &str,
     ctx: u32,
@@ -949,7 +994,7 @@ async fn catalog_item(
             // The same bytes under another name.
             f.results = known.results_for(&rec.file_name, rec.first_file_size());
         }
-        fill_from_installed(&mut f, rec, known, ctx);
+        fill_from_installed(&mut f, rec, known, ctx).await;
         if f.hub.is_none() {
             // Downloads and dates are extras for an installed model: a failure is not
             // worth a warning on its column.
@@ -1002,9 +1047,9 @@ async fn catalog_item(
     f
 }
 
-async fn repo_item(
+async fn repo_item<P: Plans>(
     hub: &impl Hub,
-    known: &Known,
+    known: &Known<P>,
     item: CompareItem,
     repo: &str,
     file: &str,
@@ -1089,7 +1134,7 @@ async fn repo_item(
             f.results = known.results_for(&rec.file_name, rec.first_file_size());
         }
         f.size_bytes.get_or_insert(rec.size);
-        fill_from_installed(&mut f, rec, known, ctx);
+        fill_from_installed(&mut f, rec, known, ctx).await;
         // Facts from the file on this computer: nothing is missing for this column.
         if f.problem != Some(CompareProblem::NotFound) || detail.is_none() {
             f.problem = None;
@@ -1139,9 +1184,9 @@ async fn repo_item(
     f
 }
 
-async fn installed_item(
+async fn installed_item<P: Plans>(
     hub: &impl Hub,
-    known: &Known,
+    known: &Known<P>,
     item: CompareItem,
     path: &str,
     ctx: u32,
@@ -1164,7 +1209,7 @@ async fn installed_item(
         f.catalog = Some(catalog_facts(id, e));
         f.title = e.name.clone();
     }
-    fill_from_installed(&mut f, rec, known, ctx);
+    fill_from_installed(&mut f, rec, known, ctx).await;
     // A model downloaded before its facts were saved: its repository's listing, once. An
     // imported file has no repository. A failure leaves the uploader's rows empty
     // without a warning: everything else about an installed model is on this computer.
@@ -1185,8 +1230,13 @@ async fn installed_item(
 /// The catalog for Suggested models: the best for this computer first (the first-run
 /// order), each with its fit at `ctx` when the file's header is known without asking
 /// the network (installed, or read earlier in this session), its installed path and the
-/// user's results. Never fetches anything.
-pub fn catalog_list(hub: &impl Hub, known: &Known, ctx: u32) -> Vec<CatalogListEntry> {
+/// user's results. Never fetches anything; a plan is asked for only for the catalog's
+/// installed files.
+pub async fn catalog_list<P: Plans>(
+    hub: &impl Hub,
+    known: &Known<P>,
+    ctx: u32,
+) -> Vec<CatalogListEntry> {
     let mut order: Vec<String> = models::catalog::first_run(&known.catalog, known.usable_bytes)
         .suggestions
         .into_iter()
@@ -1197,34 +1247,60 @@ pub fn catalog_list(hub: &impl Hub, known: &Known, ctx: u32) -> Vec<CatalogListE
             order.push(id.clone());
         }
     }
-    order
+    let mut out = Vec::with_capacity(order.len());
+    for (id, e) in order
         .iter()
         .filter_map(|id| known.catalog.models.get(id).map(|e| (id, e)))
-        .map(|(id, e)| {
-            let first = &e.files[0];
-            let installed = known.installed_for_entry(id, e);
-            let projector = e.mmproj.as_ref().map_or(0, |m| m.size);
-            let fit = match installed {
-                Some(rec) => known
-                    .plans
-                    .get(&rec.path)
-                    .and_then(|p| installed_fit(p, ctx)),
-                None => hub
-                    .cached_head(&e.repo, &e.revision, &first.path)
-                    .map(|s| fit_for(&s, e.weights_bytes(), projector, ctx, &known.target)),
-            };
-            CatalogListEntry {
-                catalog: catalog_facts(id, e),
-                repo: e.repo.clone(),
-                file: first.path.clone(),
-                quant: e.quant.clone(),
-                size_bytes: e.total_bytes(),
-                fit,
-                installed_path: installed.map(|r| r.path.clone()),
-                results: known.results_for(&first.path, first.size),
-            }
-        })
-        .collect()
+    {
+        let first = &e.files[0];
+        let installed = known.installed_for_entry(id, e);
+        let projector = e.mmproj.as_ref().map_or(0, |m| m.size);
+        let fit = match installed {
+            Some(rec) => known
+                .plans
+                .plan(&rec.path)
+                .await
+                .and_then(|p| installed_fit(&p, ctx)),
+            None => hub
+                .cached_head(&e.repo, &e.revision, &first.path)
+                .map(|s| fit_for(&s, e.weights_bytes(), projector, ctx, &known.target)),
+        };
+        out.push(CatalogListEntry {
+            catalog: catalog_facts(id, e),
+            repo: e.repo.clone(),
+            file: first.path.clone(),
+            quant: e.quant.clone(),
+            size_bytes: e.total_bytes(),
+            fit,
+            installed_path: installed.map(|r| r.path.clone()),
+            results: known.results_for(&first.path, first.size),
+        });
+    }
+    out
+}
+
+/// The fit of one file of a repository page, which Compare's Change menu also lists (its
+/// files at the comparison size): a file that is installed is judged as its Compare column
+/// judges it (the installed model that is exactly this file by Compare's rule, its own plan,
+/// [`installed_fit`]), so one column never gives two verdicts for one file; any other file
+/// gets `estimate`, the page's estimate from the repository's header. A plan is asked for
+/// only for an installed file.
+pub async fn variant_fit(
+    installed: &[Installed],
+    plans: &impl Plans,
+    repo: &str,
+    v: &models::Variant,
+    ctx: u32,
+    estimate: Option<models::FitResult>,
+) -> Option<models::FitResult> {
+    let shas: Vec<Option<&str>> = v.files.iter().map(|f| f.sha256.as_deref()).collect();
+    match installed_file(installed, repo, &v.first_file().path, &shas) {
+        Some(rec) => plans
+            .plan(&rec.path)
+            .await
+            .and_then(|p| installed_fit(&p, ctx)),
+        None => estimate,
+    }
 }
 
 #[cfg(test)]

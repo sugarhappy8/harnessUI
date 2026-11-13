@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 
 // The sections' own pages are not under test here: each is a stub, so only the dialog's
@@ -54,7 +54,8 @@ describe("Settings: the section list stays inside the dialog and scrolls", () =>
     const dialog = await open();
     // Tall enough for every section at the default window size (1200 x 800). In a shorter
     // window it shrinks, leaving 4.5rem above and below: nothing is drawn past its bottom
-    // edge and the chat's header bar never covers its title and Close button.
+    // edge. (The chat's header bar is drawn under every dialog: `#root` is its own stacking
+    // layer in styles.css, checked by the settings-pages end-to-end scenario.)
     expect(classes(dialog)).toContain("max-h-[calc(100vh-9rem)]");
     expect(classes(dialog)).toContain("h-[40rem]");
     expect(classes(dialog)).not.toContain("h-[34rem]");
@@ -80,5 +81,67 @@ describe("Settings: the section list stays inside the dialog and scrolls", () =>
     const last = within(dialog).getByRole("tab", { name: "Diagnostics" });
     expect(last.getAttribute("aria-selected")).toBe("true");
     expect(within(dialog).getByText("benchmarks page")).toBeTruthy();
+  });
+});
+
+// jsdom does no layout: a short window is drawn here by hand. The list sits 49 px down the
+// dialog and shows 200 px; each row is 32 px tall, 36 px apart, after the list's 12 px padding.
+const LIST_TOP = 49;
+const SHOWN = 200;
+const ROW = 32;
+const rowTop = (i: number) => 12 + i * 36;
+
+function layout(el: HTMLElement) {
+  const role = el.getAttribute("role");
+  if (role === "tab") {
+    const i = [...(el.parentElement?.children ?? [])].indexOf(el);
+    return { offsetTop: LIST_TOP + rowTop(i), offsetHeight: ROW, clientHeight: ROW };
+  }
+  if (role === "tablist") return { offsetTop: LIST_TOP, offsetHeight: SHOWN, clientHeight: SHOWN };
+  return { offsetTop: 0, offsetHeight: 0, clientHeight: 0 };
+}
+
+describe("Settings: opening on a section shows its row in the list", () => {
+  const props = ["offsetTop", "offsetHeight", "clientHeight"] as const;
+  const saved = props.map((p) => [p, Object.getOwnPropertyDescriptor(HTMLElement.prototype, p)] as const);
+  beforeEach(() => {
+    for (const p of props) {
+      Object.defineProperty(HTMLElement.prototype, p, {
+        configurable: true,
+        get(this: HTMLElement) {
+          return layout(this)[p];
+        },
+      });
+    }
+  });
+  afterEach(() => {
+    cleanup();
+    for (const [p, d] of saved) {
+      if (d) Object.defineProperty(HTMLElement.prototype, p, d);
+      else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[p];
+    }
+  });
+
+  function shown(list: HTMLElement, name: string) {
+    const i = SECTIONS.indexOf(name);
+    return list.scrollTop <= rowTop(i) && rowTop(i) + ROW <= list.scrollTop + SHOWN;
+  }
+
+  it.each(["Diagnostics", "Audit log", "Permissions", "Browser"])(
+    "scrolls %s into view when the dialog opens on it in a short window",
+    async (name) => {
+      const value = { Diagnostics: "diagnostics", "Audit log": "audit", Permissions: "permissions", Browser: "browser" }[name];
+      const dialog = await open(value);
+      const list = within(dialog).getByRole("tablist", { name: "Settings sections" });
+      expect(within(list).getByRole("tab", { name }).getAttribute("aria-selected")).toBe("true");
+      expect(shown(list, name)).toBe(true);
+    },
+  );
+
+  it("leaves the list at the top when the chosen section is already in view", async () => {
+    const dialog = await open("general");
+    const list = within(dialog).getByRole("tablist", { name: "Settings sections" });
+    expect(list.scrollTop).toBe(0);
+    expect(shown(list, "General")).toBe(true);
   });
 });

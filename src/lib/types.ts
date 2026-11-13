@@ -333,13 +333,18 @@ export type FitDevice = "graphicsCard" | "appleGraphics" | "processor";
 
 export interface FitResult {
   verdict: Verdict;
-  /** What the model needs in the memory that holds it. */
+  /** What the model needs in the memory that holds it (on a graphics card, the card's share). */
   neededBytes: number;
   /** Free memory there: the graphics card's, what Apple graphics may use, or the computer's. */
   availableBytes: number;
   suggestedCtx: number | null;
   partialOffload: boolean;
   device: FitDevice;
+  /**
+   * On a graphics card, the part it needs in the computer's memory besides (compare-fit-minors);
+   * 0 otherwise: on Apple graphics and the processor `neededBytes` counts all of it.
+   */
+  computerBytes: number;
   /** The backend's 0.0.4 sentence; the screens word the figures with `fitLine` (words.ts). */
   sentence: string;
 }

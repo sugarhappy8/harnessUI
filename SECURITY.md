@@ -327,14 +327,17 @@ rea's output is outside content: it is marked as data, shortened like other tool
 and the paths of harnessUI's own folders in it are hidden.
 
 **rea is kept quiet.** It starts with almost none of your settings: no proxy settings, and
-its home and temporary folders inside harnessUI's data folder. It never runs its own setup,
+its home and temporary folders inside harnessUI's data folder. On Linux, Ghidra cannot work
+from there (that folder is under `~/.local/share`), so its temporary files go to a private
+folder of harnessUI's in the system's own folder for your session (`XDG_RUNTIME_DIR`), which
+only you can open, the file tools never reach, and harnessUI removes whenever rea stops or
+the app starts. It never runs its own setup,
 so it writes nothing into the settings of Claude Code, Codex or other apps. Ghidra's
 analyser that looks up debugging-symbol files is turned off. On a Mac it never starts before
 Apple's command line tools are installed, so Apple's install window cannot appear in the
 middle of a chat. CI runs rea with the real decompilers (Ghidra on Windows, Kuna on macOS,
 both on Linux) and fails if any of their processes tries to reach anything but this
 computer.
-<!-- TODO(lead): confirm after WP9e -->
 
 **Limits:**
 
@@ -345,6 +348,11 @@ computer.
   it over, and it would then have your rights and network access. Open programs from people
   you don't trust only on a computer you can wipe.
 - If harnessUI crashes, Kuna or Java can keep running for a short while on macOS and Linux.
+- On Linux without a usable `XDG_RUNTIME_DIR`, Ghidra's working files (its project and a
+  copy of the opened program) go to a private folder in `/tmp` that only you can open; rea
+  removes it when it stops. Where the runtime folder is used, the system keeps it in memory,
+  so a very large program may not fit there. After Java is stopped by force, a 32 KB file of Java's
+  stays in `/tmp/hsperfdata_<your user name>` until Java next starts.
 - A link made inside a folder after the folder was checked is not seen until the next
   call. A hard link to a file elsewhere on the same drive looks like an ordinary file. A
   network share mounted as an ordinary folder (for example under `/Volumes`) is not

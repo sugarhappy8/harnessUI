@@ -523,8 +523,7 @@ pub struct Helper {
 }
 
 /// The helper's one user message: the app's framing, then the task and the context as the
-/// model wrote them (cleaned of chat-template control tokens, like any model-made text
-/// that goes back into a prompt).
+/// model wrote them (cleaned of chat-template control tokens, as the summary block is).
 ///
 /// The system prompt tells the model that lines starting with `[App note]` come from the
 /// app, and the task is not inside a delimited block, so without care the main model,
@@ -534,7 +533,8 @@ pub struct Helper {
 /// case, any spacing or hidden characters inside, full-width brackets too) gets round
 /// brackets, a block tag split by hidden characters is escaped like a plain one, the
 /// hidden characters in and right next to either are shown as visible escapes, and control
-/// and tag characters are shown as escapes anywhere. The rest reaches the helper word for
+/// and tag characters and the default-ignorable code points assigned to nothing are shown
+/// as escapes anywhere. The rest reaches the helper word for
 /// word, in any script; text that only resembles the marker (`[App notes]`) is not changed.
 fn handover_message(task: &str, context: &str, sanitizer: &Sanitizer) -> String {
     let clean = |text: &str| agent::prompt::defang_app_notes(text, sanitizer);

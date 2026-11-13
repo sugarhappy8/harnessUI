@@ -64,6 +64,35 @@ describe("the welcome screen", () => {
     expect(pickModel).toHaveBeenCalledWith("local:/models/a.gguf");
   });
 
+  // A GGUF named with a right-to-left override reads reversed unless the name is escaped
+  // (the header's model menu and the model list do the same).
+  it("shows model names with hidden and right-to-left characters as codes", () => {
+    useApp.setState({
+      runtime: { ...ready, modelName: "X-\u202Efuug.Q4_K_M.gguf\u200B", modelPath: "/models/X-\u202Efuug.Q4_K_M.gguf\u200B" },
+      modelOptions: [],
+    });
+    render(<Welcome />);
+    const name = screen.getByText("X-\\u{202E}fuug.Q4_K_M.gguf\\u{200B}");
+    expect(name.tagName).toBe("BDI");
+    expect(name.getAttribute("dir")).toBe("ltr");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
+    cleanup();
+    const pickModel = vi.fn(async () => undefined);
+    useApp.setState({
+      runtime: null,
+      modelOptions: [{ ref: "local:/models/Y-\u202Efuug.gguf", label: "Y-\u202Efuug.gguf", source: "local", contextLength: null }],
+      pickModel,
+    });
+    render(<Welcome />);
+    const option = screen.getByText("Y-\\u{202E}fuug.gguf");
+    expect(option.tagName).toBe("BDI");
+    expect(option.getAttribute("dir")).toBe("ltr");
+    expect(option.closest("button")?.title).toBe("Y-\\u{202E}fuug.gguf");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
+    fireEvent.click(option);
+    expect(pickModel).toHaveBeenCalledWith("local:/models/Y-\u202Efuug.gguf");
+  });
+
   // A suggestion only fills the message box: nothing is sent until the user sends it.
   it("writes a chosen idea into the message box without sending it", () => {
     useApp.setState({ runtime: ready, modelOptions: [] });

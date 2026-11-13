@@ -39,6 +39,20 @@ const THEMES: { value: ThemeChoice; label: string }[] = [
 const tabClass =
   "rounded-md px-3 py-1.5 text-left text-sm data-[state=active]:bg-bg-muted data-[state=active]:font-medium hover:bg-bg-muted";
 
+/** The section list's ref: when the list appears (the dialog opens, or opens on another
+ * section), it scrolls so the chosen section's row is in view, centred. In a short window the
+ * list shows only part of itself, and a link elsewhere (the notice's Permissions link, the
+ * Tools panel's Browser link) opens Settings on a section further down. Layout offsets, not
+ * screen rectangles, because the dialog is scaled while it opens. */
+function showChosenSection(list: HTMLDivElement | null) {
+  const tab = list?.querySelector<HTMLElement>('[role="tab"][data-state="active"]');
+  if (!list || !tab) return;
+  const top = tab.offsetParent === list ? tab.offsetTop : tab.offsetTop - list.offsetTop - list.clientTop;
+  if (top < list.scrollTop || top + tab.offsetHeight > list.scrollTop + list.clientHeight) {
+    list.scrollTop = top - (list.clientHeight - tab.offsetHeight) / 2;
+  }
+}
+
 function General() {
   const [theme, setTheme] = useState<ThemeChoice>(loadTheme);
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -795,7 +809,7 @@ export function SettingsDialog(props: {
           </div>
           <Dialog.Description className="sr-only">App settings</Dialog.Description>
           <Tabs.Root key={props.initialTab ?? "general"} defaultValue={props.initialTab ?? "general"} orientation="vertical" className="flex min-h-0 flex-1">
-            <Tabs.List className="flex min-h-0 w-48 flex-col gap-1 overflow-y-auto border-r border-border p-3" aria-label="Settings sections">
+            <Tabs.List ref={showChosenSection} className="flex min-h-0 w-48 flex-col gap-1 overflow-y-auto border-r border-border p-3" aria-label="Settings sections">
               <Tabs.Trigger value="general" className={tabClass}>General</Tabs.Trigger>
               <Tabs.Trigger value="runtime" className={tabClass}>Local models</Tabs.Trigger>
               <Tabs.Trigger value="reverse" className={tabClass}>Reverse engineering</Tabs.Trigger>

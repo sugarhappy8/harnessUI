@@ -3,6 +3,7 @@ import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
 import { toErrorInfo } from "../../store/app";
 import { ErrorBanner } from "../ErrorBanner";
+import { visiblePath } from "../FolderChip";
 import {
   benchConfirm,
   useEndpointHost,
@@ -16,7 +17,7 @@ import {
 import type { BenchRun, BenchSummary, BenchTaskInfo, BenchTotals, TaskResult } from "./types";
 
 function runName(run: { startedAt: number; model: string }): string {
-  return `${new Date(run.startedAt).toLocaleString()} · ${run.model}`;
+  return `${new Date(run.startedAt).toLocaleString()} · ${visiblePath(run.model)}`;
 }
 
 export function totalsWords(t: BenchTotals): string {

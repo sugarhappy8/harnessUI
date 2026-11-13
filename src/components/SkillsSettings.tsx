@@ -4,6 +4,7 @@ import * as ipc from "../lib/ipc";
 import type { ErrorInfo, SkillList } from "../lib/types";
 import { toErrorInfo } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
+import { visiblePath } from "./FolderChip";
 
 const TEMPLATE = (name: string) => `---
 name: ${name}
@@ -183,7 +184,8 @@ export function SkillsSettings() {
           onChange={(e) => act(() => ipc.setSharedSkills(e.target.checked))}
         />
         <span>
-          Also use skills from {list?.sharedPath ?? "~/.agents/skills"} (shared with other agent apps; read-only here)
+          Also use skills from <bdi dir="ltr">{visiblePath(list?.sharedPath ?? "~/.agents/skills")}</bdi> (shared with
+          other agent apps; read-only here)
         </span>
       </label>
       <ul className="space-y-2">
@@ -243,7 +245,10 @@ export function SkillsSettings() {
           <ul className="list-disc pl-5 text-fg-muted">
             {list.problems.map((p) => (
               <li key={p.path}>
-                <span className="font-mono text-xs">{p.path}</span>: {p.error}
+                <bdi dir="ltr" className="font-mono text-xs">
+                  {visiblePath(p.path)}
+                </bdi>
+                : {visiblePath(p.error)}
               </li>
             ))}
           </ul>

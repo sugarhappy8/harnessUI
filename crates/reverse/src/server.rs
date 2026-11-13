@@ -406,7 +406,7 @@ impl ReverseServer {
             return false;
         }
         let sandbox = self.sandbox(fs, chat, canonical);
-        (Hops::Clear == Hops::Clear) /*TEMP-REVERT*/
+        walk::safe_to_resolve(fs, &sandbox, canonical, flavor) == Hops::Clear
             && sandbox
                 .check(canonical, None, fs)
                 .is_ok_and(|c| c.exists && !walk::is_network_or_device(&c.canonical, flavor))
@@ -454,7 +454,7 @@ impl ReverseServer {
             return false;
         }
         let sandbox = self.sandbox(fs, chat, canonical);
-        if Hops::Clear != Hops::Clear /*TEMP-REVERT*/ {
+        if walk::safe_to_resolve(fs, &sandbox, canonical, flavor) != Hops::Clear {
             return false;
         }
         let same_place = sandbox
@@ -1270,8 +1270,18 @@ mod tests {
         use walk::fake::{FakeFs, Node};
         let dir = tempfile::tempdir().unwrap();
         for (platform, work, sep, net) in [
-            (Platform::MacosArm64, "/Users/me/work", "/", "/net/evil/share"),
-            (Platform::WindowsX64, r"C:\Users\me\work", r"\", r"\\evil\share"),
+            (
+                Platform::MacosArm64,
+                "/Users/me/work",
+                "/",
+                "/net/evil/share",
+            ),
+            (
+                Platform::WindowsX64,
+                r"C:\Users\me\work",
+                r"\",
+                r"\\evil\share",
+            ),
         ] {
             let s = ReverseServer::new(ReverseLayout::new(dir.path()), platform);
             let fresh = || match platform.os() {

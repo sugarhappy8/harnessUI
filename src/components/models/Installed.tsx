@@ -142,8 +142,12 @@ export function Installed(props: { onClose: () => void }) {
     <div className="space-y-3">
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
       <div className="flex items-center justify-between text-xs text-fg-muted">
-        <span className="truncate" title={usage?.modelsDir}>
-          {usage ? `${formatBytes(usage.totalBytes)} in ${usage.modelsDir}` : ""}
+        <span className="truncate" title={usage ? visiblePath(usage.modelsDir) : undefined}>
+          {usage && (
+            <>
+              {formatBytes(usage.totalBytes)} in <bdi dir="ltr">{visiblePath(usage.modelsDir)}</bdi>
+            </>
+          )}
         </span>
         <div className="flex shrink-0 gap-3">
           <button type="button" className="flex items-center gap-1 underline" onClick={() => void chooseFolder()}>

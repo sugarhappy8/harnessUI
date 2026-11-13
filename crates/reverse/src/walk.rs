@@ -10,7 +10,9 @@
 //! text ([`follow_links`]; the system resolves nothing until no hop names a network or
 //! device place), and only then where the system resolves it; a link to another folder
 //! that passes is walked too, with the same limits, so a chain of links cannot lead out.
-//! Links are never followed into folders by the walk itself.
+//! Links are never followed into folders by the walk itself. A link whose text is not
+//! valid text, and a name the system will not let the app look at, are refused, never
+//! taken for a missing name: the system may still follow them.
 //!
 //! Every folder the walk enters (plain sub-folders and folders reached through a link) must
 //! itself pass the sandbox: a folder holding harnessUI's own folders or a key store is
@@ -60,8 +62,9 @@ pub enum EntryKind {
 pub trait WalkFs: Fs + Send + Sync {
     /// The names inside a folder.
     fn read_dir(&self, path: &str) -> Result<Vec<String>, String>;
-    /// A link's own text, never resolved; `None` when `path` is not a link; an error when
-    /// it is missing or its text cannot be read (not valid text).
+    /// A link's own text, never resolved; `None` when `path` is not a link or nothing is
+    /// there (it, or a folder above it, is missing); an error when it cannot be read: its
+    /// text is not valid text, or the system refuses to look at it.
     fn read_link(&self, path: &str) -> Result<Option<String>, String>;
     /// What `path` is, without following a link; `None` when it does not exist.
     fn kind(&self, path: &str) -> Option<EntryKind>;
@@ -92,8 +95,9 @@ pub enum WalkRefusal {
         /// Its path.
         path: String,
     },
-    /// A folder the walk could not list or check, or a name it cannot represent (not valid
-    /// text): it is not checked, so it is refused. (Added by WP9c.)
+    /// A folder the walk could not list or check, a name it cannot represent (not valid
+    /// text), or a name in it the system will not let it look at: it is not checked, so it
+    /// is refused. (Added by WP9c.)
     Unreadable {
         /// Its path.
         path: String,
@@ -178,7 +182,17 @@ impl WalkFs for RealWalkFs {
     }
 
     fn read_link(&self, path: &str) -> Result<Option<String>, String> {
-        let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        use std::io::ErrorKind;
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            // Nothing there: the system stops here too.
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                return Ok(None);
+            }
+            // Something may be there, but the system will not say what (access denied, and
+            // the like): it is not known not to be a link.
+            Err(e) => return Err(e.to_string()),
+        };
         if !meta.file_type().is_symlink() {
             return Ok(None);
         }
@@ -443,14 +457,14 @@ pub fn follow_links(fs: &dyn WalkFs, path: &str, flavor: Flavor) -> Hops {
         }
         let text = match fs.read_link(&here) {
             Ok(Some(text)) => text,
+            // Not a link, or nothing there (the system stops at a missing name too; the
+            // names after it are checked all the same).
             Ok(None) => continue,
-            // Something is there, but its link text cannot be read (not valid text: bytes
-            // on Linux and macOS, unpaired surrogates on Windows): the system would still
-            // follow it, perhaps to a network place, so it is refused, never taken for a
-            // missing name. `kind` does not follow it, and nothing before it is a link.
-            Err(_) if fs.kind(&here).is_some() => return Hops::Unclear,
-            // Missing (or not reachable): the system stops here too.
-            Err(_) => return Hops::Clear,
+            // Something may be there, but its link text cannot be read (not valid text:
+            // bytes on Linux and macOS, unpaired surrogates on Windows) or it cannot be
+            // looked at at all (access denied): the system may still follow it, perhaps to
+            // a network place, so it is refused, never taken for a missing name.
+            Err(_) => return Hops::Unclear,
         };
         hops += 1;
         if hops > MAX_HOPS || text.is_empty() || text.contains('\0') {
@@ -640,8 +654,15 @@ pub fn walk_folder(
                 return Err(WalkRefusal::Unreadable { path });
             }
             let next = match fs.kind(&path) {
-                // Gone since the listing: nothing rea could read.
-                None | Some(EntryKind::File) => None,
+                Some(EntryKind::File) => None,
+                // Gone since the listing (nothing rea could read), a link since (checked),
+                // or there but the system will not say what (access denied): not checked,
+                // so refused.
+                None => match fs.read_link(&path) {
+                    Ok(None) => None,
+                    Ok(Some(_)) => check_link(fs, &path, flavor, sandbox)?,
+                    Err(_) => return Err(WalkRefusal::Unreadable { path }),
+                },
                 Some(EntryKind::Dir) => Some(check_dir(fs, path, sandbox)?),
                 Some(EntryKind::Link) => check_link(fs, &path, flavor, sandbox)?,
                 Some(
@@ -888,8 +909,7 @@ pub(crate) mod fake {
                 Some(Node::Link(t)) => Ok(Some(t)),
                 Some(Node::LinkNotText(_)) => Err("a link whose target is not valid text".into()),
                 Some(Node::NoAccess(_)) => Err("permission denied".into()),
-                Some(_) => Ok(None),
-                None => Err("missing".into()),
+                Some(_) | None => Ok(None),
             }
         }
         fn kind(&self, path: &str) -> Option<EntryKind> {
@@ -1702,5 +1722,175 @@ mod tests {
             }
             std::fs::remove_file(&link).unwrap();
         }
+    }
+
+    /// A link the system follows but this check cannot look at at all (its kind and its
+    /// text are refused, as when access is denied) is refused, never taken for a missing
+    /// name: as the path itself, at the end of a chain of links and inside a walked folder,
+    /// where it is a name the walk can't check. So is a chain of two links whose text is not
+    /// valid text. In every mode, nothing is resolved through them and nothing looks up the
+    /// network place; the model's message names nothing inside the folder. A missing name,
+    /// and a name below a file, are still missing.
+    #[test]
+    fn a_link_that_cannot_be_read_at_all_is_refused() {
+        let p = Flavor::Posix;
+        let base = || {
+            app()
+                .special("/w/hidden", Node::NoAccess("//server/share".into()))
+                .link("/w/a", "/w/hidden")
+                .special("/w/bad1", Node::LinkNotText("/w/bad2".into()))
+                .special("/w/bad2", Node::LinkNotText("//server/share".into()))
+        };
+        let resolved = |fs: &FakeFs, also: &str| -> Vec<String> {
+            fs.accessed()
+                .into_iter()
+                .filter(|a| {
+                    a.contains("server")
+                        || ["/w/hidden", "/w/a", "/w/bad1", "/w/bad2", also]
+                            .iter()
+                            .any(|l| {
+                                a == &format!("canonicalize {l}")
+                                    || a.starts_with(&format!("canonicalize {l}/"))
+                            })
+                })
+                .collect()
+        };
+        let fs = base();
+        for path in ["/w/hidden", "/w/hidden/x", "/w/a", "/w/a/x", "/w/bad1/x"] {
+            fs.clear();
+            assert_eq!(follow_links(&fs, path, p), Hops::Unclear, "{path}");
+            let looked = resolved(&fs, path);
+            assert!(looked.is_empty(), "{path}: {looked:?}");
+        }
+        for path in ["/w/missing/x", "/w/app/main.js/x"] {
+            assert_eq!(follow_links(&fs, path, p), Hops::Clear, "{path}");
+        }
+        for (entry, target) in [
+            ("/w/app/lib/hidden", None),
+            ("/w/app/lib/one", Some("../../hidden/x")),
+            ("/w/app/lib/two", Some("/w/a")),
+            ("/w/app/lib/bad", Some("/w/bad1")),
+        ] {
+            for approved in [&["/w"][..], &["/w", "/"][..]] {
+                let fs = match target {
+                    None => base().special(entry, Node::NoAccess("//server/share".into())),
+                    Some(t) => base().link(entry, t),
+                };
+                let sb = sandbox(&fs, approved, &[]);
+                fs.clear();
+                let refusal = walk_folder(&fs, "/w/app", &sb, approved.len() > 1);
+                let expected = match target {
+                    None => WalkRefusal::Unreadable { path: entry.into() },
+                    Some(_) => WalkRefusal::LinkOut { link: entry.into() },
+                };
+                assert_eq!(refusal, Err(expected.clone()), "{entry} {approved:?}");
+                let looked = resolved(&fs, entry);
+                assert!(looked.is_empty(), "{entry} {approved:?}: {looked:?}");
+                assert!(!expected.message().contains("/w/"), "{entry}");
+                assert!(
+                    expected.detail().ends_with(&format!(": {entry}.")),
+                    "{entry}"
+                );
+            }
+        }
+        // Windows: a junction to a link that cannot be looked at.
+        let w = Flavor::Windows;
+        let fs = FakeFs::windows()
+            .special(
+                "C:\\Users\\me\\hidden",
+                Node::NoAccess("\\\\server\\share".into()),
+            )
+            .link("C:\\Users\\me\\j", "\\\\?\\C:\\Users\\me\\hidden");
+        for path in ["C:\\Users\\me\\hidden\\x.exe", "C:\\Users\\me\\j\\x.exe"] {
+            fs.clear();
+            assert_eq!(follow_links(&fs, path, w), Hops::Unclear, "{path}");
+            assert!(
+                !fs.accessed()
+                    .iter()
+                    .any(|a| a.starts_with("canonicalize") || a.to_lowercase().contains("server")),
+                "{path}: {:?}",
+                fs.accessed()
+            );
+        }
+    }
+
+    /// The real file system (Unix): a link in a folder this user may not search cannot be
+    /// looked at at all, so it is refused as the path itself and at the end of a chain of
+    /// links (before the fix it was taken for a missing name), and a folder whose names can
+    /// be listed but not looked at is refused by the walk (before the fix it passed). A
+    /// missing name, and a name below a file, are still missing. Skipped as root, which may
+    /// look at everything.
+    #[cfg(unix)]
+    #[test]
+    fn the_real_file_system_a_link_that_cannot_be_read_at_all() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let s = |p: &Path| p.display().to_string();
+        let p = Flavor::Posix;
+        std::fs::write(root.join("file"), "x").unwrap();
+        for missing in ["missing", "missing/x", "file/x"] {
+            assert_eq!(
+                RealWalkFs.read_link(&s(&root.join(missing))),
+                Ok(None),
+                "{missing}"
+            );
+            assert_eq!(
+                follow_links(&RealWalkFs, &s(&root.join(missing)), p),
+                Hops::Clear,
+                "{missing}"
+            );
+        }
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        symlink("/net/server/share", locked.join("net")).unwrap();
+        symlink(locked.join("net"), root.join("a")).unwrap();
+        let app = root.join("app");
+        let listed = app.join("listed");
+        std::fs::create_dir_all(&listed).unwrap();
+        std::fs::write(app.join("main.js"), "x").unwrap();
+        symlink("/net/server/share", listed.join("net")).unwrap();
+        let sb = |approved: &[String]| {
+            PathSandbox::new(Flavor::Posix, approved, &[], &RealWalkFs, &|p| {
+                RealWalkFs.case_of(p)
+            })
+            .0
+        };
+        let modes = [vec![s(&root)], vec![s(&root), "/".to_string()]];
+        let walk = || {
+            modes
+                .iter()
+                .map(|approved| {
+                    walk_folder(&RealWalkFs, &s(&app), &sb(approved), approved.len() > 1)
+                })
+                .collect::<Vec<_>>()
+        };
+        // Where it can be looked at, the link to a network place is refused as such.
+        let out = Err(WalkRefusal::LinkOut {
+            link: s(&listed.join("net")),
+        });
+        assert_eq!(walk(), vec![out.clone(), out]);
+        let set = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        set(&locked, 0o600);
+        set(&listed, 0o444);
+        let can_look = std::fs::symlink_metadata(locked.join("net")).is_ok();
+        let hops: Vec<Hops> = [locked.join("net"), locked.join("net/x"), root.join("a/x")]
+            .iter()
+            .map(|path| follow_links(&RealWalkFs, &s(path), p))
+            .collect();
+        let walked = walk();
+        set(&locked, 0o755);
+        set(&listed, 0o755);
+        if can_look {
+            eprintln!("skipped: this user may look inside folders it may not search");
+            return;
+        }
+        assert_eq!(hops, vec![Hops::Unclear; 3]);
+        let unreadable = Err(WalkRefusal::Unreadable {
+            path: s(&listed.join("net")),
+        });
+        assert_eq!(walked, vec![unreadable.clone(), unreadable]);
     }
 }

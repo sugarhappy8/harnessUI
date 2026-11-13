@@ -79,9 +79,9 @@ Collected while the packages run. Each needs doing (or a decision) before the re
     `(mode & 0o755) | 0o600` (group/other write bits dropped). Update the spec.
   - WP9a added `UpdateInfo.part` and `ReverseError::ServerError { host, status }`: check WP9d
     shows "Node.js"/"Java" for a part update and the server-error text.
-  - WP9c (minor, left): a link whose target is not valid text is treated as missing by
-    `follow_links`, so a chain of two such links can still make the system look up a network
-    place and the folder passes. Fix: treat an unreadable link target as refused.
+  - WP9c (minor): fixed. A link whose target is not valid text, or that cannot be looked at
+    at all (access denied), is refused by `follow_links` and by the walk, never taken for a
+    missing name (`walk.rs`; FakeFs and real-file-system tests).
 - **Leftover fixes run A (wf_c6b8dca9-052) done.** Six fixes landed with tests and reviews; the
   webp and model-list fixes had a second round for a major each (decoding WebP now in a
   bounded helper; the list no longer offers paths Installed doesn't know). Still open (minor):
@@ -99,7 +99,8 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   - Other apps: a setup step copied while the new key arrives (a few ms window) is left off
     "Apps to set up again".
   - `tool_catalog.rs:250` TODO(0.0.6) (tool selection counting words of tool names; rea's
-    names) and `attachments.rs:643` TODO(0.0.6) (documents in the mentions' share): decide
+    names; done in rea-name-words: the Reverse engineering group matches by its listed
+    words only, `tool_catalog::OWN_WORDS_ONLY`) and `attachments.rs:643` TODO(0.0.6) (documents in the mentions' share): decide
     before release, or keep with a reason.
 - **Leftover fixes run C (wf_6a9d631b-ae5) done** (per-chat model switch cancel, WebP on the
   proxy and tool paths, helper escaping scope, Other apps copy race). Minors found by its
@@ -152,6 +153,15 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   lock, release.yml gate, lock flipped from that record), rea-linux-tmp (Ghidra's session in
   /tmp on Linux because the app folder is under a dot folder; private runtime folder or a
   documented limit; Java perf file), arch-todo-lead (the ARCHITECTURE.md TODO(lead) markers).
+  Done (rea-linux-tmp): on Linux with Ghidra, `TMPDIR` is `<XDG_RUNTIME_DIR>/<app id>-reverse`
+  when that folder can be used (`reverse::layout::run_tmp_in`: absolute, real folder of the
+  user's, mode 0700, 1 GiB free, no dot folder, at most 76 bytes); made afresh (0700) at each
+  start, removed after each stop and idle stop and at app start, forbidden to the tools
+  (`permissions.rs`), masked in rea's output. Else today's `/tmp/rea-ghidra-…` fallback, a
+  documented limit. `-XX:-UsePerfData` cannot be passed (rea empties the Java option variables
+  outside Windows): documented. Tests in `layout.rs`, `env.rs`, `process.rs`, `results.rs`;
+  `real_rea.rs rea_with_ghidra_under_a_dot_folder` is strict now. The StartGuard stop path
+  (rea-start-guard, below) does not remove the folder yet.
 - **Batch d (wf_728c1760-d70, 07:40 UTC):** mcp-rename-settings (renamed server keeps its
   chats' tool choices, last choice and grants, or the note says what to switch on; keychain
   failure during the rename), canonical-in-notes (pre-approval messages name the path the model
