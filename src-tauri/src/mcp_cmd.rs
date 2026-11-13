@@ -2798,8 +2798,13 @@ mod tests {
         let on = names(&["read_file", "open_binary"]);
         assert!(reverse_group_on(&Selection::Chat(&on), &tools));
 
-        let source = include_str!("mcp_cmd.rs");
-        for start in ["async fn tool_list(", "async fn reverse_switched_on("] {
+        // As checked out on Linux and macOS, and as on Windows, where lines may end in "\r\n".
+        let lf = include_str!("mcp_cmd.rs").replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        for (source, start) in [lf.as_str(), crlf.as_str()]
+            .into_iter()
+            .flat_map(|s| [(s, "async fn tool_list("), (s, "async fn reverse_switched_on(")])
+        {
             let body = source
                 .split(start)
                 .nth(1)

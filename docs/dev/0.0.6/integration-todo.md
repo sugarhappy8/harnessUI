@@ -267,3 +267,9 @@ release blocker unless the owner says so.
   owner's screenshot file in `src-tauri/src/model_options.rs` and
   `src/components/ModelPicker.list.test.tsx`; others in `ModelPicker.test.tsx` and the
   hub-cache link tests). Neutral names keep the same cases.
+- **First full Windows and macOS CI (run 43409122542 on 4c850e7; logs in scratchpad
+  ci-logs/).** Linux passed in full. Windows: mcp_cmd source-text test (line endings),
+  reverse layout test with a Linux path, reverse archive zip FIFO fixture, mcp-host
+  managed_e2e stack overflow at start; fix batch win wf_e2f37497-e46. macOS: two reverse
+  run-temp-folder tests (Linux-only feature; long macOS temp path), runtime fit_params
+  "took too long"; fix batch mac wf_9b6c72f9-297. One PR comment each.
