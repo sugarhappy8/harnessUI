@@ -60,11 +60,11 @@ def reverse_sentences() -> dict[str, str]:
 
 
 def probes() -> set[str]:
-    return set(re.findall(r'^@probe\("([a-z0-9-]+)"\)', read("e2e/scripted_agent.py"), re.M))
+    return set(re.findall(r'^@probe\("([a-z0-9-]+)"\)', read("e2e/scripted_agent.py"), re.MULTILINE))
 
 
 def jobs(workflow: str) -> set[str]:
-    return set(re.findall(r"^  ([a-z0-9-]+):\s*$", (WORKFLOWS / workflow).read_text(encoding="utf-8"), re.M))
+    return set(re.findall(r"^  ([a-z0-9-]+):\s*$", (WORKFLOWS / workflow).read_text(encoding="utf-8"), re.MULTILINE))
 
 
 class NoMarkersLeft(unittest.TestCase):
@@ -107,7 +107,7 @@ class ReverseCiAsTheWorkflowsRunIt(unittest.TestCase):
 
     def test_each_job_names_the_decompilers_it_must_test(self):
         self.assertEqual(jobs("reverse.yml"), {"linux", "windows", "macos"})
-        self.assertEqual(re.findall(r"^\s+REAL_REA_REQUIRE:\s*(\S+)", self.reverse, re.M), ["kuna,ghidra", "ghidra", "kuna"])
+        self.assertEqual(re.findall(r"^\s+REAL_REA_REQUIRE:\s*(\S+)", self.reverse, re.MULTILINE), ["kuna,ghidra", "ghidra", "kuna"])
         self.assertIn("`REAL_REA_REQUIRE`", self.bullet)
 
     def test_each_recorder_is_shown_a_control_first(self):
