@@ -146,6 +146,14 @@ one starts from this file and `README.md`.
   portability findings in wf_bf302e55-0de (Windows path test, backend check D3, MCP name clash).
   Review runs still going: processes/network + tests (wf_0772ffdb-bab), lifecycle + owner
   (wf_16028e05-829). Disk guard now also removes superseded rlib/rmeta files (8.6 GB freed).
+- 06:55 UTC check: CI on 9e8de10 failed only on clippy 1.100's needless_range_loop in
+  crates/tools/src/symbols/find.rs (fixed; the installers were skipped, so the Intel Mac smoke
+  test had no disk image). A full clippy 1.100 run is going here before the next CI push.
+  Release-review fixes running: wf_97f1aa9f-152 (rea walk refusals, escaped names),
+  wf_bf302e55-0de (backend check D3, MCP name clash; Windows path test done), wf_57274b94-12f
+  (rea start stuck, Settings list scroll, Compare fit words, Tools panel rea note); review
+  run wf_0772ffdb-bab (processes/network + tests) verifying; header refix (wf_3b4d80b6-e9b)
+  and WP9e's check round (wf_59ddd95e-968) finishing.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
