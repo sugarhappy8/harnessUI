@@ -611,18 +611,25 @@ async fn peak_memory(root: PathBuf, stop: Arc<AtomicBool>, peak: Arc<AtomicU64>)
 }
 
 /// The larger program `REAL_REA_LARGE` names: `decompile` for the pack's own Ghidra
-/// decompiler (a C++ program of a few megabytes), or a program's absolute path.
+/// decompiler for this system (a C++ program of a few megabytes), or a program's absolute
+/// path.
 fn large_program(ghidra_dir: Option<&Path>) -> Option<PathBuf> {
     let wanted = std::env::var_os("REAL_REA_LARGE")?;
     if wanted == "decompile" {
         let os = ghidra_dir?.join("Ghidra/Features/Decompiler/os");
-        let found = std::fs::read_dir(&os)
+        let own = if cfg!(windows) {
+            "decompile.exe"
+        } else {
+            "decompile"
+        };
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&os)
             .into_iter()
             .flatten()
             .flatten()
             .map(|e| e.path())
-            .flat_map(|d| [d.join("decompile"), d.join("decompile.exe")])
-            .find(|p| p.is_file());
+            .collect();
+        dirs.sort();
+        let found = dirs.iter().map(|d| d.join(own)).find(|p| p.is_file());
         assert!(
             found.is_some(),
             "no decompile program under {}",
