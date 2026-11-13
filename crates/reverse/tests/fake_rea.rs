@@ -1479,12 +1479,22 @@ mod calls {
             if mode == "ask" {
                 // Approved in Ask first, Full access turned on before it ran: the same file,
                 // reached through the whole computer now, still runs.
-                let args = json!({"path": "hello-linux-x64"});
+                let args = json!({"path": p.canonical(&p.files, "hello-linux-x64")});
                 let approved = p
                     .action("inspect_native_exports", args.clone(), &chat)
                     .await;
+                let mut whole = p.chat(1, &[]);
+                whole.full_access = true;
+                whole.approved_folders = vec!["/".into()];
+                let now = p
+                    .action("inspect_native_exports", args.clone(), &whole)
+                    .await;
+                assert_ne!(
+                    approved.payload["target"]["root"], now.payload["target"]["root"],
+                    "the grant folder differs"
+                );
                 let out = p
-                    .call_with("inspect_native_exports", args, &approved, ctx(&p.full(1)))
+                    .call_with("inspect_native_exports", args, &approved, ctx(&whole))
                     .await;
                 assert!(!out.is_error, "{}", out.joined_text());
             }
