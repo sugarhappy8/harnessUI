@@ -461,6 +461,8 @@ const ALLOWED: &[&str] = &[
     settings::DEFAULT_SYSTEM_PROMPT,
     settings::REMOTE_CONTEXT_LENGTH,
     settings::STEPS_PER_TURN,
+    // [0.0.6] Closing the note about renamed MCP servers (only ever cleared this way).
+    crate::mcp_cmd::RENAMED_SERVERS,
 ];
 
 #[tauri::command]
@@ -470,6 +472,11 @@ pub async fn set_setting(
     value: serde_json::Value,
 ) -> AppResult<()> {
     if !ALLOWED.contains(&key.as_str()) {
+        return Err(AppError::bad_request(
+            "That setting cannot be changed this way.",
+        ));
+    }
+    if key == crate::mcp_cmd::RENAMED_SERVERS && value.as_array().is_none_or(|a| !a.is_empty()) {
         return Err(AppError::bad_request(
             "That setting cannot be changed this way.",
         ));
@@ -745,6 +752,7 @@ mod tests {
                 crate::settings::DEFAULT_SYSTEM_PROMPT,
                 crate::settings::REMOTE_CONTEXT_LENGTH,
                 crate::settings::STEPS_PER_TURN,
+                crate::mcp_cmd::RENAMED_SERVERS,
             ],
             "the list changed: model settings must stay off it"
         );

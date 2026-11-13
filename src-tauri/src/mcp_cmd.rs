@@ -424,6 +424,158 @@ fn secret_names(config: &Value) -> Vec<String> {
     out
 }
 
+/// [0.0.6] Setting: the owner's saved servers that were renamed at start because a new
+/// built-in server has their name. Settings → MCP says so once, until the owner closes
+/// the note (which clears it).
+pub const RENAMED_SERVERS: &str = "mcpRenamedServers";
+
+/// One saved server renamed at start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct RenamedServer {
+    /// The name it had.
+    pub from: String,
+    /// The name it has now.
+    pub to: String,
+}
+
+/// A free name for the owner's server whose name a built-in server now has:
+/// "<name> (yours)", then "<name> (yours 2)" and so on; never a taken name, and never one
+/// that would share secrets with another server ([`prefix_clash`]).
+fn free_name(name: &str, taken: &BTreeSet<String>) -> String {
+    (1u32..)
+        .map(|n| match n {
+            1 => format!("{name} (yours)"),
+            n => format!("{name} (yours {n})"),
+        })
+        .find(|c| !taken.contains(c) && prefix_clash(c, taken.iter().map(String::as_str)).is_none())
+        .unwrap_or_else(|| format!("{name} (yours)"))
+}
+
+/// The config with the server's own secrets (the ones saved under `from`'s prefix) named
+/// under `to`'s prefix instead, and each (old, new) secret name.
+fn moved_secrets(from: &str, to: &str, config: &Value) -> (Value, Vec<(String, String)>) {
+    let old_prefix = format!("{}.", secret_prefix(from));
+    let new_prefix = format!("{}.", secret_prefix(to));
+    let pairs: Vec<(String, String)> = own_secret_names(from, config)
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|old| {
+            let new = format!("{new_prefix}{}", &old[old_prefix.len()..]);
+            (old, new)
+        })
+        .collect();
+    fn walk(v: &mut Value, pairs: &[(String, String)]) {
+        match v {
+            Value::String(s) => {
+                for (old, new) in pairs {
+                    let (old, new) = (
+                        mcp_host::secrets::placeholder(old),
+                        mcp_host::secrets::placeholder(new),
+                    );
+                    if s.contains(&old) {
+                        *s = s.replace(&old, &new);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(|x| walk(x, pairs)),
+            Value::Object(o) => o.values_mut().for_each(|x| walk(x, pairs)),
+            _ => {}
+        }
+    }
+    let mut out = config.clone();
+    walk(&mut out, &pairs);
+    (out, pairs)
+}
+
+/// [0.0.6] Renames the owner's saved servers whose name a built-in server now has
+/// ("reverse" and "coding_apps" were free before 0.0.6), before the saved servers start.
+/// The row keeps its id, so its tool switches and its on/off switch stay; its secrets move
+/// to the new name. What was renamed is added to [`RENAMED_SERVERS`] for Settings → MCP.
+pub(crate) async fn rename_clashing_servers(
+    store: &store::Store,
+    secrets: &dyn store::secrets::SecretStore,
+    builtin: &BTreeSet<String>,
+) -> Vec<RenamedServer> {
+    let rows = match store.list_mcp_servers().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("could not read MCP servers to check their names: {e}");
+            return Vec::new();
+        }
+    };
+    let mut taken: BTreeSet<String> = rows
+        .iter()
+        .map(|r| r.name.clone())
+        .chain(builtin.iter().cloned())
+        .collect();
+    let mut renamed = Vec::new();
+    for row in rows.into_iter().filter(|r| builtin.contains(&r.name)) {
+        let to = free_name(&row.name, &taken);
+        let (moved, pairs) = moved_secrets(&row.name, &to, &row.config);
+        // Each secret is copied before the row changes; if one cannot be, the config keeps
+        // its old secret names (they still work) and nothing is deleted.
+        let mut copied: Vec<String> = Vec::new();
+        let mut all_copied = true;
+        for (old, new) in &pairs {
+            match secrets.get(&mcp_secret_key(old)) {
+                Ok(Some(value)) => {
+                    if secrets.set(&mcp_secret_key(new), &value).is_err() {
+                        all_copied = false;
+                        break;
+                    }
+                    copied.push(new.clone());
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    all_copied = false;
+                    break;
+                }
+            }
+        }
+        let undo = |copied: &[String]| {
+            for new in copied {
+                let _ = secrets.delete(&mcp_secret_key(new));
+            }
+        };
+        if !all_copied {
+            undo(&copied);
+        }
+        let config = if all_copied { moved } else { row.config.clone() };
+        match store.rename_mcp_server(row.id, to.clone(), config).await {
+            Ok(()) => {
+                if all_copied {
+                    for (old, _) in &pairs {
+                        let _ = secrets.delete(&mcp_secret_key(old));
+                    }
+                }
+                tracing::info!(from = %row.name, to = %to, "renamed a saved MCP server: a built-in server has its name");
+                taken.insert(to.clone());
+                renamed.push(RenamedServer { from: row.name, to });
+            }
+            Err(e) => {
+                tracing::warn!(server = %row.name, "could not rename a saved MCP server: {e}");
+                if all_copied {
+                    undo(&copied);
+                }
+            }
+        }
+    }
+    if !renamed.is_empty() {
+        let mut note: Vec<RenamedServer> = store
+            .get_setting(RENAMED_SERVERS)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        note.extend(renamed.iter().cloned());
+        if let Err(e) = store.set_setting(RENAMED_SERVERS, &note).await {
+            tracing::warn!("could not save the note about renamed MCP servers: {e}");
+        }
+    }
+    renamed
+}
+
 #[tauri::command]
 pub async fn list_mcp_servers(state: State<'_, AppState>) -> AppResult<Vec<McpServerDto>> {
     let stored = state.store.list_mcp_servers().await?;
@@ -642,24 +794,24 @@ pub async fn add_mcp_servers(
 
 #[tauri::command]
 pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> AppResult<()> {
-    if state
-        .host
-        .servers()
-        .iter()
-        .any(|s| s.name == name && s.kind == ServerKind::Builtin)
-    {
-        return Err(AppError::bad_request(
-            "Built-in tools cannot be removed; switch them off per chat instead.",
-        ));
-    }
-    let _ = state.host.remove(&name).await;
-    if let Some(row) = state
+    let row = state
         .store
         .list_mcp_servers()
         .await?
         .into_iter()
-        .find(|r| r.name == name)
-    {
+        .find(|r| r.name == name);
+    let builtin = state.host.server_kind(&name) == Some(ServerKind::Builtin);
+    if builtin && row.is_none() {
+        return Err(AppError::bad_request(
+            "Built-in tools cannot be removed; switch them off per chat instead.",
+        ));
+    }
+    // Only an outside server is stopped; a saved row that has a built-in server's name
+    // (from before that server existed) is removed from the list alone.
+    if !builtin {
+        let _ = state.host.remove(&name).await;
+    }
+    if let Some(row) = row {
         for secret in own_secret_names(&name, &row.config) {
             let _ = state.secrets.delete(&mcp_secret_key(&secret));
         }
@@ -689,6 +841,12 @@ pub async fn set_mcp_server_enabled(
             enabled,
         })
         .await?;
+    // Only an outside server is started or stopped: a saved row with a built-in server's
+    // name never touches the built-in one.
+    let builtin = state.host.server_kind(&name) == Some(ServerKind::Builtin);
+    if builtin {
+        return Ok(());
+    }
     if enabled {
         let cfg: ServerConfig = serde_json::from_value(row.config).map_err(AppError::internal)?;
         let host = state.host.clone();
@@ -1108,17 +1266,20 @@ pub(crate) async fn reverse_switched_on(state: &AppState, chat: &store::Chat) ->
         false,
         None,
     );
-    let stored = state.store.list_mcp_servers().await.unwrap_or_default();
-    let tools: Vec<(String, String, bool)> = state
-        .host
-        .tools()
+    reverse_group_on(&selection, &tools_with_kind(&state.host))
+}
+
+/// Each registered tool as (exposed name, server, built in). "Built in" is the server's
+/// slot in the host, never whether a saved server has that name.
+fn tools_with_kind(host: &mcp_host::Host) -> Vec<(String, String, bool)> {
+    let builtin = crate::tool_catalog::builtin_servers(host);
+    host.tools()
         .into_iter()
         .map(|t| {
-            let builtin = !stored.iter().any(|r| r.name == t.server);
-            (t.exposed, t.server, builtin)
+            let is_builtin = builtin.contains(&t.server);
+            (t.exposed, t.server, is_builtin)
         })
-        .collect();
-    reverse_group_on(&selection, &tools)
+        .collect()
 }
 
 /// Whether one of the built-in `reverse` server's tools (exposed name, server, built in) is
@@ -1135,10 +1296,11 @@ async fn tool_list(
     state: &AppState,
     selection: &Selection<'_>,
 ) -> Vec<(mcp_host::RegisteredTool, ToolDto)> {
-    let stored = state.store.list_mcp_servers().await.unwrap_or_default();
+    // Built in by the server's slot in the host (a saved row may have a built-in name).
+    let builtin_servers = crate::tool_catalog::builtin_servers(&state.host);
     let mut out = Vec::new();
     for t in state.host.tools() {
-        let builtin = !stored.iter().any(|r| r.name == t.server);
+        let builtin = builtin_servers.contains(&t.server);
         let (available, changed, allow_any_args, always_ask) = if builtin {
             // The skill tools are offered only while at least one skill is enabled.
             (
@@ -2180,5 +2342,203 @@ mod tests {
         let outside = vec![("open_binary".to_string(), reverse, false)];
         assert!(!reverse_group_on(&Selection::Chat(&own_on), &outside));
         assert!(!reverse_group_on(&Selection::Chat(&own_on), &[]));
+    }
+
+    /// [0.0.6] Data from 0.0.5: the owner saved servers called "reverse" and "coding_apps",
+    /// names the app's own servers now have. At start they get free names; each keeps its
+    /// row (so its tool switches and on/off switch) and its secrets, which move to the new
+    /// name; the note for Settings → MCP lists them; other servers are left alone, and a
+    /// second start changes nothing.
+    #[tokio::test]
+    async fn saved_servers_from_0_0_5_with_a_built_in_name_are_renamed() {
+        use store::secrets::SecretStore;
+        let store = store::Store::open_in_memory().expect("store");
+        let secrets = store::secrets::MemorySecretStore::new();
+        let reverse_config = json!({
+            "type": "http",
+            "url": "https://rev.example/mcp",
+            "headers": { "Authorization": "Bearer ${secret:reverse.Authorization}", "X-Other": "${secret:shared}" }
+        });
+        let reverse_id = store
+            .upsert_mcp_server(store::McpServerInput {
+                name: "reverse".into(),
+                config: reverse_config.clone(),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        store
+            .upsert_mcp_tool_pref(store::McpToolPref {
+                server_id: reverse_id,
+                tool_name: "lookup".into(),
+                enabled: true,
+                allow_any_args: false,
+                always_ask: true,
+                fingerprint: Some("fp".into()),
+            })
+            .await
+            .unwrap();
+        secrets
+            .set(&mcp_secret_key("reverse.Authorization"), "token-1")
+            .unwrap();
+        secrets.set(&mcp_secret_key("shared"), "keep").unwrap();
+        let apps_id = store
+            .upsert_mcp_server(store::McpServerInput {
+                name: "coding_apps".into(),
+                config: json!({ "type": "stdio", "command": "npx", "args": ["apps-mcp"] }),
+                enabled: false,
+            })
+            .await
+            .unwrap();
+        // The first free name is taken already.
+        store
+            .upsert_mcp_server(store::McpServerInput {
+                name: "coding_apps (yours)".into(),
+                config: json!({ "command": "uvx", "args": ["x"] }),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let fetch_id = store
+            .upsert_mcp_server(store::McpServerInput {
+                name: "fetch".into(),
+                config: json!({ "command": "uvx", "args": ["mcp-server-fetch"] }),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+
+        let host = crate::tool_catalog::tests::builtin_host();
+        let builtin = crate::tool_catalog::builtin_servers(&host);
+        assert!(builtin.contains("reverse") && builtin.contains("coding_apps"));
+        let renamed = rename_clashing_servers(&store, &secrets, &builtin).await;
+        assert_eq!(
+            renamed,
+            vec![
+                RenamedServer {
+                    from: "coding_apps".into(),
+                    to: "coding_apps (yours 2)".into()
+                },
+                RenamedServer {
+                    from: "reverse".into(),
+                    to: "reverse (yours)".into()
+                },
+            ]
+        );
+
+        let rev = store.get_mcp_server(reverse_id).await.unwrap().unwrap();
+        assert_eq!(rev.name, "reverse (yours)");
+        assert!(rev.enabled);
+        assert_eq!(
+            rev.config,
+            json!({
+                "type": "http",
+                "url": "https://rev.example/mcp",
+                "headers": { "Authorization": "Bearer ${secret:reverse__yours_.Authorization}", "X-Other": "${secret:shared}" }
+            })
+        );
+        assert!(serde_json::from_value::<ServerConfig>(rev.config.clone()).is_ok());
+        assert_eq!(
+            secrets
+                .get(&mcp_secret_key("reverse__yours_.Authorization"))
+                .unwrap()
+                .as_deref(),
+            Some("token-1")
+        );
+        assert_eq!(
+            secrets
+                .get(&mcp_secret_key("reverse.Authorization"))
+                .unwrap(),
+            None,
+            "the old secret name is gone"
+        );
+        assert_eq!(
+            secrets.get(&mcp_secret_key("shared")).unwrap().as_deref(),
+            Some("keep"),
+            "a secret the server does not own is left alone"
+        );
+        assert_eq!(
+            own_secret_names(&rev.name, &rev.config),
+            vec!["reverse__yours_.Authorization".to_string()],
+            "removing it later deletes its secret"
+        );
+        let prefs = store.mcp_tool_prefs(reverse_id).await.unwrap();
+        assert_eq!(prefs.len(), 1);
+        assert!(prefs[0].always_ask && prefs[0].enabled);
+        let apps = store.get_mcp_server(apps_id).await.unwrap().unwrap();
+        assert_eq!(apps.name, "coding_apps (yours 2)");
+        assert!(!apps.enabled);
+        assert_eq!(
+            store.get_mcp_server(fetch_id).await.unwrap().unwrap().name,
+            "fetch"
+        );
+        let note: Vec<RenamedServer> = store.get_setting(RENAMED_SERVERS).await.unwrap().unwrap();
+        assert_eq!(note, renamed);
+
+        // A second start renames nothing and keeps the note as it is.
+        assert!(
+            rename_clashing_servers(&store, &secrets, &builtin)
+                .await
+                .is_empty()
+        );
+        let note: Vec<RenamedServer> = store.get_setting(RENAMED_SERVERS).await.unwrap().unwrap();
+        assert_eq!(note.len(), 2);
+        // No saved name is a built-in name any more.
+        let names: BTreeSet<String> = store
+            .list_mcp_servers()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert!(names.is_disjoint(&builtin), "{names:?}");
+    }
+
+    /// A free name is never taken and never shares secrets with another server.
+    #[test]
+    fn a_free_name_is_not_taken_and_shares_no_secrets() {
+        let taken = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        assert_eq!(free_name("reverse", &taken(&["reverse"])), "reverse (yours)");
+        assert_eq!(
+            free_name("reverse", &taken(&["reverse", "reverse (yours)"])),
+            "reverse (yours 2)"
+        );
+        // "reverse__yours_" has the same secret prefix as "reverse (yours)".
+        assert_eq!(
+            free_name("reverse", &taken(&["reverse", "reverse__yours_"])),
+            "reverse (yours 2)"
+        );
+    }
+
+    /// [0.0.6] Whether a tool is built in comes from its server's slot in the host, so the
+    /// built-in `reverse` group counts even if a saved server once had that name; the
+    /// Tools list and the group check never decide it from saved names.
+    #[test]
+    fn built_in_comes_from_the_host_not_from_saved_names() {
+        let host = crate::tool_catalog::tests::builtin_host();
+        let tools = tools_with_kind(&host);
+        assert!(
+            tools
+                .iter()
+                .filter(|(_, server, _)| server == reverse::server::SERVER_NAME
+                    || server == crate::outside_agent::SERVER_NAME)
+                .all(|(_, _, builtin)| *builtin)
+        );
+        assert!(tools.iter().all(|(_, _, builtin)| *builtin));
+        let on = names(&["read_file", "open_binary"]);
+        assert!(reverse_group_on(&Selection::Chat(&on), &tools));
+
+        let source = include_str!("mcp_cmd.rs");
+        for start in ["async fn tool_list(", "async fn reverse_switched_on("] {
+            let body = source
+                .split(start)
+                .nth(1)
+                .expect(start)
+                .split("\n}\n")
+                .next()
+                .unwrap();
+            assert!(body.contains("builtin_servers") || body.contains("tools_with_kind("), "{start}");
+            assert!(!body.contains("list_mcp_servers"), "{start} decides from saved names");
+        }
     }
 }

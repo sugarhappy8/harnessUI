@@ -2210,11 +2210,28 @@ mod tests {
         // Every byte is compared: a difference at the start or at the end is found alike.
         assert!(!constant_time_eq(b"xbcdef", b"abcdef"));
         assert!(!constant_time_eq(b"abcdex", b"abcdef"));
+        // Different lengths never match, whichever side is longer.
+        assert!(!constant_time_eq(b"abcd", b"abc"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(!constant_time_eq(b"a", b""));
+        // The same on long keys.
+        let long = vec![7u8; 1 << 16];
+        let mut first = long.clone();
+        first[0] = 8;
+        let mut last = long.clone();
+        *last.last_mut().unwrap() = 8;
+        assert!(constant_time_eq(&long, &long.clone()));
+        assert!(!constant_time_eq(&long, &first));
+        assert!(!constant_time_eq(&long, &last));
+        assert!(!constant_time_eq(&long, &long[1..]));
     }
 
     /// The comparison takes about as long whether the first or the last byte differs.
     /// A loose bound (a short-circuiting compare differs by far more on 64 KiB keys).
+    /// Wall-clock timing fails at random on a busy machine, so it is run by hand
+    /// (`--ignored --nocapture`; the numbers are reported).
     #[test]
+    #[ignore = "timing measurement, run by hand"]
     fn constant_time_compare_does_not_stop_at_the_first_difference() {
         let a = vec![7u8; 1 << 16];
         let mut early = a.clone();

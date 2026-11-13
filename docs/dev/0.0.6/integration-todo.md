@@ -127,3 +127,17 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   `HOLDS_APP_FOLDERS` are fixed sentences now; the entry's path is only on the card's preview
   and in the audit row (`WalkRefusal::detail`). Tests in `crates/reverse/src/describe/tests.rs`
   and the `reverse-describe` probe; item5-spec section 6 and ARCHITECTURE 13.9 updated.
+
+- **Final fix round (07:15 UTC).** Release review processes/network + tests (wf_0772ffdb-bab)
+  confirmed 4 minors (scratchpad rr-2.json). The throwaway `crates/reverse/tests/zz_review_wp9c_sec.rs`
+  (hidden by .git/info/exclude, failing locally) is deleted; remove the `zz_review_*` /
+  `zz_check_*` / `*_review_tmp*` exclude lines at the final pass and check `git status`.
+  Every remaining minor goes through v006-final-fixes (fix, review, refix of all findings, check):
+  batch a wf_bfaa840a-6b8: share-key-handoff, proxy-timing-flake, windows-locate-tests,
+  webp-proxy-minors, unreadable-link-target; batch b wf_55eeb8d4-8e0: pick-cancel-minors,
+  helper-escape-minors, mentions-share-docs, wp9d-part-update, rea-name-words.
+  Lead decision (share-key-handoff): when a coding app is set up to use harnessUI's sharing,
+  the hand-off checks that sharing is on and listening (else a plain refusal) and passes the
+  child exactly one extra variable, harnessUI's own sharing key, under the name its own setup
+  uses; every other secret variable stays stripped. The key only goes to a program whose
+  configuration points at the live local sharing address.
