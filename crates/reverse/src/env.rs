@@ -549,6 +549,25 @@ mod tests {
         }
     }
 
+    /// Fixture paths are built one part at a time, as the installer builds them: on Windows
+    /// a `join` of a text holding '/' keeps that '/' next to the '\' of `push`, and the
+    /// golden test above compares `args` and the variables as text, so it would fail there
+    /// only.
+    #[test]
+    fn fixture_paths_are_built_one_part_at_a_time() {
+        let source = include_str!("env.rs");
+        let tests = &source[source.find("mod tests {").expect("the tests")..];
+        let needle = concat!(".join", "(\"");
+        for line in tests.lines().filter(|l| !l.trim_start().starts_with("//")) {
+            let mut rest = line;
+            while let Some(at) = rest.find(needle) {
+                rest = &rest[at + needle.len()..];
+                let literal = rest.split('"').next().unwrap_or_default();
+                assert!(!literal.contains('/'), "{}", line.trim());
+            }
+        }
+    }
+
     #[test]
     fn the_first_start_after_an_install_may_take_180_seconds() {
         assert_eq!(

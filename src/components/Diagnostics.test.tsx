@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ModelBusy, RuntimeStatus } from "../lib/types";
+import type { DiagnosticsReport, ModelBusy, RuntimeStatus } from "../lib/types";
 
 const ipcMock = vi.hoisted(() => ({
   isTauri: () => false,
   modelBusy: vi.fn<() => Promise<ModelBusy>>(),
-  runDiagnostics: vi.fn<(modelPath: string | null, whenIdle: boolean) => Promise<{ text: string; savedTo: string | null }>>(
-    async () => ({ text: "the report", savedTo: null }),
-  ),
+  runDiagnostics: vi.fn<(modelPath: string | null, whenIdle: boolean) => Promise<DiagnosticsReport | null>>(async () => ({
+    text: "the report",
+    savedTo: null,
+  })),
   openLogsFolder: vi.fn(async () => undefined),
 }));
 vi.mock("../lib/ipc", () => ipcMock);
@@ -87,20 +88,20 @@ describe("Settings, Diagnostics: the backend check asks first when the model is 
     render(<Diagnostics />);
     await runAndAnswer(null);
     expect(ipcMock.runDiagnostics).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Run backend check" })).toBeEnabled();
+    expect((screen.getByRole("button", { name: "Run backend check" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("Restart when it ends waits for the reply, with the waiting line meanwhile", async () => {
     ipcMock.modelBusy.mockResolvedValue(REPLY);
-    let finish: (r: { text: string; savedTo: string | null }) => void = () => undefined;
+    let finish: (r: DiagnosticsReport) => void = () => undefined;
     ipcMock.runDiagnostics.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
     render(<Diagnostics />);
     await runAndAnswer("Restart when it ends");
     expect(ipcMock.runDiagnostics).toHaveBeenCalledWith("/m/a.gguf", true);
     expect(change.useWaiting.getState().change).toBe("reload");
-    expect(screen.getByRole("button", { name: /Running/ })).toBeDisabled();
+    expect((screen.getByRole("button", { name: /Running/ }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => finish({ text: "the report", savedTo: null }));
-    expect(screen.getByText("the report")).toBeInTheDocument();
+    expect(screen.getByText("the report")).toBeTruthy();
     expect(change.useWaiting.getState().change).toBeNull();
   });
 
@@ -109,24 +110,25 @@ describe("Settings, Diagnostics: the backend check asks first when the model is 
     render(<Diagnostics />);
     await runAndAnswer("Stop and restart");
     expect(ipcMock.runDiagnostics).toHaveBeenCalledWith("/m/a.gguf", false);
-    expect(await screen.findByText("the report")).toBeInTheDocument();
+    expect(await screen.findByText("the report")).toBeTruthy();
   });
 
   it("a wait cancelled from the waiting line shows no error", async () => {
     ipcMock.modelBusy.mockResolvedValue(REPLY);
-    ipcMock.runDiagnostics.mockRejectedValueOnce({ code: "load_replaced", message: "", hint: "", details: "" });
+    // The waiting call ended with `load_replaced`, which the wrapper turns into null.
+    ipcMock.runDiagnostics.mockResolvedValueOnce(null);
     render(<Diagnostics />);
     await runAndAnswer("Restart when it ends");
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByText("the report")).toBeNull();
-    expect(screen.getByRole("button", { name: "Run backend check" })).toBeEnabled();
+    expect((screen.getByRole("button", { name: "Run backend check" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("with nothing using the model it runs at once, as before", async () => {
     ipcMock.modelBusy.mockResolvedValue(IDLE);
     render(<Diagnostics />);
     fireEvent.click(screen.getByRole("button", { name: "Run backend check" }));
-    expect(await screen.findByText("the report")).toBeInTheDocument();
+    expect(await screen.findByText("the report")).toBeTruthy();
     expect(change.useQuestion.getState().question).toBeNull();
     // Waits rather than stops: something that starts to use the model after the check of
     // the counts is waited for, never stopped unasked.
@@ -137,7 +139,7 @@ describe("Settings, Diagnostics: the backend check asks first when the model is 
     useApp.setState({ runtime: runtime("stopped", null) });
     render(<Diagnostics />);
     fireEvent.click(screen.getByRole("button", { name: "Run backend check" }));
-    expect(await screen.findByText("the report")).toBeInTheDocument();
+    expect(await screen.findByText("the report")).toBeTruthy();
     expect(ipcMock.modelBusy).not.toHaveBeenCalled();
     expect(ipcMock.runDiagnostics).toHaveBeenCalledWith(null, true);
   });

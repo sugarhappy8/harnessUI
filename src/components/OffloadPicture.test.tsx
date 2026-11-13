@@ -140,6 +140,6 @@ describe("OffloadPicture: where the model goes, before it loads", () => {
     expect(text()).toContain("Graphics card · Card\\u{202E}evil\\u{200B} · 16 GB");
     const bar = document.querySelector('[data-bar="graphics"] [role="img"]') as HTMLElement;
     expect(bar.getAttribute("aria-label")).toMatch(/^Graphics card · Card\\u\{202E\}evil\\u\{200B\} · 16 GB: /);
-    expect(document.body.innerHTML).not.toMatch(/[\u202E\u200B]/);
+    expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
   });
 });

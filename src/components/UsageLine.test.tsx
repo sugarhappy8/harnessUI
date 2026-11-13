@@ -280,6 +280,6 @@ describe("UsageLine: this computer's usage under the model name", () => {
     await show(now);
     await openMenu();
     expect(menu()).toContain("Graphics card · Card\\u{202E}evil");
-    expect(document.body.innerHTML).not.toContain("\u202E");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("\u202E");
   });
 });

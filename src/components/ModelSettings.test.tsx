@@ -559,7 +559,7 @@ describe("ModelSettings: one model's load settings in plain words", () => {
       "Card\\u{202E}evil · 2 GB",
       "Other\\u{200B} · 16 GB (recommended)",
     ]);
-    expect(document.body.innerHTML).not.toMatch(/[‮​]/);
+    expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
     // The stored path is untouched: Save sends the file's own path.
     await choose("Which graphics card", "named:Vulkan0");
     await click("Save");

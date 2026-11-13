@@ -329,7 +329,7 @@ describe("Models → Installed", () => {
     expect(screen.getByRole("button", { name: "Add to comparison: X-\\u{202E}fuug.Q4_K_M.gguf" })).toBeTruthy();
     await click(screen.getByRole("button", { name: "Delete X-\\u{202E}fuug.Q4_K_M.gguf" }));
     expect(confirm).toHaveBeenCalledWith("Delete X-\\u{202E}fuug.Q4_K_M.gguf? This removes 1.0 GB from disk.");
-    expect(document.body.innerHTML).not.toContain("‮");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("‮");
     confirm.mockRestore();
   });
 });

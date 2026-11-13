@@ -14,6 +14,7 @@ import type {
 } from "../lib/types";
 import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
+import { askBeforeChange, backendWhenIdle, runChange } from "../store/modelChange";
 import { ErrorBanner } from "./ErrorBanner";
 import { AuditLogView, PermissionsSettings } from "./PermissionsSettings";
 import { McpSettings } from "./McpSettings";
@@ -27,7 +28,7 @@ import { ModelCheck } from "./evals/ModelCheck";
 import { LocalModels } from "./settings/LocalModels";
 import { OtherApps } from "./settings/OtherApps";
 import { Reverse } from "./settings/Reverse";
-import type { ErrorInfo } from "../lib/types";
+import type { DiagnosticsReport, ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
   { value: "system", label: "System" },
@@ -709,10 +710,21 @@ export function Diagnostics() {
   const runtime = useApp((s) => s.runtime);
 
   async function run() {
-    setBusy(true);
     setError(null);
+    // The timed generation replaces the loaded model: a reply, a model check or another
+    // app's request using it is asked about first, the same as Reload (D3). Cancel runs
+    // nothing; "Restart when it ends" waits, with the waiting line and its Cancel.
+    const answer = await askBeforeChange(runtime);
+    if (!answer) return;
+    setBusy(true);
     try {
-      const r = await ipc.runDiagnostics(runtime?.modelPath ?? null);
+      let r = null as DiagnosticsReport | null;
+      await runChange("reload", answer.whenIdle, async () => {
+        r = await ipc.runDiagnostics(runtime?.modelPath ?? null, backendWhenIdle(answer));
+        return r !== null;
+      });
+      // null: the wait for the model was cancelled, which is not an error.
+      if (r === null) return;
       setReport(r.text);
       setSavedTo(r.savedTo);
     } catch (err) {

@@ -562,7 +562,7 @@ describe("ToolsPanel: the Coding apps group (0.0.6)", () => {
     expect(path.tagName).toBe("BDI");
     expect(path.getAttribute("dir")).toBe("ltr");
     expect(screen.getByText("2.1\\u{202E}")).toBeTruthy();
-    expect(document.body.innerHTML).not.toMatch(/[‮​]/);
+    expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
   });
 });
 

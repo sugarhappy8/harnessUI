@@ -38,6 +38,6 @@ describe("Models → Downloads", () => {
     const name = screen.getByText("someone/\\u{202E}evil-GGUF · X-\\u{202E}fuug.Q4_K_M.gguf");
     expect(name.tagName).toBe("BDI");
     expect(name.getAttribute("dir")).toBe("ltr");
-    expect(document.body.innerHTML).not.toContain("‮");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("‮");
   });
 });

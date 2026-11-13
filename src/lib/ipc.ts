@@ -167,8 +167,20 @@ export const getLocalModelSettings = () =>
   invoke<LocalModelSettings>("get_local_model_settings");
 export const setLocalModelSettings = (settings: LocalModelSettings) =>
   invoke<void>("set_local_model_settings", { settings });
-export const runDiagnostics = (modelPath: string | null) =>
-  invoke<DiagnosticsReport>("run_diagnostics", { modelPath });
+/**
+ * The backend check. `whenIdle` (D3) is the answer to the question, as for Reload: its timed
+ * generation replaces the loaded model. Resolves to null when it waited for the model to be
+ * free and that wait was cancelled or replaced.
+ */
+export async function runDiagnostics(modelPath: string | null, whenIdle: boolean): Promise<DiagnosticsReport | null> {
+  let report: DiagnosticsReport | null = null;
+  const done = await unlessReplaced(
+    invoke<DiagnosticsReport>("run_diagnostics", { modelPath, whenIdle }).then((r) => {
+      report = r;
+    }),
+  );
+  return done ? report : null;
+}
 export const openLogsFolder = () => invoke<void>("open_logs_folder");
 
 // 0.0.5: one model's load settings, reload and what is using the model (WP1b; stubs
