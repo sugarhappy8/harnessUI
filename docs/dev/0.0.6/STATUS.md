@@ -186,6 +186,11 @@ one starts from this file and `README.md`.
   base); Windows fixes: three done, managed_e2e stack overflow in review. Final pass still
   running (Rust and scripted e2e; frontend and milestone e2e); completeness check done
   (owner-checklist.md). Next: one push without [skip ci] for CI on all three systems.
+- 12:20 UTC: owner asked to finish. Local final-pass runs stopped (CI is the gate: Linux
+  passed in full on 4c850e7; every fix had its own tests and checks; the completeness check
+  and owner checklist were done). Windows and macOS fixes pushed in fb7f905; CI run
+  43422225789 running. PR #5 description updated. When CI is green: hand the owner the
+  checklist and the catalog quotes; delete the hourly save task.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
