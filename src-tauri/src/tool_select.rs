@@ -566,7 +566,8 @@ fn group_score(
 ) -> u32 {
     let builtin = members.iter().all(|t| t.builtin);
     let own = words_of(server);
-    let mut score = match tool_catalog::group(server).filter(|_| builtin) {
+    let catalog = tool_catalog::group(server).filter(|_| builtin);
+    let mut score = match catalog {
         Some(group) => {
             let mut score = STRONG * wording.count(group.strong) + WEAK * wording.count(group.weak);
             if server == "skills" {
@@ -596,18 +597,21 @@ fn group_score(
             }
         }
     };
-    // The words of the tools' names, for the tool the request points at most.
-    score += members
-        .iter()
-        .map(|tool| {
-            STRONG
-                * name_words(tool, &own)
-                    .iter()
-                    .filter(|w| !is_common(w) && wording.has_form_of(w))
-                    .count() as u32
-        })
-        .max()
-        .unwrap_or(0);
+    // The words of the tools' names, for the tool the request points at most; not for a
+    // built-in group that matches by its listed words only (rea's, `OWN_WORDS_ONLY`).
+    if catalog.is_none_or(|group| group.counts_tool_names()) {
+        score += members
+            .iter()
+            .map(|tool| {
+                STRONG
+                    * name_words(tool, &own)
+                        .iter()
+                        .filter(|w| !is_common(w) && wording.has_form_of(w))
+                        .count() as u32
+            })
+            .max()
+            .unwrap_or(0);
+    }
     score
 }
 

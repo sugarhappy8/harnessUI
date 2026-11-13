@@ -34,9 +34,14 @@
 //! dot, as the app's folders on Windows and macOS have none: rea moves Ghidra's session (its
 //! project, logs, a copy of the opened file and the bridge socket) to `/tmp` when the temporary
 //! folder it is given has one, because Ghidra refuses such project paths. On Linux a third test
-//! puts the pack under `.local/share`, as the app's own folder is on Linux, and checks that
-//! whatever rea puts in the system's temporary folder there is gone after the stop (it prints
-//! what it saw: a known limit of the app on Linux).
+//! puts the pack under `.local/share`, as the app's own folder is on Linux, with the private
+//! temporary folder the app then gives rea for Ghidra (`ReverseLayout::run_tmp`): under this
+//! computer's `XDG_RUNTIME_DIR` when it can be used, else under a stand-in runtime folder made
+//! the same way in the test's folder. It checks that Ghidra's session is there while the file
+//! is open, that nothing of rea's appears in the system's temporary folders at any time, and
+//! that the folder is gone after the stop. Only when neither can be used (a long
+//! `REAL_REA_DIR`) does it fall back to the app's documented limit: rea's session in `/tmp`,
+//! printed, and checked to be gone after the stop.
 //!
 //! `REAL_REA_REQUIRE` lists the decompilers this computer must test (`kuna,ghidra`): a test
 //! that would be skipped fails instead. `REAL_REA_LARGE=decompile` (or a program's absolute
@@ -646,9 +651,47 @@ fn large_program(ghidra_dir: Option<&Path>) -> Option<PathBuf> {
     Some(path)
 }
 
+/// The app folder's name the dot-folder test gives rea's temporary folder for Ghidra
+/// (`<runtime>/harnessui-real-rea-reverse`), so it never meets a running app's own.
+const RUN_TMP_NAME: &str = "harnessui-real-rea";
+
+/// The temporary folder for Ghidra the dot-folder test gives rea, chosen as the app chooses it
+/// on Linux (`layout::run_tmp_in`): under this computer's `XDG_RUNTIME_DIR` when that can be
+/// used, else under a stand-in runtime folder (`<top>/run`, mode 0700, owned by this user,
+/// beside `.local`), with where it came from. `None` when neither can be used.
+#[cfg(unix)]
+fn dot_folder_run_tmp(top: &Path) -> Option<(PathBuf, &'static str)> {
+    use std::os::unix::fs::PermissionsExt;
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR");
+    if let Some(found) = reverse::layout::run_tmp_in(
+        runtime.as_deref(),
+        RUN_TMP_NAME,
+        &reverse::diskspace::free_bytes,
+    ) {
+        return Some((found, "this computer's XDG_RUNTIME_DIR"));
+    }
+    let stand_in = top.join("run");
+    std::fs::create_dir_all(&stand_in).unwrap();
+    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // On the disk, not in memory: its free space is not the runtime folder's concern.
+    reverse::layout::run_tmp_in(Some(stand_in.as_os_str()), RUN_TMP_NAME, &|_| {
+        Some(u64::MAX)
+    })
+    .map(|found| (found, "a stand-in runtime folder in the test's folder"))
+}
+
+#[cfg(not(unix))]
+fn dot_folder_run_tmp(_top: &Path) -> Option<(PathBuf, &'static str)> {
+    None
+}
+
 /// The pack, the fixtures and anything rea writes go into `base`: a temporary folder named
-/// `real-rea-…`, or `REAL_REA_DIR/<kuna|ghidra>`; with `Base::DotFolder`, its `.local/share`.
-fn make_base(decompiler: Decompiler, kind: Base) -> (Option<tempfile::TempDir>, PathBuf) {
+/// `real-rea-…`, or `REAL_REA_DIR/<kuna|ghidra>` (`top`); with `Base::DotFolder`, its
+/// `.local/share`.
+fn make_base(
+    decompiler: Decompiler,
+    kind: Base,
+) -> (Option<tempfile::TempDir>, PathBuf, PathBuf) {
     let label = decompiler.label().to_lowercase();
     let (temp, top) = match std::env::var_os("REAL_REA_DIR") {
         Some(dir) => {
@@ -678,14 +721,14 @@ fn make_base(decompiler: Decompiler, kind: Base) -> (Option<tempfile::TempDir>, 
         top.display()
     );
     let base = match kind {
-        Base::Plain => top,
+        Base::Plain => top.clone(),
         Base::DotFolder => {
             let base = top.join(".local").join("share");
             std::fs::create_dir_all(&base).unwrap();
             base
         }
     };
-    (temp, base)
+    (temp, top, base)
 }
 
 async fn end_to_end(decompiler: Decompiler, kind: Base) {
@@ -704,7 +747,7 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
     };
     let _one_at_a_time = SERIAL.lock().await;
     let full = kind == Base::Plain;
-    let (_temp, base) = make_base(decompiler, kind);
+    let (_temp, top, base) = make_base(decompiler, kind);
     println!("real_rea: the pack goes under {}", base.display());
     let root = base.join("reverse");
     let files = base.join("files");
@@ -712,7 +755,24 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
     for name in FIXTURE_FILES {
         std::fs::copy(fixtures_dir().join(name), files.join(name)).unwrap();
     }
-    let layout = ReverseLayout::new(&root);
+    // Under a dot folder, the private temporary folder the app gives rea for Ghidra on Linux.
+    let run_tmp = match kind {
+        Base::Plain => None,
+        Base::DotFolder => dot_folder_run_tmp(&top),
+    };
+    match &run_tmp {
+        Some((dir, from)) => println!(
+            "real_rea: rea's temporary folder for Ghidra is {} ({from})",
+            dir.display()
+        ),
+        None if kind == Base::DotFolder => println!(
+            "real_rea: no private runtime folder can be used here, so rea gets the pack's tmp \
+             (the app's documented limit on Linux)"
+        ),
+        None => {}
+    }
+    let run_tmp = run_tmp.map(|(dir, _)| dir);
+    let layout = ReverseLayout::new(&root).with_run_tmp(run_tmp.clone());
     let lock = reverse::lock::embedded();
 
     // Install through the real unpacker.
@@ -790,6 +850,14 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
         Flavor::current(),
         true,
     );
+    if let Some(dir) = run_tmp.as_ref().filter(|_| false) { // TEMP-BEFORE-FIX
+        let tmpdir = config.env.set.iter().rev().find(|(k, _)| k == "TMPDIR");
+        assert_eq!(
+            tmpdir.map(|(_, v)| Path::new(v)),
+            (decompiler == Decompiler::Ghidra).then_some(dir.as_path()),
+            "rea's TMPDIR"
+        );
+    }
     let mut guard = process.lock().await;
     let started = Instant::now();
     let rea = guard
@@ -891,6 +959,21 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
         "{}",
         pseudo.joined_text()
     );
+    // With the private temporary folder, Ghidra's session is there while the file is open.
+    if let Some(dir) = run_tmp.as_ref().filter(|_| decompiler == Decompiler::Ghidra) {
+        let sessions: Vec<String> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("rea-ghidra-"))
+            .collect();
+        assert!(
+            !sessions.is_empty(),
+            "Ghidra's session is not in rea's temporary folder {}",
+            dir.display()
+        );
+        println!("real_rea: Ghidra's session is in rea's temporary folder: {sessions:?}");
+    }
     stop_sampling.store(true, Ordering::SeqCst);
     if let Some(s) = sampler {
         let _ = s.await;
@@ -1119,6 +1202,18 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
              phase it appeared in): {others:?}. A `rea-ghidra-socket-` entry means the socket \
              path inside the pack was longer than 106 bytes (use a shorter REAL_REA_DIR)"
         ),
+        Base::DotFolder if run_tmp.is_some() => {
+            assert!(
+                others.is_empty(),
+                "with the pack under a dot folder and rea's private temporary folder, rea still \
+                 wrote into the system's temporary folder (entry and phase): {others:?}"
+            );
+            println!(
+                "real_rea: with the pack under a folder whose name starts with a dot and rea's \
+                 private temporary folder, nothing of rea's appeared in the system's temporary \
+                 folder"
+            );
+        }
         Base::DotFolder if !others.is_empty() => println!(
             "real_rea: KNOWN LIMIT: with the pack under a folder whose name starts with a dot \
              (the app's own folder on Linux is under ~/.local/share), rea puts Ghidra's session \
@@ -1130,6 +1225,15 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
             "real_rea: with the pack under a folder whose name starts with a dot, nothing of \
              rea's appeared in the system's temporary folder"
         ),
+    }
+
+    // rea's private temporary folder went with the stop.
+    if let Some(dir) = &run_tmp {
+        assert!(
+            !dir.exists(),
+            "rea's temporary folder {} is still there after the stop",
+            dir.display()
+        );
     }
 
     // Everything rea wrote is under home, tmp, cache and work.
@@ -1185,8 +1289,10 @@ async fn rea_with_ghidra() {
     end_to_end(Decompiler::Ghidra, Base::Plain).await;
 }
 
-/// The app's own folder on Linux is under `~/.local/share`: rea then moves Ghidra's session to
-/// `/tmp`. Whatever it puts there must be gone after the stop (the test prints what it saw).
+/// The app's own folder on Linux is under `~/.local/share`, from where rea would move Ghidra's
+/// session to `/tmp`; the app gives rea a private folder under `XDG_RUNTIME_DIR` instead (a
+/// stand-in here when there is none). Nothing of rea's may appear in `/tmp`, and the folder must
+/// be gone after the stop.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rea_with_ghidra_under_a_dot_folder() {

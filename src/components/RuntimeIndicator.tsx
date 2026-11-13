@@ -108,7 +108,7 @@ const MENU_ITEM =
   "flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted";
 
 /**
- * The local model's state in the chat header (0.0.5 D1, D3, D4): loading in plain words,
+ * The local model's state in the chat header (0.0.6 D1, D3, D4): loading in plain words,
  * the ready line with a menu (Reload, Model settings…, Unload to free memory), the slow
  * states and step-downs as visible text with one action, and the D3 waiting line. It also
  * hosts the model settings panel and the D3 question for the whole chat window.

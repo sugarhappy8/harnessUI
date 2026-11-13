@@ -1244,8 +1244,13 @@ fn installed_answers_follow_the_one_verdict() {
         card(7_700_000_000),
         fixed(CTX, GpuChoice::Default),
     );
-    let (fit, _) = check(&plain);
+    let (fit, info) = check(&plain);
     assert_eq!(fit.device, FitDevice::GraphicsCard);
+    // It fits the card's free memory, not with the spare: only just, as the picture says,
+    // not part of it on the processor.
+    assert_eq!(fit.verdict, Verdict::Yellow);
+    assert_eq!(info.picture.fits, Fits::Tight);
+    assert!(!fit.partial_offload && fit.needed_bytes <= fit.available_bytes);
 
     let unreadable = ModelFacts {
         header: None,

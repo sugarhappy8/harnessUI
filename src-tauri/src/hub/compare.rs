@@ -776,10 +776,16 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
             let partial = matches!(fits, Fits::Partial | Fits::WontFitGraphics);
             (verdict, partial, needed)
         }
-        // The picture without the model's sizes: everything on the device that holds it.
+        // The picture without the model's sizes (`offload::not_readable`): everything on the
+        // device that holds it; yellow is part on the processor with As much as fits or when
+        // it is larger than the free memory, else only just fitting.
         None => {
             let verdict = mark(tokens);
-            (verdict, verdict == Verdict::Yellow, input.needed_at(tokens))
+            let needed = input.needed_at(tokens);
+            let fit_choice = gpu == runtime::GpuUse::Fit && !fine.custom_placement();
+            let partial =
+                verdict == Verdict::Yellow && (fit_choice || needed > machine.room(gpu).whole);
+            (verdict, partial, needed)
         }
     };
     let suggested_ctx = if verdict == Verdict::Green {

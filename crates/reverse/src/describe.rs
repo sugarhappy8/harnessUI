@@ -98,6 +98,10 @@ pub mod messages {
     pub const WANTS_FOLDER: &str = "Give the path of the app's folder, not a file: ";
     /// (WP9c) A file that cannot be read (the path follows, then a full stop).
     pub const UNREADABLE_FILE: &str = "rea can't read that file: ";
+    /// (0.0.6) After the path in a message before approval, when the path is a link or goes
+    /// through one. The path is always the one the model gave; where a link leads is never
+    /// named there (13.9), only on the card's preview of a refusal.
+    pub const THROUGH_LINK: &str = " (through a link)";
     /// (WP9c) A result id whose file left the chat's folders.
     pub const EVIDENCE_GONE: &str =
         "That result came from a file that is no longer in this chat's folders.";
@@ -400,9 +404,45 @@ impl Cx<'_, '_> {
         self.denied_in_folder(path, why, None)
     }
 
-    /// A refusal of a folder for something inside it. `why` (the model's note) names
-    /// nothing inside the folder (13.9); `detail`, which names the entry, goes only on the
-    /// card's preview, and so into the audit row.
+    /// A message before approval about the path the model gave: `start`, the path as the
+    /// model wrote it (made absolute by its text, `written`) and a full stop. It never names
+    /// where the path's links lead (13.9): whoever made a link chose that name, and the model
+    /// reads this as the app's own note. When the path leads somewhere else, a fixed phrase
+    /// ([`m::THROUGH_LINK`]) says so.
+    fn said(
+        &self,
+        start: &str,
+        written: &str,
+        checked: &CheckedPath,
+        sandbox: &PathSandbox,
+    ) -> String {
+        let case = sandbox
+            .roots()
+            .get(checked.root)
+            .map_or_else(|| policy::path::default_case(self.flavor), |r| r.case);
+        let same = match (
+            policy::path::lexical(written, None, self.flavor),
+            policy::path::lexical(&checked.canonical, None, self.flavor),
+        ) {
+            (Ok(a), Ok(b)) => {
+                a.components.len() == b.components.len() && policy::path::is_within(&a, &b, case)
+            }
+            _ => written == checked.canonical,
+        };
+        let link = if same { "" } else { m::THROUGH_LINK };
+        format!("{start}{}{link}.", shown(written))
+    }
+
+    /// For the card's preview of a refusal of the path the model gave: where it leads, when
+    /// that is spelled differently.
+    fn leads_to(written: &str, canonical: &str) -> Option<String> {
+        (written != canonical).then(|| format!("That path leads to {}.", shown(canonical)))
+    }
+
+    /// A refusal of a folder for something inside it, or of a path for where it leads.
+    /// `why` (the model's note) names nothing inside the folder and nothing the model did not
+    /// send (13.9); `detail`, which names the entry or the place, goes only on the card's
+    /// preview, and so into the audit row.
     fn denied_in_folder(&self, path: &str, why: String, detail: Option<String>) -> Described {
         let mut preview = policy::sanitize::visible(path);
         if let Some(detail) = detail {
@@ -484,6 +524,10 @@ impl Cx<'_, '_> {
         let base_lex = base
             .as_deref()
             .and_then(|b| policy::path::lexical(b, None, self.flavor).ok());
+        // The path as the model wrote it, made absolute by its text (no link followed): the
+        // only form of it the messages below name (13.9).
+        let written = policy::path::lexical(given, base_lex.as_ref(), self.flavor)
+            .map_or_else(|_| given.to_string(), |l| l.to_string());
         if let Ok(lex) = policy::path::lexical(given, base_lex.as_ref(), self.flavor) {
             let normal = lex.to_string();
             if walk::is_network_or_device(&normal, self.flavor) {
@@ -509,18 +553,23 @@ impl Cx<'_, '_> {
         if walk::is_network_or_device(&canonical, self.flavor) {
             return self.denied(given, m::NETWORK.into());
         }
+        let said = |start: &str| self.said(start, &written, &checked, &sandbox);
         if !checked.exists {
-            return Described::Invalid(format!("{}{}.", m::NOT_FOUND, shown(&canonical)));
+            return Described::Invalid(said(m::NOT_FOUND));
         }
         let name = walk::file_name(&canonical, self.flavor).to_string();
         let folder = match self.env.fs.kind(&canonical) {
             Some(EntryKind::File) => false,
             Some(EntryKind::Dir) => true,
             Some(EntryKind::Device | EntryKind::Pipe | EntryKind::Socket | EntryKind::Other) => {
-                return self.denied(&canonical, format!("{}{}.", m::DEVICE, shown(&canonical)));
+                return self.denied_in_folder(
+                    &written,
+                    said(m::DEVICE),
+                    Self::leads_to(&written, &canonical),
+                );
             }
             Some(EntryKind::Link) | None => {
-                return Described::Invalid(format!("{}{}.", m::NOT_FOUND, shown(&canonical)));
+                return Described::Invalid(said(m::NOT_FOUND));
             }
         };
         let wrong = match (self.t.target, folder) {
@@ -530,7 +579,7 @@ impl Cx<'_, '_> {
             _ => None,
         };
         if let Some(wrong) = wrong {
-            return Described::Invalid(format!("{wrong}{}.", shown(&canonical)));
+            return Described::Invalid(said(wrong));
         }
         let identity = if folder {
             // A folder holding harnessUI's own folders or a key store: refused before it is
@@ -562,11 +611,7 @@ impl Cx<'_, '_> {
             match self.env.fs.identity(&canonical) {
                 Some(id) => Some(id),
                 None => {
-                    return Described::Invalid(format!(
-                        "{}{}.",
-                        m::UNREADABLE_FILE,
-                        shown(&canonical)
-                    ));
+                    return Described::Invalid(said(m::UNREADABLE_FILE));
                 }
             }
         };

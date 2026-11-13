@@ -1514,11 +1514,16 @@ pub(crate) mod tests {
     const TEST_WORKER_ENV: &str = "HARNESS_TEST_PICTURE_WORKER";
 
     /// The picture worker when this test binary is started as one ([`test_worker`]):
-    /// `convert` runs the real worker, `hang` never answers. A plain test run does nothing.
+    /// `convert` runs the real worker, `slow` runs it after 3 s, `hang` never answers. A
+    /// plain test run does nothing.
     #[test]
     fn picture_worker_process() {
         match std::env::var(TEST_WORKER_ENV).as_deref() {
             Ok("convert") => picture_worker_main(),
+            Ok("slow") => {
+                std::thread::sleep(Duration::from_secs(3));
+                picture_worker_main()
+            }
             Ok("hang") => {
                 std::thread::sleep(Duration::from_secs(600));
                 std::process::exit(0);
@@ -2209,5 +2214,94 @@ pub(crate) mod tests {
         assert_eq!(result.images[0].0, "image/png");
         assert_eq!(png_pixels(&unb64(&result.images[0].1)).dimensions(), (3, 2));
         assert_eq!(result.images[1], ("image/png".to_owned(), png));
+    }
+
+    /// [0.0.6 webp-other-paths, final round] The bytes decide, not the type a picture is
+    /// given: a PNG, JPEG or GIF that a tool (or a chat stored by an earlier version) labels
+    /// WebP reaches the model byte for byte under the type it really is, where it used to be
+    /// left out with a note that wrongly called it a WebP picture. A real WebP picture is
+    /// still turned into JPEG or PNG, and only one that cannot be read is left out, with the
+    /// note. Data that is no picture this app knows keeps its label and goes as it came, as
+    /// it does under any other label.
+    #[tokio::test]
+    async fn pictures_labelled_webp_are_known_by_their_bytes() {
+        use agent::history::{CallStatus, Part, ResultRecord};
+        use mcp_host::Content;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let unb64 = |data: &str| {
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .unwrap()
+        };
+        let image = |mime: &str, data: String| Content::Image {
+            mime: mime.into(),
+            data_base64: data,
+        };
+        let png = b64(b"\x89PNG\r\n\x1a\nreally a PNG");
+        let jpeg = b64(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 16, b'J', b'F', b'I', b'F', 0]);
+        let gif = b64(b"GIF89a\x01\x00\x01\x00really a GIF");
+        let worker = test_worker("convert");
+
+        let mut out = mcp_host::ToolOutput {
+            content: vec![
+                image("image/webp", png.clone()),
+                image(" Image/WebP ", jpeg.clone()),
+                image("image/webp", gif.clone()),
+                image("image/webp", b64(LOSSY_WEBP)),
+                image("image/webp", b64(&LOSSY_WEBP[..40])),
+                image("image/webp", "AAAA".into()),
+            ],
+            ..Default::default()
+        };
+        tool_pictures_with(&worker, &mut out).await;
+        assert_eq!(out.content[0], image("image/png", png.clone()));
+        assert_eq!(out.content[1], image("image/jpeg", jpeg.clone()));
+        assert_eq!(out.content[2], image("image/gif", gif.clone()));
+        let Content::Image { mime, data_base64 } = &out.content[3] else {
+            panic!("{:?}", out.content[3])
+        };
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(jpeg_pixels(&unb64(data_base64)).dimensions(), (4, 3));
+        assert_eq!(
+            out.content[4],
+            Content::Text {
+                text: PICTURE_LEFT_OUT.into()
+            }
+        );
+        assert_eq!(out.content[5], image("image/webp", "AAAA".into()));
+
+        let mut parts = vec![
+            Part::Image {
+                mime: "image/webp".into(),
+                data_base64: jpeg.clone(),
+            },
+            Part::ToolResult(ResultRecord {
+                call_id: "c1".into(),
+                name: "screenshot".into(),
+                status: CallStatus::Ok,
+                text: "here".into(),
+                images: vec![
+                    ("image/webp".into(), png.clone()),
+                    ("image/webp".into(), b64(LOSSLESS_WEBP)),
+                ],
+                source: None,
+                notes: Vec::new(),
+            }),
+        ];
+        stored_pictures_with(&worker, &mut parts).await;
+        assert_eq!(
+            parts[0],
+            Part::Image {
+                mime: "image/jpeg".into(),
+                data_base64: jpeg,
+            }
+        );
+        let Part::ToolResult(result) = &parts[1] else {
+            panic!("{:?}", parts[1])
+        };
+        assert_eq!(result.text, "here");
+        assert_eq!(result.images[0], ("image/png".to_owned(), png));
+        assert_eq!(result.images[1].0, "image/png");
+        assert_eq!(png_pixels(&unb64(&result.images[1].1)).dimensions(), (3, 2));
     }
 }

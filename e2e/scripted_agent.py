@@ -99,7 +99,9 @@ class Fake(BaseHTTPRequestHandler):
                         "index": i, "id": f"call_{len(Fake.requests)}_{i}", "type": "function",
                         "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}]}}]})
                 emit({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-                      "usage": {"prompt_tokens": item.get("prompt_tokens", 50), "completion_tokens": 10}})
+                      "usage": {"prompt_tokens": item.get("prompt_tokens", 50), "completion_tokens": 10},
+                      # [0.0.6 header-layout r2] llama-server's timings (the reply's speed), when scripted.
+                      **({"timings": item["timings"]} if "timings" in item else {})})
             else:
                 rtext = item.get("reasoning", "")
                 for i in range(0, len(rtext), 12):
@@ -6794,18 +6796,25 @@ def p_header_layout(c, notes):
             s.invoke("plugin:event|emit", {"event": "runtime-status", "payload": s.invoke("runtime_status")})
             time.sleep(0.5)
 
-    def streaming(chat):
-        """[r2] A reply streaming on the real model: the reply's speed in the header. Below @2xl
-        (a header under 42rem) the model's parts stay where they were before the reply started;
-        at every width nothing runs past the header."""
-        s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "fullAccess"})
-        s.invoke("set_chat_thinking", {"chatId": chat, "on": False})
-        open_chat("Header remote")
+    def streaming():
+        """[r2] A reply streaming with the reply's speed in the header: on the endpoint, a first
+        answer that calls a tool and reports its speed (llama-server's timings), then a slow
+        second answer, during which the header is measured. Below @2xl (a header under 42rem)
+        the model's parts stay where they were before the reply started; at every width nothing
+        runs past the header."""
+        talk = new_chat(c)
+        s.invoke("rename_chat", {"chatId": talk, "title": "Header stream"})
+        s.invoke("set_chat_approval_mode", {"chatId": talk, "mode": "fullAccess"})
+        open_chat("Header stream")
+        send(s, "hello")
+        wait_idle(s)
+        s.wait_for(lambda: s.execute("return !!document.querySelector('main header [title^=\"How much it can remember\"]');"), 10, "the meter")
         widths = [(720, False), (1024, False), (1200, False), (1200, True), (1366, True)]
         rect = s._req("GET", s._s("/window/rect"))
         idle = {}
         try:
             for width, with_panel in widths:
+                still_open()
                 panel(with_panel)
                 s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
                 time.sleep(1.0)
@@ -6813,20 +6822,12 @@ def p_header_layout(c, notes):
             panel(False)
             s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
             time.sleep(0.8)
-            speed_shown = "const e = document.querySelector('main header [data-speed]'); return !!e && e.innerText.includes('tokens/s');"
-            for attempt in (1, 2):
-                send(s, "Count from 1 to 400, separated by spaces.")
-                try:
-                    s.wait_for(lambda: s.execute(speed_shown), 180, "the reply's speed in the header")
-                    break
-                except WebDriverError:
-                    # The small model can answer in a few words, and a reload by the dev server
-                    # (see still_open) loses the reply on the page: asked once more.
-                    if attempt == 2:
-                        raise
-                    notes.append("streaming: no speed in the header during the first reply; asked again")
-                    still_open()
-                    wait_idle(s, 300)
+            Fake.queue.append({"tool_calls": [{"name": "list_dir", "arguments": {"path": "."}}],
+                               "timings": {"predicted_per_second": 12.5, "predicted_n": 10}})
+            Fake.queue.append({"content": "slow " * 600, "chunk": 5, "delay": 0.05})
+            send(s, "Look at the folder, then write a long answer.")
+            s.wait_for(lambda: s.execute("const e = document.querySelector('main header [data-speed]'); return !!e && e.innerText.includes('tokens/s');"),
+                       30, "the reply's speed in the header")
             for width, with_panel in widths:
                 if not still_open():
                     break
@@ -6834,32 +6835,29 @@ def p_header_layout(c, notes):
                 s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
                 time.sleep(1.0)
                 r = s.execute(HEADER_CHECK)
+                where = f"streaming at {width} px{' with the Panel' if with_panel else ''}"
                 if not (r["speed"] or {}).get("text"):
-                    notes.append(f"streaming at {width} px: the reply ended before it was measured")
+                    problems.append(f"{where}: the reply ended before it was measured")
                     break
                 s.screenshot(str(OUT / f"header-streaming-full-{width}{'-panel' if with_panel else ''}.png"))
-                check("streaming-full", True, "fullAccess", r, with_panel)
+                check("streaming-full", False, "fullAccess", r, with_panel)
                 before = idle[(width, with_panel)]
-                narrow = r["content"] < 672  # below @2xl (42rem)
-                notes.append(f"streaming at {width} px{' with the Panel' if with_panel else ''}: speed {r['speed']} | "
-                             f"line {before['line']} -> {r['line']} | status {before['status']} -> {r['status']} | "
-                             f"height {before['height']} -> {r['height']}")
-                if narrow:
-                    where = f"streaming at {width} px{' with the Panel' if with_panel else ''}"
-                    if r["line"] != before["line"] or (before["status"] and r["status"][1] != before["status"][1]) or r["height"] != before["height"]:
-                        problems.append(f"{where}: the model's parts moved when the reply started: {before['line']} {before['status']} "
-                                        f"{before['height']} -> {r['line']} {r['status']} {r['height']}")
+                notes.append(f"{where}: speed {r['speed']} | line {before['line']} -> {r['line']} | "
+                             f"status {before['status']} -> {r['status']} | height {before['height']} -> {r['height']}")
+                # The speed is left out under 22.25rem (the reply shows it when it ends).
+                need_speed = r["content"] >= 356
+                if (r["speed"]["shown"]) != need_speed:
+                    problems.append(f"{where}: the speed is {'missing' if need_speed else 'shown'}: {r['speed']}")
+                moved = r["line"] != before["line"] or r["status"][1] != before["status"][1] or r["height"] != before["height"]
+                if r["content"] < 672 and moved:  # below @2xl (42rem)
+                    problems.append(f"{where}: the model's parts moved when the reply started: {before['line']} {before['status']} "
+                                    f"{before['height']} -> {r['line']} {r['status']} {r['height']}")
         finally:
             panel(False)
             s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
             time.sleep(0.8)
-            try:
-                s.click_button("Stop", 5)
-            except Exception as e:  # noqa: BLE001 (the reply may have ended)
-                notes.append(f"streaming: no Stop to press ({str(e)[:80]})")
             wait_idle(s, 120)
-            s.invoke("set_chat_thinking", {"chatId": chat, "on": True})
-            s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
+            s.invoke("set_chat_approval_mode", {"chatId": talk, "mode": "ask"})
 
     chat = new_chat(c)
     s.invoke("rename_chat", {"chatId": chat, "title": "Header remote"})
@@ -6910,7 +6908,7 @@ def p_header_layout(c, notes):
             "code": "load_failed", "nextStep": "", "details": "",
             "message": "Could not read /home/user/models/Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-with-a-long-name.gguf"}},
             modes=("fullAccess",), widths=sizes((720, 1024, 1200), (1200,)))
-        streaming(chat)
+        streaming()
         notes.extend("miss: " + p for p in problems)
         assert not problems, f"{len(problems)} misses (each in a note)"
     finally:

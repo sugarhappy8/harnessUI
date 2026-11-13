@@ -288,6 +288,55 @@ fn matching_groups_are_ordered_by_score() {
     assert!(scores[0].1 > scores[1].1, "{scores:?}");
 }
 
+/// [0.0.6 item 5] Reverse engineering matches by its own listed words only (item5-spec.md
+/// R18): rea's tool names hold everyday words ("function", "strings", "python", "rust",
+/// "view"), so counting them would bring the group into ordinary coding requests once rea
+/// is on. The other groups still match by the words of their tools' names, and so does an
+/// added server that happens to be called "reverse".
+#[test]
+fn reverse_engineering_matches_by_its_own_words_only() {
+    let all: Vec<Candidate> = on(&[
+        "files",
+        "terminal",
+        "git",
+        "browser",
+        "computer",
+        "artifacts",
+        "search",
+        "reverse",
+    ])
+    .into_iter()
+    .filter(|t| !is_always_shown(t) && !is_core(t))
+    .collect();
+    let groups = |tools: &[Candidate], text: &str| -> BTreeSet<String> {
+        matching_groups(tools, &Wording::of(text), &[])
+            .into_iter()
+            .map(|(g, _)| g)
+            .collect()
+    };
+    let set = |list: &[&str]| -> BTreeSet<String> { list.iter().map(|s| s.to_string()).collect() };
+    // Everyday requests that only share words with rea's tool names.
+    assert_eq!(groups(&all, "Write a Python function"), set(&["terminal"]));
+    assert_eq!(groups(&all, "view the strings in this rust file"), set(&[]));
+    assert_eq!(groups(&all, "what does this function do?"), set(&[]));
+    // Its own words still bring it in.
+    assert_eq!(groups(&all, "decompile this program"), set(&["reverse"]));
+    assert!(groups(&all, "disassemble notepad.exe").contains("reverse"));
+    // "screenshot" and "drag" are only in the names of browser and computer tools.
+    assert_eq!(
+        groups(&all, "take a screenshot"),
+        set(&["browser", "computer"])
+    );
+    assert_eq!(groups(&all, "drag it to the left"), set(&["computer"]));
+    // An added server named like rea's group is an ordinary group: its tools' names count.
+    let added = vec![external(
+        "reverse",
+        "list_strings",
+        "Print the printable text found in a file.",
+    )];
+    assert_eq!(groups(&added, "list the strings"), set(&["reverse"]));
+}
+
 // ---- the shown set ------------------------------------------------------------------------
 
 /// [0.0.5 full access] A request to organise brings in the tools that create and move

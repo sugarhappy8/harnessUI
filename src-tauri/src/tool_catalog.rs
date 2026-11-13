@@ -48,6 +48,19 @@ pub struct Group {
     pub weak: &'static [&'static str],
 }
 
+/// [0.0.6 item 5] Groups that match a request by their listed words (`strong`, `weak`)
+/// only, not also by the words of their tools' names. rea's tool names hold everyday
+/// words ("function", "strings", "python", "rust", "view") that say nothing about reverse
+/// engineering (item5-spec.md R18).
+pub const OWN_WORDS_ONLY: &[&str] = &[reverse::server::SERVER_NAME];
+
+impl Group {
+    /// Whether the words of its tools' names also point at this group (`tool_select`).
+    pub fn counts_tool_names(&self) -> bool {
+        !OWN_WORDS_ONLY.contains(&self.server)
+    }
+}
+
 /// The skill named in the examples of the skill tools. `find_tools` puts the name of an
 /// enabled skill in its place.
 pub const EXAMPLE_SKILL: &str = "pdf-forms";
@@ -246,11 +259,8 @@ pub const GROUPS: &[Group] = &[
         weak: &[],
     },
     // [0.0.6 item 5] rea. Words match whole words, so a file name such as "notepad.exe"
-    // counts through "exe".
-    // TODO(0.0.6): the selection also counts the words of the tools' names, and rea's names
-    // hold everyday ones ("function", "strings", "python", "rust", "view"), so "Write a Python
-    // function" points at this group once it is on. Decide in `tool_select::group_score`
-    // whether this group should match by the words below only (item5-spec.md R18 assumes so).
+    // counts through "exe". Only these words count, not the words of the tools' names
+    // (`OWN_WORDS_ONLY`).
     Group {
         server: "reverse",
         label: "Reverse engineering",

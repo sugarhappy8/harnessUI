@@ -159,3 +159,8 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   Still to queue after the header refix ends: backend-check waiting line (scratchpad
   open-backend-check-d3.json: register the wait before the backend probes; the waiting line
   only while the backend waits).
+- **Header layout done (wf_3b4d80b6-e9b, two rounds).** Batch e (wf_09edf0f5-041):
+  backend-check-waiting (wait registered before the probes; waiting line only while waiting),
+  rea-call-recheck (server.rs reachable/still_there run walk::safe_to_resolve before resolving,
+  found by the rea-link-text review). Note: batch a's unreadable-link-target is the finding
+  rea-link-text already fixed; its agent re-reads the code first.

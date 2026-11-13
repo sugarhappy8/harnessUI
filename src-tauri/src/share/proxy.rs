@@ -3125,6 +3125,52 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
+    /// [0.0.6 webp-other-paths, final round] WebP pictures that each turn within the limits
+    /// but pass the request's total together are refused in words that say so and how to
+    /// fix it (fewer or smaller pictures), not as one picture that is too large.
+    #[tokio::test]
+    async fn webp_pictures_too_large_together_are_refused_as_such() {
+        use crate::attachments::tests::{LOSSY_WEBP, test_worker};
+        let worker = test_worker("convert");
+        let at_once = tokio::sync::Semaphore::new(PICTURES_AT_ONCE);
+        let url = format!("data:image/webp;base64,{}", b64(LOSSY_WEBP));
+        let part = json!({"type": "image_url", "image_url": {"url": url}});
+        let request =
+            |n: usize| json!({"messages": [{"role": "user", "content": vec![part.clone(); n]}]});
+        // How large one picture is once turned, as base64.
+        let mut one = request(1);
+        convert_webp(Api::ChatCompletions, &mut one, &worker, &at_once)
+            .await
+            .unwrap();
+        let turned = one["messages"][0]["content"][0]["image_url"]["url"]
+            .as_str()
+            .unwrap();
+        let size = turned.split_once(',').unwrap().1.len();
+        let limits = PictureLimits {
+            count: 3,
+            total: size * 2 + size / 2,
+            time: Duration::from_secs(60),
+        };
+        let mut two = request(2);
+        let got =
+            convert_webp_within(Api::ChatCompletions, &mut two, &worker, &at_once, limits).await;
+        assert_eq!(got, Ok(()));
+        let mut three = request(3);
+        let refusal =
+            convert_webp_within(Api::ChatCompletions, &mut three, &worker, &at_once, limits)
+                .await
+                .unwrap_err();
+        assert_eq!(three, request(3));
+        assert_eq!(
+            refusal.message(),
+            "The WebP pictures in this request are too large together once turned into PNG or JPEG. Send fewer or smaller pictures."
+        );
+        assert_eq!(
+            refusal.audit_summary(),
+            "Refused: the WebP pictures were too large together once turned into PNG or JPEG."
+        );
+    }
+
     /// [0.0.6 webp-other-paths] The refusals are in plain words and name the real limit.
     #[test]
     fn the_webp_refusals_are_plain_and_name_the_limit() {

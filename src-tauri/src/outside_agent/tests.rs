@@ -646,6 +646,9 @@ fn locate_as_on_windows_takes_the_exe_then_the_shim_then_the_users_bin() {
 #[cfg(windows)]
 #[test]
 fn on_windows_the_exe_then_the_npm_shim_then_the_users_bin_are_used() {
+    fn text(p: &Path) -> String {
+        p.display().to_string()
+    }
     let npm = temp("win-npm");
     let other = temp("win-other");
     let empty = temp("win-none");
@@ -675,7 +678,6 @@ fn on_windows_the_exe_then_the_npm_shim_then_the_users_bin_are_used() {
         .unwrap();
         let exe = program_file(&other, &format!("{name}.exe"));
         let in_bin = program_file(&bin, &format!("{name}.exe"));
-        let text = |p: &Path| p.display().to_string();
 
         let both = std::env::join_paths([&npm, &other]).unwrap();
         let found = find_app(app, Some(&both), Some(&home), &[]);
@@ -1883,6 +1885,168 @@ async fn the_task_goes_on_standard_input_and_the_answer_comes_back() {
             CodingApp::ClaudeCode => assert!(progress.contains("Read notes.txt"), "{progress}"),
             CodingApp::Codex => assert!(progress.contains("Runs: bash -lc ls"), "{progress}"),
         }
+    }
+}
+
+/// Names the folder where this test binary, started as a fake app by a shim
+/// ([`shim_to_this_binary`]), records its run.
+const FAKE_RECORD_ENV: &str = "HARNESS_TEST_CODING_APP_RECORD";
+
+/// This process's environment, as text.
+fn this_env() -> BTreeMap<String, String> {
+    std::env::vars_os()
+        .map(|(k, v)| {
+            let text = |s: std::ffi::OsString| s.to_string_lossy().into_owned();
+            (text(k), text(v))
+        })
+        .collect()
+}
+
+/// What a shim puts before the app's command line: this test binary runs only
+/// [`coding_app_fake_process`], and everything after `--` is the app's.
+const FAKE_WORDS: &str =
+    "outside_agent::tests::coding_app_fake_process --exact --nocapture --test-threads=1 --";
+
+/// This test binary as a fake Claude Code or Codex, when a shim ([`shim_to_this_binary`])
+/// starts it: it records the app's command line (after `--`), its standard input, working
+/// folder and environment in the folder [`FAKE_RECORD_ENV`] names, then answers as the app
+/// does. A plain test run does nothing.
+#[test]
+fn coding_app_fake_process() {
+    use std::io::{Read, Write};
+    let Some(record) = std::env::var_os(FAKE_RECORD_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let args: Vec<String> = std::env::args().skip_while(|a| a != "--").skip(1).collect();
+    let mut stdin = Vec::new();
+    std::io::stdin().read_to_end(&mut stdin).unwrap();
+    let env = this_env();
+    let cwd = std::env::current_dir().unwrap();
+    std::fs::write(record.join("args.json"), serde_json::to_vec(&args).unwrap()).unwrap();
+    std::fs::write(record.join("stdin.txt"), stdin).unwrap();
+    std::fs::write(record.join("cwd.txt"), cwd.display().to_string()).unwrap();
+    std::fs::write(record.join("env.json"), serde_json::to_vec(&env).unwrap()).unwrap();
+    let answer = match args.first().map(String::as_str) {
+        Some("-p") => CLAUDE_OK,
+        Some("exec") => CODEX_OK,
+        _ => &[],
+    };
+    // A line break first: libtest has written "test <name> ... " without one.
+    let mut out = std::io::stdout().lock();
+    writeln!(out).unwrap();
+    for line in answer {
+        writeln!(out, "{line}").unwrap();
+    }
+    out.flush().unwrap();
+}
+
+/// A shim as npm writes one, `<program>.cmd` that `cmd.exe` runs on Windows, passing on its
+/// command line with `%*`, that starts this test binary as [`coding_app_fake_process`].
+#[cfg(windows)]
+fn shim_to_this_binary(dir: &Path, program: &str) -> PathBuf {
+    let path = dir.join(format!("{program}.cmd"));
+    // `%%` is a percent sign in a batch file.
+    let exe = std::env::current_exe()
+        .unwrap()
+        .display()
+        .to_string()
+        .replace('%', "%%");
+    std::fs::write(
+        &path,
+        format!("@echo off\r\n\"{exe}\" {FAKE_WORDS} %*\r\nexit /b %ERRORLEVEL%\r\n"),
+    )
+    .unwrap();
+    path
+}
+
+/// A shim elsewhere: a shell script `<program>` passing on its command line with `"$@"`.
+#[cfg(unix)]
+fn shim_to_this_binary(dir: &Path, program: &str) -> PathBuf {
+    let exe = std::env::current_exe().unwrap().display().to_string();
+    script(
+        dir,
+        program,
+        &format!(
+            "#!/bin/sh\nexec '{}' {FAKE_WORDS} \"$@\"\n",
+            exe.replace('\'', r"'\''")
+        ),
+    )
+}
+
+/// [0.0.6 release review] A run of each app through a shim, on every system: on Windows
+/// through `<name>.cmd` as npm installs it, which `cmd.exe` runs (the one way to start the
+/// apps that adds a layer of quoting: Claude Code's `--settings` holds double quotes), and
+/// elsewhere through a shell script. The shim starts this test binary as the fake app. It
+/// gets the template word for word, the task byte for byte on standard input, the chat's
+/// working folder, and the environment without secret-looking variables; its answer comes
+/// back.
+#[tokio::test]
+async fn a_run_through_a_shim_gets_the_template_the_task_the_folder_and_the_environment() {
+    let bin = temp("shim-bin");
+    let work = temp("shim-work");
+    let record = temp("shim-record");
+    let shims = [
+        (CodingApp::ClaudeCode, shim_to_this_binary(&bin, "claude")),
+        (CodingApp::Codex, shim_to_this_binary(&bin, "codex")),
+    ];
+    // The app's own environment, as the apps get it outside macOS.
+    let mut env = this_env();
+    env.insert(FAKE_RECORD_ENV.into(), record.display().to_string());
+    env.insert("CODING_APPS_PLAIN_SETTING".into(), "kept-value".into());
+    env.insert("ANTHROPIC_API_KEY".into(), "sk-shim-secret".into());
+    let s = server_for(&bin, env);
+    for (app, shim) in &shims {
+        let found = s.saved.get(*app).and_then(|a| a.path.clone());
+        assert_eq!(found, Some(shim.display().to_string()));
+    }
+    let task = "-p --dangerously-skip-permissions \"quoted\" 'single' %PATH% !PATH! $HOME `id` ^& | < >\nsecond line\r\n\tthird";
+    for (tool, may_edit, app, answer) in [
+        (
+            CLAUDE_TOOL,
+            false,
+            CodingApp::ClaudeCode,
+            "FAKE-CLAUDE-ANSWER: the word is heron",
+        ),
+        (
+            CLAUDE_TOOL,
+            true,
+            CodingApp::ClaudeCode,
+            "FAKE-CLAUDE-ANSWER: the word is heron",
+        ),
+        (CODEX_TOOL, false, CodingApp::Codex, "FAKE-CODEX-ANSWER"),
+        (CODEX_TOOL, true, CodingApp::Codex, "FAKE-CODEX-ANSWER"),
+    ] {
+        for file in ["args.json", "stdin.txt", "cwd.txt", "env.json"] {
+            let _ = std::fs::remove_file(record.join(file));
+        }
+        let action = describe(
+            &s,
+            tool,
+            json!({"task": task, "may_edit": may_edit}),
+            &chat(&work),
+        )
+        .await;
+        assert_eq!(action.hard_limit, None, "{tool}: {}", action.preview);
+        let (out, _) = call(&s, &action, &chat(&work)).await;
+        assert!(!out.is_error, "{tool} {may_edit}: {out:?}");
+        assert_eq!(out.joined_text(), answer, "{tool} {may_edit}");
+        let read = |file: &str| std::fs::read(record.join(file)).unwrap();
+        let args: Vec<String> = serde_json::from_slice(&read("args.json")).unwrap();
+        assert_eq!(args, arguments(app, may_edit), "{tool} {may_edit}");
+        assert_eq!(read("stdin.txt"), task.as_bytes(), "{tool} {may_edit}");
+        let cwd = String::from_utf8(read("cwd.txt")).unwrap();
+        assert_eq!(dunce::canonicalize(cwd).unwrap(), work, "{tool} {may_edit}");
+        let seen: BTreeMap<String, String> = serde_json::from_slice(&read("env.json")).unwrap();
+        assert_eq!(
+            seen.get("CODING_APPS_PLAIN_SETTING").map(String::as_str),
+            Some("kept-value")
+        );
+        let secrets: Vec<&String> = seen
+            .iter()
+            .filter(|(k, v)| tools::terminal::looks_secret(k) || v.contains("sk-shim-secret"))
+            .map(|(k, _)| k)
+            .collect();
+        assert!(secrets.is_empty(), "{tool}: {secrets:?} reached the app");
     }
 }
 

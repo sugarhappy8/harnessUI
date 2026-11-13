@@ -187,6 +187,11 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
+        // This test binary as the picture worker (`attachments::tests`).
+        Self::with_pictures(crate::attachments::tests::test_worker("convert")).await
+    }
+
+    async fn with_pictures(pictures: crate::attachments::PictureWorker) -> Self {
         let llama = FakeLlama::default();
         let addr = llama.start().await;
         let model = Arc::new(FakeModel(Mutex::new(FakeModel::ready(addr, 8192))));
@@ -205,8 +210,7 @@ impl Harness {
                 store: store.clone(),
                 busy: busy.clone(),
                 counters: counters.clone(),
-                // This test binary as the picture worker (`attachments::tests`).
-                pictures: crate::attachments::tests::test_worker("convert"),
+                pictures,
             },
         )
         .unwrap();
@@ -957,6 +961,110 @@ async fn webp_pictures_that_cannot_be_turned_are_refused_in_each_apis_shape() {
         let text = serde_json::to_string(row).unwrap();
         assert!(!text.contains("UklGR") && !text.contains("data:"), "{text}");
     }
+}
+
+/// Waits until a request with a WebP picture counts as using the model, while its picture
+/// is still being turned (the slow worker takes 3 s), with `forwarded` requests seen so far.
+async fn counted_while_turning(h: &Harness, forwarded: usize) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while h.busy.snapshot().other_apps == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let busy = h.busy.snapshot();
+    assert_eq!(busy.other_apps, 1, "not counted while its picture is turned");
+    assert_eq!(h.counters.active(), 1);
+    assert_eq!(h.llama.seen().len(), forwarded, "forwarded before it was turned");
+}
+
+/// [0.0.6 webp-other-paths, final round] Turning a request's WebP pictures can take seconds,
+/// or wait behind other requests' pictures. The busy counter (D3) and the request count are
+/// held from before the model is looked up, so while the pictures are turned the busy
+/// question names "Another app" and "Restart when it ends" waits for the request, which then
+/// goes to the server it was looked up on, with that server's key. When the model is stopped
+/// or changed meanwhile all the same (the user chose not to wait), the request is never sent
+/// to the old address, which another program may hold by then.
+#[tokio::test]
+async fn the_busy_counter_is_held_while_webp_pictures_are_turned() {
+    use crate::attachments::tests::{LOSSY_WEBP, test_worker};
+    let h = Harness::with_pictures(test_worker("slow")).await;
+    let ready = h.model.current().await;
+    let body = json!({"messages": [{"role": "user", "content": [{"type": "image_url",
+        "image_url": {"url": format!("data:image/webp;base64,{}", b64(LOSSY_WEBP))}}]}]});
+    let send = || tokio::spawn(h.post("/v1/chat/completions", &body).send());
+
+    let request = send();
+    counted_while_turning(&h, 0).await;
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), 200);
+    response.bytes().await.unwrap();
+    let seen = h.llama.seen();
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0]
+            .headers
+            .contains(&("authorization".into(), format!("Bearer {PRIVATE}"))),
+        "{:?}",
+        seen[0].headers
+    );
+    let url = &seen[0].body["messages"][0]["content"][0]["image_url"]["url"];
+    assert_eq!(picture_in(url).0, image::ImageFormat::Jpeg);
+    for _ in 0..50 {
+        if !h.busy.is_busy() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!h.busy.is_busy());
+
+    // The model is unloaded while the picture is turned.
+    let request = send();
+    counted_while_turning(&h, 1).await;
+    h.model.set(Upstream::NotLoaded);
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), 503);
+    let answer: Value = response.json().await.unwrap();
+    assert_eq!(answer["error"]["message"], proxy::NO_MODEL, "{answer}");
+
+    // Another model is loaded while the picture is turned (a new server, port and key).
+    let other = FakeLlama::default();
+    let other_addr = other.start().await;
+    h.model.set(ready);
+    let request = send();
+    counted_while_turning(&h, 1).await;
+    h.model.set(FakeModel::ready(other_addr, 8192));
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), 502);
+    let answer: Value = response.json().await.unwrap();
+    assert_eq!(
+        answer["error"]["message"],
+        "The model in harnessUI did not answer. Try again.",
+        "{answer}"
+    );
+    assert_eq!(h.llama.seen().len(), 1);
+    assert!(other.seen().is_empty());
+    assert!(!h.busy.is_busy());
+    assert_eq!(h.counters.active(), 0);
+
+    let rows = h.audit_done(3).await;
+    let mut results: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.result_status.clone().unwrap_or_default(),
+                r.result_summary.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    results.sort();
+    assert_eq!(results.len(), 3, "{rows:?}");
+    assert_eq!(results[0].0, "not_run");
+    assert_eq!(results[0].1, "No model was loaded.");
+    assert_eq!(results[1].0, "not_run");
+    assert_eq!(
+        results[1].1,
+        "The model was changed while the request waited."
+    );
+    assert_eq!(results[2].0, "ok", "{rows:?}");
 }
 
 #[tokio::test]

@@ -141,6 +141,13 @@ fn forbidden_folders(app: &AppHandle) -> Vec<PathBuf> {
     .into_iter()
     // Debug builds only: the HARNESS_REVERSE_ROOT folder of a fake rea pack (item5 WP9a).
     .chain(reverse::layout::extra_forbidden())
+    // Linux: rea's temporary folder for Ghidra under XDG_RUNTIME_DIR (outside local data).
+    .chain(
+        app.path()
+            .app_local_data_dir()
+            .ok()
+            .and_then(|d| reverse::layout::run_tmp_forbidden(&d)),
+    )
     .collect()
 }
 
