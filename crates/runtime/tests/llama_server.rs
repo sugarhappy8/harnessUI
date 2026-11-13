@@ -649,7 +649,14 @@ async fn the_alias_is_the_model_id_in_every_api() {
         .into_owned();
     // `start` succeeding means the start-up check passed: /props names the launched file.
     let server = start_cpu(&bin, launch(gguf.clone())).await;
-    let client = loopback_client_builder().build().expect("client");
+    // A new connection for every request: on CI a request sent on a kept-alive connection
+    // right after a streamed answer was once closed by the server without a reply
+    // (hyper's IncompleteMessage). This test is about the model id in each API, not about
+    // connection reuse; a server that really fails still fails the request.
+    let client = loopback_client_builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("client");
 
     let models = client
         .get(format!("{}/v1/models", server.base_url()))
