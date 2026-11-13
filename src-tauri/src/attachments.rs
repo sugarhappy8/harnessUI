@@ -445,7 +445,9 @@ fn base64_picture_type(data: &str) -> Option<&'static str> {
         .filter(|c| !c.is_ascii_whitespace())
         .take(16)
         .collect();
-    let bytes = base64::engine::general_purpose::STANDARD.decode(head).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(head)
+        .ok()?;
     ["image/png", "image/jpeg", "image/gif"]
         .into_iter()
         .find(|mime| sniff(mime, &bytes))

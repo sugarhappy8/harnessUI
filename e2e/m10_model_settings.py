@@ -30,7 +30,8 @@ Drives the backend commands the model settings panel uses, in the real app:
   stops it with Stop and restart) and is the one loaded afterwards; with nothing loaded,
   "Unloaded to free memory" is as it was after the check; the backend check itself, asked
   to wait ("Restart when it ends") while the model is busy, waits and stops nothing, and the
-  waiting line's Cancel ends it with nothing checked.
+  waiting line's Cancel ends it with nothing checked, also when pressed at once (the check
+  starts its wait before it probes the backends) while a real reply streams.
 
 The small model sometimes ends the long reply after a few words; a step that needs the
 reply to still stream then tries again with a new reply in a new chat, and a change that
@@ -387,6 +388,51 @@ def check_the_backend_check_waits_when_asked(s):
     assert busy(s)["modelChecks"] == 0
 
 
+def check_cancel_at_once_ends_the_waiting_backend_check(s, home):
+    """Cancel pressed right after the backend check was answered "Restart when it ends"
+    while a reply streams ends the check at once and replaces nothing: the check starts its
+    wait before it probes the backends, so a Cancel at once finds it waiting (before, the
+    Cancel landed during the probes, cancelled nothing, and the check then waited and
+    replaced the model once the reply ended)."""
+    st = ready(s)
+    assert st["modelPath"] == MODEL, st
+    pid = the_server(home)[0]
+
+    def cancel_at_once():
+        nonlocal pid
+        s.execute(FIRE, "__diag5", "run_diagnostics", {"modelPath": MODEL, "whenIdle": True})
+        s.execute(FIRE, "__cancel5", "cancel_pending_reload", {})
+        end = time.time() + 15
+        while pending(s, "__diag5") and time.time() < end:
+            time.sleep(0.2)
+        assert not (pending(s, "__diag5") and reply_streams(s)), (
+            "Cancel at once was lost: the backend check still waits for the reply", s.invoke("runtime_status"))
+        r = fired(s, "__diag5", 1200)
+        if r.get("ok"):
+            # The reply ended by itself before the check began to wait: nothing waited, so
+            # Cancel had nothing to end, and the check ran (never while the reply streamed).
+            fired(s, "__sent", 300)
+            last = messages(s, REPLY["chat"])[-1]
+            assert last["role"] == "assistant" and last["status"] == "complete", (
+                "the check ran while the reply streamed", last["status"])
+            ready(s)
+            pid = the_server(home)[0]
+            return False
+        assert r["error"].get("code") == "load_replaced", ("Cancel did not end the check with load_replaced", r)
+        assert fired(s, "__cancel5", 30).get("ok"), "cancel_pending_reload failed"
+        st = s.invoke("runtime_status")
+        assert st["reloadWaiting"] is False, ("still shown as waiting after Cancel", st)
+        assert st["modelPath"] == MODEL and the_server(home)[0] == pid, ("the cancelled check replaced the model", st)
+        assert busy(s)["modelChecks"] == 0, busy(s)
+        return True
+
+    while_a_reply_streams(s, "Cancel at once ends the backend check", cancel_at_once)
+    if reply_streams(s):
+        s.invoke("stop_generation")
+    fired(s, "__sent", 120)
+    ready(s)
+
+
 def main() -> int:
     home = OUT / "home"
     shutil.rmtree(home, ignore_errors=True)
@@ -693,6 +739,9 @@ def main() -> int:
 
         step("the backend check asked to wait waits for the model and stops nothing")
         check_the_backend_check_waits_when_asked(s)
+
+        step("Cancel right after Restart when it ends: the backend check ends, the model stays")
+        check_cancel_at_once_ends_the_waiting_backend_check(s, home)
 
         step("the 0.0.4 command shape still loads exactly as given")
         old = {"ctx": 4096, "backend": None, "device": None}

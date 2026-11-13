@@ -164,3 +164,8 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   rea-call-recheck (server.rs reachable/still_there run walk::safe_to_resolve before resolving,
   found by the rea-link-text review). Note: batch a's unreadable-link-target is the finding
   rea-link-text already fixed; its agent re-reads the code first.
+- **wf_57274b94-12f done** (rea start stuck, Settings list scroll, Compare fit words, Tools
+  panel rea note). Batch f (wf_ab199ebb-70b): settings-dialog-minors, compare-fit-minors,
+  tools-panel-file-note. Queued after batch c's rea-linux-tmp: rea-start-guard (doc comment
+  says what the managed server really does when a start is dropped; the guard's stop path
+  also removes the run temp folder; scratchpad reports/fix-rea-start-stuck.md OPEN).

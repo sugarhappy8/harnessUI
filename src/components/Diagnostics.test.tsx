@@ -1,10 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { DiagnosticsReport, ModelBusy, RuntimeStatus } from "../lib/types";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import type { ChatDetail, DiagnosticsReport, ModelBusy, RuntimeStatus, ShareStatus } from "../lib/types";
+
+// Radix positions the header's menu with ResizeObserver, which jsdom does not have.
+globalThis.ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
 
 const ipcMock = vi.hoisted(() => ({
   isTauri: () => false,
   modelBusy: vi.fn<() => Promise<ModelBusy>>(),
+  shareStatus: vi.fn<() => Promise<ShareStatus>>(),
+  cancelPendingReload: vi.fn<() => Promise<void>>(async () => undefined),
   runDiagnostics: vi.fn<(modelPath: string | null, whenIdle: boolean) => Promise<DiagnosticsReport | null>>(async () => ({
     text: "the report",
     savedTo: null,
@@ -15,11 +24,23 @@ vi.mock("../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn(async () => undefined) }));
 
 const { Diagnostics } = await import("./SettingsDialog");
+const { RuntimeIndicator } = await import("./RuntimeIndicator");
 const change = await import("../store/modelChange");
 const { useApp } = await import("../store/app");
 
 const IDLE: ModelBusy = { chatTurns: 0, modelChecks: 0, otherApps: 0 };
 const REPLY: ModelBusy = { chatTurns: 1, modelChecks: 0, otherApps: 0 };
+/** The backend check itself, once its wait is over (its own hold). */
+const CHECK: ModelBusy = { chatTurns: 0, modelChecks: 1, otherApps: 0 };
+const SHARE_OFF: ShareStatus = {
+  enabled: false,
+  port: null,
+  listening: false,
+  error: null,
+  refused: 0,
+  inUse: false,
+  modelCtx: null,
+};
 
 function runtime(state: RuntimeStatus["state"], modelPath: string | null = "/m/a.gguf"): RuntimeStatus {
   return {
@@ -98,11 +119,13 @@ describe("Settings, Diagnostics: the backend check asks first when the model is 
     render(<Diagnostics />);
     await runAndAnswer("Restart when it ends");
     expect(ipcMock.runDiagnostics).toHaveBeenCalledWith("/m/a.gguf", true);
-    expect(change.useWaiting.getState().change).toBe("reload");
+    // The waiting line follows the backend's wait (`reloadWaiting`, see the header tests
+    // below), not the whole check, and names the change as a restart.
+    expect(change.useWaiting.getState()).toMatchObject({ change: null, kind: "reload" });
     expect((screen.getByRole("button", { name: /Running/ }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => finish({ text: "the report", savedTo: null }));
     expect(screen.getByText("the report")).toBeTruthy();
-    expect(change.useWaiting.getState().change).toBeNull();
+    expect(change.useWaiting.getState()).toMatchObject({ change: null, kind: null });
   });
 
   it("Stop and restart stops what uses the model", async () => {
@@ -142,5 +165,127 @@ describe("Settings, Diagnostics: the backend check asks first when the model is 
     expect(await screen.findByText("the report")).toBeTruthy();
     expect(ipcMock.modelBusy).not.toHaveBeenCalled();
     expect(ipcMock.runDiagnostics).toHaveBeenCalledWith(null, true);
+  });
+});
+
+function localChat(): ChatDetail {
+  return {
+    chat: {
+      id: 3,
+      title: "t",
+      modelRef: "local:/m/a.gguf",
+      systemPrompt: null,
+      leafMessageId: null,
+      createdAt: 0,
+      updatedAt: 0,
+      thinking: true,
+      workingFolder: null,
+    },
+    messages: [],
+  };
+}
+
+/** The chat header (whose waiting line has the Cancel) with the Diagnostics tab. */
+async function showWithHeader() {
+  useApp.setState({ detail: localChat(), activeChatId: 3, generation: null, error: null });
+  await act(async () => {
+    render(
+      <>
+        <RuntimeIndicator />
+        <Diagnostics />
+      </>,
+    );
+  });
+}
+
+/** The backend's status changes, as its runtime events change it. */
+async function backend(patch: Partial<RuntimeStatus>) {
+  await act(async () => {
+    useApp.setState((s) => ({ runtime: s.runtime && { ...s.runtime, ...patch } }));
+  });
+  await flush();
+}
+
+/** The header's waiting line ("Restarts when the reply ends · Cancel"), or null. */
+function waitingLine(): HTMLElement | null {
+  return screen.queryAllByRole("status").find((el) => / when .* ends/.test(el.textContent ?? "")) ?? null;
+}
+
+describe("Settings, Diagnostics: the header's waiting line is up only while the backend check waits", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.shareStatus.mockResolvedValue(SHARE_OFF);
+    change.useWaiting.setState({ change: null, kind: null });
+    change.useRestartNote.setState({ shown: false });
+    useApp.setState({ runtime: runtime("ready") });
+  });
+  afterEach(cleanup);
+
+  it("goes away once the wait is over and the check runs", async () => {
+    ipcMock.modelBusy.mockResolvedValue(REPLY);
+    let finish: (r: DiagnosticsReport) => void = () => undefined;
+    ipcMock.runDiagnostics.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    await showWithHeader();
+    await runAndAnswer("Restart when it ends");
+    expect(ipcMock.runDiagnostics).toHaveBeenCalledWith("/m/a.gguf", true);
+
+    // The backend waits for the reply: the line, with its Cancel.
+    await backend({ reloadWaiting: true });
+    expect(waitingLine()?.textContent).toContain("Restarts when the reply ends");
+    expect(within(waitingLine() as HTMLElement).getByRole("button", { name: "Cancel" })).toBeTruthy();
+
+    // The reply ended: the wait is over and the check runs for minutes, a test load and
+    // then the timed generation on the loaded test copy (ready, held by the check itself).
+    ipcMock.modelBusy.mockResolvedValue(CHECK);
+    await backend({ reloadWaiting: false, state: "starting", progress: 0.5 });
+    await backend({ state: "ready", progress: 1 });
+    expect(waitingLine(), "no waiting line once nothing waits").toBeNull();
+    expect((screen.getByRole("button", { name: /Running/ }) as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => finish({ text: "the report", savedTo: null }));
+    expect(screen.getByText("the report")).toBeTruthy();
+    expect(waitingLine()).toBeNull();
+  });
+
+  it("offers Cancel only once the backend waits; that Cancel ends the check with no report", async () => {
+    ipcMock.modelBusy.mockResolvedValue(REPLY);
+    let end: (r: DiagnosticsReport | null) => void = () => undefined;
+    ipcMock.runDiagnostics.mockImplementationOnce(() => new Promise((resolve) => (end = resolve)));
+    // The backend ends the waiting check with `load_replaced`, which the wrapper turns into null.
+    ipcMock.cancelPendingReload.mockImplementationOnce(async () => end(null));
+    await showWithHeader();
+    await runAndAnswer("Restart when it ends");
+
+    // Until the backend waits, no Cancel is offered: it would cancel nothing.
+    expect(waitingLine(), "a Cancel before anything waits").toBeNull();
+
+    await backend({ reloadWaiting: true });
+    const line = waitingLine();
+    expect(line?.textContent).toContain("Restarts when the reply ends");
+    await act(async () => {
+      fireEvent.click(within(line as HTMLElement).getByRole("button", { name: "Cancel" }));
+    });
+    await backend({ reloadWaiting: false });
+    expect(ipcMock.cancelPendingReload).toHaveBeenCalledTimes(1);
+    expect(waitingLine()).toBeNull();
+    expect(screen.queryByText("the report")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByRole("button", { name: "Run backend check" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("shows no waiting line when the check did not have to wait (the reply ended first)", async () => {
+    ipcMock.modelBusy.mockResolvedValue(REPLY);
+    let finish: (r: DiagnosticsReport) => void = () => undefined;
+    ipcMock.runDiagnostics.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    await showWithHeader();
+    await runAndAnswer("Restart when it ends");
+    // The backend found the model free and went ahead at once: never `reloadWaiting`.
+    ipcMock.modelBusy.mockResolvedValue(CHECK);
+    expect(waitingLine()).toBeNull();
+    await backend({ state: "starting", progress: 0.2 });
+    await backend({ state: "ready", progress: 1 });
+    expect(waitingLine()).toBeNull();
+    await act(async () => finish({ text: "the report", savedTo: null }));
+    expect(screen.getByText("the report")).toBeTruthy();
   });
 });

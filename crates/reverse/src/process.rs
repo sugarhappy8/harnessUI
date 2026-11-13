@@ -1389,9 +1389,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_idle_stop_removes_the_runtime_folder_too() {
         let (b, run_tmp) = bench_ghidra_with_run_tmp();
-        run_call(&b.process, b.config(Some(Decompiler::Ghidra)), "open_binary")
-            .await
-            .unwrap();
+        run_call(
+            &b.process,
+            b.config(Some(Decompiler::Ghidra)),
+            "open_binary",
+        )
+        .await
+        .unwrap();
         assert!(run_tmp.is_dir());
         tokio::time::sleep(IDLE_STOP + Duration::from_secs(60)).await;
         assert_eq!(b.process.state(), RunState::Stopped);

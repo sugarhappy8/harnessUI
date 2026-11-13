@@ -500,7 +500,8 @@ pub async fn set_setting(
 /// `when_idle` is the answer to the D3 question, as for a reload: the timed generation
 /// replaces the loaded model, so with it the check waits until nothing uses the model
 /// (a wait that is cancelled ends with `load_replaced` and no report); without it,
-/// what uses the model is stopped.
+/// what uses the model is stopped. With a model, that wait comes first, before the
+/// backends are probed, and the check counts as a model check from then on.
 #[tauri::command]
 pub async fn run_diagnostics(
     app: AppHandle,
@@ -509,6 +510,27 @@ pub async fn run_diagnostics(
     when_idle: bool,
 ) -> AppResult<DiagnosticsReportDto> {
     use std::fmt::Write;
+    // The timed generation replaces the loaded model (D3): as the user answered, the check
+    // waits until nothing uses the model, or stops what does, before anything else (the
+    // backends are probed first, up to 45 s each), so the waiting line and its Cancel are
+    // true from the first moment. A change waiting for the model is replaced, as by a
+    // reload. From then until what was there is back, the check is a model check: a change
+    // of what is loaded asks first, then waits for the check or stops it.
+    let timed = match model_path.filter(|p| std::path::Path::new(p).is_file()) {
+        Some(path) => {
+            state
+                .runtime
+                .before_change(&state.model_busy, when_idle)
+                .await?;
+            let previous = state.runtime.status();
+            let stop = CancellationToken::new();
+            let check = state
+                .runtime
+                .hold(&state.model_busy, BusyKind::ModelCheck, stop.clone());
+            Some((path, previous, stop, check))
+        }
+        None => None,
+    };
     let mut report = String::new();
     let info = app.package_info();
     let _ = writeln!(report, "{} {} diagnostics", info.name, info.version);
@@ -601,22 +623,8 @@ pub async fn run_diagnostics(
             }
         }
     }
-    if let Some(path) = model_path.filter(|p| std::path::Path::new(p).is_file()) {
+    if let Some((path, previous, stop, check)) = timed {
         let _ = writeln!(report, "\ntimed generation with {path}");
-        // The check replaces the loaded model (D3): as the user answered, it waits until
-        // nothing uses the model, or stops what does first. A change waiting for the
-        // model is replaced, as by a reload.
-        state
-            .runtime
-            .before_change(&state.model_busy, when_idle)
-            .await?;
-        let previous = state.runtime.status();
-        // Until what was there is back, the check is a model check (D3): a change of what
-        // is loaded asks first, then waits for the check or stops it.
-        let stop = CancellationToken::new();
-        let check = state
-            .runtime
-            .hold(&state.model_busy, BusyKind::ModelCheck, stop.clone());
         for (b, p) in backends.iter().filter(|(_, p)| p.error.is_none()) {
             if stop.is_cancelled() {
                 break;

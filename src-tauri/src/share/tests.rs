@@ -971,9 +971,16 @@ async fn counted_while_turning(h: &Harness, forwarded: usize) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let busy = h.busy.snapshot();
-    assert_eq!(busy.other_apps, 1, "not counted while its picture is turned");
+    assert_eq!(
+        busy.other_apps, 1,
+        "not counted while its picture is turned"
+    );
     assert_eq!(h.counters.active(), 1);
-    assert_eq!(h.llama.seen().len(), forwarded, "forwarded before it was turned");
+    assert_eq!(
+        h.llama.seen().len(),
+        forwarded,
+        "forwarded before it was turned"
+    );
 }
 
 /// [0.0.6 webp-other-paths, final round] Turning a request's WebP pictures can take seconds,
@@ -1036,8 +1043,7 @@ async fn the_busy_counter_is_held_while_webp_pictures_are_turned() {
     assert_eq!(response.status(), 502);
     let answer: Value = response.json().await.unwrap();
     assert_eq!(
-        answer["error"]["message"],
-        "The model in harnessUI did not answer. Try again.",
+        answer["error"]["message"], "The model in harnessUI did not answer. Try again.",
         "{answer}"
     );
     assert_eq!(h.llama.seen().len(), 1);

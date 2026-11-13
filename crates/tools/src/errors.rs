@@ -9,10 +9,12 @@
 //! A message that quotes lines of a file is file content. It is only ever returned as a
 //! tool result, after the policy gate let the call read the file, so it reaches the model
 //! inside the markers that say "this is data" (see [`needs_file_text`]). Messages a tool
-//! gives before the gate (an app note the model trusts) carry no text of any file.
+//! gives before the gate (an app note the model trusts) carry no text of any file, and name
+//! a path only as the model gave it, never where its links lead ([`said_path`]).
 
 use std::sync::LazyLock;
 
+use policy::path::{CheckedPath, Flavor, PathSandbox, default_case, is_within, lexical};
 use regex::Regex;
 
 /// Characters of one quoted file line.
@@ -628,6 +630,40 @@ pub fn error_lines<'a>(
         }
     }
     (found, count)
+}
+
+/// After a path in a message given before approval, when the path is a link or goes
+/// through one (13.9).
+pub const THROUGH_LINK: &str = " (through a link)";
+
+/// `given` made absolute by its text against `base`, with its dot segments read and no link
+/// followed; `given` itself when that cannot be done.
+pub fn written_path(given: &str, base: Option<&str>, flavor: Flavor) -> String {
+    let base = base.and_then(|b| lexical(b, None, flavor).ok());
+    lexical(given, base.as_ref(), flavor).map_or_else(|_| given.to_string(), |l| l.to_string())
+}
+
+/// A path as a message given before approval names it (13.9): the path the model gave
+/// ([`written_path`]), made visible. Never where its links lead: whoever made a link chose
+/// that name, and the model reads such a message as the app's own note. When `checked`
+/// leads somewhere else, [`THROUGH_LINK`] says so; where it leads is only on the card.
+pub fn said_path(written: &str, checked: &CheckedPath, sb: &PathSandbox, flavor: Flavor) -> String {
+    let case = sb
+        .roots()
+        .get(checked.root)
+        .map_or_else(|| default_case(flavor), |r| r.case);
+    let same = match (
+        lexical(written, None, flavor),
+        lexical(&checked.canonical, None, flavor),
+    ) {
+        (Ok(a), Ok(b)) => a.components.len() == b.components.len() && is_within(&a, &b, case),
+        _ => written == checked.canonical,
+    };
+    let mut out = policy::sanitize::visible(written);
+    if !same {
+        out.push_str(THROUGH_LINK);
+    }
+    out
 }
 
 #[cfg(test)]

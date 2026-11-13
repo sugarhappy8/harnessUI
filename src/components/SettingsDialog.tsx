@@ -719,7 +719,10 @@ export function Diagnostics() {
     setBusy(true);
     try {
       let r = null as DiagnosticsReport | null;
-      await runChange("reload", answer.whenIdle, async () => {
+      // The check goes on for minutes after its wait, so the waiting line follows the
+      // backend's wait (`reloadWaiting`), named as a restart, and is not kept up for the
+      // whole call: it shows, with a Cancel that works, only while the check waits.
+      await runChange("reload", undefined, async () => {
         r = await ipc.runDiagnostics(runtime?.modelPath ?? null, backendWhenIdle(answer));
         return r !== null;
       });

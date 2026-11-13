@@ -198,10 +198,13 @@ fn repo_paths(repo: &Repository) -> Result<RepoPaths, String> {
     })
 }
 
+/// The end of the refusal of a folder that is in no repository.
+pub(crate) const NOT_INSIDE_A_REPOSITORY: &str = " is not inside a git repository";
+
 /// The repository containing `start`, searching upward like `git rev-parse`.
 pub(crate) fn discover(start: &Path) -> Result<RepoPaths, String> {
     let repo = Repository::open_ext(start, RepositoryOpenFlags::empty(), &[] as &[&str])
-        .map_err(|_| format!("{} is not inside a git repository", start.display()))?;
+        .map_err(|_| format!("{}{NOT_INSIDE_A_REPOSITORY}", start.display()))?;
     repo_paths(&repo)
 }
 

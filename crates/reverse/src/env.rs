@@ -598,15 +598,8 @@ mod tests {
         let layout = ReverseLayout::new(ROOT).with_run_tmp(Some(RUN.into()));
         for flavor in [Flavor::Windows, Flavor::Macos, Flavor::Linux] {
             for d in [None, Some(Decompiler::Kuna), Some(Decompiler::Ghidra)] {
-                let with = run_config_with(
-                    &lock(),
-                    &layout,
-                    &everything(),
-                    d,
-                    flavor,
-                    false,
-                    &app_env,
-                );
+                let with =
+                    run_config_with(&lock(), &layout, &everything(), d, flavor, false, &app_env);
                 let mut want = set(&build(d, flavor, false));
                 if flavor == Flavor::Linux && d == Some(Decompiler::Ghidra) {
                     want.insert("TMPDIR".into(), RUN.into());

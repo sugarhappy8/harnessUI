@@ -495,16 +495,17 @@ fn moved_secrets(from: &str, to: &str, config: &Value) -> (Value, Vec<(String, S
 /// fits one of them, with more of its name (as "reverse__yours___x" fits "reverse
 /// (yours)"), is that server's tool and stays as it is.
 fn renamed_tool(name: &str, from: &str, to: &str, owners: &[String]) -> Option<String> {
-    use mcp_host::names::{SEPARATOR, exposed_name, sanitize_part};
+    use mcp_host::names::{MAX_TOOL_NAME_LEN, SEPARATOR, exposed_name, sanitize_part};
     let old = sanitize_part(from);
     let tool = name.strip_prefix(old.as_str())?.strip_prefix(SEPARATOR)?;
     if old.is_empty() || tool.is_empty() {
         return None;
     }
-    // In a long name a server's part may be cut down to 16 characters (names.rs).
+    // A server's part is cut (down to 16 characters) only in a name of the longest length
+    // (names.rs).
     let theirs = owners.iter().map(|o| sanitize_part(o)).any(|o| {
         (o.len().min(16)..=o.len())
-            .filter(|&n| n >= old.len())
+            .filter(|&n| n >= old.len() && (n == o.len() || name.len() == MAX_TOOL_NAME_LEN))
             .any(|n| {
                 name.strip_prefix(&o[..n])
                     .is_some_and(|rest| rest.starts_with(SEPARATOR))
@@ -2857,6 +2858,25 @@ mod tests {
             let long_owner = mcp_host::names::exposed_name("reverse (yours)", &tool, &free);
             assert_eq!(map(&long_owner), None, "{len}");
         }
+        // A server's part is cut only in a name of the longest length, so a shorter name
+        // that starts like a cut one is the renamed server's tool.
+        let apps = names(&["coding_apps (yours)"]);
+        let cut = mcp_host::names::exposed_name("coding_apps (yours)", &"t".repeat(50), &|_| false);
+        assert!(cut.starts_with("coding_apps__you__"), "{cut}");
+        assert_eq!(
+            renamed_tool(&cut, "coding_apps", "coding_apps (yours 2)", &apps),
+            None
+        );
+        assert_eq!(
+            renamed_tool(
+                "coding_apps__you__x",
+                "coding_apps",
+                "coding_apps (yours 2)",
+                &apps
+            )
+            .as_deref(),
+            Some("coding_apps__yours_2___you__x")
+        );
 
         let builtin: BTreeSet<String> = ["reverse".to_string()].into();
         let config = json!({ "headers": {

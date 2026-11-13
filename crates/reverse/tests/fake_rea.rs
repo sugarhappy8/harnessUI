@@ -286,6 +286,12 @@ mod calls {
             run(f, "result_ids_stay_with_the_chat_that_saw_them", ids()).await;
             run(f, "another_chats_open_clears_rea_first", other_open()).await;
             run(f, "a_folder_that_lost_approval_clears_rea", lost_folder()).await;
+            run(
+                f,
+                "a_folder_swapped_for_a_link_to_a_network_place_clears_rea",
+                swapped_folder(),
+            )
+            .await;
             run(f, "after_an_idle_stop_the_file_opens_again", reopen()).await;
             run(f, "a_swapped_file_is_refused", swapped()).await;
             run(f, "a_decompiler_switch_ends_the_binding", switch()).await;
@@ -1113,6 +1119,78 @@ mod calls {
             out.joined_text()
         );
         assert_eq!(p.tools_called(), ["close_binary", "reset_investigation"]);
+    }
+
+    /// The open file's folder is swapped for a link before a call on another file: a link
+    /// whose text names a network place (`//…`, which Linux reads as `/…` but a Mac or
+    /// Windows as a server; here it leads back to the same file) or whose text is not valid
+    /// text (`\xff/../real`, which the system reads as `real`). The call reads the link's
+    /// text before anything resolves it: rea is cleared, the chat's binding is dropped, and
+    /// the call on the other file runs; with and without Full access. Skipped for the text
+    /// that is not valid text where the system cannot make it.
+    async fn swapped_folder() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+        let p = Pack::new(false).await;
+        let sub = p.files.join("sub");
+        let real = p.files.join("real");
+        let network = format!("/{}", real.display());
+        let not_text = OsStr::from_bytes(b"\xff/../real");
+        let odd = p.files.join(OsStr::from_bytes(b"\xff"));
+        let probe = p.files.join("probe");
+        let can_make = std::fs::create_dir(&odd).is_ok()
+            && symlink(not_text, &probe).is_ok()
+            && std::fs::read_link(&probe).is_ok_and(|t| t.into_os_string().into_string().is_err());
+        let _ = std::fs::remove_file(&probe);
+        if !can_make {
+            eprintln!("skipped (not text): this system cannot make a link whose text is not valid text");
+        }
+        for full in [false, true] {
+            let a = if full {
+                p.full(1)
+            } else {
+                p.chat(1, &[&p.files])
+            };
+            for (what, target) in [("network text", OsStr::new(&network)), ("not text", not_text)] {
+                if what == "not text" && !can_make {
+                    continue;
+                }
+                std::fs::create_dir_all(&sub).unwrap();
+                std::fs::copy(fixture("hello-linux-x64"), sub.join("a.bin")).unwrap();
+                p.ok("open_binary", open_args("sub/a.bin"), &a).await;
+                std::fs::rename(&sub, &real).unwrap();
+                symlink(target, &sub).unwrap();
+                let label = format!("full access {full}, {what}");
+                assert!(sub.join("a.bin").is_file(), "{label}: the same file again");
+                p.clear_record();
+                let out = p
+                    .ok(
+                        "inspect_pe_imports",
+                        json!({"path": "hello-win-x64.exe"}),
+                        &a,
+                    )
+                    .await;
+                assert_eq!(
+                    out.joined_text().lines().next(),
+                    Some(notes::CLEARED),
+                    "{label}"
+                );
+                assert_eq!(
+                    p.tools_called(),
+                    ["close_binary", "reset_investigation", "inspect_pe_imports"],
+                    "{label}"
+                );
+                assert_eq!(
+                    p.invalid("list_procedures", json!({}), &a).await,
+                    m::NO_FILE_OPEN,
+                    "{label}"
+                );
+                std::fs::remove_file(&sub).unwrap();
+                std::fs::remove_dir_all(&real).unwrap();
+            }
+        }
+        let _ = std::fs::remove_dir(&odd);
     }
 
     /// After an idle stop, the next session call opens the same file again by itself,

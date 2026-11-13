@@ -683,6 +683,9 @@ pub(crate) mod fake {
         /// text (bytes on Linux and macOS, unpaired surrogates on Windows), so `read_link`
         /// fails, as it does on the real file system.
         LinkNotText(String),
+        /// A link the system follows to the text it holds, but which cannot be looked at
+        /// at all (its kind and its text are refused, as when access is denied).
+        NoAccess(String),
         Device,
         Pipe,
         Socket,
@@ -806,7 +809,9 @@ pub(crate) mod fake {
                 let here = cur.to_string();
                 match self.node(&here) {
                     None => return Ok(None),
-                    Some(Node::Link(target) | Node::LinkNotText(target)) => {
+                    Some(
+                        Node::Link(target) | Node::LinkNotText(target) | Node::NoAccess(target),
+                    ) => {
                         hops += 1;
                         if hops > 40 {
                             return Err("too many levels of links".into());
@@ -847,10 +852,10 @@ pub(crate) mod fake {
         }
         fn is_symlink(&self, path: &str) -> Option<bool> {
             self.note("is_symlink", path);
-            Some(matches!(
-                self.node(path)?,
-                Node::Link(_) | Node::LinkNotText(_)
-            ))
+            Some(match self.node(path)? {
+                Node::NoAccess(_) => return None,
+                node => matches!(node, Node::Link(_) | Node::LinkNotText(_)),
+            })
         }
     }
 
@@ -882,6 +887,7 @@ pub(crate) mod fake {
             match self.node(path) {
                 Some(Node::Link(t)) => Ok(Some(t)),
                 Some(Node::LinkNotText(_)) => Err("a link whose target is not valid text".into()),
+                Some(Node::NoAccess(_)) => Err("permission denied".into()),
                 Some(_) => Ok(None),
                 None => Err("missing".into()),
             }
@@ -892,6 +898,7 @@ pub(crate) mod fake {
                 Node::File(_) => EntryKind::File,
                 Node::Dir | Node::Locked => EntryKind::Dir,
                 Node::Link(_) | Node::LinkNotText(_) => EntryKind::Link,
+                Node::NoAccess(_) => return None,
                 Node::Device => EntryKind::Device,
                 Node::Pipe => EntryKind::Pipe,
                 Node::Socket => EntryKind::Socket,

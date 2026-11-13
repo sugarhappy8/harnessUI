@@ -34,7 +34,8 @@
 //!   picture worker (`attachments.rs`: its own process, with its memory, size and time
 //!   limits) after the checks above and before forwarding. At most [`MAX_WEBP_PICTURES`] a
 //!   request and [`MAX_CONVERTED`] bytes of converted pictures in all; one that cannot be
-//!   turned refuses the request with a plain message in the API's own shape.
+//!   turned, or pictures too large together, refuse the request with a plain message in the
+//!   API's own shape.
 //! - **Forwarded with a fixed header list** (`authorization` with the private key,
 //!   `content-type`, `accept`) through a client with no system proxy and no redirects.
 //! - **Answers are cleaned**: `timings`, `system_fingerprint` and cached-token counters are
@@ -49,9 +50,11 @@
 //!   (round 1), result `not_run` with the reason: `refused_by_policy` when one of its rules
 //!   refused it (too large, too slow, not JSON, a link instead of inline data), else
 //!   `allowed_without_prompt` (no model loaded, still loading).
-//! - **The busy counter** ([`BusyKind::OtherApp`]) is held while a request runs (D3); the
-//!   in-app chat is never blocked by it. A caller that leaves a streamed answer unread for
-//!   [`CALLER_STALL`] is cut off, so an app that hangs cannot hold it for ever.
+//! - **The busy counter** ([`BusyKind::OtherApp`]) is held while a request runs (D3), from
+//!   before the model is looked up, so turning its WebP pictures counts too; a model
+//!   stopped or changed meanwhile is never sent the request. The in-app chat is never
+//!   blocked by it. A caller that leaves a streamed answer unread for [`CALLER_STALL`] is
+//!   cut off, so an app that hangs cannot hold it for ever.
 //! - **The approval mode changes nothing here** (D12): the proxy is not a tool action, reads
 //!   no mode, and its switch is changed only by the user.
 
@@ -114,6 +117,8 @@ const MAX_SSE_LINE: usize = MAX_BODY;
 pub const NO_MODEL: &str = "No model is loaded in harnessUI. Open harnessUI and load a model.";
 /// "The model is still loading".
 pub const LOADING: &str = "The model in harnessUI is still loading. Try again in a minute.";
+/// The server a request was meant for did not answer, or was stopped before it was sent.
+const NOT_ANSWERED: &str = "The model in harnessUI did not answer. Try again.";
 
 type Body = BoxBody<Bytes, io::Error>;
 
@@ -621,9 +626,15 @@ pub enum PictureRefusal {
     /// Not valid base64, broken, larger than the picture worker's limits, too slow, or the
     /// worker failed.
     Unreadable,
-    /// Larger than 20 MB once turned, or the turned pictures over [`MAX_CONVERTED`] in all.
+    /// One picture larger than 20 MB once turned.
     TooLarge,
+    /// The turned pictures over [`MAX_CONVERTED`] in all (one alone never is, as below).
+    TooLargeTogether,
 }
+
+// One picture the worker gives back, as base64, always fits the request's total, so
+// passing the total always takes more than one picture.
+const _: () = assert!(crate::attachments::MAX_IMAGE_BYTES.div_ceil(3) * 4 < MAX_CONVERTED);
 
 impl PictureRefusal {
     fn message(self) -> &'static str {
@@ -637,6 +648,9 @@ impl PictureRefusal {
             Self::TooLarge => {
                 "A WebP picture in this request is too large to turn into PNG or JPEG. Send a smaller picture, or a PNG or JPEG."
             }
+            Self::TooLargeTogether => {
+                "The WebP pictures in this request are too large together once turned into PNG or JPEG. Send fewer or smaller pictures."
+            }
         }
     }
 
@@ -646,6 +660,9 @@ impl PictureRefusal {
             Self::TooMany => "Refused: more than 32 WebP pictures.",
             Self::Unreadable => "Refused: a WebP picture could not be read.",
             Self::TooLarge => "Refused: a WebP picture was too large to turn into PNG or JPEG.",
+            Self::TooLargeTogether => {
+                "Refused: the WebP pictures were too large together once turned into PNG or JPEG."
+            }
         }
     }
 }
@@ -798,7 +815,7 @@ async fn convert_webp_within(
             let data = STANDARD.encode(picture);
             total = total.saturating_add(data.len());
             if total > limits.total {
-                return Err(PictureRefusal::TooLarge);
+                return Err(PictureRefusal::TooLargeTogether);
             }
             turned.push((mime, data));
         }
@@ -1586,6 +1603,12 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
             .await;
         }
     };
+    // [0.0.6 webp-other-paths, final round] The busy counter (D3) and the request count are
+    // held from before the model is looked up until the answer ends, so turning WebP
+    // pictures (seconds, or a wait behind other requests' pictures) counts too: a change of
+    // model asks about this request ("Another app") or waits for it.
+    let busy = shared.deps.busy.hold(BusyKind::OtherApp);
+    let active = Active::new(&shared.deps.counters);
     let (base_url, upstream_key, model, n_ctx) = match shared.deps.model.current().await {
         Upstream::Ready {
             base_url,
@@ -1637,12 +1660,44 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
         )
         .await;
     }
+    // A change the user chose not to wait for may have stopped the server meanwhile: the
+    // request never goes to its old address, which another program may hold by then.
+    match shared.deps.model.current().await {
+        Upstream::Ready {
+            base_url: now, key, ..
+        } if now == base_url && key == upstream_key => {}
+        Upstream::Ready { .. } => {
+            return unforwarded(
+                StatusCode::BAD_GATEWAY,
+                NOT_ANSWERED,
+                None,
+                NotForwarded::NotRun("The model was changed while the request waited."),
+            )
+            .await;
+        }
+        Upstream::Loading => {
+            return unforwarded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                LOADING,
+                Some("model_loading"),
+                NotForwarded::NotRun("The model was still loading."),
+            )
+            .await;
+        }
+        Upstream::NotLoaded => {
+            return unforwarded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                NO_MODEL,
+                Some("model_not_loaded"),
+                NotForwarded::NotRun("No model was loaded."),
+            )
+            .await;
+        }
+    }
     let fail = |status: StatusCode, message: &str| {
         json_response(status, &error_body(Some(api), status, message, None))
     };
 
-    let busy = shared.deps.busy.hold(BusyKind::OtherApp);
-    let active = Active::new(&shared.deps.counters);
     let audit = AuditRow::open(shared, api, rebuilt.stream, &caller).await;
     let scrub = Scrub::new(&model);
     let sent = shared
@@ -1671,10 +1726,7 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
             audit
                 .finish("error", Some("The model did not answer.".into()))
                 .await;
-            return fail(
-                StatusCode::BAD_GATEWAY,
-                "The model in harnessUI did not answer. Try again.",
-            );
+            return fail(StatusCode::BAD_GATEWAY, NOT_ANSWERED);
         }
     };
     let status = upstream.status();
@@ -3077,7 +3129,7 @@ mod tests {
                 &worker,
                 limits(2, 100, minute),
                 &two,
-                PictureRefusal::TooLarge,
+                PictureRefusal::TooLargeTogether,
             ),
             (
                 &no_worker,
@@ -3178,6 +3230,7 @@ mod tests {
             PictureRefusal::TooMany,
             PictureRefusal::Unreadable,
             PictureRefusal::TooLarge,
+            PictureRefusal::TooLargeTogether,
         ];
         for refusal in all {
             for text in [refusal.message(), refusal.audit_summary()] {

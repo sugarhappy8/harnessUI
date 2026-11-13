@@ -346,7 +346,10 @@ mod tests {
 
         // Not set, relative, or with a `.` or `..` part.
         assert_eq!(run_tmp_in(None, "app", &plenty), None);
-        assert_eq!(run_tmp_in(Some(OsStr::new("run/user")), "app", &plenty), None);
+        assert_eq!(
+            run_tmp_in(Some(OsStr::new("run/user")), "app", &plenty),
+            None
+        );
         let dots = format!("{}/../run", run.display());
         assert_eq!(run_tmp_in(Some(OsStr::new(&dots)), "app", &plenty), None);
         let dot = format!("{}/./", run.display());

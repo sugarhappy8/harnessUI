@@ -688,10 +688,7 @@ fn dot_folder_run_tmp(_top: &Path) -> Option<(PathBuf, &'static str)> {
 /// The pack, the fixtures and anything rea writes go into `base`: a temporary folder named
 /// `real-rea-…`, or `REAL_REA_DIR/<kuna|ghidra>` (`top`); with `Base::DotFolder`, its
 /// `.local/share`.
-fn make_base(
-    decompiler: Decompiler,
-    kind: Base,
-) -> (Option<tempfile::TempDir>, PathBuf, PathBuf) {
+fn make_base(decompiler: Decompiler, kind: Base) -> (Option<tempfile::TempDir>, PathBuf, PathBuf) {
     let label = decompiler.label().to_lowercase();
     let (temp, top) = match std::env::var_os("REAL_REA_DIR") {
         Some(dir) => {
@@ -960,7 +957,10 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
         pseudo.joined_text()
     );
     // With the private temporary folder, Ghidra's session is there while the file is open.
-    if let Some(dir) = run_tmp.as_ref().filter(|_| decompiler == Decompiler::Ghidra) {
+    if let Some(dir) = run_tmp
+        .as_ref()
+        .filter(|_| decompiler == Decompiler::Ghidra)
+    {
         let sessions: Vec<String> = std::fs::read_dir(dir)
             .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
             .flatten()

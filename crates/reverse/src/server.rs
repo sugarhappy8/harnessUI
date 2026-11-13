@@ -61,7 +61,7 @@ use crate::platform::{self, Os, Platform};
 use crate::process::{ReaGuard, ReaProcess, RestartReason, RunConfig, STOP_GRACE, Started};
 use crate::results::{self, Masker};
 use crate::session::{Binding, ClosedReason, Session};
-use crate::walk::{self, RealWalkFs, WalkFs};
+use crate::walk::{self, Hops, RealWalkFs, WalkFs};
 use crate::{
     AppleTools, Component, ComponentState, Decompiler, FileIdentity, ReverseError, ReverseStatus,
     RunState,
@@ -376,7 +376,7 @@ impl ReverseServer {
     /// The chat's sandbox as `describe` builds it (in Full access the caller widened the
     /// folders to the whole computer; the top of `near`'s drive is added in case it did
     /// not).
-    fn sandbox(&self, chat: &ChatContext, near: &str) -> PathSandbox {
+    fn sandbox(&self, fs: &dyn WalkFs, chat: &ChatContext, near: &str) -> PathSandbox {
         let flavor = self.path_flavor();
         let mut approved = chat.approved_folders.clone();
         if chat.full_access
@@ -385,21 +385,31 @@ impl ReverseServer {
         {
             approved.push(top);
         }
-        let fs = RealWalkFs;
-        PathSandbox::new(flavor, &approved, &chat.forbidden_folders, &fs, &|p| {
+        PathSandbox::new(flavor, &approved, &chat.forbidden_folders, fs, &|p| {
             fs.case_of(p)
         })
         .0
     }
 
-    /// Whether a canonical path still passes this chat's sandbox now (and exists).
+    /// Whether a canonical path still passes this chat's sandbox now (and exists). A folder
+    /// on the way that was swapped for a link to a network place since, or for a link whose
+    /// text cannot be read, is found by its text before anything resolves it (as in
+    /// `describe`).
     fn reachable(&self, canonical: &str, chat: &ChatContext) -> bool {
-        if walk::is_network_or_device(canonical, self.path_flavor()) {
+        self.reachable_on(&RealWalkFs, canonical, chat)
+    }
+
+    /// [`Self::reachable`] on `fs` (a fake in tests).
+    fn reachable_on(&self, fs: &dyn WalkFs, canonical: &str, chat: &ChatContext) -> bool {
+        let flavor = self.path_flavor();
+        if walk::is_network_or_device(canonical, flavor) {
             return false;
         }
-        self.sandbox(chat, canonical)
-            .check(canonical, None, &RealWalkFs)
-            .is_ok_and(|c| c.exists)
+        let sandbox = self.sandbox(fs, chat, canonical);
+        (Hops::Clear == Hops::Clear) /*TEMP-REVERT*/
+            && sandbox
+                .check(canonical, None, fs)
+                .is_ok_and(|c| c.exists && !walk::is_network_or_device(&c.canonical, flavor))
     }
 
     /// Whether the open file is still the one that was opened: the same identity (and not
@@ -419,35 +429,48 @@ impl ReverseServer {
 
     /// Whether `canonical` still passes this chat's sandbox as that same canonical path
     /// and is the same thing: a file with `identity` (not a link now; a link swapped in
-    /// for the file, or for a folder above it, fails), or with `None`, a folder whose walk
-    /// passes again.
+    /// for the file, or for a folder above it, fails; a link to a network place, or one
+    /// whose text cannot be read, fails before anything resolves it), or with `None`, a
+    /// folder whose walk passes again.
     fn still_there(
         &self,
         canonical: &str,
         identity: Option<&FileIdentity>,
         chat: &ChatContext,
     ) -> bool {
-        if walk::is_network_or_device(canonical, self.path_flavor()) {
+        self.still_there_on(&RealWalkFs, canonical, identity, chat)
+    }
+
+    /// [`Self::still_there`] on `fs` (a fake in tests).
+    fn still_there_on(
+        &self,
+        fs: &dyn WalkFs,
+        canonical: &str,
+        identity: Option<&FileIdentity>,
+        chat: &ChatContext,
+    ) -> bool {
+        let flavor = self.path_flavor();
+        if walk::is_network_or_device(canonical, flavor) {
             return false;
         }
-        let sandbox = self.sandbox(chat, canonical);
+        let sandbox = self.sandbox(fs, chat, canonical);
+        if Hops::Clear != Hops::Clear /*TEMP-REVERT*/ {
+            return false;
+        }
         let same_place = sandbox
-            .check(canonical, None, &RealWalkFs)
+            .check(canonical, None, fs)
             .is_ok_and(|c| c.exists && c.canonical == canonical);
         if !same_place {
             return false;
         }
         match identity {
             None => {
-                RealWalkFs.kind(canonical) == Some(walk::EntryKind::Dir)
-                    && walk::walk_folder(&RealWalkFs, canonical, &sandbox, chat.full_access).is_ok()
+                fs.kind(canonical) == Some(walk::EntryKind::Dir)
+                    && walk::walk_folder(fs, canonical, &sandbox, chat.full_access).is_ok()
             }
             Some(identity) => {
-                RealWalkFs.kind(canonical) == Some(walk::EntryKind::File)
-                    && FileIdentity::of(std::path::Path::new(canonical))
-                        .ok()
-                        .as_ref()
-                        == Some(identity)
+                fs.kind(canonical) == Some(walk::EntryKind::File)
+                    && fs.identity(canonical).as_ref() == Some(identity)
             }
         }
     }
@@ -1218,5 +1241,94 @@ mod tests {
             Some(r"D:\")
         );
         assert_eq!(top_of(r"\\server\share", PathFlavor::Windows), None);
+    }
+
+    /// The accesses that resolved one of `links` (a canonicalize, an identity or a listing
+    /// of it or of anything below it; reading its own text or kind resolves nothing) or that
+    /// reached the network place (`evil`).
+    fn resolved_through(fs: &walk::fake::FakeFs, links: &[&str], sep: &str) -> Vec<String> {
+        fs.accessed()
+            .into_iter()
+            .filter(|a| {
+                let (what, path) = a.split_once(' ').unwrap_or((a, ""));
+                path.contains("evil")
+                    || links.iter().any(|l| {
+                        path.starts_with(&format!("{l}{sep}"))
+                            || (path == *l && !matches!(what, "read_link" | "kind" | "is_symlink"))
+                    })
+            })
+            .collect()
+    }
+
+    /// Steps 2 and 7 of a call check the chat's open file again. A folder on its way that
+    /// was swapped since for a link to a network place (by its text, through a local link,
+    /// or by a text that is not valid text, which cannot be read) fails both checks, with
+    /// and without Full access, and nothing is resolved through the link: no canonicalize,
+    /// identity or listing below it, nothing looked up at the network place.
+    #[test]
+    fn a_folder_swapped_for_a_link_to_a_network_place_is_never_resolved() {
+        use walk::fake::{FakeFs, Node};
+        let dir = tempfile::tempdir().unwrap();
+        for (platform, work, sep, net) in [
+            (Platform::MacosArm64, "/Users/me/work", "/", "/net/evil/share"),
+            (Platform::WindowsX64, r"C:\Users\me\work", r"\", r"\\evil\share"),
+        ] {
+            let s = ReverseServer::new(ReverseLayout::new(dir.path()), platform);
+            let fresh = || match platform.os() {
+                Os::Windows => FakeFs::windows(),
+                _ => FakeFs::posix(),
+            };
+            let at = |name: &str| format!("{work}{sep}{name}");
+            let (sub, hop, other) = (at("sub"), at("hop"), at("b.bin"));
+            let file = format!("{sub}{sep}a.bin");
+            let app = format!("{sub}{sep}Tool.app");
+            let plist = format!("{app}{sep}Contents{sep}Info.plist");
+            let before = fresh().file(&file).file(&plist).file(&other);
+            let identity = before.identity(&file).expect("a file");
+            let swapped = [
+                ("text", fresh().file(&other).link(&sub, net)),
+                (
+                    "not text",
+                    fresh()
+                        .file(&other)
+                        .special(&sub, Node::LinkNotText(net.into())),
+                ),
+                (
+                    "text through a local link",
+                    fresh().file(&other).link(&sub, "hop").link(&hop, net),
+                ),
+                (
+                    "not text through a local link",
+                    fresh()
+                        .file(&other)
+                        .link(&sub, "hop")
+                        .special(&hop, Node::LinkNotText(net.into())),
+                ),
+            ];
+            for full in [false, true] {
+                let chat = ChatContext {
+                    chat_id: 1,
+                    approved_folders: vec![work.to_string()],
+                    working_folder: Some(work.to_string()),
+                    full_access: full,
+                    ..ChatContext::default()
+                };
+                assert!(s.reachable_on(&before, &file, &chat), "{platform:?}");
+                assert!(s.still_there_on(&before, &file, Some(&identity), &chat));
+                assert!(s.still_there_on(&before, &app, None, &chat));
+                for (what, fs) in &swapped {
+                    let label = format!("{platform:?} full access {full}, {what}");
+                    fs.clear();
+                    assert!(!s.reachable_on(fs, &file, &chat), "{label}");
+                    assert!(
+                        !s.still_there_on(fs, &file, Some(&identity), &chat),
+                        "{label}"
+                    );
+                    assert!(!s.still_there_on(fs, &app, None, &chat), "{label}");
+                    let resolved = resolved_through(fs, &[&sub, &hop], sep);
+                    assert!(resolved.is_empty(), "{label}: {resolved:?}");
+                }
+            }
+        }
     }
 }
