@@ -131,6 +131,15 @@ Collected while the packages run. Each needs doing (or a decision) before the re
     the tool/stored-picture path decides by the label, so a readable PNG/JPEG labelled
     image/webp is dropped with an untrue note; the per-request total refusal says one picture
     is too large.
+    Done (webp-proxy-minors): the busy counter and the request count are taken before the
+    model is looked up, so turning pictures counts as using the model; a model stopped or
+    changed meanwhile ends the request at once (the model is looked at again every half
+    second, which also frees the counter) with the no-model, loading or did-not-answer reply.
+    The tool and stored paths go by the first bytes: a PNG, JPEG or GIF labelled WebP is sent
+    under its real type, and data labelled WebP that is none of the four known types is left
+    out with "[a picture could not be read and was left out]" (lead decision in the final
+    round: llama-server would refuse every later request in that chat over it). The
+    per-request total has its own refusal, naming fewer or smaller pictures.
 - **Docs written and reviewed (wf_50b56912-278).** 11 `TODO(lead): confirm after WP9e` markers in
   ARCHITECTURE.md (1.4, 9.3, 13.6, 16, 17, 20) to confirm or remove once WP9e is merged.
   Flagged by the writer for the release review: rea's `describe` refusals `LINK_OUT` and

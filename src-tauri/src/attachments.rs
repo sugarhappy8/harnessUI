@@ -462,6 +462,7 @@ enum InlinePicture {
     /// agent replaces with its own note): sent as it is.
     Keep,
     /// A PNG, JPEG or GIF picture labelled WebP: sent as it is, under the type it really is.
+    /// Other data labelled WebP is [`Self::LeftOut`] instead.
     Relabel(&'static str),
     /// The MIME type and base64 of the picture as JPEG or PNG.
     Converted(String, String),
@@ -472,13 +473,16 @@ enum InlinePicture {
 
 /// Decided by the picture's bytes, not by its type, as llama-server reads it: a WebP file
 /// becomes JPEG or PNG (or the note, when it cannot be read), anything else goes as it is.
+/// [last round] Data labelled WebP that is no picture type llama-server reads is left out
+/// with the general note, since nothing here can make it readable.
 async fn inline_picture(worker: &PictureWorker, mime: &str, data_base64: &str) -> InlinePicture {
     if !base64_is_webp(data_base64) {
+        if !mime.trim().eq_ignore_ascii_case("image/webp") {
+            return InlinePicture::Keep;
+        }
         return match base64_picture_type(data_base64) {
-            Some(real) if mime.trim().eq_ignore_ascii_case("image/webp") => {
-                InlinePicture::Relabel(real)
-            }
-            _ => InlinePicture::Keep,
+            Some(real) => InlinePicture::Relabel(real),
+            None => InlinePicture::LeftOut(PICTURE_UNKNOWN_LEFT_OUT),
         };
     }
     let compact: String = data_base64

@@ -1112,7 +1112,11 @@ async fn a_model_change_ends_requests_whose_webp_pictures_are_turned() {
     for request in requests {
         ended(request, 503, proxy::LOADING).await;
     }
-    assert!(changed.elapsed() < at_once, "ended {:?} after", changed.elapsed());
+    assert!(
+        changed.elapsed() < at_once,
+        "ended {:?} after",
+        changed.elapsed()
+    );
     assert!(!h.busy.is_busy(), "still counted after the change");
     assert_eq!(h.counters.active(), 0);
 
@@ -1123,7 +1127,11 @@ async fn a_model_change_ends_requests_whose_webp_pictures_are_turned() {
     let changed = Instant::now();
     h.model.set(Upstream::NotLoaded);
     ended(request, 503, proxy::NO_MODEL).await;
-    assert!(changed.elapsed() < at_once, "ended {:?} after", changed.elapsed());
+    assert!(
+        changed.elapsed() < at_once,
+        "ended {:?} after",
+        changed.elapsed()
+    );
     assert!(!h.busy.is_busy(), "still counted after the change");
 
     // Another model is loaded (a new server, port and key).
@@ -1134,8 +1142,17 @@ async fn a_model_change_ends_requests_whose_webp_pictures_are_turned() {
     counted_while_turning(&h, 0).await;
     let changed = Instant::now();
     h.model.set(FakeModel::ready(other_addr, 8192));
-    ended(request, 502, "The model in harnessUI did not answer. Try again.").await;
-    assert!(changed.elapsed() < at_once, "ended {:?} after", changed.elapsed());
+    ended(
+        request,
+        502,
+        "The model in harnessUI did not answer. Try again.",
+    )
+    .await;
+    assert!(
+        changed.elapsed() < at_once,
+        "ended {:?} after",
+        changed.elapsed()
+    );
     assert!(!h.busy.is_busy(), "still counted after the change");
     assert_eq!(h.counters.active(), 0);
     assert!(h.llama.seen().is_empty());

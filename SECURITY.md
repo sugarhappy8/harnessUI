@@ -343,9 +343,10 @@ analyser that looks up debugging-symbol files is turned off. On a Mac it never s
 Apple's command line tools are installed, so Apple's install window cannot appear in the
 middle of a chat. A CI workflow is set up to run rea with the real decompilers (Ghidra on
 Windows, Kuna on macOS, both on Linux) and to fail if they try to reach another computer.
-On Linux it watches every program the tests start, name lookups included; on Windows it
-blocks and watches Node.js, Java and Ghidra's decompiler; on macOS it blocks and watches the
-tests' TCP and UDP traffic. It has not run on GitHub yet: its Linux checks were run on the
+On Linux it watches every program the contract tests start, name lookups included; on
+Windows it blocks and watches Node.js, Java and Ghidra's decompiler; on macOS it blocks and
+watches the contract tests' TCP and UDP traffic. One more check, of the app's own call path
+with rea and Kuna, runs on Linux and macOS outside these watchers. It has not run on GitHub yet: its Linux checks were run on the
 build machine, and its Windows and macOS jobs have not run at all.
 
 **Limits:**

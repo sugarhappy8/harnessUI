@@ -1545,6 +1545,59 @@ pub fn says(headers: &HeaderMap) -> String {
         .unwrap_or_default()
 }
 
+/// [0.0.6 webp-other-paths, last round] How often a request whose WebP pictures are being
+/// turned, or which waits its turn, looks again whether its model is still the loaded one.
+const MODEL_RECHECK: Duration = Duration::from_millis(500);
+
+/// [0.0.6 webp-other-paths, last round] The loaded model is no longer the one a request was
+/// looked up on: it was stopped, or another one was loaded, while the request waited.
+enum ModelMoved {
+    Loading,
+    NotLoaded,
+    Changed,
+}
+
+impl ModelMoved {
+    /// `now` against the server `base_url` and `key` name, or `None` while it is still that
+    /// same server with that same key.
+    fn seen(now: Upstream, base_url: &str, key: &str) -> Option<Self> {
+        match now {
+            Upstream::Ready {
+                base_url: at,
+                key: with,
+                ..
+            } if at == base_url && with == key => None,
+            Upstream::Ready { .. } => Some(Self::Changed),
+            Upstream::Loading => Some(Self::Loading),
+            Upstream::NotLoaded => Some(Self::NotLoaded),
+        }
+    }
+
+    /// What the caller is told, and what its audit row says.
+    fn reply(self) -> (StatusCode, &'static str, Option<&'static str>, NotForwarded) {
+        match self {
+            Self::Changed => (
+                StatusCode::BAD_GATEWAY,
+                NOT_ANSWERED,
+                None,
+                NotForwarded::NotRun("The model was changed while the request waited."),
+            ),
+            Self::Loading => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                LOADING,
+                Some("model_loading"),
+                NotForwarded::NotRun("The model was still loading."),
+            ),
+            Self::NotLoaded => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                NO_MODEL,
+                Some("model_not_loaded"),
+                NotForwarded::NotRun("No model was loaded."),
+            ),
+        }
+    }
+}
+
 async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<Body> {
     let started = Instant::now();
     let caller = says(req.headers());
@@ -1649,50 +1702,48 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
     };
     drop(body);
     // [0.0.6 webp-other-paths] llama-server cannot read WebP: such pictures become JPEG or PNG.
+    // [last round] Turning them, and waiting for a turn, ends as soon as the model is stopped
+    // or changed ([`MODEL_RECHECK`]), so a request the user chose not to wait for stops
+    // counting as in use then and not when its pictures are done; dropping the work kills
+    // its picture worker.
     let pictures = &shared.deps.pictures;
-    let turned = convert_webp(api, &mut rebuilt.body, pictures, &shared.pictures_at_once).await;
-    if let Err(refusal) = turned {
-        return unforwarded(
-            StatusCode::BAD_REQUEST,
-            refusal.message(),
-            None,
-            NotForwarded::Refused(refusal.audit_summary()),
-        )
-        .await;
-    }
-    // A change the user chose not to wait for may have stopped the server meanwhile: the
-    // request never goes to its old address, which another program may hold by then.
-    match shared.deps.model.current().await {
-        Upstream::Ready {
-            base_url: now, key, ..
-        } if now == base_url && key == upstream_key => {}
-        Upstream::Ready { .. } => {
+    let turning = convert_webp(api, &mut rebuilt.body, pictures, &shared.pictures_at_once);
+    let watch = async {
+        loop {
+            tokio::time::sleep(MODEL_RECHECK).await;
+            if let Some(moved) =
+                ModelMoved::seen(shared.deps.model.current().await, &base_url, &upstream_key)
+            {
+                return moved;
+            }
+        }
+    };
+    let turned = tokio::select! {
+        turned = turning => turned.map(|()| None),
+        moved = watch => Ok(Some(moved)),
+    };
+    let moved = match turned {
+        Ok(moved) => moved,
+        Err(refusal) => {
             return unforwarded(
-                StatusCode::BAD_GATEWAY,
-                NOT_ANSWERED,
+                StatusCode::BAD_REQUEST,
+                refusal.message(),
                 None,
-                NotForwarded::NotRun("The model was changed while the request waited."),
+                NotForwarded::Refused(refusal.audit_summary()),
             )
             .await;
         }
-        Upstream::Loading => {
-            return unforwarded(
-                StatusCode::SERVICE_UNAVAILABLE,
-                LOADING,
-                Some("model_loading"),
-                NotForwarded::NotRun("The model was still loading."),
-            )
-            .await;
-        }
-        Upstream::NotLoaded => {
-            return unforwarded(
-                StatusCode::SERVICE_UNAVAILABLE,
-                NO_MODEL,
-                Some("model_not_loaded"),
-                NotForwarded::NotRun("No model was loaded."),
-            )
-            .await;
-        }
+    };
+    // A change the user chose not to wait for may also have come just as the pictures were
+    // done, or before the next look: the request never goes to its old address, which
+    // another program may hold by then.
+    let moved = match moved {
+        Some(moved) => Some(moved),
+        None => ModelMoved::seen(shared.deps.model.current().await, &base_url, &upstream_key),
+    };
+    if let Some(moved) = moved {
+        let (status, message, code, why) = moved.reply();
+        return unforwarded(status, message, code, why).await;
     }
     let fail = |status: StatusCode, message: &str| {
         json_response(status, &error_body(Some(api), status, message, None))
