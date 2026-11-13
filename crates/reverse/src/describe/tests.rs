@@ -442,7 +442,7 @@ fn folders_are_walked() {
     assert_eq!(
         a.preview,
         "rea will look through the folder /home/me/work/app and find out what this app is built with.\n\
-         It does not run anything in it or change it. What rea finds goes to the model as data from the folder.\n\
+         It does not run anything in it or change it.\n\
          Allow for this chat: rea may open or check other files in /home/me/work in this chat."
     );
     let p = Payload::of(a, "inspect_desktop_application").unwrap();
@@ -1263,4 +1263,264 @@ fn the_real_file_system_through_the_describer() {
         &env,
     );
     assert_eq!(action(&d).hard_limit.as_deref(), Some(m::OUTSIDE));
+}
+
+// ---- Review round 1 --------------------------------------------------------------------
+
+/// A folder that holds harnessUI's own folders or a key store (as a plain sub-folder, or
+/// behind a link) is refused in every mode, Full access included: rea walks such a folder
+/// for itself, so its forbidden parts cannot be skipped.
+#[test]
+fn a_folder_holding_the_app_folders_or_a_key_store_is_denied_in_every_mode() {
+    const SHARE: &str = "/home/me/.local/share";
+    const OWN: &str = "/home/me/.local/share/com.harnessui.app";
+    let fs = tree()
+        .file("/home/me/.local/share/com.harnessui.app/harness.db")
+        .dir("/home/me/.local/share/com.harnessui.app/reverse")
+        .file("/home/me/.local/share/someapp/main.js")
+        .link("/home/me/work/app/lib/share", SHARE);
+    let holds = "That folder contains harnessUI's own folders, which tools can't reach: ";
+    for mode in MODES {
+        let mut c = chat(mode, &[WORK, "/home/me"]);
+        c.forbidden_folders = vec![APP_DATA.into(), KEYS.into(), OWN.into()];
+        for (tool, property, path) in [
+            ("inspect_desktop_application", "path", SHARE),
+            ("analyze_javascript_application", "input_path", SHARE),
+            ("inspect_desktop_application", "path", "/home/me/.local"),
+            // Only the key store inside.
+            (
+                "analyze_javascript_application",
+                "input_path",
+                "/home/me/.local/share/",
+            ),
+        ] {
+            let d = run(&fs, &c, tool, json!({property: path}));
+            let why = denied_with(&d, mode);
+            assert!(why.starts_with(holds), "{mode:?} {tool} {path}: {why}");
+        }
+        // Behind a link inside an approved folder: the folder the link leads to is walked,
+        // and the app's folder inside it is refused.
+        let d = run(
+            &fs,
+            &c,
+            "analyze_javascript_application",
+            json!({"input_path": "/home/me/work/app"}),
+        );
+        let why = denied_with(&d, mode);
+        assert!(
+            why.starts_with(holds) || why.starts_with(m::LINK_OUT),
+            "{mode:?}: {why}"
+        );
+        // A folder beside them is fine.
+        let d = run(
+            &fs,
+            &c,
+            "inspect_desktop_application",
+            json!({"path": "/home/me/.local/share/someapp"}),
+        );
+        assert!(action(&d).hard_limit.is_none(), "{mode:?}");
+    }
+}
+
+/// A network place is found in the path after its dot segments are read, before anything
+/// is looked up: `/tmp/../net/…` is `/net/…` (on a Mac, an automounted share).
+#[test]
+fn a_network_place_behind_dot_segments_is_denied_with_no_lookup() {
+    let fs = tree().dir("/tmp");
+    for platform in [Platform::MacosArm64, LINUX] {
+        for mode in MODES {
+            let c = chat(mode, &[WORK]);
+            for path in [
+                "/tmp/../net/server/share/a.exe",
+                "/./net/server/share/a.exe",
+                "/home/me/work/../../../net/server/a.exe",
+                "../../../net/server/a.exe",
+                "/tmp/../Network/Servers/x/a.exe",
+            ] {
+                fs.clear();
+                let d = run_with(
+                    platform,
+                    &fs,
+                    &c,
+                    "inspect_pe_imports",
+                    json!({"path": path}),
+                    &ready(),
+                    &SessionView::default(),
+                );
+                assert_eq!(denied_with(&d, mode), m::NETWORK, "{mode:?} {path}");
+                let looked: Vec<String> = fs
+                    .accessed()
+                    .into_iter()
+                    .filter(|a| a.contains(" /net") || a.contains(" /Network"))
+                    .collect();
+                assert!(looked.is_empty(), "{path}: {looked:?}");
+            }
+        }
+    }
+}
+
+/// Links are followed by their text, one hop at a time, before the system resolves
+/// anything: a chain whose second link names a network place, a relative link text whose
+/// `..` reaches `/net`, and a link text that passes through another link before `..`.
+#[test]
+fn link_chains_to_a_network_place_are_denied_with_no_lookup() {
+    let cases: Vec<(&str, FakeFs)> = vec![
+        (
+            "two links",
+            tree()
+                .link("/home/me/work/app/a", "/home/me/work/b")
+                .link("/home/me/work/b", "/net/server/share"),
+        ),
+        (
+            "dot segments",
+            tree().link("/home/me/work/app/rel", "../../../../net/server/share"),
+        ),
+        (
+            "through a link",
+            tree()
+                .link("/home/me/work/app/l", "../sub/../x")
+                .link("/home/me/work/sub", "/net/server/share/deep"),
+        ),
+    ];
+    for (what, fs) in &cases {
+        for mode in MODES {
+            fs.clear();
+            let d = run(
+                fs,
+                &chat(mode, &[WORK]),
+                "inspect_desktop_application",
+                json!({"path": "app"}),
+            );
+            let why = denied_with(&d, mode);
+            assert!(why.starts_with(m::LINK_OUT), "{what} {mode:?}: {why}");
+            let resolved: Vec<String> = fs
+                .accessed()
+                .into_iter()
+                .filter(|a| {
+                    a.contains(" /net")
+                        || a == "canonicalize /home/me/work/b"
+                        || a == "canonicalize /home/me/work/app/a"
+                        || a.starts_with("canonicalize /home/me/work/sub")
+                        || a == "canonicalize /home/me/work/app/l"
+                })
+                .collect();
+            assert!(resolved.is_empty(), "{what} {mode:?}: {resolved:?}");
+        }
+    }
+    // The path given is itself a local link to such a link.
+    let fs = tree()
+        .link("/home/me/work/c.exe", "/home/me/work/b")
+        .link("/home/me/work/b", "/net/server/share/x.exe");
+    for mode in MODES {
+        fs.clear();
+        let d = run(
+            &fs,
+            &chat(mode, &[WORK]),
+            "inspect_pe_imports",
+            json!({"path": "c.exe"}),
+        );
+        assert_eq!(denied_with(&d, mode), m::NETWORK, "{mode:?}");
+        assert!(
+            !fs.accessed()
+                .iter()
+                .any(|a| a.starts_with("canonicalize /home/me/work/c.exe")
+                    || a.starts_with("canonicalize /home/me/work/b")
+                    || a.contains(" /net")),
+            "{mode:?}: {:?}",
+            fs.accessed()
+        );
+    }
+}
+
+/// The card's first line names the file that rea reads, even when its name holds the
+/// card's own placeholder text.
+#[test]
+fn a_file_name_holding_the_cards_placeholder_is_shown_as_it_is() {
+    let path = "/home/me/work/payload<decompiler>.exe";
+    let fs = tree().file(path).file("/home/me/work/payload.exe");
+    let c = chat(Mode::AskFirst, &[WORK]);
+    let d = run(&fs, &c, "inspect_pe_imports", json!({"path": path}));
+    assert_eq!(
+        action(&d).preview.lines().next(),
+        Some(
+            "rea will read /home/me/work/payload<decompiler>.exe and list the functions it uses from other libraries."
+        )
+    );
+    let d = run(&fs, &c, "open_binary", json!({"path": path}));
+    assert_eq!(
+        action(&d).preview.lines().next(),
+        Some(
+            "rea will read /home/me/work/payload<decompiler>.exe and work out its code with Kuna."
+        )
+    );
+}
+
+/// rea cannot run five session tools with Kuna: the model reads why (and, where Ghidra is
+/// offered, what the user can do), instead of rea's remedy it cannot follow. With Ghidra,
+/// and for every other tool, nothing changes.
+#[test]
+fn tools_rea_cannot_run_with_kuna_say_so() {
+    let fs = tree();
+    let c = chat(Mode::AskFirst, &[WORK]);
+    let kuna = session_with(
+        Some(binding(
+            1,
+            "/home/me/work/hello-linux-x64",
+            Decompiler::Kuna,
+        )),
+        &[],
+    );
+    let ghidra = session_with(
+        Some(binding(
+            1,
+            "/home/me/work/hello-linux-x64",
+            Decompiler::Ghidra,
+        )),
+        &[],
+    );
+    let with_ghidra = Availability {
+        decompiler: Some(Decompiler::Ghidra),
+        ..ready()
+    };
+    let calls = [
+        ("procedure_info", json!({"procedure": "main"})),
+        ("procedure_references", json!({"procedure": "main"})),
+        ("list_names", json!({})),
+        ("list_segments", json!({})),
+        ("find_xrefs_to_name", json!({"name": "main"})),
+    ];
+    for (platform, message) in [
+        (LINUX, m::KUNA_CANNOT),
+        (Platform::MacosArm64, m::KUNA_CANNOT_MAC),
+        (Platform::MacosX64, m::KUNA_CANNOT_MAC),
+    ] {
+        assert_eq!(kuna_cannot_message(platform), message);
+        for (tool, a) in &calls {
+            assert!(KUNA_CANNOT_RUN.contains(tool));
+            let d = run_with(platform, &fs, &c, tool, a.clone(), &ready(), &kuna);
+            assert_eq!(invalid(&d), message, "{platform:?} {tool}");
+            // With no file open, that comes first.
+            let d = run_with(
+                platform,
+                &fs,
+                &c,
+                tool,
+                a.clone(),
+                &ready(),
+                &SessionView::default(),
+            );
+            assert_eq!(invalid(&d), m::NO_FILE_OPEN, "{platform:?} {tool}");
+            let d = run_with(LINUX, &fs, &c, tool, a.clone(), &with_ghidra, &ghidra);
+            assert_eq!(action(&d).scope, Scope::FileAnalysisSession, "{tool}");
+        }
+    }
+    for tool in ["procedure_pseudo_code", "procedure_assembly", "xrefs"] {
+        let a = if tool == "xrefs" {
+            json!({"address": "main"})
+        } else {
+            json!({"procedure": "main"})
+        };
+        let d = run_with(LINUX, &fs, &c, tool, a, &ready(), &kuna);
+        assert_eq!(action(&d).scope, Scope::FileAnalysisSession, "{tool}");
+    }
 }

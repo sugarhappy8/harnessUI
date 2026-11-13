@@ -4,6 +4,7 @@ import { AlertTriangle, FolderPlus, Trash2, Wrench } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import type { ApprovedFolder, CodingAppsStatus, ToolDto } from "../lib/types";
 import { useApp, toErrorInfo } from "../store/app";
+import { visiblePath } from "./FolderChip";
 
 const SERVER_LABEL: Record<string, string> = {
   files: "Files",
@@ -539,20 +540,22 @@ export function ToolsPanel(props: {
               <ul className="mt-1 space-y-1">
                 {folders.map((f) => (
                   <li key={f.id} className="flex items-center gap-2">
-                    <label className="flex min-w-0 flex-1 items-center gap-2" title={f.path}>
+                    <label className="flex min-w-0 flex-1 items-center gap-2" title={visiblePath(f.path)}>
                       <input
                         type="radio"
                         name={`working-folder-${props.chatId}`}
                         checked={f.id === workingId}
                         onChange={() => void chooseWorkingFolder(f.path)}
                       />
-                      <span className="min-w-0 flex-1 truncate font-mono text-xs">{f.path}</span>
+                      <bdi dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs">
+                        {visiblePath(f.path)}
+                      </bdi>
                       {f.chatId === null && <span className="shrink-0 text-xs text-fg-muted">all chats</span>}
                     </label>
                     {f.chatId === props.chatId && (
                       <button
                         type="button"
-                        aria-label={`Remove ${f.path} from this chat`}
+                        aria-label={`Remove ${visiblePath(f.path)} from this chat`}
                         onClick={() => void removeFolder(f.id)}
                         className="text-fg-muted hover:text-danger"
                       >

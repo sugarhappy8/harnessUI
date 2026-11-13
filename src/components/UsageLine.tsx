@@ -143,12 +143,16 @@ export function UsageLine() {
     // Keeps the header's height while the first reading is on its way (or not answered).
     return <div className="h-[15px]" aria-hidden data-usage="waiting" />;
   }
+  // The narrowest form; the header keeps room for its icons by their number (`data-icons`).
+  const icons = usageIcons(now);
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
         <button
           type="button"
           aria-label="Computer usage"
+          // The whole line, also when a crowded header cuts it short.
+          title={usageLine(now, "wide")}
           className="block h-[15px] w-full min-w-0 truncate px-2.5 text-left text-[11px] leading-[15px] text-fg-muted tabular-nums hover:text-fg focus-visible:underline @max-xl:pr-0"
         >
           <span className="hidden @5xl:inline" data-usage="wide">
@@ -160,8 +164,8 @@ export function UsageLine() {
           <span className="hidden @xl:inline @3xl:hidden" data-usage="small">
             {usageLine(now, "small")}
           </span>
-          <span className="inline-flex items-center gap-1.5 @xl:hidden" data-usage="icons">
-            {usageIcons(now).map((i) => {
+          <span className="inline-flex items-center gap-1.5 @xl:hidden" data-usage="icons" data-icons={icons.length}>
+            {icons.map((i) => {
               const Icon = ICON[i.kind];
               return (
                 <span key={i.kind} className="inline-flex items-center gap-0.5" data-usage-icon={i.kind}>

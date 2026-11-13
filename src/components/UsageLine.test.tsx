@@ -18,6 +18,7 @@ vi.mock("../lib/ipc", () => ipcMock);
 
 const { UsageLine } = await import("./UsageLine");
 const { useApp } = await import("../store/app");
+const { useApprovalMode } = await import("../lib/approvalMode");
 
 function ready(patch: Partial<RuntimeStatus> = {}): RuntimeStatus {
   return {
@@ -108,6 +109,7 @@ describe("UsageLine: this computer's usage under the model name", () => {
       expect(icon.getAttribute("title")).toBe(label);
     }
     const button = screen.getByRole("button", { name: "Computer usage" });
+    expect(button.title).toBe("Graphics card 63% · 12.6 of 16 GB · Processor 12% · Memory 16.8 of 32 GB");
     expect(button.className).toContain("text-[11px]");
     expect(button.className).toContain("tabular-nums");
     expect(button.className).toContain("truncate");
@@ -247,6 +249,19 @@ describe("UsageLine: this computer's usage under the model name", () => {
     expect(menu()).not.toContain("the model:");
     expect(menu()).not.toContain("Where the model went");
     expect(screen.getByRole("menuitem", { name: /Model settings/ })).toBeTruthy();
+  });
+
+  it("is the same in Ask first, Allow all and Full access: it is not a tool action (I6-17)", async () => {
+    const seen: string[] = [];
+    for (const mode of ["ask", "allowAll", "fullAccess"] as const) {
+      useApprovalMode.setState({ modes: { 3: mode }, defaultMode: mode });
+      await show(usage());
+      await openMenu();
+      seen.push(`${form("wide").textContent} | ${menu()}`);
+      cleanup();
+    }
+    expect(new Set(seen).size).toBe(1);
+    useApprovalMode.setState({ modes: {}, defaultMode: "ask" });
   });
 
   it("keeps its height and shows nothing until the first reading answers (or when it cannot be read)", async () => {

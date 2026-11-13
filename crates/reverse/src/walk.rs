@@ -6,19 +6,26 @@
 //!
 //! rea follows links inside a folder it is given (an app folder, a `.app` bundle, an
 //! extracted JavaScript app), so a link is checked by its own text first (no I/O for a
-//! network target) and then where the system resolves it; a link to another folder that
-//! passes is walked too, with the same limits, so a chain of links cannot lead out. Links
-//! are never followed into folders by the walk itself.
+//! network target), then hop by hop through every further link on the way, each by its
+//! text ([`follow_links`]; the system resolves nothing until no hop names a network or
+//! device place), and only then where the system resolves it; a link to another folder
+//! that passes is walked too, with the same limits, so a chain of links cannot lead out.
+//! Links are never followed into folders by the walk itself.
+//!
+//! Every folder the walk enters (plain sub-folders and folders reached through a link) must
+//! itself pass the sandbox: a folder holding harnessUI's own folders or a key store is
+//! refused in every mode, since rea walks it for itself and cannot be told to skip them.
+//! A folder that cannot be listed is refused too: rea can still open a name inside it that
+//! it already knows (a `.app` bundle's `Contents/Info.plist`), which the walk never saw.
 //!
 //! Known limits: a link created after the walk is not seen until the next call (WP9g walks
 //! again in `call`); a hard link to a file elsewhere on the same drive looks like an ordinary
-//! file (the file tools share this limit); a folder the user cannot list is skipped, since
-//! rea, running as the user, cannot list it either.
+//! file (the file tools share this limit).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 
-use policy::path::{CaseRule, Flavor, Fs, PathError, PathSandbox};
+use policy::path::{CaseRule, Flavor, Fs, LexicalPath, PathError, PathSandbox, is_within, lexical};
 
 use crate::FileIdentity;
 
@@ -26,6 +33,8 @@ use crate::FileIdentity;
 pub const MAX_ENTRIES: usize = 50_000;
 /// Levels walked at most.
 pub const MAX_DEPTH: usize = 32;
+/// Links followed at most on the way to one path (the system's own limit on Linux).
+pub const MAX_HOPS: usize = 40;
 
 /// What an entry is, without following a link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,11 +91,16 @@ pub enum WalkRefusal {
         /// Its path.
         path: String,
     },
-    /// A folder the walk could not read for another reason than permission, or a name it
-    /// cannot represent (not valid text): it is not checked, so it is refused. (Added by
-    /// WP9c.)
+    /// A folder the walk could not list or check, or a name it cannot represent (not valid
+    /// text): it is not checked, so it is refused. (Added by WP9c.)
     Unreadable {
         /// Its path.
+        path: String,
+    },
+    /// A folder inside it is one of harnessUI's own folders or a key store (refused in
+    /// every mode). (Added by WP9c in review round 1.)
+    Forbidden {
+        /// That folder's path.
         path: String,
     },
 }
@@ -100,6 +114,9 @@ impl WalkRefusal {
             WalkRefusal::LinkOut { link } => format!("{}{}.", m::LINK_OUT, shown(link)),
             WalkRefusal::Device { path } => format!("{}{}.", m::DEVICE_IN_FOLDER, shown(path)),
             WalkRefusal::Unreadable { path } => format!("{}{}.", m::UNREADABLE, shown(path)),
+            WalkRefusal::Forbidden { path } => {
+                format!("{}{}.", m::HOLDS_APP_FOLDERS, shown(path))
+            }
         }
     }
 }
@@ -124,12 +141,9 @@ impl Fs for RealWalkFs {
 
 impl WalkFs for RealWalkFs {
     fn read_dir(&self, path: &str) -> Result<Vec<String>, String> {
-        let entries = match std::fs::read_dir(path) {
-            Ok(entries) => entries,
-            // rea runs as the user and cannot list it either.
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(Vec::new()),
-            Err(e) => return Err(e.to_string()),
-        };
+        // A folder the user may enter but not list is an error too, not an empty folder:
+        // rea can still open a name inside it that it knows.
+        let entries = std::fs::read_dir(path).map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
@@ -300,20 +314,196 @@ fn is_absolute(text: &str, flavor: Flavor) -> bool {
     }
 }
 
-/// The absolute path a link's own text names, or `None` when it names a network or device
-/// place (never resolved) or cannot be a path.
+/// The absolute path a link's own text names, with its dot segments read, or `None` when it
+/// names a network or device place (by its text, or once `..` is read: `../../net/x`) or
+/// cannot be a path. Nothing is looked up.
 fn link_target(text: &str, link: &str, flavor: Flavor) -> Option<String> {
     if text.is_empty() || text.contains('\0') || is_network_or_device(text, flavor) {
         return None;
     }
     let text = verbatim_drive(text).unwrap_or(text);
-    if is_absolute(text, flavor) {
-        Some(text.to_string())
+    let joined = if is_absolute(text, flavor) {
+        text.to_string()
     } else {
-        // Relative to the folder holding the link. That folder is a real folder (the walk
-        // never descends through a link), so reading `..` lexically is what the system does.
-        Some(join(&parent(link, flavor), text, flavor))
+        // Relative to the folder holding the link (a real folder: the walk never descends
+        // through a link). Where the text passes through another link before a `..`, the
+        // system reads it differently; [`follow_links`] checks that route.
+        join(&parent(link, flavor), text, flavor)
+    };
+    let normal = lexical(&joined, None, flavor).ok()?.to_string();
+    (!is_network_or_device(&normal, flavor)).then_some(normal)
+}
+
+/// What following the links on the way to a path, by their text, found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hops {
+    /// No link on the way names a network or device place (the path may not exist).
+    Clear,
+    /// The path, or a link on the way to it, names a network or device place.
+    Network,
+    /// More than [`MAX_HOPS`] links, or a link text this check cannot read: refuse it.
+    Unclear,
+}
+
+/// How a path (or a link's text) starts.
+enum Start {
+    /// An absolute path: `/` (prefix empty) or `C:\` (prefix `C:`).
+    Absolute(String),
+    /// `\x` on Windows: the top of the current drive.
+    TopOfDrive,
+    /// Relative to the folder holding the link.
+    Relative,
+    /// `C:x` on Windows (relative to a drive's current folder): not followed.
+    Odd,
+}
+
+fn start_of(text: &str, flavor: Flavor) -> (Start, &str) {
+    match flavor {
+        Flavor::Posix => match text.strip_prefix('/') {
+            Some(rest) => (Start::Absolute(String::new()), rest),
+            None => (Start::Relative, text),
+        },
+        Flavor::Windows => {
+            let b = text.as_bytes();
+            if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+                if b.len() == 2 || b[2] == b'\\' || b[2] == b'/' {
+                    let drive = format!("{}:", (b[0] as char).to_ascii_uppercase());
+                    (Start::Absolute(drive), text.get(3..).unwrap_or(""))
+                } else {
+                    (Start::Odd, text)
+                }
+            } else if text.starts_with(['\\', '/']) {
+                (Start::TopOfDrive, &text[1..])
+            } else {
+                (Start::Relative, text)
+            }
+        }
     }
+}
+
+/// The names of a path, in order (dot segments kept: they are read as the system reads
+/// them, after the links before them).
+fn names(text: &str, flavor: Flavor) -> Vec<String> {
+    text.split(|c| is_sep(c, flavor))
+        .filter(|n| !n.is_empty() && *n != ".")
+        .map(str::to_string)
+        .collect()
+}
+
+fn render(prefix: &str, done: &[String], flavor: Flavor) -> String {
+    let sep = if flavor == Flavor::Windows { "\\" } else { "/" };
+    format!("{prefix}{sep}{}", done.join(sep))
+}
+
+/// Follows every link on the way to `path` (an absolute path) by reading its text, one
+/// hop at a time, the way the system would resolve it (a `..` after a link goes to the
+/// folder above the link's target), but without letting the system resolve anything:
+/// every place is checked by its text before it is looked at, so a link to
+/// `\\server\share` or to `/net/…` (a Mac's automounted shares) is never touched, even at
+/// the end of a chain of local links. Use it before anything canonicalises the path.
+pub fn follow_links(fs: &dyn WalkFs, path: &str, flavor: Flavor) -> Hops {
+    if is_network_or_device(path, flavor) {
+        return Hops::Network;
+    }
+    let path = verbatim_drive(path).unwrap_or(path);
+    let (Start::Absolute(mut prefix), rest) = start_of(path, flavor) else {
+        return Hops::Unclear;
+    };
+    let mut done: Vec<String> = Vec::new();
+    let mut todo: VecDeque<String> = names(rest, flavor).into();
+    let mut hops = 0usize;
+    while let Some(name) = todo.pop_front() {
+        if name == ".." {
+            // `done` holds no link (each was replaced by its target), so this is the
+            // folder above, as the system sees it.
+            done.pop();
+            continue;
+        }
+        done.push(name);
+        let here = render(&prefix, &done, flavor);
+        if is_network_or_device(&here, flavor) {
+            return Hops::Network;
+        }
+        let text = match fs.read_link(&here) {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            // Missing (or not reachable): the system stops here too.
+            Err(_) => return Hops::Clear,
+        };
+        hops += 1;
+        if hops > MAX_HOPS || text.is_empty() || text.contains('\0') {
+            return Hops::Unclear;
+        }
+        if is_network_or_device(&text, flavor) {
+            return Hops::Network;
+        }
+        let text = verbatim_drive(&text).unwrap_or(&text).to_string();
+        done.pop();
+        let (start, rest) = start_of(&text, flavor);
+        match start {
+            Start::Absolute(p) => {
+                prefix = p;
+                done.clear();
+            }
+            Start::TopOfDrive => done.clear(),
+            Start::Relative => {}
+            Start::Odd => return Hops::Unclear,
+        }
+        for n in names(rest, flavor).into_iter().rev() {
+            todo.push_front(n);
+        }
+    }
+    Hops::Clear
+}
+
+/// Whether `path` sits lexically under one of the sandbox's folders: only then does the
+/// sandbox look anything up for it (it refuses the rest from the text).
+fn lexically_inside(sandbox: &PathSandbox, path: &str, flavor: Flavor) -> bool {
+    let Ok(lex) = lexical(path, None, flavor) else {
+        return false;
+    };
+    sandbox
+        .roots()
+        .iter()
+        .any(|r| is_within(&lex, &r.lexical, r.case) || is_within(&lex, &r.canonical, r.case))
+}
+
+/// Whether the system may be asked to resolve `path` for `sandbox`: either the sandbox
+/// refuses it from its text alone, or no link on the way names a network or device place.
+pub fn safe_to_resolve(fs: &dyn WalkFs, sandbox: &PathSandbox, path: &str, flavor: Flavor) -> Hops {
+    if !lexically_inside(sandbox, path, flavor) {
+        return Hops::Clear;
+    }
+    follow_links(fs, path, flavor)
+}
+
+/// The first of `forbidden` (as written, or where it resolves) that is `folder` or lies
+/// inside it, compared with the volume's case rule. Nothing is listed: a folder holding
+/// harnessUI's own folders or a key store is refused before it is walked.
+pub fn forbidden_inside(
+    fs: &dyn WalkFs,
+    folder: &str,
+    forbidden: &[String],
+    flavor: Flavor,
+) -> Option<String> {
+    let outer = lexical(folder, None, flavor).ok()?;
+    let case = fs.case_of(folder);
+    let inside = |f: &LexicalPath| is_within(f, &outer, case);
+    for f in forbidden {
+        let Ok(lex) = lexical(f, None, flavor) else {
+            continue;
+        };
+        if inside(&lex) {
+            return Some(lex.to_string());
+        }
+        if let Ok(Some(c)) = fs.canonicalize(&lex.to_string())
+            && let Ok(cl) = lexical(&c, None, flavor)
+            && inside(&cl)
+        {
+            return Some(cl.to_string());
+        }
+    }
+    None
 }
 
 /// Whether a name read from a folder is a plain name.
@@ -341,12 +531,22 @@ fn check_link(
         _ => return Err(out()),
     };
     let target = link_target(&text, link, flavor).ok_or_else(out)?;
+    // Every further link on the way, by its text, before the system resolves anything:
+    // the route the system takes (through the link itself) and the target as written.
+    if follow_links(fs, link, flavor) != Hops::Clear
+        || safe_to_resolve(fs, sandbox, &target, flavor) != Hops::Clear
+    {
+        return Err(out());
+    }
     // A target outside the roots is refused in every mode: in Full access the roots are
     // already the whole computer (`approvals::widen`), and a forbidden folder is refused
     // by the sandbox before containment is looked at.
     let checked = |path: &str| sandbox.check(path, None, fs).map_err(|_: PathError| out());
     checked(&target)?;
     let by_system = checked(link)?;
+    if is_network_or_device(&by_system.canonical, flavor) {
+        return Err(out());
+    }
     if !by_system.exists {
         // A dangling link: its text was checked above; nothing to look inside.
         return Ok(None);
@@ -362,6 +562,22 @@ fn check_link(
         }
         // Resolves to a link: the sandbox resolved it fully, so this cannot happen; refuse.
         Some(EntryKind::Link) | None => Err(out()),
+    }
+}
+
+/// Checks a folder found in a folder (a real folder, not a link): it must pass the sandbox
+/// itself, so one of harnessUI's own folders or a key store inside the walked folder is
+/// refused (the sandbox refuses it from its text, as its parent is canonical).
+fn check_dir(fs: &dyn WalkFs, path: String, sandbox: &PathSandbox) -> Result<String, WalkRefusal> {
+    match sandbox.check(&path, None, fs) {
+        Ok(_) => Ok(path),
+        Err(PathError::Forbidden) => Err(WalkRefusal::Forbidden { path }),
+        // Changed since it was listed (a link now leading out), or a name the sandbox does
+        // not take: not checked, so refused.
+        Err(PathError::OutsideApprovedFolders | PathError::RemoteResolution) => {
+            Err(WalkRefusal::LinkOut { link: path })
+        }
+        Err(_) => Err(WalkRefusal::Unreadable { path }),
     }
 }
 
@@ -404,7 +620,7 @@ pub fn walk_folder(
             let next = match fs.kind(&path) {
                 // Gone since the listing: nothing rea could read.
                 None | Some(EntryKind::File) => None,
-                Some(EntryKind::Dir) => Some(path),
+                Some(EntryKind::Dir) => Some(check_dir(fs, path, sandbox)?),
                 Some(EntryKind::Link) => check_link(fs, &path, flavor, sandbox)?,
                 Some(
                     EntryKind::Device | EntryKind::Pipe | EntryKind::Socket | EntryKind::Other,
@@ -438,6 +654,8 @@ pub(crate) mod fake {
     pub enum Node {
         File(u64),
         Dir,
+        /// A folder that can be entered but not listed (`d-wx--x--x`).
+        Locked,
         Link(String),
         Device,
         Pipe,
@@ -613,8 +831,10 @@ pub(crate) mod fake {
             if let Some(n) = self.big.get(&self.key(path)) {
                 return Ok((0..*n).map(|i| format!("f{i}")).collect());
             }
-            if !matches!(self.node(path), Some(Node::Dir)) {
-                return Err("not a folder".into());
+            match self.node(path) {
+                Some(Node::Dir) => {}
+                Some(Node::Locked) => return Err("permission denied".into()),
+                _ => return Err("not a folder".into()),
             }
             let prefix = self.key(&join(path, "", self.flavor));
             Ok(self
@@ -640,7 +860,7 @@ pub(crate) mod fake {
             self.note("kind", path);
             Some(match self.node(path)? {
                 Node::File(_) => EntryKind::File,
-                Node::Dir => EntryKind::Dir,
+                Node::Dir | Node::Locked => EntryKind::Dir,
                 Node::Link(_) => EntryKind::Link,
                 Node::Device => EntryKind::Device,
                 Node::Pipe => EntryKind::Pipe,
@@ -929,12 +1149,16 @@ mod tests {
             link_target("\\\\?\\C:\\Windows", "C:\\a\\l", w).as_deref(),
             Some("C:\\Windows")
         );
+        // Dot segments are read, so `..` cannot hide a network place.
         assert_eq!(
             link_target("..\\b", "C:\\a\\l", w).as_deref(),
-            Some("C:\\a\\..\\b")
+            Some("C:\\b")
         );
         assert_eq!(link_target("x", "/a/l", p).as_deref(), Some("/a/x"));
         assert_eq!(link_target("", "/a/l", p), None);
+        assert_eq!(link_target("../../net/srv/s", "/a/b/l", p), None);
+        assert_eq!(link_target("../../Network/x", "/a/b/l", p), None);
+        assert_eq!(link_target("../../../x", "/a/l", p), None);
         assert_eq!(parent("/a", p), "/");
         assert_eq!(parent("C:\\a", w), "C:\\");
         assert_eq!(file_name("C:\\a\\b.exe", w), "b.exe");
@@ -945,6 +1169,264 @@ mod tests {
             .message(),
             "That folder contains a link to a place this chat can't reach: /w/a\\u{202E}b."
         );
+    }
+
+    /// A folder holding one of harnessUI's own folders or a key store is refused in every
+    /// mode (Full access's whole-computer roots included), as a plain sub-folder or inside a
+    /// folder a link leads to; nothing below the forbidden folder is listed.
+    #[test]
+    fn a_folder_holding_a_forbidden_folder_is_refused_in_every_mode() {
+        let tree = || {
+            app()
+                .file("/home/u/.local/share/com.harnessui.app/harness.db")
+                .dir("/home/u/.local/share/com.harnessui.app/reverse")
+                .file("/home/u/.local/share/keyrings/login.keyring")
+                .file("/home/u/.local/share/other/a.js")
+        };
+        let forbidden = [
+            "/home/u/.local/share/com.harnessui.app",
+            "/home/u/.local/share/keyrings",
+        ];
+        for approved in [&["/home/u"][..], &["/home/u", "/"][..]] {
+            let fs = tree();
+            let sb = sandbox(&fs, approved, &forbidden);
+            fs.clear();
+            for folder in ["/home/u/.local/share", "/home/u/.local", "/home/u"] {
+                assert!(
+                    matches!(
+                        walk_folder(&fs, folder, &sb, approved.len() > 1),
+                        Err(WalkRefusal::Forbidden { .. })
+                    ),
+                    "{folder} {approved:?}"
+                );
+            }
+            assert!(
+                !fs.accessed().iter().any(|a| a
+                    .starts_with("read_dir /home/u/.local/share/com.harnessui.app")
+                    || a.starts_with("read_dir /home/u/.local/share/keyrings")),
+                "{:?}",
+                fs.accessed()
+            );
+            assert_eq!(
+                walk_folder(&fs, "/home/u/.local/share/other", &sb, false),
+                Ok(())
+            );
+        }
+        // Behind a link: the folder it leads to is walked, and refused.
+        let fs = tree().link("/w/app/share", "/home/u/.local/share");
+        let sb = sandbox(&fs, &["/w", "/home/u", "/"], &forbidden);
+        assert_eq!(
+            walk_folder(&fs, "/w/app", &sb, true),
+            Err(WalkRefusal::Forbidden {
+                path: "/home/u/.local/share/com.harnessui.app".into()
+            })
+        );
+        assert_eq!(
+            WalkRefusal::Forbidden {
+                path: "/home/u/.local/share/keyrings".into()
+            }
+            .message(),
+            "That folder contains harnessUI's own folders, which tools can't reach: /home/u/.local/share/keyrings."
+        );
+        // Found without listing anything, as written and where it resolves.
+        let fs = tree().link(
+            "/home/u/data-link",
+            "/home/u/.local/share/com.harnessui.app",
+        );
+        let f = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            forbidden_inside(&fs, "/home/u/.local", &f(&forbidden), Flavor::Posix).as_deref(),
+            Some("/home/u/.local/share/com.harnessui.app")
+        );
+        assert_eq!(
+            forbidden_inside(
+                &fs,
+                "/home/u/.local/share",
+                &f(&["/home/u/data-link"]),
+                Flavor::Posix
+            )
+            .as_deref(),
+            Some("/home/u/.local/share/com.harnessui.app")
+        );
+        assert_eq!(
+            forbidden_inside(
+                &fs,
+                "/home/u/.local/share/other",
+                &f(&forbidden),
+                Flavor::Posix
+            ),
+            None
+        );
+        assert_eq!(
+            forbidden_inside(
+                &FakeFs::windows(),
+                "c:\\users\\u\\appdata",
+                &f(&["C:\\Users\\u\\AppData\\Local\\harnessUI"]),
+                Flavor::Windows
+            )
+            .as_deref(),
+            Some("C:\\Users\\u\\AppData\\Local\\harnessUI")
+        );
+    }
+
+    /// A folder that can be entered but not listed is refused: rea could still open a name
+    /// inside it that it knows, which the walk never saw.
+    #[test]
+    fn an_unlistable_folder_is_refused() {
+        let fs = app()
+            .special("/w/x.app/Contents", Node::Locked)
+            .link("/w/x.app/Contents/Info.plist", "/etc/passwd");
+        let sb = sandbox(&fs, &["/w"], &[]);
+        assert_eq!(
+            walk_folder(&fs, "/w/x.app", &sb, false),
+            Err(WalkRefusal::Unreadable {
+                path: "/w/x.app/Contents".into()
+            })
+        );
+    }
+
+    /// Links are followed by their text, hop by hop, the way the system resolves them, and
+    /// nothing named by a network or device place is looked at.
+    #[test]
+    fn follow_links_reads_every_hop_by_its_text() {
+        let p = Flavor::Posix;
+        let fs = app()
+            .link("/w/a", "/w/b")
+            .link("/w/b", "/net/srv/share")
+            .link("/w/c", "../w/d/../e")
+            .link("/w/d", "/net/srv/x/y")
+            .link("/w/ok", "app/lib")
+            .link("/w/loop1", "/w/loop2")
+            .link("/w/loop2", "/w/loop1")
+            .link("/w/rel", "../../../../net/srv/s");
+        for path in [
+            "/w/a",
+            "/w/a/deeper",
+            "/w/c",
+            "/w/rel",
+            "/w/rel/x",
+            "/w/app/../a",
+        ] {
+            fs.clear();
+            assert_eq!(follow_links(&fs, path, p), Hops::Network, "{path}");
+            assert!(
+                !fs.accessed()
+                    .iter()
+                    .any(|a| a.contains(" /net") || a.starts_with("canonicalize")),
+                "{path}: {:?}",
+                fs.accessed()
+            );
+        }
+        assert_eq!(follow_links(&fs, "/w/ok/a.js", p), Hops::Clear);
+        assert_eq!(follow_links(&fs, "/w/missing/x", p), Hops::Clear);
+        assert_eq!(follow_links(&fs, "/w/loop1", p), Hops::Unclear);
+        assert_eq!(follow_links(&fs, "relative", p), Hops::Unclear);
+        // Windows: a junction chain to a share, the top of the drive, a drive-relative text.
+        let w = Flavor::Windows;
+        let fs = FakeFs::windows()
+            .file("C:\\Windows\\notepad.exe")
+            .link("C:\\Users\\me\\j1", "\\\\?\\C:\\Users\\me\\j2")
+            .link("C:\\Users\\me\\j2", "\\\\server\\share")
+            .link("C:\\Users\\me\\top", "\\Windows")
+            .link("C:\\Users\\me\\odd", "D:x");
+        fs.clear();
+        assert_eq!(
+            follow_links(&fs, "C:\\Users\\me\\j1\\x.exe", w),
+            Hops::Network
+        );
+        assert!(
+            !fs.accessed()
+                .iter()
+                .any(|a| a.to_lowercase().contains("server"))
+        );
+        assert_eq!(
+            follow_links(&fs, "C:\\Users\\me\\top\\notepad.exe", w),
+            Hops::Clear
+        );
+        assert_eq!(follow_links(&fs, "C:\\Users\\me\\odd", w), Hops::Unclear);
+        assert_eq!(follow_links(&fs, "\\\\server\\share\\x", w), Hops::Network);
+    }
+
+    /// The real file system (Unix): a folder holding the app's folders, a chain of links to
+    /// `/net`, and a folder that cannot be listed (the last only when not run as root, which
+    /// lists every folder).
+    #[cfg(unix)]
+    #[test]
+    fn the_real_file_system_round_one() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let s = |p: &Path| p.display().to_string();
+        let share = root.join("share");
+        std::fs::create_dir_all(share.join("com.harnessui.app/reverse")).unwrap();
+        std::fs::create_dir_all(share.join("keyrings")).unwrap();
+        std::fs::write(share.join("com.harnessui.app/harness.db"), "x").unwrap();
+        std::fs::write(share.join("keyrings/login.keyring"), "k").unwrap();
+        let forbidden = [
+            s(&share.join("com.harnessui.app")),
+            s(&share.join("keyrings")),
+        ];
+        let sb = |approved: &[String], forbidden: &[String]| {
+            PathSandbox::new(Flavor::Posix, approved, forbidden, &RealWalkFs, &|p| {
+                RealWalkFs.case_of(p)
+            })
+            .0
+        };
+        for approved in [vec![s(&root)], vec![s(&root), "/".to_string()]] {
+            let full = approved.len() > 1;
+            assert!(
+                matches!(
+                    walk_folder(&RealWalkFs, &s(&share), &sb(&approved, &forbidden), full),
+                    Err(WalkRefusal::Forbidden { .. })
+                ),
+                "{approved:?}"
+            );
+            assert!(forbidden_inside(&RealWalkFs, &s(&share), &forbidden, Flavor::Posix).is_some());
+        }
+        std::fs::remove_dir_all(&share).unwrap();
+
+        // a -> b -> /net/…: refused; before review round 1 it passed as a dangling link.
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        symlink(root.join("b"), app.join("a")).unwrap();
+        symlink("/net/server/share", root.join("b")).unwrap();
+        assert_eq!(
+            walk_folder(&RealWalkFs, &s(&app), &sb(&[s(&root)], &[]), false),
+            Err(WalkRefusal::LinkOut {
+                link: s(&app.join("a"))
+            })
+        );
+        assert_eq!(
+            follow_links(&RealWalkFs, &s(&app.join("a")), Flavor::Posix),
+            Hops::Network
+        );
+        std::fs::remove_file(app.join("a")).unwrap();
+
+        // Contents can be entered but not listed; Info.plist inside leads out.
+        let bundle = root.join("x.app");
+        let contents = bundle.join("Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(root.join("outside/secret.plist"), "s").unwrap();
+        symlink(
+            root.join("outside/secret.plist"),
+            contents.join("Info.plist"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&contents, std::fs::Permissions::from_mode(0o311)).unwrap();
+        // SAFETY: geteuid has no preconditions.
+        let root_user = unsafe { libc::geteuid() } == 0;
+        let result = walk_folder(&RealWalkFs, &s(&bundle), &sb(&[s(&bundle)], &[]), false);
+        std::fs::set_permissions(&contents, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if root_user {
+            // Root lists it anyway, and so meets the link out.
+            assert!(
+                matches!(result, Err(WalkRefusal::LinkOut { .. })),
+                "{result:?}"
+            );
+        } else {
+            assert_eq!(result, Err(WalkRefusal::Unreadable { path: s(&contents) }));
+        }
     }
 
     /// The real file system (Unix: links, a pipe and a socket made in a temporary folder).

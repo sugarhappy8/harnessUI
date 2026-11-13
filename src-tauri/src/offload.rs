@@ -43,8 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dto::{GraphicsUse, Placement};
 use crate::load_settings::{
-    DEFAULT_LEAVE_FREE_MIB, LayerFacts, Machine, ModelFacts, ModelLoadSettings, Plan,
-    ResolvedLoad,
+    DEFAULT_LEAVE_FREE_MIB, LayerFacts, Machine, ModelFacts, ModelLoadSettings, Plan, ResolvedLoad,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -405,7 +404,13 @@ fn bars(split: &Split, machine: &Machine, gpu: GpuUse) -> (Option<MemoryBar>, Me
     };
     let (graphics_bar, computer_bar) = placement::bars(split, kind, Some(graphics), computer);
     (
-        graphics_bar.map(|bar| memory_bar(machine.gpu_description.clone(), bar, machine.gpu_freed_bytes > 0)),
+        graphics_bar.map(|bar| {
+            memory_bar(
+                machine.gpu_description.clone(),
+                bar,
+                machine.gpu_freed_bytes > 0,
+            )
+        }),
         memory_bar(String::new(), computer_bar, computer_credit),
     )
 }
@@ -638,10 +643,12 @@ impl Measurements {
                         older.cancel.cancel();
                     }
                     let cancel = CancellationToken::new();
-                    let task = tokio::spawn((self.runner)(backend, cfg, self.timeout, cancel.clone()));
-                    let result = async move { task.await.unwrap_or(Err(FitParamsError::Cancelled)) }
-                        .boxed()
-                        .shared();
+                    let task =
+                        tokio::spawn((self.runner)(backend, cfg, self.timeout, cancel.clone()));
+                    let result =
+                        async move { task.await.unwrap_or(Err(FitParamsError::Cancelled)) }
+                            .boxed()
+                            .shared();
                     state.next_id = state.next_id.wrapping_add(1);
                     let id = state.next_id;
                     state.running = Some(Running {
@@ -787,11 +794,20 @@ pub async fn measured(
     let gpu = resolved.gpu;
     let fine = &resolved.fine;
     let worked = placer.work(u64::from(resolved.ctx), gpu, fine);
-    let cfg = measure_config(path, resolved, &worked.place, worked.split.units, &candidate);
+    let cfg = measure_config(
+        path,
+        resolved,
+        &worked.place,
+        worked.split.units,
+        &candidate,
+    );
     let Some(key) = MeasureKey::of(&candidate.backend, &cfg) else {
         return picture;
     };
-    match measurements.measure(candidate.backend.clone(), cfg, key).await {
+    match measurements
+        .measure(candidate.backend.clone(), cfg, key)
+        .await
+    {
         Outcome::Rows(rows) => {
             let split = measured_split(&rows, &worked.split, facts, machine.graphics(gpu));
             let verdict = placer.judge_split(&split, gpu, fine);
@@ -820,7 +836,12 @@ pub async fn measured(
 /// The split llama.cpp measured: device rows on the graphics side, the host and every
 /// buffer type in computer memory, the projector's file size as the estimate places it
 /// (llama.cpp does not measure it), the layer counts of the estimate's placement.
-fn measured_split(rows: &[MemoryRow], estimate: &Split, facts: &ModelFacts, graphics: bool) -> Split {
+fn measured_split(
+    rows: &[MemoryRow],
+    estimate: &Split,
+    facts: &ModelFacts,
+    graphics: bool,
+) -> Split {
     let (mut gpu, mut cpu) = rows_to_parts(rows);
     if graphics {
         gpu.image_reader = facts.projector_bytes;

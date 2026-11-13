@@ -346,6 +346,72 @@ describe("pickModel (store): the model's own settings, and D3 before a switch", 
     expect(useApp.getState().detail?.chat.modelRef).toBe("local:/m/c.gguf");
   });
 
+  it("puts the chat back on its model when a switch is cancelled on a path that did not ask to wait", async () => {
+    let chatModel: string | null = "local:/m/a.gguf";
+    ipcMock.setChatModel.mockImplementation(async (_id, ref) => {
+      chatModel = ref;
+    });
+    ipcMock.getChat.mockImplementation(async (id: number) => ({ chat: { id, modelRef: chatModel }, messages: [] }));
+    useApp.setState({ runtime: runtime("ready", "/m/a.gguf") });
+
+    // No question: nothing used the model at the check (or the count could not be read), so
+    // the backend is told to wait anyway; a reply that started meanwhile makes it wait on its
+    // own, with the waiting line and its Cancel. "Stop and restart" can still be replaced
+    // while it stops what uses the model. Each ends with load_replaced (false).
+    const paths: { name: string; busy: () => void; choice: string | null }[] = [
+      { name: "nothing used the model", busy: () => ipcMock.modelBusy.mockResolvedValue(IDLE), choice: null },
+      {
+        name: "the count could not be read",
+        busy: () => ipcMock.modelBusy.mockRejectedValue(new Error("no count")),
+        choice: null,
+      },
+      { name: "Stop and restart", busy: () => ipcMock.modelBusy.mockResolvedValue(REPLY), choice: "Stop and restart" },
+    ];
+    for (const path of paths) {
+      chatModel = "local:/m/a.gguf";
+      await useApp.getState().openChat(3);
+      ipcMock.setChatModel.mockClear();
+      ipcMock.loadLocalModel.mockClear();
+      path.busy();
+      ipcMock.loadLocalModel.mockResolvedValueOnce(false);
+      const pick = useApp.getState().pickModel("local:/m/b.gguf");
+      if (path.choice !== null) await answer(path.choice);
+      await pick;
+      expect(change.useQuestion.getState().question, path.name).toBeNull();
+      expect(ipcMock.loadLocalModel, path.name).toHaveBeenCalledWith("/m/b.gguf", null, path.choice === null);
+      expect(ipcMock.setChatModel, path.name).toHaveBeenNthCalledWith(1, 3, "local:/m/b.gguf");
+      expect(ipcMock.setChatModel, path.name).toHaveBeenLastCalledWith(3, "local:/m/a.gguf");
+      expect(useApp.getState().detail?.chat.modelRef, path.name).toBe("local:/m/a.gguf");
+      expect(useApp.getState().error, path.name).toBeNull();
+    }
+  });
+
+  it("keeps the chat on a model picked again while the first pick of it waited", async () => {
+    let chatModel: string | null = "local:/m/a.gguf";
+    ipcMock.setChatModel.mockImplementation(async (_id, ref) => {
+      chatModel = ref;
+    });
+    ipcMock.getChat.mockImplementation(async (id: number) => ({ chat: { id, modelRef: chatModel }, messages: [] }));
+    await useApp.getState().openChat(3);
+    useApp.setState({ runtime: runtime("ready", "/m/a.gguf") });
+    ipcMock.modelBusy.mockResolvedValue(REPLY);
+
+    // The second pick of the same model replaces the first one's wait: the first ends with
+    // load_replaced, but the chat must stay on the model that the second pick loads.
+    let endWait: (done: boolean) => void = () => undefined;
+    ipcMock.loadLocalModel.mockImplementationOnce(() => new Promise((resolve) => (endWait = resolve)));
+    const first = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Restart when it ends");
+    await flush();
+    const second = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Stop and restart");
+    await second;
+    endWait(false);
+    await first;
+    expect(ipcMock.setChatModel).toHaveBeenLastCalledWith(3, "local:/m/b.gguf");
+    expect(useApp.getState().detail?.chat.modelRef).toBe("local:/m/b.gguf");
+  });
+
   it("calls onChatSet after the chat has the model and before the load, and shows a failed load", async () => {
     const order: string[] = [];
     ipcMock.setChatModel.mockImplementationOnce(async () => {

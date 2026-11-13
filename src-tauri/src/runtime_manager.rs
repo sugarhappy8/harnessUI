@@ -788,21 +788,7 @@ impl RuntimeManager {
             return;
         };
         let status = self.status();
-        let kind = status.backend.as_deref().and_then(backend_kind);
-        let less_gpu = status
-            .adjustments
-            .iter()
-            .any(|a| matches!(a, LoadStage::RetryingWithLessGpu { .. }));
-        let gpu = match kind {
-            Some(BackendKind::Cpu) | None => GpuUse::Off,
-            Some(_) if less_gpu => GpuUse::Fit,
-            Some(_) => loaded.resolved.gpu,
-        };
-        let mut fine = loaded.resolved.fine.clone();
-        if less_gpu {
-            fine.gpu_layers = None;
-            fine.experts_on_cpu = runtime::ExpertsOnCpu::None;
-        }
+        let (kind, gpu, fine) = attempt_launch(&loaded.resolved, &status);
         let device_description = kind.zip(status.device.as_deref()).and_then(|(kind, name)| {
             self.cached_backends()?.iter().find_map(|(b, p)| {
                 (b.kind == kind)
@@ -942,7 +928,35 @@ pub(crate) fn planned_candidate(
     found: &[(Backend, ProbeResult)],
     settings: &ResolvedLoad,
 ) -> Option<Candidate> {
-    first_candidate(found, settings).ok().map(|(first, _)| first)
+    first_candidate(found, settings)
+        .ok()
+        .map(|(first, _)| first)
+}
+
+/// What the attempt now running launched with, for its memory report: the backend in the
+/// status (after a step-down, the one stepped down to; on the processor nothing goes to a
+/// graphics device), and the resolved "Use the graphics card" and Fine control, except
+/// after the retry with As much as fits (the custom placement cleared, item 6 3.3).
+fn attempt_launch(
+    resolved: &ResolvedLoad,
+    status: &RuntimeStatusDto,
+) -> (Option<BackendKind>, GpuUse, runtime::FineLaunch) {
+    let kind = status.backend.as_deref().and_then(backend_kind);
+    let less_gpu = status
+        .adjustments
+        .iter()
+        .any(|a| matches!(a, LoadStage::RetryingWithLessGpu { .. }));
+    let gpu = match kind {
+        Some(BackendKind::Cpu) | None => GpuUse::Off,
+        Some(_) if less_gpu => GpuUse::Fit,
+        Some(_) => resolved.gpu,
+    };
+    let mut fine = resolved.fine.clone();
+    if less_gpu {
+        fine.gpu_layers = None;
+        fine.experts_on_cpu = runtime::ExpertsOnCpu::None;
+    }
+    (kind, gpu, fine)
 }
 
 /// The backend named `name` in the status (`kind_name`).
@@ -1666,5 +1680,58 @@ mod tests {
         assert_eq!(s.load_stage, None);
         assert_eq!(s.adjustments, vec![step]);
         assert!(s.error.is_some());
+    }
+
+    /// Item 6: the memory report is explained by what the attempt running now launched
+    /// with: the resolved choices; As much as fits without the custom placement after that
+    /// retry; nothing on a graphics device after a step-down to the processor.
+    #[test]
+    fn a_memory_report_belongs_to_the_attempt_running_now() {
+        let chosen = ResolvedLoad {
+            fine: runtime::FineLaunch {
+                gpu_layers: Some(30),
+                experts_on_cpu: runtime::ExpertsOnCpu::FirstLayers(4),
+                kv_in_computer_memory: true,
+                threads: Some(4),
+                ..runtime::FineLaunch::default()
+            },
+            ..resolved(GpuUse::All, false, false)
+        };
+        let on_card = RuntimeStatusDto {
+            state: RuntimeStateDto::Ready,
+            backend: Some("vulkan".into()),
+            device: Some("Vulkan1".into()),
+            ..Default::default()
+        };
+        let (kind, gpu, fine) = attempt_launch(&chosen, &on_card);
+        assert_eq!((kind, gpu), (Some(BackendKind::Vulkan), GpuUse::All));
+        assert_eq!(fine, chosen.fine);
+        let retried = RuntimeStatusDto {
+            adjustments: vec![LoadStage::RetryingWithLessGpu {
+                backend: BackendKind::Vulkan,
+                custom: true,
+                chosen_layers: Some(30),
+            }],
+            ..on_card.clone()
+        };
+        let (_, gpu, fine) = attempt_launch(&chosen, &retried);
+        assert_eq!(gpu, GpuUse::Fit);
+        assert_eq!(fine.gpu_layers, None);
+        assert_eq!(fine.experts_on_cpu, runtime::ExpertsOnCpu::None);
+        assert!(
+            fine.kv_in_computer_memory,
+            "the conversation memory place is kept"
+        );
+        assert_eq!(fine.threads, Some(4));
+        let stepped = RuntimeStatusDto {
+            backend: Some("cpu".into()),
+            device: None,
+            ..on_card.clone()
+        };
+        assert_eq!(attempt_launch(&chosen, &stepped).1, GpuUse::Off);
+        assert_eq!(backend_kind("rocm"), Some(BackendKind::Rocm));
+        assert_eq!(backend_kind("other"), None);
+        // Each load starts without a placement.
+        assert_eq!(RuntimeStatusDto::default().placement, None);
     }
 }

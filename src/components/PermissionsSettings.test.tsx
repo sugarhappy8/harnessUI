@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import type { AuditRow } from "../lib/types";
+import type { ApprovedFolder, AuditRow } from "../lib/types";
 import type { ApprovalModeName } from "../lib/ipc";
 
 let saved: ApprovalModeName = "ask";
@@ -8,7 +8,8 @@ let chatModes: Record<number, ApprovalModeName> = {};
 let rows: AuditRow[] = [];
 
 const ipcMock = vi.hoisted(() => ({
-  listApprovedFolders: vi.fn(async () => []),
+  listApprovedFolders: vi.fn<(chatId: number | null) => Promise<ApprovedFolder[]>>(async () => []),
+  removeApprovedFolder: vi.fn<(id: number) => Promise<void>>(async () => undefined),
   stopHotkeyStatus: vi.fn(async () => ({ accelerator: "Control+Alt+Backspace", registered: true, error: null })),
   getTerminalPassThrough: vi.fn(async () => []),
   getDefaultApprovalMode: vi.fn<() => Promise<ApprovalModeName>>(),
@@ -185,6 +186,50 @@ describe("Settings: the mode every chat starts in", () => {
     expect(checked()).toEqual([label("allowAll")]);
     expect(useApprovalMode.getState().defaultMode).toBe("allowAll");
     expect(screen.getByRole("alert").textContent).toContain("The setting could not be saved.");
+  });
+});
+
+describe("Settings: folders for every chat", () => {
+  const odd = "/home/u/odd\u202Egnp.exe\u200B";
+  const shown = "/home/u/odd\\u{202E}gnp.exe\\u{200B}";
+  let folders: ApprovedFolder[] = [];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    folders = [
+      { id: 1, path: "/home/u/all", chatId: null },
+      { id: 2, path: odd, chatId: null },
+    ];
+    ipcMock.listApprovedFolders.mockImplementation(async () => folders);
+    ipcMock.getDefaultApprovalMode.mockImplementation(async () => "ask");
+  });
+  afterEach(cleanup);
+
+  it("shows a folder's hidden and direction-changing characters escaped, like the folder chip", async () => {
+    await open();
+    expect(ipcMock.listApprovedFolders).toHaveBeenCalledWith(null);
+    const list = screen.getByText("/home/u/all").closest("ul")!;
+    // Not in the text, the tooltips or the Remove buttons' names.
+    const said = [
+      list.textContent ?? "",
+      ...[...list.querySelectorAll("[title], [aria-label]")].map(
+        (e) => `${e.getAttribute("title") ?? ""} ${e.getAttribute("aria-label") ?? ""}`,
+      ),
+    ].join("\n");
+    expect(said.includes("\u202E")).toBe(false);
+    expect(said.includes("\u200B")).toBe(false);
+    // The path reads left to right whatever its letters are, with the full path as its tooltip.
+    const path = screen.getByText(shown);
+    expect(path.tagName).toBe("BDI");
+    expect(path.getAttribute("dir")).toBe("ltr");
+    expect(path.getAttribute("title")).toBe(shown);
+    // Remove still gets the folder's real id.
+    folders = folders.slice(0, 1);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: `Remove ${shown}` }));
+    });
+    expect(ipcMock.removeApprovedFolder).toHaveBeenCalledWith(2);
+    expect(screen.queryByText(shown)).toBeNull();
   });
 });
 

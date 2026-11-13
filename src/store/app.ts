@@ -309,6 +309,9 @@ export const useApp = create<AppState>((set, get) => {
     }
   }
 
+  /** Counts the picks that changed a chat's model, so a switch can tell a newer pick replaced it. */
+  let picks = 0;
+
   return {
     chats: [],
     search: "",
@@ -437,6 +440,7 @@ export const useApp = create<AppState>((set, get) => {
         // An endpoint, or the local model already loaded (or loading): nothing to load. Its
         // changed settings wait for Apply and restart (D3).
         if (path === null || isLoadedNow(runtime, path)) {
+          picks += 1;
           await get().setChatModel(modelRef);
           opts?.onChatSet?.();
           return;
@@ -446,16 +450,19 @@ export const useApp = create<AppState>((set, get) => {
         const chatId = get().activeChatId;
         const open = get().detail;
         const before = chatId !== null && open?.chat.id === chatId ? open.chat.modelRef : null;
+        const pick = ++picks;
         await get().setChatModel(modelRef);
         opts?.onChatSet?.();
         const done = await runChange("switch", answer.whenIdle, () =>
           ipc.loadLocalModel(path, null, backendWhenIdle(answer)),
         );
-        // A waiting switch that was cancelled changes nothing: the chat goes back to the model
-        // that is still loaded, unless a newer pick has changed it since.
+        // A switch that was cancelled changes nothing, whether the user asked it to wait or
+        // the backend waited on its own (no question was asked): the chat goes back to the
+        // model that is still loaded, unless a newer pick has changed it since (even to the
+        // same model, whose newer load is the one that replaced this one).
         const now = get().detail;
         const unchanged = now?.chat.id === chatId && now.chat.modelRef === modelRef;
-        if (!done && answer.whenIdle && chatId !== null && before !== null && unchanged) {
+        if (!done && pick === picks && chatId !== null && before !== null && unchanged) {
           await ipc.setChatModel(chatId, before);
           await get().openChat(chatId);
         }

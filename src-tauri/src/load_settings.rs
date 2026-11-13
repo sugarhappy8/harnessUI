@@ -347,7 +347,11 @@ fn fine_values_in_range(fine: &FineControl) -> [bool; 4] {
 fn sane_fine(fine: FineControl) -> FineControl {
     let [layers, experts, threads, leave_free] = fine_values_in_range(&fine);
     FineControl {
-        layers: if layers { fine.layers } else { LayersChoice::Auto },
+        layers: if layers {
+            fine.layers
+        } else {
+            LayersChoice::Auto
+        },
         experts: if experts {
             fine.experts
         } else {
@@ -864,7 +868,10 @@ pub struct LayerFacts {
 impl LayerFacts {
     /// From a header's summary and, when every table was read, the sizes. `None` for a
     /// header that names no block.
-    pub fn from_summary(s: &models::ModelSummary, sizes: Option<models::LayerSizes>) -> Option<Self> {
+    pub fn from_summary(
+        s: &models::ModelSummary,
+        sizes: Option<models::LayerSizes>,
+    ) -> Option<Self> {
         use models::summary::KvCacheType;
         let blocks = u32::try_from(s.block_count.min(models::layers::MAX_BLOCKS)).ok()?;
         if blocks == 0 {
@@ -1003,7 +1010,10 @@ fn read_header_and_layers(path: &std::path::Path) -> (Option<HeaderFacts>, Optio
         for other in others {
             tables.push(models::read_tensor_table(&dir.join(other)).ok()?);
         }
-        Some(models::LayerSizes::from_tables(&tables, summary.block_count))
+        Some(models::LayerSizes::from_tables(
+            &tables,
+            summary.block_count,
+        ))
     });
     (
         Some(HeaderFacts::from_summary(&summary)),
@@ -1498,8 +1508,12 @@ pub fn build_info(
     // "Even with the shortest memory": the floor does not fit.
     let too_large =
         input.is_some() && marks.at(floor_ctx(trained), resolved.gpu, fine) == Verdict::Red;
-    let picture =
-        crate::offload::estimate(crate::offload::draft_key(path, &overrides), facts, machine, &resolved);
+    let picture = crate::offload::estimate(
+        crate::offload::draft_key(path, &overrides),
+        facts,
+        machine,
+        &resolved,
+    );
     ModelLoadInfo {
         path: path.to_string(),
         file_name: facts.file_name.clone(),

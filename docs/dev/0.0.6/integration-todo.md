@@ -58,3 +58,13 @@ Collected while the packages run. Each needs doing (or a decision) before the re
     restore checks `answer.whenIdle`, undefined on that path).
   - WP8: a model opened through a link or mapped drive is listed under its real path when not
     loaded; picking it there switches the chat that opened it to that spelling.
+- **WP9g done.** For the lead:
+  - Confirm the loosened id rule: a result id belongs to every chat whose own successful
+    result about the **same canonical file** showed it (two chats looking at the same file
+    share rea's ids); an id seen about another file is "contested" and readable by no chat.
+    The spec said ids are never given to another chat.
+  - Stop during a slow rea start leaves the state "Starting" and busy (WP9b's `process.rs`,
+    `ReaGuard::ensure_started` sets `starting` before the await): make sure WP9b's fix covers
+    it (drop guard or a start in its own task).
+  - The `reverse-tools` e2e probe's last step expects `{"installed": False, "items": [...]}`;
+    WP9h's `reverse_drop.rs` now also returns `groupOn: false`: update the probe (WP9h).

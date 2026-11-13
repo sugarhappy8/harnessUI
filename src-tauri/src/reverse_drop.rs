@@ -979,7 +979,7 @@ mod tests {
             .chars()
             .map(|c| char::from_u32(0xE0000 + c as u32).unwrap())
             .collect();
-        let cases: Vec<(String, String)> = vec![
+        let mut cases: Vec<(String, String)> = vec![
             (
                 format!("hello{tags}.bin"),
                 format!(
@@ -994,8 +994,6 @@ mod tests {
                 "report\\u{202E}fdp.exe".into(),
             ),
             ("a\u{200B}b.exe".into(), "a\\u{200B}b.exe".into()),
-            ("two\nlines.exe".into(), "two\\nlines.exe".into()),
-            ("tab\there.exe".into(), "tab\\there.exe".into()),
             ("line\u{2028}sep.exe".into(), "line\\u{2028}sep.exe".into()),
             (
                 "soft\u{AD}hyphen.exe".into(),
@@ -1003,6 +1001,11 @@ mod tests {
             ),
             ("iso\u{2066}late.exe".into(), "iso\\u{2066}late.exe".into()),
         ];
+        // Line breaks and tabs: Windows does not allow them in file names.
+        if cfg!(unix) {
+            cases.push(("two\nlines.exe".into(), "two\\nlines.exe".into()));
+            cases.push(("tab\there.exe".into(), "tab\\there.exe".into()));
+        }
         for full in [false, true] {
             let c = cx(&[&work], &[&own], full);
             for (name, shown) in &cases {
@@ -1033,14 +1036,13 @@ mod tests {
         let p = write(&folder.join("tool.exe"), PE);
         let c = cx(&[&work], &[], false);
         assert_eq!(classify(&s(&p), &c, &RealDropFs), rename("tool.exe"));
-        // Ordinary names are inserted as they are, other scripts and spaces included.
-        for name in [
-            "naïve tool.exe",
-            "程序.exe",
-            "Привет",
-            "it's \"odd\".bin",
-            "a (1).exe",
-        ] {
+        // Ordinary names are inserted as they are, other scripts and spaces included (no
+        // letters a Mac volume could store decomposed; no '"', which Windows does not allow).
+        let mut ordinary = vec!["my tool.exe", "程序.exe", "Привет", "it's (1).bin"];
+        if cfg!(unix) {
+            ordinary.push("say \"odd\".bin");
+        }
+        for name in ordinary {
             let p = write(&work.join(name), ELF);
             assert_eq!(classify(&s(&p), &c, &RealDropFs), insert(&p), "{name}");
         }

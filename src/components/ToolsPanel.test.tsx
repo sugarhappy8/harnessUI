@@ -130,6 +130,38 @@ describe("ToolsPanel: folders and loaded skills", () => {
     expect(ipcMock.setChatWorkingFolder).toHaveBeenCalledWith(CHAT, "/home/u/proj");
   });
 
+  it("shows a folder's hidden and direction-changing characters escaped, like the folder chip", async () => {
+    const odd = "/home/u/odd\u202Egnp.exe\u200B";
+    const shown = "/home/u/odd\\u{202E}gnp.exe\\u{200B}";
+    folders = [...folders, { id: 3, path: odd, chatId: CHAT }];
+    await openPanel();
+    const list = screen.getByRole("radiogroup", { name: "Working folder" });
+    // Not in the text, the tooltips or the Remove buttons' names.
+    const said = [
+      list.textContent ?? "",
+      ...[...list.querySelectorAll("[title], [aria-label]")].map(
+        (e) => `${e.getAttribute("title") ?? ""} ${e.getAttribute("aria-label") ?? ""}`,
+      ),
+    ].join("\n");
+    expect(said.includes("\u202E")).toBe(false);
+    expect(said.includes("\u200B")).toBe(false);
+    expect(list.textContent).toContain(shown);
+    // The path reads left to right whatever its letters are.
+    const path = screen.getByTitle(shown).querySelector("bdi");
+    expect(path?.getAttribute("dir")).toBe("ltr");
+    expect(path?.textContent).toBe(shown);
+    // The commands still get the folder's real path and id.
+    await act(async () => {
+      fireEvent.click(radio(shown));
+    });
+    expect(ipcMock.setChatWorkingFolder).toHaveBeenCalledWith(CHAT, odd);
+    folders = folders.slice(0, 2);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: `Remove ${shown} from this chat` }));
+    });
+    expect(ipcMock.removeApprovedFolder).toHaveBeenCalledWith(3);
+  });
+
   it("unloads a loaded skill from this chat", async () => {
     loaded = ["pdf-forms", "release-notes"];
     await openPanel();

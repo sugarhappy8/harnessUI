@@ -432,8 +432,7 @@ pub async fn get_setting(
 /// steer llama.cpp or look like secrets, which never reach a child (4.1).
 fn full_environment(names: impl Iterator<Item = String>) -> runtime::EnvSpec {
     // A crash never starts a debugger (item 6, I6-8); the app's own GGML_* are left out.
-    let mut env =
-        runtime::EnvSpec::minimal().set(runtime::llama::launch::NO_BACKTRACE_ENV, "1");
+    let mut env = runtime::EnvSpec::minimal().set(runtime::llama::launch::NO_BACKTRACE_ENV, "1");
     for name in names {
         let upper = name.to_ascii_uppercase();
         let steers = ["LLAMA_", "GGML_", "HF_", "HUGGING"]
@@ -802,6 +801,45 @@ mod tests {
         assert_eq!(r.backend.as_deref(), Some("vulkan"));
         assert_eq!(r.device.as_deref(), Some("Vulkan1"));
         assert!(r.mmproj.is_none() && !r.save_memory && !r.keep_in_memory);
+    }
+
+    /// Item 6 (I6-8): the backend check's probe with the whole environment never lets a
+    /// crash start a debugger, whatever the app's own environment says.
+    #[test]
+    fn diagnostics_environment_turns_off_debugger_backtraces() {
+        let env = super::full_environment(
+            ["GGML_NO_BACKTRACE", "GGML_BACKTRACE_LLDB", "PATH"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        let passed: Vec<(String, String)> = env
+            .resolve_from(
+                [
+                    ("GGML_NO_BACKTRACE", ""),
+                    ("GGML_BACKTRACE_LLDB", "1"),
+                    ("PATH", "/usr/bin"),
+                ]
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into())),
+            )
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert!(
+            passed.contains(&("GGML_NO_BACKTRACE".into(), "1".into())),
+            "{passed:?}"
+        );
+        assert!(!passed.iter().any(|(k, _)| k == "GGML_BACKTRACE_LLDB"));
+        // The backend check's timed loads carry no Fine control.
+        assert_eq!(
+            super::diagnostic_load("cpu", None).fine,
+            runtime::FineLaunch::default()
+        );
     }
 
     #[test]

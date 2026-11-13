@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::allow::{self, AllowedTool, TargetKind, ToolClass};
 use crate::platform::{self, Os, Platform};
 use crate::session::{ClosedReason, SessionView};
-use crate::walk::{self, EntryKind, WalkFs, shown};
+use crate::walk::{self, EntryKind, Hops, WalkFs, shown};
 use crate::{AppleTools, Component, Decompiler, FileIdentity};
 
 /// The server's name on every action.
@@ -106,6 +106,15 @@ pub mod messages {
     /// full stop).
     pub const SOURCE_PATH: &str =
         "source_paths must be relative to the app's folder, without .. or a drive: ";
+    /// (WP9c, review round 1) A folder holding harnessUI's own folders or a key store (the
+    /// folder inside follows, then a full stop).
+    pub const HOLDS_APP_FOLDERS: &str =
+        "That folder contains harnessUI's own folders, which tools can't reach: ";
+    /// (WP9c, review round 1) A tool rea cannot run with Kuna, where Ghidra is offered.
+    pub const KUNA_CANNOT: &str = "rea can't do this with Kuna. With Ghidra it can: the user can install Ghidra or switch to it in Settings → Reverse engineering. The other rea tools still work on the open file.";
+    /// (WP9c, review round 1) A tool rea cannot run with Kuna, on a Mac (no Ghidra there in
+    /// this version).
+    pub const KUNA_CANNOT_MAC: &str = "rea can't do this with Kuna, and Ghidra isn't available for Macs in this version. The other rea tools still work on the open file.";
 }
 
 use messages as m;
@@ -241,6 +250,26 @@ pub fn no_decompiler_message(platform: Platform) -> &'static str {
     }
 }
 
+/// Session tools that rea 6.9.0 cannot run with Kuna 1.990: its Kuna provider does not
+/// declare them, so rea answers every call with `capability_unavailable` (checked with the
+/// real rea and Kuna on `hello-linux-x64` in WP9c's review). Revisit with each rea pin.
+pub const KUNA_CANNOT_RUN: [&str; 5] = [
+    "procedure_info",
+    "procedure_references",
+    "list_names",
+    "list_segments",
+    "find_xrefs_to_name",
+];
+
+/// What the model reads for a tool rea cannot run with Kuna, on this computer.
+pub fn kuna_cannot_message(platform: Platform) -> &'static str {
+    if platform::availability(crate::lock::embedded(), Component::Ghidra, platform).0 {
+        m::KUNA_CANNOT
+    } else {
+        m::KUNA_CANNOT_MAC
+    }
+}
+
 /// Why `tool` cannot run on this computer now, checked before anything else (section 6).
 pub fn unavailable(tool: &AllowedTool, a: &Availability, platform: Platform) -> Option<String> {
     let why = if !a.rea_installed {
@@ -311,6 +340,7 @@ pub fn describe_on(
         chat,
         env,
         flavor,
+        platform,
     };
     match t.class {
         ToolClass::Open | ToolClass::FileCheck => cx.path_call(),
@@ -326,6 +356,7 @@ struct Cx<'a, 'b> {
     chat: &'a ChatContext,
     env: &'a DescribeEnv<'b>,
     flavor: Flavor,
+    platform: Platform,
 }
 
 impl Cx<'_, '_> {
@@ -432,11 +463,37 @@ impl Cx<'_, '_> {
         }
         let given = strip_verbatim(given);
         let sandbox = self.sandbox(given);
-        let checked = match sandbox.check(given, self.base(&sandbox).as_deref(), self.env.fs) {
+        let base = self.base(&sandbox);
+        // The same once its dot segments are read (`/tmp/../net/…`), still from the text;
+        // then every link on the way, by its text, before the sandbox resolves the path.
+        let base_lex = base
+            .as_deref()
+            .and_then(|b| policy::path::lexical(b, None, self.flavor).ok());
+        if let Ok(lex) = policy::path::lexical(given, base_lex.as_ref(), self.flavor) {
+            let normal = lex.to_string();
+            if walk::is_network_or_device(&normal, self.flavor) {
+                return self.denied(given, m::NETWORK.into());
+            }
+            match walk::safe_to_resolve(self.env.fs, &sandbox, &normal, self.flavor) {
+                Hops::Clear => {}
+                Hops::Network => return self.denied(given, m::NETWORK.into()),
+                Hops::Unclear => {
+                    return Described::Invalid(format!(
+                        "{}{}.",
+                        m::UNREADABLE_FILE,
+                        shown(&normal)
+                    ));
+                }
+            }
+        }
+        let checked = match sandbox.check(given, base.as_deref(), self.env.fs) {
             Ok(c) => c,
             Err(e) => return self.path_refusal(given, &e),
         };
         let canonical = checked.canonical.clone();
+        if walk::is_network_or_device(&canonical, self.flavor) {
+            return self.denied(given, m::NETWORK.into());
+        }
         if !checked.exists {
             return Described::Invalid(format!("{}{}.", m::NOT_FOUND, shown(&canonical)));
         }
@@ -461,6 +518,19 @@ impl Cx<'_, '_> {
             return Described::Invalid(format!("{wrong}{}.", shown(&canonical)));
         }
         let identity = if folder {
+            // A folder holding harnessUI's own folders or a key store: refused before it is
+            // walked (the walk refuses them too, where it meets them).
+            if let Some(inside) = walk::forbidden_inside(
+                self.env.fs,
+                &canonical,
+                &self.chat.forbidden_folders,
+                self.flavor,
+            ) {
+                return self.denied(
+                    &canonical,
+                    format!("{}{}.", m::HOLDS_APP_FOLDERS, shown(&inside)),
+                );
+            }
             if let Err(refusal) =
                 walk::walk_folder(self.env.fs, &canonical, &sandbox, self.chat.full_access)
             {
@@ -579,6 +649,9 @@ impl Cx<'_, '_> {
         if !self.reachable(&b.canonical) {
             return Described::Invalid(m::NO_LONGER_REACHABLE.into());
         }
+        if b.decompiler == Decompiler::Kuna && KUNA_CANNOT_RUN.contains(&self.t.name) {
+            return Described::Invalid(kuna_cannot_message(self.platform).into());
+        }
         let args = self.forwarded();
         let name = walk::file_name(&b.canonical, self.flavor).to_string();
         let summary = format!("{} on {name} (rea)", self.t.name);
@@ -608,15 +681,18 @@ impl Cx<'_, '_> {
         self.action(Scope::FileAnalysisSession, summary, preview, payload)
     }
 
-    /// Whether a canonical path still passes this chat's sandbox now (and exists).
+    /// Whether a canonical path still passes this chat's sandbox now (and exists). A folder
+    /// on the way that was swapped for a link to a network place since is found by its
+    /// text, before anything resolves it.
     fn reachable(&self, canonical: &str) -> bool {
         if walk::is_network_or_device(canonical, self.flavor) {
             return false;
         }
         let sandbox = self.sandbox(canonical);
-        sandbox
-            .check(canonical, None, self.env.fs)
-            .is_ok_and(|c| c.exists)
+        walk::safe_to_resolve(self.env.fs, &sandbox, canonical, self.flavor) == Hops::Clear
+            && sandbox
+                .check(canonical, None, self.env.fs)
+                .is_ok_and(|c| c.exists && !walk::is_network_or_device(&c.canonical, self.flavor))
     }
 
     // ---- inspect_analysis_view ---------------------------------------------------------
@@ -681,13 +757,14 @@ pub fn card(
     folder: bool,
     decompiler: Option<Decompiler>,
 ) -> String {
+    // The decompiler first, the path last: a file's own name may hold "<decompiler>".
     let first = tool
         .card_line
         .unwrap_or("rea will read <path>.")
-        .replace("<path>", &shown(canonical))
-        .replace("<decompiler>", decompiler.map_or("", Decompiler::label));
+        .replace("<decompiler>", decompiler.map_or("", Decompiler::label))
+        .replace("<path>", &shown(canonical));
     let second = if folder {
-        "It does not run anything in it or change it. What rea finds goes to the model as data from the folder."
+        "It does not run anything in it or change it."
     } else {
         "It does not run the file or change it. What rea finds goes to the model as data from the file."
     };

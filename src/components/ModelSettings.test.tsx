@@ -816,6 +816,22 @@ describe("ModelSettings: Fine control and where the model goes (0.0.6 item 6)", 
     expect((screen.getByRole("button", { name: "Reset to defaults" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("is the same in Ask first, Allow all and Full access: nothing here is a tool action (I6-17)", async () => {
+    const { useApprovalMode } = await import("../lib/approvalMode");
+    const seen: string[] = [];
+    for (const mode of ["ask", "allowAll", "fullAccess"] as const) {
+      useApprovalMode.setState({ modes: { 3: mode }, defaultMode: mode });
+      await openPanel(onCard());
+      await openFine();
+      seen.push(document.querySelector('[role="dialog"]')?.textContent ?? "");
+      cleanup();
+    }
+    expect(seen[0]).toContain("Where the model goes");
+    expect(seen[0]).toContain("Processor threads");
+    expect(new Set(seen).size).toBe(1);
+    useApprovalMode.setState({ modes: {}, defaultMode: "ask" });
+  });
+
   it("is hidden for a backend without item 6 (no picture, no Fine control)", async () => {
     const old = sample() as Partial<ModelLoadInfo>;
     delete old.picture;

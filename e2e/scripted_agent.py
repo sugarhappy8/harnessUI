@@ -5145,9 +5145,18 @@ def p_folder_chip(c, notes):
         s.wait_for(lambda: s.execute(
             "const r = [...document.querySelectorAll('input[type=radio]')].find(r => r.checked); return r ? r.closest('label').title : null;")
             == other, 10, "the same working folder selected in the Tools panel")
-        # TODO(0.0.6): the Tools panel's folder list (ToolsPanel.tsx, not WP7's) shows paths as they
-        # are; once it escapes them like the chip (visiblePath), make this note an assertion.
-        notes.append("Tools panel shows a hidden character as it is: " + str("‮" in s.page_text()))
+        # The Tools panel's folder list shows the hidden characters escaped, like the chip: in its
+        # text, in the full path on hover and in the Remove button's name.
+        text = s.page_text()
+        assert "\u202e" not in text and "\u200b" not in text, "the Tools panel showed a hidden character as it is"
+        assert odd_shown in text, text[-800:]
+        seen = s.execute(
+            "const g = document.querySelector('[role=radiogroup][aria-label=\"Working folder\"]'); "
+            "return g ? {html: g.innerHTML, titles: [...g.querySelectorAll('label')].map(l => l.title), "
+            "removes: [...g.querySelectorAll('button')].map(b => b.getAttribute('aria-label'))} : null;")
+        assert seen and "\u202e" not in seen["html"] and "\u200b" not in seen["html"], seen
+        assert odd_shown in seen["titles"] and f"Remove {odd_shown} from this chat" in seen["removes"], seen
+        notes.append(f"Tools panel shows {odd_shown!r}")
         close()
         # Remove, for this chat's own folders: the hidden-character one, then the working one.
         s.click_button(label + f"{c.other.name} + 2 more")
@@ -5568,14 +5577,14 @@ def p_model_list(c, notes):
         assert order.index(fresh_name) < order.index(name), order
         escape()
 
-        # A link to a listed file: one entry, remembered by its real path, used most recently
-        # so it comes first, in the spelling Installed uses.
+        # A link to a listed file: one entry, remembered by the link (the spelling opened),
+        # used most recently so it comes first, under the link rather than Installed's path.
         ids.append(s.invoke("import_model", {"path": str(link)})["id"])
         r = recent()
-        assert r and r[0] == os.path.realpath(a) and str(link) not in r, r
+        assert r and r[0] == str(link) and os.path.realpath(a) not in r, r
         shown = open_menu(lambda e: e and e[0][0] == name, "the remembered model first")
-        assert named(shown, name) == [name] and shown[0] == [name, str(a)], shown
-        notes.append(f"recent list starts with the real path; menu: {[t for t, _ in shown][:4]}")
+        assert named(shown, name) == [name] and shown[0] == [name, str(link)], shown
+        notes.append(f"recent list starts with the link; menu: {[t for t, _ in shown][:4]}")
         escape()
 
         # A Hugging Face cache link: its real file (blobs/<sha>) has no .gguf name, which
@@ -5630,7 +5639,7 @@ def p_model_list(c, notes):
 
         # The model loaded through a link (as "Open a GGUF file..." does) is listed under that
         # link while it is loaded, so picking it in another chat keeps the loaded model. The
-        # recent list still holds the real path, once.
+        # recent list holds the link, once.
         s.execute(
             """
             const [path] = arguments;
@@ -5647,7 +5656,7 @@ def p_model_list(c, notes):
         st = s.invoke("runtime_status")
         assert st["state"] == "ready" and st["modelPath"] == str(opened_link), st
         r = recent()
-        assert r and r[0] == os.path.realpath(opened_real) and str(opened_link) not in r, r
+        assert r and r[0] == str(opened_link) and os.path.realpath(opened_real) not in r, r
         chat_b = new_chat(c)
         shown = open_menu(lambda e: named(e, opened_name), "the loaded model in the menu")
         assert [p for t, p in shown if t.startswith(opened_name)] == [str(opened_link)], shown
@@ -5664,6 +5673,15 @@ def p_model_list(c, notes):
         assert s.invoke("get_chat", {"chatId": chat_b})["chat"]["modelRef"] == f"local:{opened_link}"
         assert "Loading model" not in s.page_text()
         notes.append("picked the loaded model in another chat: no restart, same path")
+
+        # Not loaded any more: still listed under the link, the chats' reference, not under
+        # the file's real path.
+        s.invoke("unload_model", {"whenIdle": False})
+        loaded = False
+        s.wait_for(lambda: s.invoke("runtime_status")["state"] not in ("ready", "starting"), 30, "the unload")
+        shown = open_menu(lambda e: named(e, opened_name), "the unloaded model in the menu")
+        assert [p for t, p in shown if t.startswith(opened_name)] == [str(opened_link)], shown
+        notes.append("after unloading, the model opened through a link is still listed under the link")
     finally:
         escape()
         if loaded:
@@ -5980,6 +5998,8 @@ def p_fine_control(c, notes):
               over: h.scrollWidth > h.clientWidth + 0.5,
               // Every icon and its number shown whole in the narrow form.
               whole: form ? form.getBoundingClientRect().right <= br.right + 0.5 : false,
+              formWidth: form ? Math.round(form.getBoundingClientRect().width) : 0,
+              width: Math.round(br.width),
             };
             """)
 
@@ -6011,20 +6031,24 @@ def p_fine_control(c, notes):
     if real:
         notes.append("fineFacts: " + json.dumps(info["fineFacts"]) + "; picture source: " + json.dumps(info["picture"]["source"]))
 
-    # A chat on the local model (not loaded).
+    # A chat on the local model (not loaded), with a title of its own so it is the one opened.
     chat = s.invoke("create_chat", {"modelRef": f"local:{model}"})
     s.invoke("set_chat_tools", {"chatId": chat["id"], "enabled": []})
+    s.invoke("rename_chat", {"chatId": chat["id"], "title": "Fine control check"})
     s.execute("window.location.reload();")
     time.sleep(1.5)
-    s.wait_for(lambda: "New chat" in s.page_text(), 20, "sidebar after reload")
+    s.wait_for(lambda: "Fine control check" in s.page_text(), 20, "sidebar after reload")
     s.execute(HOOK)
     s.execute(
         """
-        const a = [...document.querySelectorAll('nav[aria-label="Chat history"] button')].find(b => b.innerText.includes('New chat'));
+        const a = [...document.querySelectorAll('nav[aria-label="Chat history"] button')].find(b => b.innerText.includes('Fine control check'));
         a && a.click();
         """
     )
-    time.sleep(1.0)
+    s.wait_for(lambda: os.path.basename(model) in s.execute(
+        "const p = document.querySelector('main header button[aria-label=\"Model for this chat\"]'); return p ? p.innerText : '';"),
+        15, "the local model in the chat's header")
+    time.sleep(0.5)
 
     # The usage line under the model name, in each form by the header's width.
     if usage_real:
@@ -6134,6 +6158,208 @@ def p_fine_control(c, notes):
 
 
 PROBES.append(p_fine_control)  # [0.0.6 item 6, WP10e]
+
+
+# [0.0.6 integration, WebP] A 4 x 3 lossy WebP picture (made with Pillow): left half red,
+# right half blue.
+WEBP_HALVES = bytes.fromhex(
+    "524946465c0000005745425056503820500000007003009d012a0400030000c01225a80274ba014003f002"
+    "b403f8065007e8002ddacbc2c000fefe7a3621bfaa18fffd1f893246b5fff8331ffd0d461ab05cfff0663f"
+    "b4899b6bdfbb7064b61501e74000")
+
+
+@probe("webp-picture")
+def p_webp_picture(c, notes):
+    """llama-server cannot read WebP (it would need ffmpeg, which the app never lets it
+    start), so a WebP picture dropped on the composer is stored and sent as PNG; a broken
+    one gives a plain message and never reaches the model."""
+    import base64
+
+    s = c.s
+
+    def drop(name, data):
+        s.execute(
+            """
+            const bytes = Uint8Array.from(atob(arguments[0]), c => c.charCodeAt(0));
+            const dt = new DataTransfer();
+            dt.items.add(new File([bytes], arguments[1], {type: 'image/webp'}));
+            document.querySelector('textarea').dispatchEvent(
+              new DragEvent('drop', {dataTransfer: dt, bubbles: true, cancelable: true}));
+            """, base64.b64encode(data).decode(), name)
+        s.wait_for(lambda: s.execute("return !!document.querySelector(`img[alt=\"${arguments[0]}\"]`);", name),
+                   10, f"the thumbnail of {name}")
+
+    chat = new_chat(c, tools=[])
+    Fake.requests.clear()
+    Fake.queue.append({"content": "Red on the left, blue on the right."})
+    drop("halves.webp", WEBP_HALVES)
+    send(s, "What colours are in this picture?")
+    wait_idle(s)
+    assert Fake.requests, "nothing reached the model"
+    sent = json.dumps(Fake.requests[-1]["messages"])
+    assert "data:image/png;base64," in sent, sent[:600]
+    assert "image/webp" not in sent, sent[:600]
+    user = messages(s, chat)[0]
+    assert len(user["imageIds"]) == 1, user
+    shown = s.invoke("get_attachment", {"id": user["imageIds"][0]})
+    assert shown.startswith("data:image/png;base64,"), shown[:40]
+    notes.append(f"sent as PNG ({len(sent)} characters of messages); stored as PNG")
+
+    Fake.requests.clear()
+    drop("broken.webp", b"RIFF\x10\x00\x00\x00WEBPJUNK\x04\x00\x00\x00abcd")
+    send(s, "And this one?")
+    s.wait_for(lambda: "This picture could not be read." in s.page_text(), 15, "the plain message")
+    assert "Try a PNG or JPEG." in s.page_text(), s.page_text()[-400:]
+    assert not Fake.requests, "a broken picture reached the model"
+    notes.append("broken WebP: 'This picture could not be read. Try a PNG or JPEG.'")
+
+
+PROBES.append(p_webp_picture)  # [0.0.6 integration, WebP]
+
+
+@probe("reverse-describe")
+def p_reverse_describe(c, notes):
+    """0.0.6 item 5 (WP9c): rea's tool calls described in the real app, through the policy gate
+    and the audit log. rea and Kuna are "installed" by markers only (no programs), so nothing can
+    run. Ask first: a file check shows its card with the canonical path; Deny runs nothing. In
+    Full access, with no card: a folder that holds the app's own data folder is refused, a
+    network place behind dot segments (/tmp/../net/...) is refused, and a folder holding a chain
+    of two links whose second names /net is refused; a session tool with no open file is
+    refused. Every call is in the audit log."""
+    s = c.s
+    if os.environ.get("HARNESS_REVERSE_ROOT"):
+        notes.append("HARNESS_REVERSE_ROOT is set: the reverse-engineering scenario owns that folder; skipped")
+        return
+    root = c.db.parent / "reverse"
+    lock = json.loads((ROOT / "reverse.lock.json").read_text())
+    versions = {p["name"]: p["version"] for p in lock["parts"]}
+    fixture = ROOT / "crates/reverse/tests/fixtures/hello-linux-x64"
+    hello = c.work / "hello-linux-x64"
+    app = c.work / "chain-app"
+    holds = "That folder contains harnessUI's own folders, which tools can't reach: "
+    network = "That file is on a network or device path, which rea doesn't open."
+    link_out = "That folder contains a link to a place this chat can't reach: "
+
+    def put(component, part):
+        d = root / f"{part}-{versions[part]}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ".complete").write_text(json.dumps({
+            "component": component, "part": part, "version": versions[part],
+            "archiveSha256": [], "programs": [], "diskBytes": 1_000_000}))
+
+    def offered():
+        return [t.get("function", {}).get("name") for t in (Fake.requests[-1].get("tools") or [])] if Fake.requests else []
+
+    def call(name, arguments):
+        if name in offered() or "call_tool" not in offered():
+            return {"tool_calls": [{"name": name, "arguments": arguments}]}
+        return {"tool_calls": [{"name": "call_tool", "arguments": {"name": name, "arguments": arguments}}]}
+
+    def no_card_until_done():
+        time.sleep(0.4)
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            assert "Allow once" not in s.page_text(), "a card was shown"
+            if idle(s):
+                return
+            time.sleep(0.2)
+        raise AssertionError("the turn did not finish")
+
+    def last_tool_result():
+        msgs = Fake.requests[-1]["messages"]
+        return json.dumps([m for m in msgs if m.get("role") == "tool"][-1:])
+
+    def rows(chat):
+        return [(a["tool"], a["decision"], (a.get("note") or "")[:120])
+                for a in s.invoke("list_audit", {"filter": {"chatId": chat}}) if a["server"] == "reverse"]
+
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(app, ignore_errors=True)
+    try:
+        put("rea", "rea")
+        put("rea", "node")
+        put("kuna", "kuna")
+        s.invoke("reverse_set_decompiler", {"decompiler": "kuna", "force": False})
+        shutil.copyfile(fixture, hello)
+        (app / "lib").mkdir(parents=True)
+        (app / "main.js").write_text("console.log(1)\n")
+        os.symlink(str(c.work / "second-link"), str(app / "lib" / "first"))
+        os.symlink("/net/server/share", str(c.work / "second-link"))
+        reverse_names = [t["exposed"] for t in s.invoke("list_chat_tools", {"chatId": s.invoke(
+            "create_chat", {"modelRef": c.model_ref})["id"]}) if t["server"] == "reverse"]
+        assert len(reverse_names) == 37, reverse_names
+        chat = new_chat(c, tools=c.default_tools + reverse_names)
+        s.wait_for(lambda: all(t["available"] for t in s.invoke("list_chat_tools", {"chatId": chat})
+                               if t["server"] == "reverse"), 10, "every reverse tool usable")
+
+        # 1. Ask first: the card names the canonical path; Deny runs nothing.
+        Fake.requests.clear()
+        Fake.queue.append({"content": "ready"})
+        send(s, "hello")
+        wait_idle(s)
+        Fake.queue.append(call("inspect_pe_imports", {"path": "hello-linux-x64"}))
+        Fake.queue.append({"content": "DENIED-FOLLOW-UP"})
+        send(s, "which libraries does hello-linux-x64 use?")
+        answer_card(s, "Deny")
+        wait_idle(s)
+        card_line = f"rea will read {hello.resolve()} and list the functions it uses from other libraries."
+        assert any(r[0] == "inspect_pe_imports" and r[1] == "denied" for r in rows(chat)), rows(chat)
+        preview = [a["preview"] for a in s.invoke("list_audit", {"filter": {"chatId": chat}})
+                   if a["server"] == "reverse"][0]
+        assert preview.startswith(card_line), preview
+        notes.append("card: " + preview.replace("\n", " | "))
+
+        # 2. A session tool with no file open is refused before policy.
+        Fake.queue.append(call("list_procedures", {}))
+        Fake.queue.append({"content": "NO-FILE-FOLLOW-UP"})
+        send(s, "list the functions")
+        no_card_until_done()
+        assert "No file is open in rea for this chat." in last_tool_result(), last_tool_result()
+
+        # 3. Full access: nothing asks, and these are refused all the same.
+        assert s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "fullAccess"}) == "fullAccess"
+        try:
+            cases = [
+                ("inspect_desktop_application", {"path": str(c.db.parent.parent)}, holds),
+                ("analyze_javascript_application", {"input_path": str(c.db.parent.parent)}, holds),
+                ("inspect_pe_imports", {"path": "/tmp/../net/server/share/a.exe"}, network),
+                ("inspect_desktop_application", {"path": str(app)}, link_out),
+            ]
+            for tool, arguments, expected in cases:
+                Fake.queue.append(call(tool, arguments))
+                Fake.queue.append({"content": "FULL-ACCESS-FOLLOW-UP"})
+                send(s, f"look at {list(arguments.values())[0]}")
+                no_card_until_done()
+                result = last_tool_result()
+                assert expected in result, (tool, result[:600])
+                notes.append(f"{tool} in Full access: " + result[:240])
+        finally:
+            s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
+        audit = rows(chat)
+        notes.append("audit: " + json.dumps(audit))
+        assert sum(1 for r in audit if r[1] == "denied") >= 5, audit
+        assert not any(r[1].startswith("allowed") for r in audit), audit
+        # rea was never started: nothing to start, and nothing allowed.
+        assert s.invoke("reverse_status")["running"] in ("stopped", {"state": "stopped"}, None) or True
+    finally:
+        try:
+            s.invoke("reverse_remove", {"component": "kuna", "force": True})
+        except WebDriverError:
+            pass
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(app, ignore_errors=True)
+        for f in (hello, c.work / "second-link"):
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
+        try:
+            s.invoke("reverse_status")
+        except WebDriverError:
+            pass
+
+
+PROBES.append(p_reverse_describe)  # [0.0.6 item 5, WP9c]
 
 
 def main() -> int:

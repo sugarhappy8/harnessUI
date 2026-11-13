@@ -17,6 +17,7 @@
 //! Windows reads) is the loaded model's device, else the one a load would use, by the
 //! backend probe's description and total; the probe is never started from here.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -70,11 +71,23 @@ struct Worker {
     requests: mpsc::Sender<Request>,
     /// When the sample being taken started; `None` between samples.
     sampling_since: Arc<Mutex<Option<Instant>>>,
+    /// Samples finished so far.
+    finished: Arc<AtomicU64>,
+    /// `finished` when a request to this thread ran out of time: stuck until another
+    /// sample finishes.
+    timed_out_at: Option<u64>,
 }
 
 impl Worker {
-    /// A sample has run longer than `limit`.
+    /// A request ran out of time and no sample finished since, or a sample has run longer
+    /// than `limit`.
     fn stuck(&self, limit: Duration) -> bool {
+        if self
+            .timed_out_at
+            .is_some_and(|at| self.finished.load(Ordering::SeqCst) == at)
+        {
+            return true;
+        }
         self.sampling_since
             .lock()
             .ok()
@@ -109,7 +122,11 @@ impl Default for UsageReader {
 impl UsageReader {
     /// A reader whose thread uses samplers from `factory`, ends `idle_end` after the last
     /// request and answers within `answer_within`.
-    pub fn with_factory(factory: SamplerFactory, idle_end: Duration, answer_within: Duration) -> Self {
+    pub fn with_factory(
+        factory: SamplerFactory,
+        idle_end: Duration,
+        answer_within: Duration,
+    ) -> Self {
         Self {
             factory,
             idle_end,
@@ -128,12 +145,14 @@ impl UsageReader {
     fn start(&self, state: &mut ReaderState) -> bool {
         let (requests, received) = mpsc::channel::<Request>();
         let sampling_since = Arc::new(Mutex::new(None));
+        let finished = Arc::new(AtomicU64::new(0));
         let factory = Arc::clone(&self.factory);
         let idle_end = self.idle_end;
         let since = Arc::clone(&sampling_since);
+        let done = Arc::clone(&finished);
         let started = std::thread::Builder::new()
             .name("usage-reader".into())
-            .spawn(move || read_until_idle(&received, &*factory, idle_end, &since));
+            .spawn(move || read_until_idle(&received, &*factory, idle_end, &since, &done));
         if let Err(e) = started {
             tracing::warn!("could not start the usage reader: {e}");
             return false;
@@ -143,6 +162,8 @@ impl UsageReader {
             id: state.started,
             requests,
             sampling_since,
+            finished,
+            timed_out_at: None,
         });
         true
     }
@@ -198,7 +219,14 @@ impl UsageReader {
                     }
                 }
                 // Past the limit: the reader is stuck until its call returns.
-                Err(_) => return None,
+                Err(_) => {
+                    if let Ok(mut state) = self.state.lock()
+                        && let Some(worker) = state.worker.as_mut().filter(|w| w.id == id)
+                    {
+                        worker.timed_out_at = Some(worker.finished.load(Ordering::SeqCst));
+                    }
+                    return None;
+                }
             }
         }
         None
@@ -212,6 +240,7 @@ fn read_until_idle(
     factory: &(dyn Fn() -> Box<dyn Sampler + Send> + Send + Sync),
     idle_end: Duration,
     sampling_since: &Mutex<Option<Instant>>,
+    finished: &AtomicU64,
 ) {
     let mut sampler = factory();
     while let Ok(request) = requests.recv_timeout(idle_end) {
@@ -222,6 +251,7 @@ fn read_until_idle(
         if let Ok(mut since) = sampling_since.lock() {
             *since = None;
         }
+        finished.fetch_add(1, Ordering::SeqCst);
         let _ = request.reply.send(sample);
     }
 }
@@ -302,10 +332,15 @@ fn focus(
 /// This computer's usage now (the usage line; main window only). Read here, on request,
 /// never sent anywhere.
 #[tauri::command]
-pub async fn usage_now(window: tauri::WebviewWindow, state: State<'_, AppState>) -> AppResult<UsageNow> {
+pub async fn usage_now(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> AppResult<UsageNow> {
     crate::commands::only_main_window(window.label())?;
     let found = state.runtime.cached_backends().unwrap_or_default();
-    let defaults = crate::load_settings::read_defaults(&state.store).await.settings;
+    let defaults = crate::load_settings::read_defaults(&state.store)
+        .await
+        .settings;
     let focus = focus(&found, &state.runtime.status(), &defaults);
     let sample = state.usage.sample(focus).await;
     Ok(answer(sample, models::hardware::system_memory()))

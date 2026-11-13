@@ -52,7 +52,7 @@ fn card(free_mib: u64) -> Machine {
                 runtime::BackendKind::Vulkan,
                 &[("Vulkan0", "AMD Radeon RX 9070 XT", 16_304, free_mib)],
             ),
-            probe(runtime::BackendKind::Cpu, &[]),
+            probe(runtime::BackendKind::Cpu, &[("CPU", "CPU", 0, 0)]),
         ],
         None,
         None,
@@ -67,7 +67,7 @@ fn card(free_mib: u64) -> Machine {
 /// No graphics device: the processor only.
 fn processor_only() -> Machine {
     let mut m = Machine::from_probes(
-        &[probe(runtime::BackendKind::Cpu, &[])],
+        &[probe(runtime::BackendKind::Cpu, &[("CPU", "CPU", 0, 0)])],
         None,
         None,
         32 * GB,
@@ -86,7 +86,7 @@ fn mac() -> Machine {
                 runtime::BackendKind::Metal,
                 &[("MTL0", "Apple M2", 10_922, 10_922)],
             ),
-            probe(runtime::BackendKind::Cpu, &[]),
+            probe(runtime::BackendKind::Cpu, &[("CPU", "CPU", 0, 0)]),
         ],
         Some("metal"),
         None,
@@ -217,7 +217,10 @@ fn fine_control_old_json_both_ways() {
             "leaveFree": {"mib": 2048}
         })
     );
-    assert_eq!(serde_json::from_value::<ModelLoadSettings>(v.clone()).unwrap(), with);
+    assert_eq!(
+        serde_json::from_value::<ModelLoadSettings>(v.clone()).unwrap(),
+        with
+    );
     assert_eq!(
         serde_json::to_value(FineControl {
             experts: ExpertsChoice::All,
@@ -329,14 +332,35 @@ fn fine_values_are_checked_against_their_lists_and_the_model() {
     }
     // Expert parts: only for a model that has them, 1 to its expert layers (48).
     assert_eq!(check(experts(ExpertsChoice::All), Some(&d)), refused);
-    assert_eq!(check(experts(ExpertsChoice::FirstLayers(1)), Some(&d)), refused);
+    assert_eq!(
+        check(experts(ExpertsChoice::FirstLayers(1)), Some(&d)),
+        refused
+    );
     assert_eq!(check(experts(ExpertsChoice::All), Some(&m)), Ok(()));
-    assert_eq!(check(experts(ExpertsChoice::FirstLayers(1)), Some(&m)), Ok(()));
-    assert_eq!(check(experts(ExpertsChoice::FirstLayers(48)), Some(&m)), Ok(()));
-    assert_eq!(check(experts(ExpertsChoice::FirstLayers(49)), Some(&m)), refused);
-    assert_eq!(check(experts(ExpertsChoice::FirstLayers(0)), Some(&m)), refused);
-    assert_eq!(check(experts(ExpertsChoice::FirstLayers(1000)), None), Ok(()));
-    assert_eq!(check(experts(ExpertsChoice::FirstLayers(1001)), None), refused);
+    assert_eq!(
+        check(experts(ExpertsChoice::FirstLayers(1)), Some(&m)),
+        Ok(())
+    );
+    assert_eq!(
+        check(experts(ExpertsChoice::FirstLayers(48)), Some(&m)),
+        Ok(())
+    );
+    assert_eq!(
+        check(experts(ExpertsChoice::FirstLayers(49)), Some(&m)),
+        refused
+    );
+    assert_eq!(
+        check(experts(ExpertsChoice::FirstLayers(0)), Some(&m)),
+        refused
+    );
+    assert_eq!(
+        check(experts(ExpertsChoice::FirstLayers(1000)), None),
+        Ok(())
+    );
+    assert_eq!(
+        check(experts(ExpertsChoice::FirstLayers(1001)), None),
+        refused
+    );
     // A header that cannot be read: the ranges only.
     let unreadable = ModelFacts {
         header: None,
@@ -344,13 +368,13 @@ fn fine_values_are_checked_against_their_lists_and_the_model() {
         ..dense()
     };
     assert_eq!(check(layers(500), Some(&unreadable)), Ok(()));
-    assert_eq!(check(experts(ExpertsChoice::All), Some(&unreadable)), Ok(()));
+    assert_eq!(
+        check(experts(ExpertsChoice::All), Some(&unreadable)),
+        Ok(())
+    );
     // Every command's check includes them.
     let machine = card(15_000);
-    assert_eq!(
-        validate(&fine(threads(0)), Some(40_960), &machine),
-        refused
-    );
+    assert_eq!(validate(&fine(threads(0)), Some(40_960), &machine), refused);
     assert_eq!(validate_for(&fine(layers(42)), &d, &machine), refused);
     assert_eq!(validate_for(&fine(layers(41)), &d, &machine), Ok(()));
 }
@@ -522,7 +546,12 @@ fn fine_control_resolves_per_row_of_the_table() {
     );
     // The first k at or above the expert layers: all of them.
     assert_eq!(
-        words(&all(experts(ExpertsChoice::FirstLayers(48))), &m, &on_card, dev),
+        words(
+            &all(experts(ExpertsChoice::FirstLayers(48))),
+            &m,
+            &on_card,
+            dev
+        ),
         "--device Vulkan0 -ngl all --fit off --cpu-moe"
     );
     // A model without expert parts drops them.
@@ -574,7 +603,13 @@ fn fine_control_resolves_per_row_of_the_table() {
     let r2 = resolve(&fine(every), &off_defaults, None, Some(&m), &on_card);
     assert_eq!(r2.fine, r.fine, "Don't use it from the defaults wins too");
     // No graphics device: the same.
-    let r3 = resolve(&fine(every), &auto_defaults(), None, Some(&m), &processor_only());
+    let r3 = resolve(
+        &fine(every),
+        &auto_defaults(),
+        None,
+        Some(&m),
+        &processor_only(),
+    );
     assert_eq!(r3.fine, r.fine);
     assert_eq!(
         placement_words(&r3, None),
@@ -706,7 +741,11 @@ fn a_change_that_launches_the_same_is_not_settings_changed() {
         ..ModelLoadSettings::default()
     };
     for (what, before, after) in [
-        ("Leave free with All of it", ModelLoadSettings::default(), fine(leave)),
+        (
+            "Leave free with All of it",
+            ModelLoadSettings::default(),
+            fine(leave),
+        ),
         (
             "layers with Don't use it",
             off.clone(),
@@ -736,7 +775,10 @@ fn a_change_that_launches_the_same_is_not_settings_changed() {
             &m,
             Some(&loaded),
         );
-        assert!(!info.older_settings_loaded, "{what}: no \"Settings changed\"");
+        assert!(
+            !info.older_settings_loaded,
+            "{what}: no \"Settings changed\""
+        );
     }
 }
 
@@ -838,7 +880,11 @@ fn marks_follow_fine_control() {
         (all.picture.mark, all.picture.fits),
         (Verdict::Yellow, Fits::WontFitGraphics)
     );
-    assert_eq!(all.gpu_options[0].fit, all.fit.unwrap(), "the selected option");
+    assert_eq!(
+        all.gpu_options[0].fit,
+        all.fit.unwrap(),
+        "the selected option"
+    );
     // Fewer layers in the draft: the marks follow.
     let twenty = info(ModelLoadSettings {
         context: ContextChoice::Fixed(32_768),
@@ -857,11 +903,7 @@ fn marks_follow_fine_control() {
     );
     // The plain options are marked as choosing them would load (no custom placement).
     assert_eq!(
-        twenty
-            .gpu_options
-            .iter()
-            .map(|o| o.fit)
-            .collect::<Vec<_>>(),
+        twenty.gpu_options.iter().map(|o| o.fit).collect::<Vec<_>>(),
         all.gpu_options.iter().map(|o| o.fit).collect::<Vec<_>>()
     );
     // Too large: the floor does not fit, by the same verdict.
@@ -870,8 +912,22 @@ fn marks_follow_fine_control() {
         ram_free_bytes: 3 * GB,
         ..tiny
     };
-    let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&d), &small);
-    let i = build_info("/m", &d, ModelLoadSettings::default(), auto_defaults(), r, &small, None);
+    let r = resolve(
+        &ModelLoadSettings::default(),
+        &auto_defaults(),
+        None,
+        Some(&d),
+        &small,
+    );
+    let i = build_info(
+        "/m",
+        &d,
+        ModelLoadSettings::default(),
+        auto_defaults(),
+        r,
+        &small,
+        None,
+    );
     assert!(i.too_large);
     assert_eq!(i.picture.fits, Fits::WontFitAtAll);
     assert_eq!(i.context_options[0].fit, Verdict::Red);
@@ -892,7 +948,13 @@ fn facts_without_a_tensor_table_keep_wp1b_marks() {
         ..dense()
     };
     for f in [no_sizes, no_layers] {
-        let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&f), &m);
+        let r = resolve(
+            &ModelLoadSettings::default(),
+            &auto_defaults(),
+            None,
+            Some(&f),
+            &m,
+        );
         let info = build_info(
             "/m",
             &f,
@@ -959,8 +1021,22 @@ fn fine_facts_say_what_fine_control_may_offer() {
         ..auto_defaults()
     };
     let m = card(15_000);
-    let r = resolve(&ModelLoadSettings::default(), &off, None, Some(&dense()), &m);
-    let info = build_info("/m", &dense(), ModelLoadSettings::default(), off, r, &m, None);
+    let r = resolve(
+        &ModelLoadSettings::default(),
+        &off,
+        None,
+        Some(&dense()),
+        &m,
+    );
+    let info = build_info(
+        "/m",
+        &dense(),
+        ModelLoadSettings::default(),
+        off,
+        r,
+        &m,
+        None,
+    );
     assert!(info.fine_facts.graphics);
     assert_eq!(info.fine_facts, fine_facts(&dense(), &m));
 }
@@ -1024,7 +1100,13 @@ async fn split_parts_are_found_only_from_the_first_files_name() {
     write_set(&whole.0, "big", 3, &[1, 2, 3]);
     let first = whole.0.join("big-00001-of-00003.gguf");
     let f = read_facts(&first, None).await.unwrap();
-    let sizes = f.layers.as_ref().unwrap().sizes.clone().expect("every part read");
+    let sizes = f
+        .layers
+        .as_ref()
+        .unwrap()
+        .sizes
+        .clone()
+        .expect("every part read");
     assert_eq!(sizes.layers.len(), 2);
     assert_eq!(sizes.input_bytes, 64);
     assert_eq!(sizes.output_bytes, 64);
@@ -1046,8 +1128,22 @@ async fn split_parts_are_found_only_from_the_first_files_name() {
     let layers = f.layers.clone().unwrap();
     assert_eq!((layers.sizes.clone(), layers.units()), (None, 3));
     let m = processor_only();
-    let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&f), &m);
-    let info = build_info("/m", &f, ModelLoadSettings::default(), auto_defaults(), r, &m, None);
+    let r = resolve(
+        &ModelLoadSettings::default(),
+        &auto_defaults(),
+        None,
+        Some(&f),
+        &m,
+    );
+    let info = build_info(
+        "/m",
+        &f,
+        ModelLoadSettings::default(),
+        auto_defaults(),
+        r,
+        &m,
+        None,
+    );
     assert_eq!(
         info.picture.source,
         PictureSource::Estimate {
@@ -1060,7 +1156,11 @@ async fn split_parts_are_found_only_from_the_first_files_name() {
     write_set(&odd.0, "big", 3, &[1, 2, 3]);
     std::fs::write(
         odd.0.join("big-00001-of-00003.gguf"),
-        gguf(2, Some(2), &[("token_embd.weight", 64), ("blk.0.attn_q.weight", 96)]),
+        gguf(
+            2,
+            Some(2),
+            &[("token_embd.weight", 64), ("blk.0.attn_q.weight", 96)],
+        ),
     )
     .unwrap();
     let f = read_facts(&odd.0.join("big-00001-of-00003.gguf"), None)
@@ -1068,7 +1168,10 @@ async fn split_parts_are_found_only_from_the_first_files_name() {
         .unwrap();
     assert_eq!(f.layers.unwrap().sizes, None);
     // More than 256 parts: never looked for.
-    assert_eq!(other_split_files("x-00001-of-00300.gguf", Some(300)), Err(()));
+    assert_eq!(
+        other_split_files("x-00001-of-00300.gguf", Some(300)),
+        Err(())
+    );
     assert_eq!(
         other_split_files("x-00001-of-00256.gguf", Some(256)).map(|v| v.len()),
         Ok(255)
@@ -1121,7 +1224,13 @@ async fn the_real_model_has_layer_facts() {
     assert_eq!(u64::from(layers.units()), summary.block_count + 1);
     assert!(sizes.total() > f.size_bytes / 2);
     let m = processor_only();
-    let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&f), &m);
+    let r = resolve(
+        &ModelLoadSettings::default(),
+        &auto_defaults(),
+        None,
+        Some(&f),
+        &m,
+    );
     let info = build_info(
         &path.display().to_string(),
         &f,
