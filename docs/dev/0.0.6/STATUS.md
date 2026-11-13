@@ -114,6 +114,10 @@ one starts from this file and `README.md`.
   accepts an existing report) for WP9d (wf_b32b9b4f-38c), WP9g (wf_370c5424-374), WP9h
   (wf_0a683d9b-c4b), starting at their reviews (developer reports in the scratchpad,
   dev_WP9*.txt). WP9e (last) is to be started by hand when all five are done.
+- 02:30 UTC: WP1a, WP1b, WP2, WP8 done (models run finished). Leftover minors are being fixed
+  by run wf_c6b8dca9-052 (Other apps key, helper app-note escaping, WebP to PNG, cancelling a
+  model switch, model list spelling for links, folder path escaping). The header layout pass
+  (WP2 widths, WP7 chip at narrow widths, item 6 usage line) waits for WP10e.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

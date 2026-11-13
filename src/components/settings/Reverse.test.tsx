@@ -211,6 +211,8 @@ describe("Reverse engineering, nothing installed (Linux)", () => {
     ).toBeTruthy();
     expect(screen.getByText(NO_DECOMPILER)).toBeTruthy();
     expect(within(rowOf("rea")).getByRole("button", { name: "Download" })).toBeTruthy();
+    // Each row says where it stands (owner checklist: "the tab returns to 'Not installed'").
+    for (const name of ["rea", "Kuna", "Ghidra"]) expect(within(rowOf(name)).getByText("Not installed")).toBeTruthy();
     // Nothing about running or using it until rea is there; no Mac step elsewhere.
     expect(screen.queryByText("rea is not running.")).toBeNull();
     expect(screen.queryByText(HOW_TO_USE)).toBeNull();
@@ -304,6 +306,8 @@ describe("downloads", () => {
     await act(async () => progress?.(event({ component: "kuna", part: "rea", done: 23e6, total: 105e6, partDone: 23e6, partTotal: 42e6 })));
     const kuna = rowOf("Kuna");
     expect(within(kuna).getByText("Downloading… 23 MB of 105 MB")).toBeTruthy();
+    expect(within(kuna).queryByText("Not installed")).toBeNull();
+    expect(within(rowOf("rea")).queryByText("Not installed")).toBeNull();
     expect(within(kuna).getByRole("progressbar", { name: "rea" }).getAttribute("aria-valuenow")).toBe("55");
     expect(within(kuna).getByText("23 MB of 42 MB")).toBeTruthy();
 
@@ -327,8 +331,60 @@ describe("downloads", () => {
     ipcMock.reverseStatus.mockResolvedValue(status({ decompiler: "kuna", chosen: "kuna" }, { rea: INSTALLED, kuna: INSTALLED }));
     await act(async () => progress?.(event({ component: "kuna", part: "", finished: true })));
     expect(within(rowOf("Kuna")).getByText("Installed")).toBeTruthy();
+    expect(within(rowOf("Kuna")).queryByText("Not installed")).toBeNull();
+    expect(within(rowOf("Ghidra")).getByText("Not installed")).toBeTruthy();
     expect(screen.getByText("Decompiling uses Kuna.")).toBeTruthy();
     expect(screen.queryByText(/Downloading…/)).toBeNull();
+  });
+
+  it("while a part unpacks, the parts already checked say Checked, not Checking", async () => {
+    await show(status());
+    fireEvent.click(within(rowOf("Kuna")).getByRole("button", { name: "Download" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Accept and download" }));
+    await act(async () => {});
+    const parts: [string, number][] = [
+      ["rea", 42e6],
+      ["node", 38e6],
+      ["kuna", 25e6],
+    ];
+    let done = 0;
+    for (const [part, size] of parts) {
+      await act(async () =>
+        progress?.(event({ component: "kuna", part, done, total: 105e6, partDone: 0, partTotal: size })),
+      );
+      done += size;
+    }
+    for (const [part, size] of parts) {
+      await act(async () =>
+        progress?.(event({ component: "kuna", part, stage: "checking", done: 0, total: 105e6, partDone: 0, partTotal: size })),
+      );
+    }
+    const partLine = (name: string) => {
+      const li = within(rowOf("Kuna")).getByRole("progressbar", { name }).closest("li");
+      if (!li) throw new Error(name);
+      return li;
+    };
+    // Kuna is being checked; rea and Node.js were checked before it.
+    expect(within(partLine("Kuna")).getByText("Checking…")).toBeTruthy();
+    expect(within(partLine("rea")).getByText("Checked")).toBeTruthy();
+    expect(within(partLine("Node.js")).getByText("Checked")).toBeTruthy();
+    await act(async () =>
+      progress?.(
+        event({ component: "kuna", part: "rea", stage: "unpacking", done: 10e6, total: 212e6, partDone: 10e6, partTotal: 212e6 }),
+      ),
+    );
+    expect(within(partLine("rea")).getByText("Unpacking…")).toBeTruthy();
+    expect(within(partLine("Node.js")).getByText("Checked")).toBeTruthy();
+    expect(within(partLine("Kuna")).getByText("Checked")).toBeTruthy();
+    expect(within(rowOf("Kuna")).queryByText("Checking…")).toBeNull();
+    await act(async () =>
+      progress?.(
+        event({ component: "kuna", part: "node", stage: "unpacking", done: 1e6, total: 94e6, partDone: 1e6, partTotal: 94e6 }),
+      ),
+    );
+    expect(within(partLine("rea")).getByText("Unpacked")).toBeTruthy();
+    expect(within(partLine("Node.js")).getByText("Unpacking…")).toBeTruthy();
+    expect(within(partLine("Kuna")).getByText("Checked")).toBeTruthy();
   });
 
   it("a download already running when the page opens shows its step", async () => {
@@ -663,6 +719,37 @@ describe("what each computer offers", () => {
   it("Mac with Ghidra offered: Kuna's row points at Ghidra", async () => {
     await show(status({ os: "macos", appleTools: "present" }));
     expect(screen.getByText(`${KUNA_MAC} Ghidra can open Mac apps.`)).toBeTruthy();
+  });
+
+  it("a decompiler this build does not offer, with files on disk: greyed, never the choice, removable", async () => {
+    const withheld: Partial<ReverseComponentStatus> = {
+      ...INSTALLED,
+      available: false,
+      reason: "Not available in this version of harnessUI.",
+    };
+    // Both on disk, Ghidra withheld: no choice control, Kuna is what is used.
+    await show(status({ decompiler: "kuna", chosen: "kuna" }, { rea: INSTALLED, kuna: INSTALLED, ghidra: withheld }));
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+    expect(screen.getByText("Decompiling uses Kuna.")).toBeTruthy();
+    expect(screen.queryByText("Decompiling uses Ghidra.")).toBeNull();
+    const ghidra = rowOf("Ghidra");
+    expect(within(ghidra).getByText("Not available in this version of harnessUI.")).toBeTruthy();
+    expect(within(ghidra).queryByRole("button", { name: "Download" })).toBeNull();
+    expect(within(ghidra).queryByRole("button", { name: "Repair" })).toBeNull();
+    cleanup();
+
+    // Only the withheld one on disk: it is never named as the decompiler in use.
+    ipcMock.reverseRemove.mockResolvedValue(status({}, { rea: INSTALLED }));
+    await show(status({ decompiler: null, chosen: null }, { rea: INSTALLED, ghidra: withheld }));
+    expect(screen.queryByText(/^Decompiling uses/)).toBeNull();
+    expect(screen.getByText(NO_DECOMPILER)).toBeTruthy();
+    // Its files can still be removed to free the space.
+    fireEvent.click(within(rowOf("Ghidra")).getByRole("button", { name: "Remove" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText("Remove Ghidra?")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await act(async () => {});
+    expect(ipcMock.reverseRemove).toHaveBeenCalledWith("ghidra", false);
   });
 
   it("an unsupported computer greys every row with its reason and never says to install one", async () => {

@@ -383,7 +383,10 @@ export function Reverse() {
   const appleMissing = status?.appleTools === "missing";
   const offered = DECOMPILERS.filter((d) => row(d)?.available);
   const onlyOffered = offered.length === 1 ? offered[0] : undefined;
-  const decompilersOnDisk = DECOMPILERS.filter((d) => onDisk(row(d)));
+  // The decompilers that can be the choice: offered here and on this computer (reverse_cmd.rs
+  // decides the same way, so files of one this build does not offer are never used).
+  const decompilersOnDisk = DECOMPILERS.filter((d) => row(d)?.available && onDisk(row(d)));
+  const used = status?.chosen && decompilersOnDisk.includes(status.chosen) ? status.chosen : decompilersOnDisk[0];
   const label = (d: ReverseDecompiler) => ROW_LABEL[d];
 
   function errorBanner() {
@@ -440,7 +443,10 @@ export function Reverse() {
                 p.stage === "downloading"
                   ? `${mb(p.done)} MB of ${mb(p.total)} MB`
                   : p.stage === "checking"
-                    ? "Checking…"
+                    ? // nextOp marks a part whose check is over as done; the one being checked has 0.
+                      p.done >= p.total && p.total > 0
+                      ? "Checked"
+                      : "Checking…"
                     : p.done >= p.total && p.total > 0
                       ? "Unpacked"
                       : "Unpacking…";
@@ -484,10 +490,27 @@ export function Reverse() {
     const r = row(c);
     if (!r) return null;
     if (!r.available) {
+      // Not offered by this build here. Files left on this computer (by a debug build, or a
+      // part a later version withdrew) are never used, but can be removed to free the space.
+      const leftover = onDisk(r) ? "remove" : r.state.kind === "partial" ? "discard" : null;
       return (
-        <li key={c} className="rounded-md border border-border px-3 py-2 opacity-60" aria-label={ROW_LABEL[c]}>
-          <p className="font-medium">{ROW_LABEL[c]}</p>
-          <p className="text-xs text-fg-muted">{r.reason}</p>
+        <li key={c} className="rounded-md border border-border px-3 py-2" aria-label={ROW_LABEL[c]}>
+          <div className="flex items-start gap-2">
+            <div className="min-w-0 flex-1 space-y-0.5 opacity-60">
+              <p className="font-medium">{ROW_LABEL[c]}</p>
+              <p className="text-xs text-fg-muted">{r.reason}</p>
+            </div>
+            {leftover && (
+              <button
+                type="button"
+                className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted disabled:opacity-40"
+                disabled={working}
+                onClick={() => (leftover === "remove" ? setRemoving(c) : void change({ kind: "discard", component: c }))}
+              >
+                <Trash2 size={12} aria-hidden /> Remove
+              </button>
+            )}
+          </div>
         </li>
       );
     }
@@ -555,6 +578,7 @@ export function Reverse() {
         {!running && s.kind === "partial" && (
           <p className="mt-1 text-xs text-fg-muted">{`Paused at ${mb(s.bytes)} MB of ${mb(r.downloadBytes)} MB. Remove frees that space.`}</p>
         )}
+        {!running && s.kind === "notInstalled" && <p className="mt-1 text-xs text-fg-muted">Not installed</p>}
         {!running && s.kind === "installed" && <p className="mt-1 text-xs">Installed</p>}
         {!running && s.kind === "installed" && r.update && (
           <p className="mt-1 text-xs">
@@ -664,7 +688,7 @@ export function Reverse() {
             </div>
           ) : decompilersOnDisk.length === 1 ? (
             // The owner's choice, also while it is broken or needs an update (its row says so).
-            <p>{`Decompiling uses ${label(status.chosen ?? status.decompiler ?? decompilersOnDisk[0] ?? "kuna")}.`}</p>
+            <p>{`Decompiling uses ${label(used ?? "kuna")}.`}</p>
           ) : offered.length > 0 ? (
             <p className="text-fg-muted">{NO_DECOMPILER}</p>
           ) : null}
