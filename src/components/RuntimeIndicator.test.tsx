@@ -389,6 +389,17 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect(screen.getByRole("menu").textContent).toContain("Used by another app");
   });
 
+  it("shows the model file name and path with hidden and right-to-left characters as codes", async () => {
+    await show(status({ modelName: "X-\u202Efuug.Q4_K_M.gguf\u200B", modelPath: "/models/X-\u202Efuug.Q4_K_M.gguf\u200B" }));
+    const button = screen.getByRole("button", { name: "Model menu" });
+    expect(button.title).toBe("Remembers about 24,000 words (Automatic)\n/models/X-\\u{202E}fuug.Q4_K_M.gguf\\u{200B}");
+    await openMenu();
+    const menu = screen.getByRole("menu");
+    expect(menu.textContent).toContain("X-\\u{202E}fuug.Q4_K_M.gguf\\u{200B} · runs on Graphics card (Vulkan)");
+    expect(menu.querySelector('bdi[dir="ltr"]')?.textContent).toBe("X-\\u{202E}fuug.Q4_K_M.gguf\\u{200B}");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
+  });
+
   it("shortens the ready line by whole phrases only, never inside a word (header-layout)", async () => {
     await show(status());
     const button = screen.getByRole("button", { name: "Model menu" });

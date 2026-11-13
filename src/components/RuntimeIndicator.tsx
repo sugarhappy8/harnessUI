@@ -16,6 +16,7 @@ import {
 import { usePageVisible, usePoll } from "../lib/usePoll";
 import { toErrorInfo, useApp } from "../store/app";
 import { reloadModel, switchModel, unloadModel, useRestartNote, useWaiting } from "../store/modelChange";
+import { visiblePath } from "./FolderChip";
 import { ModelSettingsHost, openModelSettings, QuestionHost } from "./ModelSettings";
 
 /** What a note's one button does. */
@@ -231,7 +232,9 @@ function Status() {
               <button
                 type="button"
                 aria-label="Model menu"
-                title={[full, shared ? "Used by another app" : null, runtime.modelPath].filter(Boolean).join("\n")}
+                title={[full, shared ? "Used by another app" : null, runtime.modelPath && visiblePath(runtime.modelPath)]
+                  .filter(Boolean)
+                  .join("\n")}
                 className="flex max-w-full min-w-0 items-center gap-1 overflow-hidden rounded hover:text-fg hover:underline focus-visible:underline"
               >
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-hidden />
@@ -266,7 +269,8 @@ function Status() {
                 className="z-50 max-w-sm min-w-64 rounded-xl border border-border bg-surface p-1.5 shadow-pop"
               >
                 <DropdownMenu.Label className="px-2.5 py-1 text-xs text-fg-muted">
-                  {runtime.modelName ?? "Local model"} · runs on {backendWords(runtime.backend)}
+                  <bdi dir="ltr">{visiblePath(runtime.modelName ?? "Local model")}</bdi> · runs on{" "}
+                  {backendWords(runtime.backend)}
                   <span className="block">{full}</span>
                   {shared && <span className="block text-accent">Used by another app</span>}
                 </DropdownMenu.Label>

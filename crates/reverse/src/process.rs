@@ -23,7 +23,9 @@
 //!   5 s grace and the stop after it still run to their end, and that call still counts as
 //!   holding rea: [`ReaProcess::lock`] and the idle stop wait for it after taking the lock,
 //!   and the state stays `Busy` until rea has answered or been stopped. A caller that goes
-//!   away without cancelling cancels the call.
+//!   away without cancelling cancels the call. A start whose caller stops waiting is no
+//!   longer `Starting`: the half-started rea is stopped the same way, and holds rea until
+//!   it has stopped.
 //! - **State** for the tab: `Failed` carries the stderr tail with the reverse folder masked
 //!   ([`crate::results::mask`]) and invisible characters made visible.
 //!
@@ -232,7 +234,8 @@ struct Shared {
     platform: Platform,
     calls: Arc<Mutex<()>>,
     status: StdMutex<Status>,
-    /// Calls whose work has not ended, even if their caller went away (at most one).
+    /// Calls whose work has not ended, even if their caller went away, and the stop of a
+    /// start whose caller went away (at most one).
     in_flight: watch::Sender<u32>,
     generation: AtomicU64,
     installer: StdMutex<Arc<Installer>>,
@@ -307,6 +310,45 @@ impl Drop for InFlight {
         self.shared
             .in_flight
             .send_modify(|n| *n = n.saturating_sub(1));
+    }
+}
+
+/// Clears [`Status::starting`] on every way out of [`ReaGuard::ensure_started`], also when
+/// its caller stops waiting (the agent loop drops a stopped tool's future 250 ms after
+/// Stop). Only while `starting` is still this server: then the half-started server is also
+/// stopped, in a task of its own that holds rea like a call that is still ending.
+struct StartGuard {
+    shared: Arc<Shared>,
+    server: Arc<dyn Rea>,
+}
+
+impl Drop for StartGuard {
+    fn drop(&mut self) {
+        let ours = {
+            let mut s = self.shared.status();
+            let ours = s
+                .starting
+                .as_ref()
+                .is_some_and(|starting| Arc::ptr_eq(starting, &self.server));
+            if ours {
+                s.starting = None;
+            }
+            ours
+        };
+        if !ours {
+            // Started, failed, or taken by a stop that stops it itself.
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        // Number 0 is no call's, so it never clears another call's busy state.
+        let flight = InFlight::begin(self.shared.clone(), 0);
+        let server = self.server.clone();
+        runtime.spawn(async move {
+            let _flight = flight;
+            server.stop(STOP_GRACE).await;
+        });
     }
 }
 
@@ -466,7 +508,8 @@ async fn stop_shared(shared: &Shared, grace: Duration) {
         if let Some(task) = s.idle_task.take() {
             task.abort();
         }
-        (s.running.take(), s.starting.clone())
+        // Taken: the start that runs ends as stopped, and the tab no longer says Starting.
+        (s.running.take(), s.starting.take())
     };
     if let Some(server) = starting {
         server.stop(grace).await;
@@ -558,6 +601,10 @@ impl ReaGuard {
             let server = (shared.launch)(spec, s.lifecycle);
             s.starting = Some(server.clone());
             (server, s.stops)
+        };
+        let _starting = StartGuard {
+            shared: shared.clone(),
+            server: server.clone(),
         };
         let result = server.start().await;
         // Decided under the lock, which is released before anything is awaited.

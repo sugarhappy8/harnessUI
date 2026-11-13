@@ -335,6 +335,28 @@ fn set_mcp_server_field(
     Ok(())
 }
 
+/// Renames a server in place (same id, so its tool preferences stay) and stores its config
+/// with the secret names that moved with it. The acknowledgement is kept: what runs is
+/// the same.
+fn rename_mcp_server(
+    conn: &Connection,
+    id: McpServerId,
+    name: String,
+    config: &Value,
+) -> Result<(), StoreError> {
+    if name.is_empty() {
+        return Err(StoreError::InvalidInput("MCP server name is empty".into()));
+    }
+    let sets = vec![
+        ("name", SqlValue::Text(name)),
+        ("config", SqlValue::Text(json_text(config)?)),
+    ];
+    if update_columns(conn, "mcp_servers", "id", id.0, sets)? == 0 {
+        return Err(StoreError::not_found("MCP server", id.0));
+    }
+    Ok(())
+}
+
 /// Records the acknowledgement only if the server's config is still the one the user saw.
 fn acknowledge_mcp_server(
     conn: &Connection,
@@ -620,6 +642,18 @@ impl Store {
         era: Option<String>,
     ) -> Result<(), StoreError> {
         self.call(move |c| set_mcp_server_field(c, id, "protocol_era", sql_opt_text(era)))
+            .await
+    }
+
+    /// Renames an MCP server, keeping its id and tool preferences, and stores `config` (the
+    /// same config with its secret names moved to the new name).
+    pub async fn rename_mcp_server(
+        &self,
+        id: McpServerId,
+        name: String,
+        config: Value,
+    ) -> Result<(), StoreError> {
+        self.call(move |c| rename_mcp_server(c, id, name, &config))
             .await
     }
 
@@ -1003,6 +1037,77 @@ mod tests {
         );
         assert!(matches!(
             store.acknowledge_mcp_server(id, json!({}), 1).await,
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+
+    /// [0.0.6] A rename keeps the row's id, so its tool preferences, enabled switch,
+    /// acknowledgement and protocol stay; a name already taken is refused.
+    #[tokio::test]
+    async fn an_mcp_server_is_renamed_in_place() {
+        let store = Store::open_in_memory().expect("open");
+        let config = json!({ "url": "https://x.test", "headers": { "A": "${secret:reverse.A}" } });
+        let id = store
+            .upsert_mcp_server(McpServerInput {
+                name: "reverse".into(),
+                config: config.clone(),
+                enabled: false,
+            })
+            .await
+            .expect("insert");
+        store
+            .acknowledge_mcp_server(id, config, 5)
+            .await
+            .expect("ack");
+        store
+            .set_mcp_protocol_era(id, Some("2025-06-18".into()))
+            .await
+            .expect("era");
+        store
+            .upsert_mcp_tool_pref(McpToolPref {
+                server_id: id,
+                tool_name: "open".into(),
+                enabled: true,
+                allow_any_args: true,
+                always_ask: false,
+                fingerprint: Some("f".into()),
+            })
+            .await
+            .expect("pref");
+        let moved = json!({ "url": "https://x.test", "headers": { "A": "${secret:reverse__yours_.A}" } });
+        store
+            .rename_mcp_server(id, "reverse (yours)".into(), moved.clone())
+            .await
+            .expect("rename");
+        let s = store.get_mcp_server(id).await.expect("get").expect("row");
+        assert_eq!(s.name, "reverse (yours)");
+        assert_eq!(s.config, moved);
+        assert!(!s.enabled);
+        assert_eq!(s.acknowledged_at, Some(5));
+        assert_eq!(s.protocol_era.as_deref(), Some("2025-06-18"));
+        let prefs = store.mcp_tool_prefs(id).await.expect("prefs");
+        assert_eq!(prefs.len(), 1);
+        assert!(prefs[0].allow_any_args);
+
+        let other = store
+            .upsert_mcp_server(McpServerInput {
+                name: "other".into(),
+                config: json!({}),
+                enabled: true,
+            })
+            .await
+            .expect("other");
+        assert!(
+            store
+                .rename_mcp_server(other, "reverse (yours)".into(), json!({}))
+                .await
+                .is_err(),
+            "names stay unique"
+        );
+        assert!(matches!(
+            store
+                .rename_mcp_server(McpServerId(77), "x".into(), json!({}))
+                .await,
             Err(StoreError::NotFound { .. })
         ));
     }
