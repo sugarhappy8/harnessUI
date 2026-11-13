@@ -20,26 +20,39 @@
 //!   the middle of the analysis (it ends as cancelled); after the last stop nothing from the
 //!   pack still runs (Linux; the workflow checks Windows and macOS with their own tools);
 //! - checks that everything rea wrote is under the pack's `home`, `tmp`, `cache` and `work`
-//!   (the part folders and the fixtures' folder are as they were), and that rea added
-//!   nothing to the runner's `~/.cache/rea`, `~/Library/Caches/rea`, `~/.codex`, `~/.cursor`,
-//!   `~/.gemini`, `~/.claude` or `~/.claude.json`. `~/.claude` and `~/.claude.json` are
-//!   compared in full only when `CI` is set (on a developer's computer Claude Code itself
-//!   writes there while the test runs); otherwise their settings files must not newly name
-//!   rea.
+//!   (the part folders and the fixtures' folder are as they were, and nothing of rea's, Kuna's
+//!   or Ghidra's appeared in the system's temporary folders at any time during the run: they
+//!   are watched every 200 ms), and that rea added nothing to the runner's `~/.cache/rea`,
+//!   `~/Library/Caches/rea`, `~/.codex`, `~/.cursor`, `~/.gemini`, `~/.claude` or
+//!   `~/.claude.json`. `~/.claude` and `~/.claude.json` are compared in full only when `CI` is
+//!   set (on a developer's computer Claude Code itself writes there while the test runs);
+//!   otherwise their settings files must not newly name rea.
 //!
-//! The pack goes into a temporary folder, or into `REAL_REA_DIR/<kuna|ghidra>` when that is
-//! set (the Windows job blocks the pack's programs in the firewall by path before the run).
-//! `REAL_REA_VERBOSE` prints rea's results in full.
+//! The pack goes into a temporary folder named `real-rea-…`, or into
+//! `REAL_REA_DIR/<kuna|ghidra>` when that is set (the Windows job blocks the pack's programs in
+//! the firewall by path before the run). Neither may have a folder whose name starts with a
+//! dot, as the app's folders on Windows and macOS have none: rea moves Ghidra's session (its
+//! project, logs, a copy of the opened file and the bridge socket) to `/tmp` when the temporary
+//! folder it is given has one, because Ghidra refuses such project paths. On Linux a third test
+//! puts the pack under `.local/share`, as the app's own folder is on Linux, and checks that
+//! whatever rea puts in the system's temporary folder there is gone after the stop (it prints
+//! what it saw: a known limit of the app on Linux).
+//!
+//! `REAL_REA_REQUIRE` lists the decompilers this computer must test (`kuna,ghidra`): a test
+//! that would be skipped fails instead. `REAL_REA_LARGE=decompile` (or a program's absolute
+//! path) also opens a larger program with Ghidra (the pack's own decompiler, 3.4 MB on Linux)
+//! and prints how long its analysis took and Java's peak memory. `REAL_REA_VERBOSE` prints
+//! rea's results in full.
 //!
 //! The test starts no process itself (`scripts/check-spawn.sh`): rea starts through
 //! `crates/runtime`, and the workflow (`.github/workflows/reverse.yml`) adds the process and
 //! network checks around it. The two tests take turns: one rea, and Ghidra's 2 GB heap, at a
 //! time.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component as PathPart, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use mcp_host::ToolOutput;
@@ -106,6 +119,155 @@ fn needs(decompiler: Decompiler) -> Result<(PathBuf, Platform), String> {
         return Err(format!("the cache lacks {missing:?}"));
     }
     Ok((cache, platform))
+}
+
+/// Whether `REAL_REA_REQUIRE` (a comma list such as `kuna,ghidra`) names this decompiler: the
+/// workflow sets it per system, so a test that would be skipped fails the job instead.
+fn required(decompiler: Decompiler, list: Option<&str>) -> bool {
+    list.unwrap_or_default()
+        .split(',')
+        .any(|d| d.trim().eq_ignore_ascii_case(decompiler.label()))
+}
+
+/// Where the test puts the pack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Base {
+    /// A folder with no element whose name starts with a dot, like the app's own folder on
+    /// Windows (`AppData\Local\<id>`) and macOS (`Library/Application Support/<id>`).
+    Plain,
+    /// Under `.local/share`, like the app's own folder on Linux.
+    DotFolder,
+}
+
+/// Whether a path has a folder whose name starts with a dot (rea then moves Ghidra's session
+/// out of the temporary folder it was given).
+fn dotted(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, PathPart::Normal(n) if n.to_string_lossy().starts_with('.')))
+}
+
+/// The system's temporary folders: `std::env::temp_dir()`, and on Unix also `/tmp`, where
+/// rea's fallbacks point.
+fn system_temp_dirs() -> BTreeSet<PathBuf> {
+    let mut dirs = vec![std::env::temp_dir()];
+    if cfg!(unix) {
+        dirs.push(PathBuf::from("/tmp"));
+    }
+    dirs.into_iter()
+        .filter_map(|d| dunce::canonicalize(d).ok())
+        .collect()
+}
+
+/// Whether a name in a temporary folder is rea's, Kuna's or Ghidra's: rea names its private
+/// folders `rea-…` or `.rea-…` (`PrivateRuntimeRoot`, `mkdtemp` in its package), and anything
+/// named after Kuna, Ghidra or JNA (Java's native-library loader that Ghidra uses).
+fn rea_temp_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.starts_with("rea-")
+        || name.starts_with(".rea-")
+        || ["kuna", "ghidra", "jna"].iter().any(|w| name.contains(w))
+}
+
+/// rea's, Kuna's and Ghidra's entries in the system's temporary folders, plus the entries of
+/// Java's performance counters (`hsperfdata_<user>/<pid>`, which the JVM writes to the
+/// system's temporary folder whatever its own temporary folder is).
+fn temp_entries(dirs: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+    let mut out = BTreeSet::new();
+    for dir in dirs {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("hsperfdata_") {
+                for f in std::fs::read_dir(e.path()).into_iter().flatten().flatten() {
+                    out.insert(f.path());
+                }
+            } else if rea_temp_name(&name) {
+                out.insert(e.path());
+            }
+        }
+    }
+    out
+}
+
+/// Whether an entry is one of Java's performance counters.
+fn java_counters(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|n| n.to_string_lossy().starts_with("hsperfdata_"))
+}
+
+/// Watches the system's temporary folders while rea runs: every 200 ms, and at each phase,
+/// it notes each new entry of rea's, Kuna's, Ghidra's or Java's, with the phase it was first
+/// seen in. It reads folder listings only.
+struct TempWatch {
+    dirs: Arc<BTreeSet<PathBuf>>,
+    before: Arc<BTreeSet<PathBuf>>,
+    seen: Arc<Mutex<BTreeMap<PathBuf, &'static str>>>,
+    phase: Arc<Mutex<&'static str>>,
+    stop: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TempWatch {
+    fn start() -> Self {
+        let dirs = Arc::new(system_temp_dirs());
+        let before = Arc::new(temp_entries(&dirs));
+        let seen = Arc::new(Mutex::new(BTreeMap::new()));
+        let phase = Arc::new(Mutex::new("start"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn({
+            let (dirs, before, seen, phase, stop) = (
+                dirs.clone(),
+                before.clone(),
+                seen.clone(),
+                phase.clone(),
+                stop.clone(),
+            );
+            async move {
+                while !stop.load(Ordering::SeqCst) {
+                    note(&dirs, &before, &seen, &phase);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        });
+        Self {
+            dirs,
+            before,
+            seen,
+            phase,
+            stop,
+            task,
+        }
+    }
+
+    fn phase(&self, name: &'static str) {
+        note(&self.dirs, &self.before, &self.seen, &self.phase);
+        *self.phase.lock().unwrap() = name;
+    }
+
+    /// Everything that appeared during the run (with its phase), and what is still there.
+    async fn finish(self) -> (BTreeMap<PathBuf, &'static str>, BTreeSet<PathBuf>) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = self.task.await;
+        let left = note(&self.dirs, &self.before, &self.seen, &self.phase);
+        let seen = self.seen.lock().unwrap().clone();
+        (seen, left)
+    }
+}
+
+/// Notes the new entries now, and returns them.
+fn note(
+    dirs: &BTreeSet<PathBuf>,
+    before: &BTreeSet<PathBuf>,
+    seen: &Mutex<BTreeMap<PathBuf, &'static str>>,
+    phase: &Mutex<&'static str>,
+) -> BTreeSet<PathBuf> {
+    let new: BTreeSet<PathBuf> = temp_entries(dirs).difference(before).cloned().collect();
+    let phase = *phase.lock().unwrap();
+    let mut seen = seen.lock().unwrap();
+    for p in &new {
+        seen.entry(p.clone()).or_insert(phase);
+    }
+    new
 }
 
 /// Every file under `dir` with its size (relative paths with `/`).
@@ -364,6 +526,16 @@ fn short(text: &str) -> String {
 /// Calls `tool` the way the `reverse` server forwards it: the arguments given plus the
 /// tool's fixed `detail`, its time limit, and the app's list of what may be called.
 async fn call(guard: &mut ReaGuard, tool: &str, args: Value) -> ToolOutput {
+    call_with(guard, tool, args, None).await
+}
+
+/// As `call`, with another time limit (a larger program's analysis).
+async fn call_with(
+    guard: &mut ReaGuard,
+    tool: &str,
+    args: Value,
+    timeout: Option<Duration>,
+) -> ToolOutput {
     let t = allow::get(tool)
         .map(|t| (t.fixed_detail, t.timeout))
         .unwrap_or((None, Duration::from_secs(180)));
@@ -377,7 +549,7 @@ async fn call(guard: &mut ReaGuard, tool: &str, args: Value) -> ToolOutput {
             &allow::app_list(),
             tool,
             args,
-            t.1,
+            timeout.unwrap_or(t.1),
             &CancellationToken::new(),
             None,
         )
