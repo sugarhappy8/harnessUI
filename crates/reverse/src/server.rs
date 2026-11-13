@@ -631,7 +631,7 @@ impl ReverseServer {
                 if t.class == ToolClass::Open && fresh.decompiler != payload.decompiler {
                     return Err(refusals::DECOMPILER_CHANGED.into());
                 }
-                if fresh.args != payload.args || fresh.target != payload.target {
+                if fresh.args != payload.args || !same_target(&fresh.target, &payload.target) {
                     return Err(refusals::FILE_CHANGED.into());
                 }
             }
@@ -650,7 +650,10 @@ impl ReverseServer {
                     // nor made to open it again just to close it.
                     if !self.holds(&b) {
                         self.session().closed_by_model();
-                        return Ok(ToolOutput::text(closed_line(&b.view.canonical, self.path_flavor())));
+                        return Ok(ToolOutput::text(closed_line(
+                            &b.view.canonical,
+                            self.path_flavor(),
+                        )));
                     }
                 } else if !self.intact(&b, &ctx.chat) {
                     self.drop_binding(&mut guard, &b, &config, chat, &ctx.cancel, notes)
@@ -935,6 +938,23 @@ enum Reopened {
     Failed(ToolOutput),
 }
 
+/// Whether two checks of a path saw the same file: the same canonical path, kind and
+/// identity. The approved folder that holds it may differ (Full access turned on between
+/// the card and the call reaches it through the whole computer); it is still the file the
+/// card named.
+fn same_target(a: &Option<describe::TargetSeen>, b: &Option<describe::TargetSeen>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            a.property == b.property
+                && a.canonical == b.canonical
+                && a.identity == b.identity
+                && a.folder == b.folder
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// A file's name as the app's own lines show it: hidden and control characters made
 /// visible, on one line, at most 120 characters.
 fn shown_name(canonical: &str, flavor: PathFlavor) -> String {
@@ -968,9 +988,11 @@ struct Ticker(Option<tokio::task::JoinHandle<()>>);
 impl Ticker {
     fn start(progress: Option<mcp_host::ProgressFn>, line: String) -> Self {
         Self(progress.map(|p| {
+            // The first line at once, whatever the call's length; then one a minute.
+            p(format!("{line} 0 min · Stop\n"));
             tokio::spawn(async move {
                 let started = tokio::time::Instant::now();
-                let mut every = tokio::time::interval(PROGRESS_EVERY);
+                let mut every = tokio::time::interval_at(started + PROGRESS_EVERY, PROGRESS_EVERY);
                 loop {
                     every.tick().await;
                     let minutes = started.elapsed().as_secs() / 60;
@@ -1063,6 +1085,49 @@ mod tests {
         );
         assert_eq!(s.decompiler(), None);
         assert_eq!(s.name(), "reverse");
+    }
+
+    #[test]
+    fn marks_of_another_rea_version_do_not_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = ReverseServer::new(ReverseLayout::new(dir.path()), Platform::LinuxX64);
+        *s.live.lock().unwrap() = Live {
+            version: Some("6.8.0".into()),
+            changed: vec!["list_strings".into()],
+            housekeeping_ok: false,
+        };
+        // rea 6.8.0 is not what is installed (nothing is): its marks are gone.
+        let live = s.live_now();
+        assert!(live.changed.is_empty() && live.housekeeping_ok);
+        assert!(s.availability().changed_tools.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_progress_line_at_once_then_every_minute() {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = lines.clone();
+        let progress: mcp_host::ProgressFn = Arc::new(move |l| sink.lock().unwrap().push(l));
+        let ticker = Ticker::start(Some(progress), "rea is reading x with Kuna…".into());
+        assert_eq!(
+            *lines.lock().unwrap(),
+            ["rea is reading x with Kuna… 0 min · Stop\n"]
+        );
+        tokio::time::sleep(Duration::from_secs(150)).await;
+        assert_eq!(
+            lines.lock().unwrap()[1..],
+            [
+                "rea is reading x with Kuna… 1 min · Stop\n",
+                "rea is reading x with Kuna… 2 min · Stop\n"
+            ]
+        );
+        drop(ticker);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(
+            lines.lock().unwrap().len(),
+            3,
+            "nothing after the call ends"
+        );
+        assert!(Ticker::start(None, "x".into()).0.is_none());
     }
 
     #[test]

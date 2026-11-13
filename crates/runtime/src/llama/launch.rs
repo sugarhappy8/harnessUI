@@ -445,7 +445,12 @@ fn placement_args(cfg: &LaunchConfig) -> Vec<String> {
         let layers = fine
             .gpu_layers
             .map_or_else(|| "all".to_owned(), |n| n.to_string());
-        let mut args = vec!["-ngl".to_owned(), layers, "--fit".to_owned(), "off".to_owned()];
+        let mut args = vec![
+            "-ngl".to_owned(),
+            layers,
+            "--fit".to_owned(),
+            "off".to_owned(),
+        ];
         args.extend(fine.experts_flag().unwrap_or_default());
         args
     } else {
@@ -1046,7 +1051,9 @@ mod tests {
                         ..FineLaunch::default()
                     },
                 ),
-                vec!["--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-nkvo"],
+                vec![
+                    "--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-nkvo",
+                ],
             ),
             (
                 "conversation memory in computer memory with As much as fits",
@@ -1057,7 +1064,9 @@ mod tests {
                         ..margin(512)
                     },
                 ),
-                vec!["--device", "Vulkan0", "--fit", "on", "-fitt", "512", "-nkvo"],
+                vec![
+                    "--device", "Vulkan0", "--fit", "on", "-fitt", "512", "-nkvo",
+                ],
             ),
             (
                 "threads",
@@ -1205,7 +1214,10 @@ mod tests {
                 "-c 8192 -np 1 --device",
                 "--cache-ram 512",
             ] {
-                assert!(joined.contains(fixed), "{name}: {fixed} missing from {joined}");
+                assert!(
+                    joined.contains(fixed),
+                    "{name}: {fixed} missing from {joined}"
+                );
             }
         }
     }
@@ -1282,12 +1294,7 @@ mod tests {
     #[test]
     fn fine_launch_old_json_reads() {
         let mut v = serde_json::to_value(config()).expect("json");
-        assert!(
-            v.as_object_mut()
-                .expect("object")
-                .remove("fine")
-                .is_some()
-        );
+        assert!(v.as_object_mut().expect("object").remove("fine").is_some());
         let back: LaunchConfig = serde_json::from_value(v).expect("reads");
         assert_eq!(back, config());
         assert_eq!(back.fine, FineLaunch::default());
@@ -1358,7 +1365,10 @@ mod tests {
             (ExpertsOnCpu::FirstLayers(3), r#"{"firstLayers":3}"#),
         ] {
             assert_eq!(serde_json::to_string(&value).expect("json"), json);
-            assert_eq!(serde_json::from_str::<ExpertsOnCpu>(json).expect("reads"), value);
+            assert_eq!(
+                serde_json::from_str::<ExpertsOnCpu>(json).expect("reads"),
+                value
+            );
         }
         for (value, json) in [
             (FlashAttn::Auto, r#""auto""#),
@@ -1366,7 +1376,10 @@ mod tests {
             (FlashAttn::Off, r#""off""#),
         ] {
             assert_eq!(serde_json::to_string(&value).expect("json"), json);
-            assert_eq!(serde_json::from_str::<FlashAttn>(json).expect("reads"), value);
+            assert_eq!(
+                serde_json::from_str::<FlashAttn>(json).expect("reads"),
+                value
+            );
         }
     }
 

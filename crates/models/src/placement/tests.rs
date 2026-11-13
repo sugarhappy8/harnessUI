@@ -87,18 +87,30 @@ fn split_a_dense_model() {
     );
     // Three units: the output and blocks 3 and 2; blocks 0 and 1 on the processor.
     let three = split(&i, &on_card(Layers::Count(3), ExpertsPick::None));
-    assert_eq!((three.gpu, three.cpu), (parts(120, 7, 7, 9), parts(130, 3, 3, 0)));
+    assert_eq!(
+        (three.gpu, three.cpu),
+        (parts(120, 7, 7, 9), parts(130, 3, 3, 0))
+    );
     assert_eq!(three.layers_on_gpu, 3);
     // One unit is the output alone.
     let one = split(&i, &on_card(Layers::Count(1), ExpertsPick::None));
-    assert_eq!((one.gpu, one.cpu), (parts(50, 0, 7, 9), parts(200, 10, 3, 0)));
+    assert_eq!(
+        (one.gpu, one.cpu),
+        (parts(50, 0, 7, 9), parts(200, 10, 3, 0))
+    );
     // None: the processor holds the output and its working space; the image reader stays
     // with the graphics card.
     let none = split(&i, &on_card(Layers::Count(0), ExpertsPick::None));
-    assert_eq!((none.gpu, none.cpu), (parts(0, 0, 0, 9), parts(250, 10, 7, 0)));
+    assert_eq!(
+        (none.gpu, none.cpu),
+        (parts(0, 0, 0, 9), parts(250, 10, 7, 0))
+    );
     assert_eq!(none.layers_on_gpu, 0);
     // More units than the model has is all of them.
-    assert_eq!(split(&i, &on_card(Layers::Count(99), ExpertsPick::None)), all);
+    assert_eq!(
+        split(&i, &on_card(Layers::Count(99), ExpertsPick::None)),
+        all
+    );
     assert_eq!(
         split(&i, &on_card(Layers::Count(u32::MAX), ExpertsPick::None)),
         all
@@ -131,18 +143,28 @@ fn split_with_conversation_memory_in_computer_memory() {
     };
     // The processor now does the attention, so it needs working space too.
     let all = split(&i, &place(Layers::All));
-    assert_eq!((all.gpu, all.cpu), (parts(150, 0, 7, 0), parts(100, 10, 3, 0)));
+    assert_eq!(
+        (all.gpu, all.cpu),
+        (parts(150, 0, 7, 0), parts(100, 10, 3, 0))
+    );
     let three = split(&i, &place(Layers::Count(3)));
-    assert_eq!((three.gpu, three.cpu), (parts(120, 0, 7, 0), parts(130, 10, 3, 0)));
+    assert_eq!(
+        (three.gpu, three.cpu),
+        (parts(120, 0, 7, 0), parts(130, 10, 3, 0))
+    );
     // Fewer per-block figures than blocks count the rest as 0; more are ignored.
     let short = input(&s, vec![1], 0, 0, 0);
     assert_eq!(
-        split(&short, &on_card(Layers::All, ExpertsPick::None)).gpu.context,
+        split(&short, &on_card(Layers::All, ExpertsPick::None))
+            .gpu
+            .context,
         1
     );
     let long = input(&s, vec![1; 9], 0, 0, 0);
     assert_eq!(
-        split(&long, &on_card(Layers::All, ExpertsPick::None)).gpu.context,
+        split(&long, &on_card(Layers::All, ExpertsPick::None))
+            .gpu
+            .context,
         4
     );
 }
@@ -152,7 +174,9 @@ fn other_tensors_go_with_the_output() {
     let s = sizes(100, 50, &[(10, 0), (20, 0)], 5);
     let i = input(&s, vec![], 0, 0, 0);
     assert_eq!(
-        split(&i, &on_card(Layers::All, ExpertsPick::None)).gpu.model,
+        split(&i, &on_card(Layers::All, ExpertsPick::None))
+            .gpu
+            .model,
         85
     );
     assert_eq!(
@@ -212,7 +236,10 @@ fn split_expert_parts() {
         case(L::Count(3), E::LastLayers(3)),
         (parts(62, 7, 7, 0), parts(2003, 3, 3, 0), 2)
     );
-    assert_eq!(case(L::Count(3), E::LastLayers(3)), case(L::Count(3), E::All));
+    assert_eq!(
+        case(L::Count(3), E::LastLayers(3)),
+        case(L::Count(3), E::All)
+    );
     assert_eq!(
         case(L::Count(3), E::LastLayers(0)),
         case(L::Count(3), E::None)
@@ -326,7 +353,11 @@ fn fit_layers_for_a_dense_model() {
     assert_eq!(fit(125), (Layers::Count(3), ExpertsPick::None));
     assert_eq!(fit(124), (Layers::Count(2), ExpertsPick::None));
     assert_eq!(fit(55), (Layers::Count(1), ExpertsPick::None));
-    assert_eq!(fit(54), (Layers::Count(0), ExpertsPick::None), "less than one unit");
+    assert_eq!(
+        fit(54),
+        (Layers::Count(0), ExpertsPick::None),
+        "less than one unit"
+    );
     assert_eq!(fit(0), (Layers::Count(0), ExpertsPick::None));
     // The image reader is not counted: llama.cpp's fit does not measure it.
     let with_reader = input(&s, vec![0; 4], 5, 3, 1000);
@@ -336,7 +367,10 @@ fn fit_layers_for_a_dense_model() {
     );
     // Conversation memory goes with the layers unless it is kept in computer memory.
     let with_kv = input(&s, vec![1; 4], 5, 3, 0);
-    assert_eq!(fit_layers(&with_kv, 155), (Layers::Count(4), ExpertsPick::None));
+    assert_eq!(
+        fit_layers(&with_kv, 155),
+        (Layers::Count(4), ExpertsPick::None)
+    );
     assert_eq!(
         fit_layers_where(&with_kv, 155, false),
         (Layers::All, ExpertsPick::None)
@@ -466,17 +500,133 @@ fn explain_gives_none_between_steps() {
     assert_eq!(explain(&s, 105), None);
     assert_eq!(explain(&s, 151), Some((L::All, E::None)));
     assert_eq!(explain(&s, 1_000), None);
-    // Experts: … 100, 130 … 450, 500.
+    // Experts, step 3 (whole layers only): … 100, 130 …
     let s = even_experts();
     assert_eq!(explain(&s, 102), Some((L::Count(2), E::None)));
     assert_eq!(explain(&s, 115), None);
-    assert_eq!(explain(&s, 325), None);
     assert_eq!(explain(&s, 505), Some((L::All, E::None)));
     assert_eq!(explain(&s, 600), None);
     // Nothing weighs anything: only an exact 0 is explained.
     let empty = sizes(0, 0, &[(0, 0), (0, 0)], 0);
     assert_eq!(explain(&empty, 0), Some((L::Count(0), E::None)));
     assert_eq!(explain(&empty, 1), None);
+}
+
+/// llama.cpp's step 4 keeps the up (or up and gate) expert tensors of one more block on the
+/// card, or moves that block's shared parts off it: bytes up to three quarters of that
+/// block's expert parts above a step-4 placement, or a little below it, are explained as
+/// that placement ("about K layers"), never as the next one.
+#[test]
+fn explain_takes_part_of_one_more_layer_in_step_4() {
+    use ExpertsPick as E;
+    use Layers as L;
+    // Step 4: 250, 300, 350, …; each step brings back one block's expert parts (50).
+    let s = even_experts();
+    let third = 50 / 3;
+    assert_eq!(explain(&s, 300 + third), Some((L::All, E::LastLayers(4))));
+    assert_eq!(
+        explain(&s, 300 + 2 * third),
+        Some((L::All, E::LastLayers(4)))
+    );
+    assert_eq!(explain(&s, 300 + 37), Some((L::All, E::LastLayers(4))));
+    assert_eq!(explain(&s, 300 + 39), Some((L::All, E::LastLayers(3))));
+    assert_eq!(explain(&s, 299), Some((L::All, E::LastLayers(4))));
+    assert_eq!(explain(&s, 250 + third), Some((L::All, E::LastLayers(5))));
+    // A model whose block 0 has no expert parts (a leading dense block): its step-3 end
+    // moves every expert part, and step 4 brings them back from block 1.
+    let lead = leading_dense();
+    let order = fit_order(&lead);
+    assert_eq!(
+        order,
+        vec![
+            (L::Count(0), E::None),
+            (L::Count(1), E::None),
+            (L::Count(2), E::None),
+            (L::Count(3), E::LastLayers(1)),
+            (L::Count(4), E::LastLayers(2)),
+            (L::All, E::LastLayers(3)),
+            (L::All, E::LastLayers(2)),
+            (L::All, E::LastLayers(1)),
+            (L::All, E::None),
+        ]
+    );
+    let bytes: Vec<u64> = order.iter().map(|&p| model_on_card(&lead, p)).collect();
+    // The last step-3 placement weighs less than the one before: block 0 is lighter than
+    // block 1's expert parts.
+    assert_eq!(bytes, vec![0, 20, 100, 130, 160, 135, 185, 235, 285]);
+    for place in order {
+        assert_eq!(explain(&lead, model_on_card(&lead, place)), Some(place));
+    }
+    // Beyond the whole model, or for a model of nothing but its output, nothing else.
+    assert_eq!(explain(&lead, 400), None);
+    let output_only = sizes(10, 5, &[], 0);
+    assert_eq!(
+        fit_order(&output_only),
+        vec![(L::Count(0), E::None), (L::All, E::None)]
+    );
+    assert_eq!(explain(&output_only, 5), Some((L::All, E::None)));
+    assert_eq!(explain(&output_only, 3), None);
+}
+
+/// Whatever the target, the answer fits under it (or nothing is on the card) and is one of
+/// fit's own placements.
+#[test]
+fn fit_layers_never_goes_over_the_target() {
+    for s in [dense(), even_experts(), uneven_experts(), leading_dense()] {
+        for kv_on_gpu in [true, false] {
+            let i = input(&s, vec![3; 8], 7, 2, 500);
+            for target in 0..=2_200 {
+                let (layers, experts) = fit_layers_where(&i, target, kv_on_gpu);
+                let r = split(
+                    &i,
+                    &Where {
+                        graphics: true,
+                        layers,
+                        experts_on_cpu: experts,
+                        kv_on_gpu,
+                    },
+                );
+                if layers != Layers::Count(0) {
+                    assert!(
+                        r.gpu.model + r.gpu.context + r.gpu.compute <= target,
+                        "{s:?} {target}: {layers:?} {experts:?} {r:?}"
+                    );
+                }
+                // Fit's own order, or step 4 on fewer units than all (k ≤ n − 2).
+                let fewer = matches!(
+                    (layers, experts),
+                    (Layers::Count(n), ExpertsPick::LastLayers(k)) if k + 2 <= n
+                );
+                assert!(
+                    fit_order(&s).contains(&(layers, experts)) || fewer,
+                    "{target}: {layers:?} {experts:?}"
+                );
+            }
+        }
+    }
+    // The leading dense block, with 5 of working space on the card: step 3's needs are
+    // 0, 25, 105, 135, 165 and, with all units, 140 (= every dense part with every expert
+    // part on the processor, as block 0 has none); step 4 adds 50 per block.
+    let lead = leading_dense();
+    let i = input(&lead, vec![0; 4], 5, 2, 0);
+    use ExpertsPick as E;
+    use Layers as L;
+    // 140: all units fit, but without a surplus (140 is not below 140) step 4 never runs.
+    assert_eq!(fit_layers(&i, 140), (L::All, E::LastLayers(3)));
+    // 150: all units, as llama.cpp tries them first, although 4 units (165) would not fit.
+    assert_eq!(fit_layers(&i, 150), (L::All, E::LastLayers(3)));
+    assert_eq!(fit_layers(&i, 139), (L::Count(3), E::LastLayers(1)));
+    assert_eq!(fit_layers(&i, 190), (L::All, E::LastLayers(2)));
+    assert_eq!(fit_layers(&i, 240), (L::All, E::LastLayers(1)));
+    assert_eq!(fit_layers(&i, 289), (L::All, E::LastLayers(1)));
+    assert_eq!(fit_layers(&i, 290), (L::All, E::None));
+}
+
+/// A mixture of experts whose block 0 has no expert parts and is lighter than the others'
+/// expert parts: input 400, output 20, block 0 dense 25, blocks 1 to 3 dense 30 and
+/// experts 50.
+fn leading_dense() -> LayerSizes {
+    sizes(400, 20, &[(25, 0), (30, 50), (30, 50), (30, 50)], 0)
 }
 
 // ---- judge ------------------------------------------------------------------------------
@@ -503,9 +653,18 @@ fn judge_gives_each_answer() {
     assert_eq!(j(sp(8 * GB, GB, 5, 5, 0)), (V::Green, F::Fits));
     assert_eq!(j(sp(9 * GB + 1, GB, 5, 5, 0)), (V::Yellow, F::Tight));
     assert_eq!(j(sp(10 * GB, GB, 5, 5, 0)), (V::Yellow, F::Tight));
-    assert_eq!(j(sp(10 * GB + 1, GB, 5, 5, 0)), (V::Yellow, F::WontFitGraphics));
-    assert_eq!(j(sp(12 * GB, 15 * GB, 5, 5, 0)), (V::Yellow, F::WontFitGraphics));
-    assert_eq!(j(sp(12 * GB, 15 * GB + 1, 5, 5, 0)), (V::Red, F::WontFitAtAll));
+    assert_eq!(
+        j(sp(10 * GB + 1, GB, 5, 5, 0)),
+        (V::Yellow, F::WontFitGraphics)
+    );
+    assert_eq!(
+        j(sp(12 * GB, 15 * GB, 5, 5, 0)),
+        (V::Yellow, F::WontFitGraphics)
+    );
+    assert_eq!(
+        j(sp(12 * GB, 15 * GB + 1, 5, 5, 0)),
+        (V::Red, F::WontFitAtAll)
+    );
     // As much as fits: part on the processor is expected, never wontFitGraphics.
     let f = |s: Split| judge(&s, card, true);
     assert_eq!(f(sp(8 * GB, GB, 5, 5, 0)), (V::Green, F::Fits));
@@ -540,7 +699,10 @@ fn judge_on_the_processor_is_room_verdict() {
                     expert_layers_on_cpu: 0,
                 };
                 assert_eq!(judge(&s, room, fit), (expected, fits), "{total}");
-                assert_eq!(judge_in(&s, room, fit, MemoryKind::Processor), (expected, fits));
+                assert_eq!(
+                    judge_in(&s, room, fit, MemoryKind::Processor),
+                    (expected, fits)
+                );
             }
         }
     }
@@ -557,7 +719,11 @@ fn judge_on_one_device_is_room_verdict() {
     ] {
         for need in [0, 5 * GB, 9 * GB, 10 * GB, 11 * GB, 13 * GB, 30 * GB] {
             let s = sp(need, 0, 5, 5, 0);
-            assert_eq!(judge(&s, room, false).0, room.verdict(need), "{room:?} {need}");
+            assert_eq!(
+                judge(&s, room, false).0,
+                room.verdict(need),
+                "{room:?} {need}"
+            );
         }
     }
 }
@@ -578,14 +744,22 @@ fn memory_kinds() {
         (V::Red, F::WontFitAtAll)
     );
     assert_eq!(
-        judge_in(&sp(2 * GB, 18 * GB, 1, 5, 0), card, false, MemoryKind::Separate),
+        judge_in(
+            &sp(2 * GB, 18 * GB, 1, 5, 0),
+            card,
+            false,
+            MemoryKind::Separate
+        ),
         (V::Green, F::Fits)
     );
     // A 16 GB Mac: 11 GB working set, 9 GB available (7 GB after the reserve).
     let mac = Room::apple(11 * GB, 9 * GB);
     let m = sp(9 * GB, GB / 2, 5, 5, 0);
     assert_eq!(judge(&m, mac, false), (V::Green, F::Fits));
-    assert_eq!(judge_in(&m, mac, false, MemoryKind::Unified), (V::Green, F::Fits));
+    assert_eq!(
+        judge_in(&m, mac, false, MemoryKind::Unified),
+        (V::Green, F::Fits)
+    );
     assert_eq!(
         judge(&sp(10 * GB, GB / 2, 5, 5, 0), mac, false),
         (V::Red, F::WontFitAtAll)
@@ -699,7 +873,12 @@ fn auto_ctx_placed_matches_auto_ctx_on_one_device() {
                     "{room:?} {max_ctx:?} {projector}"
                 );
                 assert_eq!(
-                    auto_ctx_placed_in(&at, room, floor, cap, MemoryKind::Separate),
+                    auto_ctx_placed_in(&at, room, floor, cap, MemoryKind::Separate, false),
+                    expected
+                );
+                // Everything on the card: As much as fits gives the same answer.
+                assert_eq!(
+                    auto_ctx_placed_in(&at, room, floor, cap, MemoryKind::Separate, true),
                     expected
                 );
             }
@@ -733,7 +912,10 @@ fn auto_ctx_placed_for_a_custom_placement() {
     let got = auto_ctx_placed(at, small, 4096, 32_768).unwrap();
     assert_eq!(got.verdict, Verdict::Yellow);
     // Not even the floor at all.
-    assert_eq!(auto_ctx_placed(at, Room::graphics_card(GB, GB), 4096, 32_768), None);
+    assert_eq!(
+        auto_ctx_placed(at, Room::graphics_card(GB, GB), 4096, 32_768),
+        None
+    );
 }
 
 #[test]
@@ -774,7 +956,8 @@ fn auto_ctx_placed_never_panics_or_hangs() {
         Some(3000)
     );
     // The candidates are the floor, the multiples of 1,024 between, and the cap.
-    let up_to = |limit: u64| move |ctx: u64| sp(if ctx <= limit { 0 } else { u64::MAX }, 0, 5, 5, 0);
+    let up_to =
+        |limit: u64| move |ctx: u64| sp(if ctx <= limit { 0 } else { u64::MAX }, 0, 5, 5, 0);
     assert_eq!(
         auto_ctx_placed(up_to(20_000), big, 4096, 32_768).map(|a| a.ctx),
         Some(19_456)
@@ -860,12 +1043,24 @@ fn bars_add_up() {
     let (g, c) = bars(&s, MemoryKind::Separate, Some(graphics), computer);
     let g = g.unwrap();
     assert_eq!(
-        (g.total_bytes, g.free_bytes, g.other_bytes, g.need, g.free_after_bytes),
+        (
+            g.total_bytes,
+            g.free_bytes,
+            g.other_bytes,
+            g.need,
+            g.free_after_bytes
+        ),
         (159, 150, 9, s.gpu, 33)
     );
     assert_eq!(g.need.total() + g.other_bytes + g.free_after_bytes, 159);
     assert_eq!(
-        (c.total_bytes, c.free_bytes, c.other_bytes, c.need, c.free_after_bytes),
+        (
+            c.total_bytes,
+            c.free_bytes,
+            c.other_bytes,
+            c.need,
+            c.free_after_bytes
+        ),
         (319, 199, 120, s.cpu, 151)
     );
     // Apple silicon: one bar with both parts.
@@ -886,7 +1081,10 @@ fn bars_add_up() {
         },
         Parts::default(),
     );
-    assert_eq!((odd.total_bytes, odd.free_bytes, odd.other_bytes), (10, 10, 0));
+    assert_eq!(
+        (odd.total_bytes, odd.free_bytes, odd.other_bytes),
+        (10, 10, 0)
+    );
     let unknown = bar(
         Capacity {
             total_bytes: 0,
@@ -911,5 +1109,135 @@ fn serialized_names_are_camel_case() {
     assert_eq!(
         serde_json::to_value(Fits::WontFitAtAll).unwrap(),
         "wontFitAtAll"
+    );
+}
+
+// ---- the worked example and As much as fits ---------------------------------------------
+
+/// Section 6's worked example: a model of 14.0 GB in 41 units (40 blocks of 0.32 GB, input
+/// and output 0.6 GB each), 16,384 tokens of conversation memory (0.04 GB per block),
+/// working space 0.6 GB on the card and 0.3 GB on the processor, on a 15.9 GB card with
+/// 15.0 GB free and a 31.9 GB computer with 19.9 GB free.
+#[test]
+fn the_worked_example_of_the_picture() {
+    const CENTI: u64 = 10_000_000; // 0.01 GB
+    let s = sizes(60 * CENTI, 60 * CENTI, &[(32 * CENTI, 0); 40], 0);
+    assert_eq!(s.total(), 1400 * CENTI);
+    assert_eq!(s.units(), 41);
+    let i = input(&s, vec![4 * CENTI; 40], 60 * CENTI, 30 * CENTI, 0);
+    let chosen = split(&i, &on_card(Layers::Count(30), ExpertsPick::None));
+    // 30 of 41 units: the output and 29 blocks on the card, 11 blocks on the processor.
+    assert_eq!(chosen.gpu, parts(988 * CENTI, 116 * CENTI, 60 * CENTI, 0));
+    assert_eq!(chosen.cpu, parts(412 * CENTI, 44 * CENTI, 30 * CENTI, 0));
+    assert_eq!(chosen.gpu.model + chosen.cpu.model, 1400 * CENTI);
+    let room = Room::graphics_card(1500 * CENTI, 1990 * CENTI);
+    assert_eq!(
+        judge_in(&chosen, room, false, MemoryKind::Separate),
+        (Verdict::Green, Fits::Fits)
+    );
+    // All 41 would need about 15.6 GB, more than the 15.0 GB free.
+    let all = split(&i, &on_card(Layers::All, ExpertsPick::None));
+    assert_eq!(all.gpu.total(), 1560 * CENTI);
+    assert_eq!(
+        judge_in(&all, room, false, MemoryKind::Separate),
+        (Verdict::Yellow, Fits::WontFitGraphics)
+    );
+    // The bars add up to each memory's size.
+    let (g, c) = bars(
+        &chosen,
+        MemoryKind::Separate,
+        Some(Capacity {
+            total_bytes: 1590 * CENTI,
+            free_bytes: 1500 * CENTI,
+        }),
+        Capacity {
+            total_bytes: 3190 * CENTI,
+            free_bytes: 1990 * CENTI,
+        },
+    );
+    let g = g.unwrap();
+    assert_eq!(g.other_bytes, 90 * CENTI);
+    assert_eq!(g.free_after_bytes, (1500 - 1164) * CENTI);
+    assert_eq!(c.other_bytes, 1200 * CENTI);
+    assert_eq!(c.free_after_bytes, (1990 - 486) * CENTI);
+    for b in [g, c] {
+        assert_eq!(
+            b.need.total() + b.other_bytes + b.free_after_bytes,
+            b.total_bytes
+        );
+    }
+    // As much as fits with llama.cpp's margin of 1,024 MiB: 13.93 GB to fill, 1.2 GB plus
+    // 0.36 GB per block, so 35 blocks and the output: "About 36 of 41 layers".
+    let target = fit_target(1500 * CENTI, 1024 * 1024 * 1024);
+    assert_eq!(
+        fit_layers(&i, target),
+        (Layers::Count(36), ExpertsPick::None)
+    );
+    let fit = split(&i, &on_card(Layers::Count(36), ExpertsPick::None));
+    assert_eq!(
+        judge_in(&fit, room, true, MemoryKind::Separate),
+        (Verdict::Yellow, Fits::Partial)
+    );
+    // The bytes on the card after such a load are explained as that placement.
+    assert_eq!(
+        explain(&s, fit.gpu.model),
+        Some((Layers::Count(36), ExpertsPick::None))
+    );
+}
+
+/// Automatic with As much as fits and the conversation memory in computer memory: Green
+/// only with every unit on the card, and the computer's part must fit computer memory on
+/// its own.
+#[test]
+fn auto_ctx_with_as_much_as_fits_and_memory_in_the_computer() {
+    let s = eight_b(500_000_000);
+    let compute = eight_b_fit(Some(131_072), 0).compute_bytes();
+    let at = |room: Room| {
+        let s = &s;
+        move |ctx: u64| {
+            let i = input(s, vec![4096 * ctx; 32], compute, COMPUTE_BASE_BYTES, 0);
+            let (layers, experts_on_cpu) =
+                fit_layers_where(&i, fit_target(room.whole, 1024 * 1024 * 1024), false);
+            split(
+                &i,
+                &Where {
+                    graphics: true,
+                    layers,
+                    experts_on_cpu,
+                    kv_on_gpu: false,
+                },
+            )
+        }
+    };
+    let auto =
+        |room: Room| auto_ctx_placed_in(at(room), room, 4096, 32_768, MemoryKind::Separate, true);
+    // A 15 GB card holds every unit at any size: the cap, Green.
+    let big = Room::graphics_card(15 * GB, 24 * GB);
+    assert_eq!(
+        auto(big),
+        Some(AutoCtx {
+            ctx: 32_768,
+            verdict: Verdict::Green
+        })
+    );
+    assert_eq!(at(big)(32_768).layers_on_gpu, 33);
+    // A 5 GB card cannot hold every unit: part on the processor is Yellow at every size,
+    // so the largest size that fits at all.
+    let small = Room::graphics_card(5 * GB, 24 * GB);
+    assert_eq!(auto(small).map(|a| a.verdict), Some(Verdict::Yellow));
+    assert_eq!(auto(small).map(|a| a.ctx), Some(32_768));
+    // Little computer memory: the conversation memory there limits the size.
+    let short = Room::graphics_card(15 * GB, 4 * GB);
+    let got = auto(short).unwrap();
+    assert_eq!(got.verdict, Verdict::Green);
+    assert!(got.ctx < 32_768 && got.ctx.is_multiple_of(1024), "{got:?}");
+    let judged = |ctx| judge_in(&at(short)(ctx), short, true, MemoryKind::Separate).0;
+    assert_eq!(judged(got.ctx), Verdict::Green);
+    assert_eq!(judged(got.ctx + 1024), Verdict::Red);
+    // Judged without knowing the memory kind, the computer's part is not checked on its
+    // own, so the cap looks fine.
+    assert_eq!(
+        auto_ctx_placed(at(short), short, 4096, 32_768).map(|a| a.ctx),
+        Some(32_768)
     );
 }

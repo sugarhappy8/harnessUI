@@ -26,7 +26,8 @@ impl LayerSize {
 /// What each part of the model weighs, in bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct LayerSizes {
-    /// `token_embd.*`: always in computer memory.
+    /// llama.cpp's input layer, always in computer memory: `token_embd.*` and the other
+    /// tensors it reads by row ([`INPUT_TENSORS`]).
     pub input_bytes: u64,
     /// `output.*`, `output_norm.*`: llama.cpp's last unit. With tied embeddings (no
     /// `output.weight`) llama.cpp loads `token_embd.weight` a second time as the output, so
@@ -127,8 +128,26 @@ const EXPERT_PARTS: [&str; 8] = [
     "ffn_gate_up_chexps",
 ];
 
+/// The tensors of llama.cpp's input layer, which it always keeps on the processor
+/// (`LLM_TENSOR_LAYER_INPUT` in llama-arch.cpp, b12110): the token embedding, and the
+/// position, token-type, value and per-layer token embeddings (the last one is large in
+/// models that have it) and two mask tables.
+pub const INPUT_TENSORS: [&str; 8] = [
+    "token_embd",
+    "position_embd",
+    "token_types",
+    "value_embd",
+    "per_layer_token_embd",
+    "masked_embd_centroids",
+    "masked_embd_ordering",
+    "mask_embd",
+];
+
 fn part_of(name: &str, blocks: usize) -> Part {
-    if name.starts_with("token_embd.") {
+    if INPUT_TENSORS.iter().any(|input| {
+        name.strip_prefix(input)
+            .is_some_and(|rest| rest.starts_with('.'))
+    }) {
         return Part::Input;
     }
     if name.starts_with("output.") || name.starts_with("output_norm.") {
@@ -226,6 +245,29 @@ mod tests {
         let s = LayerSizes::from_tables(&[table], 1);
         assert_eq!(s.layers, vec![layer(1 + 2 + 4 + 8 + 16 + 32, 10_230)]);
         assert!(s.has_experts());
+    }
+
+    /// Every tensor of llama.cpp's input layer stays in computer memory, not only the token
+    /// embedding; names that only start the same way do not.
+    #[test]
+    fn the_whole_input_layer_is_input() {
+        let table = vec![
+            t("token_embd.weight", 1),
+            t("position_embd.weight", 2),
+            t("token_types.weight", 4),
+            t("value_embd.weight", 8),
+            t("per_layer_token_embd.weight", 16),
+            t("masked_embd_centroids.weight", 32),
+            t("masked_embd_ordering.weight", 64),
+            t("mask_embd.weight", 128),
+            t("token_embd_norm.weight", 256),
+            t("per_layer_token_embdx.weight", 512),
+            t("output.weight", 1024),
+        ];
+        let s = LayerSizes::from_tables(&[table], 0);
+        assert_eq!(s.input_bytes, 255);
+        assert_eq!(s.other_bytes, 768);
+        assert_eq!(s.output_bytes, 1024);
     }
 
     /// Without `output.weight`, the output unit weighs `token_embd.weight` again.
@@ -326,8 +368,8 @@ mod tests {
         let Ok(path) = std::env::var("TEST_GGUF") else {
             return;
         };
-        let (header, table) = crate::gguf::read_file_with_tensors(std::path::Path::new(&path))
-            .unwrap();
+        let (header, table) =
+            crate::gguf::read_file_with_tensors(std::path::Path::new(&path)).unwrap();
         let blocks = header.arch_u64("block_count").unwrap();
         let in_file: u64 = table.iter().map(|t| t.bytes).sum();
         let tied = !table.iter().any(|t| t.name == "output.weight");

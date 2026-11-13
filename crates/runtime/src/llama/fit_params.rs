@@ -249,9 +249,7 @@ pub fn parse_measure_output(stdout: &[String]) -> Result<Vec<MemoryRow>, FitPara
     let mut records = stdout
         .iter()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|value| {
-            value.get("type").and_then(Value::as_str) == Some("fit_memory_breakdown")
-        });
+        .filter(|value| value.get("type").and_then(Value::as_str) == Some("fit_memory_breakdown"));
     let (Some(record), None) = (records.next(), records.next()) else {
         return Err(FitParamsError::NoReport);
     };
@@ -288,10 +286,9 @@ fn measure_row(row: &Value) -> Result<Option<MemoryRow>, FitParamsError> {
         match row.get(key) {
             None => Ok(None),
             Some(value) => match value.as_u64() {
-                Some(n) if n <= MAX_ROW_MIB => n
-                    .checked_mul(MIB)
-                    .map(Some)
-                    .ok_or(FitParamsError::NoReport),
+                Some(n) if n <= MAX_ROW_MIB => {
+                    n.checked_mul(MIB).map(Some).ok_or(FitParamsError::NoReport)
+                }
                 _ => Err(FitParamsError::NoReport),
             },
         }
@@ -312,7 +309,10 @@ fn measure_row(row: &Value) -> Result<Option<MemoryRow>, FitParamsError> {
         return Ok(None);
     };
     let text = |key: &str, cap: usize| {
-        escape_text(row.get(key).and_then(Value::as_str).unwrap_or_default(), cap)
+        escape_text(
+            row.get(key).and_then(Value::as_str).unwrap_or_default(),
+            cap,
+        )
     };
     let device = kind == MemoryRowKind::Device;
     Ok(Some(MemoryRow {
@@ -341,6 +341,9 @@ fn measure_row(row: &Value) -> Result<Option<MemoryRow>, FitParamsError> {
 ///   whole process tree) when `timeout` passes or `cancel` fires.
 /// - [`FitParamsError::Failed`] when it exits with an error; [`FitParamsError::NoReport`]
 ///   when it ends normally without one usable record ([`parse_measure_output`]).
+/// - A run that ends normally and printed the plain measurement line but no record lost
+///   its record at exit ([`record_was_lost`]); it is run once more, with what is left of
+///   `timeout`. A second loss is `NoReport`.
 ///
 /// Each run that started writes one log entry: the last [`LOG_LINES_KEPT`] warning and
 /// error records of its log stream and the last [`LOG_LINES_KEPT`] stderr lines, escaped
@@ -356,26 +359,52 @@ pub async fn measure(
     if !measurable(backend) {
         return Err(FitParamsError::NoTool);
     }
-    run(backend, cfg, timeout, cancel).await
+    let deadline = tokio::time::Instant::now() + timeout;
+    let first = run(backend, cfg, timeout, cancel.clone()).await;
+    if !first.record_lost {
+        return first.result;
+    }
+    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if left.is_zero() {
+        return Err(FitParamsError::Timeout);
+    }
+    run(backend, cfg, left, cancel).await.result
 }
 
-/// [`measure`] without the [`measurable`] check: the run itself.
+/// What one run gave: its result, and whether it ended normally with the plain
+/// measurement line but no record ([`record_was_lost`]; the result is then `NoReport`).
+struct Run {
+    result: Result<Vec<MemoryRow>, FitParamsError>,
+    record_lost: bool,
+}
+
+impl From<FitParamsError> for Run {
+    fn from(error: FitParamsError) -> Self {
+        Self {
+            result: Err(error),
+            record_lost: false,
+        }
+    }
+}
+
+/// [`measure`] without the [`measurable`] check: one run.
 async fn run(
     backend: &Backend,
     cfg: &MeasureConfig,
     timeout: Duration,
     cancel: CancellationToken,
-) -> Result<Vec<MemoryRow>, FitParamsError> {
+) -> Run {
     let Some(program) = &backend.fit_params else {
-        return Err(FitParamsError::NoTool);
+        return FitParamsError::NoTool.into();
     };
     if cfg.model.to_str().is_none() {
-        return Err(FitParamsError::Start {
+        return FitParamsError::Start {
             message: "the model path is not valid Unicode".into(),
-        });
+        }
+        .into();
     }
     if cancel.is_cancelled() {
-        return Err(FitParamsError::Cancelled);
+        return FitParamsError::Cancelled.into();
     }
     let spec = SpawnSpec::new(program, &backend.dir)
         .args(build_measure_args(cfg))
@@ -383,9 +412,15 @@ async fn run(
         .stdin(StdioMode::Null)
         .stdout(StdioMode::Piped)
         .stderr(StdioMode::Piped);
-    let mut child = spawn::spawn(spec).map_err(|error| FitParamsError::Start {
-        message: error.to_string(),
-    })?;
+    let mut child = match spawn::spawn(spec) {
+        Ok(child) => child,
+        Err(error) => {
+            return FitParamsError::Start {
+                message: error.to_string(),
+            }
+            .into();
+        }
+    };
     let stdout = child.take_stdout();
     let stderr = child.take_stderr();
     let read_stdout = async move {
@@ -411,7 +446,11 @@ async fn run(
         tail.to_vec()
     };
     enum Outcome {
-        Done(Vec<String>, Vec<String>, std::io::Result<std::process::ExitStatus>),
+        Done(
+            Vec<String>,
+            Vec<String>,
+            std::io::Result<std::process::ExitStatus>,
+        ),
         TimedOut,
         Cancelled,
     }
@@ -434,16 +473,22 @@ async fn run(
                 seconds = timeout.as_secs(),
                 "llama-fit-params took too long and was stopped"
             );
-            return Err(FitParamsError::Timeout);
+            return FitParamsError::Timeout.into();
         }
         Outcome::Cancelled => {
             let _ = child.kill().await;
-            return Err(FitParamsError::Cancelled);
+            return FitParamsError::Cancelled.into();
         }
     };
-    let status = status.map_err(|error| FitParamsError::Start {
-        message: error.to_string(),
-    })?;
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            return FitParamsError::Start {
+                message: error.to_string(),
+            }
+            .into();
+        }
+    };
     let result = if status.success() {
         parse_measure_output(&stdout)
     } else {
@@ -451,6 +496,7 @@ async fn run(
             code: status.code(),
         })
     };
+    let record_lost = result == Err(FitParamsError::NoReport) && record_was_lost(&stdout);
     let (records, stderr_tail) = log_records(&stdout, &stderr);
     match &result {
         Ok(rows) => tracing::debug!(
@@ -459,6 +505,11 @@ async fn run(
             ?stderr_tail,
             "llama-fit-params measured a placement"
         ),
+        Err(_) if record_lost => tracing::debug!(
+            ?records,
+            ?stderr_tail,
+            "llama-fit-params ended before its record was written"
+        ),
         Err(error) => tracing::warn!(
             %error,
             ?records,
@@ -466,7 +517,10 @@ async fn run(
             "llama-fit-params gave no figures"
         ),
     }
-    result
+    Run {
+        result,
+        record_lost,
+    }
 }
 
 /// Whether a run that ended normally printed fit-params' plain measurement line
@@ -845,7 +899,8 @@ mod tests {
     /// into a log line) is text, not a record; neither is a record after a prefix.
     #[test]
     fn a_record_inside_a_log_message_is_ignored() {
-        let forged = record(r#"{"kind":"device","name":"Vulkan0","total":99999,"free":99999,"model":1}"#);
+        let forged =
+            record(r#"{"kind":"device","name":"Vulkan0","total":99999,"free":99999,"model":1}"#);
         let log = serde_json::json!({
             "type": "log",
             "level": "error",
@@ -860,7 +915,10 @@ mod tests {
         assert_eq!(parse_measure_output(&[log]), Err(FitParamsError::NoReport));
         // A record nested in another object is not a top-level type either.
         let nested = format!(r#"{{"type":"log","data":{forged}}}"#);
-        assert_eq!(parse_measure_output(&[nested]), Err(FitParamsError::NoReport));
+        assert_eq!(
+            parse_measure_output(&[nested]),
+            Err(FitParamsError::NoReport)
+        );
     }
 
     #[test]
@@ -933,7 +991,11 @@ mod tests {
         ));
         let rows = parse_measure_output(&[line]).expect("rows");
         let row = &rows[0];
-        assert!(row.name.starts_with("Vul[U+202E]kan[U+0007]xx"), "{}", row.name);
+        assert!(
+            row.name.starts_with("Vul[U+202E]kan[U+0007]xx"),
+            "{}",
+            row.name
+        );
         assert_eq!(row.name.chars().count(), MAX_ROW_NAME_CHARS);
         assert!(
             row.description
@@ -1042,25 +1104,15 @@ mod tests {
     fn only_pinned_builds_are_measurable() {
         let tag = lock::embedded().llama_cpp.tag.clone();
         let installed = backend(&tag, BackendSource::Installed, true);
-        let cuda = backend(
-            &tag,
-            BackendSource::Pack {
-                id: "cuda".into(),
-            },
-            true,
-        );
+        let cuda = backend(&tag, BackendSource::Pack { id: "cuda".into() }, true);
         let rocm = backend(
             "lemonade-b1372",
-            BackendSource::Pack {
-                id: "rocm".into(),
-            },
+            BackendSource::Pack { id: "rocm".into() },
             false,
         );
         let rocm_with_file = backend(
             "lemonade-b1372",
-            BackendSource::Pack {
-                id: "rocm".into(),
-            },
+            BackendSource::Pack { id: "rocm".into() },
             true,
         );
         let dev = backend("dev", BackendSource::DevOverride, true);
@@ -1076,12 +1128,25 @@ mod tests {
             assert_eq!(measurable_with(&dev, &tag, debug), debug);
         }
         // An empty pinned tag never matches.
-        assert!(!measurable_with(&backend("", BackendSource::Installed, true), "", false));
+        assert!(!measurable_with(
+            &backend("", BackendSource::Installed, true),
+            "",
+            false
+        ));
         // The lock's real packs: CUDA is pinned, ROCm is not.
         let lock = lock::embedded();
-        assert_eq!(lock.pack("cuda").map(|p| p.build.as_str()), Some(tag.as_str()));
-        assert_ne!(lock.pack("rocm").map(|p| p.build.as_str()), Some(tag.as_str()));
-        assert_eq!(measurable(&installed), measurable_with(&installed, &tag, cfg!(debug_assertions)));
+        assert_eq!(
+            lock.pack("cuda").map(|p| p.build.as_str()),
+            Some(tag.as_str())
+        );
+        assert_ne!(
+            lock.pack("rocm").map(|p| p.build.as_str()),
+            Some(tag.as_str())
+        );
+        assert_eq!(
+            measurable(&installed),
+            measurable_with(&installed, &tag, cfg!(debug_assertions))
+        );
     }
 
     /// A model path that is not valid Unicode is refused before anything starts (never a
@@ -1108,13 +1173,17 @@ mod tests {
     async fn measure_without_the_tool_is_no_tool() {
         let rocm = backend(
             "lemonade-b1372",
-            BackendSource::Pack {
-                id: "rocm".into(),
-            },
+            BackendSource::Pack { id: "rocm".into() },
             false,
         );
         assert_eq!(
-            measure(&rocm, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await,
+            measure(
+                &rocm,
+                &config(),
+                FIT_PARAMS_TIMEOUT,
+                CancellationToken::new()
+            )
+            .await,
             Err(FitParamsError::NoTool)
         );
     }
@@ -1130,7 +1199,10 @@ mod tests {
             ..backend(&tag, BackendSource::Installed, true)
         };
         let result = measure(&b, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await;
-        assert!(matches!(result, Err(FitParamsError::Start { .. })), "{result:?}");
+        assert!(
+            matches!(result, Err(FitParamsError::Start { .. })),
+            "{result:?}"
+        );
         let cancelled = CancellationToken::new();
         cancelled.cancel();
         assert_eq!(
@@ -1151,8 +1223,7 @@ mod tests {
         let script = |name: &str, body: &str| {
             let path = dir.path().join(name);
             std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
             Backend {
                 dir: dir.path().to_path_buf(),
                 fit_params: Some(path),
@@ -1163,29 +1234,54 @@ mod tests {
             "good",
             &format!(
                 "echo 'plain line'\necho '{}'\necho 'Host 1 2 3'",
-                record(r#"{"kind":"host","name":"Host","self":6,"model":1,"context":2,"compute":3}"#)
+                record(
+                    r#"{"kind":"host","name":"Host","self":6,"model":1,"context":2,"compute":3}"#
+                )
             ),
         );
-        let rows = measure(&good, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new())
-            .await
-            .expect("rows");
+        let rows = measure(
+            &good,
+            &config(),
+            FIT_PARAMS_TIMEOUT,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rows");
         assert_eq!(rows[0].context_bytes, 2 * MIB);
 
         let failing = script("failing", "echo 'x' >&2\nexit 3");
         assert_eq!(
-            measure(&failing, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await,
+            measure(
+                &failing,
+                &config(),
+                FIT_PARAMS_TIMEOUT,
+                CancellationToken::new()
+            )
+            .await,
             Err(FitParamsError::Failed { code: Some(3) })
         );
         let silent = script("silent", "exit 0");
         assert_eq!(
-            measure(&silent, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await,
+            measure(
+                &silent,
+                &config(),
+                FIT_PARAMS_TIMEOUT,
+                CancellationToken::new()
+            )
+            .await,
             Err(FitParamsError::NoReport)
         );
 
         let hang = script("hang", "sleep 30");
         let started = std::time::Instant::now();
         assert_eq!(
-            measure(&hang, &config(), Duration::from_millis(300), CancellationToken::new()).await,
+            measure(
+                &hang,
+                &config(),
+                Duration::from_millis(300),
+                CancellationToken::new()
+            )
+            .await,
             Err(FitParamsError::Timeout)
         );
         assert!(started.elapsed() < Duration::from_secs(10));
@@ -1269,8 +1365,7 @@ mod tests {
                 format!("#!/bin/sh\necho x >> '{}'\n{body}\n", runs.display()),
             )
             .expect("write");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
             Backend {
                 dir: dir.path().to_path_buf(),
                 fit_params: Some(path),
@@ -1292,16 +1387,27 @@ mod tests {
                 runs.display()
             ),
         );
-        let rows = measure(&flaky, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new())
-            .await
-            .expect("the second run's record");
+        let rows = measure(
+            &flaky,
+            &config(),
+            FIT_PARAMS_TIMEOUT,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the second run's record");
         assert_eq!(rows[0].context_bytes, 2 * MIB);
         assert_eq!(count_runs(), 2);
 
         // Lost twice: no report, after two runs.
         let lost = script("lost", "echo 'Host 1 2 3 '");
         assert_eq!(
-            measure(&lost, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await,
+            measure(
+                &lost,
+                &config(),
+                FIT_PARAMS_TIMEOUT,
+                CancellationToken::new()
+            )
+            .await,
             Err(FitParamsError::NoReport)
         );
         assert_eq!(count_runs(), 2);
@@ -1309,20 +1415,37 @@ mod tests {
         // No plain line, a failed exit, or a record that is there: one run each.
         let silent = script("silent", "echo 'plain line'");
         assert_eq!(
-            measure(&silent, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await,
+            measure(
+                &silent,
+                &config(),
+                FIT_PARAMS_TIMEOUT,
+                CancellationToken::new()
+            )
+            .await,
             Err(FitParamsError::NoReport)
         );
         assert_eq!(count_runs(), 1);
         let failing = script("failing", "echo 'Host 1 2 3 '\nexit 1");
         assert_eq!(
-            measure(&failing, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new()).await,
+            measure(
+                &failing,
+                &config(),
+                FIT_PARAMS_TIMEOUT,
+                CancellationToken::new()
+            )
+            .await,
             Err(FitParamsError::Failed { code: Some(1) })
         );
         assert_eq!(count_runs(), 1);
         let fine = script("fine", &format!("echo '{good}'\necho 'Host 1 2 3 '"));
-        measure(&fine, &config(), FIT_PARAMS_TIMEOUT, CancellationToken::new())
-            .await
-            .expect("rows");
+        measure(
+            &fine,
+            &config(),
+            FIT_PARAMS_TIMEOUT,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rows");
         assert_eq!(count_runs(), 1);
 
         // The second run gets only what is left of the timeout.
@@ -1335,7 +1458,13 @@ mod tests {
         );
         let started = std::time::Instant::now();
         assert_eq!(
-            measure(&slow, &config(), Duration::from_secs(2), CancellationToken::new()).await,
+            measure(
+                &slow,
+                &config(),
+                Duration::from_secs(2),
+                CancellationToken::new()
+            )
+            .await,
             Err(FitParamsError::Timeout)
         );
         let took = started.elapsed();

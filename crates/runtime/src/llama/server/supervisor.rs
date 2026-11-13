@@ -524,8 +524,7 @@ impl<S: Starter> Supervisor<S> {
             // can fail on a graphics card that cannot do it. Off for the rest of the load.
             next.launch.fine.flash_attn = FlashAttn::Off;
             LoadStage::RetryingWithoutFastAttention { backend }
-        } else if card && (spec.launch.gpu == GpuUse::All || custom) && reason.is_out_of_memory()
-        {
+        } else if card && (spec.launch.gpu == GpuUse::All || custom) && reason.is_out_of_memory() {
             // All of it, or a placement chosen in Fine control (item 6, section 3.3 step 3),
             // ran out of graphics memory: As much as fits for the rest of the load. The
             // chosen layers and expert parts are set aside; the margin As much as fits
@@ -2111,7 +2110,12 @@ mod tests {
             .collect();
         assert_eq!(
             flash,
-            [FlashAttn::On, FlashAttn::Off, FlashAttn::Off, FlashAttn::Off]
+            [
+                FlashAttn::On,
+                FlashAttn::Off,
+                FlashAttn::Off,
+                FlashAttn::Off
+            ]
         );
         assert_eq!(
             drain(&mut rx),
@@ -2374,7 +2378,11 @@ mod tests {
                 .iter()
                 .map(|s| s.backend.kind)
                 .collect();
-            assert_eq!(kinds.last(), Some(&BackendKind::Cpu), "{failure:?}: {kinds:?}");
+            assert_eq!(
+                kinds.last(),
+                Some(&BackendKind::Cpu),
+                "{failure:?}: {kinds:?}"
+            );
             match failure {
                 LoadFailure::ContextTooLarge => assert_eq!(
                     events,

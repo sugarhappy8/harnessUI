@@ -1118,13 +1118,18 @@ async fn fine_control_flags_start() {
         args.contains("--device none -ngl 0 --fit off -t 2 -fa off --cache-ram"),
         "{args}"
     );
-    assert!(!args.contains("--cpu-moe") && !args.contains("-nkvo"), "{args}");
+    assert!(
+        !args.contains("--cpu-moe") && !args.contains("-nkvo"),
+        "{args}"
+    );
     let fa_on = with(FineLaunch {
         flash_attn: FlashAttn::On,
         ..FineLaunch::default()
     });
     assert!(
-        build_args(&fa_on).join(" ").contains("--fit off -fa on --cache-ram"),
+        build_args(&fa_on)
+            .join(" ")
+            .contains("--fit off -fa on --cache-ram"),
         "{:?}",
         build_args(&fa_on)
     );
@@ -1194,7 +1199,10 @@ async fn ready_reports_where_the_model_went() {
         .find(|r| r.kind == MemoryRowKind::Host)
         .expect("a Host row");
     assert_eq!(host.name, "Host");
-    assert_eq!(host.description, "", "the ready line carries no description");
+    assert_eq!(
+        host.description, "",
+        "the ready line carries no description"
+    );
     assert!(
         report
             .rows

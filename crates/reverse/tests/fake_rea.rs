@@ -291,12 +291,7 @@ mod calls {
                 close_after_stop(),
             )
             .await;
-            run(
-                f,
-                "a_fresh_rea_is_not_cleared_before_an_open",
-                fresh_open(),
-            )
-            .await;
+            run(f, "a_fresh_rea_is_not_cleared_before_an_open", fresh_open()).await;
             run(f, "hostile_file_names_in_progress_lines", hostile_names()).await;
             run(f, "the_real_rea_through_the_server", real_rea()).await;
         });
@@ -1406,7 +1401,11 @@ mod calls {
             // A file check: the same decision as the open; in Ask first "Allow for this
             // chat" (a grant for the folder) covers another file of that folder only.
             let check = p
-                .action("inspect_pe_imports", json!({"path": "hello-win-x64.exe"}), &chat)
+                .action(
+                    "inspect_pe_imports",
+                    json!({"path": "hello-win-x64.exe"}),
+                    &chat,
+                )
                 .await;
             let decision = policy::evaluate(&check, &turn, &grants);
             match mode {
@@ -1477,6 +1476,18 @@ mod calls {
                     json!({"path": p.canonical(&p.files, "hello-win-x64.exe")})
                 )]
             );
+            if mode == "ask" {
+                // Approved in Ask first, Full access turned on before it ran: the same file,
+                // reached through the whole computer now, still runs.
+                let args = json!({"path": "hello-linux-x64"});
+                let approved = p
+                    .action("inspect_native_exports", args.clone(), &chat)
+                    .await;
+                let out = p
+                    .call_with("inspect_native_exports", args, &approved, ctx(&p.full(1)))
+                    .await;
+                assert!(!out.is_error, "{}", out.joined_text());
+            }
             let session = p.action("list_procedures", json!({}), &chat).await;
             let decision = policy::evaluate(&session, &turn, &grants);
             if mode == "full" {
@@ -1570,7 +1581,11 @@ mod calls {
             out.joined_text(),
             "hello-linux-x64 is closed in rea for this chat."
         );
-        assert!(p.record().is_empty(), "rea was not started: {:?}", p.record());
+        assert!(
+            p.record().is_empty(),
+            "rea was not started: {:?}",
+            p.record()
+        );
         assert_eq!(p.server.process().state(), RunState::Stopped);
         assert_eq!(
             p.invalid("list_procedures", json!({}), &a).await,
@@ -1593,7 +1608,9 @@ mod calls {
         let action = p.action("close_binary", json!({}), &a).await;
         std::fs::write(&swap, b"\x7fELF changed").unwrap();
         p.clear_record();
-        let out = p.call_with("close_binary", json!({}), &action, ctx(&a)).await;
+        let out = p
+            .call_with("close_binary", json!({}), &action, ctx(&a))
+            .await;
         assert!(!out.is_error, "{}", out.joined_text());
         assert_eq!(p.tools_called(), ["close_binary"]);
     }
@@ -1663,7 +1680,6 @@ mod calls {
         }
     }
 
-
     /// The same call path with the real rea, Node.js and Kuna, installed through
     /// `reverse::install` from a cache filled by `scripts/pin_reverse.py --download-to`
     /// (`REVERSE_PACK_CACHE`; skipped without it, and where Kuna is not offered). It checks
@@ -1701,7 +1717,10 @@ mod calls {
             .download(Component::Kuna, &CancellationToken::new(), &|_| {})
             .await
             .expect("install rea, Node.js and Kuna from the cache");
-        println!("fake_rea: installed rea and Kuna in {:?}", started.elapsed());
+        println!(
+            "fake_rea: installed rea and Kuna in {:?}",
+            started.elapsed()
+        );
         let server = ReverseServer::with_installer(installer);
         server.set_decompiler(Some(Decompiler::Kuna));
         let chat = |id: i64, folder: &Path| ChatContext {
@@ -1721,7 +1740,11 @@ mod calls {
                     Described::Action(a) => a,
                     Described::Invalid(why) => panic!("{tool}: {why}"),
                 };
-                assert!(action.hard_limit.is_none(), "{tool}: {:?}", action.hard_limit);
+                assert!(
+                    action.hard_limit.is_none(),
+                    "{tool}: {:?}",
+                    action.hard_limit
+                );
                 let started = Instant::now();
                 let out = server
                     .call(tool, args.as_object().unwrap(), &action, ctx(&c))
@@ -1730,7 +1753,11 @@ mod calls {
                     "fake_rea: real {tool} ({:.1} s, error {}): {}",
                     started.elapsed().as_secs_f64(),
                     out.is_error,
-                    out.joined_text().chars().take(600).collect::<String>().replace('\n', " | ")
+                    out.joined_text()
+                        .chars()
+                        .take(600)
+                        .collect::<String>()
+                        .replace('\n', " | ")
                 );
                 out
             }
@@ -1750,13 +1777,26 @@ mod calls {
         assert!(!out.is_error);
         no_root(&out);
         for tool in allow::MODEL_TOOLS {
-            assert_eq!(server.unavailable_reason(tool), None, "{tool} after the live check");
+            assert_eq!(
+                server.unavailable_reason(tool),
+                None,
+                "{tool} after the live check"
+            );
         }
         let listed = call("list_procedures", json!({}), a.clone()).await;
         assert!(!listed.is_error);
         no_root(&listed);
-        assert!(listed.joined_text().contains("main"), "{}", listed.joined_text());
-        let pseudo = call("procedure_pseudo_code", json!({"procedure": "main"}), a.clone()).await;
+        assert!(
+            listed.joined_text().contains("main"),
+            "{}",
+            listed.joined_text()
+        );
+        let pseudo = call(
+            "procedure_pseudo_code",
+            json!({"procedure": "main"}),
+            a.clone(),
+        )
+        .await;
         assert!(!pseudo.is_error);
         no_root(&pseudo);
         assert!(pseudo.joined_text().len() > 20);
@@ -1765,13 +1805,27 @@ mod calls {
         let session = call("binary_session", json!({}), a.clone()).await;
         assert!(!session.is_error);
         no_root(&session);
-        let check = call("inspect_pe_imports", json!({"path": "hello-win-x64.exe"}), b.clone()).await;
+        let check = call(
+            "inspect_pe_imports",
+            json!({"path": "hello-win-x64.exe"}),
+            b.clone(),
+        )
+        .await;
         no_root(&check);
-        let managed = call("inspect_managed_members", json!({"path": "hello-dotnet.dll"}), b.clone()).await;
+        let managed = call(
+            "inspect_managed_members",
+            json!({"path": "hello-dotnet.dll"}),
+            b.clone(),
+        )
+        .await;
         no_root(&managed);
         if let Some(id) = ids.first() {
-            let view = json!({"source": {"kind": "retained-evidence", "evidence_id": id}, "view": {}});
-            match server.describe("inspect_analysis_view", view.as_object().unwrap(), &b).await {
+            let view =
+                json!({"source": {"kind": "retained-evidence", "evidence_id": id}, "view": {}});
+            match server
+                .describe("inspect_analysis_view", view.as_object().unwrap(), &b)
+                .await
+            {
                 Described::Invalid(why) => assert_eq!(why, m::UNKNOWN_ID),
                 Described::Action(a) => panic!("chat B read chat A's id: {a:?}"),
             }
@@ -1799,5 +1853,4 @@ mod calls {
         server.restart(RestartReason::Quit).await;
         assert_eq!(server.process().state(), RunState::Stopped);
     }
-
 }

@@ -301,7 +301,9 @@ fn read_raw_tensors<R: Read + Seek>(
         let name = r.utf8(name_len)?;
         let n_dims = r.u32()?;
         if n_dims > MAX_DIMS {
-            return Err(GgufError::Corrupt(format!("tensor with {n_dims} dimensions")));
+            return Err(GgufError::Corrupt(format!(
+                "tensor with {n_dims} dimensions"
+            )));
         }
         let mut dims = Vec::with_capacity(4);
         for _ in 0..n_dims {
@@ -339,7 +341,9 @@ fn sizes_from_offsets(
             .checked_add(t.offset)
             .ok_or_else(|| GgufError::Corrupt("tensor offset overflows".into()))?;
         if start > len {
-            return Err(GgufError::Corrupt("tensor beyond the end of the file".into()));
+            return Err(GgufError::Corrupt(
+                "tensor beyond the end of the file".into(),
+            ));
         }
         if starts.last().is_some_and(|&previous| start <= previous) {
             return Err(GgufError::Corrupt("tensor offsets do not increase".into()));
@@ -1022,7 +1026,12 @@ mod tests {
             assert_eq!(t.name, raw.name);
             let n = ggml_nbytes(raw.ggml_type, &raw.dims)
                 .unwrap_or_else(|| panic!("type {} of {}", raw.ggml_type, raw.name));
-            assert!(t.bytes >= n && t.bytes - n < 32, "{}: {} vs {n}", t.name, t.bytes);
+            assert!(
+                t.bytes >= n && t.bytes - n < 32,
+                "{}: {} vs {n}",
+                t.name,
+                t.bytes
+            );
             exact += n;
         }
         // Within 1% of the file size less the header.

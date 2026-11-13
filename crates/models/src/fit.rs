@@ -69,7 +69,7 @@ pub struct FitInput {
 impl FitInput {
     /// Output-logits buffer (`vocab × ubatch × 4 bytes`) plus a fixed allowance.
     pub fn compute_bytes(&self) -> u64 {
-        COMPUTE_BASE_BYTES + self.vocab_size.saturating_mul(UBATCH).saturating_mul(4)
+        COMPUTE_BASE_BYTES.saturating_add(self.vocab_size.saturating_mul(UBATCH).saturating_mul(4))
     }
     pub fn needed_at(&self, ctx: u64) -> u64 {
         self.weights_bytes
@@ -669,6 +669,8 @@ mod tests {
                 let _ = auto_ctx_with_margin(input, room, u64::MAX);
             }
         }
+        // A hostile vocabulary size saturates the working space (it overflowed before).
+        assert_eq!(inputs[4].compute_bytes(), u64::MAX);
         // 4 GB left free instead of 1 GB: 7,168 tokens on the 7.5 GB card drop below the
         // floor, so only the partial room is left; half a GB free gives more.
         let small = Room::graphics_card(7_500_000_000, 24 * GB);

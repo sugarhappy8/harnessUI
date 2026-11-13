@@ -153,7 +153,7 @@ pub fn local_entries(
     for p in installed {
         let Some(c) = locate(p) else { continue };
         let row = (*p == c, p.clone());
-        let better = |old: &(bool, String)| row.0 > old.0 || (row.0 == old.0 && row.1 < old.1);
+        let better = |old: &(bool, String)| (row.0 && !old.0) || (row.0 == old.0 && row.1 < old.1);
         match rows.get(&rule.key(&c)) {
             Some(old) if !better(old) => {}
             _ => {
@@ -723,7 +723,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        assert_eq!(recent, [canonical.clone()]);
+        assert_eq!(recent, vec![canonical.clone()]);
 
         #[cfg(unix)]
         {
@@ -736,7 +736,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(recent, [canonical.clone()]);
+            assert_eq!(recent, vec![canonical.clone()]);
         }
         let out = local_options(&store).await.unwrap();
         assert_eq!(out.len(), 1, "{:?}", refs(&out));
