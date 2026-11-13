@@ -118,6 +118,9 @@ one starts from this file and `README.md`.
   by run wf_c6b8dca9-052 (Other apps key, helper app-note escaping, WebP to PNG, cancelling a
   model switch, model list spelling for links, folder path escaping). The header layout pass
   (WP2 widths, WP7 chip at narrow widths, item 6 usage line) waits for WP10e.
+- 02:51 UTC check: done: WP9d, WP10a, WP10b (plus everything earlier). Fixing: WP9b (being
+  checked), WP9c, WP9g, WP9h. Developing: WP10d, WP10e. Leftover fixes run wf_c6b8dca9-052:
+  1 of 6 done. Still to start: WP9e (after WP9b-WP9h), then integration.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

@@ -446,6 +446,7 @@ describe("0.0.6 item 6: plain words for Fine control, the picture and the usage 
       "Fine control · On the processor only · changed",
     );
     expect(fineSummary(null, false, true)).toBe("Fine control · changed");
+    expect(fineSummary(picture({ layersOnGraphics: 41 }), false, false)).toBe("Fine control · All 41 layers on the graphics card");
   });
 
   it("says where the layers go in the picture, for every placement", () => {

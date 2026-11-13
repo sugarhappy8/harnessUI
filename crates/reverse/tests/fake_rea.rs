@@ -313,12 +313,7 @@ mod calls {
                 hostile_ids(),
             )
             .await;
-            run(
-                f,
-                "the_same_file_in_two_chats_shares_its_ids",
-                shared_ids(),
-            )
-            .await;
+            run(f, "the_same_file_in_two_chats_shares_its_ids", shared_ids()).await;
             run(
                 f,
                 "a_view_after_rea_stopped_does_not_start_it",
@@ -1779,7 +1774,12 @@ mod calls {
         p.clear_record();
         let swap = swap_later(&p.other.join("hello-linux-x64"), &fake_json, 800);
         let out = p
-            .call_with("open_binary", open_args("hello-linux-x64"), &action, ctx(&b))
+            .call_with(
+                "open_binary",
+                open_args("hello-linux-x64"),
+                &action,
+                ctx(&b),
+            )
             .await;
         swap.await.unwrap();
         assert!(out.is_error);

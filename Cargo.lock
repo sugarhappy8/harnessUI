@@ -186,6 +186,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "url",
+ "usage",
  "uuid",
  "windows 0.62.2",
 ]

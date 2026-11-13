@@ -187,3 +187,5 @@ reverse_set_decompiler
 reverse_clear_cache
 reverse_install_apple_tools
 reverse_dropped
+offload_measure
+usage_now

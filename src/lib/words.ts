@@ -472,7 +472,11 @@ export function fineSummary(picture: OffloadPreview | null, apple: boolean, chan
     if (processorOnly(picture)) parts.push("On the processor only");
     else if (picture.units !== null) {
       const n = Math.min(picture.layersOnGraphics, picture.units);
-      parts.push(`${picture.layersAbout ? "About " : ""}${layersOfWords(n, picture.units)} on ${graphicsPlace(apple)}`);
+      parts.push(
+        n >= picture.units
+          ? `All ${layersCount(picture.units)} on ${graphicsPlace(apple)}`
+          : `${picture.layersAbout ? "About " : ""}${layersOfWords(n, picture.units)} on ${graphicsPlace(apple)}`,
+      );
     }
   }
   if (changed) parts.push("changed");

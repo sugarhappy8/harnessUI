@@ -265,7 +265,15 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
       window.clearTimeout(timer);
     };
   }, [path, fineOpen, canMeasure, draftKey]);
-  const measuredNow = measured && measured.key === draftKey ? measured : null;
+  // The backend keys both answers by the draft they answer (`OffloadPreview.key`): when the
+  // instant estimate on screen is for these choices, a measurement with another key is old.
+  const estimateNow = previewNow ?? (!dirty ? info : null);
+  const measuredNow =
+    measured &&
+    measured.key === draftKey &&
+    (!measured.picture || !estimateNow?.picture || measured.picture.key === estimateNow.picture.key)
+      ? measured
+      : null;
   const measuring = fineOpen && canMeasure && !measuredNow;
   // The latest answer for the choices on screen: the measurement, else the instant estimate
   // (which says why exact figures could not be worked out when the request failed).

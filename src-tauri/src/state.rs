@@ -25,6 +25,11 @@ pub struct AppState {
     /// and benchmarks, other apps), so a reload can ask first or wait. Each user holds a
     /// [`BusyGuard`] while it runs.
     pub model_busy: Arc<BusyCounter>,
+    /// 0.0.6 item 6 (WP10d): llama.cpp's measurements for "Where the model goes", one at a
+    /// time, with their cache.
+    pub offload: crate::offload::Measurements,
+    /// 0.0.6 item 6 (WP10d): the usage line's reader thread.
+    pub usage: crate::usage_cmd::UsageReader,
 }
 
 /// What holds a [`BusyGuard`].

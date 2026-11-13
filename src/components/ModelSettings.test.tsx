@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ModelBusy, ModelLoadInfo, ModelLoadSettings, RuntimeStatus } from "../lib/types";
-import { FINE_LAUNCH_NONE, fineFacts, processorPicture } from "./fine.fixtures";
+import type { ModelBusy, ModelLoadInfo, ModelLoadSettings, OffloadPreview, RuntimeStatus } from "../lib/types";
+import { FINE_LAUNCH_NONE, computerBar, fineFacts, gb, graphicsBar, picture, processorPicture } from "./fine.fixtures";
 
 const IDLE: ModelBusy = { chatTurns: 0, modelChecks: 0, otherApps: 0 };
 
@@ -17,6 +17,7 @@ const ipcMock = vi.hoisted(() => ({
   setChatModel: vi.fn(async () => undefined),
   getChat: vi.fn(async (id: number) => ({ chat: { id, modelRef: null }, messages: [] })),
   listModelOptions: vi.fn(async () => []),
+  offloadMeasure: vi.fn<(path: string, o: ModelLoadSettings) => Promise<OffloadPreview>>(),
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 
@@ -539,5 +540,289 @@ describe("ModelSettings: one model's load settings in plain words", () => {
       ...DEFAULTS,
       device: { named: "Vulkan1" },
     });
+  });
+});
+
+describe("ModelSettings: Fine control and where the model goes (0.0.6 item 6)", () => {
+  /** A model on a graphics card: 41 layers, the picture an instant estimate that fits. */
+  function onCard(path = "/models/model.gguf"): ModelLoadInfo {
+    return {
+      ...sample(path),
+      fineFacts: fineFacts(),
+      picture: picture({ source: { kind: "estimate", why: "quick" }, custom: false, layersOnGraphics: 41 }),
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.modelBusy.mockResolvedValue(IDLE);
+    ipcMock.setModelLoadSettings.mockImplementation(async (path, overrides) => ({ ...onCard(path), overrides }));
+    ipcMock.resetModelLoadSettings.mockImplementation(async (path) => onCard(path));
+    ipcMock.previewModelLoadSettings.mockImplementation(async (path, overrides) => ({ ...opened, path, overrides }));
+    ipcMock.offloadMeasure.mockImplementation(async () => picture({ custom: false, layersOnGraphics: 41 }));
+    useApp.setState({ runtime: null, activeChatId: 3, detail: null, error: null });
+    Object.defineProperty(navigator, "platform", { value: "Linux x86_64", configurable: true });
+  });
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  const text = () => document.body.textContent ?? "";
+
+  function fineSection(): HTMLDetailsElement {
+    return document.querySelector('details[data-section="fine"]') as HTMLDetailsElement;
+  }
+
+  async function openFine() {
+    await act(async () => {
+      const d = fineSection();
+      d.open = true;
+      d.dispatchEvent(new Event("toggle"));
+    });
+  }
+
+  async function wait(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  it("shows the picture after the plain settings, and Fine control closed after More options", async () => {
+    await openPanel(onCard());
+    const heading = screen.getByRole("heading", { name: "Where the model goes" });
+    const keep = select("Keep the model in memory");
+    const more = [...document.querySelectorAll("summary")].find((x) => x.textContent === "More options") as HTMLElement;
+    const fine = fineSection();
+    const before = (a: Node, b: Node) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(before(keep, heading)).toBe(true);
+    expect(before(heading, more)).toBe(true);
+    expect(before(more, fine)).toBe(true);
+    expect(fine.open).toBe(false);
+    expect(fine.querySelector("summary")?.textContent).toBe("Fine control · All 41 layers on the graphics card");
+    expect(text()).toContain("Rough estimate from the model file. Open Fine control to work out exact figures.");
+    // Closed: nothing is measured.
+    expect(ipcMock.offloadMeasure).not.toHaveBeenCalled();
+  });
+
+  it("works out exact figures only while Fine control is open, a moment after the last change, for the choices on screen", async () => {
+    vi.useFakeTimers();
+    await openPanel(onCard());
+    let answer: (p: OffloadPreview) => void = () => undefined;
+    ipcMock.offloadMeasure.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    await openFine();
+    expect(text()).toContain("Working out exact figures…");
+    await wait(500);
+    expect(ipcMock.offloadMeasure).not.toHaveBeenCalled();
+    await wait(200);
+    expect(ipcMock.offloadMeasure).toHaveBeenCalledWith("/models/model.gguf", DEFAULTS);
+    await act(async () => answer(picture({ custom: false, layersOnGraphics: 41 })));
+    expect(text()).toContain("Worked out for these settings.");
+
+    // A change: the estimate shows again until the new choices are measured; an answer for
+    // the old choices that arrives late is not used.
+    let late: (p: OffloadPreview) => void = () => undefined;
+    ipcMock.offloadMeasure.mockImplementation(() => new Promise((resolve) => (late = resolve)));
+    await choose("Processor threads", "count");
+    expect(text()).toContain("Working out exact figures…");
+    expect(text()).not.toContain("Worked out for these settings.");
+    await wait(700);
+    expect(ipcMock.offloadMeasure).toHaveBeenLastCalledWith("/models/model.gguf", {
+      ...DEFAULTS,
+      fine: { layers: "auto", experts: "auto", kv: "auto", threads: { count: 8 }, fastAttention: "auto", leaveFree: "auto" },
+    });
+    await choose("Fast attention", "off");
+    await act(async () => late(picture({ custom: false, layersOnGraphics: 41 })));
+    expect(text()).toContain("Working out exact figures…");
+    expect(fineSection().querySelector("summary")?.textContent).toContain(" · changed");
+  });
+
+  it("drops a measurement whose key is not the key of the choices on screen", async () => {
+    vi.useFakeTimers();
+    ipcMock.offloadMeasure.mockResolvedValue(picture({ key: "another draft", custom: false, layersOnGraphics: 41 }));
+    await openPanel(onCard());
+    await openFine();
+    await wait(700);
+    expect(ipcMock.offloadMeasure).toHaveBeenCalled();
+    expect(text()).toContain("Working out exact figures…");
+    expect(text()).not.toContain("Worked out for these settings.");
+  });
+
+  it("says why when exact figures could not be asked for", async () => {
+    vi.useFakeTimers();
+    ipcMock.offloadMeasure.mockRejectedValue({ code: "internal", message: "No.", nextStep: "", details: "" });
+    await openPanel(onCard());
+    await openFine();
+    await wait(700);
+    expect(text()).toContain("Rough estimate from the model file. Exact figures couldn't be worked out for this file.");
+  });
+
+  it("lets the measurement replace the marks of the selected choices only", async () => {
+    vi.useFakeTimers();
+    ipcMock.offloadMeasure.mockResolvedValue(picture({ custom: false, layersOnGraphics: 41, mark: "yellow", fits: "tight" }));
+    await openPanel(onCard());
+    expect(optionTexts("How much it can remember")[3]).toBe("8,192 tokens, about 6,000 words · Fits");
+    expect(optionTexts("Use the graphics card")[1]).toBe("All of it · Fits");
+    await openFine();
+    await wait(700);
+    // The resolved choices (8,192 tokens, All of it) take the measured mark; the others keep theirs.
+    expect(optionTexts("How much it can remember")[3]).toBe("8,192 tokens, about 6,000 words · Fits with limits");
+    expect(optionTexts("How much it can remember")[4]).toBe("16,384 tokens, about 12,000 words · Fits");
+    expect(optionTexts("Use the graphics card")[1]).toBe("All of it · Fits with limits");
+    expect(optionTexts("Use the graphics card")[2]).toBe("As much as fits · Fits");
+    // ...and its warning replaces the estimate's.
+    expect(screen.getByRole("alert").textContent).toBe(
+      "It only just fits. Programs that use the graphics card, such as games or video, may stop it from loading.",
+    );
+  });
+
+  it("shows a Custom option while Fine control chooses the layers, and any plain choice goes back to it", async () => {
+    await openPanel(onCard());
+    await openFine();
+    await choose("Layers on the graphics card", "count");
+    const gpu = select("Use the graphics card");
+    expect(gpu.value).toBe("custom");
+    const custom = [...gpu.options].find((o) => o.value === "custom") as HTMLOptionElement;
+    expect(custom.textContent).toBe("Custom: 41 of 41 layers (set in Fine control)");
+    expect(custom.disabled).toBe(true);
+    expect(text()).toContain("Fine control sets where the model goes. Choose another option here to go back to it.");
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Layers on the graphics card: how many"), { target: { value: "30" } });
+    });
+    expect(custom.textContent).toBe("Custom: 30 of 41 layers (set in Fine control)");
+
+    await choose("Use the graphics card", "all");
+    expect(select("Use the graphics card").value).toBe("all");
+    expect(select("Layers on the graphics card").value).toBe("auto");
+    expect([...select("Use the graphics card").options].some((o) => o.value === "custom")).toBe(false);
+    await click("Save");
+    // Fine control all Automatic is not sent at all.
+    expect(ipcMock.setModelLoadSettings).toHaveBeenLastCalledWith("/models/model.gguf", { ...DEFAULTS, gpu: "all" });
+
+    // Expert parts only, then "Same as default (…)": back to the plain placement too.
+    cleanup();
+    await openPanel({ ...onCard(), fineFacts: fineFacts({ expertLayers: 40 }) });
+    await openFine();
+    await choose("Expert parts on the processor", "all");
+    expect(select("Use the graphics card").value).toBe("custom");
+    expect(optionTexts("Use the graphics card")).toContain("Custom: expert parts on the processor (set in Fine control)");
+    await choose("Use the graphics card", "default");
+    expect(select("Use the graphics card").value).toBe("default");
+    expect(select("Expert parts on the processor").value).toBe("auto");
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows no Custom option when the defaults for all models say Don't use it, and greys the placement out", async () => {
+    const info = onCard();
+    info.defaults.gpu = "off";
+    info.overrides = { ...DEFAULTS, fine: { layers: { count: 20 }, experts: "auto", kv: "auto", threads: "auto", fastAttention: "auto", leaveFree: "auto" } };
+    await openPanel(info);
+    await openFine();
+    expect(select("Use the graphics card").value).toBe("default");
+    expect([...select("Use the graphics card").options].some((o) => o.value === "custom")).toBe(false);
+    expect(select("Layers on the graphics card").disabled).toBe(true);
+    expect(screen.getAllByText("Not used while Use the graphics card is Don't use it.").length).toBeGreaterThan(0);
+  });
+
+  it("shows one warning line, the most important first", async () => {
+    const cases: [Partial<ModelLoadInfo>, Partial<OffloadPreview>, string | null][] = [
+      [{ tooLarge: true }, { fits: "wontFitAtAll" }, "Too large for this computer, even with the shortest memory."],
+      [
+        {},
+        {
+          fits: "wontFitAtAll",
+          graphics: graphicsBar({ need: { model: gb(16), context: gb(1), compute: gb(1), imageReader: 0 } }),
+          computer: computerBar({ freeBytes: gb(15.2), need: { model: gb(18), context: gb(1), compute: gb(1), imageReader: 0 } }),
+        },
+        "This probably needs more memory than this computer has free: about 38 GB, with 30.2 GB free.",
+      ],
+      [
+        {},
+        { fits: "wontFitGraphics", custom: false, graphics: graphicsBar({ need: { model: gb(13.8), context: gb(1.2), compute: gb(0.6), imageReader: 0 } }) },
+        "This probably won't fit in the graphics card's memory: it needs about 15.6 GB and 15 GB is free. Choose As much as fits, or turn on Save memory.",
+      ],
+      [{}, { fits: "tight" }, "It only just fits."],
+      [{}, { fits: "partial" }, null],
+      [{}, { fits: "fits" }, null],
+    ];
+    for (const [patch, pic, words] of cases) {
+      const info = { ...onCard(), ...patch };
+      info.picture = { ...info.picture, ...pic };
+      await openPanel(info);
+      const alerts = screen.queryAllByRole("alert");
+      if (words === null) expect(alerts.length).toBe(0);
+      else {
+        expect(alerts.length).toBe(1);
+        expect(alerts[0]?.textContent).toContain(words);
+      }
+      cleanup();
+    }
+  });
+
+  it("asks before loading what probably won't fit on the graphics card, with Cancel focused", async () => {
+    const info = onCard("/models/other.gguf");
+    info.picture = { ...info.picture, fits: "wontFitGraphics" };
+    await openPanel(info);
+    await click("Load with these settings");
+    const question =
+      "This probably won't fit in the graphics card's memory. If it doesn't, the model won't load, or part of it moves to the processor, which is slower.";
+    expect(screen.getByText(question)).toBeTruthy();
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    await click("Cancel");
+    expect(ipcMock.loadLocalModel).not.toHaveBeenCalled();
+    expect(ipcMock.setChatModel).not.toHaveBeenCalled();
+    await click("Load with these settings");
+    await click("Load anyway");
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/other.gguf", null, true);
+  });
+
+  it("asks WP2's question before loading what probably won't fit at all", async () => {
+    const info = onCard("/models/other.gguf");
+    info.picture = { ...info.picture, fits: "wontFitAtAll" };
+    await openPanel(info);
+    await click("Load with these settings");
+    expect(screen.getByText("This model probably needs more memory than this computer has. Load it anyway?")).toBeTruthy();
+    await click("Cancel");
+    expect(ipcMock.loadLocalModel).not.toHaveBeenCalled();
+  });
+
+  it("asks before Apply and restart too, and loads nothing on Cancel", async () => {
+    const info = onCard();
+    info.loaded = true;
+    info.olderSettingsLoaded = true;
+    info.picture = { ...info.picture, fits: "wontFitGraphics" };
+    useApp.setState({ runtime: ready(info.path) });
+    await openPanel(info);
+    await click("Apply and restart");
+    expect(screen.getByText(/This probably won't fit in the graphics card's memory\. If it doesn't/)).toBeTruthy();
+    await click("Cancel");
+    expect(ipcMock.reloadLocalModel).not.toHaveBeenCalled();
+    await click("Apply and restart");
+    await click("Load anyway");
+    expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, true);
+  });
+
+  it("counts Fine control all Automatic the same as none", async () => {
+    const info = onCard();
+    // The backend leaves an all-Automatic Fine control out; here it is sent back in full.
+    info.overrides = { ...DEFAULTS, fine: { layers: "auto", experts: "auto", kv: "auto", threads: "auto", fastAttention: "auto", leaveFree: "auto" } };
+    await openPanel(info);
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+    await openFine();
+    await choose("Processor threads", "count");
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(false);
+    await click("Reset fine control");
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Reset to defaults" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("is hidden for a backend without item 6 (no picture, no Fine control)", async () => {
+    const old = sample() as Partial<ModelLoadInfo>;
+    delete old.picture;
+    delete old.fineFacts;
+    await openPanel(old as ModelLoadInfo);
+    expect(screen.queryByText("Where the model goes")).toBeNull();
+    expect(fineSection()).toBeNull();
+    expect(select("How much it can remember").value).toBe("default");
   });
 });

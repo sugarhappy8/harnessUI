@@ -149,7 +149,7 @@ export function UsageLine() {
         <button
           type="button"
           aria-label="Computer usage"
-          className="block h-[15px] w-full min-w-0 truncate px-2.5 text-left text-[11px] leading-[15px] text-fg-muted tabular-nums hover:text-fg focus-visible:underline"
+          className="block h-[15px] w-full min-w-0 truncate px-2.5 text-left text-[11px] leading-[15px] text-fg-muted tabular-nums hover:text-fg focus-visible:underline @max-xl:pr-0"
         >
           <span className="hidden @5xl:inline" data-usage="wide">
             {usageLine(now, "wide")}
@@ -160,7 +160,7 @@ export function UsageLine() {
           <span className="hidden @xl:inline @3xl:hidden" data-usage="small">
             {usageLine(now, "small")}
           </span>
-          <span className="inline-flex items-center gap-2 @xl:hidden" data-usage="icons">
+          <span className="inline-flex items-center gap-1.5 @xl:hidden" data-usage="icons">
             {usageIcons(now).map((i) => {
               const Icon = ICON[i.kind];
               return (

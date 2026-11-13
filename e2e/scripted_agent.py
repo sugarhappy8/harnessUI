@@ -4046,7 +4046,8 @@ def p_model_settings(c, notes):
                   "Apply and restart"):
         assert words in page, (words, page[-900:])
     # Option text is not part of innerText: read what each select shows.
-    shown = s.execute("return [...document.querySelectorAll('[role=dialog] select')].map(e => e.selectedOptions[0].textContent);")
+    # [0.0.6 item 6] Fine control's own settings start at Automatic (they have no defaults).
+    shown = s.execute("return [...document.querySelectorAll('[role=dialog] select:not([data-fine])')].map(e => e.selectedOptions[0].textContent);")
     notes.append("panel shows: " + " | ".join(shown))
     assert shown and all(t.startswith("Same as default (") for t in shown), shown
     options = s.execute("return [...document.querySelectorAll('#model-context option')].map(o => o.value);")
@@ -5887,7 +5888,7 @@ def p_reverse_tools(c, notes):
         s.invoke("reverse_remove", {"component": "kuna", "force": True})
         shutil.rmtree(root, ignore_errors=True)
         answer = s.invoke("reverse_dropped", {"chatId": chat, "paths": [str(hello)]})
-        assert answer == {"installed": False, "items": [{"kind": "ignore"}]}, answer
+        assert answer == {"installed": False, "groupOn": False, "items": [{"kind": "ignore"}]}, answer
         s.execute("document.querySelector('button[aria-label=\"Dismiss\"]')?.click();")
         drop([str(hello)])
         time.sleep(1.5)
@@ -5911,6 +5912,228 @@ def p_reverse_tools(c, notes):
 
 
 PROBES.append(p_reverse_tools)  # [0.0.6 item 5, WP9h]
+
+
+@probe("fine-control")
+def p_fine_control(c, notes):
+    """0.0.6 item 6 (WP10e): the usage line under the model name (its form by the header's
+    width, its menu), "Where the model goes" and Fine control in Settings for this model
+    opened from the picker's gear (Processor threads 2 and Fast attention Off, " · changed"
+    on the closed section, Reset fine control), and the usage line for a chat on an endpoint,
+    whose menu has no "Where the model went". Uses the real small model's file (TEST_GGUF)
+    without loading it; this computer has no graphics card, so the layer settings do not
+    appear (vitest covers them). Steps that need WP10d's commands (`usage_now`, the picture
+    and `fineFacts` in `model_load_info`, `offload_measure`) are noted as waiting for
+    integration when those commands do not answer."""
+    s = c.s
+    model = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
+    if not os.path.isfile(model):
+        notes.append(f"skipped: no test model at {model}")
+        return
+
+    def set_select(css, value):
+        s.execute(
+            """
+            const el = document.querySelector(arguments[0]);
+            if (!el) throw new Error('no select ' + arguments[0]);
+            Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(el, arguments[1]);
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            css, value)
+        time.sleep(0.3)
+
+    def set_range(css, value):
+        s.execute(
+            """
+            const el = document.querySelector(arguments[0]);
+            if (!el) throw new Error('no slider ' + arguments[0]);
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, String(arguments[1]));
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            """,
+            css, value)
+        time.sleep(0.3)
+
+    def escape():
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.5)
+
+    def usage_line():
+        """The usage line: which form shows, its text, where it sits against the picker, and
+        whether the header runs over."""
+        return s.execute(
+            """
+            const h = document.querySelector('main header');
+            const b = h && h.querySelector('button[aria-label="Computer usage"]');
+            if (!b) return null;
+            const form = [...b.querySelectorAll('[data-usage]')].find(e => getComputedStyle(e).display !== 'none');
+            const picker = h.querySelector('button[aria-label="Model for this chat"]');
+            const pr = picker.getBoundingClientRect(), br = b.getBoundingClientRect();
+            return {
+              inner: window.innerWidth,
+              // The container's own width (its content box), which the container queries read.
+              header: h.clientWidth - parseFloat(getComputedStyle(h).paddingLeft) - parseFloat(getComputedStyle(h).paddingRight),
+              form: form ? form.dataset.usage : null,
+              text: form ? form.innerText : '',
+              labels: [...b.querySelectorAll('[role=img]')].map(e => e.getAttribute('aria-label')),
+              under: br.top >= pr.bottom - 1 && Math.abs(br.left - pr.left) < 2,
+              fontSize: getComputedStyle(b).fontSize,
+              over: h.scrollWidth > h.clientWidth + 0.5,
+              // Every icon and its number shown whole in the narrow form.
+              whole: form ? form.getBoundingClientRect().right <= br.right + 0.5 : false,
+            };
+            """)
+
+    def open_usage_menu():
+        el = s.wait_for(lambda: s.execute(
+            "return document.querySelector('main header button[aria-label=\"Computer usage\"]') || false;"), 15, "the usage line")
+        s.click(next(iter(el.values())))
+        return s.wait_for(lambda: s.execute(
+            "const m = document.querySelector('[role=menu]'); return m ? m.innerText : false;"), 10, "the usage menu")
+
+    def summary():
+        return s.execute("const d = document.querySelector('details[data-section=fine] summary'); return d ? d.innerText : null;")
+
+    # What WP10d's commands answer yet.
+    try:
+        now = s.invoke("usage_now")
+        usage_real = True
+        notes.append("usage_now: " + json.dumps(now)[:300])
+    except WebDriverError as e:
+        usage_real = False
+        notes.append(f"usage_now not answered yet ({str(e)[:80]}): usage line steps wait for integration")
+    try:
+        s.invoke("import_model", {"path": model})
+    except WebDriverError as e:
+        notes.append(f"import: {str(e)[:120]}")
+    info = s.invoke("model_load_info", {"path": model})
+    real = "picture" in info and "fineFacts" in info
+    notes.append("model_load_info: " + ("picture and fineFacts (WP10d)" if real else "no picture yet; panel steps wait for integration"))
+    if real:
+        notes.append("fineFacts: " + json.dumps(info["fineFacts"]) + "; picture source: " + json.dumps(info["picture"]["source"]))
+
+    # A chat on the local model (not loaded).
+    chat = s.invoke("create_chat", {"modelRef": f"local:{model}"})
+    s.invoke("set_chat_tools", {"chatId": chat["id"], "enabled": []})
+    s.execute("window.location.reload();")
+    time.sleep(1.5)
+    s.wait_for(lambda: "New chat" in s.page_text(), 20, "sidebar after reload")
+    s.execute(HOOK)
+    s.execute(
+        """
+        const a = [...document.querySelectorAll('nav[aria-label="Chat history"] button')].find(b => b.innerText.includes('New chat'));
+        a && a.click();
+        """
+    )
+    time.sleep(1.0)
+
+    # The usage line under the model name, in each form by the header's width.
+    if usage_real:
+        line = s.wait_for(usage_line, 15, "the usage line under the model name")
+        notes.append(f"usage line at {line['inner']} px: {line['form']} {line['text']!r}")
+        assert line["under"] and line["fontSize"] == "11px" and not line["over"], line
+        assert "Processor" in line["text"] or line["form"] == "icons", line
+        rect = s._req("GET", s._s("/window/rect"))
+        seen = {}
+        try:
+            for width in (1700, 1280, 1000, 760, 560):
+                s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
+                time.sleep(1.0)
+                geo = usage_line()
+                seen[geo["form"]] = geo
+                notes.append(f"at {geo['inner']} px (header {geo['header']} px): {geo['form']} {geo['text']!r} "
+                             f"{geo['labels'] if geo['form'] == 'icons' else ''} runs over {geo['over']}")
+                assert geo["under"] and not geo["over"], geo
+                if geo["form"] == "icons":
+                    assert geo["whole"], geo
+                # The form follows the header's width: 64rem, 48rem, 36rem (16 px a rem).
+                want = "wide" if geo["header"] >= 1024 else "medium" if geo["header"] >= 768 else "small" if geo["header"] >= 576 else "icons"
+                assert geo["form"] == want, (want, geo)
+                s.screenshot(str(OUT / f"fine-control-usage-{width}.png"))
+        finally:
+            s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
+            time.sleep(1.0)
+        if "icons" in seen:
+            labels = seen["icons"]["labels"]
+            assert labels and all(("busy" in l or "in use" in l or "measuring" in l or "not available" in l) for l in labels), labels
+        menu = open_usage_menu()
+        notes.append("usage menu (local, not loaded): " + menu.replace("\n", " | ")[:400])
+        for words in ("This computer right now", "Processor:", "threads", "Memory:", " GB in use",
+                      "Read on this computer only while you can see it. Nothing is sent anywhere.", "Model settings…"):
+            assert words in menu, (words, menu)
+        assert "Where the model went" not in menu and "the model:" not in menu, menu
+        escape()
+    else:
+        assert s.execute("return !!document.querySelector('main header [data-usage=waiting]');"), "no usage line placeholder"
+
+    # Settings for this model from the picker's gear.
+    s.click_button("Model for this chat")
+    el = s.wait_for(lambda: s.execute(
+        "return document.querySelector('[role=menuitem][aria-label^=\"Settings for this model\"]') || false;"), 15, "the picker's gear")
+    try:
+        s.click(next(iter(el.values())))
+    except WebDriverError:
+        s.execute("arguments[0].click();", el)
+    s.wait_text("Settings for this model", 10)
+    s.wait_text("How much of the chat the model can see at once.", 60)
+    if not real:
+        notes.append("waiting for integration: Where the model goes, Fine control")
+        escape()
+    else:
+        s.wait_text("Where the model goes", 20)
+        page = s.page_text()
+        assert "Memory is counted the way Task Manager counts it" in page, page[-600:]
+        assert "Computer memory · " in page and "Needs about " in page, page[-900:]
+        notes.append("picture: " + page[page.index("Where the model goes"):][:400].replace("\n", " | "))
+        assert summary() is not None and summary().startswith("Fine control"), summary()
+        assert " · changed" not in summary(), summary()
+        assert not s.execute("return document.querySelector('details[data-section=fine]').open;")
+        # Open Fine control: llama.cpp works out the exact figures.
+        el = s.execute("return document.querySelector('details[data-section=fine] summary');")
+        s.click(next(iter(el.values())))
+        began = time.time()
+        s.wait_for(lambda: any(w in s.page_text() for w in (
+            "Worked out for these settings.", "Exact figures couldn't be worked out", "Working them out took too long",
+            "can't work out exact figures")), 60, "the measurement's answer")
+        page = s.page_text()
+        measured = "Worked out for these settings." in page
+        notes.append(f"measurement answered in {time.time() - began:.1f} s: " + ("worked out" if measured else page[page.index("Where the model goes"):][:300]))
+        assert measured, page[-900:]
+        s.screenshot(str(OUT / "fine-control-open.png"))
+        # Processor only here: no layer, expert, conversation memory or Leave free settings.
+        for css in ("#fine-layers", "#fine-experts", "#fine-kv", "#fine-leave-free"):
+            assert not s.execute("return !!document.querySelector(arguments[0]);", css), css
+        threads = info["fineFacts"]["threads"]
+        set_select("#fine-threads", "count")
+        set_range("#fine-threads-count", 2)
+        words = s.execute("return document.querySelector('#fine-threads-count').parentElement.innerText;")
+        assert words.strip() == f"2 of {threads} threads", words
+        set_select("#fine-fast-attention", "off")
+        s.wait_for(lambda: " · changed" in (summary() or ""), 10, "' · changed' on Fine control")
+        notes.append("summary: " + summary())
+        # The figures are worked out again for the new choices.
+        s.wait_for(lambda: "Worked out for these settings." in s.page_text(), 60, "the measurement for the new choices")
+        click_reset = s.execute("return [...document.querySelectorAll('details[data-section=fine] button')].find(b => b.innerText.trim() === 'Reset fine control');")
+        s.click(next(iter(click_reset.values())))
+        time.sleep(0.4)
+        assert " · changed" not in summary(), summary()
+        assert s.execute("return document.querySelector('#fine-threads').value;") == "auto"
+        assert s.execute("return document.querySelector('#fine-fast-attention').value;") == "auto"
+        # Nothing was saved.
+        assert "fine" not in s.invoke("model_load_info", {"path": model})["overrides"]
+        escape()
+
+    # A chat on an endpoint: the usage line is there; its menu has nothing about a model.
+    new_chat(c)
+    if usage_real:
+        line = s.wait_for(usage_line, 15, "the usage line for a chat on an endpoint")
+        notes.append(f"endpoint chat: {line['form']} {line['text']!r}")
+        menu = open_usage_menu()
+        notes.append("usage menu (endpoint): " + menu.replace("\n", " | ")[:300])
+        assert "Where the model went" not in menu and "Model settings" not in menu and "The model uses" not in menu, menu
+        escape()
+
+
+PROBES.append(p_fine_control)  # [0.0.6 item 6, WP10e]
 
 
 def main() -> int:

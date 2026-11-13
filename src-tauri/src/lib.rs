@@ -29,6 +29,8 @@ mod mentions;
 mod model_options;
 mod models_cmd;
 mod navigation;
+// 0.0.6 item 6 (WP10d): "Where the model goes" and the usage line.
+mod offload;
 mod outputs;
 mod outside_agent;
 mod overlay;
@@ -51,6 +53,7 @@ mod tool_select;
 mod toolset;
 mod turns;
 mod updates;
+mod usage_cmd;
 
 use std::sync::Arc;
 
@@ -293,6 +296,9 @@ pub fn run() {
             reverse_cmd::reverse_install_apple_tools,
             // 0.0.6 item 5: a program file dropped on the message box (WP9h).
             reverse_drop::reverse_dropped,
+            // 0.0.6 item 6 (WP10d): llama.cpp's measurement and the usage line.
+            models_cmd::offload_measure,
+            usage_cmd::usage_now,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -354,6 +360,8 @@ pub fn run() {
                 skills,
                 grants: Default::default(),
                 model_busy: Default::default(),
+                offload: Default::default(),
+                usage: Default::default(),
             });
             app.manage(turns::PendingApprovals::default());
             // 0.0.6 item 5: the decompiler chosen in Settings → Reverse engineering.

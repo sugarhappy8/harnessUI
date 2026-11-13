@@ -67,6 +67,8 @@ http = { workspace = true }
 bytes = { workspace = true }
 # 0.0.5 setup text for Codex (share/setup_text.rs) is written with the TOML serialiser.
 toml = { workspace = true, features = ["display"] }
+# 0.0.6 item 6: the usage line's readers (crates/usage, WP10c).
+usage = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Reading the Windows build number (ROCm needs Windows 11 25H2); same major as Tauri.

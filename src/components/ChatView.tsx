@@ -249,8 +249,9 @@ export function ChatView() {
   return (
     <main className="flex min-w-0 flex-1 flex-col">
       <header className="glass @container z-10 flex items-center gap-1.5 border-b border-border px-3 py-2">
-        {/* [0.0.6 item 6] This computer's usage under the model name (WP10e). */}
-        <div className="flex min-w-0 shrink flex-col">
+        {/* [0.0.6 item 6] This computer's usage under the model name (WP10e); in a narrow
+            header it keeps room for its icons and their numbers. */}
+        <div className="flex min-w-0 shrink flex-col @max-xl:min-w-[8.5rem]">
           <ModelPicker />
           <UsageLine />
         </div>

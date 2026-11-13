@@ -1257,6 +1257,9 @@ impl Machine {
                     recommended: recommended.as_deref() == Some(d.name.as_str()),
                 })
                 .collect(),
+            // Set by the caller, which reads the system (`plan_from`).
+            ram_total_bytes: 0,
+            threads: 0,
         }
     }
 }
@@ -1746,6 +1749,7 @@ mod tests {
             keep_in_memory: Toggle::Off,
             device: DeviceChoice::Named("Vulkan1".into()),
             thinking_limit: ThinkingChoice::Short,
+            fine: FineControl::default(),
         };
         let v = serde_json::to_value(&all).unwrap();
         assert_eq!(
@@ -1878,6 +1882,7 @@ mod tests {
                 vocab: 128_256,
                 thinking: true,
             }),
+            layers: None,
         }
     }
 
@@ -2201,6 +2206,7 @@ mod tests {
                 backend: Some("vulkan".into()),
                 device: Some("Vulkan1".into()),
                 mmproj: Some("/models/mmproj.gguf".into()),
+                fine: FineLaunch::default(),
             }
         );
         // Its own choices win, field by field.
@@ -2211,6 +2217,7 @@ mod tests {
             keep_in_memory: Toggle::On,
             device: DeviceChoice::Auto,
             thinking_limit: ThinkingChoice::Short,
+            fine: FineControl::default(),
         };
         let r = resolve(&own, &defaults, None, Some(&facts()), &machine);
         assert_eq!(
@@ -2977,3 +2984,7 @@ mod tests {
         }
     }
 }
+
+/// Fine control (0.0.6 item 6, WP10d): storage, checks, the resolver and the marks.
+#[cfg(test)]
+mod fine_tests;

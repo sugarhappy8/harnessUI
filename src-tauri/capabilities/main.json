@@ -213,6 +213,8 @@
     "allow-reverse-set-decompiler",
     "allow-reverse-clear-cache",
     "allow-reverse-install-apple-tools",
-    "allow-reverse-dropped"
+    "allow-reverse-dropped",
+    "allow-offload-measure",
+    "allow-usage-now"
   ]
 }

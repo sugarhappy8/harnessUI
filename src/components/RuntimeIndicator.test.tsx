@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ChatDetail, LoadFailure, ModelBusy, RuntimeStatus, ShareStatus } from "../lib/types";
+import { placement } from "./fine.fixtures";
 
 // Radix positions menus with ResizeObserver, which jsdom does not have.
 globalThis.ResizeObserver ??= class {
@@ -35,7 +36,7 @@ const ipcMock = vi.hoisted(() => ({
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 
-const { RuntimeIndicator, runtimeNotes } = await import("./RuntimeIndicator");
+const { RuntimeIndicator, runtimeNotes, partOnProcessor } = await import("./RuntimeIndicator");
 const { useApp } = await import("../store/app");
 const { useRestartNote, useWaiting } = await import("../store/modelChange");
 const { useApprovalMode } = await import("../lib/approvalMode");
@@ -418,5 +419,66 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect(text()).toContain("Unloaded to free memory");
     await click(screen.getByRole("button", { name: "Load" }));
     expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/a.gguf", null, true);
+  });
+});
+
+describe("RuntimeIndicator: where the model went (0.0.6 item 6)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.modelBusy.mockResolvedValue(IDLE);
+    ipcMock.shareStatus.mockResolvedValue(SHARE_OFF);
+    useWaiting.setState({ change: null, kind: null });
+    useRestartNote.setState({ shown: false });
+  });
+  afterEach(cleanup);
+
+  const PARTIAL =
+    "Part of the model runs on the processor, so replies are slower. Save memory or a smaller memory size lets more fit on the graphics card.";
+  const notes = (patch: Partial<RuntimeStatus>) =>
+    runtimeNotes(status(patch), { restarted: false, hasMessages: false }).map((n) => n.text);
+
+  it("says part of the model runs on the processor from the ready line's report, expert parts included", async () => {
+    // As much as fits left 11 of 41 layers on the processor.
+    expect(notes({ placement: placement({ custom: false, layersAbout: true }) })).toEqual([PARTIAL]);
+    // All layers on the card, but the expert parts of some on the processor.
+    expect(notes({ placement: placement({ custom: false, layersOnGraphics: 41, expertLayersOnProcessor: 19 }) })).toEqual([PARTIAL]);
+    // Everything on the card: no note.
+    expect(notes({ placement: placement({ custom: false, layersOnGraphics: 41 }) })).toEqual([]);
+    // The report wins over the old layer counts.
+    expect(notes({ offloadedLayers: 10, totalLayers: 20, placement: placement({ custom: false, layersOnGraphics: 41 }) })).toEqual([]);
+    await show(status({ placement: placement({ custom: false, layersAbout: true }) }));
+    expect(screen.getByRole("status").textContent).toContain(PARTIAL);
+    expect(screen.getByRole("button", { name: "Model settings…" })).toBeTruthy();
+  });
+
+  it("says nothing of the kind for a placement chosen in Fine control, or with nothing on the card", () => {
+    expect(notes({ placement: placement({ custom: true }) })).toEqual([]);
+    expect(notes({ placement: placement({ custom: true, layersOnGraphics: 41, expertLayersOnProcessor: 20 }) })).toEqual([]);
+    expect(notes({ placement: placement({ custom: false, graphics: null, layersOnGraphics: 0 }) })).toEqual([]);
+    // Only amounts known: no claim about layers.
+    expect(notes({ placement: placement({ custom: false, layersOnGraphics: null }) })).toEqual([]);
+    expect(partOnProcessor(status({ backend: "cpu", placement: placement({ custom: false, layersAbout: true }) }))).toBe(true);
+    // Without a report (a backend without item 6) the old layer counts still work.
+    const old = status({ offloadedLayers: 10, totalLayers: 20 }) as Partial<RuntimeStatus>;
+    delete old.placement;
+    expect(partOnProcessor(old as RuntimeStatus)).toBe(true);
+  });
+
+  it("words the two new retries in the loading line and after the load", async () => {
+    await show(status({ state: "starting", progress: null, loadStage: { kind: "retryingWithoutFastAttention", backend: "vulkan" } }));
+    expect(document.body.textContent).toContain("Loading model · Trying again without Fast attention");
+    cleanup();
+    expect(
+      notes({ adjustments: [{ kind: "retryingWithLessGpu", backend: "vulkan", custom: true, chosenLayers: 40 }], placement: placement({ custom: false, layersAbout: true }) }),
+    ).toEqual([
+      "The 40 layers you chose didn't fit on the graphics card, so As much as fits was used for this load. Choose fewer layers in Fine control.",
+    ]);
+    const after = runtimeNotes(status({ adjustments: [{ kind: "retryingWithoutFastAttention", backend: "vulkan" }] }), {
+      restarted: false,
+      hasMessages: false,
+    });
+    expect(after.map((n) => [n.text, n.action])).toEqual([
+      ["Fast attention doesn't work with this graphics card, so it was turned off for this load.", "settings"],
+    ]);
   });
 });

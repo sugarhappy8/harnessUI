@@ -38,7 +38,7 @@ function show(opts: Opts = {}) {
     />
   );
   const { rerender } = render(view(fine));
-  return { writes, onToggle, last: () => writes[writes.length - 1] };
+  return { writes, onToggle, last: (): FineSettings => writes[writes.length - 1] as FineSettings };
 }
 
 function select(label: string): HTMLSelectElement {

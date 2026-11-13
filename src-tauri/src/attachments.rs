@@ -48,6 +48,144 @@ fn extension(mime: &str) -> &'static str {
     }
 }
 
+/// [0.0.6] Widest or tallest WebP picture turned into PNG, in pixels.
+const MAX_PICTURE_SIDE: u32 = 8_192;
+/// [0.0.6] Most memory the WebP decoder may set aside for one picture's pixels: 128 MiB, a
+/// 33-megapixel picture with see-through parts or a 44-megapixel one without.
+const MAX_PICTURE_DECODE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// [0.0.6] What the user is told when a WebP picture cannot be turned into PNG (broken, or
+/// larger than the limits); what went wrong is in the details.
+fn unreadable_picture(details: impl Into<String>) -> AppError {
+    AppError::new(
+        "picture_unreadable",
+        "This picture could not be read.",
+        "Try a PNG or JPEG.",
+        details,
+    )
+}
+
+/// [0.0.6] Whether every picture header in a WebP file, its own and each animation frame's,
+/// claims at most [`MAX_PICTURE_SIDE`] pixels a side. The decoder checks the limits against
+/// the canvas only, but sizes its buffers from each frame's own header, so a small canvas
+/// holding a frame that claims 16,383 x 16,383 pixels would cost about 400 MB before it is
+/// refused. A header cut short counts as too large.
+fn webp_sides_within_limits(bytes: &[u8]) -> bool {
+    fn side_ok(side: u32) -> bool {
+        side <= MAX_PICTURE_SIDE
+    }
+    fn chunks_ok(mut data: &[u8], in_frame: bool) -> bool {
+        while data.len() >= 8 {
+            let size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+            let body = &data[8..];
+            let body = &body[..size.min(body.len())];
+            let ok = match &data[..4] {
+                b"VP8 " => {
+                    body.len() >= 10
+                        && side_ok(u32::from(u16::from_le_bytes([body[6], body[7]]) & 0x3FFF))
+                        && side_ok(u32::from(u16::from_le_bytes([body[8], body[9]]) & 0x3FFF))
+                }
+                b"VP8L" => {
+                    body.len() >= 5 && {
+                        let header = u32::from_le_bytes([body[1], body[2], body[3], body[4]]);
+                        side_ok((header & 0x3FFF) + 1) && side_ok(((header >> 14) & 0x3FFF) + 1)
+                    }
+                }
+                // A frame's picture follows its 16-byte frame header.
+                b"ANMF" if !in_frame => body.len() < 16 || chunks_ok(&body[16..], true),
+                _ => true,
+            };
+            if !ok {
+                return false;
+            }
+            // Each chunk is padded to an even size.
+            let next = size.saturating_add(8).saturating_add(size & 1);
+            if next >= data.len() {
+                break;
+            }
+            data = &data[next..];
+        }
+        true
+    }
+    bytes.len() >= 12 && chunks_ok(&bytes[12..], false)
+}
+
+/// [0.0.6] A WebP picture as PNG (the first frame of an animation), decoded within limits so
+/// a crafted file cannot exhaust memory: at most [`MAX_PICTURE_SIDE`] pixels a side, the
+/// canvas and every frame ([`webp_sides_within_limits`]), and [`MAX_PICTURE_DECODE_BYTES`]
+/// for the pixels. Pure Rust (the `image` crate's WebP decoder); nothing else is started.
+fn webp_to_png(bytes: &[u8]) -> image::ImageResult<Vec<u8>> {
+    use image::error::{LimitError, LimitErrorKind};
+    if !webp_sides_within_limits(bytes) {
+        return Err(image::ImageError::Limits(LimitError::from_kind(
+            LimitErrorKind::DimensionError,
+        )));
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_PICTURE_SIDE);
+    limits.max_image_height = Some(MAX_PICTURE_SIDE);
+    limits.max_alloc = Some(MAX_PICTURE_DECODE_BYTES);
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::WebP);
+    reader.limits(limits);
+    let picture = reader.decode()?;
+    let mut png = Vec::new();
+    picture.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+    Ok(png)
+}
+
+/// [0.0.6] A picture's MIME type and bytes as the model gets them. llama-server reads WebP
+/// only through ffmpeg, which the app never lets it start (`--video-ffmpeg-dir` is a fixed
+/// empty folder), so a WebP picture becomes PNG ([`webp_to_png`]); PNG, JPEG and GIF are
+/// kept byte for byte. A WebP picture that cannot be turned into PNG gives the user's
+/// plain message, also if the decoder panics.
+fn picture_for_model(mime: String, bytes: Vec<u8>) -> AppResult<(String, Vec<u8>)> {
+    if mime != "image/webp" {
+        return Ok((mime, bytes));
+    }
+    match std::panic::catch_unwind(|| webp_to_png(&bytes)) {
+        Ok(Ok(png)) => Ok(("image/png".to_owned(), png)),
+        Ok(Err(e)) => Err(unreadable_picture(e.to_string())),
+        Err(_) => Err(unreadable_picture("the WebP decoder stopped")),
+    }
+}
+
+/// [0.0.6] [`picture_for_model`] away from the async threads: a large picture takes a while
+/// to decode and encode.
+async fn picture_for_model_async(mime: String, bytes: Vec<u8>) -> AppResult<(String, Vec<u8>)> {
+    if mime != "image/webp" {
+        return Ok((mime, bytes));
+    }
+    tokio::task::spawn_blocking(move || picture_for_model(mime, bytes))
+        .await
+        .map_err(|e| unreadable_picture(e.to_string()))?
+}
+
+/// A composer picture checked (its size, and that its bytes really are the type it claims)
+/// and in the form it is stored and sent: its MIME type, file extension and bytes. [0.0.6] A
+/// WebP picture comes back as PNG ([`picture_for_model`]).
+async fn checked_picture(img: &ImageInput) -> AppResult<(String, &'static str, Vec<u8>)> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(img.data.as_bytes())
+        .map_err(|_| AppError::bad_request("An attached image could not be read."))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(AppError::bad_request(format!(
+            "{} is larger than {} MB.",
+            img.file_name,
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        )));
+    }
+    if !sniff(&img.mime, &bytes) {
+        return Err(AppError::bad_request(format!(
+            "{} is not a PNG, JPEG, GIF or WebP image.",
+            img.file_name
+        )));
+    }
+    let (mime, bytes) = picture_for_model_async(img.mime.clone(), bytes).await?;
+    let ext = extension(&mime);
+    Ok((mime, ext, bytes))
+}
+
 fn store_dir(app: &AppHandle) -> AppResult<PathBuf> {
     let dir = app
         .path()
@@ -73,27 +211,12 @@ pub async fn save_images(
     let dir = store_dir(app)?;
     let mut parts = Vec::new();
     for img in images {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(img.data.as_bytes())
-            .map_err(|_| AppError::bad_request("An attached image could not be read."))?;
-        if bytes.len() > MAX_IMAGE_BYTES {
-            return Err(AppError::bad_request(format!(
-                "{} is larger than {} MB.",
-                img.file_name,
-                MAX_IMAGE_BYTES / (1024 * 1024)
-            )));
-        }
-        if !sniff(&img.mime, &bytes) {
-            return Err(AppError::bad_request(format!(
-                "{} is not a PNG, JPEG, GIF or WebP image.",
-                img.file_name
-            )));
-        }
+        let (mime, ext, bytes) = checked_picture(img).await?;
         let sha: String = Sha256::digest(&bytes)
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        let path = dir.join(format!("{sha}.{}", extension(&img.mime)));
+        let path = dir.join(format!("{sha}.{ext}"));
         if !path.exists() {
             let tmp = path.with_extension("tmp");
             std::fs::write(&tmp, &bytes).map_err(|e| AppError::internal(e.to_string()))?;
@@ -110,7 +233,7 @@ pub async fn save_images(
             .insert_attachment(store::NewAttachment {
                 chat_id,
                 sha256: sha,
-                mime: img.mime.clone(),
+                mime,
                 file_name: name,
                 size_bytes: bytes.len() as u64,
                 bytes_path: path.display().to_string(),
@@ -562,8 +685,19 @@ pub fn image_ids(content: &serde_json::Value) -> Vec<i64> {
         .unwrap_or_default()
 }
 
-/// Base64 of an attachment's bytes with its MIME type.
+/// Base64 of an attachment's bytes with its MIME type, as the model gets them: [0.0.6] a
+/// WebP picture stored by an earlier version is turned into PNG here ([`picture_for_model`]).
 pub async fn load_base64(state: &AppState, id: i64) -> AppResult<(String, String)> {
+    let (mime, bytes) = load_bytes(state, id).await?;
+    let (mime, bytes) = picture_for_model_async(mime, bytes).await?;
+    Ok((
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    ))
+}
+
+/// An attachment's MIME type and bytes as stored.
+async fn load_bytes(state: &AppState, id: i64) -> AppResult<(String, Vec<u8>)> {
     let att = state
         .store
         .get_attachment(store::AttachmentId(id))
@@ -577,16 +711,15 @@ pub async fn load_base64(state: &AppState, id: i64) -> AppResult<(String, String
             e.to_string(),
         )
     })?;
-    Ok((
-        att.mime,
-        base64::engine::general_purpose::STANDARD.encode(bytes),
-    ))
+    Ok((att.mime, bytes))
 }
 
-/// A data: URI for showing an attachment in the chat (CSP allows `img-src data:`).
+/// A data: URI for showing an attachment in the chat (CSP allows `img-src data:`): the bytes
+/// as stored ([0.0.6] the webview shows a WebP picture from an earlier version itself).
 #[tauri::command]
 pub async fn get_attachment(state: State<'_, AppState>, id: i64) -> AppResult<String> {
-    let (mime, b64) = load_base64(&state, id).await?;
+    let (mime, bytes) = load_bytes(&state, id).await?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{mime};base64,{b64}"))
 }
 
@@ -929,5 +1062,296 @@ mod tests {
                 "{note}"
             );
         }
+    }
+
+    /// A 4 x 3 lossy WebP picture (made with Pillow): left half red, right half blue.
+    const LOSSY_WEBP: &[u8] = &[
+        0x52, 0x49, 0x46, 0x46, 0x5c, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x20, 0x50, 0x00, 0x00, 0x00, 0x70, 0x03, 0x00, 0x9d, 0x01, 0x2a, 0x04, 0x00, 0x03, 0x00,
+        0x00, 0xc0, 0x12, 0x25, 0xa8, 0x02, 0x74, 0xba, 0x01, 0x40, 0x03, 0xf0, 0x02, 0xb4, 0x03,
+        0xf8, 0x06, 0x50, 0x07, 0xe8, 0x00, 0x2d, 0xda, 0xcb, 0xc2, 0xc0, 0x00, 0xfe, 0xfe, 0x7a,
+        0x36, 0x21, 0xbf, 0xaa, 0x18, 0xff, 0xfd, 0x1f, 0x89, 0x32, 0x46, 0xb5, 0xff, 0xf8, 0x33,
+        0x1f, 0xfd, 0x0d, 0x46, 0x1a, 0xb0, 0x5c, 0xff, 0xf0, 0x66, 0x3f, 0xb4, 0x89, 0x9b, 0x6b,
+        0xdf, 0xbb, 0x70, 0x64, 0xb6, 0x15, 0x01, 0xe7, 0x40, 0x00,
+    ];
+    /// A 3 x 2 lossless WebP picture with see-through parts (made with Pillow): green, the
+    /// top left pixel clear and the bottom right one (10, 20, 30) half see-through.
+    const LOSSLESS_WEBP: &[u8] = &[
+        0x52, 0x49, 0x46, 0x46, 0x36, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x4c, 0x2a, 0x00, 0x00, 0x00, 0x2f, 0x02, 0x40, 0x00, 0x10, 0x17, 0x20, 0x90, 0x4d, 0x0e,
+        0x11, 0x76, 0xfe, 0x13, 0x12, 0x24, 0x64, 0xff, 0x6f, 0x35, 0x0b, 0x04, 0x92, 0x48, 0xf6,
+        0xe7, 0x9a, 0x44, 0x40, 0x50, 0xf4, 0x9c, 0xe9, 0x01, 0xd5, 0x7f, 0xb8, 0x06, 0x4a, 0x44,
+        0xff, 0x23,
+    ];
+    /// A 4 x 4 animated WebP picture (made with Pillow): a yellow frame, then a blue one.
+    const ANIMATED_WEBP: &[u8] = &[
+        0x52, 0x49, 0x46, 0x46, 0x84, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x58, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x41, 0x4e, 0x49, 0x4d, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41,
+        0x4e, 0x4d, 0x46, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
+        0x00, 0x03, 0x00, 0x00, 0x64, 0x00, 0x00, 0x02, 0x56, 0x50, 0x38, 0x4c, 0x10, 0x00, 0x00,
+        0x00, 0x2f, 0x03, 0xc0, 0x00, 0x00, 0x07, 0x50, 0xe4, 0xea, 0x47, 0xff, 0x03, 0x11, 0xd1,
+        0xff, 0x00, 0x41, 0x4e, 0x4d, 0x46, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x56, 0x50, 0x38, 0x4c,
+        0x0f, 0x00, 0x00, 0x00, 0x2f, 0x03, 0xc0, 0x00, 0x00, 0x07, 0x10, 0x51, 0xfd, 0xfe, 0x07,
+        0x22, 0xa2, 0xff, 0x01, 0x00,
+    ];
+
+    fn picture(mime: &str, bytes: &[u8]) -> ImageInput {
+        ImageInput {
+            mime: mime.to_owned(),
+            file_name: "picture".to_owned(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    fn png_pixels(bytes: &[u8]) -> image::RgbaImage {
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
+        image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+            .expect("a valid PNG")
+            .to_rgba8()
+    }
+
+    /// A WebP file holding `chunks` (name and body), with the sizes filled in and odd
+    /// bodies padded, as the format has it.
+    fn riff(chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut body = b"WEBP".to_vec();
+        for (name, data) in chunks {
+            body.extend_from_slice(*name);
+            body.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+            body.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                body.push(0);
+            }
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        out.extend(body);
+        out
+    }
+
+    /// The start of a lossy (VP8) key frame claiming `w` x `h` pixels, and no picture data.
+    fn vp8_claiming(w: u16, h: u16) -> Vec<u8> {
+        let mut d = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a];
+        d.extend_from_slice(&w.to_le_bytes());
+        d.extend_from_slice(&h.to_le_bytes());
+        d.extend_from_slice(&[0; 32]);
+        d
+    }
+
+    /// The start of a lossless (VP8L) picture with see-through parts claiming `w` x `h`
+    /// pixels, and no picture data.
+    fn vp8l_claiming(w: u32, h: u32) -> Vec<u8> {
+        let header = (w - 1) | ((h - 1) << 14) | (1 << 28);
+        let mut d = vec![0x2f];
+        d.extend_from_slice(&header.to_le_bytes());
+        d.extend_from_slice(&[0; 32]);
+        d
+    }
+
+    /// An extended-format header (VP8X): `flags` (2 animated, 16 see-through) and a canvas
+    /// of `w` x `h` pixels.
+    fn vp8x(flags: u8, w: u32, h: u32) -> Vec<u8> {
+        let mut d = vec![flags, 0, 0, 0];
+        d.extend_from_slice(&(w - 1).to_le_bytes()[..3]);
+        d.extend_from_slice(&(h - 1).to_le_bytes()[..3]);
+        d
+    }
+
+    /// An animation frame (ANMF) of 1 x 1 pixels at the top left holding `name` / `data`.
+    fn frame_holding(name: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut d = vec![0; 12];
+        d.extend_from_slice(&[100, 0, 0, 0]);
+        d.extend_from_slice(name);
+        d.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+        d.extend_from_slice(data);
+        d
+    }
+
+    /// A valid lossless WebP picture of one colour, `w` x `h` pixels: tiny however large.
+    fn plain_webp(w: u32, h: u32) -> Vec<u8> {
+        let pixels = vec![90u8; (w * h * 3) as usize];
+        let mut out = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+            .encode(&pixels, w, h, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        out
+    }
+
+    /// [0.0.6] llama-server cannot read WebP (it would need ffmpeg, which the app never lets
+    /// it start), so a WebP picture is stored and sent as PNG: the same size and colours,
+    /// see-through parts kept, and the first frame of an animation.
+    #[tokio::test]
+    async fn a_webp_picture_is_stored_and_sent_as_png() {
+        let (mime, ext, bytes) = checked_picture(&picture("image/webp", LOSSY_WEBP))
+            .await
+            .unwrap();
+        assert_eq!((mime.as_str(), ext), ("image/png", "png"));
+        let px = png_pixels(&bytes);
+        assert_eq!(px.dimensions(), (4, 3));
+        let [r, _, b, a] = px.get_pixel(0, 0).0;
+        assert!(r > 180 && b < 80 && a == 255, "{:?}", px.get_pixel(0, 0));
+        let [r, _, b, _] = px.get_pixel(3, 0).0;
+        assert!(b > 180 && r < 80, "{:?}", px.get_pixel(3, 0));
+
+        let (mime, _, bytes) = checked_picture(&picture("image/webp", LOSSLESS_WEBP))
+            .await
+            .unwrap();
+        assert_eq!(mime, "image/png");
+        let px = png_pixels(&bytes);
+        assert_eq!(px.dimensions(), (3, 2));
+        assert_eq!(px.get_pixel(1, 0).0, [0, 160, 0, 255]);
+        assert_eq!(px.get_pixel(2, 1).0, [10, 20, 30, 128]);
+        assert_eq!(px.get_pixel(0, 0).0[3], 0);
+
+        let (mime, _, bytes) = checked_picture(&picture("image/webp", ANIMATED_WEBP))
+            .await
+            .unwrap();
+        assert_eq!(mime, "image/png");
+        let px = png_pixels(&bytes);
+        assert_eq!(px.dimensions(), (4, 4));
+        assert_eq!(px.get_pixel(2, 2).0, [250, 200, 0, 255]);
+    }
+
+    /// [0.0.6] PNG, JPEG and GIF pictures are stored and sent byte for byte as they came.
+    #[tokio::test]
+    async fn png_jpeg_and_gif_pictures_are_kept_as_they_are() {
+        for (mime, ext, bytes) in [
+            ("image/png", "png", &b"\x89PNG\r\n\x1a\nnot decoded"[..]),
+            ("image/jpeg", "jpg", &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3][..]),
+            ("image/gif", "gif", &b"GIF89a not decoded"[..]),
+        ] {
+            let got = checked_picture(&picture(mime, bytes)).await.unwrap();
+            assert_eq!(got, (mime.to_owned(), ext, bytes.to_vec()), "{mime}");
+        }
+    }
+
+    /// [0.0.6] A WebP picture that is broken, or larger than the decoder may take, gives the
+    /// user a plain message, and nothing panics: cut short, not a picture inside, wider than
+    /// 8,192 pixels, more pixels than the memory limit, or a frame inside claiming more than
+    /// its canvas.
+    #[tokio::test]
+    async fn a_broken_or_oversized_webp_gives_the_plain_message() {
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("cut short", LOSSY_WEBP[..40].to_vec()),
+            (
+                "bad frame",
+                riff(&[(b"VP8 ", vec![0x10, 0x02, 0x00, 1, 2, 3, 4])]),
+            ),
+            ("no picture", riff(&[(b"JUNK", vec![0; 16])])),
+            ("too wide", plain_webp(10_000, 8)),
+            (
+                "too many pixels",
+                riff(&[(b"VP8L", vp8l_claiming(8_000, 8_000))]),
+            ),
+            (
+                "largest lossy",
+                riff(&[(b"VP8 ", vp8_claiming(16_383, 16_383))]),
+            ),
+            (
+                "frame larger than its canvas",
+                riff(&[
+                    (b"VP8X", vp8x(0, 1, 1)),
+                    (b"VP8 ", vp8_claiming(16_383, 16_383)),
+                ]),
+            ),
+            (
+                "animation frame larger than its canvas",
+                riff(&[
+                    (b"VP8X", vp8x(2, 2, 2)),
+                    (b"ANIM", vec![0; 6]),
+                    (
+                        b"ANMF",
+                        frame_holding(b"VP8 ", &vp8_claiming(16_383, 16_383)),
+                    ),
+                ]),
+            ),
+        ];
+        for (what, bytes) in cases {
+            let err = checked_picture(&picture("image/webp", &bytes))
+                .await
+                .expect_err(what);
+            assert_eq!(err.code, "picture_unreadable", "{what}");
+            assert_eq!(err.message, "This picture could not be read.", "{what}");
+            assert_eq!(err.next_step, "Try a PNG or JPEG.", "{what}");
+        }
+    }
+
+    /// [0.0.6] The limits refuse an oversized WebP picture before it is decoded (a limit
+    /// error, not a decoding error after the buffers were made), including a frame that
+    /// claims more than its small canvas; a picture at the limit is still turned into PNG.
+    #[test]
+    fn the_webp_limits_refuse_before_decoding() {
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("too wide", plain_webp(10_000, 8)),
+            ("too tall", plain_webp(8, 10_000)),
+            (
+                "too many pixels",
+                riff(&[(b"VP8L", vp8l_claiming(8_000, 8_000))]),
+            ),
+            (
+                "largest lossy",
+                riff(&[(b"VP8 ", vp8_claiming(16_383, 16_383))]),
+            ),
+            (
+                "frame larger than its canvas",
+                riff(&[
+                    (b"VP8X", vp8x(0, 1, 1)),
+                    (b"VP8 ", vp8_claiming(16_383, 16_383)),
+                ]),
+            ),
+            (
+                "animation frame larger than its canvas",
+                riff(&[
+                    (b"VP8X", vp8x(2, 2, 2)),
+                    (b"ANIM", vec![0; 6]),
+                    (
+                        b"ANMF",
+                        frame_holding(b"VP8L", &vp8l_claiming(16_384, 16_384)),
+                    ),
+                ]),
+            ),
+            (
+                "canvas too large",
+                riff(&[
+                    (b"VP8X", vp8x(16, 9_000, 9_000)),
+                    (b"VP8L", vp8l_claiming(1, 1)),
+                ]),
+            ),
+        ];
+        for (what, bytes) in cases {
+            match webp_to_png(&bytes) {
+                Err(image::ImageError::Limits(_)) => {}
+                other => panic!("{what}: {other:?}"),
+            }
+        }
+        let png = webp_to_png(&plain_webp(MAX_PICTURE_SIDE, 2)).unwrap();
+        assert_eq!(png_pixels(&png).dimensions(), (MAX_PICTURE_SIDE, 2));
+    }
+
+    /// [0.0.6] No WebP file, however damaged, makes the decoder panic: every cut and many
+    /// changed bytes of the three sample pictures give a PNG or an error.
+    #[test]
+    fn damaged_webp_files_never_panic() {
+        let mut tried = 0;
+        for sample in [LOSSY_WEBP, LOSSLESS_WEBP, ANIMATED_WEBP] {
+            for end in 0..sample.len() {
+                if let Ok(png) = webp_to_png(&sample[..end]) {
+                    png_pixels(&png);
+                }
+                tried += 1;
+            }
+            for at in 0..sample.len() {
+                for change in [0x00, 0xFF, sample[at] ^ 0x55, sample[at].wrapping_add(1)] {
+                    let mut bytes = sample.to_vec();
+                    bytes[at] = change;
+                    if let Ok(png) = webp_to_png(&bytes) {
+                        png_pixels(&png);
+                    }
+                    tried += 1;
+                }
+            }
+        }
+        assert!(tried > 1_000, "{tried}");
     }
 }
