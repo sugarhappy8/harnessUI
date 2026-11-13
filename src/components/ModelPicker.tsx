@@ -29,6 +29,15 @@ export function ModelPicker() {
   // The settings panel opens as the menu closes; the menu must not take the focus back.
   const openingSettings = useRef(false);
 
+  // [0.0.6 item 8] The list names this chat's own model file the way the chat does (a link, a
+  // mapped drive), so it is read again when the chat's model changes (another chat, a pick).
+  const listedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (listedFor.current === current) return;
+    listedFor.current = current;
+    refreshModelOptions().catch(() => undefined);
+  }, [current, refreshModelOptions]);
+
   // [0.0.6 item 8] A finished download shows up in the list without the menu being reopened.
   useEffect(() => {
     let alive = true;

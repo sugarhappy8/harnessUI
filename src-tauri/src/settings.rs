@@ -69,9 +69,9 @@ pub async fn local_model_settings(app: &AppHandle) -> LocalModelSettings {
         .unwrap_or_default()
 }
 
-/// Remembers a model file so it appears first in the model picker: the spelling it was
-/// opened with (the chat's reference), with any older spelling of the same file, found by
-/// its canonical path, dropped (0.0.6 item 8, `model_options`).
+/// Remembers a model file so it appears first in the model picker: its canonical path,
+/// with any older spelling of the same file dropped (0.0.6 item 8, `model_options`). The
+/// chat that opened it through a link or a mapped drive still sees that spelling there.
 pub async fn remember_local_model(state: &AppState, path: &str) {
     crate::model_options::remember(&state.store, path).await;
 }

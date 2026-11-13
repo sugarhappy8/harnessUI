@@ -114,8 +114,10 @@ export function Installed(props: { onClose: () => void }) {
       // The loaded model is unloaded first, the way Unload does it: when something uses it,
       // the D3 question comes first, and with Restart when it ends the delete waits for it
       // (a cancelled wait deletes nothing). Removing it never cuts a reply off unasked.
+      // [0.0.6 item 8] The same file loaded through a link or a mapped drive counts too.
       const runtime = useApp.getState().runtime;
-      if (isLoadedNow(runtime, m.path) && !(await unloadModel(runtime))) return;
+      const loaded = isLoadedNow(runtime, m.path) || (!!m.loadedAs && isLoadedNow(runtime, m.loadedAs));
+      if (loaded && !(await unloadModel(runtime))) return;
       await ipc.deleteModel(m.id, files);
       await load();
     } catch (err) {

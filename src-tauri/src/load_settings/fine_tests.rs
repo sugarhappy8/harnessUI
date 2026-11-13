@@ -528,7 +528,11 @@ async fn a_stored_fine_value_of_the_wrong_type_resets_only_that_value() {
             .await
             .unwrap();
         let o = read_overrides(&store, "m.gguf", 16).await;
-        assert_eq!((o.gpu, o.fine), (GpuChoice::Off, FineControl::default()), "{bad}");
+        assert_eq!(
+            (o.gpu, o.fine),
+            (GpuChoice::Off, FineControl::default()),
+            "{bad}"
+        );
     }
     // Every Fine control value the app saves reads back as it was (the field names of the
     // lenient reader follow the stored JSON).
@@ -548,7 +552,10 @@ async fn a_stored_fine_value_of_the_wrong_type_resets_only_that_value() {
     assert_eq!(read_overrides(&store, "m.gguf", 16).await, full);
     // A row that is not readable at all still follows the defaults for all models.
     store
-        .set_setting(&key, &json!({"gpu": "sideways", "fine": {"threads": {"count": 3}}}))
+        .set_setting(
+            &key,
+            &json!({"gpu": "sideways", "fine": {"threads": {"count": 3}}}),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -562,10 +569,8 @@ async fn a_stored_fine_value_of_the_wrong_type_resets_only_that_value() {
     );
     // Drafts from the webview stay strict: the same shapes are refused, not repaired.
     assert!(
-        serde_json::from_value::<ModelLoadSettings>(
-            json!({"fine": {"threads": {"count": 70000}}})
-        )
-        .is_err()
+        serde_json::from_value::<ModelLoadSettings>(json!({"fine": {"threads": {"count": 70000}}}))
+            .is_err()
     );
 }
 

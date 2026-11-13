@@ -179,6 +179,8 @@ pub async fn history_of(
         } else if let Some(t) = m.content.as_str() {
             parts.push(Part::Text(t.to_string()));
         }
+        // [0.0.6 pictures] a WebP picture stored by an earlier version becomes JPEG or PNG.
+        crate::attachments::stored_pictures_for_model(&mut parts).await;
         out.push(HistoryMessage {
             role: role_of(m.role),
             parts,
@@ -944,6 +946,8 @@ impl ToolHost for AppTools {
         crate::outputs::after_call(&self.app, chat_id, &call_id, name, &mut out).await;
         // [0.0.4 task] notes changed files and completed checks in the chat's task.
         crate::task::after_call(&self.app, chat_id, name, args, action, &out).await;
+        // [0.0.6 pictures] a WebP picture becomes JPEG or PNG (llama-server cannot read WebP).
+        crate::attachments::tool_pictures_for_model(&mut out).await;
         out
     }
 }

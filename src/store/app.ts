@@ -165,6 +165,9 @@ function lastMessageId(detail: ChatDetail | null): number | null {
 /** The tabs of the panel beside the chat. */
 export type WorkbenchTab = "artifacts" | "task" | "sources" | "context";
 
+/** [0.0.6 item 8] Counts reads of the chat's model list, so an older answer never replaces a newer one. */
+let modelOptionsRead = 0;
+
 export const useApp = create<AppState>((set, get) => {
   /** Re-reads a chat after a stream event. Never rejects: the chat may have been deleted
    * while its reply was being written, and the turn still has to end in the UI. */
@@ -415,8 +418,11 @@ export const useApp = create<AppState>((set, get) => {
     setRuntime: (s) => set({ runtime: s }),
 
     refreshModelOptions: async () => {
-      const modelOptions = await ipc.listModelOptions();
-      set({ modelOptions });
+      // [0.0.6 item 8] The open chat's own model file is listed the way the chat names it (a
+      // link, a mapped drive). Of two reads that cross, the newer one is kept.
+      const read = ++modelOptionsRead;
+      const modelOptions = await ipc.listModelOptions(get().detail?.chat.modelRef ?? null);
+      if (read === modelOptionsRead) set({ modelOptions });
     },
 
     setChatModel: async (modelRef) => {

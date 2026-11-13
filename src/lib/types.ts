@@ -410,6 +410,9 @@ export interface InstalledModel {
   projectorPath: string | null;
   summary: ModelSummaryView | null;
   architectureSupported: boolean | null;
+  /** [0.0.6 item 8] The path the model loaded now was loaded with, when it is this row's file
+   *  under any spelling (a link, a mapped drive). Sent only then. */
+  loadedAs?: string;
 }
 
 export interface HardwareInfo {

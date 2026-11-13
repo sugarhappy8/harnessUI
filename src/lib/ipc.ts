@@ -159,7 +159,10 @@ export const loadLocalModel = (path: string, settings?: LocalModelSettings | nul
  */
 export const unloadModel = (whenIdle?: boolean) =>
   unlessReplaced(invoke<void>("unload_model", { whenIdle: whenIdle ?? null }));
-export const listModelOptions = () => invoke<ModelOption[]>("list_model_options");
+/** [0.0.6 item 8] `chatModel`: the asking chat's model reference, whose own file is listed the
+ *  way it names it (a link, a mapped drive); no other chat sees that spelling. */
+export const listModelOptions = (chatModel?: string | null) =>
+  invoke<ModelOption[]>("list_model_options", { chatModel: chatModel ?? null });
 export const getLocalModelSettings = () =>
   invoke<LocalModelSettings>("get_local_model_settings");
 export const setLocalModelSettings = (settings: LocalModelSettings) =>

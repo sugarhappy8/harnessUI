@@ -60,6 +60,7 @@ use std::sync::Arc;
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, RunEvent, WebviewWindowBuilder};
 
+pub use attachments::{PICTURE_WORKER_FLAG, picture_worker_main};
 pub use children::REAPER_FLAG;
 
 /// Window labels. The capability files bind permissions to these labels.

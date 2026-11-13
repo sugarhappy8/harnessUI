@@ -825,9 +825,13 @@ fn find_projector(model: &Path) -> Option<String> {
     found.first().map(|p| p.display().to_string())
 }
 
-/// The projector recorded for an installed model, if any.
+/// The projector recorded for an installed model, if any, under any spelling of its path
+/// (a link, a mapped drive: 0.0.6 item 8, `model_options::installed_row`).
 pub async fn projector_for(state: &AppState, model_path: &str) -> Option<String> {
-    let rec = state.store.model_by_path(model_path).await.ok().flatten()?;
+    let rec = crate::model_options::installed_row(&state.store, model_path)
+        .await
+        .ok()
+        .flatten()?;
     let stored: StoredSummary = serde_json::from_value(rec.gguf_summary).ok()?;
     stored.projector.filter(|p| Path::new(p).is_file())
 }
@@ -844,12 +848,24 @@ pub struct InstalledModelDto {
     pub projector_path: Option<String>,
     pub summary: Option<serde_json::Value>,
     pub architecture_supported: Option<bool>,
+    /// The path the model loaded or loading now was loaded with, when it is this row's
+    /// file under any spelling (a link, a mapped drive), so Delete asks before unloading it
+    /// (0.0.6 item 8). Sent only then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_as: Option<String>,
 }
 
 #[tauri::command]
 pub async fn list_installed_models(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<InstalledModelDto>> {
+    let status = state.runtime.status();
+    let loaded = matches!(
+        status.state,
+        crate::dto::RuntimeStateDto::Ready | crate::dto::RuntimeStateDto::Starting
+    )
+    .then_some(status.model_path)
+    .flatten();
     let mut out = Vec::new();
     for m in state.store.list_models().await? {
         let stored: StoredSummary =
@@ -873,6 +889,9 @@ pub async fn list_installed_models(
                 .architecture
                 .is_some()
                 .then(|| serde_json::to_value(&stored).unwrap_or_default()),
+            loaded_as: loaded
+                .clone()
+                .filter(|l| crate::model_options::same_file(l, &m.path)),
         });
     }
     Ok(out)
@@ -929,7 +948,10 @@ pub async fn delete_model(
     let Some(rec) = state.store.get_model(store::ModelId(id)).await? else {
         return Err(AppError::not_found("model"));
     };
-    if state.runtime.status().model_path.as_deref() == Some(rec.path.as_str()) {
+    // The same file loaded under another spelling (a link, a mapped drive) is unloaded too,
+    // so its files are never deleted while llama-server has them open (0.0.6 item 8).
+    let loaded = state.runtime.status().model_path;
+    if loaded.is_some_and(|p| crate::model_options::same_file(&p, &rec.path)) {
         state.runtime.unload().await;
     }
     if delete_files && rec.source == ModelSource::Download {

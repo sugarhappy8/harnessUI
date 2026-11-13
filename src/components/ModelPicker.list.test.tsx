@@ -14,7 +14,7 @@ globalThis.ResizeObserver ??= class {
 const ipcMock = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
   onDownloadProgress: vi.fn<(h: (g: DownloadGroup) => void) => Promise<() => void>>(),
-  listModelOptions: vi.fn<() => Promise<ModelOption[]>>(),
+  listModelOptions: vi.fn<(chatModel?: string | null) => Promise<ModelOption[]>>(),
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -207,5 +207,57 @@ describe("ModelPicker: On this computer", () => {
     });
     await act(async () => render(<ModelPicker />));
     expect(screen.getByRole("button", { name: "Model for this chat" }).textContent).toBe("y\\u{202E}gguf.exe");
+  });
+
+  it("asks for the list with the chat's own model, so a file it opened through a link is listed that way", async () => {
+    // The backend lists this chat's own file the way its reference names it (a link, a
+    // mapped drive); every other chat, and no chat, gets the path Models → Installed uses.
+    const own: ModelOption = { ref: "local:/links/M.gguf", label: "M.gguf", source: "local", contextLength: null };
+    ipcMock.listModelOptions.mockResolvedValue([own]);
+    useApp.setState({ detail: { chat: { modelRef: own.ref } } as never });
+    await act(async () => render(<ModelPicker />));
+    ipcMock.listModelOptions.mockClear();
+    await openMenu();
+    expect(ipcMock.listModelOptions).toHaveBeenCalledTimes(1);
+    expect(ipcMock.listModelOptions).toHaveBeenLastCalledWith(own.ref);
+    expect(screen.getByRole("menuitem", { name: "M.gguf" }).getAttribute("title")).toBe("/links/M.gguf");
+    cleanup();
+
+    useApp.setState({ detail: null });
+    await act(async () => render(<ModelPicker />));
+    await openMenu();
+    expect(ipcMock.listModelOptions).toHaveBeenLastCalledWith(null);
+  });
+
+  it("reads the list again when the chat's model changes, not when it stays the same", async () => {
+    await act(async () => render(<ModelPicker />));
+    expect(ipcMock.listModelOptions).not.toHaveBeenCalled();
+    await act(async () => useApp.setState({ detail: { chat: { id: 1, modelRef: "local:/links/M.gguf" } } as never }));
+    expect(ipcMock.listModelOptions).toHaveBeenCalledTimes(1);
+    expect(ipcMock.listModelOptions).toHaveBeenLastCalledWith("local:/links/M.gguf");
+    // Another chat on the same model: the same list.
+    await act(async () => useApp.setState({ detail: { chat: { id: 2, modelRef: "local:/links/M.gguf" } } as never }));
+    expect(ipcMock.listModelOptions).toHaveBeenCalledTimes(1);
+    await act(async () => useApp.setState({ detail: { chat: { id: 3, modelRef: "local:/models/M.gguf" } } as never }));
+    expect(ipcMock.listModelOptions).toHaveBeenCalledTimes(2);
+    expect(ipcMock.listModelOptions).toHaveBeenLastCalledWith("local:/models/M.gguf");
+  });
+
+  it("keeps the newest answer when two reads of the list cross", async () => {
+    const first: ModelOption[] = [{ ref: "local:/links/M.gguf", label: "M.gguf", source: "local", contextLength: null }];
+    const second: ModelOption[] = [{ ref: "local:/models/M.gguf", label: "M.gguf", source: "local", contextLength: null }];
+    let answerFirst: (v: ModelOption[]) => void = () => undefined;
+    ipcMock.listModelOptions
+      .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))
+      .mockResolvedValueOnce(second);
+    const refresh = useApp.getState().refreshModelOptions;
+    const a = refresh();
+    await act(async () => refresh());
+    expect(useApp.getState().modelOptions).toEqual(second);
+    await act(async () => {
+      answerFirst(first);
+      await a;
+    });
+    expect(useApp.getState().modelOptions).toEqual(second);
   });
 });

@@ -54,9 +54,11 @@ dunce = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
-# 0.0.6: WebP pictures become PNG before they reach the model (attachments.rs): llama-server
-# reads WebP only through ffmpeg, which the app never lets it start. Pure Rust decoder.
-image = { workspace = true, features = ["webp"] }
+# 0.0.6: WebP pictures become JPEG or PNG before they reach the model (attachments.rs, in a
+# worker process): llama-server reads WebP only through ffmpeg, which the app never lets it
+# start. Pure Rust decoder. jpeg: an opaque picture becomes JPEG, many times smaller than
+# PNG (zune-jpeg is already in the lock through tiff).
+image = { workspace = true, features = ["webp", "jpeg"] }
 # 0.0.5 sharing proxy (share/proxy.rs): a small HTTP/1 server on a loopback port that
 # checks, rebuilds and forwards other apps' requests. hyper, hyper-util and http-body-util
 # are already in the lock through reqwest; the server feature adds only httpdate.

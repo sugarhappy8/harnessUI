@@ -391,10 +391,14 @@ pub async fn set_local_model_settings(
 /// recently, then cached endpoint models, then every other installed model by name. The
 /// picker shows the local ones as "On this computer" and the endpoints' as "Endpoints".
 /// Each file is listed once, with a folder hint when two files share a name, and the model
-/// loaded now under the spelling it was loaded with. Makes no network request.
+/// loaded now under the spelling it was loaded with. `chat_model` is the model reference of
+/// the chat that asks (none for the Welcome card or a new chat): its own model file is
+/// listed the way it names it (a link, a mapped drive), and no other chat sees that
+/// spelling. Makes no network request.
 #[tauri::command]
 pub async fn list_model_options(
     state: State<'_, AppState>,
+    chat_model: Option<String>,
 ) -> AppResult<Vec<crate::model_options::ModelOptionEntry>> {
     let status = state.runtime.status();
     let loaded = matches!(
@@ -403,7 +407,8 @@ pub async fn list_model_options(
     )
     .then_some(status.model_path)
     .flatten();
-    let local = crate::model_options::local_options(&state.store, loaded.as_deref()).await?;
+    let chat = chat_model.as_deref().and_then(|r| r.strip_prefix("local:"));
+    let local = crate::model_options::local_options(&state.store, loaded.as_deref(), chat).await?;
     let mut endpoints = Vec::new();
     for p in state.store.list_providers().await? {
         let cached: Vec<ModelOptionDto> = state

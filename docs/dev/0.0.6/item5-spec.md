@@ -586,7 +586,8 @@ space, file identity, short names; already in the lock). Runs `cargo deny check`
     Arc<ReverseServer>)` (Tauri managed state) and `reverse::handle() ->
     Option<Arc<ReverseServer>>` (set once by `toolset::build_host`).
 - `archive.rs`: `unpack_tar_gz` and `unpack_zip` into a folder with a strip prefix and a keep
-  list (`All` or exact relative paths). Kept: Unix modes, masked to `(mode & 0o777) | 0o600`;
+  list (`All` or exact relative paths). Kept: Unix modes, masked to `(mode & 0o755) | 0o600` (group and other write bits
+  dropped; changed after WP9a's review);
   relative links whose target stays inside the unpack folder, created last, never through
   another link, checked again on disk afterwards. Refused: absolute paths, `..`, NUL, Windows
   device names and drive letters, links that are absolute or leave the folder, hard links,

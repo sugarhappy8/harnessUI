@@ -5429,11 +5429,16 @@ def p_model_list(c, notes):
     table, not in the recent list); two copies of one name each show the end of their
     folder; a finished download (its `download-progress` event, every file done) shows up
     in the open menu without reopening it, while progress does not; a deleted file is left
-    out; a link to a listed file is one entry and is remembered by its real path; a Hugging
-    Face cache link (its real file has no .gguf name) is remembered by the link; recently
-    used first, then by name; Remove in Installed takes an imported model off the list; a
-    long list stays inside the window and scrolls; the model loaded through a link is listed
-    under that link, so picking it in another chat does not restart it. Copies are hard
+    out; a link to a listed file is one entry, remembered by its real path and listed under
+    the path Installed uses; a Hugging Face cache link (its real file has no .gguf name) is
+    remembered by the link; an installed vision model opened through a link with another
+    name keeps its picture reader; recently used first, then by name; Remove in Installed
+    takes an imported model off the list; a long list stays inside the window and scrolls;
+    the model loaded through a link is listed under that link, so picking it in another
+    chat does not restart it; once unloaded, only the chat that names it by the link sees
+    the link (any other chat, the path Installed uses), picking it there loads the link and
+    leaves that chat's model as it is, and deleting the file's Installed row unloads it
+    first. Copies are hard
     links of the test model (or its first 64 MB), with names no other scenario uses, all
     removed again at the end, and the recent list is put back as it was."""
     s = c.s
@@ -5455,6 +5460,10 @@ def p_model_list(c, notes):
     hf_link = root / "hf" / "snapshots" / "rev" / hf_name
     opened_real = root / "real" / opened_name
     opened_link = root / "opened" / opened_name
+    vis_name = "Vis-Picture-Q4_K_M.gguf"
+    vis_real = root / "vis" / vis_name
+    vis_proj = root / "vis" / "mmproj-Vis-Picture-f16.gguf"
+    vis_link = root / "vis-opened" / "Vis-Alias.gguf"
 
     def place(dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -5466,13 +5475,16 @@ def p_model_list(c, notes):
                 g.write(f.read(64 << 20))
             return "first 64 MB"
 
-    notes.append("copies: " + ", ".join(sorted({place(p) for p in (a, b, fresh, blob, opened_real)})))
+    notes.append("copies: " + ", ".join(sorted({place(p) for p in (a, b, fresh, blob, opened_real, vis_real)})))
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(a)
     hf_link.parent.mkdir(parents=True, exist_ok=True)
     hf_link.symlink_to(pathlib.Path("..") / ".." / "blobs" / blob.name)
     opened_link.parent.mkdir(parents=True, exist_ok=True)
     opened_link.symlink_to(opened_real)
+    vis_proj.write_bytes(b"GGUF" + b"\0" * 1020)
+    vis_link.parent.mkdir(parents=True, exist_ok=True)
+    vis_link.symlink_to(vis_real)
     ids = []
     loaded = False
 
@@ -5577,14 +5589,14 @@ def p_model_list(c, notes):
         assert order.index(fresh_name) < order.index(name), order
         escape()
 
-        # A link to a listed file: one entry, remembered by the link (the spelling opened),
-        # used most recently so it comes first, under the link rather than Installed's path.
+        # A link to a listed file: one entry, remembered by its real path, used most recently
+        # so it comes first, in the spelling Installed uses (this chat's model is another).
         ids.append(s.invoke("import_model", {"path": str(link)})["id"])
         r = recent()
-        assert r and r[0] == str(link) and os.path.realpath(a) not in r, r
+        assert r and r[0] == os.path.realpath(a) and str(link) not in r, r
         shown = open_menu(lambda e: e and e[0][0] == name, "the remembered model first")
-        assert named(shown, name) == [name] and shown[0] == [name, str(link)], shown
-        notes.append(f"recent list starts with the link; menu: {[t for t, _ in shown][:4]}")
+        assert named(shown, name) == [name] and shown[0] == [name, str(a)], shown
+        notes.append(f"recent list starts with the real path; menu: {[t for t, _ in shown][:4]}")
         escape()
 
         # A Hugging Face cache link: its real file (blobs/<sha>) has no .gguf name, which
@@ -5595,6 +5607,15 @@ def p_model_list(c, notes):
         shown = open_menu(lambda e: e and e[0][0] == hf_name, "the cache link first")
         assert shown[0] == [hf_name, str(hf_link)] and not named(shown, blob.name), shown
         escape()
+
+        # An installed vision model opened through a link with another name: its picture
+        # reader (recorded with the Installed row) follows the file, not the spelling.
+        vis_row = s.invoke("import_model", {"path": str(vis_real)})
+        ids.append(vis_row["id"])
+        assert vis_row.get("projectorPath") == str(vis_proj), vis_row
+        vision = {p.name: s.invoke("model_load_info", {"path": str(p)})["vision"] for p in (vis_real, vis_link)}
+        assert vision == {vis_name: True, vis_link.name: True}, vision
+        notes.append(f"picture reader through a link with another name: {vision}")
 
         # Remove in Installed takes an imported model off the list (a real import, which
         # also puts it on the recent list); its file stays.
@@ -5639,7 +5660,7 @@ def p_model_list(c, notes):
 
         # The model loaded through a link (as "Open a GGUF file..." does) is listed under that
         # link while it is loaded, so picking it in another chat keeps the loaded model. The
-        # recent list holds the link, once.
+        # recent list still holds the real path, once.
         s.execute(
             """
             const [path] = arguments;
@@ -5656,7 +5677,7 @@ def p_model_list(c, notes):
         st = s.invoke("runtime_status")
         assert st["state"] == "ready" and st["modelPath"] == str(opened_link), st
         r = recent()
-        assert r and r[0] == str(opened_link) and os.path.realpath(opened_real) not in r, r
+        assert r and r[0] == os.path.realpath(opened_real) and str(opened_link) not in r, r
         chat_b = new_chat(c)
         shown = open_menu(lambda e: named(e, opened_name), "the loaded model in the menu")
         assert [p for t, p in shown if t.startswith(opened_name)] == [str(opened_link)], shown
@@ -5674,14 +5695,46 @@ def p_model_list(c, notes):
         assert "Loading model" not in s.page_text()
         notes.append("picked the loaded model in another chat: no restart, same path")
 
-        # Not loaded any more: still listed under the link, the chats' reference, not under
-        # the file's real path.
+        # Installed under its real path while loaded through the link: its row says so, so
+        # Delete there asks before unloading it.
+        opened_row = s.invoke("import_model", {"path": str(opened_real)})
+        ids.append(opened_row["id"])
+        rows = {m["path"]: m.get("loadedAs") for m in s.invoke("list_installed_models")}
+        assert rows.get(str(opened_real)) == str(opened_link), rows
+
+        # Not loaded any more: this chat, which names it by the link, still sees the link; any
+        # other chat (and no chat) gets the path Installed uses, so none takes the link by
+        # default.
         s.invoke("unload_model", {"whenIdle": False})
         loaded = False
         s.wait_for(lambda: s.invoke("runtime_status")["state"] not in ("ready", "starting"), 30, "the unload")
         shown = open_menu(lambda e: named(e, opened_name), "the unloaded model in the menu")
         assert [p for t, p in shown if t.startswith(opened_name)] == [str(opened_link)], shown
-        notes.append("after unloading, the model opened through a link is still listed under the link")
+
+        def listed(chat_model):
+            return [o["ref"] for o in s.invoke("list_model_options", {"chatModel": chat_model})
+                    if o["ref"].endswith(os.sep + opened_name)]
+        assert listed(None) == [f"local:{opened_real}"], listed(None)
+        assert listed(f"local:{a}") == [f"local:{opened_real}"], listed(f"local:{a}")
+        assert listed(f"local:{opened_link}") == [f"local:{opened_link}"], listed(f"local:{opened_link}")
+        notes.append("after unloading: the link in the chat that names it so, the Installed path elsewhere")
+
+        # Picked there, it loads through the link and the chat keeps its model.
+        s.click_menu_item(opened_name)
+        loaded = True
+        s.wait_for(lambda: s.invoke("runtime_status")["state"] == "ready", 300, "the model loaded again")
+        st = s.invoke("runtime_status")
+        assert st["modelPath"] == str(opened_link), st
+        assert s.invoke("get_chat", {"chatId": chat_b})["chat"]["modelRef"] == f"local:{opened_link}"
+
+        # Deleting its Installed row (the real path) unloads it first, the file left in place.
+        s.invoke("delete_model", {"id": opened_row["id"], "deleteFiles": False})
+        ids.remove(opened_row["id"])
+        s.wait_for(lambda: s.invoke("runtime_status")["state"] not in ("ready", "starting"), 10,
+                   "the model unloaded by the delete")
+        loaded = False
+        assert opened_real.exists()
+        notes.append("picked again: loaded through the link, chat kept it; deleting the row unloaded it first")
     finally:
         escape()
         if loaded:
@@ -6190,11 +6243,57 @@ WEBP_HALVES = bytes.fromhex(
     "b4899b6bdfbb7064b61501e74000")
 
 
+# [0.0.6 integration, WebP] A 3 x 2 lossless WebP picture with see-through parts (made with
+# Pillow).
+WEBP_CLEAR = bytes.fromhex(
+    "5249464636000000574542505650384c2a0000002f024000101720904d0e1176fe13122464ff6f350b04"
+    "9248f6e79a444050f49ce901d57fb8064a44ff23")
+
+
+def webp_many_groups(groups):
+    """The 0.0.6 review's crafted WebP picture: 1 x 1 pixels whose entropy image asks for
+    `groups` Huffman groups of five full trees each, which the decoder builds before it reads
+    a pixel (65,536 groups: about 1.3 GB to decode, in 3.8 MB)."""
+    import struct
+
+    def lsb(v, k):
+        return "".join("1" if v >> i & 1 else "0" for i in range(k))
+
+    def msb(v, k):
+        return "".join("1" if v >> i & 1 else "0" for i in reversed(range(k)))
+
+    order = [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    lengths = [0] + [3] * 6 + [4] * 4 + [0] * 8
+    nxt, code = [0] * 16, 0
+    for n in range(1, 16):
+        nxt[n], code = code, (code + lengths.count(n)) << 1
+    codes = {}
+    for sym, n in enumerate(lengths):
+        if n:
+            codes[sym] = msb(nxt[n], n)
+            nxt[n] += 1
+
+    def single(sym):
+        return "10" + ("0" + lsb(sym, 1) if sym < 2 else "1" + lsb(sym, 8))
+
+    tree = ("0" + lsb(10, 4) + "".join(lsb(lengths[o], 3) for o in order[:14]) + "1" + lsb(1, 3)
+            + lsb(9, 4) + "".join(codes[n] for n in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10]))
+    last = groups - 1
+    bits = (lsb(0x2F, 8) + lsb(0, 28) + "0" + lsb(0, 3) + "00" + "1" + lsb(0, 3) + "0"
+            + single(last & 0xFF) + single(last >> 8) + single(0) * 3 + tree * (groups * 5))
+    bits += "0" * (-len(bits) % 16)
+    vp8l = int(bits[::-1], 2).to_bytes(len(bits) // 8, "little")
+    body = b"WEBP" + b"VP8L" + struct.pack("<I", len(vp8l)) + vp8l
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
 @probe("webp-picture")
 def p_webp_picture(c, notes):
     """llama-server cannot read WebP (it would need ffmpeg, which the app never lets it
-    start), so a WebP picture dropped on the composer is stored and sent as PNG; a broken
-    one gives a plain message and never reaches the model."""
+    start), so a WebP picture dropped on the composer is stored and sent as JPEG, or as PNG
+    when it has see-through parts. It is decoded in a worker with a memory cap: a crafted one
+    that would take gigabytes gives a plain message, and the app goes on working. A broken one
+    gives the plain message too, and neither reaches the model."""
     import base64
 
     s = c.s
@@ -6211,21 +6310,43 @@ def p_webp_picture(c, notes):
         s.wait_for(lambda: s.execute("return !!document.querySelector(`img[alt=\"${arguments[0]}\"]`);", name),
                    10, f"the thumbnail of {name}")
 
+    def dismiss():
+        s.execute("document.querySelector('[role=alert] button[aria-label=\"Dismiss\"]').click();")
+        s.wait_for(lambda: "This picture could not be read." not in s.page_text(), 10, "the message gone")
+
     chat = new_chat(c, tools=[])
     Fake.requests.clear()
-    Fake.queue.append({"content": "Red on the left, blue on the right."})
+    Fake.queue.append({"content": "Red on the left, blue on the right; green with a clear corner."})
     drop("halves.webp", WEBP_HALVES)
-    send(s, "What colours are in this picture?")
+    drop("clear.webp", WEBP_CLEAR)
+    send(s, "What colours are in these pictures?")
     wait_idle(s)
     assert Fake.requests, "nothing reached the model"
     sent = json.dumps(Fake.requests[-1]["messages"])
-    assert "data:image/png;base64," in sent, sent[:600]
+    assert sent.count("data:image/jpeg;base64,") == 1, sent[:600]
+    assert sent.count("data:image/png;base64,") == 1, sent[:600]
     assert "image/webp" not in sent, sent[:600]
     user = messages(s, chat)[0]
-    assert len(user["imageIds"]) == 1, user
-    shown = s.invoke("get_attachment", {"id": user["imageIds"][0]})
-    assert shown.startswith("data:image/png;base64,"), shown[:40]
-    notes.append(f"sent as PNG ({len(sent)} characters of messages); stored as PNG")
+    assert len(user["imageIds"]) == 2, user
+    shown = [s.invoke("get_attachment", {"id": i})[:30] for i in user["imageIds"]]
+    assert shown[0].startswith("data:image/jpeg;base64,"), shown
+    assert shown[1].startswith("data:image/png;base64,"), shown
+    notes.append(f"opaque sent and stored as JPEG, see-through as PNG ({len(sent)} characters of messages)")
+
+    Fake.requests.clear()
+    crafted = webp_many_groups(65_536)
+    drop("crafted.webp", crafted)
+    started = time.time()
+    send(s, "And this one?")
+    s.wait_for(lambda: "This picture could not be read." in s.page_text(), 90, "the plain message")
+    took = time.time() - started
+    assert not Fake.requests, "the crafted picture reached the model"
+    dismiss()
+    Fake.queue.append({"content": "Still here."})
+    send(s, "Are you still there?")
+    wait_idle(s)
+    assert Fake.requests, "the app stopped answering after the crafted picture"
+    notes.append(f"crafted WebP ({len(crafted):,} bytes): plain message after {took:.1f} s; the app went on")
 
     Fake.requests.clear()
     drop("broken.webp", b"RIFF\x10\x00\x00\x00WEBPJUNK\x04\x00\x00\x00abcd")
@@ -6388,6 +6509,361 @@ def p_reverse_describe(c, notes):
 
 
 PROBES.append(p_reverse_describe)  # [0.0.6 item 5, WP9c]
+
+
+# [0.0.6 item 5, WP9e] The reverse-engineering scenario needs the app started with
+# HARNESS_REVERSE_ROOT (debug builds only) pointing at its fake pack, and a canary and
+# NODE_OPTIONS in the app's own environment that must never reach rea. Set here, before
+# main() starts the app, when the run asks for it (the other reverse probes then skip).
+REA_CANARY = ("HARNESS_E2E_REA_CANARY", "canary-5b1e0c")
+if "reverse-engineering" in ONLY:
+    os.environ.setdefault("HARNESS_REVERSE_ROOT", str(OUT.resolve() / "reverse-pack"))
+    os.environ[REA_CANARY[0]] = REA_CANARY[1]
+    os.environ["NODE_OPTIONS"] = "--max-old-space-size=4097"
+
+
+@probe("reverse-engineering")
+def p_reverse_engineering(c, notes):
+    """0.0.6 item 5 (WP9e): rea's tools from a turn to the process and back, in the real app,
+    with a fake rea (e2e/fake_rea.py) in a fake installed pack at HARNESS_REVERSE_ROOT whose
+    `node` runs it with valid markers. Settings shows rea and Kuna installed and Kuna is
+    chosen; the owner turns the group on in the Tools panel. Ask first: an open with a
+    relative path shows its card with the canonical path and Kuna; Deny sends nothing to rea;
+    Allow once sends the canonical path and no provider_id. A session call and a view of the
+    chat's own result run with no card; a file check without its path, a path outside the
+    folders, and tools that are not offered (Frida, GDB) never reach rea. Allow all runs a
+    file check without a card. Full access refuses the fake pack's folder and the app's data
+    folder and runs a file outside the approved folders. The result's injection line stays
+    text and the pack's folder shows only as "[harnessUI's rea folder]" in what the model
+    reads, what is stored and the tool card. Stop during a slow call ends the fake and its
+    child process; the next call opens the file again by itself with no card. Another chat
+    cannot read the first chat's result id. rea's environment never holds the canary,
+    NODE_OPTIONS or the test's PATH. Every call is in the audit log as its mode decided."""
+    s = c.s
+    root_env = os.environ.get("HARNESS_REVERSE_ROOT")
+    if not root_env:
+        notes.append("HARNESS_REVERSE_ROOT is not set: run with PROBES=reverse-engineering; skipped")
+        return
+    import re
+    root = pathlib.Path(root_env)
+    flag = root / ".fake-rea-pack"
+    if root.exists() and any(root.iterdir()) and not flag.exists():
+        raise AssertionError(f"{root} is not empty and is not a fake pack this scenario made")
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True)
+    flag.write_text("made by the reverse-engineering scenario\n")
+    lock = json.loads((ROOT / "reverse.lock.json").read_text())
+    versions = {p["name"]: p["version"] for p in lock["parts"]}
+    record_file = root / "fake-calls.jsonl"
+    config_file = root / "fake.json"
+    mask = "[harnessUI's rea folder]"
+    fixture = ROOT / "crates/reverse/tests/fixtures/hello-linux-x64"
+    hello = c.work / "hello-linux-x64"
+    elsewhere = OUT / "outside-rea"
+    shutil.rmtree(elsewhere, ignore_errors=True)
+    elsewhere.mkdir()
+    far = elsewhere / "hello-linux-x64"
+    canon = str(hello.resolve())
+
+    def put(component, part, programs=()):
+        d = root / f"{part}-{versions[part]}"
+        d.mkdir(parents=True, exist_ok=True)
+        listed = []
+        for rel, data, mode in programs:
+            p = d / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(data)
+            p.chmod(mode)
+            listed.append({"path": rel, "size": p.stat().st_size})
+        (d / ".complete").write_text(json.dumps({
+            "component": component, "part": part, "version": versions[part],
+            "archiveSha256": [], "programs": listed, "diskBytes": 1_000_000}))
+
+    # The fake pack: rea's entry, a `node` that runs the fake rea (python3 -I, so rea's
+    # environment is recorded exactly as the app gave it), Kuna, and Ghidra with Java
+    # (markers only) so the page offers the choice.
+    fake = (ROOT / "e2e" / "fake_rea.py").resolve()
+    node = (f"#!{sys.executable} -I\nimport runpy, sys\nsys.argv[0] = {str(fake)!r}\n"
+            f"runpy.run_path({str(fake)!r}, run_name='__main__')\n")
+    put("rea", "rea", [("scripts/rea.mjs", "// the fake pack's rea entry; e2e/fake_rea.py answers instead\n", 0o644)])
+    put("rea", "node", [("bin/node", node, 0o755)])
+    put("kuna", "kuna", [("kuna", "#!/bin/sh\nexit 0\n", 0o755)])
+    put("ghidra", "ghidra")
+    put("ghidra", "java")
+
+    def records(event=None):
+        if not record_file.exists():
+            return []
+        rows = [json.loads(line) for line in record_file.read_text().splitlines() if line.strip()]
+        return [r for r in rows if event is None or r.get("event") == event]
+
+    def calls():
+        return [(r["tool"], r["args"]) for r in records("call")]
+
+    def steer(cfg):
+        config_file.write_text(json.dumps(cfg))
+
+    def panel():
+        return s.execute("const p = [...document.querySelectorAll('[role=tabpanel]')]"
+                         ".find(e => e.getAttribute('data-state') === 'active'); return p ? p.innerText : '';")
+
+    def row(name):
+        return s.execute("const l = [...document.querySelectorAll('li[aria-label]')]"
+                         ".find(e => e.getAttribute('aria-label') === arguments[0]); return l ? l.innerText : null;", name)
+
+    def escape():
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.4)
+
+    section = """
+        const sec = [...document.querySelectorAll('section')].find(s => {
+          const l = s.querySelector(':scope > label');
+          return l && l.innerText.trim() === 'Reverse engineering';
+        });
+    """
+
+    def reverse_tools(chat):
+        return [t for t in s.invoke("list_chat_tools", {"chatId": chat}) if t["server"] == "reverse"]
+
+    auto = s.invoke("get_tool_selection")["auto"]
+
+    def call(name, arguments, direct=False):
+        """A tool call as the model makes it: through call_tool while the app chooses the tools
+        for each task (the default), else directly."""
+        if auto and not direct:
+            return {"tool_calls": [{"name": "call_tool", "arguments": {"name": name, "arguments": arguments}}]}
+        return {"tool_calls": [{"name": name, "arguments": arguments}]}
+
+    def turn(tool, arguments, text, answer=None, direct=False):
+        """One user message whose reply is the tool call; `answer` clicks the card (None: no
+        card may appear). Returns the tool message as stored."""
+        before = len([m for m in messages(s, chat_now[0]) if m["role"] == "tool"])
+        Fake.queue.append(call(tool, arguments, direct))
+        Fake.queue.append({"content": f"after {tool}"})
+        send(s, text)
+        if answer:
+            answer_card(s, answer)
+        else:
+            time.sleep(0.4)
+            deadline = time.time() + 60
+            while not idle(s):
+                assert "Allow once" not in s.page_text(), f"{tool}: a card was shown"
+                assert time.time() < deadline, f"{tool}: the turn did not finish"
+                time.sleep(0.2)
+        wait_idle(s)
+        tools = [m for m in messages(s, chat_now[0]) if m["role"] == "tool"]
+        assert len(tools) > before, f"{tool}: no tool message"
+        return tools[-1]["toolResult"]
+
+    def audit(chat):
+        return [(a["tool"], a["decision"], a.get("note") or "")
+                for a in s.invoke("list_audit", {"filter": {"chatId": chat}}) if a["server"] == "reverse"]
+
+    def gone(pid):
+        try:
+            stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            return True
+        return stat.rsplit(")", 1)[1].split()[0] == "Z"
+
+    def ids_in(text):
+        return re.findall(r"ev_[a-f0-9]{64}", text)
+
+    chat_now = [None]
+    try:
+        # 1. Settings: rea and Kuna installed with their versions; Kuna chosen on the page.
+        s.invoke("reverse_status")
+        s.click_button("Settings")
+        s.click_button("Reverse engineering")
+        s.wait_for(lambda: "Installed" in (row("rea") or "") and "Use for decompiling:" in panel(), 15, "installed rows")
+        assert f"rea {versions['rea']}, with Node.js {versions['node']} to run it" in row("rea"), row("rea")
+        assert "Installed" in row("Kuna") and f"Kuna {versions['kuna']}" in row("Kuna"), row("Kuna")
+        el = s.wait_for(lambda: s.execute(
+            "return [...document.querySelectorAll('[role=radio]')].find(b => b.innerText.trim() === 'Kuna') || null;") or False,
+            10, "the Kuna choice")
+        s.click(next(iter(el.values())))
+        s.wait_for(lambda: s.invoke("get_setting", {"key": "reverseDecompiler"}) == "kuna", 10, "Kuna chosen")
+        s.wait_for(lambda: "rea is not running." in panel(), 10, "rea not running yet")
+        s.screenshot(str(OUT / "reverse-engineering-settings.png"))
+        escape()
+
+        # 2. A chat with hello-linux-x64 in its folder; the owner turns the group on (it is off
+        # in new chats until then, Q4 = B).
+        shutil.copyfile(fixture, hello)
+        shutil.copyfile(fixture, far)
+        chat = new_chat(c)
+        chat_now[0] = chat
+        assert not any(t["enabledInChat"] for t in reverse_tools(chat)), "the group is on in a new chat"
+        s.execute("document.querySelector('button[title=\"Tools for this chat\"]').click();")
+        s.wait_for(lambda: s.execute(section + "return sec ? sec.innerText : null;"), 10, "the Reverse engineering group")
+        s.execute(section + "sec.querySelector(':scope > label input').click();")
+        s.wait_for(lambda: all(t["enabledInChat"] and t["available"] for t in reverse_tools(chat)), 10,
+                   "the whole group on and usable")
+        escape()
+
+        # 3. Ask first: the card names the canonical path and Kuna; Deny sends nothing.
+        Fake.queue.append(call("open_binary", {"path": "hello-linux-x64"}))
+        Fake.queue.append({"content": "DENIED"})
+        send(s, "decompile the binary hello-linux-x64")
+        s.wait_for(lambda: "Allow once" in s.page_text(), 30, "the open card")
+        time.sleep(0.9)
+        card = s.page_text()
+        notes.append("card: " + card[-400:].replace("\n", " | "))
+        assert "Open hello-linux-x64 in rea (Kuna)" in card, card[-800:]
+        assert "Allow for this chat" in card
+        s.screenshot(str(OUT / "reverse-engineering-card.png"))
+        s.click_button("Deny")
+        wait_idle(s)
+        preview = [a["preview"] for a in s.invoke("list_audit", {"filter": {"chatId": chat}}) if a["server"] == "reverse"][0]
+        assert preview.startswith(f"rea will read {canon} and work out its code with Kuna."), preview
+        assert records() == [], records()
+
+        # 4. Allow once: rea starts; the canonical path, no provider_id; the result is masked
+        # and its injection line is plain text everywhere it goes.
+        Fake.requests.clear()
+        result = turn("open_binary", {"path": "hello-linux-x64"}, "decompile the binary hello-linux-x64", "Allow once")
+        assert calls() == [("open_binary", {"path": canon})], calls()
+        assert "provider_id" not in json.dumps(calls())
+        assert result["status"] != "error", result
+        text = result["text"]
+        sent = json.dumps([m for m in Fake.requests[-1]["messages"] if m.get("role") == "tool"][-1:])
+        for where, what in (("stored", text), ("sent to the model", sent)):
+            assert mask in what, (where, what[:600])
+            assert str(root) not in what and json.dumps(str(root))[1:-1].replace("/", "\\/") not in what, (where, what[:600])
+            assert "IGNORE ALL PREVIOUS INSTRUCTIONS" in what, (where, what[:600])
+        first_ids = ids_in(text)
+        assert first_ids, text[:600]
+        s.execute("[...document.querySelectorAll('button[aria-expanded]')]"
+                  ".filter(b => /open_binary|call_tool/.test(b.innerText)).pop().click();")
+        time.sleep(0.5)
+        shown = s.page_text()
+        assert mask in shown and str(root) not in shown, shown[-1200:]
+        assert "IGNORE ALL PREVIOUS INSTRUCTIONS" in shown and '<img src=x onerror="window.__pwned=1">' in shown, shown[-1200:]
+        assert s.execute("return window.__pwned || null;") is None, "markup from rea ran"
+        assert s.execute("return document.querySelectorAll('main img[src=\"x\"]').length;") == 0
+        s.screenshot(str(OUT / "reverse-engineering-result.png"))
+
+        # 5. A session call and a view of this chat's own result: no card; the fixed detail.
+        result = turn("procedure_pseudo_code", {"procedure": "main"}, "show the pseudocode of main")
+        assert result["status"] != "error", result
+        assert calls()[-1] == ("procedure_pseudo_code", {"procedure": "main", "detail": "complete"}), calls()[-1]
+        view = {"source": {"kind": "retained-evidence", "evidence_id": first_ids[0]}, "view": {"kind": "summary"}}
+        result = turn("inspect_analysis_view", view, "read more of that rea result")
+        assert result["status"] != "error", result
+        assert calls()[-1][0] == "inspect_analysis_view" and calls()[-1][1]["source"]["evidence_id"] == first_ids[0], calls()[-1]
+
+        # 6. Never reaching rea: a file check without its path, a path outside the folders, and
+        # tools that are not offered (directly and through call_tool).
+        made = len(calls())
+        result = turn("inspect_managed_members", {}, "list the .NET classes of the binary")
+        assert result["status"] == "error" and "path" in result["text"], result
+        result = turn("inspect_pe_imports", {"path": str(far)}, "which libraries does that binary use?")
+        assert "That file is outside this chat's folders." in result["text"], result
+        for name, args in (("instrument_with_frida", {"target": "hello"}), ("start_gdb_session", {"path": canon})):
+            for direct in (True, False):
+                result = turn(name, args, f"attach to the program with {name}", direct=direct)
+                said = result["text"].lower()
+                assert result["status"] == "error" and ("no tool named" in said or "no such tool" in said), (name, direct, result)
+        assert len(calls()) == made, calls()[made:]
+        assert not any(t in ("instrument_with_frida", "start_gdb_session") for t, _ in calls())
+
+        # 7. Allow all: a file check inside the folder runs with no card.
+        assert s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "allowAll"}) == "allowAll"
+        try:
+            turn("inspect_native_exports", {"path": "hello-linux-x64"}, "which functions does the binary export?")
+            assert calls()[-1] == ("inspect_native_exports", {"path": canon, "detail": "summary"}), calls()[-1]
+        finally:
+            s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
+
+        # 8. Full access: the fake pack's folder and the app's data folder are still refused;
+        # a file outside the approved folders runs with no card.
+        assert s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "fullAccess"}) == "fullAccess"
+        try:
+            made = len(calls())
+            for path in (root / f"kuna-{versions['kuna']}" / "kuna", c.db):
+                result = turn("inspect_pe_imports", {"path": str(path)}, "which libraries does this binary use?")
+                assert "That file is in harnessUI's own folders, which tools can't reach." in result["text"], (path, result)
+            assert len(calls()) == made, calls()[made:]
+            turn("inspect_pe_imports", {"path": str(far)}, "which libraries does that binary use?")
+            assert calls()[-1] == ("inspect_pe_imports", {"path": str(far.resolve())}), calls()[-1]
+        finally:
+            s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
+
+        # 9. Stop during a slow call ends the fake rea and its child (as rea starts Kuna).
+        starts = len(records("start"))
+        steer({"slow": ["procedure_pseudo_code"]})
+        Fake.queue.append(call("procedure_pseudo_code", {"procedure": "main"}))
+        Fake.queue.append({"content": "never"})
+        send(s, "show the pseudocode of main again")
+        slow = s.wait_for(lambda: records("slow"), 30, "the slow call")[-1]
+        assert not gone(slow["pid"]) and not gone(slow["child"]), slow
+        s.execute("document.querySelector('button[aria-label=\"Stop\"]').click();")
+        wait_idle(s, 30)
+        s.wait_for(lambda: gone(slow["pid"]) and gone(slow["child"]), 30, "the fake rea and its child to end")
+        notes.append("after Stop: " + json.dumps([r["event"] for r in records()][-4:]))
+        steer({})
+        # The next session call opens the same file again by itself, with no card.
+        made = len(calls())
+        result = turn("procedure_pseudo_code", {"procedure": "main"}, "and the pseudocode of main once more")
+        assert result["status"] != "error", result
+        assert len(records("start")) == starts + 1, records("start")
+        assert [t for t, _ in calls()[made:]] == ["open_binary", "procedure_pseudo_code"], calls()[made:]
+        assert calls()[made][1] == {"path": canon}, calls()[made]
+        latest_ids = ids_in(result["text"])
+        assert latest_ids, result["text"][:400]
+
+        # 10. Another chat cannot read this chat's result id (the group follows the owner's
+        # last choice there).
+        made = len(calls())
+        other = new_chat(c, tools=[t["exposed"] for t in s.invoke("list_chat_tools", {
+            "chatId": s.invoke("create_chat", {"modelRef": c.model_ref})["id"]}) if t["enabledInChat"]])
+        chat_now[0] = other
+        assert all(t["enabledInChat"] for t in reverse_tools(other)), "the last choice did not carry over"
+        view = {"source": {"kind": "retained-evidence", "evidence_id": latest_ids[0]}, "view": {"kind": "summary"}}
+        result = turn("inspect_analysis_view", view, "read more of that rea result")
+        assert "That id isn't one of this chat's rea results" in result["text"], result
+        assert len(calls()) == made, calls()[made:]
+
+        # 11. rea's environment: exactly what the app gives it, never the canary, NODE_OPTIONS
+        # or the test's PATH.
+        for start in records("start"):
+            env = start["env"]
+            assert REA_CANARY[0] not in env and REA_CANARY[1] not in json.dumps(env), env
+            assert "NODE_OPTIONS" not in env, env
+            assert env.get("PATH") == "/usr/local/bin:/usr/bin:/bin", env.get("PATH")
+            assert env.get("REA_ANALYSIS_PROVIDER") == "kuna" and env.get("REA_KUNA_COMMAND") == str(
+                root / f"kuna-{versions['kuna']}" / "kuna"), env
+            assert env.get("HOME") == str(root / "home") and env.get("TMPDIR") == str(root / "tmp"), env
+            stray = sorted(k for k in env if not (k in ("PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG")
+                                                  or k.startswith(("XDG_", "REA_"))))
+            assert not stray, stray
+            assert start["cwd"] == str(root / "work"), start["cwd"]
+            assert start["argv"] == [str(root / f"rea-{versions['rea']}" / "scripts" / "rea.mjs"), "mcp"], start["argv"]
+        notes.append(f"rea started {len(records('start'))} times; calls: {[t for t, _ in calls()]}")
+
+        # 12. The audit log: each call as its mode decided.
+        rows = audit(chat)
+        notes.append("audit: " + json.dumps([r[:2] for r in rows]))
+        decided = [r[:2] for r in reversed(rows)]
+        for expected in (("open_binary", "denied"), ("open_binary", "allow_once"),
+                         ("procedure_pseudo_code", "allowed_without_prompt"),
+                         ("inspect_analysis_view", "allowed_without_prompt"),
+                         ("inspect_pe_imports", "refused_by_policy"),
+                         ("inspect_native_exports", "allowed_by_mode")):
+            assert expected in decided, (expected, decided)
+        assert any(r[0] == "inspect_pe_imports" and r[1] == "allowed_by_mode" and "Full access" in r[2] for r in rows), rows
+        assert not any(r[0] in ("instrument_with_frida", "start_gdb_session") for r in rows), rows
+    finally:
+        try:
+            escape()
+            s.invoke("reverse_remove", {"component": "rea", "force": True})
+        except WebDriverError:
+            pass
+        for f in (hello, far):
+            f.unlink(missing_ok=True)
+
+
+PROBES.append(p_reverse_engineering)  # [0.0.6 item 5, WP9e]
 
 
 def main() -> int:

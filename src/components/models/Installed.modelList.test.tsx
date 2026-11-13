@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { InstalledModel } from "../../lib/types";
+import type { InstalledModel, RuntimeStatus } from "../../lib/types";
 
 // [0.0.6 item 8, WP8] Importing or deleting a model in Installed reads the chat's model list
 // ("On this computer") again.
@@ -15,6 +15,8 @@ const ipcMock = vi.hoisted(() => ({
   importModel: vi.fn(async () => undefined),
   deleteModel: vi.fn(async () => undefined),
   listModelOptions: vi.fn(async () => []),
+  modelBusy: vi.fn(async () => ({ chatTurns: 0, modelChecks: 0, otherApps: 0 })),
+  unloadModel: vi.fn(async () => true),
 }));
 const dialog = vi.hoisted(() => ({ open: vi.fn<() => Promise<string | null>>() }));
 vi.mock("../../lib/ipc", () => ipcMock);
@@ -68,6 +70,39 @@ describe("Installed: the chat's model list follows imports and deletes", () => {
     await click(screen.getByRole("button", { name: "Delete m.gguf" }));
     expect(ipcMock.deleteModel).toHaveBeenCalledWith(7, true);
     expect(refreshModelOptions).toHaveBeenCalledTimes(1);
+    confirm.mockRestore();
+  });
+
+  it("unloads first a model loaded through a link to the row's file, as it does the row's own path", async () => {
+    // The row is the real path; the model was opened through a link to it (its `loadedAs`).
+    const link = "/links/m-link.gguf";
+    ipcMock.listInstalledModels.mockResolvedValue([{ ...MODEL, loadedAs: link }]);
+    useApp.setState({ runtime: { state: "ready", modelPath: link } as RuntimeStatus });
+    const order: string[] = [];
+    ipcMock.unloadModel.mockImplementationOnce(async () => {
+      order.push("unload");
+      return true;
+    });
+    ipcMock.deleteModel.mockImplementationOnce(async () => {
+      order.push("delete");
+    });
+    await act(async () => render(<Installed onClose={() => undefined} />));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await click(screen.getByRole("button", { name: "Delete m.gguf" }));
+    expect(ipcMock.modelBusy).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["unload", "delete"]);
+    confirm.mockRestore();
+  });
+
+  it("does not unload a model that was loaded under the row's other spelling but is not loaded now", async () => {
+    // The list was read while the link was loaded; another model has been loaded since.
+    ipcMock.listInstalledModels.mockResolvedValue([{ ...MODEL, loadedAs: "/links/m-link.gguf" }]);
+    useApp.setState({ runtime: { state: "ready", modelPath: "/models/other.gguf" } as RuntimeStatus });
+    await act(async () => render(<Installed onClose={() => undefined} />));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await click(screen.getByRole("button", { name: "Delete m.gguf" }));
+    expect(ipcMock.unloadModel).not.toHaveBeenCalled();
+    expect(ipcMock.deleteModel).toHaveBeenCalledWith(7, true);
     confirm.mockRestore();
   });
 });

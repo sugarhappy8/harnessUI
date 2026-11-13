@@ -671,8 +671,9 @@ command line.
    attention". Note after the load: "Fast attention doesn't work with this graphics card,
    so it was turned off for this load." (Mac: "… with Apple graphics, …").
 3. As much as fits on a graphics-card out-of-memory, **now also when the placement is
-   custom**: layers and experts cleared, `gpu = Fit` (Leave free kept, conversation memory
-   place kept), `LoadStage::RetryingWithLessGpu { custom: true, chosen_layers }`. Note after
+   custom**: layers and experts cleared, `gpu = Fit` (conversation memory place kept; the
+   memory to leave free is llama.cpp's default, because Leave free applies only to As much
+   as fits without a custom placement, 3.2; the lead's decision after WP10a's review), `LoadStage::RetryingWithLessGpu { custom: true, chosen_layers }`. Note after
    the load with a chosen count: "The 40 layers you chose didn't fit on the graphics card,
    so As much as fits was used for this load. Choose fewer layers in Fine control." With
    expert parts only: "Your Fine control choices didn't fit on the graphics card, so As

@@ -6,9 +6,11 @@
 //! recently come first, newest first, then the other installed models by name; a file that
 //! is no longer there is left out. One file reached by two spellings of its path (a link,
 //! `..`, or letters in another case on Windows and macOS) is one entry, keyed by its
-//! canonical path; a file used recently is listed under the spelling it was used with, so
-//! a chat's model reference stays as it is. Two different files with the same name each
-//! carry the end of their folder (`hint`), so the list can tell them apart.
+//! canonical path, and listed under the spelling Models → Installed uses, so what the list
+//! loads is the file Installed knows (its picture reader, its row); only the chat that asks
+//! sees its own model file the way its reference names it (a link, a mapped drive), so
+//! picking it there leaves that reference as it is. Two different files with the same name
+//! each carry the end of their folder (`hint`), so the list can tell them apart.
 //!
 //! Only the app's own model table and its own setting are read; nothing a model or a tool
 //! writes reaches this list, and it is reachable only through the main window's command.
@@ -191,21 +193,23 @@ fn visible(text: &str) -> String {
 /// The local entries of the list. `recent` (newest first) and `installed` (the model
 /// table's paths) as stored; `loaded` is the path of the model loaded or loading now, as
 /// it was loaded; `locate` gives an existing file's canonical path and `None` for a file
-/// that is gone. Files used recently come first, then the other installed models by name
-/// (ignoring case), then by path. One file is one entry; the canonical path only tells
-/// which spellings are one file. A file used recently keeps the spelling it was used with
-/// (a link, a mapped drive), installed under another or not, so picking it here leaves the
-/// chat that used it on the same reference; an installed model never used keeps the
-/// spelling of a row of Models → Installed: of two rows for one file, the one spelled as
-/// its real path, else the first by path. The loaded model keeps the spelling it was
-/// loaded with, so picking it here in another chat is the model already loaded, not a
-/// restart of the same file under another spelling (which would leave the chat that
-/// loaded it with "A different model is loaded"). Same-looking names (ignoring case) carry
-/// folder hints.
+/// that is gone. `chat` is the model file of the chat that asks, as its reference names it.
+/// Files used recently come first, then the other installed models by name (ignoring
+/// case), then by path. One file is one entry; an installed one keeps the spelling of a
+/// row of Models → Installed, so picking it here or there loads the same path, the one
+/// whose picture reader and settings Installed knows: of two rows for one file, the one
+/// spelled as its real path, else the first by path. The asking chat's own file keeps the
+/// chat's spelling (a link, a mapped drive), so picking it there leaves that chat's
+/// reference as it is; no other chat is offered that spelling. The loaded model keeps the
+/// spelling it was loaded with, before the chat's own, so picking it here in another chat
+/// is the model already loaded, not a restart of the same file under another spelling
+/// (which would leave the chat that loaded it with "A different model is loaded").
+/// Same-looking names (ignoring case) carry folder hints.
 pub fn local_entries(
     recent: &[String],
     installed: &[String],
     loaded: Option<&str>,
+    chat: Option<&str>,
     rule: PathRule,
     locate: impl Fn(&str) -> Option<String>,
 ) -> Vec<ModelOptionEntry> {
@@ -225,10 +229,16 @@ pub fn local_entries(
     let mut installed: Vec<(String, String)> =
         rows.into_iter().map(|(key, (_, p))| (key, p)).collect();
     installed.sort_by_cached_key(|(_, p)| (rule.file_name(p).to_lowercase(), p.clone()));
+    let row_path: HashMap<&str, &str> = installed
+        .iter()
+        .map(|(key, path)| (key.as_str(), path.as_str()))
+        .collect();
 
     let loaded = loaded.and_then(|l| locate(l).map(|c| (rule.key(&c), l.to_owned())));
-    let spelled = |key: &str, path: String| match &loaded {
-        Some((k, l)) if k == key => l.clone(),
+    let chat = chat.and_then(|p| locate(p).map(|c| (rule.key(&c), p.to_owned())));
+    let spelled = |key: &str, path: String| match (&loaded, &chat) {
+        (Some((k, l)), _) if k == key => l.clone(),
+        (_, Some((k, p))) if k == key => p.clone(),
         _ => path,
     };
 
@@ -241,7 +251,10 @@ pub fn local_entries(
         if seen.contains(&key) {
             continue;
         }
-        paths.push((spelled(&key, path.clone()), true));
+        let path = row_path
+            .get(key.as_str())
+            .map_or_else(|| path.clone(), |p| (*p).to_owned());
+        paths.push((spelled(&key, path), true));
         seen.insert(key);
     }
     for (key, path) in &installed {
@@ -309,19 +322,29 @@ fn folder_hints(paths: &[String], rule: PathRule) -> Vec<Option<String>> {
     hints
 }
 
+/// Whether a path names a `.gguf` file (any case), as loading and importing require: a
+/// name with something before the extension.
+fn is_gguf_name(rule: PathRule, path: &str) -> bool {
+    rule.file_name(path)
+        .rsplit_once('.')
+        .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("gguf"))
+}
+
 /// What a remembered path is compared by: its canonical spelling under `rule`, or the path
 /// as written when the file is gone.
 fn file_key(rule: PathRule, canonical: &impl Fn(&str) -> Option<String>, path: &str) -> String {
     rule.key(&canonical(path).unwrap_or_else(|| path.to_owned()))
 }
 
-/// The recent list after `path` was used: that spelling first, as the user opened it (a
-/// link, a mapped drive: the reference of the chat that opened it), every other spelling
-/// of the same file dropped, at most [`RECENT_LIMIT`]. `canonical` gives a path's
-/// canonical spelling when the file is there, and serves only to tell which spellings are
-/// one file; a file that is gone is compared as written and kept (a drive that is not
-/// plugged in comes back). A Hugging Face cache link (`snapshots/<rev>/x.gguf`, pointing at
-/// `blobs/<sha>`, a name loading refuses) is kept as the link the same way.
+/// The recent list after `path` was used: its canonical spelling first, every other
+/// spelling of the same file dropped, at most [`RECENT_LIMIT`]. `canonical` gives a path's
+/// canonical spelling when the file is there; a file that is gone is compared as written
+/// and kept (a drive that is not plugged in comes back). When the canonical spelling has
+/// no `.gguf` name (a Hugging Face cache link `snapshots/<rev>/x.gguf` points at
+/// `blobs/<sha>`), loading would refuse it, so the spelling used is stored instead; the
+/// file's other spellings are dropped either way. The chat that opened the file through a
+/// link or a mapped drive still sees that spelling in its own list ([`local_entries`]'s
+/// `chat`).
 pub fn remembered(
     mut recent: Vec<String>,
     path: &str,
@@ -329,10 +352,37 @@ pub fn remembered(
     canonical: impl Fn(&str) -> Option<String>,
 ) -> Vec<String> {
     let key = file_key(rule, &canonical, path);
+    let stored = canonical(path)
+        .filter(|c| is_gguf_name(rule, c))
+        .unwrap_or_else(|| path.to_owned());
     recent.retain(|p| file_key(rule, &canonical, p) != key);
-    recent.insert(0, path.to_owned());
+    recent.insert(0, stored);
     recent.truncate(RECENT_LIMIT);
     recent
+}
+
+/// Which of the model table's paths `rows` is the file at `path`: the row with that very
+/// path, else one that is the same file under another spelling (a link, a mapped drive,
+/// letters in another case on Windows and macOS), the one spelled as its real path first,
+/// then the first by path. `None` when no row is, or the file is gone.
+pub fn row_for(
+    path: &str,
+    rows: &[String],
+    rule: PathRule,
+    locate: impl Fn(&str) -> Option<String>,
+) -> Option<usize> {
+    if let Some(i) = rows.iter().position(|r| r == path) {
+        return Some(i);
+    }
+    let key = rule.key(&locate(path)?);
+    rows.iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let c = locate(r)?;
+            (rule.key(&c) == key).then(|| (*r != c, r, i))
+        })
+        .min()
+        .map(|(_, _, i)| i)
 }
 
 /// The recent list after `path` was removed from Models → Installed: every spelling of the
@@ -361,10 +411,12 @@ async fn read_recent(store: &store::Store) -> Vec<String> {
 }
 
 /// "On this computer", read from the store and this computer's files; `loaded` is the
-/// path of the model loaded or loading now (see [`local_entries`]).
+/// path of the model loaded or loading now, `chat` the asking chat's model file (see
+/// [`local_entries`]).
 pub async fn local_options(
     store: &store::Store,
     loaded: Option<&str>,
+    chat: Option<&str>,
 ) -> Result<Vec<ModelOptionEntry>, store::StoreError> {
     let recent = read_recent(store).await;
     let installed: Vec<String> = store
@@ -377,9 +429,36 @@ pub async fn local_options(
         &recent,
         &installed,
         loaded,
+        chat,
         PathRule::this_system(),
         locate,
     ))
+}
+
+/// The row of Models → Installed for the file at `path`, under any spelling of it (see
+/// [`row_for`]), so a model opened through a link or a mapped drive still finds its
+/// picture reader and the facts saved with it.
+pub async fn installed_row(
+    store: &store::Store,
+    path: &str,
+) -> Result<Option<store::ModelRecord>, store::StoreError> {
+    let mut rows = store.list_models().await?;
+    let paths: Vec<String> = rows.iter().map(|m| m.path.clone()).collect();
+    Ok(row_for(path, &paths, PathRule::this_system(), locate).map(|i| rows.swap_remove(i)))
+}
+
+/// Whether two paths name one file on this computer: the same text, or two spellings of
+/// one existing file (a link, `..`, a mapped drive, letters in another case on Windows and
+/// macOS).
+pub fn same_file(a: &str, b: &str) -> bool {
+    same_file_by(a, b, PathRule::this_system(), locate)
+}
+
+fn same_file_by(a: &str, b: &str, rule: PathRule, locate: impl Fn(&str) -> Option<String>) -> bool {
+    a == b
+        || locate(a)
+            .zip(locate(b))
+            .is_some_and(|(x, y)| rule.key(&x) == rule.key(&y))
 }
 
 async fn save_recent(store: &store::Store, recent: &[String]) {
@@ -417,14 +496,15 @@ mod tests {
         v.iter().map(|s| (*s).to_owned()).collect()
     }
 
-    /// The local entries with no model loaded.
+    /// The local entries with no model loaded, asked for without a chat (the Welcome card, a
+    /// new chat).
     fn entries(
         recent: &[String],
         installed: &[String],
         rule: PathRule,
         locate: impl Fn(&str) -> Option<String>,
     ) -> Vec<ModelOptionEntry> {
-        local_entries(recent, installed, None, rule, locate)
+        local_entries(recent, installed, None, None, rule, locate)
     }
 
     /// Every path exists and is already canonical (a file system that keeps the spelling it
@@ -506,8 +586,8 @@ mod tests {
 
     /// The owner's screenshot, first reading: one file under two spellings (the drive letter
     /// and folders in another case, the other slash). One entry on Windows and macOS, in the
-    /// spelling used last (the chat's reference), else the one Installed uses; the rule is
-    /// named, so this holds on any build machine.
+    /// spelling Installed uses, used recently or not; the rule is named, so this holds on any
+    /// build machine.
     #[test]
     fn two_spellings_of_one_file_give_one_entry_on_windows_and_macos() {
         let recent = strings(&[r"c:/users/me/downloads/MODELS/ornith-1.5-9b-uncensored.q8_0.GGUF"]);
@@ -516,11 +596,11 @@ mod tests {
         let out = entries(&recent, &installed, PathRule::Windows, all_there);
         assert_eq!(
             shown(&out),
-            [("ornith-1.5-9b-uncensored.q8_0.GGUF".to_owned(), None)]
+            [("Ornith-1.5-9B-uncensored.Q8_0.gguf".to_owned(), None)]
         );
         assert_eq!(
             refs(&out),
-            [r"local:c:/users/me/downloads/MODELS/ornith-1.5-9b-uncensored.q8_0.GGUF"]
+            [r"local:C:\Users\Me\Downloads\models\Ornith-1.5-9B-uncensored.Q8_0.gguf"]
         );
         assert!(out[0].recent);
         let out = entries(&[], &installed, PathRule::Windows, all_there);
@@ -535,7 +615,7 @@ mod tests {
             PathRule::Mac,
             all_there,
         );
-        assert_eq!(refs(&out), ["local:/Users/me/Models/Ornith.Q8_0.gguf"]);
+        assert_eq!(refs(&out), ["local:/users/ME/models/ornith.q8_0.gguf"]);
 
         // On Linux the case matters: those are two files, told apart by their folders.
         let out = entries(
@@ -554,9 +634,8 @@ mod tests {
     }
 
     /// One file in two rows of Installed (a link and the file itself, or one path in two
-    /// cases on Windows), never used: one entry, the row spelled as the file's real path,
-    /// whatever the link is called; without such a row, the first by path, the same every
-    /// time. Used recently: the spelling it was used with.
+    /// cases on Windows): one entry, the row spelled as the file's real path, whatever the
+    /// link is called; without such a row, the first by path, the same every time.
     #[test]
     fn one_file_in_two_rows_is_listed_by_its_real_path() {
         let canonical = |p: &str| Some(p.replace("/m/alias.gguf", "/m/real/z.gguf"));
@@ -568,14 +647,14 @@ mod tests {
         );
         assert_eq!(shown(&out), [("z.gguf".to_owned(), None)]);
         assert_eq!(refs(&out), ["local:/m/real/z.gguf"]);
-        // Used recently under the link's name: the link (the chat's reference), first.
+        // Used recently under the link's name: still the real path, first.
         let out = entries(
             &strings(&["/m/alias.gguf"]),
             &strings(&["/m/other.gguf", "/m/real/z.gguf", "/m/alias.gguf"]),
             PathRule::Unix,
             canonical,
         );
-        assert_eq!(refs(&out), ["local:/m/alias.gguf", "local:/m/other.gguf"]);
+        assert_eq!(refs(&out), ["local:/m/real/z.gguf", "local:/m/other.gguf"]);
 
         let real = |_: &str| Some(r"C:\m\A.gguf".to_owned());
         let out = entries(
@@ -595,7 +674,7 @@ mod tests {
     }
 
     /// Two spellings that only the file system can tell are one file (a link, `..`): the
-    /// canonical path is the key; the spelling used most recently is the one listed.
+    /// canonical path is the key.
     #[test]
     fn two_spellings_resolved_by_the_file_system_give_one_entry() {
         let canonical = |p: &str| Some(p.replace("/link/", "/models/").replace("/x/../", "/"));
@@ -605,8 +684,8 @@ mod tests {
             PathRule::Unix,
             canonical,
         );
-        assert_eq!(refs(&out), ["local:/home/me/link/a.gguf"]);
-        // Not installed: the same.
+        assert_eq!(refs(&out), ["local:/home/me/models/a.gguf"]);
+        // Not installed: the spelling used most recently stays.
         let out = entries(
             &strings(&["/home/me/link/a.gguf", "/home/me/models/a.gguf"]),
             &[],
@@ -711,7 +790,7 @@ mod tests {
         let out = remembered(recent, r"C:/Models/X.gguf", PathRule::Windows, all_there);
         assert_eq!(out, strings(&[r"C:/Models/X.gguf", r"C:\other\y.gguf"]));
 
-        // The spelling used is what is stored; the canonical one only finds the others.
+        // The canonical spelling is what is stored.
         let canonical = |p: &str| Some(p.replace("/link/", "/models/"));
         let out = remembered(
             strings(&["/m/models/a.gguf", "/m/b.gguf"]),
@@ -719,7 +798,7 @@ mod tests {
             PathRule::Unix,
             canonical,
         );
-        assert_eq!(out, strings(&["/m/link/a.gguf", "/m/b.gguf"]));
+        assert_eq!(out, strings(&["/m/models/a.gguf", "/m/b.gguf"]));
 
         // A file that is gone stays remembered under its own spelling.
         let out = remembered(
@@ -749,12 +828,13 @@ mod tests {
             &recent,
             &[],
             Some("/x/link/M.gguf"),
+            None,
             PathRule::Unix,
             canonical,
         );
         assert_eq!(refs(&out), ["local:/x/link/M.gguf", "local:/m/b.gguf"]);
         assert!(out[0].recent && out[1].recent);
-        let out = local_entries(&recent, &[], None, PathRule::Unix, canonical);
+        let out = local_entries(&recent, &[], None, None, PathRule::Unix, canonical);
         assert_eq!(refs(&out), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
 
         // Installed under its real path, loaded through the link: the loaded spelling.
@@ -763,6 +843,7 @@ mod tests {
             &[],
             &installed,
             Some("/x/link/M.gguf"),
+            None,
             PathRule::Unix,
             canonical,
         );
@@ -775,6 +856,7 @@ mod tests {
             &strings(&[r"\\server\share\models\M.gguf"]),
             &[],
             Some(r"z:\MODELS\m.gguf"),
+            None,
             PathRule::Windows,
             |p: &str| unc(&p.replace("z:", "Z:")),
         );
@@ -786,42 +868,119 @@ mod tests {
             &recent,
             &[],
             Some("/other/n.gguf"),
+            None,
             PathRule::Unix,
             canonical,
         );
         assert_eq!(refs(&out), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
         let gone = |p: &str| (!p.contains("link")).then(|| p.to_owned());
-        let out = local_entries(&recent, &[], Some("/x/link/M.gguf"), PathRule::Unix, gone);
+        let out = local_entries(
+            &recent,
+            &[],
+            Some("/x/link/M.gguf"),
+            None,
+            PathRule::Unix,
+            gone,
+        );
         assert_eq!(refs(&out), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
     }
 
-    /// A model opened through a link or a mapped drive keeps that spelling in the list when
-    /// it is not loaded, installed under its real path or not, so picking it there leaves the
-    /// chat that opened it on the same reference. The canonical path only tells that two
-    /// spellings are one file.
+    /// The chat that opened a model through a link or a mapped drive sees its own file under
+    /// that spelling, installed under its real path or not, and whatever spelling the file
+    /// was used under last (Models → Installed's Use, another chat), so picking it there
+    /// leaves that chat's reference as it is. Every other chat, and a view asked without a
+    /// chat (the Welcome card, a new chat), sees the spelling Installed uses, so no new chat
+    /// takes the link by default. The canonical path only tells that two spellings are one
+    /// file.
     #[test]
-    fn a_file_opened_through_a_link_keeps_that_spelling_when_not_loaded() {
-        let canonical = |p: &str| Some(p.replace("/x/link/", "/x/real/"));
+    fn the_asking_chat_sees_its_own_file_the_way_it_names_it() {
+        let canonical = |p: &str| {
+            Some(
+                p.replace("/x/link/", "/x/real/")
+                    .replace("/x/Alias.gguf", "/x/real/M.gguf"),
+            )
+        };
+        let chat = |recent: &[String], installed: &[String], own: &str| {
+            local_entries(
+                recent,
+                installed,
+                None,
+                Some(own),
+                PathRule::Unix,
+                canonical,
+            )
+        };
+        // Opened through the link: the real path is what is remembered.
         let recent = remembered(
-            strings(&["/x/real/M.gguf", "/m/b.gguf"]),
+            strings(&["/m/b.gguf"]),
             "/x/link/M.gguf",
             PathRule::Unix,
             canonical,
         );
-        assert_eq!(recent, strings(&["/x/link/M.gguf", "/m/b.gguf"]));
-        for installed in [Vec::new(), strings(&["/m/b.gguf", "/x/real/M.gguf"])] {
-            let out = entries(&recent, &installed, PathRule::Unix, canonical);
-            assert_eq!(refs(&out), ["local:/x/link/M.gguf", "local:/m/b.gguf"]);
-            assert_eq!(shown(&out)[0], ("M.gguf".to_owned(), None));
+        assert_eq!(recent, strings(&["/x/real/M.gguf", "/m/b.gguf"]));
+        let installed = strings(&["/m/b.gguf", "/x/real/M.gguf"]);
+        for rows in [Vec::new(), installed.clone()] {
+            let own = chat(&recent, &rows, "/x/link/M.gguf");
+            assert_eq!(refs(&own), ["local:/x/link/M.gguf", "local:/m/b.gguf"]);
+            assert_eq!(shown(&own)[0], ("M.gguf".to_owned(), None));
+            assert!(own[0].recent && own[1].recent);
+            let other = chat(&recent, &rows, "/m/b.gguf");
+            assert_eq!(refs(&other), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
+            let asked_without = entries(&recent, &rows, PathRule::Unix, canonical);
+            assert_eq!(refs(&asked_without), refs(&other));
         }
-        // Opened again by its real path: that spelling, once.
+        // Used later under its real path: that chat still sees the link.
         let recent = remembered(recent, "/x/real/M.gguf", PathRule::Unix, canonical);
         assert_eq!(recent, strings(&["/x/real/M.gguf", "/m/b.gguf"]));
-        let out = entries(&recent, &[], PathRule::Unix, canonical);
-        assert_eq!(refs(&out), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
+        let own = chat(&recent, &installed, "/x/link/M.gguf");
+        assert_eq!(refs(&own), ["local:/x/link/M.gguf", "local:/m/b.gguf"]);
+        // A link with another name: that name, in that chat only.
+        let own = chat(&recent, &installed, "/x/Alias.gguf");
+        assert_eq!(shown(&own)[0], ("Alias.gguf".to_owned(), None));
+        assert_eq!(refs(&own), ["local:/x/Alias.gguf", "local:/m/b.gguf"]);
+        // Installed and never used: the same, in its place by name.
+        let own = chat(&[], &installed, "/x/link/M.gguf");
+        assert_eq!(refs(&own), ["local:/m/b.gguf", "local:/x/link/M.gguf"]);
+        assert!(!own[1].recent);
+        // Folder hints are worked out on what that chat sees.
+        let copies = strings(&["/y/models/M.gguf", "/x/real/M.gguf"]);
+        let own = chat(&[], &copies, "/x/link/M.gguf");
+        assert_eq!(
+            shown(&own),
+            [
+                ("M.gguf".to_owned(), Some("x/link".to_owned())),
+                ("M.gguf".to_owned(), Some("y/models".to_owned())),
+            ]
+        );
 
-        // A Windows mapped drive, typed in another case, and its network path, the one the
-        // file system gives back and the one Installed lists.
+        // The loaded model's spelling comes first: loaded under the real path by another
+        // chat, this chat is offered the model already loaded, not a restart under its link.
+        let own = local_entries(
+            &recent,
+            &installed,
+            Some("/x/real/M.gguf"),
+            Some("/x/link/M.gguf"),
+            PathRule::Unix,
+            canonical,
+        );
+        assert_eq!(refs(&own), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
+
+        // A chat's file that is in neither list is not added; one that is gone changes nothing.
+        let own = chat(&recent, &installed, "/elsewhere/n.gguf");
+        assert_eq!(refs(&own), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
+        let gone = |p: &str| (!p.contains("link")).then(|| p.to_owned());
+        let own = local_entries(
+            &recent,
+            &installed,
+            None,
+            Some("/x/link/M.gguf"),
+            PathRule::Unix,
+            gone,
+        );
+        assert_eq!(refs(&own), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
+
+        // A Windows mapped drive typed in another case, whose network path is the one the file
+        // system gives back and the one Installed lists.
         let unc = |p: &str| {
             Some(if PathRule::Windows.key(p).ends_with(r"\MODELS\M.GGUF") {
                 r"\\server\share\models\M.gguf".to_owned()
@@ -829,21 +988,92 @@ mod tests {
                 p.to_owned()
             })
         };
-        let recent = remembered(
-            strings(&[r"\\server\share\models\M.gguf"]),
-            r"z:\MODELS\m.gguf",
-            PathRule::Windows,
-            unc,
-        );
-        assert_eq!(recent, strings(&[r"z:\MODELS\m.gguf"]));
-        let out = entries(
+        let recent = remembered(Vec::new(), r"z:\MODELS\m.gguf", PathRule::Windows, unc);
+        assert_eq!(recent, strings(&[r"\\server\share\models\M.gguf"]));
+        let installed = strings(&[r"\\server\share\models\M.gguf"]);
+        let own = local_entries(
             &recent,
-            &strings(&[r"\\server\share\models\M.gguf"]),
+            &installed,
+            None,
+            Some(r"z:\MODELS\m.gguf"),
             PathRule::Windows,
             unc,
         );
-        assert_eq!(shown(&out), [("m.gguf".to_owned(), None)]);
-        assert_eq!(refs(&out), [r"local:z:\MODELS\m.gguf"]);
+        assert_eq!(shown(&own), [("m.gguf".to_owned(), None)]);
+        assert_eq!(refs(&own), [r"local:z:\MODELS\m.gguf"]);
+        let other = entries(&recent, &installed, PathRule::Windows, unc);
+        assert_eq!(refs(&other), [r"local:\\server\share\models\M.gguf"]);
+    }
+
+    /// The row of Models → Installed for a file opened under another spelling (a link, a
+    /// mapped drive, another case on Windows): its picture reader and saved facts follow the
+    /// file, not the spelling. Of two rows for one file, the one with that very path, else
+    /// the one spelled as its real path, else the first by path. Two paths are one file when
+    /// they are the same text or two spellings of one existing file.
+    #[test]
+    fn the_installed_row_and_the_loaded_check_follow_the_file() {
+        let canonical = |p: &str| {
+            (!p.contains("gone")).then(|| {
+                p.replace("/x/link/", "/x/real/")
+                    .replace("/x/Alias.gguf", "/x/real/M.gguf")
+            })
+        };
+        let row =
+            |path: &str, rows: &[&str]| row_for(path, &strings(rows), PathRule::Unix, canonical);
+        let rows = ["/m/b.gguf", "/x/real/M.gguf"];
+        assert_eq!(row("/x/real/M.gguf", &rows), Some(1));
+        assert_eq!(row("/x/link/M.gguf", &rows), Some(1));
+        assert_eq!(row("/x/Alias.gguf", &rows), Some(1));
+        assert_eq!(row("/m/c.gguf", &rows), None);
+        assert_eq!(row("/x/gone/M.gguf", &rows), None);
+        let rows = ["/x/link/M.gguf", "/x/real/M.gguf", "/x/Alias.gguf"];
+        assert_eq!(row("/x/link/M.gguf", &rows), Some(0));
+        assert_eq!(row("/x/Alias.gguf", &rows), Some(2));
+        assert_eq!(row("/x/real/M.gguf", &rows), Some(1));
+        assert_eq!(
+            row("/x/real/M.gguf", &["/x/link/M.gguf", "/x/Alias.gguf"]),
+            Some(1)
+        );
+        let rows = ["/x/link/M.gguf", "/x/real/M.gguf"];
+        assert_eq!(row("/x/Alias.gguf", &rows), Some(1));
+        // A row whose file is gone is found only by its own path.
+        assert_eq!(row("/x/gone/M.gguf", &["/x/gone/M.gguf"]), Some(0));
+        assert_eq!(row("/x/real/M.gguf", &["/x/gone/M.gguf"]), None);
+        // Windows: letters in another case and either slash; Linux: case matters.
+        let rows = strings(&[r"C:\Models\M.gguf"]);
+        assert_eq!(
+            row_for(r"c:/models/m.GGUF", &rows, PathRule::Windows, all_there),
+            Some(0)
+        );
+        assert_eq!(
+            row_for(r"c:/models/m.GGUF", &rows, PathRule::Unix, all_there),
+            None
+        );
+
+        let same = |a: &str, b: &str| same_file_by(a, b, PathRule::Unix, canonical);
+        assert!(same("/x/link/M.gguf", "/x/real/M.gguf"));
+        assert!(same("/x/Alias.gguf", "/x/link/M.gguf"));
+        assert!(same("/x/gone/a.gguf", "/x/gone/a.gguf"));
+        assert!(!same("/m/b.gguf", "/x/real/M.gguf"));
+        assert!(!same("/x/gone/M.gguf", "/x/real/M.gguf"));
+        assert!(same_file_by(
+            r"C:\M\a.gguf",
+            r"c:/m/A.GGUF",
+            PathRule::Windows,
+            all_there
+        ));
+        assert!(same_file_by(
+            "/M/a.gguf",
+            "/m/A.gguf",
+            PathRule::Mac,
+            all_there
+        ));
+        assert!(!same_file_by(
+            "/m/a.gguf",
+            "/m/A.gguf",
+            PathRule::Unix,
+            all_there
+        ));
     }
 
     /// Removing a model from Models → Installed forgets every spelling of its file; the rest of
@@ -951,10 +1181,10 @@ mod tests {
             [format!("local:{link}"), "local:/m/b.gguf".to_owned()]
         );
         assert_eq!(listed[0].option.label, "Qwen-Q4_K_M.gguf");
-        // A link whose real path keeps a `.gguf` name, in any case, is kept as the link too.
+        // A real path that keeps a `.gguf` name, in any case, is still the one stored.
         let upper = |p: &str| Some(p.replace("/link/", "/models/").replace("a.gguf", "A.GGUF"));
         let out = remembered(Vec::new(), "/m/link/a.gguf", PathRule::Unix, upper);
-        assert_eq!(out, strings(&["/m/link/a.gguf"]));
+        assert_eq!(out, strings(&["/m/models/A.GGUF"]));
         let dotfile = |_: &str| Some("/m/blobs/.gguf".to_owned());
         let out = remembered(Vec::new(), "/m/link/a.gguf", PathRule::Unix, dotfile);
         assert_eq!(out, strings(&["/m/link/a.gguf"]));
@@ -1089,7 +1319,7 @@ mod tests {
             .await
             .unwrap();
 
-        let out = local_options(&store, None).await.unwrap();
+        let out = local_options(&store, None, None).await.unwrap();
         assert_eq!(
             refs(&out),
             [
@@ -1102,8 +1332,8 @@ mod tests {
     }
 
     /// Two spellings of one file through the real file system (`..`, and on Unix a link) are
-    /// one entry, and remembering stores one spelling of it, the one used last; never used,
-    /// the row spelled as the file's real path.
+    /// one entry, and remembering stores the canonical path once. The list shows the row
+    /// spelled as the file's real path, except to the chat that names the file another way.
     #[tokio::test]
     async fn the_store_keys_files_by_their_canonical_path() {
         let dir = temp_dir("canon");
@@ -1128,36 +1358,102 @@ mod tests {
             .into_owned();
         assert_eq!(recent, vec![canonical.clone()]);
 
-        let used_last = if cfg!(unix) {
+        // The spelling a chat names the file by: on Unix a link (registered too, as an
+        // import of the link does), elsewhere `..`.
+        let own = if cfg!(unix) {
             dir.join("link.gguf")
         } else {
-            file.clone()
+            dotted.clone()
         };
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&file, &used_last).unwrap();
-            register(&store, &used_last).await;
-            remember(&store, &used_last.to_string_lossy()).await;
+            std::os::unix::fs::symlink(&file, &own).unwrap();
+            register(&store, &own).await;
+            remember(&store, &own.to_string_lossy()).await;
             let recent: Vec<String> = store
                 .get_setting(RECENT_LOCAL_MODELS)
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(recent, vec![used_last.to_string_lossy().into_owned()]);
+            assert_eq!(recent, vec![canonical.clone()]);
         }
-        let out = local_options(&store, None).await.unwrap();
+        let out = local_options(&store, None, None).await.unwrap();
         assert_eq!(out.len(), 1, "{:?}", refs(&out));
         assert_eq!(out[0].hint, None);
-        // The spelling used last, the chat's reference.
-        assert_eq!(refs(&out), [format!("local:{}", used_last.display())]);
-        // Never used: the row spelled as the file's real path, not the link's.
-        store
-            .set_setting(RECENT_LOCAL_MODELS, &serde_json::json!([]))
-            .await
-            .unwrap();
-        let out = local_options(&store, None).await.unwrap();
+        // The row spelled as the file's real path, not the link's.
         assert_eq!(refs(&out), [format!("local:{}", file.display())]);
         assert_eq!(out[0].option.label, "m.gguf");
+        // The chat that names it the other way sees that spelling, once.
+        let own = own.to_string_lossy().into_owned();
+        let out = local_options(&store, None, Some(&own)).await.unwrap();
+        assert_eq!(refs(&out), [format!("local:{own}")]);
+        // Its Installed row is found under any spelling: the row with that very path (the
+        // link is a row too on Unix), else the one spelled as its real path. The spellings
+        // are one file.
+        let row = installed_row(&store, &dotted.to_string_lossy())
+            .await
+            .unwrap();
+        assert_eq!(row.unwrap().path, file.to_string_lossy());
+        let row = installed_row(&store, &own).await.unwrap().unwrap();
+        let expected = if cfg!(unix) {
+            own.clone()
+        } else {
+            file.to_string_lossy().into_owned()
+        };
+        assert_eq!(row.path, expected);
+        assert!(same_file(&own, &file.to_string_lossy()));
+        assert!(!same_file(&own, &dir.join("other").to_string_lossy()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The picture reader recorded with an installed model is found when the model is opened
+    /// through a link with another name (Unix) or a `..` spelling, and no row is found for a
+    /// file Installed does not have.
+    #[tokio::test]
+    async fn the_store_finds_the_installed_row_under_another_spelling() {
+        let dir = temp_dir("row");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::create_dir_all(dir.join("opened")).unwrap();
+        let file = dir.join("real").join("Vis-Q4_K_M.gguf");
+        let lone = dir.join("real").join("Lone.gguf");
+        std::fs::write(&file, b"GGUF").unwrap();
+        std::fs::write(&lone, b"GGUF").unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        register(&store, &file).await;
+        let dotted = dir
+            .join("opened")
+            .join("..")
+            .join("real")
+            .join("Vis-Q4_K_M.gguf");
+        let mut spellings = vec![file.clone(), dotted];
+        #[cfg(unix)]
+        {
+            let alias = dir.join("opened").join("Alias.gguf");
+            std::os::unix::fs::symlink(&file, &alias).unwrap();
+            spellings.push(alias);
+        }
+        for p in &spellings {
+            let row = installed_row(&store, &p.to_string_lossy()).await.unwrap();
+            assert_eq!(
+                row.map(|r| r.path),
+                Some(file.to_string_lossy().into_owned()),
+                "{}",
+                p.display()
+            );
+        }
+        assert!(
+            installed_row(&store, &lone.to_string_lossy())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let gone = dir.join("real").join("gone.gguf");
+        assert!(
+            installed_row(&store, &gone.to_string_lossy())
+                .await
+                .unwrap()
+                .is_none()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1182,7 +1478,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(recent, vec![link.to_string_lossy().into_owned()]);
-        let out = local_options(&store, None).await.unwrap();
+        let out = local_options(&store, None, None).await.unwrap();
         assert_eq!(refs(&out), [format!("local:{}", link.display())]);
         assert_eq!(out[0].option.label, "Qwen-Q4_K_M.gguf");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1190,7 +1486,7 @@ mod tests {
 
     /// An imported model (import also remembers it) removed from Models → Installed leaves
     /// the chat's model list; its file stays. A model loaded through a link is listed under
-    /// the link, while it is loaded and after.
+    /// the link while it is loaded, and after that to the chat that names it so.
     #[tokio::test]
     async fn the_store_forgets_a_removed_model_and_keeps_the_loaded_spelling() {
         let dir = temp_dir("forget");
@@ -1205,7 +1501,7 @@ mod tests {
         let model = store.list_models().await.unwrap().remove(0);
         store.delete_model(model.id).await.unwrap();
         forget(&store, &file.to_string_lossy()).await;
-        let out = local_options(&store, None).await.unwrap();
+        let out = local_options(&store, None, None).await.unwrap();
         assert_eq!(refs(&out), [format!("local:{}", other.display())]);
         assert!(file.exists());
         // Forgetting a file that is not on the list writes nothing new.
@@ -1223,9 +1519,12 @@ mod tests {
             std::os::unix::fs::symlink(&other, &link).unwrap();
             let link = link.to_string_lossy().into_owned();
             remember(&store, &link).await;
-            let out = local_options(&store, Some(&link)).await.unwrap();
+            let out = local_options(&store, Some(&link), None).await.unwrap();
             assert_eq!(refs(&out), [format!("local:{link}")]);
-            let out = local_options(&store, None).await.unwrap();
+            let out = local_options(&store, None, None).await.unwrap();
+            assert_eq!(refs(&out), [format!("local:{}", other.display())]);
+            // Not loaded any more: the chat that names it by the link still sees the link.
+            let out = local_options(&store, None, Some(&link)).await.unwrap();
             assert_eq!(refs(&out), [format!("local:{link}")]);
         }
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1243,7 +1542,7 @@ mod tests {
             .set_setting(RECENT_LOCAL_MODELS, &serde_json::json!({"not": "a list"}))
             .await
             .unwrap();
-        let out = local_options(&store, None).await.unwrap();
+        let out = local_options(&store, None, None).await.unwrap();
         assert_eq!(refs(&out), [format!("local:{}", file.display())]);
         remember(&store, &file.to_string_lossy()).await;
         let recent: Vec<String> = store

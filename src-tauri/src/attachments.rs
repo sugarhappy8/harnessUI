@@ -2,7 +2,8 @@
 //! under the local data folder, referenced from message content by attachment id, and
 //! sent to the model as base64 data URIs (never as file or http URLs).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use base64::Engine;
 use serde::Deserialize;
@@ -48,20 +49,59 @@ fn extension(mime: &str) -> &'static str {
     }
 }
 
-/// [0.0.6] Widest or tallest WebP picture turned into PNG, in pixels.
+/// [0.0.6] Widest or tallest WebP picture turned into JPEG or PNG, in pixels.
 const MAX_PICTURE_SIDE: u32 = 8_192;
 /// [0.0.6] Most memory the WebP decoder may set aside for one picture's pixels: 128 MiB, a
-/// 33-megapixel picture with see-through parts or a 44-megapixel one without.
+/// 33-megapixel picture with see-through parts or a 44-megapixel one without. This bounds
+/// the decoded picture only. The decoder's own tables are not counted (a 4 MB crafted file
+/// can make them take over a gigabyte), which is why decoding runs in the picture worker,
+/// under [`PICTURE_WORKER_MEMORY`].
 const MAX_PICTURE_DECODE_BYTES: u64 = 128 * 1024 * 1024;
+/// [0.0.6] JPEG quality for a WebP picture without see-through parts.
+const JPEG_QUALITY: u8 = 90;
 
-/// [0.0.6] What the user is told when a WebP picture cannot be turned into PNG (broken, or
-/// larger than the limits); what went wrong is in the details.
+/// [0.0.6] Hidden command-line flag that turns the app binary into the picture worker
+/// ([`picture_worker_main`]).
+pub const PICTURE_WORKER_FLAG: &str = "--internal-picture-worker";
+/// [0.0.6] Memory the picture worker may use, its own program and libraries included (about
+/// 320 MB of address space for the debug build on Linux); the largest picture the limits
+/// let through takes about 300 MB more.
+const PICTURE_WORKER_MEMORY: u64 = 1024 * 1024 * 1024;
+/// [0.0.6] How long the picture worker may take for one picture.
+const PICTURE_WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+/// [0.0.6] Starts the converted picture on the worker's output; anything written before it
+/// (a test harness's own lines) is skipped.
+const PICTURE_MARK: &[u8] = b"@@harness-picture-worker@@\n";
+/// [0.0.6] Output skipped before [`PICTURE_MARK`] at most, in bytes.
+const PICTURE_PREAMBLE: usize = 4096;
+/// [0.0.6] The worker's error output kept for the details, in bytes.
+const PICTURE_ERROR_TAIL: usize = 4096;
+/// [0.0.6] The worker's exit code when the converted picture would be larger than
+/// [`MAX_IMAGE_BYTES`].
+const PICTURE_TOO_LARGE_EXIT: i32 = 3;
+
+/// [0.0.6] What the user is told when a WebP picture cannot be turned into JPEG or PNG
+/// (broken, larger than the limits, or too slow); what went wrong is in the details.
 fn unreadable_picture(details: impl Into<String>) -> AppError {
     AppError::new(
         "picture_unreadable",
         "This picture could not be read.",
         "Try a PNG or JPEG.",
         details,
+    )
+}
+
+/// [0.0.6] What the user is told when a WebP picture would be larger than
+/// [`MAX_IMAGE_BYTES`] once turned into JPEG or PNG.
+fn picture_too_large(file_name: &str) -> AppError {
+    AppError::new(
+        "picture_too_large",
+        format!(
+            "{file_name} is larger than {} MB once it is turned into a picture the model can read.",
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        ),
+        "Try a smaller picture.",
+        String::new(),
     )
 }
 
@@ -110,11 +150,45 @@ fn webp_sides_within_limits(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && chunks_ok(&bytes[12..], false)
 }
 
-/// [0.0.6] A WebP picture as PNG (the first frame of an animation), decoded within limits so
-/// a crafted file cannot exhaust memory: at most [`MAX_PICTURE_SIDE`] pixels a side, the
-/// canvas and every frame ([`webp_sides_within_limits`]), and [`MAX_PICTURE_DECODE_BYTES`]
-/// for the pixels. Pure Rust (the `image` crate's WebP decoder); nothing else is started.
-fn webp_to_png(bytes: &[u8]) -> image::ImageResult<Vec<u8>> {
+/// [0.0.6] Why a WebP picture was not turned into JPEG or PNG.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NotConverted {
+    /// Broken, larger than the decoding limits, too slow, or the worker failed: what went
+    /// wrong, for the details.
+    Unreadable(String),
+    /// Larger than [`MAX_IMAGE_BYTES`] once converted.
+    TooLarge,
+}
+
+/// [0.0.6] Encoded bytes up to a cap: a write past it fails, so a picture that would be too
+/// large stops being encoded as soon as it is.
+struct CappedOutput {
+    bytes: Vec<u8>,
+    cap: usize,
+    over: bool,
+}
+
+impl std::io::Write for CappedOutput {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(buf.len()) > self.cap {
+            self.over = true;
+            return Err(std::io::Error::other("the picture is too large"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// [0.0.6] A WebP picture decoded (the first frame of an animation) within limits: at most
+/// [`MAX_PICTURE_SIDE`] pixels a side, the canvas and every frame
+/// ([`webp_sides_within_limits`]), and [`MAX_PICTURE_DECODE_BYTES`] for the pixels. Pure
+/// Rust (the `image` crate's WebP decoder). The limits do not bound the decoder's own
+/// tables, so this runs only in the picture worker ([`picture_worker_main`]).
+fn decode_webp(bytes: &[u8]) -> image::ImageResult<image::DynamicImage> {
     use image::error::{LimitError, LimitErrorKind};
     if !webp_sides_within_limits(bytes) {
         return Err(image::ImageError::Limits(LimitError::from_kind(
@@ -128,43 +202,335 @@ fn webp_to_png(bytes: &[u8]) -> image::ImageResult<Vec<u8>> {
     let mut reader =
         image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::WebP);
     reader.limits(limits);
-    let picture = reader.decode()?;
-    let mut png = Vec::new();
-    picture.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
-    Ok(png)
+    reader.decode()
+}
+
+/// [0.0.6] A decoded picture as the model gets it, at most `cap` bytes: JPEG at quality
+/// [`JPEG_QUALITY`] when every pixel is opaque (a photo is many times smaller than as PNG),
+/// PNG when some are see-through.
+fn encode_for_model(picture: image::DynamicImage, cap: usize) -> Result<Vec<u8>, NotConverted> {
+    use image::ImageEncoder;
+    let (width, height) = (picture.width(), picture.height());
+    let opaque = match picture.as_rgba8() {
+        Some(rgba) => rgba.pixels().all(|p| p.0[3] == u8::MAX),
+        None => !picture.color().has_alpha(),
+    };
+    let mut out = CappedOutput {
+        bytes: Vec::new(),
+        cap,
+        over: false,
+    };
+    let encoded = if opaque {
+        let rgb = picture.into_rgb8();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY).write_image(
+            rgb.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )
+    } else {
+        let rgba = picture.into_rgba8();
+        image::codecs::png::PngEncoder::new(&mut out).write_image(
+            rgba.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+    };
+    match encoded {
+        Ok(()) => Ok(out.bytes),
+        Err(_) if out.over => Err(NotConverted::TooLarge),
+        Err(e) => Err(NotConverted::Unreadable(e.to_string())),
+    }
+}
+
+/// [0.0.6] A WebP picture as JPEG or PNG, at most [`MAX_IMAGE_BYTES`] ([`decode_webp`],
+/// [`encode_for_model`]). Runs only in the picture worker.
+fn webp_for_model(bytes: &[u8]) -> Result<Vec<u8>, NotConverted> {
+    let picture = decode_webp(bytes).map_err(|e| NotConverted::Unreadable(e.to_string()))?;
+    encode_for_model(picture, MAX_IMAGE_BYTES)
+}
+
+/// [0.0.6] The picture worker's entry point (`main.rs`). It caps its own memory
+/// ([`PICTURE_WORKER_MEMORY`]) before anything else, reads one WebP picture from stdin (at
+/// most [`MAX_IMAGE_BYTES`]), and writes [`PICTURE_MARK`] and the picture as JPEG or PNG
+/// ([`webp_for_model`]) to stdout. Never returns. Exits with 0 on success,
+/// [`PICTURE_TOO_LARGE_EXIT`] when the picture would be too large, and 2 when it cannot be
+/// read, with the reason on stderr. A failed allocation aborts it.
+pub fn picture_worker_main() -> ! {
+    use std::io::{Read, Write};
+    tools::pdf::limit_own_memory(PICTURE_WORKER_MEMORY);
+    let mut webp = Vec::new();
+    let read = std::io::stdin()
+        .lock()
+        .take(MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut webp);
+    if read.is_err() || webp.len() > MAX_IMAGE_BYTES {
+        eprintln!("the picture could not be read whole");
+        std::process::exit(2);
+    }
+    match std::panic::catch_unwind(|| webp_for_model(&webp)) {
+        Ok(Ok(picture)) => {
+            let mut out = std::io::stdout().lock();
+            let written = out
+                .write_all(PICTURE_MARK)
+                .and_then(|()| out.write_all(&picture))
+                .and_then(|()| out.flush());
+            std::process::exit(if written.is_ok() { 0 } else { 2 })
+        }
+        Ok(Err(NotConverted::TooLarge)) => std::process::exit(PICTURE_TOO_LARGE_EXIT),
+        Ok(Err(NotConverted::Unreadable(why))) => {
+            eprintln!("{why}");
+            std::process::exit(2)
+        }
+        // The panic message is already on stderr.
+        Err(_) => std::process::exit(2),
+    }
+}
+
+/// [0.0.6] How the app starts the picture worker: its own binary with
+/// [`PICTURE_WORKER_FLAG`] and no other argument, through the runtime spawn module; the
+/// picture goes in on stdin and comes back on stdout. Tests start their own binary instead.
+#[derive(Debug, Clone)]
+struct PictureWorker {
+    program: PathBuf,
+    args: Vec<std::ffi::OsString>,
+    env: runtime::EnvSpec,
+    timeout: Duration,
+    /// Largest converted picture taken from the worker, in bytes.
+    max_output: usize,
+}
+
+impl PictureWorker {
+    /// The app's own binary as the worker. Without its path the worker cannot start, and
+    /// the picture counts as unreadable.
+    fn app() -> Self {
+        Self::of(std::env::current_exe().unwrap_or_default())
+    }
+
+    fn of(program: PathBuf) -> Self {
+        Self {
+            program,
+            args: vec![PICTURE_WORKER_FLAG.into()],
+            env: runtime::EnvSpec::minimal(),
+            timeout: PICTURE_WORKER_TIMEOUT,
+            max_output: MAX_IMAGE_BYTES,
+        }
+    }
+
+    /// `webp` as JPEG or PNG, with its MIME type, turned in a worker process
+    /// ([`picture_worker_main`]), so a crafted file can cost the app neither its memory
+    /// nor its life. A worker that fails, aborts or takes longer than its time is killed
+    /// with its process tree, and the picture counts as unreadable.
+    async fn convert(&self, webp: &[u8]) -> Result<(String, Vec<u8>), NotConverted> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let failed = NotConverted::Unreadable;
+        let cwd = self
+            .program
+            .parent()
+            .map_or_else(std::env::temp_dir, Path::to_path_buf);
+        let spec = runtime::SpawnSpec::new(&self.program, cwd)
+            .args(self.args.iter().cloned())
+            .env(self.env.clone())
+            .stdin(runtime::StdioMode::Piped)
+            .stdout(runtime::StdioMode::Piped)
+            .stderr(runtime::StdioMode::Piped);
+        let mut child = runtime::spawn(spec)
+            .map_err(|e| failed(format!("the picture worker could not start: {e}")))?;
+        let (Some(mut stdin), Some(stdout), Some(stderr)) =
+            (child.take_stdin(), child.take_stdout(), child.take_stderr())
+        else {
+            return Err(failed("the picture worker could not be reached".into()));
+        };
+        let most = PICTURE_PREAMBLE + PICTURE_MARK.len() + self.max_output + 1;
+        let work = async {
+            let write = async move {
+                // A worker that stops early closes its end; its exit code says why.
+                let _ = stdin.write_all(webp).await;
+            };
+            // Reading stops after `most` bytes and closes the pipe, so a worker that writes
+            // more fails instead of waiting.
+            let output = async move {
+                let mut out = Vec::new();
+                let _ = stdout.take(most as u64).read_to_end(&mut out).await;
+                out
+            };
+            let errors = async move {
+                let mut err = Vec::new();
+                let _ = stderr
+                    .take(PICTURE_ERROR_TAIL as u64)
+                    .read_to_end(&mut err)
+                    .await;
+                err
+            };
+            let ((), out, err) = tokio::join!(write, output, errors);
+            (out, err, child.wait().await)
+        };
+        let (mut out, err, status) = tokio::time::timeout(self.timeout, work)
+            .await
+            .map_err(|_| failed("turning the picture into JPEG or PNG took too long".into()))?;
+        let status = status.map_err(|e| failed(format!("the picture worker was lost: {e}")))?;
+        if out.len() >= most || status.code() == Some(PICTURE_TOO_LARGE_EXIT) {
+            return Err(NotConverted::TooLarge);
+        }
+        if !status.success() {
+            let why = String::from_utf8_lossy(&err).trim().to_owned();
+            return Err(failed(if why.is_empty() {
+                format!("the picture worker stopped ({status})")
+            } else {
+                why
+            }));
+        }
+        let start = out
+            .windows(PICTURE_MARK.len())
+            .take(PICTURE_PREAMBLE + 1)
+            .position(|w| w == PICTURE_MARK)
+            .ok_or_else(|| failed("the picture worker gave no picture".into()))?;
+        let picture = out.split_off(start + PICTURE_MARK.len());
+        if picture.len() > self.max_output {
+            return Err(NotConverted::TooLarge);
+        }
+        let mime = if sniff("image/png", &picture) {
+            "image/png"
+        } else if sniff("image/jpeg", &picture) {
+            "image/jpeg"
+        } else {
+            return Err(failed("the picture worker gave no picture".into()));
+        };
+        Ok((mime.to_owned(), picture))
+    }
 }
 
 /// [0.0.6] A picture's MIME type and bytes as the model gets them. llama-server reads WebP
 /// only through ffmpeg, which the app never lets it start (`--video-ffmpeg-dir` is a fixed
-/// empty folder), so a WebP picture becomes PNG ([`webp_to_png`]); PNG, JPEG and GIF are
-/// kept byte for byte. A WebP picture that cannot be turned into PNG gives the user's
-/// plain message, also if the decoder panics.
-fn picture_for_model(mime: String, bytes: Vec<u8>) -> AppResult<(String, Vec<u8>)> {
+/// empty folder), so a WebP picture becomes JPEG or PNG in the picture worker
+/// ([`PictureWorker::convert`]); PNG, JPEG and GIF are kept byte for byte.
+async fn picture_for_model(
+    worker: &PictureWorker,
+    mime: String,
+    bytes: Vec<u8>,
+) -> Result<(String, Vec<u8>), NotConverted> {
     if mime != "image/webp" {
         return Ok((mime, bytes));
     }
-    match std::panic::catch_unwind(|| webp_to_png(&bytes)) {
-        Ok(Ok(png)) => Ok(("image/png".to_owned(), png)),
-        Ok(Err(e)) => Err(unreadable_picture(e.to_string())),
-        Err(_) => Err(unreadable_picture("the WebP decoder stopped")),
+    worker.convert(&bytes).await
+}
+
+/// [0.0.6] What the model gets instead of a stored or tool WebP picture that cannot be
+/// turned into JPEG or PNG.
+const PICTURE_LEFT_OUT: &str = "[a WebP picture could not be read and was left out]";
+/// [0.0.6] As [`PICTURE_LEFT_OUT`], for a picture too large once turned into JPEG or PNG.
+const PICTURE_LEFT_OUT_TOO_LARGE: &str =
+    "[a WebP picture was left out: it is larger than 20 MB as JPEG or PNG]";
+
+/// [0.0.6] A picture from a tool or stored inline in a chat, as the model gets it.
+enum InlinePicture {
+    /// Not WebP (or not base64, which the agent replaces with its own note): sent as it is.
+    Keep,
+    /// The MIME type and base64 of the picture as JPEG or PNG.
+    Converted(String, String),
+    /// The note sent instead: llama-server refuses a whole request holding a picture it
+    /// cannot read, and the picture would be sent again with every later request.
+    LeftOut(&'static str),
+}
+
+async fn inline_picture(worker: &PictureWorker, mime: &str, data_base64: &str) -> InlinePicture {
+    if !mime.trim().eq_ignore_ascii_case("image/webp") {
+        return InlinePicture::Keep;
+    }
+    let compact: String = data_base64
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(compact) else {
+        return InlinePicture::Keep;
+    };
+    match worker.convert(&bytes).await {
+        Ok((mime, picture)) => InlinePicture::Converted(
+            mime,
+            base64::engine::general_purpose::STANDARD.encode(picture),
+        ),
+        Err(NotConverted::TooLarge) => InlinePicture::LeftOut(PICTURE_LEFT_OUT_TOO_LARGE),
+        Err(NotConverted::Unreadable(_)) => InlinePicture::LeftOut(PICTURE_LEFT_OUT),
     }
 }
 
-/// [0.0.6] [`picture_for_model`] away from the async threads: a large picture takes a while
-/// to decode and encode.
-async fn picture_for_model_async(mime: String, bytes: Vec<u8>) -> AppResult<(String, Vec<u8>)> {
-    if mime != "image/webp" {
-        return Ok((mime, bytes));
+/// [0.0.6] The pictures in a tool's output as the model gets them ([`inline_picture`]):
+/// called after every tool call (`turns.rs`), so the chat stores them that way too.
+pub async fn tool_pictures_for_model(out: &mut mcp_host::ToolOutput) {
+    tool_pictures_with(&PictureWorker::app(), out).await;
+}
+
+async fn tool_pictures_with(worker: &PictureWorker, out: &mut mcp_host::ToolOutput) {
+    for block in &mut out.content {
+        let mcp_host::Content::Image { mime, data_base64 } = block else {
+            continue;
+        };
+        match inline_picture(worker, mime, data_base64).await {
+            InlinePicture::Keep => {}
+            InlinePicture::Converted(new_mime, data) => {
+                *mime = new_mime;
+                *data_base64 = data;
+            }
+            InlinePicture::LeftOut(note) => {
+                *block = mcp_host::Content::Text {
+                    text: note.to_owned(),
+                };
+            }
+        }
     }
-    tokio::task::spawn_blocking(move || picture_for_model(mime, bytes))
-        .await
-        .map_err(|e| unreadable_picture(e.to_string()))?
+}
+
+/// [0.0.6] The pictures stored in a chat message, inline or in tool results, as the model
+/// gets them ([`inline_picture`]): chats from earlier versions can hold WebP pictures, which
+/// would make every later request in the chat fail (`turns.rs` `history_of`). Pictures
+/// attached from the composer go through [`load_base64`].
+pub async fn stored_pictures_for_model(parts: &mut [agent::history::Part]) {
+    stored_pictures_with(&PictureWorker::app(), parts).await;
+}
+
+async fn stored_pictures_with(worker: &PictureWorker, parts: &mut [agent::history::Part]) {
+    use agent::history::Part;
+    for part in parts.iter_mut() {
+        match part {
+            Part::Image { mime, data_base64 } => {
+                match inline_picture(worker, mime, data_base64).await {
+                    InlinePicture::Keep => {}
+                    InlinePicture::Converted(new_mime, data) => {
+                        *mime = new_mime;
+                        *data_base64 = data;
+                    }
+                    InlinePicture::LeftOut(note) => *part = Part::Text(note.to_owned()),
+                }
+            }
+            Part::ToolResult(result) => {
+                let mut kept = Vec::new();
+                for (mime, data) in std::mem::take(&mut result.images) {
+                    match inline_picture(worker, &mime, &data).await {
+                        InlinePicture::Keep => kept.push((mime, data)),
+                        InlinePicture::Converted(new_mime, data) => kept.push((new_mime, data)),
+                        InlinePicture::LeftOut(note) => {
+                            if !result.text.is_empty() {
+                                result.text.push('\n');
+                            }
+                            result.text.push_str(note);
+                        }
+                    }
+                }
+                result.images = kept;
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A composer picture checked (its size, and that its bytes really are the type it claims)
 /// and in the form it is stored and sent: its MIME type, file extension and bytes. [0.0.6] A
-/// WebP picture comes back as PNG ([`picture_for_model`]).
-async fn checked_picture(img: &ImageInput) -> AppResult<(String, &'static str, Vec<u8>)> {
+/// WebP picture comes back as JPEG or PNG ([`picture_for_model`]).
+async fn checked_picture(
+    worker: &PictureWorker,
+    img: &ImageInput,
+) -> AppResult<(String, &'static str, Vec<u8>)> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(img.data.as_bytes())
         .map_err(|_| AppError::bad_request("An attached image could not be read."))?;
@@ -181,7 +547,12 @@ async fn checked_picture(img: &ImageInput) -> AppResult<(String, &'static str, V
             img.file_name
         )));
     }
-    let (mime, bytes) = picture_for_model_async(img.mime.clone(), bytes).await?;
+    let (mime, bytes) = picture_for_model(worker, img.mime.clone(), bytes)
+        .await
+        .map_err(|e| match e {
+            NotConverted::Unreadable(why) => unreadable_picture(why),
+            NotConverted::TooLarge => picture_too_large(&img.file_name),
+        })?;
     let ext = extension(&mime);
     Ok((mime, ext, bytes))
 }
@@ -209,9 +580,10 @@ pub async fn save_images(
         )));
     }
     let dir = store_dir(app)?;
+    let worker = PictureWorker::app();
     let mut parts = Vec::new();
     for img in images {
-        let (mime, ext, bytes) = checked_picture(img).await?;
+        let (mime, ext, bytes) = checked_picture(&worker, img).await?;
         let sha: String = Sha256::digest(&bytes)
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -686,10 +1058,18 @@ pub fn image_ids(content: &serde_json::Value) -> Vec<i64> {
 }
 
 /// Base64 of an attachment's bytes with its MIME type, as the model gets them: [0.0.6] a
-/// WebP picture stored by an earlier version is turned into PNG here ([`picture_for_model`]).
+/// WebP picture stored by an earlier version is turned into JPEG or PNG here
+/// ([`picture_for_model`]).
 pub async fn load_base64(state: &AppState, id: i64) -> AppResult<(String, String)> {
     let (mime, bytes) = load_bytes(state, id).await?;
-    let (mime, bytes) = picture_for_model_async(mime, bytes).await?;
+    let (mime, bytes) = picture_for_model(&PictureWorker::app(), mime, bytes)
+        .await
+        .map_err(|e| {
+            unreadable_picture(match e {
+                NotConverted::Unreadable(why) => why,
+                NotConverted::TooLarge => "larger than 20 MB as JPEG or PNG".to_owned(),
+            })
+        })?;
     Ok((
         mime,
         base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -1112,6 +1492,48 @@ mod tests {
             .to_rgba8()
     }
 
+    fn jpeg_pixels(bytes: &[u8]) -> image::RgbImage {
+        assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "not a JPEG");
+        image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg)
+            .expect("a valid JPEG")
+            .to_rgb8()
+    }
+
+    const TEST_WORKER_ENV: &str = "HARNESS_TEST_PICTURE_WORKER";
+
+    /// The picture worker when this test binary is started as one ([`test_worker`]):
+    /// `convert` runs the real worker, `hang` never answers. A plain test run does nothing.
+    #[test]
+    fn picture_worker_process() {
+        match std::env::var(TEST_WORKER_ENV).as_deref() {
+            Ok("convert") => picture_worker_main(),
+            Ok("hang") => {
+                std::thread::sleep(Duration::from_secs(600));
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+
+    /// This test binary as the picture worker, running only [`picture_worker_process`] as
+    /// `mode` says (libtest's own line comes before the worker's mark).
+    fn test_worker(mode: &str) -> PictureWorker {
+        PictureWorker {
+            args: [
+                "attachments::tests::picture_worker_process",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+            env: runtime::EnvSpec::minimal().set(TEST_WORKER_ENV, mode),
+            timeout: Duration::from_secs(120),
+            ..PictureWorker::of(std::env::current_exe().unwrap())
+        }
+    }
+
     /// A WebP file holding `chunks` (name and body), with the sizes filled in and odd
     /// bodies padded, as the format has it.
     fn riff(chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
@@ -1178,50 +1600,178 @@ mod tests {
         out
     }
 
+    /// Bits as a lossless WebP stream holds them, least significant first.
+    #[derive(Default)]
+    struct Bits {
+        acc: u64,
+        n: u32,
+        out: Vec<u8>,
+    }
+
+    impl Bits {
+        fn put(&mut self, value: u32, bits: u32) {
+            self.acc |= u64::from(value) << self.n;
+            self.n += bits;
+            while self.n >= 8 {
+                self.out.push(self.acc as u8);
+                self.acc >>= 8;
+                self.n -= 8;
+            }
+        }
+
+        /// A Huffman code, its most significant bit first.
+        fn code(&mut self, (code, len): (u32, u32)) {
+            for i in (0..len).rev() {
+                self.put((code >> i) & 1, 1);
+            }
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            if self.n > 0 {
+                self.out.push(self.acc as u8);
+            }
+            self.out
+        }
+    }
+
+    /// The canonical Huffman code of each symbol, `(code, length)`, from the symbols' code
+    /// lengths (0 for a symbol not used).
+    fn canonical(lengths: &[u32]) -> Vec<(u32, u32)> {
+        let mut count = [0u32; 16];
+        for &len in lengths.iter().filter(|&&len| len > 0) {
+            count[len as usize] += 1;
+        }
+        let mut next = [0u32; 16];
+        let mut code = 0;
+        for len in 1..16 {
+            next[len] = code;
+            code = (code + count[len]) << 1;
+        }
+        lengths
+            .iter()
+            .map(|&len| {
+                if len == 0 {
+                    return (0, 0);
+                }
+                let c = next[len as usize];
+                next[len as usize] += 1;
+                (c, len)
+            })
+            .collect()
+    }
+
+    /// The reviewer's crafted sample: a lossless WebP picture of 1 x 1 pixels whose entropy
+    /// image asks for `groups` Huffman groups of five full trees each, which the decoder
+    /// builds before it reads a pixel. 65,536 groups take about 1.3 GB in a 3.8 MB file.
+    fn many_huffman_groups(groups: u32) -> Vec<u8> {
+        const ORDER: [usize; 19] = [
+            17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        ];
+        let mut length_lengths = [0u32; 19];
+        length_lengths[1..=6].fill(3);
+        length_lengths[7..=10].fill(4);
+        let length_codes = canonical(&length_lengths);
+        let symbol_lengths = [1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10];
+        let single = |b: &mut Bits, symbol: u32| {
+            b.put(1, 1);
+            b.put(0, 1);
+            if symbol < 2 {
+                b.put(0, 1);
+                b.put(symbol, 1);
+            } else {
+                b.put(1, 1);
+                b.put(symbol, 8);
+            }
+        };
+        let mut b = Bits::default();
+        b.put(0x2f, 8);
+        b.put(0, 14); // 1 pixel wide
+        b.put(0, 14); // 1 pixel tall
+        b.put(0, 1); // no see-through parts
+        b.put(0, 3); // version 0
+        b.put(0, 1); // no transforms
+        b.put(0, 1); // no colour cache
+        b.put(1, 1); // an entropy image
+        b.put(0, 3); // of 4 x 4 pixel blocks: one pixel here
+        // The entropy image: no colour cache, single-symbol trees, its pixel naming the
+        // last group.
+        b.put(0, 1);
+        single(&mut b, (groups - 1) & 0xFF);
+        single(&mut b, (groups - 1) >> 8);
+        for _ in 0..3 {
+            single(&mut b, 0);
+        }
+        for _ in 0..groups * 5 {
+            b.put(0, 1); // a full tree
+            b.put(14 - 4, 4); // 14 code length code lengths
+            for &symbol in &ORDER[..14] {
+                b.put(length_lengths[symbol], 3);
+            }
+            b.put(1, 1); // the number of symbols is given
+            b.put(1, 3); // in 4 bits
+            b.put(symbol_lengths.len() as u32 - 2, 4);
+            for &len in &symbol_lengths {
+                b.code(length_codes[len as usize]);
+            }
+        }
+        riff(&[(b"VP8L", b.finish())])
+    }
+
     /// [0.0.6] llama-server cannot read WebP (it would need ffmpeg, which the app never lets
-    /// it start), so a WebP picture is stored and sent as PNG: the same size and colours,
-    /// see-through parts kept, and the first frame of an animation.
+    /// it start), so a WebP picture is stored and sent as JPEG when it is opaque and as PNG
+    /// when it has see-through parts: the same size and colours, see-through parts kept, and
+    /// the first frame of an animation.
     #[tokio::test]
-    async fn a_webp_picture_is_stored_and_sent_as_png() {
-        let (mime, ext, bytes) = checked_picture(&picture("image/webp", LOSSY_WEBP))
+    async fn a_webp_picture_is_stored_and_sent_as_jpeg_or_png() {
+        let worker = test_worker("convert");
+        let (mime, ext, bytes) = checked_picture(&worker, &picture("image/webp", LOSSY_WEBP))
+            .await
+            .unwrap();
+        assert_eq!((mime.as_str(), ext), ("image/jpeg", "jpg"));
+        let px = jpeg_pixels(&bytes);
+        assert_eq!(px.dimensions(), (4, 3));
+        let [r, _, b] = px.get_pixel(0, 0).0;
+        assert!(r > 180 && b < 80, "{:?}", px.get_pixel(0, 0));
+        let [r, _, b] = px.get_pixel(3, 0).0;
+        assert!(b > 180 && r < 80, "{:?}", px.get_pixel(3, 0));
+
+        let (mime, ext, bytes) = checked_picture(&worker, &picture("image/webp", LOSSLESS_WEBP))
             .await
             .unwrap();
         assert_eq!((mime.as_str(), ext), ("image/png", "png"));
-        let px = png_pixels(&bytes);
-        assert_eq!(px.dimensions(), (4, 3));
-        let [r, _, b, a] = px.get_pixel(0, 0).0;
-        assert!(r > 180 && b < 80 && a == 255, "{:?}", px.get_pixel(0, 0));
-        let [r, _, b, _] = px.get_pixel(3, 0).0;
-        assert!(b > 180 && r < 80, "{:?}", px.get_pixel(3, 0));
-
-        let (mime, _, bytes) = checked_picture(&picture("image/webp", LOSSLESS_WEBP))
-            .await
-            .unwrap();
-        assert_eq!(mime, "image/png");
         let px = png_pixels(&bytes);
         assert_eq!(px.dimensions(), (3, 2));
         assert_eq!(px.get_pixel(1, 0).0, [0, 160, 0, 255]);
         assert_eq!(px.get_pixel(2, 1).0, [10, 20, 30, 128]);
         assert_eq!(px.get_pixel(0, 0).0[3], 0);
 
-        let (mime, _, bytes) = checked_picture(&picture("image/webp", ANIMATED_WEBP))
+        let (mime, _, bytes) = checked_picture(&worker, &picture("image/webp", ANIMATED_WEBP))
             .await
             .unwrap();
-        assert_eq!(mime, "image/png");
-        let px = png_pixels(&bytes);
+        assert_eq!(mime, "image/jpeg");
+        let px = jpeg_pixels(&bytes);
         assert_eq!(px.dimensions(), (4, 4));
-        assert_eq!(px.get_pixel(2, 2).0, [250, 200, 0, 255]);
+        let [r, g, b] = px.get_pixel(2, 2).0;
+        assert!(
+            r > 220 && (170..=230).contains(&g) && b < 40,
+            "{:?}",
+            px.get_pixel(2, 2)
+        );
     }
 
-    /// [0.0.6] PNG, JPEG and GIF pictures are stored and sent byte for byte as they came.
+    /// [0.0.6] PNG, JPEG and GIF pictures are stored and sent byte for byte as they came,
+    /// without starting the picture worker.
     #[tokio::test]
     async fn png_jpeg_and_gif_pictures_are_kept_as_they_are() {
+        let no_worker = PictureWorker::of(PathBuf::from("/no/such/program"));
         for (mime, ext, bytes) in [
             ("image/png", "png", &b"\x89PNG\r\n\x1a\nnot decoded"[..]),
             ("image/jpeg", "jpg", &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3][..]),
             ("image/gif", "gif", &b"GIF89a not decoded"[..]),
         ] {
-            let got = checked_picture(&picture(mime, bytes)).await.unwrap();
+            let got = checked_picture(&no_worker, &picture(mime, bytes))
+                .await
+                .unwrap();
             assert_eq!(got, (mime.to_owned(), ext, bytes.to_vec()), "{mime}");
         }
     }
@@ -1229,7 +1779,7 @@ mod tests {
     /// [0.0.6] A WebP picture that is broken, or larger than the decoder may take, gives the
     /// user a plain message, and nothing panics: cut short, not a picture inside, wider than
     /// 8,192 pixels, more pixels than the memory limit, or a frame inside claiming more than
-    /// its canvas.
+    /// its canvas. So does a worker that cannot start.
     #[tokio::test]
     async fn a_broken_or_oversized_webp_gives_the_plain_message() {
         let cases: Vec<(&str, Vec<u8>)> = vec![
@@ -1267,19 +1817,30 @@ mod tests {
                 ]),
             ),
         ];
+        let worker = test_worker("convert");
         for (what, bytes) in cases {
-            let err = checked_picture(&picture("image/webp", &bytes))
+            let err = checked_picture(&worker, &picture("image/webp", &bytes))
                 .await
                 .expect_err(what);
             assert_eq!(err.code, "picture_unreadable", "{what}");
             assert_eq!(err.message, "This picture could not be read.", "{what}");
             assert_eq!(err.next_step, "Try a PNG or JPEG.", "{what}");
         }
+        let no_worker = PictureWorker::of(PathBuf::from("/no/such/program"));
+        let err = checked_picture(&no_worker, &picture("image/webp", LOSSY_WEBP))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "picture_unreadable");
+        assert!(
+            err.details
+                .starts_with("the picture worker could not start"),
+            "{err:?}"
+        );
     }
 
     /// [0.0.6] The limits refuse an oversized WebP picture before it is decoded (a limit
     /// error, not a decoding error after the buffers were made), including a frame that
-    /// claims more than its small canvas; a picture at the limit is still turned into PNG.
+    /// claims more than its small canvas; a picture at the limit is still converted.
     #[test]
     fn the_webp_limits_refuse_before_decoding() {
         let cases: Vec<(&str, Vec<u8>)> = vec![
@@ -1320,38 +1881,235 @@ mod tests {
             ),
         ];
         for (what, bytes) in cases {
-            match webp_to_png(&bytes) {
+            match decode_webp(&bytes) {
                 Err(image::ImageError::Limits(_)) => {}
                 other => panic!("{what}: {other:?}"),
             }
         }
-        let png = webp_to_png(&plain_webp(MAX_PICTURE_SIDE, 2)).unwrap();
-        assert_eq!(png_pixels(&png).dimensions(), (MAX_PICTURE_SIDE, 2));
+        let jpeg = webp_for_model(&plain_webp(MAX_PICTURE_SIDE, 2)).unwrap();
+        assert_eq!(jpeg_pixels(&jpeg).dimensions(), (MAX_PICTURE_SIDE, 2));
     }
 
     /// [0.0.6] No WebP file, however damaged, makes the decoder panic: every cut and many
-    /// changed bytes of the three sample pictures give a PNG or an error.
+    /// changed bytes of the three sample pictures give a JPEG, a PNG or an error.
     #[test]
     fn damaged_webp_files_never_panic() {
         let mut tried = 0;
+        let check = |bytes: &[u8]| {
+            if let Ok(out) = webp_for_model(bytes) {
+                image::load_from_memory(&out).expect("a valid JPEG or PNG");
+            }
+        };
         for sample in [LOSSY_WEBP, LOSSLESS_WEBP, ANIMATED_WEBP] {
             for end in 0..sample.len() {
-                if let Ok(png) = webp_to_png(&sample[..end]) {
-                    png_pixels(&png);
-                }
+                check(&sample[..end]);
                 tried += 1;
             }
             for at in 0..sample.len() {
                 for change in [0x00, 0xFF, sample[at] ^ 0x55, sample[at].wrapping_add(1)] {
                     let mut bytes = sample.to_vec();
                     bytes[at] = change;
-                    if let Ok(png) = webp_to_png(&bytes) {
-                        png_pixels(&png);
-                    }
+                    check(&bytes);
                     tried += 1;
                 }
             }
         }
         assert!(tried > 1_000, "{tried}");
+    }
+
+    /// [0.0.6] A crafted WebP picture cannot make the app's own process take gigabytes: it is
+    /// decoded in the picture worker, under the worker's memory cap. The reviewer's sample (1
+    /// x 1 pixels in 3.8 MB, asking for 65,536 Huffman groups, about 1.3 GB to decode) is
+    /// refused with the plain message; the same file with 16 groups is a valid picture.
+    #[tokio::test]
+    async fn a_crafted_webp_is_stopped_by_the_workers_memory_cap() {
+        let worker = test_worker("convert");
+        let (mime, bytes) = worker.convert(&many_huffman_groups(16)).await.unwrap();
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(jpeg_pixels(&bytes).dimensions(), (1, 1));
+
+        let crafted = many_huffman_groups(65_536);
+        assert!(
+            (3_000_000..MAX_IMAGE_BYTES).contains(&crafted.len()),
+            "{}",
+            crafted.len()
+        );
+        let started = std::time::Instant::now();
+        let got = worker.convert(&crafted).await;
+        if cfg!(target_os = "linux") {
+            // The address-space cap holds on Linux: the worker cannot allocate past it.
+            let Err(NotConverted::Unreadable(why)) = &got else {
+                panic!("{got:?}")
+            };
+            assert!(why.contains("memory allocation"), "{why}");
+        } else {
+            // macOS may not hold every allocation to the cap; the app is unharmed either way.
+            assert!(
+                matches!(&got, Err(NotConverted::Unreadable(_)) | Ok(_)),
+                "{got:?}"
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "{:?}",
+            started.elapsed()
+        );
+        if cfg!(target_os = "linux") {
+            let err = checked_picture(&worker, &picture("image/webp", &crafted))
+                .await
+                .unwrap_err();
+            assert_eq!(err.message, "This picture could not be read.");
+        }
+    }
+
+    /// [0.0.6] A worker that takes longer than its time is stopped, and the picture counts as
+    /// unreadable.
+    #[tokio::test]
+    async fn a_worker_that_takes_too_long_is_stopped() {
+        let worker = PictureWorker {
+            timeout: Duration::from_secs(2),
+            ..test_worker("hang")
+        };
+        let started = std::time::Instant::now();
+        let got = worker.convert(LOSSY_WEBP).await;
+        assert_eq!(
+            got,
+            Err(NotConverted::Unreadable(
+                "turning the picture into JPEG or PNG took too long".into()
+            ))
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// [0.0.6] The app starts the picture worker as its own binary with one fixed argument and
+    /// the minimal environment; the picture goes in on stdin, never on the command line.
+    #[test]
+    fn the_picture_worker_is_the_app_with_one_fixed_argument() {
+        let worker = PictureWorker::of(PathBuf::from("/opt/app/harness"));
+        assert_eq!(worker.program, PathBuf::from("/opt/app/harness"));
+        assert_eq!(
+            worker.args,
+            vec![std::ffi::OsString::from("--internal-picture-worker")]
+        );
+        assert_eq!(worker.env, runtime::EnvSpec::minimal());
+        assert_eq!(worker.timeout, Duration::from_secs(60));
+        assert_eq!(worker.max_output, MAX_IMAGE_BYTES);
+        assert_eq!(
+            PictureWorker::app().program,
+            std::env::current_exe().unwrap()
+        );
+    }
+
+    /// [0.0.6] A converted picture is held to the 20 MB limit too: the encoder stops past its
+    /// cap, the app takes no more than the limit from the worker, and the user is told which
+    /// file was too large.
+    #[tokio::test]
+    async fn a_picture_too_large_once_converted_is_refused_with_its_name() {
+        let decoded = decode_webp(LOSSLESS_WEBP).unwrap();
+        assert_eq!(
+            encode_for_model(decoded.clone(), 40),
+            Err(NotConverted::TooLarge)
+        );
+        assert!(encode_for_model(decoded, 4096).is_ok());
+
+        let worker = PictureWorker {
+            max_output: 40,
+            ..test_worker("convert")
+        };
+        let mut input = picture("image/webp", LOSSLESS_WEBP);
+        input.file_name = "holiday.webp".into();
+        let err = checked_picture(&worker, &input).await.unwrap_err();
+        assert_eq!(err.code, "picture_too_large");
+        assert_eq!(
+            err.message,
+            "holiday.webp is larger than 20 MB once it is turned into a picture the model can read."
+        );
+        assert_eq!(err.next_step, "Try a smaller picture.");
+    }
+
+    /// [0.0.6] A WebP picture from a tool, or stored in a chat by an earlier version, reaches
+    /// the model as JPEG or PNG. One that cannot be read is left out with a note, since
+    /// llama-server would refuse the request and every later one in the chat. Other pictures
+    /// are kept as they are.
+    #[tokio::test]
+    async fn webp_pictures_from_tools_and_old_chats_become_jpeg_or_png() {
+        use agent::history::{CallStatus, Part, ResultRecord};
+        use mcp_host::Content;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let image = |mime: &str, data: String| Content::Image {
+            mime: mime.into(),
+            data_base64: data,
+        };
+        let png = b64(b"\x89PNG\r\n\x1a\nkept as it is");
+        let worker = test_worker("convert");
+
+        let mut out = mcp_host::ToolOutput {
+            content: vec![
+                Content::Text {
+                    text: "two pictures".into(),
+                },
+                image("image/webp", b64(LOSSLESS_WEBP)),
+                image("image/webp", b64(&LOSSY_WEBP[..40])),
+                image("image/png", png.clone()),
+            ],
+            ..Default::default()
+        };
+        tool_pictures_with(&worker, &mut out).await;
+        let Content::Image { mime, data_base64 } = &out.content[1] else {
+            panic!("{:?}", out.content[1])
+        };
+        assert_eq!(mime, "image/png");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data_base64)
+            .unwrap();
+        assert_eq!(png_pixels(&bytes).get_pixel(2, 1).0, [10, 20, 30, 128]);
+        assert_eq!(
+            out.content[2],
+            Content::Text {
+                text: PICTURE_LEFT_OUT.into()
+            }
+        );
+        assert_eq!(out.content[3], image("image/png", png.clone()));
+
+        // Stored by an earlier version: inline, and in a tool result (whitespace in the
+        // base64 and capitals in the type are taken as they come).
+        let mut spaced = b64(LOSSY_WEBP);
+        spaced.insert(10, '\n');
+        let mut parts = vec![
+            Part::Image {
+                mime: "image/webp".into(),
+                data_base64: b64(&LOSSY_WEBP[..40]),
+            },
+            Part::ToolResult(ResultRecord {
+                call_id: "c1".into(),
+                name: "screenshot".into(),
+                status: CallStatus::Ok,
+                text: "here".into(),
+                images: vec![
+                    ("Image/WebP".into(), spaced),
+                    ("image/webp".into(), b64(b"RIFF\x04\x00\x00\x00WEBP")),
+                    ("image/png".into(), png.clone()),
+                ],
+                source: None,
+                notes: Vec::new(),
+            }),
+        ];
+        stored_pictures_with(&worker, &mut parts).await;
+        assert_eq!(parts[0], Part::Text(PICTURE_LEFT_OUT.into()));
+        let Part::ToolResult(result) = &parts[1] else {
+            panic!("{:?}", parts[1])
+        };
+        assert_eq!(result.text, format!("here\n{PICTURE_LEFT_OUT}"));
+        assert_eq!(result.images.len(), 2);
+        assert_eq!(result.images[0].0, "image/jpeg");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&result.images[0].1)
+            .unwrap();
+        assert_eq!(jpeg_pixels(&bytes).dimensions(), (4, 3));
+        assert_eq!(result.images[1], ("image/png".to_owned(), png));
     }
 }
