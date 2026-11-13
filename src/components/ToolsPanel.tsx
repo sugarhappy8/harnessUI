@@ -15,13 +15,54 @@ const SERVER_LABEL: Record<string, string> = {
   subagents: "Subagents",
   artifacts: "Artifacts",
   search: "Web search",
+  reverse: "Reverse engineering",
 };
 
 /** One line under a group's name, for groups that need a word of explanation. */
 const SERVER_NOTE: Record<string, string> = {
   subagents:
     "Lets the model hand a task to a helper that works in its own context with the same tools and the same approvals.",
+  reverse: "Lets the model look inside program files in this chat's folders with rea. It never runs them.",
 };
+
+/**
+ * The Reverse engineering group (0.0.6 item 5). Its 37 tools are always listed; the ones that
+ * can't run yet carry the backend's reason (`ReverseServer::unavailable_reason`, pinned in
+ * `mcp_cmd.rs`'s tests), recognised here by their first words.
+ */
+const REVERSE = "reverse";
+const REVERSE_NOT_SET_UP = "Not set up yet.";
+const REVERSE_NEEDS_DECOMPILER = "Needs a decompiler.";
+const REVERSE_DECOMPILER_LINE = "Readable code needs a decompiler. Install one in Settings → Reverse engineering.";
+
+/**
+ * What the Reverse engineering group says about itself: one reason every tool shares (not set
+ * up), or every tool but `open_binary` (Apple's command line tools, an update), shown once
+ * with a button to its Settings tab; or, when only the tools that need a decompiler can't
+ * run, one line saying so. Other reasons stay on their tools.
+ */
+type ReverseNote = { kind: "group"; reason: string; setUp: boolean } | { kind: "decompiler" } | null;
+
+function reverseNote(list: ToolDto[]): ReverseNote {
+  const shared = (tools: ToolDto[]) => {
+    const reason = tools[0]?.schemaError ?? null;
+    return reason !== null && tools.every((t) => !t.available && t.schemaError === reason) ? reason : null;
+  };
+  const all = shared(list);
+  if (all !== null) return { kind: "group", reason: all, setUp: all.startsWith(REVERSE_NOT_SET_UP) };
+  const open = list.filter((t) => t.original === "open_binary");
+  const rest = shared(list.filter((t) => t.original !== "open_binary"));
+  if (rest !== null && !rest.startsWith(REVERSE_NEEDS_DECOMPILER) && open.every((t) => !t.schemaError)) {
+    return { kind: "group", reason: rest, setUp: false };
+  }
+  return list.some((t) => t.schemaError?.startsWith(REVERSE_NEEDS_DECOMPILER)) ? { kind: "decompiler" } : null;
+}
+
+/** Whether the group's own line already says why this tool can't run. */
+function saidByReverseNote(note: ReverseNote, t: ToolDto): boolean {
+  if (note === null || !t.schemaError) return false;
+  return note.kind === "group" ? t.schemaError === note.reason : t.schemaError.startsWith(REVERSE_NEEDS_DECOMPILER);
+}
 
 /** Groups shown after every other group. */
 const LAST_GROUPS = ["subagents"];
@@ -299,14 +340,20 @@ export function ToolsPanel(props: {
             const reason = list[0]?.schemaError ?? null;
             const noBrowser =
               server === "browser" && reason !== null && list.every((t) => !t.available && t.schemaError === reason);
+            // [0.0.6 item 5] Reverse engineering: switching the group saves every one of its tools
+            // by name, also those that can't run yet, so they work once a decompiler or Apple's
+            // tools are installed (item5-spec R19). Nothing to switch before rea is set up.
+            const note = server === REVERSE ? reverseNote(list) : null;
+            const switches =
+              server !== REVERSE ? names : note?.kind === "group" && note.setUp ? [] : list.map((t) => t.exposed);
             return (
               <section key={server} className="mb-3">
                 <label className="flex items-center gap-2 font-medium">
                   <input
                     type="checkbox"
                     checked={allOn}
-                    disabled={names.length === 0}
-                    onChange={(e) => toggle(names, e.target.checked)}
+                    disabled={switches.length === 0}
+                    onChange={(e) => toggle(switches, e.target.checked)}
                   />
                   {SERVER_LABEL[server] ?? server}
                   {server === "terminal" && (
@@ -337,6 +384,24 @@ export function ToolsPanel(props: {
                     </button>
                   </div>
                 )}
+                {note && (
+                  <div className="mt-1 pl-6 text-xs">
+                    <p className="flex items-start gap-1 text-warning">
+                      <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden />
+                      {note.kind === "group" ? note.reason : REVERSE_DECOMPILER_LINE}
+                    </p>
+                    <button
+                      type="button"
+                      className="mt-1 rounded-md border border-border px-2 py-0.5 hover:bg-bg-muted"
+                      onClick={() => {
+                        setOpen(false);
+                        window.dispatchEvent(new CustomEvent("app:open-settings", { detail: REVERSE }));
+                      }}
+                    >
+                      {note.kind === "group" && note.setUp ? "Set up reverse engineering" : "Open Reverse engineering settings"}
+                    </button>
+                  </div>
+                )}
                 <ul className="mt-1 space-y-1 pl-6">
                   {list.map((t) => (
                     <li key={t.exposed}>
@@ -349,7 +414,9 @@ export function ToolsPanel(props: {
                           onChange={(e) => toggle([t.exposed], e.target.checked)}
                         />
                         <span className="min-w-0 flex-1">
-                          <span className="font-mono text-xs">{t.exposed}</span>
+                          <span className={`font-mono text-xs${server === REVERSE && !t.available ? " text-fg-muted" : ""}`}>
+                            {t.exposed}
+                          </span>
                           {usable(t) && (
                             <span
                               className={`ml-1.5 rounded px-1 text-[10px] ${t.shown ? "bg-bg-muted text-fg-muted" : "text-fg-muted"}`}
@@ -365,7 +432,7 @@ export function ToolsPanel(props: {
                           {!t.available && !t.changed && !t.builtin && (
                             <span className="ml-1 text-xs text-fg-muted">off in Settings → MCP servers</span>
                           )}
-                          {t.schemaError && !noBrowser && (
+                          {t.schemaError && !noBrowser && !saidByReverseNote(note, t) && (
                             <span className="ml-1 text-xs text-danger">{t.schemaError}</span>
                           )}
                         </span>

@@ -939,6 +939,12 @@ async fn chat_tool_list(
             dto.mark_unavailable(reason);
         }
     }
+    // [0.0.6 item 5, WP9h] Reverse engineering: its tools are always listed (R19); the ones
+    // that cannot run here yet say why (not set up, Apple's tools, an update, a decompiler).
+    mark_reverse(
+        list.iter_mut().map(|(_, dto)| dto),
+        reverse::handle().as_deref(),
+    );
     // The companions follow the other tools, once it is known which of those can work.
     let setting = crate::tool_select::settings(state).await;
     let mut dtos: Vec<&mut ToolDto> = list.iter_mut().map(|(_, dto)| dto).collect();
@@ -1051,6 +1057,39 @@ async fn computer_unavailable(state: &AppState, chat: &store::Chat) -> Option<St
     let status = state.runtime.status();
     crate::computer_cmd::unavailable_reason(model, status.model_path.as_deref(), status.vision)
         .map(str::to_string)
+}
+
+/// [0.0.6 item 5, WP9h] What the Tools panel says about a reverse tool when the app has no
+/// `reverse` server to ask (it is then not registered either; kept so a missing server
+/// can never leave its tools offered). The same words as a server with nothing installed.
+const REVERSE_NOT_SET_UP: &str = "Not set up yet. Set it up in Settings → Reverse engineering.";
+
+/// [0.0.6 item 5, WP9h] Marks the built-in `reverse` server's tools that cannot run here yet
+/// with the reason the Tools panel shows (`ReverseServer::unavailable_reason`: not set up;
+/// Apple's command line tools; an update; a decompiler; a tool that changed in the installed
+/// rea). A marked tool is not offered to the model, but stays switched on by name, so a
+/// group the owner switched on also covers tools that become usable later (R19).
+///
+/// Whether the group is on in a new chat is not decided here: `reverse` is not in
+/// [`DEFAULT_ON_BUILTIN`] (the owner's answer Q4 = B), so it starts off until the owner
+/// turns it on in a chat's Tools panel, and then new chats follow the last choice like any
+/// other group (it is not [`PER_CHAT_ONLY`]: its tools only read files).
+fn mark_reverse<'a>(
+    tools: impl IntoIterator<Item = &'a mut ToolDto>,
+    server: Option<&reverse::ReverseServer>,
+) {
+    for dto in tools {
+        if !dto.builtin || dto.server != reverse::server::SERVER_NAME {
+            continue;
+        }
+        let reason = match server {
+            Some(s) => s.unavailable_reason(&dto.original),
+            None => Some(REVERSE_NOT_SET_UP.to_string()),
+        };
+        if let Some(reason) = reason {
+            dto.mark_unavailable(&reason);
+        }
+    }
 }
 
 async fn tool_list(
@@ -1786,5 +1825,278 @@ mod tests {
         });
         assert_eq!(kind, "http");
         assert!(!s.contains("SECRET") && !s.contains("pw"), "{s}");
+    }
+
+    // ---- [0.0.6 item 5, WP9h] The Reverse engineering group ------------------------------
+
+    /// The reasons the Tools panel shows for reverse tools (`ReverseServer::
+    /// unavailable_reason`). `ToolsPanel.tsx` recognises the first two by their opening
+    /// words, so they are pinned here as well.
+    const NOT_SET_UP: &str = "Not set up yet. Set it up in Settings → Reverse engineering.";
+    const NEEDS_DECOMPILER: &str =
+        "Needs a decompiler. Install one in Settings → Reverse engineering.";
+    const NEEDS_UPDATE: &str = "Needs an update in Settings → Reverse engineering.";
+    const NEEDS_APPLE_TOOLS: &str =
+        "Needs Apple's command line tools. Install them in Settings → Reverse engineering.";
+
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("mcp-cmd-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    /// A part on disk the way the installer leaves it: its folder with `.complete` (no
+    /// programs recorded, so nothing else is checked).
+    fn put_part(root: &std::path::Path, component: &str, part: &str, version: &str) {
+        let dir = root.join(format!("{part}-{version}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = json!({
+            "component": component,
+            "part": part,
+            "version": version,
+            "archiveSha256": [],
+            "programs": [],
+            "diskBytes": 1_000_000,
+        });
+        std::fs::write(dir.join(".complete"), marker.to_string()).unwrap();
+    }
+
+    fn put_rea(root: &std::path::Path, version: &str) {
+        put_part(root, "rea", "rea", version);
+        put_part(root, "rea", "node", "24.22.3");
+    }
+
+    /// The app's `reverse` server over `root` on `platform` (the embedded lock; the
+    /// development rules, so Kuna is offered on Linux).
+    fn reverse_server(
+        root: &std::path::Path,
+        platform: reverse::Platform,
+    ) -> std::sync::Arc<reverse::ReverseServer> {
+        reverse::ReverseServer::with_installer(
+            reverse::Installer::new(reverse::ReverseLayout::new(root), platform)
+                .with_release_rules(false),
+        )
+    }
+
+    /// The 37 reverse tools as the Tools panel lists them, all switched on or all off.
+    fn reverse_dtos(on: bool) -> Vec<ToolDto> {
+        reverse::allow::MODEL_TOOLS
+            .iter()
+            .map(|name| ToolDto {
+                exposed: name.to_string(),
+                original: name.to_string(),
+                ..dto(reverse::server::SERVER_NAME, on)
+            })
+            .collect()
+    }
+
+    /// The reverse tools after the Tools panel's marks, as (name, reason).
+    fn reverse_marks(server: Option<&reverse::ReverseServer>) -> Vec<(String, Option<String>)> {
+        let mut list = reverse_dtos(true);
+        mark_reverse(list.iter_mut(), server);
+        for d in &list {
+            // A marked tool is never offered; an unmarked one (switched on here) is.
+            assert_eq!(d.offered(), d.schema_error.is_none(), "{}", d.exposed);
+            assert_eq!(d.available, d.schema_error.is_none(), "{}", d.exposed);
+        }
+        list.into_iter()
+            .map(|d| (d.exposed, d.schema_error))
+            .collect()
+    }
+
+    fn is_session(name: &str) -> bool {
+        reverse::allow::class_of(name) == Some(reverse::ToolClass::Session)
+    }
+
+    /// Q4 = B: the group is off in a new chat, whatever is installed and however much the
+    /// model can remember; once the owner turns it on in a chat, new chats follow that last
+    /// choice (it is not a per-chat-only group), and turning it off again carries over too.
+    #[test]
+    fn reverse_stays_off_in_a_new_chat_until_the_owner_turns_it_on() {
+        let server = reverse::server::SERVER_NAME;
+        assert!(!DEFAULT_ON_BUILTIN.contains(&server));
+        assert!(!PER_CHAT_ONLY.contains(&server));
+        for (available, context) in [
+            (true, Some(4096)),
+            (true, Some(8192)),
+            (true, Some(131_072)),
+            (false, Some(32768)),
+            (true, None),
+        ] {
+            assert!(!default_on(server, available, context));
+            let new_chat = Selection::for_chat(None, None, available, context);
+            for tool in reverse::allow::MODEL_TOOLS {
+                assert!(!new_chat.on(tool, server, true), "{tool}");
+            }
+            assert!(new_chat.on("read_file", "files", true));
+        }
+        // Turned on in a chat: that list is the last choice, so a new chat starts with it.
+        let mut last = names(&["read_file"]);
+        last.extend(reverse::allow::MODEL_TOOLS.iter().map(|t| t.to_string()));
+        let new_chat = Selection::for_chat(None, Some(&last), true, Some(4096));
+        for tool in reverse::allow::MODEL_TOOLS {
+            assert!(new_chat.on(tool, server, true), "{tool}");
+        }
+        // Turned off again in a chat: the next last choice leaves it out.
+        let last = names(&["read_file"]);
+        let new_chat = Selection::for_chat(None, Some(&last), true, Some(32768));
+        assert!(!new_chat.on("open_binary", server, true));
+        // A last choice saved before item 5 existed (any older list) leaves it off.
+        let older = names(&["read_file", "web_search", "create_artifact"]);
+        let new_chat = Selection::for_chat(None, Some(&older), true, Some(32768));
+        assert!(!new_chat.on("open_binary", server, true));
+    }
+
+    /// Nothing installed: every one of the 37 tools says so (the panel shows it once on the
+    /// group with "Set up reverse engineering"), and none is offered even when switched on.
+    /// With no server to ask, the same.
+    #[test]
+    fn reverse_tools_say_when_rea_is_not_set_up() {
+        let dir = scratch("not-set-up");
+        let s = reverse_server(&dir.0, reverse::Platform::LinuxX64);
+        for marks in [reverse_marks(Some(&s)), reverse_marks(None)] {
+            assert_eq!(marks.len(), 37);
+            for (tool, why) in marks {
+                assert_eq!(why.as_deref(), Some(NOT_SET_UP), "{tool}");
+            }
+        }
+        assert_eq!(s.unavailable_reason("open_binary").as_deref(), Some(REVERSE_NOT_SET_UP));
+    }
+
+    /// rea without a decompiler: opening a file and the file checks work; the tools that
+    /// work on an open file say they need a decompiler. With Kuna installed and chosen,
+    /// every tool works.
+    #[test]
+    fn reverse_tools_say_when_a_decompiler_is_needed() {
+        let dir = scratch("no-decompiler");
+        put_rea(&dir.0, "6.9.0");
+        let s = reverse_server(&dir.0, reverse::Platform::LinuxX64);
+        let marks = reverse_marks(Some(&s));
+        let session = marks.iter().filter(|(t, _)| is_session(t)).count();
+        assert_eq!(session, 22, "the tools that work on the open file");
+        for (tool, why) in &marks {
+            if is_session(tool) {
+                assert_eq!(why.as_deref(), Some(NEEDS_DECOMPILER), "{tool}");
+            } else {
+                assert_eq!(why, &None, "{tool}");
+            }
+        }
+        for tool in ["close_binary", "binary_session", "procedure_pseudo_code"] {
+            assert!(marks.iter().any(|(t, w)| t == tool && w.as_deref() == Some(NEEDS_DECOMPILER)));
+        }
+        put_part(&dir.0, "kuna", "kuna", "1.990");
+        s.set_decompiler(Some(reverse::Decompiler::Kuna));
+        assert!(reverse_marks(Some(&s)).iter().all(|(_, why)| why.is_none()));
+    }
+
+    /// An installed rea this app has no reviewed allow-list for (or below its minimum):
+    /// every tool but `open_binary` says it needs an update; `open_binary` stays offered
+    /// so a request to open a program gets the plain reason from `describe`.
+    #[test]
+    fn reverse_tools_say_when_rea_needs_an_update() {
+        let dir = scratch("needs-update");
+        put_rea(&dir.0, "6.8.0");
+        let s = reverse_server(&dir.0, reverse::Platform::LinuxX64);
+        for (tool, why) in reverse_marks(Some(&s)) {
+            if tool == "open_binary" {
+                assert_eq!(why, None);
+            } else {
+                assert_eq!(why.as_deref(), Some(NEEDS_UPDATE), "{tool}");
+            }
+        }
+    }
+
+    /// A Mac without Apple's command line tools: every tool but `open_binary` says so.
+    /// (Checked where this computer has no such tools, which is every computer but a Mac
+    /// that has them.)
+    #[test]
+    fn reverse_tools_say_when_apple_tools_are_missing() {
+        let mac = reverse::Platform::MacosArm64;
+        if reverse::platform::apple_tools(mac) != reverse::AppleTools::Missing {
+            return;
+        }
+        let dir = scratch("apple-tools");
+        put_rea(&dir.0, "6.9.0");
+        put_part(&dir.0, "kuna", "kuna", "1.990");
+        let s = reverse_server(&dir.0, mac);
+        s.set_decompiler(Some(reverse::Decompiler::Kuna));
+        for (tool, why) in reverse_marks(Some(&s)) {
+            if tool == "open_binary" {
+                assert_eq!(why, None);
+            } else {
+                assert_eq!(why.as_deref(), Some(NEEDS_APPLE_TOOLS), "{tool}");
+            }
+        }
+    }
+
+    /// The group switched on while the decompiler tools could not run saves every name
+    /// (the Tools panel sends them all; a saved choice keeps registered tools that cannot
+    /// run yet), so installing a decompiler later leaves the group fully on in that chat.
+    #[test]
+    fn installing_a_decompiler_later_keeps_a_chats_reverse_group_fully_on() {
+        let host = crate::tool_catalog::tests::builtin_host();
+        let builtin = crate::tool_catalog::builtin_servers(&host);
+        let all: Vec<String> = reverse::allow::MODEL_TOOLS
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        let saved = user_switches(all.clone(), &host.tools(), &builtin);
+        assert_eq!(saved, all, "every reverse tool is a switch, usable or not");
+
+        let dir = scratch("later");
+        put_rea(&dir.0, "6.9.0");
+        let s = reverse_server(&dir.0, reverse::Platform::LinuxX64);
+        let chat = Selection::for_chat(Some(&saved), None, true, Some(4096));
+        let listed = |s: &reverse::ReverseServer| {
+            let mut list = reverse_dtos(false);
+            for d in &mut list {
+                d.enabled_in_chat = chat.on(&d.exposed, &d.server, true);
+            }
+            mark_reverse(list.iter_mut(), Some(s));
+            list
+        };
+        let before = listed(&s);
+        assert!(before.iter().all(|d| d.enabled_in_chat));
+        assert_eq!(before.iter().filter(|d| d.offered()).count(), 37 - 22);
+        put_part(&dir.0, "kuna", "kuna", "1.990");
+        s.set_decompiler(Some(reverse::Decompiler::Kuna));
+        let after = listed(&s);
+        assert!(after.iter().all(|d| d.offered()), "fully on once Kuna is installed");
+    }
+
+    /// Only the built-in server's tools are marked: an external server the user happened
+    /// to call "reverse" is left to its own switches.
+    #[test]
+    fn reverse_marks_touch_only_the_built_in_server() {
+        let mut external = dto(reverse::server::SERVER_NAME, true);
+        external.builtin = false;
+        let mut files = dto("files", true);
+        mark_reverse([&mut external, &mut files], None);
+        assert!(external.offered() && files.offered());
+    }
+
+    /// The marks are made before the companions decide whether another tool is on, so a
+    /// chat whose only switched-on group cannot run gets no companions either.
+    #[test]
+    fn reverse_marks_come_before_the_companions() {
+        let source = include_str!("mcp_cmd.rs");
+        let body = source
+            .split("async fn chat_tool_list(")
+            .nth(1)
+            .expect("chat_tool_list")
+            .split("\nasync fn ")
+            .next()
+            .unwrap();
+        let marks = body.find("mark_reverse(").expect("marks the reverse tools");
+        let companions = body.find("companions_follow(").expect("companions");
+        assert!(marks < companions);
+        assert!(body.contains("reverse::handle()"));
     }
 }

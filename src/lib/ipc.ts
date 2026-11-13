@@ -481,3 +481,15 @@ export const reverseInstallAppleTools = () => invoke<void>("reverse_install_appl
 export function onReverseProgress(handler: (p: import("./types").ReverseProgress) => void): Promise<UnlistenFn> {
   return listen<import("./types").ReverseProgress>("reverse-progress", (e) => handler(e.payload));
 }
+
+// 0.0.6 item 5 (WP9h): files the owner drops on the window. Tauri delivers their paths (the
+// webview's own drop events carry none); `reverse_dropped` says what the message box does
+// with each (at most 8 a time). With no paths it only says whether rea is installed.
+export const reverseDropped = (chatId: number, paths: string[]) =>
+  invoke<import("./types").DropAnswer>("reverse_dropped", { chatId, paths });
+export async function onDroppedPaths(handler: (paths: string[]) => void): Promise<UnlistenFn> {
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  return getCurrentWebview().onDragDropEvent((e) => {
+    if (e.payload.type === "drop") handler(e.payload.paths);
+  });
+}

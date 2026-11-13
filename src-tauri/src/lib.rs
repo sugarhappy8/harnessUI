@@ -37,6 +37,7 @@ mod permissions;
 mod pinned;
 mod providers;
 mod reverse_cmd;
+mod reverse_drop;
 mod runtime_manager;
 mod search_cmd;
 mod settings;
@@ -290,6 +291,8 @@ pub fn run() {
             reverse_cmd::reverse_set_decompiler,
             reverse_cmd::reverse_clear_cache,
             reverse_cmd::reverse_install_apple_tools,
+            // 0.0.6 item 5: a program file dropped on the message box (WP9h).
+            reverse_drop::reverse_dropped,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

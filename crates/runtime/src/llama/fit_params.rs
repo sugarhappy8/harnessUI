@@ -18,8 +18,8 @@
 //!   name; nothing a user or a model types.
 //! - [`measure`]: one run through [`crate::spawn`] in the backend's folder with the
 //!   backend's scrubbed environment (which carries `GGML_NO_BACKTRACE=1`, so a crash never
-//!   starts a debugger), stdin closed, stdout capped at [`MAX_STDOUT_LINES`] lines of 16
-//!   KiB, killed on the timeout or on cancel.
+//!   starts a debugger), stdin closed, the last [`MAX_STDOUT_LINES`] stdout lines of at
+//!   most 16 KiB kept, killed on the timeout or on cancel.
 //! - [`parse_measure_output`]: with `--log-jsonl` the whole log stream is on stdout as JSON
 //!   lines; exactly one record of type `fit_memory_breakdown` must be there, with values
 //!   in range (section 2.0). The plain `Host 157 448 312` line is ignored: it leaves out
@@ -48,8 +48,8 @@ use crate::spawn::{self, EnvSpec, SpawnSpec, StdioMode};
 /// of a program's first start (item 6, I6-14).
 pub const FIT_PARAMS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Most stdout lines read from one run (each cut at 16 KiB by the line reader); the rest
-/// is drained and dropped.
+/// Most stdout lines kept from one run, the last ones (each cut at 16 KiB by the line
+/// reader); earlier lines are drained and dropped.
 pub const MAX_STDOUT_LINES: usize = 512;
 
 /// Log records and stderr lines kept for the one log entry a run writes.
@@ -423,17 +423,16 @@ async fn run(
     };
     let stdout = child.take_stdout();
     let stderr = child.take_stderr();
+    // The last lines are kept: the record and the plain line come at the end of a run.
     let read_stdout = async move {
-        let mut lines = Vec::new();
+        let mut tail = Tail::new(MAX_STDOUT_LINES);
         if let Some(stdout) = stdout {
             let mut reader = LineReader::new(stdout);
             while let Some(line) = reader.next_line().await {
-                if lines.len() < MAX_STDOUT_LINES {
-                    lines.push(line);
-                }
+                tail.push(line);
             }
         }
-        lines
+        tail.to_vec()
     };
     let read_stderr = async move {
         let mut tail = Tail::new(LOG_LINES_KEPT);
@@ -1470,5 +1469,41 @@ mod tests {
         let took = started.elapsed();
         assert!(took < Duration::from_secs(5), "{took:?}");
         assert_eq!(count_runs(), 2);
+    }
+
+    /// The record and the plain line come at the end of a run, so the last
+    /// [`MAX_STDOUT_LINES`] lines are kept: a run that logs more than that first is still
+    /// read (and its warnings are the latest ones).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_long_log_before_the_record_is_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tag = lock::embedded().llama_cpp.tag.clone();
+        let path = dir.path().join("chatty");
+        let log = r#"{"type":"log","level":"warn","msg":"a warning"}"#;
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo '{log}'; i=$((i+1)); done\necho '{}'\necho 'Host 1 2 3 '\n",
+                record(r#"{"kind":"host","name":"Host","model":1,"context":2,"compute":3}"#)
+            ),
+        )
+        .expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let chatty = Backend {
+            dir: dir.path().to_path_buf(),
+            fit_params: Some(path),
+            ..backend(&tag, BackendSource::Installed, true)
+        };
+        let rows = measure(
+            &chatty,
+            &config(),
+            FIT_PARAMS_TIMEOUT,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the record after 2,000 log lines");
+        assert_eq!(rows[0].context_bytes, 2 * MIB);
     }
 }

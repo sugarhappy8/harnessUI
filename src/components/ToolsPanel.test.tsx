@@ -519,3 +519,172 @@ describe("ToolsPanel: the Coding apps group (0.0.6)", () => {
     expect(screen.getByText(changed)).toBeTruthy();
   });
 });
+
+describe("ToolsPanel: the Reverse engineering group (0.0.6)", () => {
+  // The reasons as the backend gives them (`ReverseServer::unavailable_reason`, pinned in
+  // `mcp_cmd.rs`'s tests).
+  const NOT_SET_UP = "Not set up yet. Set it up in Settings → Reverse engineering.";
+  const APPLE = "Needs Apple's command line tools. Install them in Settings → Reverse engineering.";
+  const UPDATE = "Needs an update in Settings → Reverse engineering.";
+  const DECOMPILER = "Needs a decompiler. Install one in Settings → Reverse engineering.";
+  const CHANGED = "Changed in the installed rea. Update rea in Settings → Reverse engineering.";
+  const NOTE = "Lets the model look inside program files in this chat's folders with rea. It never runs them.";
+  const DECOMPILER_LINE = "Readable code needs a decompiler. Install one in Settings → Reverse engineering.";
+  // A few of the 37, one of each kind: opening, a file check, two that work on the open file.
+  const OPEN = "open_binary";
+  const CHECK = "inspect_pe_imports";
+  const SESSION = ["list_procedures", "procedure_pseudo_code"];
+
+  function reverse(
+    reasons: { open?: string | null; check?: string | null; session?: string | null },
+    over: Partial<ToolDto> = {},
+  ): ToolDto[] {
+    const one = (name: string, why: string | null | undefined) =>
+      tool("reverse", name, { available: !why, schemaError: why ?? null, ...over });
+    return [one(OPEN, reasons.open), one(CHECK, reasons.check), ...SESSION.map((n) => one(n, reasons.session))];
+  }
+
+  function groupBox(): HTMLInputElement {
+    return screen.getByText("Reverse engineering").closest("label")!.querySelector("input")!;
+  }
+
+  function toolBox(name: string): HTMLInputElement {
+    return screen.getByText(name).closest("label")!.querySelector("input")!;
+  }
+
+  async function opensSettingsOnTheTab(button: string) {
+    const opened: unknown[] = [];
+    const listener = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+    window.addEventListener("app:open-settings", listener);
+    try {
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: button }));
+      });
+      expect(opened).toEqual(["reverse"]);
+      // The panel closes so the Settings dialog is not behind it.
+      expect(screen.queryByText("Tools for this chat", { selector: "h2" })).toBeNull();
+    } finally {
+      window.removeEventListener("app:open-settings", listener);
+    }
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listApprovedFolders.mockImplementation(async () => []);
+    ipcMock.loadedSkills.mockImplementation(async () => []);
+  });
+  afterEach(cleanup);
+
+  it("is named and explained in one line", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file", { enabledInChat: true }),
+      ...reverse({}),
+    ]);
+    await openPanel();
+    const titles = [...document.querySelectorAll("section > label")].map((l) => l.textContent?.trim());
+    expect(titles).toEqual(["Files", "Reverse engineering"]);
+    expect(screen.getAllByText(NOTE)).toHaveLength(1);
+    expect(groupBox().checked).toBe(false);
+    expect(groupBox().disabled).toBe(false);
+    // Everything can run: no line about setting it up.
+    expect(screen.queryByRole("button", { name: "Set up reverse engineering" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Reverse engineering settings" })).toBeNull();
+    expect(screen.queryByText(DECOMPILER_LINE)).toBeNull();
+  });
+
+  it("before rea is set up says so once on the group, and Set up reverse engineering opens its Settings tab", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => reverse({ open: NOT_SET_UP, check: NOT_SET_UP, session: NOT_SET_UP }));
+    await openPanel();
+    expect(screen.getAllByText(NOT_SET_UP)).toHaveLength(1);
+    // Nothing to switch on yet.
+    expect(groupBox().disabled).toBe(true);
+    expect(groupBox().checked).toBe(false);
+    expect(toolBox(OPEN).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "Open Reverse engineering settings" })).toBeNull();
+    await opensSettingsOnTheTab("Set up reverse engineering");
+  });
+
+  for (const [what, why] of [
+    ["Apple's command line tools are missing", APPLE],
+    ["rea needs an update", UPDATE],
+  ] as const) {
+    it(`when ${what} says so once, keeps open_binary a switch and opens Settings`, async () => {
+      ipcMock.listChatTools.mockImplementation(async () => reverse({ check: why, session: why }));
+      await openPanel();
+      expect(screen.getAllByText(why)).toHaveLength(1);
+      expect(toolBox(OPEN).disabled).toBe(false);
+      expect(toolBox(CHECK).disabled).toBe(true);
+      expect(screen.queryByRole("button", { name: "Set up reverse engineering" })).toBeNull();
+      expect(screen.queryByText(DECOMPILER_LINE)).toBeNull();
+      await opensSettingsOnTheTab("Open Reverse engineering settings");
+    });
+  }
+
+  it("without a decompiler says readable code needs one, greys those tools and opens Settings", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => reverse({ session: DECOMPILER }));
+    await openPanel();
+    expect(screen.getAllByText(DECOMPILER_LINE)).toHaveLength(1);
+    // The tools' own reason is said by that line, not once per tool.
+    expect(screen.queryByText(DECOMPILER)).toBeNull();
+    for (const name of SESSION) {
+      expect(toolBox(name).disabled).toBe(true);
+      expect(screen.getByText(name).className).toContain("text-fg-muted");
+    }
+    expect(toolBox(OPEN).disabled).toBe(false);
+    expect(toolBox(CHECK).disabled).toBe(false);
+    expect(screen.getByText(OPEN).className).not.toContain("text-fg-muted");
+    await opensSettingsOnTheTab("Open Reverse engineering settings");
+  });
+
+  it("switched on saves every reverse tool, also those that can't run yet, so a decompiler installed later finds them on", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file", { enabledInChat: true }),
+      ...reverse({ session: DECOMPILER }),
+    ]);
+    await openPanel();
+    await act(async () => {
+      fireEvent.click(groupBox());
+    });
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT, ["read_file", OPEN, CHECK, ...SESSION]);
+  });
+
+  it("is on when every tool that can run is on, and switching it off turns every reverse tool off", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("files", "read_file", { enabledInChat: true }),
+      ...reverse({ session: DECOMPILER }, { enabledInChat: true }),
+    ]);
+    await openPanel();
+    expect(groupBox().checked).toBe(true);
+    // Saved but not able to run: not counted as tools that are on.
+    expect(screen.getByTitle("Tools for this chat").textContent).toContain("Tools (3)");
+    await act(async () => {
+      fireEvent.click(groupBox());
+    });
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT, ["read_file"]);
+  });
+
+  it("keeps a reason that only one tool has on that tool", async () => {
+    ipcMock.listChatTools.mockImplementation(async () => [
+      ...reverse({}),
+      tool("reverse", "list_strings", { available: false, schemaError: CHANGED }),
+    ]);
+    await openPanel();
+    expect(screen.getAllByText(CHANGED)).toHaveLength(1);
+    expect(screen.getByText(CHANGED).closest("li")?.textContent).toContain("list_strings");
+    expect(screen.queryByRole("button", { name: "Open Reverse engineering settings" })).toBeNull();
+    expect(screen.queryByText(DECOMPILER_LINE)).toBeNull();
+  });
+
+  it("does not change how other groups switch: a browser tool that can't run is not saved", async () => {
+    const NO_BROWSER = "The browser tool needs Chrome, Edge, Brave, Vivaldi or Chromium, and none was found.";
+    ipcMock.listChatTools.mockImplementation(async () => [
+      tool("computer", "computer_screenshot"),
+      tool("computer", "computer_click", { available: false, schemaError: NO_BROWSER }),
+    ]);
+    await openPanel();
+    await act(async () => {
+      fireEvent.click(screen.getByText("Computer").closest("label")!.querySelector("input")!);
+    });
+    expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT, ["computer_screenshot"]);
+  });
+});

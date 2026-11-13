@@ -1172,6 +1172,25 @@ async fn ready_reports_where_the_model_went() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         events.extend(drain(&mut rx));
     }
+    // The running server really has GGML_NO_BACKTRACE=1, so a crash would start no
+    // debugger (item 6, I6-8). Its environment holds the API key, so only this one entry
+    // is looked at and nothing of it is printed.
+    #[cfg(target_os = "linux")]
+    {
+        let pid = server.pid().expect("the server's process id");
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).expect("environ");
+        let entries: Vec<&[u8]> = environ.split(|b| *b == 0).collect();
+        assert!(
+            entries.contains(&b"GGML_NO_BACKTRACE=1".as_slice()),
+            "llama-server runs without GGML_NO_BACKTRACE=1"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.starts_with(b"GGML_BACKTRACE_LLDB=")),
+            "no debugger switch reaches llama-server"
+        );
+    }
     server.stop().await;
     events.extend(drain(&mut rx));
     let reports: Vec<&runtime::MemoryReport> = events

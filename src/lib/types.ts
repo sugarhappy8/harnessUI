@@ -1084,3 +1084,16 @@ export interface ReverseProgress {
   finished: boolean;
   error: ErrorInfo | null;
 }
+
+/** 0.0.6 item 5 (WP9h): what the message box does with one file dropped on the window (`reverse_dropped`). */
+export type DroppedProgram =
+  | { kind: "insert"; path: string }
+  | { kind: "addFolder"; fileName: string }
+  | { kind: "notReachable"; fileName: string }
+  | { kind: "ignore" };
+
+/** The answer to one drop: whether rea is installed, and one entry per path, in order. */
+export interface DropAnswer {
+  installed: boolean;
+  items: DroppedProgram[];
+}

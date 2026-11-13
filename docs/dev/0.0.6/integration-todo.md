@@ -29,3 +29,13 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   once without waiting); re-run it several times at integration and confirm WP4b's fix.
   WP4c's table of quotes (in its report, journal of wf_da155c8a-e67) goes to the owner for
   review before release.
+- **WP3a, WP3b, WP5a, WP5b done.** Left as minor:
+  - WP5b: "Make a new key" while a "Show key" read is still on its way leaves the old,
+    refused key on the page and Copy copies it (`OtherApps.tsx` makeNewKey does not clear the
+    pending read or `key`); the old-key note is one flag for all apps and is cleared by copying
+    any step, even one without the key. Fix both (small).
+  - WP3a: `defang_app_notes` in `src-tauri/src/subagent.rs` still lets the extra invisible
+    characters hide an "[App note]" marker (WP3a fixed it in `crates/agent/src/prompt.rs`
+    with `hidden_in_summary`); reuse that check there.
+  - WP3a: the real-model `llama_memory` test takes very long under load (36 min at load 20;
+    about 2-4 min alone); keep it out of the default CI run if it is slow there.
