@@ -6802,6 +6802,7 @@ def p_reverse_engineering(c, notes):
         s.wait_for(lambda: gone(slow["pid"]) and gone(slow["child"]), 30, "the fake rea and its child to end")
         notes.append("after Stop: " + json.dumps([r["event"] for r in records()][-4:]))
         steer({})
+        Fake.queue.clear()  # the reply that never came
         # The next session call opens the same file again by itself, with no card.
         made = len(calls())
         result = turn("procedure_pseudo_code", {"procedure": "main"}, "and the pseudocode of main once more")

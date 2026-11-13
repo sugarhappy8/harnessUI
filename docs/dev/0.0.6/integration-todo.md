@@ -82,3 +82,22 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   - WP9c (minor, left): a link whose target is not valid text is treated as missing by
     `follow_links`, so a chain of two such links can still make the system look up a network
     place and the folder passes. Fix: treat an unreadable link target as refused.
+- **Leftover fixes run A (wf_c6b8dca9-052) done.** Six fixes landed with tests and reviews; the
+  webp and model-list fixes had a second round for a major each (decoding WebP now in a
+  bounded helper; the list no longer offers paths Installed doesn't know). Still open (minor):
+  - pick-cancel: the pick counter is shared by all chats, so a quick pick in another chat stops
+    the restore (a regression on the asked-to-wait path); Cancel while another chat is open
+    still leaves the picking chat on the new model; re-picking the loaded model while a switch
+    waits doesn't cancel the backend's waiting load. Fix in `app.ts` pickModel (per-chat).
+  - webp: WebP sent by other apps through the sharing proxy, or by MCP tools, still reaches
+    llama-server as image/webp and fails (convert in the proxy and the tool-result path too,
+    or refuse with a plain message).
+  - helper hand-over: escaping now also changes ordinary non-ASCII text a helper may need word
+    for word (ZWNJ/ZWJ in Persian and Indic scripts, emoji variation selectors, RTL marks);
+    consider escaping hidden characters only next to bracketed markers. Near-miss markers with
+    no hidden characters still pass (doc wording must not overclaim).
+  - Other apps: a setup step copied while the new key arrives (a few ms window) is left off
+    "Apps to set up again".
+  - `tool_catalog.rs:250` TODO(0.0.6) (tool selection counting words of tool names; rea's
+    names) and `attachments.rs:643` TODO(0.0.6) (documents in the mentions' share): decide
+    before release, or keep with a reason.
