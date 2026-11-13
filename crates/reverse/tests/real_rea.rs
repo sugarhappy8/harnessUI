@@ -850,7 +850,7 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
         Flavor::current(),
         true,
     );
-    if let Some(dir) = run_tmp.as_ref().filter(|_| false) { // TEMP-BEFORE-FIX
+    if let Some(dir) = &run_tmp {
         let tmpdir = config.env.set.iter().rev().find(|(k, _)| k == "TMPDIR");
         assert_eq!(
             tmpdir.map(|(_, v)| Path::new(v)),

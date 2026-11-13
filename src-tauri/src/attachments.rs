@@ -437,11 +437,27 @@ pub(crate) fn base64_is_webp(data: &str) -> bool {
         .is_ok_and(|b| b.len() == 12 && b.starts_with(b"RIFF") && b.ends_with(b"WEBP"))
 }
 
+/// [0.0.6 webp-other-paths, final round] The type a PNG, JPEG or GIF picture really is,
+/// read from the first bytes of its base64 (whitespace skipped) as [`sniff`] reads them.
+fn base64_picture_type(data: &str) -> Option<&'static str> {
+    let head: String = data
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .take(16)
+        .collect();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(head).ok()?;
+    ["image/png", "image/jpeg", "image/gif"]
+        .into_iter()
+        .find(|mime| sniff(mime, &bytes))
+}
+
 /// [0.0.6] A picture from a tool or stored inline in a chat, as the model gets it.
 enum InlinePicture {
-    /// Not WebP by its type or its first bytes (or not base64, which the agent replaces
-    /// with its own note): sent as it is.
+    /// Not a WebP file by its first bytes, whatever its type says (or not base64, which the
+    /// agent replaces with its own note): sent as it is.
     Keep,
+    /// A PNG, JPEG or GIF picture labelled WebP: sent as it is, under the type it really is.
+    Relabel(&'static str),
     /// The MIME type and base64 of the picture as JPEG or PNG.
     Converted(String, String),
     /// The note sent instead: llama-server refuses a whole request holding a picture it
@@ -449,9 +465,16 @@ enum InlinePicture {
     LeftOut(&'static str),
 }
 
+/// Decided by the picture's bytes, not by its type, as llama-server reads it: a WebP file
+/// becomes JPEG or PNG (or the note, when it cannot be read), anything else goes as it is.
 async fn inline_picture(worker: &PictureWorker, mime: &str, data_base64: &str) -> InlinePicture {
-    if !mime.trim().eq_ignore_ascii_case("image/webp") && !base64_is_webp(data_base64) {
-        return InlinePicture::Keep;
+    if !base64_is_webp(data_base64) {
+        return match base64_picture_type(data_base64) {
+            Some(real) if mime.trim().eq_ignore_ascii_case("image/webp") => {
+                InlinePicture::Relabel(real)
+            }
+            _ => InlinePicture::Keep,
+        };
     }
     let compact: String = data_base64
         .chars()
@@ -483,6 +506,7 @@ async fn tool_pictures_with(worker: &PictureWorker, out: &mut mcp_host::ToolOutp
         };
         match inline_picture(worker, mime, data_base64).await {
             InlinePicture::Keep => {}
+            InlinePicture::Relabel(real) => *mime = real.to_owned(),
             InlinePicture::Converted(new_mime, data) => {
                 *mime = new_mime;
                 *data_base64 = data;
@@ -511,6 +535,7 @@ async fn stored_pictures_with(worker: &PictureWorker, parts: &mut [agent::histor
             Part::Image { mime, data_base64 } => {
                 match inline_picture(worker, mime, data_base64).await {
                     InlinePicture::Keep => {}
+                    InlinePicture::Relabel(real) => *mime = real.to_owned(),
                     InlinePicture::Converted(new_mime, data) => {
                         *mime = new_mime;
                         *data_base64 = data;
@@ -523,6 +548,7 @@ async fn stored_pictures_with(worker: &PictureWorker, parts: &mut [agent::histor
                 for (mime, data) in std::mem::take(&mut result.images) {
                     match inline_picture(worker, &mime, &data).await {
                         InlinePicture::Keep => kept.push((mime, data)),
+                        InlinePicture::Relabel(real) => kept.push((real.to_owned(), data)),
                         InlinePicture::Converted(new_mime, data) => kept.push((new_mime, data)),
                         InlinePicture::LeftOut(note) => {
                             if !result.text.is_empty() {

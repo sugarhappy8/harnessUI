@@ -154,6 +154,13 @@ one starts from this file and `README.md`.
   (rea start stuck, Settings list scroll, Compare fit words, Tools panel rea note); review
   run wf_0772ffdb-bab (processes/network + tests) verifying; header refix (wf_3b4d80b6-e9b)
   and WP9e's check round (wf_59ddd95e-968) finishing.
+- 07:53 UTC check: release review finished (all four runs; findings fixed or in the final
+  round). Done since 06:55: WP9e, header layout (two rounds), rea walk refusals, escaped
+  names, Windows path test, backend check D3, MCP name clash, rea start stuck, Settings list,
+  Tools panel rea note. Final fix round (v006-final-fixes: fix, review, refix of every
+  finding, check): batch a wf_bfaa840a-6b8, b wf_55eeb8d4-8e0, c wf_dad2159c-dae (Ghidra pin
+  from CI run 43380365172, Linux temp folder, ARCHITECTURE markers), d wf_728c1760-d70, e
+  wf_09edf0f5-041; wf_57274b94-12f reviewing its last two. Then the final pass and CI.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

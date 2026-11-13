@@ -238,7 +238,7 @@ pub fn run_config_with(
             // reverse folder is under ~/.local/share, and from a temporary folder there rea
             // would move Ghidra's session to /tmp (module documentation of `layout`).
             let tmp = match (&ghidra, layout.run_tmp()) {
-                (Some(_), Some(_run_tmp)) => layout.tmp(), // TEMP-BEFORE-FIX
+                (Some(_), Some(run_tmp)) => run_tmp.to_path_buf(),
                 _ => layout.tmp(),
             };
             env = env

@@ -579,7 +579,10 @@ async fn carry_tool_choices(store: &store::Store, renamed: &[RenamedServer], own
                 )
                 .await
         {
-            tracing::warn!(chat = summary.id.0, "could not keep a renamed server's tools on: {e}");
+            tracing::warn!(
+                chat = summary.id.0,
+                "could not keep a renamed server's tools on: {e}"
+            );
         }
     }
     if let Ok(Some(mut last)) = store.get_setting::<Vec<String>>(DEFAULT_TOOLS).await {
@@ -2824,9 +2827,15 @@ mod tests {
     fn only_the_renamed_servers_tools_and_secrets_follow_it() {
         let owners = names(&["reverse (yours)", "reverse_", "reverse x"]);
         let map = |name: &str| renamed_tool(name, "reverse", "reverse (yours 2)", &owners);
-        assert_eq!(map("reverse__lookup").as_deref(), Some("reverse__yours_2___lookup"));
+        assert_eq!(
+            map("reverse__lookup").as_deref(),
+            Some("reverse__yours_2___lookup")
+        );
         // A name the host made unique stays unique.
-        assert_eq!(map("reverse__lookup_2").as_deref(), Some("reverse__yours_2___lookup_2"));
+        assert_eq!(
+            map("reverse__lookup_2").as_deref(),
+            Some("reverse__yours_2___lookup_2")
+        );
         for theirs in [
             "reverse__yours___lookup",
             "reverse___lookup",
@@ -2973,7 +2982,11 @@ mod tests {
                 None,
                 "refuse_get {refuse_get}: its secret is deleted"
             );
-            assert_eq!(keychain.inner.len(), 1, "only the other server's secret is left");
+            assert_eq!(
+                keychain.inner.len(),
+                1,
+                "only the other server's secret is left"
+            );
             assert_eq!(
                 keychain
                     .get(&mcp_secret_key("fetch.env.KEY"))
