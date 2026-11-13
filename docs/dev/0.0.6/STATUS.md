@@ -196,6 +196,10 @@ one starts from this file and `README.md`.
   and "a larger context"); CHANGELOG/SECURITY/README wording corrected; Windows Error
   Reporting stated as a known limit. Pushed without [skip ci]: the CI run on this commit is
   the final gate for merge and release.
+- 12:57 UTC check: CI on 92c8af2 failed one Linux contract test (llama-server closed a
+  kept-alive connection without a reply); the test now uses a new connection per request
+  (de7929a), and CI runs again on all three systems. Dev server restarted. Waiting for CI,
+  then PR #5 ready; merge and release on the owner's go.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
