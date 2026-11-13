@@ -180,6 +180,12 @@ one starts from this file and `README.md`.
   Windows and macOS installer jobs running their workspace tests. Final pass: completeness
   critic done (owner checklist written), its verify running; Rust, scripted e2e, frontend and
   milestone e2e running.
+- 11:53 UTC check: first full Windows/macOS CI (run 43409122542) found Windows-only and
+  macOS-only test failures (scratchpad ci-logs/; one PR comment each). macOS fixes done
+  (fit-params limit 120 s for the first Metal compile; reverse run-temp tests on a short
+  base); Windows fixes: three done, managed_e2e stack overflow in review. Final pass still
+  running (Rust and scripted e2e; frontend and milestone e2e); completeness check done
+  (owner-checklist.md). Next: one push without [skip ci] for CI on all three systems.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
