@@ -108,6 +108,12 @@ one starts from this file and `README.md`.
   (developing). Disk filled up once (00:40); freed to 11 GB; a disk guard
   (scratchpad/diskguard.py, every 5 min below 8 GB free) now removes target/debug/incremental
   and superseded test binaries.
+- 01:55 UTC: done: WP3a, WP3b, WP5a, WP5b (memory+share run finished); WP8 and WP10a/WP10b
+  in fixing; WP9b reviewed. To use the idle processors, the item 5 run was split: wf_a08f0014-543
+  resumed with WP9a, WP10c, WP9b, WP9c only; new runs (script v006-packages-v3.js, which
+  accepts an existing report) for WP9d (wf_b32b9b4f-38c), WP9g (wf_370c5424-374), WP9h
+  (wf_0a683d9b-c4b), starting at their reviews (developer reports in the scratchpad,
+  dev_WP9*.txt). WP9e (last) is to be started by hand when all five are done.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

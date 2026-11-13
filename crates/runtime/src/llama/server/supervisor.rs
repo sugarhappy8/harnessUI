@@ -20,10 +20,12 @@
 //!      It stays off for the rest of the load.
 //!   3. **As much as fits** ([`LoadStage::RetryingWithLessGpu`]) when a graphics card ran
 //!      out of memory ([`LoadFailure::is_out_of_memory`]) with All of it ([`GpuUse::All`])
-//!      or with layers or expert parts chosen in Fine control (a custom placement, item 6).
-//!      The chosen placement is set aside for the rest of the load (the stage says so, with
-//!      the chosen number of layers); the margin As much as fits leaves free and where the
-//!      conversation memory lives are kept.
+//!      or with layers or expert parts chosen in Fine control (a custom placement, item 6)
+//!      that put part of the model on the card. The chosen placement is set aside for the
+//!      rest of the load (the stage says so, with the chosen number of layers); the margin
+//!      As much as fits leaves free and where the conversation memory lives are kept. A
+//!      placement of 0 layers puts none of the model on the card, so As much as fits would
+//!      put more there than chosen: such a load steps down instead.
 //! - **Stepping down:** when a GPU backend still fails, and a lower backend passed its
 //!   probe, try the next one down (ROCm or CUDA → Vulkan → CPU) and report
 //!   [`ServerEvent::SteppedDown`]. The processor runs with [`GpuUse::Off`]; another
@@ -64,7 +66,7 @@ use tokio_util::sync::CancellationToken;
 use super::{RunningServer, ServerEvent, ServerState, StartError, StartSpec, start};
 use crate::llama::backend::{Backend, BackendKind};
 use crate::llama::failure::{LoadFailure, classify, save_memory_refused};
-use crate::llama::launch::{ExpertsOnCpu, FlashAttn, GpuUse, free_loopback_port};
+use crate::llama::launch::{ExpertsOnCpu, FlashAttn, GpuUse, MAX_LAYER_COUNT, free_loopback_port};
 use crate::llama::stage::LoadStage;
 
 /// Starts a server. Implemented by [`LocalStarter`] for real llama-server processes and by
@@ -311,6 +313,19 @@ fn uses_graphics_card(spec: &StartSpec) -> bool {
     spec.backend.kind != BackendKind::Cpu && spec.launch.uses_device()
 }
 
+/// Whether As much as fits puts less of `spec`'s model on the graphics card than it asked
+/// for: All of it, or a custom placement (Fine control, item 6) that puts part of the model
+/// on the card. A placement of 0 layers puts none there (expert flags then have nothing on
+/// the card to move), so As much as fits would put more there than the user chose.
+fn turned_down_by_fit(spec: &StartSpec) -> bool {
+    let fine = &spec.launch.fine;
+    if fine.custom_placement() {
+        fine.gpu_layers != Some(0)
+    } else {
+        spec.launch.gpu == GpuUse::All
+    }
+}
+
 /// Runs one model with the restart, step-down and new-port policy.
 #[derive(Debug)]
 pub struct Supervisor<S: Starter> {
@@ -524,7 +539,7 @@ impl<S: Starter> Supervisor<S> {
             // can fail on a graphics card that cannot do it. Off for the rest of the load.
             next.launch.fine.flash_attn = FlashAttn::Off;
             LoadStage::RetryingWithoutFastAttention { backend }
-        } else if card && (spec.launch.gpu == GpuUse::All || custom) && reason.is_out_of_memory() {
+        } else if card && turned_down_by_fit(spec) && reason.is_out_of_memory() {
             // All of it, or a placement chosen in Fine control (item 6, section 3.3 step 3),
             // ran out of graphics memory: As much as fits for the rest of the load. The
             // chosen layers and expert parts are set aside; the margin As much as fits
@@ -535,7 +550,12 @@ impl<S: Starter> Supervisor<S> {
             LoadStage::RetryingWithLessGpu {
                 backend,
                 custom,
-                chosen_layers: if custom { fine.gpu_layers } else { None },
+                // The count the command line named (above its limit it said `all`).
+                chosen_layers: if custom {
+                    fine.gpu_layers.filter(|&n| n <= MAX_LAYER_COUNT)
+                } else {
+                    None
+                },
             }
         } else {
             return None;
@@ -2317,6 +2337,74 @@ mod tests {
             .await
             .expect("starts");
         assert_eq!(drain(&mut rx), vec![with_less_gpu(BackendKind::Vulkan)]);
+
+        // 0 layers chosen puts none of the model on the card (`-ngl 0`; expert flags have
+        // nothing there to move). As much as fits would put more on the card than chosen
+        // and its note would blame the chosen layers, so the load steps down to the
+        // processor, which is where the user put the layers.
+        for gpu in [GpuUse::All, GpuUse::Fit] {
+            for experts in [
+                ExpertsOnCpu::None,
+                ExpertsOnCpu::All,
+                ExpertsOnCpu::FirstLayers(5),
+            ] {
+                let zero = FineLaunch {
+                    gpu_layers: Some(0),
+                    experts_on_cpu: experts,
+                    ..FineLaunch::default()
+                };
+                for reason in [LoadFailure::OutOfMemory, LoadFailure::ContextTooLarge] {
+                    let script = vec![Script::Fail(reason.clone()), Script::Run(None)];
+                    let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+                    let (_server, running) = sup
+                        .start(spec_fine(gpu, false, zero.clone()))
+                        .await
+                        .expect("starts on the processor");
+                    let attempts = fine_attempts(&log);
+                    assert_eq!(
+                        attempts
+                            .iter()
+                            .map(|(backend, gpu, _)| (*backend, *gpu))
+                            .collect::<Vec<_>>(),
+                        vec![(BackendKind::Vulkan, gpu), (BackendKind::Cpu, GpuUse::Off)],
+                        "{gpu:?} {experts:?} {reason:?}"
+                    );
+                    assert_eq!(running.backend.kind, BackendKind::Cpu);
+                    assert_eq!(
+                        drain(&mut rx),
+                        vec![ServerEvent::SteppedDown {
+                            from: BackendKind::Vulkan,
+                            to: BackendKind::Cpu,
+                            reason,
+                        }],
+                        "{gpu:?} {experts:?}: no As much as fits retry"
+                    );
+                }
+            }
+        }
+
+        // A chosen count above the command line's limit launched as `-ngl all`
+        // (`launch::MAX_LAYER_COUNT`), so the stage names no count.
+        let script = vec![Script::Fail(LoadFailure::OutOfMemory), Script::Run(None)];
+        let (mut sup, _log, mut rx) = supervisor(script, gpu_cpu());
+        sup.start(spec_fine(
+            GpuUse::All,
+            false,
+            FineLaunch {
+                gpu_layers: Some(u32::MAX),
+                ..FineLaunch::default()
+            },
+        ))
+        .await
+        .expect("starts");
+        assert_eq!(
+            drain(&mut rx),
+            vec![ServerEvent::Stage(LoadStage::RetryingWithLessGpu {
+                backend: BackendKind::Vulkan,
+                custom: true,
+                chosen_layers: None,
+            })]
+        );
     }
 
     /// Every retry happens once, with every setting on (Save memory, fast attention On, a

@@ -5416,10 +5416,13 @@ def p_model_list(c, notes):
     table, not in the recent list); two copies of one name each show the end of their
     folder; a finished download (its `download-progress` event, every file done) shows up
     in the open menu without reopening it, while progress does not; a deleted file is left
-    out; a link to a listed file is one entry and is remembered by its real path; recently
-    used first, then by name; Remove in Installed takes it off the list. Copies are hard
+    out; a link to a listed file is one entry and is remembered by its real path; a Hugging
+    Face cache link (its real file has no .gguf name) is remembered by the link; recently
+    used first, then by name; Remove in Installed takes an imported model off the list; a
+    long list stays inside the window and scrolls; the model loaded through a link is listed
+    under that link, so picking it in another chat does not restart it. Copies are hard
     links of the test model (or its first 64 MB), with names no other scenario uses, all
-    removed again at the end."""
+    removed again at the end, and the recent list is put back as it was."""
     s = c.s
     src = any_gguf()
     if src is None:
@@ -5429,10 +5432,16 @@ def p_model_list(c, notes):
     shutil.rmtree(root, ignore_errors=True)
     name = "Model-List-Q8_0.gguf"
     fresh_name = "Fresh-Download-Q4_K_M.gguf"
+    hf_name = "HF-Cache-Q4_K_M.gguf"
+    opened_name = "Opened-Through-Link.gguf"
     a = root / "Downloads" / "models" / name
     b = root / "harnessUI" / "models" / name
     fresh = root / "Downloads" / "models" / fresh_name
     link = root / "link" / name
+    blob = root / "hf" / "blobs" / "3f2a9c0d1e"
+    hf_link = root / "hf" / "snapshots" / "rev" / hf_name
+    opened_real = root / "real" / opened_name
+    opened_link = root / "opened" / opened_name
 
     def place(dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -5444,24 +5453,34 @@ def p_model_list(c, notes):
                 g.write(f.read(64 << 20))
             return "first 64 MB"
 
-    notes.append("copies: " + ", ".join(sorted({place(p) for p in (a, b, fresh)})))
+    notes.append("copies: " + ", ".join(sorted({place(p) for p in (a, b, fresh, blob, opened_real)})))
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(a)
+    hf_link.parent.mkdir(parents=True, exist_ok=True)
+    hf_link.symlink_to(pathlib.Path("..") / ".." / "blobs" / blob.name)
+    opened_link.parent.mkdir(parents=True, exist_ok=True)
+    opened_link.symlink_to(opened_real)
     ids = []
+    loaded = False
 
     def recent():
         return s.invoke("get_setting", {"key": "recentLocalModels"}) or []
 
+    before = recent()
+
+    def write_recent(value):
+        con = sqlite3.connect(c.db)
+        con.execute("UPDATE settings SET value = ?, updated_at = ? WHERE key = 'recentLocalModels'",
+                    (json.dumps(value), int(time.time() * 1000)))
+        con.commit()
+        con.close()
+
     def ours(p):
-        return any(os.path.realpath(p) == os.path.realpath(q) or p == str(q) for q in (a, b, fresh, link))
+        return os.path.realpath(p).startswith(os.path.realpath(root) + os.sep) or p.startswith(str(root) + os.sep)
 
     def forget():
         """Takes our files off the recent list, as a download never puts them there."""
-        con = sqlite3.connect(c.db)
-        con.execute("UPDATE settings SET value = ?, updated_at = ? WHERE key = 'recentLocalModels'",
-                    (json.dumps([p for p in recent() if not ours(p)]), int(time.time() * 1000)))
-        con.commit()
-        con.close()
+        write_recent([p for p in recent() if not ours(p)])
 
     def register(p):
         ids.append(s.invoke("import_model", {"path": str(p)})["id"])
@@ -5493,6 +5512,18 @@ def p_model_list(c, notes):
             "id": "e2e-model-list", "repo": "e2e-uploader/Fresh-GGUF", "label": "Q4_K_M", "fileCount": 1,
             "bytesDone": 10, "bytesTotal": 10, "status": status, "error": None, "bytesPerSecond": None,
             "unverified": False}})
+
+    def remove_in_installed(file_name):
+        s.execute("window.confirm = () => true;")
+        s.click_button("Models")
+        s.click_button("Installed")
+        el = s.wait_for(lambda: s.execute("return document.querySelector(arguments[0]);",
+                                          f'button[aria-label="Delete {file_name}"]') or False, 15, "Delete on the row")
+        s.click(next(iter(el.values())))
+        s.wait_for(lambda: not s.execute("return document.querySelector(arguments[0]);",
+                                         f'button[aria-label="Delete {file_name}"]'), 15, "the row removed")
+        escape()
+        s.wait_for(lambda: s.execute("return !document.querySelector('[role=dialog]');"), 10, "the dialog closed")
 
     try:
         new_chat(c)
@@ -5543,35 +5574,294 @@ def p_model_list(c, notes):
         notes.append(f"recent list starts with the real path; menu: {[t for t, _ in shown][:4]}")
         escape()
 
-        # Remove in Installed takes it off the list.
-        s.execute("window.confirm = () => true;")
-        s.click_button("Models")
-        s.click_button("Installed")
-        el = s.wait_for(lambda: s.execute("return document.querySelector(arguments[0]);",
-                                          f'button[aria-label="Delete {fresh_name}"]') or False, 15, "Delete on the row")
-        s.click(next(iter(el.values())))
-        s.wait_for(lambda: not s.execute("return document.querySelector(arguments[0]);",
-                                         f'button[aria-label="Delete {fresh_name}"]'), 15, "the row removed")
+        # A Hugging Face cache link: its real file (blobs/<sha>) has no .gguf name, which
+        # loading refuses, so the link is what is remembered and listed.
+        ids.append(s.invoke("import_model", {"path": str(hf_link)})["id"])
+        r = recent()
+        assert r and r[0] == str(hf_link) and str(blob) not in r, r
+        shown = open_menu(lambda e: e and e[0][0] == hf_name, "the cache link first")
+        assert shown[0] == [hf_name, str(hf_link)] and not named(shown, blob.name), shown
         escape()
-        s.wait_for(lambda: s.execute("return !document.querySelector('[role=dialog]');"), 10, "the dialog closed")
+
+        # Remove in Installed takes an imported model off the list (a real import, which
+        # also puts it on the recent list); its file stays.
+        s.invoke("import_model", {"path": str(fresh)})
+        assert str(fresh) in recent(), recent()
+        shown = open_menu(lambda e: named(e, fresh_name), "the imported model listed")
+        escape()
+        remove_in_installed(fresh_name)
         shown = open_menu(lambda e: not named(e, fresh_name), "the removed model gone")
         assert named(shown, name) == [name], shown
+        assert str(fresh) not in recent() and fresh.exists(), recent()
         escape()
+
+        # Many installed models: the menu stays inside the window and scrolls to its end.
+        many = []
+        for i in range(30):
+            f = root / "many" / f"Many-{i:02d}-Q4_K_M.gguf"
+            place(f)
+            many.append(s.invoke("import_model", {"path": str(f)})["id"])
+        ids.extend(many)
+        open_menu(lambda e: len(named(e, "Many-")) == 30, "the long menu")
+        time.sleep(0.5)
+        facts = s.execute("""
+            const m = document.querySelector('[role=menu]');
+            const r = m.getBoundingClientRect();
+            const last = [...m.querySelectorAll('[role=menuitem]')].find(e => e.innerText.includes('Find and manage models'));
+            const before = last.getBoundingClientRect().bottom;
+            last.scrollIntoView({block: 'nearest'});
+            const lr = last.getBoundingClientRect();
+            return {innerHeight: window.innerHeight, menuTop: r.top, menuBottom: r.bottom, scrollHeight: m.scrollHeight,
+                    clientHeight: m.clientHeight, overflowY: getComputedStyle(m).overflowY, lastBefore: before,
+                    lastTop: lr.top, lastBottom: lr.bottom, scrollTop: m.scrollTop};""")
+        notes.append(f"long menu: {facts}")
+        assert facts["menuBottom"] <= facts["innerHeight"], facts
+        assert facts["overflowY"] in ("auto", "scroll") and facts["scrollHeight"] > facts["clientHeight"], facts
+        assert facts["lastBefore"] > facts["menuBottom"] and facts["scrollTop"] > 0, facts
+        assert facts["menuTop"] <= facts["lastTop"] and facts["lastBottom"] <= facts["menuBottom"] + 1, facts
+        escape()
+        for i in many:
+            s.invoke("delete_model", {"id": i, "deleteFiles": False})
+            ids.remove(i)
+
+        # The model loaded through a link (as "Open a GGUF file..." does) is listed under that
+        # link while it is loaded, so picking it in another chat keeps the loaded model. The
+        # recent list still holds the real path, once.
+        s.execute(
+            """
+            const [path] = arguments;
+            window.__mlLoad = 'pending';
+            window.__TAURI_INTERNALS__.invoke('load_local_model', {path, settings: null})
+              .then(() => { window.__mlLoad = {ok: true}; })
+              .catch(e => { window.__mlLoad = {ok: false, error: e}; });
+            """,
+            str(opened_link))
+        loaded = True
+        s.wait_for(lambda: s.execute("return window.__mlLoad !== 'pending';"), 300, "the model load")
+        result = s.execute("return window.__mlLoad;")
+        assert result.get("ok"), result
+        st = s.invoke("runtime_status")
+        assert st["state"] == "ready" and st["modelPath"] == str(opened_link), st
+        r = recent()
+        assert r and r[0] == os.path.realpath(opened_real) and str(opened_link) not in r, r
+        chat_b = new_chat(c)
+        shown = open_menu(lambda e: named(e, opened_name), "the loaded model in the menu")
+        assert [p for t, p in shown if t.startswith(opened_name)] == [str(opened_link)], shown
+        s.click_menu_item(opened_name)
+        states = set()
+        paths = set()
+        until = time.time() + 4
+        while time.time() < until:
+            st = s.invoke("runtime_status")
+            states.add(st["state"])
+            paths.add(st["modelPath"])
+            time.sleep(0.1)
+        assert states == {"ready"} and paths == {str(opened_link)}, (states, paths)
+        assert s.invoke("get_chat", {"chatId": chat_b})["chat"]["modelRef"] == f"local:{opened_link}"
+        assert "Loading model" not in s.page_text()
+        notes.append("picked the loaded model in another chat: no restart, same path")
     finally:
         escape()
+        if loaded:
+            try:
+                s.invoke("unload_model", {"whenIdle": False})
+            except WebDriverError as e:
+                notes.append(f"unload: {e}")
         for i in ids:
             try:
                 s.invoke("delete_model", {"id": i, "deleteFiles": False})
             except WebDriverError:
                 pass
         try:
-            forget()
+            write_recent(before)
         except Exception as e:  # noqa: BLE001
-            notes.append(f"could not tidy the recent list: {e}")
+            notes.append(f"could not put the recent list back: {e}")
         shutil.rmtree(root, ignore_errors=True)
 
 
 PROBES.append(p_model_list)  # [0.0.6 item 8, WP8]
+
+
+@probe("reverse-tools")
+def p_reverse_tools(c, notes):
+    """0.0.6 item 5 (WP9h): the Reverse engineering group in the Tools panel and a program file
+    dropped on the window, in the real app. Nothing is downloaded: rea and Kuna are "installed"
+    by writing the installer's folders and markers (no programs) into the app's reverse folder.
+    The group is off in a new chat (the owner's answer Q4 = B); before rea is set up it says so
+    once with "Set up reverse engineering", which opens its Settings tab; with rea but no
+    decompiler it says readable code needs one; switched on then, it saves every tool, so once
+    Kuna is installed the whole group is on, and a new chat follows that last choice. Dropped
+    paths: the command answers insert, add a folder, nothing and can't reach; the window's drop
+    event puts a path into the message box or a note under it; nothing happens without rea."""
+    s = c.s
+    if os.environ.get("HARNESS_REVERSE_ROOT"):
+        notes.append("HARNESS_REVERSE_ROOT is set: the reverse-engineering scenario owns that folder; skipped")
+        return
+    root = c.db.parent / "reverse"
+    lock = json.loads((ROOT / "reverse.lock.json").read_text())
+    versions = {p["name"]: p["version"] for p in lock["parts"]}
+    not_set_up = "Not set up yet. Set it up in Settings → Reverse engineering."
+    note = "Lets the model look inside program files in this chat's folders with rea. It never runs them."
+    decompiler_line = "Readable code needs a decompiler. Install one in Settings → Reverse engineering."
+
+    def put(component, part):
+        d = root / f"{part}-{versions[part]}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ".complete").write_text(json.dumps({
+            "component": component, "part": part, "version": versions[part],
+            "archiveSha256": [], "programs": [], "diskBytes": 1_000_000}))
+
+    def reverse_tools(chat):
+        return [t for t in s.invoke("list_chat_tools", {"chatId": chat}) if t["server"] == "reverse"]
+
+    section = """
+        const sec = [...document.querySelectorAll('section')].find(s => {
+          const l = s.querySelector(':scope > label');
+          return l && l.innerText.trim() === 'Reverse engineering';
+        });
+    """
+
+    def section_text():
+        return s.execute(section + "return sec ? sec.innerText : null;")
+
+    def escape():
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.4)
+
+    def open_panel():
+        escape()
+        s.execute("document.querySelector('button[title=\"Tools for this chat\"]').click();")
+        s.wait_for(lambda: s.execute(
+            "return [...document.querySelectorAll('h2')].some(h => h.innerText.trim() === 'Tools for this chat');"), 10, "the Tools panel")
+        s.wait_for(lambda: section_text() is not None, 10, "the Reverse engineering group")
+
+    def box():
+        return s.execute("const t = document.querySelector('textarea'); return t ? t.value : null;")
+
+    def drop(paths):
+        """The window's drop event as the app sends it (the native drag cannot be driven)."""
+        s.execute_async(
+            """
+            const [paths, done] = arguments;
+            window.__TAURI_INTERNALS__.invoke('plugin:event|emit',
+              {event: 'tauri://drag-drop', payload: {paths, position: {x: 10, y: 10}}})
+              .then(() => done(true), e => done(String(e)));
+            """, paths)
+
+    names = list(json.loads((ROOT / "crates/reverse/tests/fixtures/rea-6.9.0-catalog.json").read_text()).get("tool_names", []))
+    fixture = ROOT / "crates/reverse/tests/fixtures/hello-linux-x64"
+    hello = c.work / "hello-linux-x64"
+    outside = c.other / "hello-linux-x64"
+    forbidden = root / f"rea-{versions['rea']}" / "prog"
+    shutil.rmtree(root, ignore_errors=True)
+    try:
+        # A new chat: the group is off, and every one of its 37 tools says rea is not set up.
+        chat = new_chat(c)
+        tools = reverse_tools(chat)
+        assert len(tools) == 37, len(tools)
+        assert not any(t["exposed"] in c.default_tools for t in tools), "on by default in a new chat"
+        assert all(not t["enabledInChat"] and not t["available"] and t["schemaError"] == not_set_up for t in tools), tools[0]
+        open_panel()
+        text = section_text()
+        notes.append("not set up: " + text.replace("\n", " | ")[:300])
+        s.execute(section + "const p = sec.closest('.overflow-y-auto'); if (p) p.scrollTop = sec.offsetTop - 8;")
+        time.sleep(0.6)
+        s.screenshot(str(OUT / "reverse-tools-not-set-up.png"))
+        assert note in text and text.count(not_set_up) == 1, text
+        assert s.execute(section + "return sec.querySelector(':scope > label input').disabled;"), "switchable before set-up"
+        s.click_button("Set up reverse engineering")
+        s.wait_for(lambda: "Lets the model look inside programs" in (s.execute(
+            "const p = [...document.querySelectorAll('[role=tabpanel]')].find(e => e.getAttribute('data-state') === 'active');"
+            " return p ? p.innerText : '';") or ""), 10, "Settings on the Reverse engineering tab")
+        escape()
+
+        # rea without a decompiler: one line about the decompiler; switching the group on saves
+        # every tool, also those that can't run yet.
+        put("rea", "rea")
+        put("rea", "node")
+        open_panel()
+        s.wait_for(lambda: decompiler_line in (section_text() or ""), 10, "the decompiler line")
+        s.execute(section + "const p = sec.closest('.overflow-y-auto'); if (p) p.scrollTop = sec.offsetTop - 8;")
+        time.sleep(0.6)
+        s.screenshot(str(OUT / "reverse-tools-no-decompiler.png"))
+        s.execute(section + "sec.querySelector(':scope > label input').click();")
+        s.wait_for(lambda: all(t["enabledInChat"] for t in reverse_tools(chat)), 10, "the whole group switched on")
+        tools = reverse_tools(chat)
+        usable = [t["exposed"] for t in tools if t["available"]]
+        assert len(usable) == 15 and "open_binary" in usable and "procedure_pseudo_code" not in usable, usable
+        escape()
+
+        # Kuna installed later: the group is fully on in that chat, with no switch touched.
+        put("kuna", "kuna")
+        s.invoke("reverse_set_decompiler", {"decompiler": "kuna", "force": False})
+        s.wait_for(lambda: all(t["enabledInChat"] and t["available"] and t["schemaError"] is None
+                               for t in reverse_tools(chat)), 10, "every reverse tool usable and on")
+        # A new chat follows the last choice: the group the owner turned on.
+        later = s.invoke("create_chat", {"modelRef": c.model_ref})["id"]
+        assert all(t["enabledInChat"] for t in reverse_tools(later)), "the last choice did not carry over"
+        if names:
+            assert {t["exposed"] for t in tools} <= set(names), "a tool not in rea's catalog"
+
+        # Dropped paths, through the real command (registered and granted to the main window).
+        shutil.copyfile(fixture, hello)
+        shutil.copyfile(fixture, outside)
+        forbidden.write_bytes(fixture.read_bytes()[:64])
+        answer = s.invoke("reverse_dropped", {"chatId": chat, "paths": [
+            str(hello), str(outside), str(c.work / "notes.txt"), str(forbidden)]})
+        notes.append("reverse_dropped: " + json.dumps(answer))
+        assert answer == {"installed": True, "items": [
+            {"kind": "insert", "path": str(hello.resolve())},
+            {"kind": "addFolder", "fileName": "hello-linux-x64"},
+            {"kind": "ignore"},
+            {"kind": "notReachable", "fileName": "prog"},
+        ]}, answer
+        try:
+            s.invoke("reverse_dropped", {"chatId": chat, "paths": [str(hello)] * 9})
+            raise AssertionError("nine paths were accepted")
+        except WebDriverError as e:
+            assert "at most 8" in str(e), e
+
+        # The window's drop event: the path goes into the message box, in quotes.
+        s.wait_for(lambda: box() is not None, 10, "the message box")
+        drop([str(hello)])
+        s.wait_for(lambda: box() == f'"{hello.resolve()}"', 10, "the dropped path in the message box")
+        # Outside the chat's folders: a note with Add a folder… (the picker is native: not clicked).
+        drop([str(outside)])
+        s.wait_for(lambda: "To let the model look inside hello-linux-x64, add its folder to this chat." in s.page_text(),
+                   10, "the add-a-folder note")
+        assert s.execute("return [...document.querySelectorAll('button')].some(b => b.innerText.trim() === 'Add a folder…');")
+        drop([str(forbidden)])
+        s.wait_for(lambda: "rea can't reach prog from this chat." in s.page_text(), 10, "the can't-reach note")
+        s.screenshot(str(OUT / "reverse-tools-drop.png"))
+        assert box() == f'"{hello.resolve()}"', box()
+
+        # Without rea nothing happens: no path, no note.
+        s.invoke("reverse_remove", {"component": "kuna", "force": True})
+        shutil.rmtree(root, ignore_errors=True)
+        answer = s.invoke("reverse_dropped", {"chatId": chat, "paths": [str(hello)]})
+        assert answer == {"installed": False, "items": [{"kind": "ignore"}]}, answer
+        s.execute("document.querySelector('button[aria-label=\"Dismiss\"]')?.click();")
+        drop([str(hello)])
+        time.sleep(1.5)
+        assert box() == f'"{hello.resolve()}"', box()
+        assert "add its folder" not in s.page_text()
+    finally:
+        escape()
+        try:
+            if (root / f"kuna-{versions['kuna']}").exists():
+                s.invoke("reverse_remove", {"component": "kuna", "force": True})
+        except WebDriverError:
+            pass
+        shutil.rmtree(root, ignore_errors=True)
+        for f in (hello, outside):
+            f.unlink(missing_ok=True)
+        try:
+            s.invoke("reverse_status")
+        except WebDriverError:
+            pass
+
+
+PROBES.append(p_reverse_tools)  # [0.0.6 item 5, WP9h]
 
 
 def main() -> int:

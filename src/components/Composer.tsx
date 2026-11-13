@@ -4,6 +4,7 @@ import type { DocumentInput, ImageInput, MentionHit, MentionInput } from "../lib
 import { resolveMentions, searchMentions } from "../lib/ipc";
 import { ApprovalHint } from "./AllowAllButton";
 import { messagePlaceholder, useWorkingFolderName } from "./FolderChip";
+import { dropNoteText, useDroppedPrograms } from "./useDroppedPrograms";
 import {
   type MentionChip,
   MentionPicker,
@@ -93,6 +94,8 @@ export function Composer(props: {
   const [documents, setDocuments] = useState<DocumentInput[]>([]);
   const [imageError, setImageError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
+  // [0.0.6 item 5] A program file dropped on the window puts its path in the box (rea installed).
+  const dropped = useDroppedPrograms(chatId, ref, setText);
   const fileInput = useRef<HTMLInputElement>(null);
   // Mentions: the chips chosen so far, and the picker while an `@` is typed.
   const [chips, setChips] = useState<MentionChip[]>([]);
@@ -245,7 +248,7 @@ export function Composer(props: {
       onDrop={(e) => {
         if (e.dataTransfer.files.length > 0) {
           e.preventDefault();
-          void addFiles(e.dataTransfer.files);
+          void dropped.withoutPrograms([...e.dataTransfer.files]).then(addFiles);
         }
       }}
     >
@@ -402,6 +405,25 @@ export function Composer(props: {
           )}
         </div>
       </div>
+      {dropped.notes.length > 0 && (
+        <div className="mx-auto mt-1.5 flex max-w-3xl items-start gap-2 px-1 text-xs text-fg-muted" aria-live="polite">
+          <ul className="min-w-0 flex-1 space-y-1">
+            {dropped.notes.map((n, i) => (
+              <li key={`${n.path}-${i}`} className="flex flex-wrap items-center gap-x-2">
+                <span className="min-w-0 break-words">{dropNoteText(n)}</span>
+                {n.kind === "addFolder" && n === dropped.notes.find((x) => x.kind === "addFolder") && (
+                  <button type="button" onClick={() => void dropped.addFolder()} className="text-accent underline">
+                    Add a folder…
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+          <button type="button" aria-label="Dismiss" onClick={dropped.dismiss} className="hover:text-fg">
+            <X size={12} aria-hidden />
+          </button>
+        </div>
+      )}
       {chips.length > 0 && (
         <ul aria-label="Mentions" className="mx-auto mt-1.5 flex max-w-3xl flex-wrap gap-1.5 px-1">
           {chips.map((c) => (

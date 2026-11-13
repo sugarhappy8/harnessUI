@@ -1967,7 +1967,10 @@ mod tests {
                 assert_eq!(why.as_deref(), Some(NOT_SET_UP), "{tool}");
             }
         }
-        assert_eq!(s.unavailable_reason("open_binary").as_deref(), Some(REVERSE_NOT_SET_UP));
+        assert_eq!(
+            s.unavailable_reason("open_binary").as_deref(),
+            Some(REVERSE_NOT_SET_UP)
+        );
     }
 
     /// rea without a decompiler: opening a file and the file checks work; the tools that
@@ -1989,7 +1992,11 @@ mod tests {
             }
         }
         for tool in ["close_binary", "binary_session", "procedure_pseudo_code"] {
-            assert!(marks.iter().any(|(t, w)| t == tool && w.as_deref() == Some(NEEDS_DECOMPILER)));
+            assert!(
+                marks
+                    .iter()
+                    .any(|(t, w)| t == tool && w.as_deref() == Some(NEEDS_DECOMPILER))
+            );
         }
         put_part(&dir.0, "kuna", "kuna", "1.990");
         s.set_decompiler(Some(reverse::Decompiler::Kuna));
@@ -2068,7 +2075,10 @@ mod tests {
         put_part(&dir.0, "kuna", "kuna", "1.990");
         s.set_decompiler(Some(reverse::Decompiler::Kuna));
         let after = listed(&s);
-        assert!(after.iter().all(|d| d.offered()), "fully on once Kuna is installed");
+        assert!(
+            after.iter().all(|d| d.offered()),
+            "fully on once Kuna is installed"
+        );
     }
 
     /// Only the built-in server's tools are marked: an external server the user happened

@@ -36,7 +36,9 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::backend::{Backend, BackendSource};
-use super::launch::{ExpertsOnCpu, FlashAttn, HIP_VISIBLE_DEVICES_ENV, SAVE_MEMORY_CACHE_TYPE};
+use super::launch::{
+    ExpertsOnCpu, FlashAttn, HIP_VISIBLE_DEVICES_ENV, SAVE_MEMORY_CACHE_TYPE, layers_word,
+};
 use super::lines::{LineReader, Tail};
 use super::lock;
 use super::protocol::{
@@ -159,7 +161,8 @@ pub fn measurable_with(backend: &Backend, pinned_tag: &str, debug_build: bool) -
 /// ```
 ///
 /// `D` is the device, or `none` for none or an empty name. `FirstLayers(0)` adds no
-/// expert flag. Save memory gives `-fa on -ctk q8_0 -ctv q8_0` (the server's words); without
+/// expert flag. Counts have the server's limits: above `launch::MAX_LAYER_COUNT` a layer
+/// count is `all` and an expert layer count `--cpu-moe`. Save memory gives `-fa on -ctk q8_0 -ctv q8_0` (the server's words); without
 /// it fast attention gives `-fa on`, `-fa off` or nothing. `--fit off` measures the
 /// arguments as they are; `-fitp on` prints the measurement; `--log-jsonl` makes it a JSON
 /// record. The path is converted lossily: [`measure`] refuses a path that is not valid
@@ -182,17 +185,10 @@ pub fn build_measure_args(cfg: &MeasureConfig) -> Vec<String> {
         "-ngl".to_owned(),
         match cfg.layers {
             MeasureLayers::All => "all".to_owned(),
-            MeasureLayers::Count(n) => n.to_string(),
+            MeasureLayers::Count(n) => layers_word(n),
         },
     ];
-    match cfg.experts_on_cpu {
-        ExpertsOnCpu::None | ExpertsOnCpu::FirstLayers(0) => {}
-        ExpertsOnCpu::All => args.push("--cpu-moe".to_owned()),
-        ExpertsOnCpu::FirstLayers(n) => {
-            args.push("--n-cpu-moe".to_owned());
-            args.push(n.to_string());
-        }
-    }
+    args.extend(cfg.experts_on_cpu.flag().unwrap_or_default());
     if cfg.kv_in_computer_memory {
         args.push("-nkvo".to_owned());
     }
@@ -580,9 +576,11 @@ pub fn log_records(stdout: &[String], stderr: &[String]) -> (Vec<String>, Vec<St
 /// Text from llama.cpp, a model file or the system as the app keeps it (section 2.0):
 /// every control character (Unicode Cc), bidirectional mark or override (U+061C, U+200E,
 /// U+200F, U+202A to U+202E, U+2066 to U+2069) and zero-width or invisible character
-/// (U+200B to U+200D, U+2060 to U+2064, U+FEFF) written as `[U+XXXX]`, then cut to at most
-/// `cap` characters; an escape that does not fit whole is left out. Reading stops at the
-/// cap, so a huge input costs no more than its first characters.
+/// (U+200B to U+200D, U+2060 to U+2064, U+FEFF, and the rest of `uploader_text`'s set:
+/// soft hyphen, fillers, variation selectors, tag characters and others; see `is_hidden`)
+/// written as `[U+XXXX]`, then cut to at most `cap` characters; an escape that does not fit
+/// whole is left out. Reading stops at the cap, so a huge input costs no more than its first
+/// characters.
 ///
 /// The rule of `models::hf::uploader_text`, copied because this crate does not depend on
 /// `models`.
@@ -609,17 +607,31 @@ pub(crate) fn escape_text(text: &str, cap: usize) -> String {
     out
 }
 
-/// Whether `c` is written as an escape by [`escape_text`].
+/// Whether `c` is written as an escape by [`escape_text`]: control characters and every
+/// character that changes how text looks without being visible. A copy of
+/// `is_invisible_or_control` in `crates/models/src/hf.rs` (the set of
+/// `models::hf::uploader_text`, the approval cards' sanitiser and the comparison screen);
+/// keep the two the same.
 fn is_hidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{061C}'
-                | '\u{200B}'..='\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{2069}'
-                | '\u{FEFF}'
+            '\u{00AD}'                      // soft hyphen
+                | '\u{061C}'                // Arabic letter mark
+                | '\u{115F}' | '\u{1160}'   // Hangul fillers
+                | '\u{17B4}' | '\u{17B5}'
+                | '\u{180B}'..='\u{180F}'   // Mongolian variation selectors, vowel separator
+                | '\u{200B}'..='\u{200F}'   // zero-width space and joiners, LRM, RLM
+                | '\u{202A}'..='\u{202E}'   // bidi embeddings and overrides
+                | '\u{2060}'..='\u{206F}'   // word joiner, invisible operators, bidi isolates
+                | '\u{3164}'                // Hangul filler
+                | '\u{FE00}'..='\u{FE0F}'   // variation selectors
+                | '\u{FEFF}'                // zero-width no-break space
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'   // interlinear annotation
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E007F}' // tag characters
+                | '\u{E0100}'..='\u{E01EF}'
         )
 }
 
@@ -757,6 +769,48 @@ mod tests {
             }
         }
         assert_eq!(seen, 3 * 3 * 4 * 2 * 2 * 3);
+
+        // The limits of the command line, as for the server (`launch::MAX_LAYER_COUNT`):
+        // llama.cpp builds one override per layer for `--n-cpu-moe K` before it reads the
+        // model, so a huge K uses up memory long before the timeout, and from about 4,000
+        // it aborts. A count above the limit means every layer, which is what any count at
+        // or above the model's own does.
+        let words = |layers: MeasureLayers, experts: ExpertsOnCpu| {
+            let cfg = MeasureConfig {
+                layers,
+                experts_on_cpu: experts,
+                ..config()
+            };
+            let args = build_measure_args(&cfg);
+            let at = args.iter().position(|a| a == "-ngl").expect("-ngl");
+            let end = args.iter().position(|a| a == "--fit").expect("--fit");
+            args[at..end].join(" ")
+        };
+        let limit = crate::llama::launch::MAX_LAYER_COUNT;
+        for (layers, experts, want) in [
+            (
+                MeasureLayers::Count(limit),
+                ExpertsOnCpu::FirstLayers(limit),
+                "-ngl 1000 --n-cpu-moe 1000",
+            ),
+            (
+                MeasureLayers::Count(limit + 1),
+                ExpertsOnCpu::FirstLayers(limit + 1),
+                "-ngl all --cpu-moe",
+            ),
+            (
+                MeasureLayers::Count(u32::MAX),
+                ExpertsOnCpu::FirstLayers(2_000_000_000),
+                "-ngl all --cpu-moe",
+            ),
+            (
+                MeasureLayers::Count(0),
+                ExpertsOnCpu::FirstLayers(u32::MAX),
+                "-ngl 0 --cpu-moe",
+            ),
+        ] {
+            assert_eq!(words(layers, experts), want, "{layers:?} {experts:?}");
+        }
     }
 
     /// ROCm's device mask goes into the environment only; the base is the backend's own.
@@ -1006,6 +1060,18 @@ mod tests {
         for c in ['\u{202e}', '\u{7}', '\u{200b}', '\u{2066}', '\n'] {
             assert!(!row.name.contains(c) && !row.description.contains(c));
         }
+        // Tag characters, variation selectors and the other invisible characters of
+        // `models::hf::uploader_text`'s set are escaped too.
+        let line = record(
+            "{\"kind\":\"device\",\"name\":\"AB\u{e0041}\u{e0042}0\u{ad}\u{fe0f}\u{180e}\u{206a}\",\
+             \"description\":\"Radeon\u{206f}\u{fff9}\u{e0100}\",\"model\":1}",
+        );
+        let rows = parse_measure_output(&[line]).expect("rows");
+        assert_eq!(
+            rows[0].name,
+            "AB[U+E0041][U+E0042]0[U+00AD][U+FE0F][U+180E][U+206A]"
+        );
+        assert_eq!(rows[0].description, "Radeon[U+206F][U+FFF9][U+E0100]");
         // A description on a host row is dropped (only device rows carry one).
         let host = record(r#"{"kind":"host","name":"Host","description":"x","total":5,"model":1}"#);
         let rows = parse_measure_output(&[host]).expect("rows");
@@ -1018,14 +1084,66 @@ mod tests {
     fn escape_text_rules() {
         assert_eq!(escape_text("plain", 64), "plain");
         assert_eq!(escape_text("a\u{061c}b", 64), "a[U+061C]b");
-        for c in [
+        let listed = [
             '\u{0}', '\u{1f}', '\u{7f}', '\u{9f}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}',
             '\u{200f}', '\u{202a}', '\u{202e}', '\u{2060}', '\u{2064}', '\u{2066}', '\u{2069}',
             '\u{feff}',
-        ] {
+        ];
+        // The rest of `models::hf::uploader_text`'s set (crates/models/src/hf.rs,
+        // `is_invisible_or_control`): soft hyphen, fillers, variation selectors, the
+        // deprecated format characters, interlinear annotation, musical formatting and the
+        // tag characters that can hide text ("ASCII smuggling").
+        let also = [
+            '\u{ad}',
+            '\u{115f}',
+            '\u{1160}',
+            '\u{17b4}',
+            '\u{17b5}',
+            '\u{180b}',
+            '\u{180e}',
+            '\u{180f}',
+            '\u{2065}',
+            '\u{206a}',
+            '\u{206f}',
+            '\u{3164}',
+            '\u{fe00}',
+            '\u{fe0f}',
+            '\u{ffa0}',
+            '\u{fff9}',
+            '\u{fffb}',
+            '\u{1d173}',
+            '\u{1d17a}',
+            '\u{e0000}',
+            '\u{e0041}',
+            '\u{e007f}',
+            '\u{e0100}',
+            '\u{e01ef}',
+        ];
+        for c in listed.into_iter().chain(also) {
             let out = escape_text(&format!("a{c}b"), 64);
             assert_eq!(out, format!("a[U+{:04X}]b", u32::from(c)));
         }
+        // Their visible neighbours pass.
+        for c in [
+            '\u{ac}',
+            '\u{ae}',
+            '\u{1810}',
+            '\u{2070}',
+            '\u{3165}',
+            '\u{fe10}',
+            '\u{fffc}',
+            '\u{1d17b}',
+            '\u{e0080}',
+            '\u{e01f0}',
+        ] {
+            assert_eq!(escape_text(&format!("a{c}b"), 64), format!("a{c}b"));
+        }
+        // Hidden text in tag characters is spelled out, never kept.
+        let smuggled = "llama\u{e0049}\u{e0047}\u{e004e}\u{206a}\u{ad}";
+        assert_eq!(
+            escape_text(smuggled, 300),
+            "llama[U+E0049][U+E0047][U+E004E][U+206A][U+00AD]"
+        );
         // Visible characters pass, counted in characters.
         assert_eq!(escape_text("éèê", 2), "éè");
         assert_eq!(escape_text("Radeon™ 9070", 64), "Radeon™ 9070");
@@ -1077,6 +1195,20 @@ mod tests {
         let err: Vec<String> = (0..100).map(|i| format!("e{i}\u{7}")).collect();
         let (records, tail) = log_records(&many, &err);
         assert_eq!(records.len(), LOG_LINES_KEPT);
+        // A model file can name its architecture with hidden tag characters; llama.cpp
+        // repeats the name in an error record, which reaches the app's log escaped.
+        let hidden = serde_json::json!({
+            "type": "log",
+            "level": "error",
+            "msg": "unknown model architecture: 'llama\u{e0049}\u{e0047}\u{206a}\u{ad}'",
+        })
+        .to_string();
+        let (hidden_records, hidden_tail) = log_records(&[hidden], &["x\u{e0041}".to_owned()]);
+        assert_eq!(
+            hidden_records,
+            vec!["unknown model architecture: 'llama[U+E0049][U+E0047][U+206A][U+00AD]'"]
+        );
+        assert_eq!(hidden_tail, vec!["x[U+E0041]"]);
         assert!(records[0].starts_with("60[U+202E]y"), "{}", records[0]);
         assert!(
             records

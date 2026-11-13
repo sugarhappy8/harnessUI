@@ -1,4 +1,4 @@
-import { type Dispatch, type RefObject, type SetStateAction, useCallback, useEffect, useState } from "react";
+import { type Dispatch, type RefObject, type SetStateAction, useCallback, useEffect, useMemo, useState } from "react";
 import * as ipc from "../lib/ipc";
 import type { DroppedProgram } from "../lib/types";
 import { toErrorInfo, useApp } from "../store/app";
@@ -130,20 +130,21 @@ export function useDroppedPrograms(
   box: RefObject<HTMLTextAreaElement | null>,
   setText: Dispatch<SetStateAction<string>>,
 ) {
-  const [installed, setInstalled] = useState(false);
-  const [notes, setNotes] = useState<DropNote[]>([]);
+  // Both belong to the chat they were found for: another chat starts with none.
+  const [known, setKnown] = useState<{ chat: number; installed: boolean } | null>(null);
+  const [noted, setNoted] = useState<{ chat: number; notes: DropNote[] } | null>(null);
+  const installed = known !== null && known.chat === chatId && known.installed;
+  const notes = useMemo(() => (noted !== null && noted.chat === chatId ? noted.notes : []), [noted, chatId]);
   const showError = useApp((s) => s.showError);
 
   // Whether rea is installed: asked for each chat, and again whenever the tools may have
   // changed (Settings → Reverse engineering tells the app so after an install or removal).
   useEffect(() => {
-    setNotes([]);
-    setInstalled(false);
     if (chatId === null) return;
     let alive = true;
     const ask = () =>
       void quietly(() => ipc.reverseDropped(chatId, [])).then((a) => {
-        if (alive) setInstalled(a?.installed ?? false);
+        if (alive) setKnown({ chat: chatId, installed: a?.installed ?? false });
       });
     ask();
     const unlisten = quietly(() => ipc.onMcpChanged(ask));
@@ -179,10 +180,10 @@ export function useDroppedPrograms(
         .reverseDropped(chatId, paths)
         .then((answer) => {
           if (!alive) return;
-          setInstalled(answer.installed);
+          setKnown({ chat: chatId, installed: answer.installed });
           // Nothing to do with these files (not programs, or no rea): nothing changes.
           if (!answer.installed || answer.items.every((i) => i.kind === "ignore")) return;
-          setNotes(apply(paths, answer.items));
+          setNoted({ chat: chatId, notes: apply(paths, answer.items) });
         })
         .catch((e) => showError(toErrorInfo(e)));
     };
@@ -207,13 +208,16 @@ export function useDroppedPrograms(
       if (waiting.length === 0) return;
       const answer = await ipc.reverseDropped(chatId, waiting);
       const still = apply(waiting, answer.items);
-      setNotes((old) => [...old.filter((n) => n.kind !== "addFolder"), ...still]);
+      setNoted((old) => ({
+        chat: chatId,
+        notes: [...(old?.chat === chatId ? old.notes : []).filter((n) => n.kind !== "addFolder"), ...still],
+      }));
     } catch (e) {
       showError(toErrorInfo(e));
     }
   }, [chatId, notes, apply, showError]);
 
-  const dismiss = useCallback(() => setNotes([]), []);
+  const dismiss = useCallback(() => setNoted(null), []);
 
   /** For the box's own drop handler: while rea is installed, program files are left to the window's drop event. */
   const withoutPrograms = useCallback(

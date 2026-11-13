@@ -187,6 +187,40 @@ fn other_tensors_go_with_the_output() {
     );
 }
 
+/// A tied output (no `output.weight`) is the embedding loaded a second time: counted on
+/// the graphics card with the output unit, and on the processor too (the safe side; llama.cpp
+/// reuses the input's copy there unless it repacks the weights).
+#[test]
+fn a_tied_output_is_counted_wherever_the_output_unit_is() {
+    let entry = |name: &str, bytes: u64| crate::gguf::TensorEntry {
+        name: name.to_string(),
+        bytes,
+    };
+    let table = vec![
+        entry("token_embd.weight", 100),
+        entry("output_norm.weight", 1),
+        entry("blk.0.attn_q.weight", 10),
+        entry("blk.1.attn_q.weight", 20),
+    ];
+    let s = LayerSizes::from_tables(&[table], 2);
+    assert_eq!((s.input_bytes, s.output_bytes), (100, 101));
+    let i = input(&s, vec![0; 2], 0, 0, 0);
+    let all = split(&i, &on_card(Layers::All, ExpertsPick::None));
+    assert_eq!((all.gpu.model, all.cpu.model), (101 + 30, 100));
+    let processor = split(
+        &i,
+        &Where {
+            graphics: false,
+            layers: Layers::All,
+            experts_on_cpu: ExpertsPick::None,
+            kv_on_gpu: true,
+        },
+    );
+    assert_eq!(processor.cpu.model, 100 + 101 + 30);
+    let none = split(&i, &on_card(Layers::Count(0), ExpertsPick::None));
+    assert_eq!((none.gpu.model, none.cpu.model), (0, 100 + 101 + 30));
+}
+
 #[test]
 fn split_expert_parts() {
     let s = uneven_experts();
@@ -320,8 +354,16 @@ fn split_never_panics_on_huge_numbers() {
     for place in fit_order(&s) {
         let r = split(&i, &on_card(place.0, place.1));
         assert_eq!(r.gpu.total().max(r.cpu.total()), u64::MAX);
+        #[allow(deprecated)]
         let _ = judge(&r, Room::graphics_card(u64::MAX, u64::MAX), false);
-        let _ = judge_in(&r, Room::default(), true, MemoryKind::Separate);
+        for kind in [
+            MemoryKind::Processor,
+            MemoryKind::Separate,
+            MemoryKind::Unified,
+        ] {
+            let _ = judge_in(&r, Room::default(), true, kind);
+            let _ = judge_in(&r, Room::graphics_card(u64::MAX, u64::MAX), false, kind);
+        }
         let _ = bars(
             &r,
             MemoryKind::Separate,
@@ -506,6 +548,35 @@ fn explain_gives_none_between_steps() {
     assert_eq!(explain(&s, 115), None);
     assert_eq!(explain(&s, 505), Some((L::All, E::None)));
     assert_eq!(explain(&s, 600), None);
+    // Experts that weigh 20 times the dense part: step 3 never places part of a layer, so
+    // bytes between two step-3 placements with expert parts moved are between steps too.
+    // Count(n) holds the output (100 MB), the frontmost block whole (210 MB) and n − 2
+    // dense parts (10 MB each): 330 MB at Count(4), 340 MB at Count(5).
+    const MB: u64 = 1_000_000;
+    let heavy = sizes(GB, 100 * MB, &[(10 * MB, 200 * MB); 10], 0);
+    assert_eq!(
+        model_on_card(&heavy, (L::Count(4), E::LastLayers(2))),
+        330 * MB
+    );
+    assert_eq!(
+        model_on_card(&heavy, (L::Count(5), E::LastLayers(3))),
+        340 * MB
+    );
+    assert_eq!(
+        explain(&heavy, 332 * MB),
+        Some((L::Count(4), E::LastLayers(2)))
+    );
+    assert_eq!(explain(&heavy, 334 * MB), None);
+    assert_eq!(explain(&heavy, 335 * MB), None);
+    assert_eq!(explain(&heavy, 336 * MB), None);
+    assert_eq!(
+        explain(&heavy, 338 * MB),
+        Some((L::Count(5), E::LastLayers(3)))
+    );
+    // With every unit on the card (where step 4 starts), part of one more block's expert
+    // parts above is still that placement: 400 MB, then up to 3/4 of 200 MB.
+    assert_eq!(model_on_card(&heavy, (L::All, E::LastLayers(9))), 400 * MB);
+    assert_eq!(explain(&heavy, 540 * MB), Some((L::All, E::LastLayers(9))));
     // Nothing weighs anything: only an exact 0 is explained.
     let empty = sizes(0, 0, &[(0, 0), (0, 0)], 0);
     assert_eq!(explain(&empty, 0), Some((L::Count(0), E::None)));
@@ -649,7 +720,7 @@ fn judge_gives_each_answer() {
     // A 10 GB card and 20 GB of computer memory: 28 GB together after the reserve.
     let card = Room::graphics_card(10 * GB, 20 * GB);
     assert_eq!((card.whole, card.partial), (10 * GB, 28 * GB));
-    let j = |s: Split| judge(&s, card, false);
+    let j = |s: Split| judge_in(&s, card, false, MemoryKind::Separate);
     assert_eq!(j(sp(8 * GB, GB, 5, 5, 0)), (V::Green, F::Fits));
     assert_eq!(j(sp(9 * GB + 1, GB, 5, 5, 0)), (V::Yellow, F::Tight));
     assert_eq!(j(sp(10 * GB, GB, 5, 5, 0)), (V::Yellow, F::Tight));
@@ -666,7 +737,7 @@ fn judge_gives_each_answer() {
         (V::Red, F::WontFitAtAll)
     );
     // As much as fits: part on the processor is expected, never wontFitGraphics.
-    let f = |s: Split| judge(&s, card, true);
+    let f = |s: Split| judge_in(&s, card, true, MemoryKind::Separate);
     assert_eq!(f(sp(8 * GB, GB, 5, 5, 0)), (V::Green, F::Fits));
     assert_eq!(f(sp(8 * GB, GB, 3, 5, 0)), (V::Yellow, F::Partial));
     assert_eq!(f(sp(8 * GB, GB, 5, 5, 2)), (V::Yellow, F::Partial));
@@ -698,7 +769,9 @@ fn judge_on_the_processor_is_room_verdict() {
                     units: 5,
                     expert_layers_on_cpu: 0,
                 };
-                assert_eq!(judge(&s, room, fit), (expected, fits), "{total}");
+                #[allow(deprecated)]
+                let contract = judge(&s, room, fit);
+                assert_eq!(contract, (expected, fits), "{total}");
                 assert_eq!(
                     judge_in(&s, room, fit, MemoryKind::Processor),
                     (expected, fits)
@@ -711,16 +784,16 @@ fn judge_on_the_processor_is_room_verdict() {
 /// With everything on the graphics side, judge's mark is Room::verdict on every room.
 #[test]
 fn judge_on_one_device_is_room_verdict() {
-    for room in [
-        Room::graphics_card(10 * GB, 20 * GB),
-        Room::graphics_card(4 * GB, GB),
-        Room::apple(11 * GB, 9 * GB),
-        Room::apple(11 * GB, 15 * GB),
+    for (room, kind) in [
+        (Room::graphics_card(10 * GB, 20 * GB), MemoryKind::Separate),
+        (Room::graphics_card(4 * GB, GB), MemoryKind::Separate),
+        (Room::apple(11 * GB, 9 * GB), MemoryKind::Unified),
+        (Room::apple(11 * GB, 15 * GB), MemoryKind::Unified),
     ] {
         for need in [0, 5 * GB, 9 * GB, 10 * GB, 11 * GB, 13 * GB, 30 * GB] {
             let s = sp(need, 0, 5, 5, 0);
             assert_eq!(
-                judge(&s, room, false).0,
+                judge_in(&s, room, false, kind).0,
                 room.verdict(need),
                 "{room:?} {need}"
             );
@@ -738,7 +811,6 @@ fn memory_kinds() {
     // 2 GB on the card, 20 GB on the processor: together it is under 28 GB, but the
     // computer has only 18 GB after the reserve.
     let s = sp(2 * GB, 20 * GB, 1, 5, 0);
-    assert_eq!(judge(&s, card, false), (V::Green, F::Fits));
     assert_eq!(
         judge_in(&s, card, false, MemoryKind::Separate),
         (V::Red, F::WontFitAtAll)
@@ -755,13 +827,17 @@ fn memory_kinds() {
     // A 16 GB Mac: 11 GB working set, 9 GB available (7 GB after the reserve).
     let mac = Room::apple(11 * GB, 9 * GB);
     let m = sp(9 * GB, GB / 2, 5, 5, 0);
-    assert_eq!(judge(&m, mac, false), (V::Green, F::Fits));
     assert_eq!(
         judge_in(&m, mac, false, MemoryKind::Unified),
         (V::Green, F::Fits)
     );
     assert_eq!(
-        judge(&sp(10 * GB, GB / 2, 5, 5, 0), mac, false),
+        judge_in(
+            &sp(10 * GB, GB / 2, 5, 5, 0),
+            mac,
+            false,
+            MemoryKind::Unified
+        ),
         (V::Red, F::WontFitAtAll)
     );
     // Nothing on the card of a discrete room: the computer part is what counts.
@@ -770,6 +846,137 @@ fn memory_kinds() {
         judge_in(&none, card, false, MemoryKind::Separate),
         (V::Green, F::Fits)
     );
+}
+
+/// The reviewers' cases (round 1): on a graphics card with its own memory, a placement
+/// whose computer part does not fit computer memory is Red, and Automatic stops where the
+/// conversation memory kept in computer memory still fits there.
+#[test]
+fn a_graphics_card_checks_the_computers_part_on_its_own() {
+    use Fits as F;
+    use Verdict as V;
+    const MB: u64 = 1_000_000;
+    let card = MemoryKind::Separate;
+    // 41 units: 40 blocks of 300 MB, input and output 300 MB each. A 16 GB card with 4 GB
+    // of computer memory free (2 GB after the reserve).
+    let s = sizes(300 * MB, 300 * MB, &[(300 * MB, 0); 40], 0);
+    let room = Room::graphics_card(16 * GB, 4 * GB);
+    let i = input(&s, vec![0; 40], 500 * MB, COMPUTE_BASE_BYTES, 0);
+    for n in [0, 1, 2] {
+        let r = split(&i, &on_card(Layers::Count(n), ExpertsPick::None));
+        assert!(r.cpu.total() > 11 * GB, "{n}: {r:?}");
+        assert_eq!(
+            judge_in(&r, room, false, card),
+            (V::Red, F::WontFitAtAll),
+            "{n}"
+        );
+        assert_eq!(judge_in(&r, room, true, card), (V::Red, F::WontFitAtAll));
+    }
+    // Every unit on the card: only the input layer and nothing else is in the computer.
+    let r = split(&i, &on_card(Layers::All, ExpertsPick::None));
+    assert_eq!(judge_in(&r, room, false, card), (V::Green, F::Fits));
+    // A 9 GB model with no layer on a card with 15 GB free, 4 GB free in the computer.
+    let nine = sizes(GB / 2, GB / 2, &[(250 * MB, 0); 32], 0);
+    let i = input(&nine, vec![0; 32], 500 * MB, COMPUTE_BASE_BYTES, 0);
+    let r = split(&i, &on_card(Layers::Count(0), ExpertsPick::None));
+    assert_eq!(
+        judge_in(&r, Room::graphics_card(15 * GB, 4 * GB), false, card),
+        (V::Red, F::WontFitAtAll)
+    );
+
+    // A 6 GB model on a 16 GB card, 250,000 bytes per token of conversation memory kept
+    // in computer memory, 8 GB of computer memory free (6 GB after the reserve).
+    let six = sizes(0, 500 * MB, &[(220 * MB, 0); 25], 0);
+    assert_eq!(six.total(), 6 * GB);
+    let room = Room::graphics_card(16 * GB, 8 * GB);
+    let at = |ctx: u64| {
+        let i = input(
+            &six,
+            vec![10_000 * ctx; 25],
+            600 * MB,
+            COMPUTE_BASE_BYTES,
+            0,
+        );
+        split(
+            &i,
+            &Where {
+                graphics: true,
+                layers: Layers::All,
+                experts_on_cpu: ExpertsPick::None,
+                kv_on_gpu: false,
+            },
+        )
+    };
+    let computer = room.partial - room.whole;
+    // 250,000 × ctx + the processor's working space ≤ 6 GB: up to 22,926 tokens.
+    let got = auto_ctx_placed_in(at, room, 4096, 32_768, card, false).unwrap();
+    assert_eq!(
+        got,
+        AutoCtx {
+            ctx: 22_528,
+            verdict: Verdict::Green
+        }
+    );
+    assert!(at(22_528).cpu.total() <= computer);
+    assert!(at(22_528 + 1024).cpu.total() > computer);
+    assert_eq!(
+        judge_in(&at(23_552), room, false, card),
+        (V::Red, F::WontFitAtAll)
+    );
+    // A 1.5 GB model with no layer on the card and 2 GB of computer room: not even the
+    // floor fits there.
+    let small = sizes(100 * MB, 100 * MB, &[(65 * MB, 0); 20], 0);
+    let at = |ctx: u64| {
+        let i = input(
+            &small,
+            vec![9_000 * ctx; 20],
+            500 * MB,
+            COMPUTE_BASE_BYTES,
+            0,
+        );
+        split(&i, &on_card(Layers::Count(0), ExpertsPick::None))
+    };
+    let room = Room::graphics_card(15 * GB, 4 * GB);
+    assert_eq!(
+        auto_ctx_placed_in(at, room, 4096, 32_768, card, false),
+        None
+    );
+}
+
+/// The contract's `judge` and `auto_ctx_placed` (deprecated) are the shared-memory rule,
+/// and the processor's when nothing is on the graphics side: right on Apple silicon and
+/// the processor, wrong on a graphics card (the test above), so callers pass the kind.
+#[test]
+#[allow(deprecated)]
+fn the_contracts_verdict_is_the_shared_memory_rule() {
+    let rooms = [
+        Room::graphics_card(10 * GB, 20 * GB),
+        Room::apple(11 * GB, 15 * GB),
+        Room::processor(12 * GB),
+    ];
+    let splits = [
+        sp(2 * GB, 20 * GB, 1, 5, 0),
+        sp(9 * GB, GB, 5, 5, 0),
+        sp(0, 9 * GB, 0, 5, 0),
+        sp(8 * GB, GB, 3, 5, 2),
+    ];
+    for room in rooms {
+        for s in &splits {
+            let kind = if s.gpu.total() == 0 && s.layers_on_gpu == 0 {
+                MemoryKind::Processor
+            } else {
+                MemoryKind::Unified
+            };
+            for fit in [false, true] {
+                assert_eq!(judge(s, room, fit), judge_in(s, room, fit, kind));
+            }
+            let at = |_: u64| s.clone();
+            assert_eq!(
+                auto_ctx_placed(at, room, 4096, 32_768),
+                auto_ctx_placed_in(at, room, 4096, 32_768, kind, false)
+            );
+        }
+    }
 }
 
 // ---- auto_ctx_placed --------------------------------------------------------------------
@@ -834,23 +1041,33 @@ fn auto_ctx_placed_matches_auto_ctx_on_one_device() {
                     )
                 };
                 let (floor, cap) = floor_cap(max_ctx);
-                assert_eq!(
-                    auto_ctx_placed(at, room, floor, cap),
-                    fit::auto_ctx(&fit_input, room),
-                    "{room:?} {max_ctx:?} {projector}"
-                );
+                let expected = fit::auto_ctx(&fit_input, room);
+                for fit in [false, true] {
+                    assert_eq!(
+                        auto_ctx_placed_in(at, room, floor, cap, MemoryKind::Processor, fit),
+                        expected,
+                        "{room:?} {max_ctx:?} {projector}"
+                    );
+                }
+                // The contract's function is right on the processor.
+                #[allow(deprecated)]
+                let contract = auto_ctx_placed(at, room, floor, cap);
+                assert_eq!(contract, expected);
             }
         }
     }
     // A graphics device holding everything (no input layer in this model).
     let s = eight_b(0);
-    for room in [
-        Room::graphics_card(15 * GB, 24 * GB),
-        Room::graphics_card(7_500_000_000, 24 * GB),
-        Room::graphics_card(4 * GB, 24 * GB),
-        Room::graphics_card(4 * GB, GB),
-        Room::apple(11 * GB, 9 * GB),
-        Room::apple(7 * GB, 30 * GB),
+    for (room, kind) in [
+        (Room::graphics_card(15 * GB, 24 * GB), MemoryKind::Separate),
+        (
+            Room::graphics_card(7_500_000_000, 24 * GB),
+            MemoryKind::Separate,
+        ),
+        (Room::graphics_card(4 * GB, 24 * GB), MemoryKind::Separate),
+        (Room::graphics_card(4 * GB, GB), MemoryKind::Separate),
+        (Room::apple(11 * GB, 9 * GB), MemoryKind::Unified),
+        (Room::apple(7 * GB, 30 * GB), MemoryKind::Unified),
     ] {
         for max_ctx in trained {
             for projector in [0, 600_000_000] {
@@ -868,17 +1085,13 @@ fn auto_ctx_placed_matches_auto_ctx_on_one_device() {
                 let (floor, cap) = floor_cap(max_ctx);
                 let expected = fit::auto_ctx(&fit_input, room);
                 assert_eq!(
-                    auto_ctx_placed(at, room, floor, cap),
+                    auto_ctx_placed_in(at, room, floor, cap, kind, false),
                     expected,
                     "{room:?} {max_ctx:?} {projector}"
                 );
-                assert_eq!(
-                    auto_ctx_placed_in(at, room, floor, cap, MemoryKind::Separate, false),
-                    expected
-                );
                 // Everything on the card: As much as fits gives the same answer.
                 assert_eq!(
-                    auto_ctx_placed_in(at, room, floor, cap, MemoryKind::Separate, true),
+                    auto_ctx_placed_in(at, room, floor, cap, kind, true),
                     expected
                 );
             }
@@ -901,21 +1114,23 @@ fn auto_ctx_placed_for_a_custom_placement() {
         );
         split(&i, &on_card(Layers::Count(17), ExpertsPick::None))
     };
+    let card = MemoryKind::Separate;
+    let auto = |room| auto_ctx_placed_in(at, room, 4096, 32_768, card, false);
     let room = Room::graphics_card(5 * GB, 16 * GB);
-    let got = auto_ctx_placed(at, room, 4096, 32_768).unwrap();
+    let got = auto(room).unwrap();
     assert_eq!(got.verdict, Verdict::Green);
     assert!(got.ctx < 32_768 && got.ctx.is_multiple_of(1024), "{got:?}");
-    assert_eq!(judge(&at(got.ctx), room, false).0, Verdict::Green);
-    assert_ne!(judge(&at(got.ctx + 1024), room, false).0, Verdict::Green);
+    assert_eq!(judge_in(&at(got.ctx), room, false, card).0, Verdict::Green);
+    assert_ne!(
+        judge_in(&at(got.ctx + 1024), room, false, card).0,
+        Verdict::Green
+    );
     // Too little for even the floor on the card, but the computer holds it: Yellow.
     let small = Room::graphics_card(2 * GB, 16 * GB);
-    let got = auto_ctx_placed(at, small, 4096, 32_768).unwrap();
+    let got = auto(small).unwrap();
     assert_eq!(got.verdict, Verdict::Yellow);
     // Not even the floor at all.
-    assert_eq!(
-        auto_ctx_placed(at, Room::graphics_card(GB, GB), 4096, 32_768),
-        None
-    );
+    assert_eq!(auto(Room::graphics_card(GB, GB)), None);
 }
 
 #[test]
@@ -935,42 +1150,56 @@ fn auto_ctx_placed_never_panics_or_hangs() {
         whole: 1000 * GB,
         partial: 1000 * GB,
     };
-    assert_eq!(auto_ctx_placed(huge, big, 0, u64::MAX), None);
+    for kind in [
+        MemoryKind::Processor,
+        MemoryKind::Separate,
+        MemoryKind::Unified,
+    ] {
+        for fit in [false, true] {
+            assert_eq!(auto_ctx_placed_in(huge, big, 0, u64::MAX, kind, fit), None);
+            // A room of u64::MAX holds even this; it only must not panic or hang.
+            let _ = auto_ctx_placed_in(huge, any, 0, u64::MAX, kind, fit);
+        }
+    }
+    #[allow(deprecated)]
+    let contract = auto_ctx_placed(huge, big, 0, u64::MAX);
+    assert_eq!(contract, None);
+    // The search itself, with the shared-memory rule (the contract's).
+    fn unified(at: impl Fn(u64) -> Split, room: Room, floor: u64, cap: u64) -> Option<AutoCtx> {
+        auto_ctx_placed_in(at, room, floor, cap, MemoryKind::Unified, false)
+    }
     let nothing = |_: u64| sp(0, 0, 5, 5, 0);
     assert_eq!(
-        auto_ctx_placed(nothing, any, 0, u64::MAX),
+        unified(nothing, any, 0, u64::MAX),
         Some(AutoCtx {
             ctx: u64::MAX,
             verdict: Verdict::Green
         })
     );
     assert_eq!(
-        auto_ctx_placed(nothing, any, u64::MAX, 0),
+        unified(nothing, any, u64::MAX, 0),
         Some(AutoCtx {
             ctx: 0,
             verdict: Verdict::Green
         })
     );
-    assert_eq!(
-        auto_ctx_placed(nothing, any, 3000, 3000).map(|a| a.ctx),
-        Some(3000)
-    );
+    assert_eq!(unified(nothing, any, 3000, 3000).map(|a| a.ctx), Some(3000));
     // The candidates are the floor, the multiples of 1,024 between, and the cap.
     let up_to =
         |limit: u64| move |ctx: u64| sp(if ctx <= limit { 0 } else { u64::MAX }, 0, 5, 5, 0);
     assert_eq!(
-        auto_ctx_placed(up_to(20_000), big, 4096, 32_768).map(|a| a.ctx),
+        unified(up_to(20_000), big, 4096, 32_768).map(|a| a.ctx),
         Some(19_456)
     );
     assert_eq!(
-        auto_ctx_placed(up_to(20_000), big, 4096, 20_000).map(|a| a.ctx),
+        unified(up_to(20_000), big, 4096, 20_000).map(|a| a.ctx),
         Some(20_000)
     );
     assert_eq!(
-        auto_ctx_placed(up_to(5000), big, 4500, 32_768).map(|a| a.ctx),
+        unified(up_to(5000), big, 4500, 32_768).map(|a| a.ctx),
         Some(4500)
     );
-    assert_eq!(auto_ctx_placed(up_to(4000), big, 4096, 32_768), None);
+    assert_eq!(unified(up_to(4000), big, 4096, 32_768), None);
 }
 
 // ---- conversation memory per block ------------------------------------------------------
@@ -1234,12 +1463,6 @@ fn auto_ctx_with_as_much_as_fits_and_memory_in_the_computer() {
     let judged = |ctx| judge_in(&at(short)(ctx), short, true, MemoryKind::Separate).0;
     assert_eq!(judged(got.ctx), Verdict::Green);
     assert_eq!(judged(got.ctx + 1024), Verdict::Red);
-    // Judged without knowing the memory kind, the computer's part is not checked on its
-    // own, so the cap looks fine.
-    assert_eq!(
-        auto_ctx_placed(at(short), short, 4096, 32_768).map(|a| a.ctx),
-        Some(32_768)
-    );
 }
 
 /// The pinned test model (CI's `TEST_GGUF`, Qwen3 0.6B at Q8_0) against what llama-server

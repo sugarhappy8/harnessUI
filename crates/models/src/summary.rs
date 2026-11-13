@@ -4,6 +4,7 @@
 use serde::Serialize;
 
 use crate::gguf::{GgufHeader, Value};
+use crate::layers::MAX_BLOCKS;
 
 /// A model's GGUF summary. Stored in the `models` table and shown as badges.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -77,7 +78,7 @@ impl ModelSummary {
         let mut head_count_kv = per_layer(h, &arch, "attention.head_count_kv", block_count);
         if head_count_kv.is_empty() || head_count_kv.iter().all(|&n| n == 0) {
             // Without the key llama.cpp uses one KV head per attention head.
-            head_count_kv = vec![head_count; block_count as usize];
+            head_count_kv = vec![head_count; kept_layers(block_count)];
         }
         let default_head_dim = embedding_length.checked_div(head_count).unwrap_or(0);
         let key_length = h
@@ -131,8 +132,8 @@ impl ModelSummary {
     /// safe side for models that use them; the bundled `llama-fit-params` gives the
     /// exact figure once the file is local (ARCHITECTURE.md 11).
     pub fn kv_bytes_per_token(&self) -> u64 {
-        let per_head = (self.key_length + self.value_length) * KV_F16_BYTES;
-        self.head_count_kv.iter().map(|&n| n * per_head).sum()
+        // The same formula, saturating: header numbers may be anything (spec 2.0).
+        self.kv_bytes_per_token_as(KvCacheType::F16)
     }
 
     pub fn kv_bytes(&self, ctx: u64) -> u64 {
@@ -159,13 +160,20 @@ impl ModelSummary {
     }
 }
 
+/// How many per-layer entries are built for a header's `block_count`: at most
+/// [`MAX_BLOCKS`] (llama.cpp loads at most 512 layers), so a crafted number never asks for
+/// a huge allocation.
+fn kept_layers(block_count: u64) -> usize {
+    usize::try_from(block_count.min(MAX_BLOCKS)).unwrap_or(0)
+}
+
 /// A parameter that is either one number or one number per layer.
 fn per_layer(h: &GgufHeader, arch: &str, suffix: &str, layers: u64) -> Vec<u64> {
     match h.get(&format!("{arch}.{suffix}")) {
         Some(Value::Array(items)) => items.iter().map(|v| v.as_u64().unwrap_or(0)).collect(),
         Some(v) => v
             .as_u64()
-            .map(|n| vec![n; layers as usize])
+            .map(|n| vec![n; kept_layers(layers)])
             .unwrap_or_default(),
         None => Vec::new(),
     }
@@ -341,6 +349,46 @@ mod tests {
         );
         assert!(s.is_projector);
         assert_eq!(s.kv_bytes_per_token(), 0);
+    }
+
+    /// A crafted header (0.0.6 item 6, spec 2.0): huge per-layer numbers never panic
+    /// or allocate per the header's word, and the conversation memory saturates.
+    #[test]
+    fn hostile_header_numbers_neither_panic_nor_allocate() {
+        let hostile = |block_count: u64, key_length: u64| {
+            summary(
+                Writer::new()
+                    .str("general.architecture", "llama")
+                    .u64("llama.block_count", block_count)
+                    .u32("llama.embedding_length", 4096)
+                    .u32("llama.attention.head_count", 32)
+                    .u32("llama.attention.head_count_kv", 8)
+                    .u64("llama.attention.key_length", key_length)
+                    .build(),
+            )
+        };
+        // A key length near u64::MAX: the per-token figure saturates.
+        let s = hostile(32, u64::MAX);
+        assert_eq!(s.kv_bytes_per_token(), u64::MAX);
+        assert_eq!(s.kv_bytes(4096), u64::MAX);
+        // 2^61 blocks (a capacity overflow) and 2^40 blocks (an 8 TiB allocation): at most
+        // MAX_BLOCKS entries, the header's number itself kept for display.
+        for block_count in [1u64 << 61, 1 << 40, u64::MAX] {
+            let s = hostile(block_count, 128);
+            assert_eq!(s.block_count, block_count);
+            assert_eq!(s.head_count_kv.len() as u64, crate::layers::MAX_BLOCKS);
+            assert!(s.kv_bytes_per_token() > 0);
+        }
+        // Without head_count_kv the head count is used per layer, with the same cap.
+        let s = summary(
+            Writer::new()
+                .str("general.architecture", "llama")
+                .u64("llama.block_count", 1 << 40)
+                .u32("llama.attention.head_count", 32)
+                .build(),
+        );
+        assert_eq!(s.head_count_kv.len() as u64, crate::layers::MAX_BLOCKS);
+        assert!(s.head_count_kv.iter().all(|&n| n == 32));
     }
 
     #[test]

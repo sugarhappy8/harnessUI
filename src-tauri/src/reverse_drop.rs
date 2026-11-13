@@ -338,8 +338,11 @@ fn top_of(path: &str, flavor: Flavor) -> Option<String> {
         Flavor::Posix => path.starts_with('/').then(|| "/".to_string()),
         Flavor::Windows => {
             let b = path.as_bytes();
-            (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && is_sep(b[2] as char, flavor))
-                .then(|| format!("{}:\\", (b[0] as char).to_ascii_uppercase()))
+            (b.len() >= 3
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && is_sep(b[2] as char, flavor))
+            .then(|| format!("{}:\\", (b[0] as char).to_ascii_uppercase()))
         }
     }
 }
@@ -456,11 +459,23 @@ mod tests {
             ("Windows program or library", b"MZ\x90\0"),
             ("Linux program", b"\x7fELF\x02\x01"),
             ("Mach-O 32-bit", &[0xFE, 0xED, 0xFA, 0xCE, 0, 0, 0, 7]),
-            ("Mach-O 32-bit, swapped", &[0xCE, 0xFA, 0xED, 0xFE, 7, 0, 0, 0]),
+            (
+                "Mach-O 32-bit, swapped",
+                &[0xCE, 0xFA, 0xED, 0xFE, 7, 0, 0, 0],
+            ),
             ("Mach-O 64-bit", &[0xFE, 0xED, 0xFA, 0xCF, 1, 0, 0, 7]),
-            ("Mach-O 64-bit, swapped (Apple chips)", &[0xCF, 0xFA, 0xED, 0xFE, 12, 0, 0, 1]),
-            ("universal, two processors", &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2]),
-            ("universal, 64-bit table", &[0xCA, 0xFE, 0xBA, 0xBF, 0, 0, 0, 2]),
+            (
+                "Mach-O 64-bit, swapped (Apple chips)",
+                &[0xCF, 0xFA, 0xED, 0xFE, 12, 0, 0, 1],
+            ),
+            (
+                "universal, two processors",
+                &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2],
+            ),
+            (
+                "universal, 64-bit table",
+                &[0xCA, 0xFE, 0xBA, 0xBF, 0, 0, 0, 2],
+            ),
             ("Python 3.10", &[0x6F, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0]),
             ("Python 3.13", &[0xF3, 0x0D, 0x0D, 0x0A]),
             ("Python 2.7", &[0x03, 0xF3, 0x0D, 0x0A]),
@@ -473,7 +488,10 @@ mod tests {
             ("one byte", b"M"),
             ("text", b"hello world\n"),
             ("text with CR LF early", b"OK\r\nmore"),
-            ("Java class file (version 52)", &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 0x34]),
+            (
+                "Java class file (version 52)",
+                &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 0x34],
+            ),
             ("cafebabe cut short", &[0xCA, 0xFE, 0xBA, 0xBE]),
             ("a model file", b"GGUF\x03\0\0\0"),
             ("a zip", b"PK\x03\x04"),
@@ -495,8 +513,14 @@ mod tests {
         let programs = [
             write(&work.join("hello-linux-x64"), ELF),
             write(&work.join("notepad.exe"), PE),
-            write(&work.join("lib.dylib"), &[0xCF, 0xFA, 0xED, 0xFE, 12, 0, 0, 1, 0, 0]),
-            write(&work.join("both.bin"), &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2]),
+            write(
+                &work.join("lib.dylib"),
+                &[0xCF, 0xFA, 0xED, 0xFE, 12, 0, 0, 1, 0, 0],
+            ),
+            write(
+                &work.join("both.bin"),
+                &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2],
+            ),
             write(&work.join("tool.pyc"), b"\x6f\x0d\x0d\x0a\0\0\0\0"),
             write(&work.join("app.asar"), b"\x04\0\0\0 not a magic at all"),
         ];
@@ -505,7 +529,10 @@ mod tests {
         let not_programs = [
             write(&work.join("notes.txt"), b"Hello, these are notes.\n"),
             write(&work.join("empty.exe"), b""),
-            write(&work.join("Main.class"), &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 0x34]),
+            write(
+                &work.join("Main.class"),
+                &[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 0x34],
+            ),
             write(&work.join("model.gguf"), b"GGUF\x03\0\0\0"),
             write(&work.join("photo.png"), b"\x89PNG\r\n\x1a\n"),
         ];
@@ -515,13 +542,24 @@ mod tests {
         std::fs::create_dir_all(&no_plist).unwrap();
         let c = cx(&[&work], &[], false);
         for p in programs.iter().chain([&app]) {
-            assert_eq!(classify(&s(p), &c, &RealDropFs), insert(p), "{}", p.display());
+            assert_eq!(
+                classify(&s(p), &c, &RealDropFs),
+                insert(p),
+                "{}",
+                p.display()
+            );
         }
-        for p in not_programs
-            .iter()
-            .chain([&work, &plain_folder, &no_plist, &work.join("missing.exe")])
+        for p in
+            not_programs
+                .iter()
+                .chain([&work, &plain_folder, &no_plist, &work.join("missing.exe")])
         {
-            assert_eq!(classify(&s(p), &c, &RealDropFs), Dropped::Ignore, "{}", p.display());
+            assert_eq!(
+                classify(&s(p), &c, &RealDropFs),
+                Dropped::Ignore,
+                "{}",
+                p.display()
+            );
         }
     }
 
@@ -529,14 +567,20 @@ mod tests {
     #[test]
     fn nothing_changes_while_rea_is_not_installed() {
         let fs = Recording::default();
-        let paths = vec!["/home/u/work/hello".to_string(), "\\\\server\\x.exe".to_string()];
+        let paths = vec![
+            "/home/u/work/hello".to_string(),
+            "\\\\server\\x.exe".to_string(),
+        ];
         let c = DropContext {
             flavor: Flavor::Posix,
             approved: vec!["/home/u/work".into()],
             forbidden: vec![],
             full_access: false,
         };
-        assert_eq!(answer(false, &paths, &c, &fs), vec![Dropped::Ignore, Dropped::Ignore]);
+        assert_eq!(
+            answer(false, &paths, &c, &fs),
+            vec![Dropped::Ignore, Dropped::Ignore]
+        );
         assert!(fs.calls().is_empty());
     }
 
@@ -565,9 +609,21 @@ mod tests {
             let full = modes.full_access(chat);
             assert_eq!(full, mode == ApprovalMode::FullAccess);
             let c = cx(&[&work], &[&own], full);
-            assert_eq!(classify(&s(&inside), &c, &RealDropFs), insert(&inside), "{mode:?}");
-            let expected = if full { insert(&outside) } else { add_folder("hello") };
-            assert_eq!(classify(&s(&outside), &c, &RealDropFs), expected, "{mode:?}");
+            assert_eq!(
+                classify(&s(&inside), &c, &RealDropFs),
+                insert(&inside),
+                "{mode:?}"
+            );
+            let expected = if full {
+                insert(&outside)
+            } else {
+                add_folder("hello")
+            };
+            assert_eq!(
+                classify(&s(&outside), &c, &RealDropFs),
+                expected,
+                "{mode:?}"
+            );
             assert_eq!(
                 classify(&s(&forbidden), &c, &RealDropFs),
                 not_reachable("node"),
@@ -594,25 +650,28 @@ mod tests {
         std::os::unix::fs::symlink(&real, work.join("link")).unwrap();
         std::os::unix::fs::symlink(&outside, work.join("out")).unwrap();
         let c = cx(&[&work], &[], false);
-        assert_eq!(classify(&s(&work.join("link")), &c, &RealDropFs), insert(&real));
+        assert_eq!(
+            classify(&s(&work.join("link")), &c, &RealDropFs),
+            insert(&real)
+        );
         assert_eq!(
             classify(&s(&work.join("out")), &c, &RealDropFs),
             add_folder("out")
         );
     }
 
-    /// A pipe is never opened (opening one can wait forever).
+    /// Only a regular file is opened: a socket (like a pipe or a device) is not a program
+    /// and is never read (opening a pipe can wait forever).
     #[cfg(unix)]
     #[test]
-    fn a_pipe_is_ignored_without_being_opened() {
-        let dir = scratch("pipe");
-        let pipe = dir.0.join("fifo.exe");
-        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
-        if !made.is_ok_and(|s| s.success()) {
-            return;
-        }
+    fn a_special_file_is_ignored_without_being_read() {
+        let dir = scratch("special");
+        let socket = dir.0.join("tool.exe");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert_eq!(RealDropFs.kind(&s(&socket)), Some(Kind::Other));
+        assert_eq!(RealDropFs.head(&s(&socket)), None);
         let c = cx(&[&dir.0], &[], false);
-        assert_eq!(classify(&s(&pipe), &c, &RealDropFs), Dropped::Ignore);
+        assert_eq!(classify(&s(&socket), &c, &RealDropFs), Dropped::Ignore);
     }
 
     /// A file system that records every access and answers from a fixed table.
@@ -753,7 +812,10 @@ mod tests {
     #[test]
     fn names_and_tops() {
         assert_eq!(file_name("/a/b/c.exe", Flavor::Posix), "c.exe");
-        assert_eq!(file_name("C:\\a\\Thing.app\\", Flavor::Windows), "Thing.app");
+        assert_eq!(
+            file_name("C:\\a\\Thing.app\\", Flavor::Windows),
+            "Thing.app"
+        );
         assert_eq!(file_name("/a/b\\c", Flavor::Posix), "b\\c");
         assert_eq!(top_of("/a/b", Flavor::Posix).as_deref(), Some("/"));
         assert_eq!(top_of("d:\\x", Flavor::Windows).as_deref(), Some("D:\\"));
@@ -768,7 +830,9 @@ mod tests {
         let a = DropAnswer {
             installed: true,
             items: vec![
-                Dropped::Insert { path: "/w/a".into() },
+                Dropped::Insert {
+                    path: "/w/a".into(),
+                },
                 add_folder("b"),
                 not_reachable("c"),
                 Dropped::Ignore,
@@ -804,13 +868,17 @@ mod tests {
         assert!(crate::commands::only_main_window(crate::MAIN_WINDOW).is_ok());
         let capabilities = include_str!("../capabilities/main.json");
         assert!(capabilities.contains("\"allow-reverse-dropped\""));
-        assert!(include_str!("../commands.list")
-            .lines()
-            .any(|l| l.trim() == "reverse_dropped"));
+        assert!(
+            include_str!("../commands.list")
+                .lines()
+                .any(|l| l.trim() == "reverse_dropped")
+        );
         assert!(include_str!("lib.rs").contains("reverse_drop::reverse_dropped,"));
         // Granted to the main window's capability only.
         for other in ["overlay.json", "indicator.json"] {
-            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities").join(other);
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("capabilities")
+                .join(other);
             if let Ok(text) = std::fs::read_to_string(path) {
                 assert!(!text.contains("reverse-dropped"), "{other}");
             }

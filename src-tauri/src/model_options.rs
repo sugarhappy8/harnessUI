@@ -102,19 +102,43 @@ fn fold_case(text: &str) -> String {
 
 /// One entry of the chat's model list: the option, and for a local file whose name another
 /// file in the list shares, the end of its folder ("Downloads\models"), shown in small text.
+/// `recent` marks a local file used recently (sent only when true), so a view that offers
+/// "where you left off" can leave out installed models that were never used.
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelOptionEntry {
     #[serde(flatten)]
     pub option: ModelOptionDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub recent: bool,
 }
 
 impl ModelOptionEntry {
     /// An entry without a folder hint (an endpoint's model).
     pub fn plain(option: ModelOptionDto) -> Self {
-        Self { option, hint: None }
+        Self {
+            option,
+            hint: None,
+            recent: false,
+        }
     }
+}
+
+/// The whole list in the order every view reads it: the local files used recently, then
+/// the endpoints' models, then the installed models that were never used. The picker shows
+/// local and endpoint models in sections of their own, so it reads as "On this computer"
+/// (recent first, then by name) and "Endpoints"; the views that take the first entries as
+/// the ones used last (the Welcome card, a new chat with nothing loaded, the model selects)
+/// get the same first entries as before installed models were listed.
+pub fn arrange(
+    local: Vec<ModelOptionEntry>,
+    endpoints: impl IntoIterator<Item = ModelOptionEntry>,
+) -> Vec<ModelOptionEntry> {
+    let (mut out, never_used): (Vec<_>, Vec<_>) = local.into_iter().partition(|e| e.recent);
+    out.extend(endpoints);
+    out.extend(never_used);
+    out
 }
 
 /// Where an existing file really is: its canonical path (links and `..` resolved, on
@@ -135,16 +159,49 @@ fn canonical(path: &str) -> Option<String> {
         .map(|c| c.to_string_lossy().into_owned())
 }
 
+/// Whether a character changes how text is displayed without being visible: control
+/// characters (new lines and tabs too: a name is one line), bidirectional embeddings,
+/// overrides and isolates, zero-width characters, separators, fillers, variation selectors
+/// and tag characters. The same set as the webview's `visiblePath` (`FolderChip.tsx`).
+fn is_invisible(c: char) -> bool {
+    matches!(c as u32,
+        0x00..=0x1F | 0x7F..=0x9F | 0xAD | 0x34F | 0x61C | 0x115F | 0x1160 | 0x17B4 | 0x17B5
+        | 0x180B..=0x180F | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0x3164
+        | 0xFE00..=0xFE0F | 0xFEFF | 0xFFA0 | 0xFFF9..=0xFFFB | 0x1BCA0..=0x1BCA3
+        | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
+}
+
+/// Text as the list shows it: every invisible or direction-changing character as
+/// `\u{XXXX}`, exactly as the webview's `visiblePath` writes it, so a file name from a
+/// download or another program cannot pass for another name in any view of the list (the
+/// picker, the Welcome card, the model selects).
+fn visible(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if is_invisible(c) {
+            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The local entries of the list. `recent` (newest first) and `installed` (the model
-/// table's paths) as stored; `locate` gives an existing file's canonical path and `None`
-/// for a file that is gone. Files used recently come first, then the other installed
-/// models by name (ignoring case), then by path. One file is one entry; an installed one
-/// keeps the spelling of a row of Models → Installed, so picking it here or there loads
-/// the same path: of two rows for one file, the one spelled as its real path, else the
-/// first by path. Same-looking names (ignoring case) carry folder hints.
+/// table's paths) as stored; `loaded` is the path of the model loaded or loading now, as
+/// it was loaded; `locate` gives an existing file's canonical path and `None` for a file
+/// that is gone. Files used recently come first, then the other installed models by name
+/// (ignoring case), then by path. One file is one entry; an installed one keeps the
+/// spelling of a row of Models → Installed, so picking it here or there loads the same
+/// path: of two rows for one file, the one spelled as its real path, else the first by
+/// path. The loaded model keeps the spelling it was loaded with, so picking it here in
+/// another chat is the model already loaded, not a restart of the same file under another
+/// spelling (which would leave the chat that loaded it with "A different model is
+/// loaded"). Same-looking names (ignoring case) carry folder hints.
 pub fn local_entries(
     recent: &[String],
     installed: &[String],
+    loaded: Option<&str>,
     rule: PathRule,
     locate: impl Fn(&str) -> Option<String>,
 ) -> Vec<ModelOptionEntry> {
@@ -169,39 +226,47 @@ pub fn local_entries(
         .map(|(key, path)| (key.as_str(), path.as_str()))
         .collect();
 
+    let loaded = loaded.and_then(|l| locate(l).map(|c| (rule.key(&c), l.to_owned())));
+    let spelled = |key: &str, path: String| match &loaded {
+        Some((k, l)) if k == key => l.clone(),
+        _ => path,
+    };
+
     let mut seen: HashSet<String> = HashSet::new();
-    let mut paths: Vec<String> = Vec::new();
+    // (the path shown and picked, whether it was used recently)
+    let mut paths: Vec<(String, bool)> = Vec::new();
     for path in recent {
         let Some(c) = locate(path) else { continue };
         let key = rule.key(&c);
         if seen.contains(&key) {
             continue;
         }
-        paths.push(
-            row_path
-                .get(key.as_str())
-                .map_or_else(|| path.clone(), |p| (*p).to_owned()),
-        );
+        let path = row_path
+            .get(key.as_str())
+            .map_or_else(|| path.clone(), |p| (*p).to_owned());
+        paths.push((spelled(&key, path), true));
         seen.insert(key);
     }
     for (key, path) in &installed {
         if seen.insert(key.clone()) {
-            paths.push(path.clone());
+            paths.push((spelled(key, path.clone()), false));
         }
     }
 
-    let hints = folder_hints(&paths, rule);
+    let shown: Vec<String> = paths.iter().map(|(p, _)| p.clone()).collect();
+    let hints = folder_hints(&shown, rule);
     paths
         .into_iter()
         .zip(hints)
-        .map(|(path, hint)| ModelOptionEntry {
+        .map(|((path, recent), hint)| ModelOptionEntry {
             option: ModelOptionDto {
-                label: rule.file_name(&path).to_owned(),
+                label: visible(rule.file_name(&path)),
                 reference: format!("local:{path}"),
                 source: "local".into(),
                 context_length: None,
             },
-            hint,
+            hint: hint.map(|h| visible(&h)),
+            recent,
         })
         .collect()
 }
@@ -247,21 +312,53 @@ fn folder_hints(paths: &[String], rule: PathRule) -> Vec<Option<String>> {
     hints
 }
 
+/// Whether a path names a `.gguf` file (any case), as loading and importing require: a
+/// name with something before the extension.
+fn is_gguf_name(rule: PathRule, path: &str) -> bool {
+    rule.file_name(path)
+        .rsplit_once('.')
+        .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("gguf"))
+}
+
+/// What a remembered path is compared by: its canonical spelling under `rule`, or the path
+/// as written when the file is gone.
+fn file_key(rule: PathRule, canonical: &impl Fn(&str) -> Option<String>, path: &str) -> String {
+    rule.key(&canonical(path).unwrap_or_else(|| path.to_owned()))
+}
+
 /// The recent list after `path` was used: its canonical spelling first, every other
 /// spelling of the same file dropped, at most [`RECENT_LIMIT`]. `canonical` gives a path's
 /// canonical spelling when the file is there; a file that is gone is compared as written
-/// and kept (a drive that is not plugged in comes back).
+/// and kept (a drive that is not plugged in comes back). When the canonical spelling has
+/// no `.gguf` name (a Hugging Face cache link `snapshots/<rev>/x.gguf` points at
+/// `blobs/<sha>`), loading would refuse it, so the spelling used is stored instead; the
+/// file's other spellings are dropped either way.
 pub fn remembered(
     mut recent: Vec<String>,
     path: &str,
     rule: PathRule,
     canonical: impl Fn(&str) -> Option<String>,
 ) -> Vec<String> {
-    let stored = canonical(path).unwrap_or_else(|| path.to_owned());
-    let key = rule.key(&stored);
-    recent.retain(|p| rule.key(&canonical(p).unwrap_or_else(|| p.clone())) != key);
+    let key = file_key(rule, &canonical, path);
+    let stored = canonical(path)
+        .filter(|c| is_gguf_name(rule, c))
+        .unwrap_or_else(|| path.to_owned());
+    recent.retain(|p| file_key(rule, &canonical, p) != key);
     recent.insert(0, stored);
     recent.truncate(RECENT_LIMIT);
+    recent
+}
+
+/// The recent list after `path` was removed from Models → Installed: every spelling of the
+/// file dropped, the rest kept in order.
+pub fn forgotten(
+    mut recent: Vec<String>,
+    path: &str,
+    rule: PathRule,
+    canonical: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let key = file_key(rule, &canonical, path);
+    recent.retain(|p| file_key(rule, &canonical, p) != key);
     recent
 }
 
@@ -277,9 +374,11 @@ async fn read_recent(store: &store::Store) -> Vec<String> {
     }
 }
 
-/// "On this computer", read from the store and this computer's files.
+/// "On this computer", read from the store and this computer's files; `loaded` is the
+/// path of the model loaded or loading now (see [`local_entries`]).
 pub async fn local_options(
     store: &store::Store,
+    loaded: Option<&str>,
 ) -> Result<Vec<ModelOptionEntry>, store::StoreError> {
     let recent = read_recent(store).await;
     let installed: Vec<String> = store
@@ -291,9 +390,16 @@ pub async fn local_options(
     Ok(local_entries(
         &recent,
         &installed,
+        loaded,
         PathRule::this_system(),
         locate,
     ))
+}
+
+async fn save_recent(store: &store::Store, recent: &[String]) {
+    if let Err(e) = store.set_setting(RECENT_LOCAL_MODELS, &recent).await {
+        tracing::warn!("could not save recent models: {e}");
+    }
 }
 
 /// Remembers a model file as the one used most recently (see [`remembered`]).
@@ -304,8 +410,16 @@ pub async fn remember(store: &store::Store, path: &str) {
         PathRule::this_system(),
         canonical,
     );
-    if let Err(e) = store.set_setting(RECENT_LOCAL_MODELS, &recent).await {
-        tracing::warn!("could not save recent models: {e}");
+    save_recent(store, &recent).await;
+}
+
+/// Forgets a model file removed from Models → Installed (see [`forgotten`]), so "Remove
+/// from the list" takes it off the chat's model list too. The file itself is not touched.
+pub async fn forget(store: &store::Store, path: &str) {
+    let before = read_recent(store).await;
+    let recent = forgotten(before.clone(), path, PathRule::this_system(), canonical);
+    if recent != before {
+        save_recent(store, &recent).await;
     }
 }
 
@@ -315,6 +429,16 @@ mod tests {
 
     fn strings(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The local entries with no model loaded.
+    fn entries(
+        recent: &[String],
+        installed: &[String],
+        rule: PathRule,
+        locate: impl Fn(&str) -> Option<String>,
+    ) -> Vec<ModelOptionEntry> {
+        local_entries(recent, installed, None, rule, locate)
     }
 
     /// Every path exists and is already canonical (a file system that keeps the spelling it
@@ -336,7 +460,7 @@ mod tests {
 
     #[test]
     fn a_model_installed_but_never_loaded_is_listed() {
-        let out = local_entries(&[], &strings(&["/m/fresh.gguf"]), PathRule::Unix, all_there);
+        let out = entries(&[], &strings(&["/m/fresh.gguf"]), PathRule::Unix, all_there);
         assert_eq!(refs(&out), ["local:/m/fresh.gguf"]);
         let e = &out[0];
         assert_eq!(
@@ -353,7 +477,7 @@ mod tests {
     #[test]
     fn files_that_are_gone_are_left_out() {
         let gone = |p: &str| (!p.contains("gone")).then(|| p.to_owned());
-        let out = local_entries(
+        let out = entries(
             &strings(&["/m/gone-recent.gguf", "/m/kept.gguf"]),
             &strings(&["/m/gone-installed.gguf", "/m/other.gguf"]),
             PathRule::Unix,
@@ -366,7 +490,7 @@ mod tests {
     /// models by name, ignoring case.
     #[test]
     fn recently_used_first_then_the_rest_by_name() {
-        let out = local_entries(
+        let out = entries(
             &strings(&["/m/c.gguf", "/elsewhere/opened.gguf", "/m/a.gguf"]),
             &strings(&[
                 "/m/b.gguf",
@@ -402,7 +526,7 @@ mod tests {
         let recent = strings(&[r"c:/users/me/downloads/MODELS/ornith-1.5-9b-uncensored.q8_0.GGUF"]);
         let installed =
             strings(&[r"C:\Users\Me\Downloads\models\Ornith-1.5-9B-uncensored.Q8_0.gguf"]);
-        let out = local_entries(&recent, &installed, PathRule::Windows, all_there);
+        let out = entries(&recent, &installed, PathRule::Windows, all_there);
         assert_eq!(
             shown(&out),
             [("Ornith-1.5-9B-uncensored.Q8_0.gguf".to_owned(), None)]
@@ -412,7 +536,7 @@ mod tests {
             [r"local:C:\Users\Me\Downloads\models\Ornith-1.5-9B-uncensored.Q8_0.gguf"]
         );
 
-        let out = local_entries(
+        let out = entries(
             &strings(&["/Users/me/Models/Ornith.Q8_0.gguf"]),
             &strings(&["/users/ME/models/ornith.q8_0.gguf"]),
             PathRule::Mac,
@@ -421,7 +545,7 @@ mod tests {
         assert_eq!(refs(&out), ["local:/users/ME/models/ornith.q8_0.gguf"]);
 
         // On Linux the case matters: those are two files, told apart by their folders.
-        let out = local_entries(
+        let out = entries(
             &strings(&["/home/me/Models/Ornith.Q8_0.gguf"]),
             &strings(&["/home/me/models/ornith.q8_0.gguf"]),
             PathRule::Unix,
@@ -442,7 +566,7 @@ mod tests {
     #[test]
     fn one_file_in_two_rows_is_listed_by_its_real_path() {
         let canonical = |p: &str| Some(p.replace("/m/alias.gguf", "/m/real/z.gguf"));
-        let out = local_entries(
+        let out = entries(
             &[],
             &strings(&["/m/alias.gguf", "/m/real/z.gguf"]),
             PathRule::Unix,
@@ -451,7 +575,7 @@ mod tests {
         assert_eq!(shown(&out), [("z.gguf".to_owned(), None)]);
         assert_eq!(refs(&out), ["local:/m/real/z.gguf"]);
         // Used recently under the link's name: still the real path, first.
-        let out = local_entries(
+        let out = entries(
             &strings(&["/m/alias.gguf"]),
             &strings(&["/m/other.gguf", "/m/real/z.gguf", "/m/alias.gguf"]),
             PathRule::Unix,
@@ -460,7 +584,7 @@ mod tests {
         assert_eq!(refs(&out), ["local:/m/real/z.gguf", "local:/m/other.gguf"]);
 
         let real = |_: &str| Some(r"C:\m\A.gguf".to_owned());
-        let out = local_entries(
+        let out = entries(
             &[],
             &strings(&[r"c:\m\a.gguf", r"C:\m\A.gguf", r"C:\M\A.GGUF"]),
             PathRule::Windows,
@@ -471,7 +595,7 @@ mod tests {
             [r"c:\m\a.gguf", r"C:\M\A.GGUF"],
             [r"C:\M\A.GGUF", r"c:\m\a.gguf"],
         ] {
-            let out = local_entries(&[], &strings(&rows), PathRule::Windows, real);
+            let out = entries(&[], &strings(&rows), PathRule::Windows, real);
             assert_eq!(refs(&out), [r"local:C:\M\A.GGUF"]);
         }
     }
@@ -481,7 +605,7 @@ mod tests {
     #[test]
     fn two_spellings_resolved_by_the_file_system_give_one_entry() {
         let canonical = |p: &str| Some(p.replace("/link/", "/models/").replace("/x/../", "/"));
-        let out = local_entries(
+        let out = entries(
             &strings(&["/home/me/link/a.gguf", "/home/me/x/../models/a.gguf"]),
             &strings(&["/home/me/models/a.gguf"]),
             PathRule::Unix,
@@ -489,7 +613,7 @@ mod tests {
         );
         assert_eq!(refs(&out), ["local:/home/me/models/a.gguf"]);
         // Not installed: the spelling used most recently stays.
-        let out = local_entries(
+        let out = entries(
             &strings(&["/home/me/link/a.gguf", "/home/me/models/a.gguf"]),
             &[],
             PathRule::Unix,
@@ -503,7 +627,7 @@ mod tests {
     #[test]
     fn two_copies_give_two_entries_with_folder_hints() {
         let name = "Ornith-1.5-9B-uncensored.Q8_0.gguf";
-        let out = local_entries(
+        let out = entries(
             &strings(&[&format!(r"C:\Users\Me\Downloads\models\{name}")]),
             &strings(&[
                 &format!(r"C:\Users\Me\AppData\Roaming\harnessUI\models\{name}"),
@@ -521,7 +645,7 @@ mod tests {
             ]
         );
 
-        let out = local_entries(
+        let out = entries(
             &[],
             &strings(&[
                 "/home/me/Downloads/models/Q8_0.gguf",
@@ -542,7 +666,7 @@ mod tests {
     /// Hints grow until they differ, and stop at the whole folder.
     #[test]
     fn folder_hints_show_enough_to_tell_the_copies_apart() {
-        let out = local_entries(
+        let out = entries(
             &[],
             &strings(&[
                 "/a/x/models/m.gguf",
@@ -557,7 +681,7 @@ mod tests {
         hints.sort();
         assert_eq!(hints, ["/", "a/x/models", "b/x/models", "srv"]);
 
-        let out = local_entries(
+        let out = entries(
             &[],
             &strings(&[r"D:\models\m.gguf", r"E:\models\m.gguf", r"C:\m.gguf"]),
             PathRule::Windows,
@@ -619,10 +743,243 @@ mod tests {
         assert_eq!(out[1], "/m/0.gguf");
     }
 
+    /// The model loaded now is listed under the spelling it was loaded with (a link, a mapped
+    /// drive), whether it is installed or not, so picking it in another chat is the loaded
+    /// model. Other files keep their spelling; a loaded file that is in neither list is not
+    /// added; with nothing loaded the list is as before.
+    #[test]
+    fn the_loaded_model_keeps_the_spelling_it_was_loaded_with() {
+        let canonical = |p: &str| Some(p.replace("/x/link/", "/x/real/"));
+        let recent = strings(&["/x/real/M.gguf", "/m/b.gguf"]);
+        let out = local_entries(
+            &recent,
+            &[],
+            Some("/x/link/M.gguf"),
+            PathRule::Unix,
+            canonical,
+        );
+        assert_eq!(refs(&out), ["local:/x/link/M.gguf", "local:/m/b.gguf"]);
+        assert!(out[0].recent && out[1].recent);
+        let out = local_entries(&recent, &[], None, PathRule::Unix, canonical);
+        assert_eq!(refs(&out), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
+
+        // Installed under its real path, loaded through the link: the loaded spelling.
+        let installed = strings(&["/x/real/M.gguf", "/m/c.gguf"]);
+        let out = local_entries(
+            &[],
+            &installed,
+            Some("/x/link/M.gguf"),
+            PathRule::Unix,
+            canonical,
+        );
+        assert_eq!(refs(&out), ["local:/m/c.gguf", "local:/x/link/M.gguf"]);
+        assert!(!out[1].recent);
+
+        // A Windows mapped drive and its network path, and letters in another case.
+        let unc = |p: &str| Some(p.replace(r"Z:\", r"\\server\share\"));
+        let out = local_entries(
+            &strings(&[r"\\server\share\models\M.gguf"]),
+            &[],
+            Some(r"z:\MODELS\m.gguf"),
+            PathRule::Windows,
+            |p: &str| unc(&p.replace("z:", "Z:")),
+        );
+        assert_eq!(shown(&out), [("m.gguf".to_owned(), None)]);
+        assert_eq!(refs(&out), [r"local:z:\MODELS\m.gguf"]);
+
+        // A loaded file that is not listed is not added, and one that is gone changes nothing.
+        let out = local_entries(
+            &recent,
+            &[],
+            Some("/other/n.gguf"),
+            PathRule::Unix,
+            canonical,
+        );
+        assert_eq!(refs(&out), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
+        let gone = |p: &str| (!p.contains("link")).then(|| p.to_owned());
+        let out = local_entries(&recent, &[], Some("/x/link/M.gguf"), PathRule::Unix, gone);
+        assert_eq!(refs(&out), ["local:/x/real/M.gguf", "local:/m/b.gguf"]);
+    }
+
+    /// Removing a model from Models → Installed forgets every spelling of its file; the rest of
+    /// the list keeps its order.
+    #[test]
+    fn forgetting_drops_every_spelling_of_the_file() {
+        let canonical = |p: &str| Some(p.replace("/link/", "/models/"));
+        let out = forgotten(
+            strings(&["/m/b.gguf", "/m/models/a.gguf", "/m/c.gguf"]),
+            "/m/link/a.gguf",
+            PathRule::Unix,
+            canonical,
+        );
+        assert_eq!(out, strings(&["/m/b.gguf", "/m/c.gguf"]));
+        let out = forgotten(
+            strings(&[r"c:\models\X.gguf", r"C:\other\y.gguf"]),
+            r"C:/Models/x.GGUF",
+            PathRule::Windows,
+            all_there,
+        );
+        assert_eq!(out, strings(&[r"C:\other\y.gguf"]));
+        // A file that is gone is compared as written.
+        let gone = |_: &str| None;
+        let out = forgotten(
+            strings(&["/m/a.gguf", "/m/b.gguf"]),
+            "/m/a.gguf",
+            PathRule::Unix,
+            gone,
+        );
+        assert_eq!(out, strings(&["/m/b.gguf"]));
+        let out = forgotten(
+            strings(&["/m/a.gguf"]),
+            "/m/z.gguf",
+            PathRule::Unix,
+            all_there,
+        );
+        assert_eq!(out, strings(&["/m/a.gguf"]));
+    }
+
+    /// The order every view reads: local files used recently, then the endpoints' models, then
+    /// the installed models never used. The picker's two sections read as before; the first
+    /// entries (the Welcome card, a new chat with nothing loaded) are the ones used last, as
+    /// before installed models were listed. `recent` is sent only when true.
+    #[test]
+    fn recently_used_entries_are_marked_and_come_before_the_endpoints() {
+        let local = entries(
+            &strings(&["/m/used.gguf"]),
+            &strings(&["/m/a-never.gguf", "/m/used.gguf"]),
+            PathRule::Unix,
+            all_there,
+        );
+        let endpoint = ModelOptionEntry::plain(ModelOptionDto {
+            reference: "provider:1:remote-model".into(),
+            label: "remote-model".into(),
+            source: "provider".into(),
+            context_length: Some(32768),
+        });
+        let out = arrange(local, [endpoint]);
+        assert_eq!(
+            refs(&out),
+            [
+                "local:/m/used.gguf",
+                "provider:1:remote-model",
+                "local:/m/a-never.gguf"
+            ]
+        );
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(json[0]["recent"], serde_json::json!(true));
+        assert!(
+            json[1].get("recent").is_none() && json[2].get("recent").is_none(),
+            "{json}"
+        );
+        assert!(json[1].get("hint").is_none());
+        // Nothing used yet and no endpoints: the installed models.
+        let out = arrange(
+            entries(&[], &strings(&["/m/a.gguf"]), PathRule::Unix, all_there),
+            Vec::new(),
+        );
+        assert_eq!(refs(&out), ["local:/m/a.gguf"]);
+    }
+
+    /// A Hugging Face cache link (`snapshots/<rev>/x.gguf` pointing at `blobs/<sha>`): the
+    /// file it points at has no `.gguf` name, and loading refuses such a path, so the link's
+    /// own spelling is what is remembered. Other spellings of the file are still dropped.
+    #[test]
+    fn remembering_a_link_to_a_file_without_a_gguf_name_keeps_the_link() {
+        let link = "/hf/snapshots/rev/Qwen-Q4_K_M.gguf";
+        let canonical = |p: &str| {
+            Some(if p == link || p == "/hf/blobs/3f2a9c0d1e" {
+                "/hf/blobs/3f2a9c0d1e".to_owned()
+            } else {
+                p.to_owned()
+            })
+        };
+        let out = remembered(
+            strings(&["/hf/blobs/3f2a9c0d1e", "/m/b.gguf"]),
+            link,
+            PathRule::Unix,
+            canonical,
+        );
+        assert_eq!(out, strings(&[link, "/m/b.gguf"]));
+        let listed = entries(&out, &[], PathRule::Unix, canonical);
+        assert_eq!(
+            refs(&listed),
+            [format!("local:{link}"), "local:/m/b.gguf".to_owned()]
+        );
+        assert_eq!(listed[0].option.label, "Qwen-Q4_K_M.gguf");
+        // A real path that keeps a `.gguf` name, in any case, is still the one stored.
+        let upper = |p: &str| Some(p.replace("/link/", "/models/").replace("a.gguf", "A.GGUF"));
+        let out = remembered(Vec::new(), "/m/link/a.gguf", PathRule::Unix, upper);
+        assert_eq!(out, strings(&["/m/models/A.GGUF"]));
+        let dotfile = |_: &str| Some("/m/blobs/.gguf".to_owned());
+        let out = remembered(Vec::new(), "/m/link/a.gguf", PathRule::Unix, dotfile);
+        assert_eq!(out, strings(&["/m/link/a.gguf"]));
+    }
+
+    /// File names come from downloads and other programs; the label and the folder hint show
+    /// every invisible or direction-changing character as a code (the picker's `visiblePath`
+    /// does the same, so it changes nothing more), for every view that shows the list. The
+    /// reference keeps the real path, so picking it loads that file.
+    #[test]
+    fn labels_and_hints_show_invisible_characters_as_codes() {
+        let out = entries(
+            &[],
+            &strings(&[
+                "/a/x\u{200B}y/evil\u{202E}fuug.Q4.gguf",
+                "/b/z/evil\u{202E}fuug.Q4.gguf",
+                "/c/tab\there\u{2066}.gguf",
+            ]),
+            PathRule::Unix,
+            all_there,
+        );
+        assert_eq!(
+            shown(&out),
+            [
+                (
+                    "evil\\u{202E}fuug.Q4.gguf".to_owned(),
+                    Some("a/x\\u{200B}y".to_owned())
+                ),
+                (
+                    "evil\\u{202E}fuug.Q4.gguf".to_owned(),
+                    Some("b/z".to_owned())
+                ),
+                ("tab\\u{0009}here\\u{2066}.gguf".to_owned(), None),
+            ]
+        );
+        assert_eq!(
+            out[0].option.reference,
+            "local:/a/x\u{200B}y/evil\u{202E}fuug.Q4.gguf"
+        );
+        for (raw, shown) in [
+            (
+                "\u{0}\u{1F}\u{7F}\u{9F}\u{AD}\u{34F}\u{61C}",
+                "\\u{0000}\\u{001F}\\u{007F}\\u{009F}\\u{00AD}\\u{034F}\\u{061C}",
+            ),
+            (
+                "\u{115F}\u{1160}\u{17B4}\u{17B5}\u{180B}\u{180F}",
+                "\\u{115F}\\u{1160}\\u{17B4}\\u{17B5}\\u{180B}\\u{180F}",
+            ),
+            (
+                "\u{200F}\u{2028}\u{202A}\u{2060}\u{206F}\u{3164}",
+                "\\u{200F}\\u{2028}\\u{202A}\\u{2060}\\u{206F}\\u{3164}",
+            ),
+            (
+                "\u{FE00}\u{FE0F}\u{FEFF}\u{FFA0}\u{FFF9}\u{FFFB}",
+                "\\u{FE00}\\u{FE0F}\\u{FEFF}\\u{FFA0}\\u{FFF9}\\u{FFFB}",
+            ),
+            (
+                "\u{1BCA0}\u{1BCA3}\u{1D173}\u{1D17A}\u{E0001}\u{E0FFF}",
+                "\\u{1BCA0}\\u{1BCA3}\\u{1D173}\\u{1D17A}\\u{E0001}\\u{E0FFF}",
+            ),
+            ("Straße é 模型 \\u{41} 🙂", "Straße é 模型 \\u{41} 🙂"),
+        ] {
+            assert_eq!(visible(raw), shown, "{raw:?}");
+        }
+    }
+
     /// The JSON the picker reads: the 0.0.4 fields as before, and `hint` only when there is one.
     #[test]
     fn entries_serialise_as_model_options_with_an_optional_hint() {
-        let out = local_entries(
+        let out = entries(
             &[],
             &strings(&["/a/b/m.gguf", "/c/d/m.gguf", "/c/d/n.gguf"]),
             PathRule::Unix,
@@ -687,7 +1044,7 @@ mod tests {
             .await
             .unwrap();
 
-        let out = local_options(&store).await.unwrap();
+        let out = local_options(&store, None).await.unwrap();
         assert_eq!(
             refs(&out),
             [
@@ -738,12 +1095,82 @@ mod tests {
                 .unwrap();
             assert_eq!(recent, vec![canonical.clone()]);
         }
-        let out = local_options(&store).await.unwrap();
+        let out = local_options(&store, None).await.unwrap();
         assert_eq!(out.len(), 1, "{:?}", refs(&out));
         assert_eq!(out[0].hint, None);
         // The row spelled as the file's real path, not the link's.
         assert_eq!(refs(&out), [format!("local:{}", file.display())]);
         assert_eq!(out[0].option.label, "m.gguf");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The Hugging Face cache through the real file system: a model opened through
+    /// `snapshots/<rev>/x.gguf`, a link to `blobs/<sha>`, is remembered and listed by the
+    /// link, whose name loading accepts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_store_remembers_a_hub_cache_link_by_its_own_name() {
+        let dir = temp_dir("hfcache");
+        std::fs::create_dir_all(dir.join("blobs")).unwrap();
+        std::fs::create_dir_all(dir.join("snapshots").join("rev")).unwrap();
+        let blob = dir.join("blobs").join("3f2a9c0d1e");
+        std::fs::write(&blob, b"GGUF").unwrap();
+        let link = dir.join("snapshots").join("rev").join("Qwen-Q4_K_M.gguf");
+        std::os::unix::fs::symlink("../../blobs/3f2a9c0d1e", &link).unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        remember(&store, &link.to_string_lossy()).await;
+        let recent: Vec<String> = store
+            .get_setting(RECENT_LOCAL_MODELS)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recent, vec![link.to_string_lossy().into_owned()]);
+        let out = local_options(&store, None).await.unwrap();
+        assert_eq!(refs(&out), [format!("local:{}", link.display())]);
+        assert_eq!(out[0].option.label, "Qwen-Q4_K_M.gguf");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An imported model (import also remembers it) removed from Models → Installed leaves
+    /// the chat's model list; its file stays. A model loaded through a link is listed under
+    /// the link while it is loaded.
+    #[tokio::test]
+    async fn the_store_forgets_a_removed_model_and_keeps_the_loaded_spelling() {
+        let dir = temp_dir("forget");
+        let file = dir.join("Imported.gguf");
+        let other = dir.join("other.gguf");
+        std::fs::write(&file, b"GGUF").unwrap();
+        std::fs::write(&other, b"GGUF").unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        register(&store, &file).await;
+        remember(&store, &other.to_string_lossy()).await;
+        remember(&store, &file.to_string_lossy()).await;
+        let model = store.list_models().await.unwrap().remove(0);
+        store.delete_model(model.id).await.unwrap();
+        forget(&store, &file.to_string_lossy()).await;
+        let out = local_options(&store, None).await.unwrap();
+        assert_eq!(refs(&out), [format!("local:{}", other.display())]);
+        assert!(file.exists());
+        // Forgetting a file that is not on the list writes nothing new.
+        forget(&store, &file.to_string_lossy()).await;
+        let recent: Vec<String> = store
+            .get_setting(RECENT_LOCAL_MODELS)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recent, vec![other.to_string_lossy().into_owned()]);
+
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.gguf");
+            std::os::unix::fs::symlink(&other, &link).unwrap();
+            let link = link.to_string_lossy().into_owned();
+            remember(&store, &link).await;
+            let out = local_options(&store, Some(&link)).await.unwrap();
+            assert_eq!(refs(&out), [format!("local:{link}")]);
+            let out = local_options(&store, None).await.unwrap();
+            assert_eq!(refs(&out), [format!("local:{}", other.display())]);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -759,7 +1186,7 @@ mod tests {
             .set_setting(RECENT_LOCAL_MODELS, &serde_json::json!({"not": "a list"}))
             .await
             .unwrap();
-        let out = local_options(&store).await.unwrap();
+        let out = local_options(&store, None).await.unwrap();
         assert_eq!(refs(&out), [format!("local:{}", file.display())]);
         remember(&store, &file.to_string_lossy()).await;
         let recent: Vec<String> = store

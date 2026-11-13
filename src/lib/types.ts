@@ -238,6 +238,9 @@ export interface ModelOption {
   /** [0.0.6 item 8] The end of a local file's folder ("Downloads\models"), only when another
    *  file in the list has the same name. */
   hint?: string;
+  /** [0.0.6 item 8] A local file used recently; installed models never used are left without
+   *  it. The list starts with these, then the endpoints' models, then the other installed ones. */
+  recent?: boolean;
 }
 
 /**

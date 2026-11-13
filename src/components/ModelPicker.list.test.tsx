@@ -168,6 +168,38 @@ describe("ModelPicker: On this computer", () => {
     expect(item.getAttribute("title")).toBe("/models/x\\u{202E}fug.gguf");
   });
 
+  it("shows an endpoint's model name with direction or invisible characters as codes", async () => {
+    const remote: ModelOption = {
+      ref: "provider:1:bad‮ledom",
+      label: "bad‮ledom⁦​",
+      source: "provider",
+      contextLength: null,
+    };
+    ipcMock.listModelOptions.mockResolvedValue([COPIES[0] as ModelOption, remote]);
+    await act(async () => render(<ModelPicker />));
+    await openMenu();
+    const item = screen.getByRole("menuitem", { name: /^bad/ });
+    expect(item.textContent).toBe(" bad\\u{202E}ledom\\u{2066}\\u{200B}");
+  });
+
+  it("stops at the window's edge and scrolls when the list is long", async () => {
+    const many: ModelOption[] = Array.from({ length: 40 }, (_, i) => ({
+      ref: `local:/models/m${i}.gguf`,
+      label: `m${i}.gguf`,
+      source: "local" as const,
+      contextLength: null,
+    }));
+    ipcMock.listModelOptions.mockResolvedValue(many);
+    await act(async () => render(<ModelPicker />));
+    await openMenu();
+    const menu = screen.getByRole("menu");
+    // Radix sets the room left below the button as this variable; the menu never grows past it.
+    expect(menu.className).toContain("max-h-[var(--radix-dropdown-menu-content-available-height)]");
+    expect(menu.className).toContain("overflow-y-auto");
+    expect(screen.getAllByRole("menuitem", { name: /^m\d+\.gguf$/ })).toHaveLength(40);
+    expect(screen.getByRole("menuitem", { name: /Find and manage models/ })).toBeTruthy();
+  });
+
   it("names the chat's model without invisible characters in the button", async () => {
     useApp.setState({
       modelOptions: [],

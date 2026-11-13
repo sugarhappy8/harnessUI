@@ -616,5 +616,16 @@ mod tests {
         assert_eq!(name.chars().count(), MAX_ROW_NAME_CHARS);
         assert!(!name.contains('\u{202e}') && !name.contains('\0'));
         assert_eq!(report.rows[15].name, "Row14");
+
+        // Tag characters and the other invisible characters of
+        // `models::hf::uploader_text`'s set are escaped too.
+        let line = ready_with(
+            "[{\"kind\":\"device\",\"name\":\"MTL\u{e0041}0\u{ad}\u{fe0f}\u{180e}\u{206a}\",\"model\":1}]",
+        );
+        let report = ready_memory_of(&line).expect("a report");
+        assert_eq!(
+            report.rows[0].name,
+            "MTL[U+E0041]0[U+00AD][U+FE0F][U+180E][U+206A]"
+        );
     }
 }

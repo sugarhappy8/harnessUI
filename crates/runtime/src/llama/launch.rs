@@ -75,6 +75,18 @@ pub enum GpuUse {
     Off,
 }
 
+/// The largest layer count that reaches a command line as a number (`-ngl N`,
+/// `--n-cpu-moe K`), the same limit as the app's own check of Fine control (item 6, 3.2).
+/// llama.cpp builds one tensor override per layer for `--n-cpu-moe K` before it does
+/// anything else, so a huge `K` uses up memory within seconds, and from about 4,000 it
+/// aborts. No model has this many layers, and any count at or above a model's own means
+/// every layer: above the limit `-ngl` gets `all` and the expert parts `--cpu-moe`.
+pub(crate) const MAX_LAYER_COUNT: u32 = 1_000;
+
+/// The most processor threads that reach a command line (`-t N`), the app's own limit
+/// (item 6, 3.2). Above it no `-t` is given, so llama.cpp picks (its default).
+pub(crate) const MAX_THREADS: u16 = 1_024;
+
 /// Expert parts kept on the processor, for a mixture-of-experts model (Fine control,
 /// item 6). JSON `"none"`, `"all"` or `{"firstLayers":n}`.
 ///
@@ -94,6 +106,32 @@ pub enum ExpertsOnCpu {
     All,
     /// The expert parts of the first `n` layers on the processor (`--n-cpu-moe n`).
     FirstLayers(u32),
+}
+
+impl ExpertsOnCpu {
+    /// The expert flag and its number, when one applies: nothing for `None` and
+    /// `FirstLayers(0)`; `--cpu-moe` for `All`, and for a count above [`MAX_LAYER_COUNT`]
+    /// (every layer either way); otherwise `--n-cpu-moe K`.
+    pub(crate) fn flag(self) -> Option<Vec<String>> {
+        match self {
+            Self::None | Self::FirstLayers(0) => None,
+            Self::FirstLayers(n) if n <= MAX_LAYER_COUNT => {
+                Some(vec!["--n-cpu-moe".to_owned(), n.to_string()])
+            }
+            Self::All | Self::FirstLayers(_) => Some(vec!["--cpu-moe".to_owned()]),
+        }
+    }
+}
+
+/// `-ngl`'s value for a chosen layer count: the number, or `all` above
+/// [`MAX_LAYER_COUNT`] (llama.cpp puts every layer on the device for any count at or
+/// above the model's own).
+pub(crate) fn layers_word(n: u32) -> String {
+    if n > MAX_LAYER_COUNT {
+        "all".to_owned()
+    } else {
+        n.to_string()
+    }
 }
 
 /// Fast attention (`-fa`), Fine control item 6. JSON `"auto"`, `"on"` or `"off"`. With
@@ -130,7 +168,8 @@ pub struct FineLaunch {
     /// Keep the conversation memory in computer memory (`-nkvo`), with a graphics device.
     #[serde(default)]
     pub kv_in_computer_memory: bool,
-    /// Processor threads (`-t N`). `None` and `Some(0)` add nothing (llama.cpp's default).
+    /// Processor threads (`-t N`). `None`, `Some(0)` and more than [`MAX_THREADS`] add
+    /// nothing (llama.cpp's default).
     #[serde(default)]
     pub threads: Option<u16>,
     /// Fast attention (`-fa on` / `-fa off`), when Save memory is off.
@@ -149,13 +188,14 @@ impl FineLaunch {
         self.gpu_layers.is_some() || self.experts_flag().is_some()
     }
 
-    /// The expert flag and its number, when one applies.
+    /// The expert flag and its number, when one applies ([`ExpertsOnCpu::flag`]).
     fn experts_flag(&self) -> Option<Vec<String>> {
-        match self.experts_on_cpu {
-            ExpertsOnCpu::None | ExpertsOnCpu::FirstLayers(0) => None,
-            ExpertsOnCpu::All => Some(vec!["--cpu-moe".to_owned()]),
-            ExpertsOnCpu::FirstLayers(n) => Some(vec!["--n-cpu-moe".to_owned(), n.to_string()]),
-        }
+        self.experts_on_cpu.flag()
+    }
+
+    /// `-t`'s value, when threads are chosen and within [`MAX_THREADS`].
+    fn threads_arg(&self) -> Option<u16> {
+        self.threads.filter(|&t| t > 0 && t <= MAX_THREADS)
     }
 }
 
@@ -350,6 +390,9 @@ const MAX_ALIAS_LEN: usize = 64;
 ///
 /// Every word is fixed except the paths, the numbers, the device name from the probe and
 /// the alias, which is used only when it is one plain word (otherwise [`MODEL_ALIAS`]).
+/// Fine control's numbers have limits: a layer count above [`MAX_LAYER_COUNT`] gives
+/// `-ngl all`, an expert layer count above it `--cpu-moe`, and more than [`MAX_THREADS`]
+/// threads no `-t`.
 /// Paths are converted lossily; [`super::server::start`] refuses paths that are not valid
 /// Unicode before it gets here.
 pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
@@ -391,7 +434,7 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
         device.to_owned(),
     ]);
     args.extend(placement_args(cfg));
-    if let Some(threads) = cfg.fine.threads.filter(|&t| t > 0) {
+    if let Some(threads) = cfg.fine.threads_arg() {
         args.push("-t".to_owned());
         args.push(threads.to_string());
     }
@@ -444,7 +487,7 @@ fn placement_args(cfg: &LaunchConfig) -> Vec<String> {
     let mut args = if fine.custom_placement() {
         let layers = fine
             .gpu_layers
-            .map_or_else(|| "all".to_owned(), |n| n.to_string());
+            .map_or_else(|| "all".to_owned(), layers_word);
         let mut args = vec![
             "-ngl".to_owned(),
             layers,
@@ -1186,6 +1229,113 @@ mod tests {
                     ..with(GpuUse::Fit, everything.clone())
                 },
                 vec!["--device", "none", "--fit", "on", "-t", "4", "-fa", "off"],
+            ),
+            // The limits of the command line (a stored value the app's own checks missed):
+            // llama.cpp builds one override per layer for `--n-cpu-moe K` before anything
+            // else, and starts a thread per `-t`.
+            (
+                "the largest layer count is used as it is",
+                with(GpuUse::All, layers(MAX_LAYER_COUNT)),
+                vec!["--device", "Vulkan0", "-ngl", "1000", "--fit", "off"],
+            ),
+            (
+                "a layer count above the limit launches as all",
+                with(GpuUse::All, layers(MAX_LAYER_COUNT + 1)),
+                vec!["--device", "Vulkan0", "-ngl", "all", "--fit", "off"],
+            ),
+            (
+                "the largest expert layer count is used as it is",
+                with(
+                    GpuUse::All,
+                    experts(ExpertsOnCpu::FirstLayers(MAX_LAYER_COUNT)),
+                ),
+                vec![
+                    "--device",
+                    "Vulkan0",
+                    "-ngl",
+                    "all",
+                    "--fit",
+                    "off",
+                    "--n-cpu-moe",
+                    "1000",
+                ],
+            ),
+            (
+                "an expert layer count above the limit means every expert part",
+                with(
+                    GpuUse::Fit,
+                    experts(ExpertsOnCpu::FirstLayers(MAX_LAYER_COUNT + 1)),
+                ),
+                vec![
+                    "--device",
+                    "Vulkan0",
+                    "-ngl",
+                    "all",
+                    "--fit",
+                    "off",
+                    "--cpu-moe",
+                ],
+            ),
+            (
+                "the most threads are used as they are",
+                with(
+                    GpuUse::All,
+                    FineLaunch {
+                        threads: Some(MAX_THREADS),
+                        ..FineLaunch::default()
+                    },
+                ),
+                vec![
+                    "--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-t", "1024",
+                ],
+            ),
+            (
+                "threads above the limit add nothing",
+                with(
+                    GpuUse::All,
+                    FineLaunch {
+                        threads: Some(MAX_THREADS + 1),
+                        ..FineLaunch::default()
+                    },
+                ),
+                vec!["--device", "Vulkan0", "-ngl", "all", "--fit", "off"],
+            ),
+            (
+                "the largest numbers of every kind at once",
+                with(
+                    GpuUse::All,
+                    FineLaunch {
+                        gpu_layers: Some(u32::MAX),
+                        experts_on_cpu: ExpertsOnCpu::FirstLayers(2_000_000_000),
+                        kv_in_computer_memory: true,
+                        threads: Some(u16::MAX),
+                        flash_attn: FlashAttn::Auto,
+                        fit_margin_mib: None,
+                    },
+                ),
+                vec![
+                    "--device",
+                    "Vulkan0",
+                    "-ngl",
+                    "all",
+                    "--fit",
+                    "off",
+                    "--cpu-moe",
+                    "-nkvo",
+                ],
+            ),
+            (
+                "the largest numbers without a device add nothing",
+                with(
+                    GpuUse::Off,
+                    FineLaunch {
+                        gpu_layers: Some(u32::MAX),
+                        experts_on_cpu: ExpertsOnCpu::FirstLayers(u32::MAX),
+                        threads: Some(u16::MAX),
+                        ..FineLaunch::default()
+                    },
+                ),
+                vec!["--device", "none", "-ngl", "0", "--fit", "off"],
             ),
         ];
         for (name, cfg, want) in cases {

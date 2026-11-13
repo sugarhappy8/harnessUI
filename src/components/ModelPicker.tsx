@@ -66,7 +66,10 @@ export function ModelPicker() {
         <DropdownMenu.Content
           align="start"
           sideOffset={4}
-          className="z-50 min-w-64 rounded-xl border border-border bg-surface p-1.5 shadow-pop"
+          collisionPadding={8}
+          // [0.0.6 item 8] Every installed model is listed, so the menu can be taller than the
+          // window: it stops at the window's edge and scrolls.
+          className="z-50 max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-64 overflow-y-auto rounded-xl border border-border bg-surface p-1.5 shadow-pop"
           onCloseAutoFocus={(e) => {
             if (openingSettings.current) {
               openingSettings.current = false;
@@ -114,7 +117,7 @@ export function ModelPicker() {
               onSelect={() => void choose(o.ref)}
               className="flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
             >
-              <Globe size={14} aria-hidden /> <span className="truncate">{o.label}</span>
+              <Globe size={14} aria-hidden /> <span className="truncate">{visiblePath(o.label)}</span>
             </DropdownMenu.Item>
           ))}
           <DropdownMenu.Separator className="my-1 h-px bg-border" />

@@ -360,28 +360,37 @@ pub async fn set_local_model_settings(
     Ok(())
 }
 
-/// Model picker entries: "On this computer" (0.0.6 item 8: the files used recently, then
-/// every other installed model by name, each file once, with a folder hint when two files
-/// share a name; see `model_options`), then cached endpoint models.
-/// Makes no network request.
+/// Model picker entries (0.0.6 item 8; see `model_options`): the local files used
+/// recently, then cached endpoint models, then every other installed model by name. The
+/// picker shows the local ones as "On this computer" and the endpoints' as "Endpoints".
+/// Each file is listed once, with a folder hint when two files share a name, and the model
+/// loaded now under the spelling it was loaded with. Makes no network request.
 #[tauri::command]
 pub async fn list_model_options(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<crate::model_options::ModelOptionEntry>> {
-    let mut out = crate::model_options::local_options(&state.store).await?;
+    let status = state.runtime.status();
+    let loaded = matches!(
+        status.state,
+        crate::dto::RuntimeStateDto::Ready | crate::dto::RuntimeStateDto::Starting
+    )
+    .then_some(status.model_path)
+    .flatten();
+    let local = crate::model_options::local_options(&state.store, loaded.as_deref()).await?;
+    let mut endpoints = Vec::new();
     for p in state.store.list_providers().await? {
         let cached: Vec<ModelOptionDto> = state
             .store
             .get_setting(&settings::provider_models_key(p.id))
             .await?
             .unwrap_or_default();
-        out.extend(
+        endpoints.extend(
             cached
                 .into_iter()
                 .map(crate::model_options::ModelOptionEntry::plain),
         );
     }
-    Ok(out)
+    Ok(crate::model_options::arrange(local, endpoints))
 }
 
 #[tauri::command]

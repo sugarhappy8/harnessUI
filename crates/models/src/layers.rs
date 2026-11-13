@@ -31,7 +31,11 @@ pub struct LayerSizes {
     pub input_bytes: u64,
     /// `output.*`, `output_norm.*`: llama.cpp's last unit. With tied embeddings (no
     /// `output.weight`) llama.cpp loads `token_embd.weight` a second time as the output, so
-    /// its size is counted here as well.
+    /// its size is counted here as well. That second copy is real whenever the output unit
+    /// is on a graphics device (another buffer) or repacked on the processor; when the
+    /// processor keeps the output in the input layer's own buffer (`--no-repack`, or a type
+    /// it does not repack, such as Q6_K), llama.cpp reuses the first copy and the estimate
+    /// is that much high: the safe side, until the measurement replaces it.
     pub output_bytes: u64,
     /// `blk.0` … `blk.(block_count-1)`.
     pub layers: Vec<LayerSize>,

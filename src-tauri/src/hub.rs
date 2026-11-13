@@ -950,6 +950,7 @@ pub async fn delete_model(
         }
     }
     state.store.delete_model(rec.id).await?;
+    crate::model_options::forget(&state.store, &rec.path).await; // [0.0.6 item 8, WP8]
     state.runtime.forget_unloaded(&rec.path);
     Ok(())
 }

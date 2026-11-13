@@ -150,6 +150,10 @@ fn add(to: &mut u64, bytes: u64) {
 /// - The image reader is on the graphics card whenever one is used.
 /// - Without a graphics device everything is in computer memory, with the whole working
 ///   space.
+/// - A tied output (embeddings shared with the input) is counted twice wherever the output
+///   unit is, as [`LayerSizes::output_bytes`] says: right on a graphics device and for
+///   weights the processor repacks, high by the embedding when the processor shares the
+///   input's copy (the safe side; the measurement replaces the estimate).
 pub fn split(input: &PlacementInput, place: &Where) -> Split {
     let sizes = input.sizes;
     let units = sizes.units();
@@ -365,12 +369,14 @@ pub fn fit_order(sizes: &LayerSizes) -> Vec<(Layers, ExpertsPick)> {
 ///
 /// A placement explains the bytes when they lie within a quarter of the gap to its
 /// neighbours in the order (llama.cpp's buffers add a little alignment to the file's
-/// sizes); bytes further from every placement are "between steps". Above a placement that
-/// keeps the expert parts of the last K blocks on the processor, the window reaches three
-/// quarters (rounded up) of the frontmost of those blocks' expert parts: llama.cpp's step 4 puts the up
-/// (or the up and gate) expert tensors of that block on the card ("part of one more
-/// layer"), so the answer stays right within one layer. When windows overlap, the nearest
-/// placement wins, and of equals the first.
+/// sizes); bytes further from every placement are "between steps". Above a placement with
+/// every unit on the card that keeps the expert parts of the last K blocks on the processor
+/// (step 4, or the end of step 3 where step 4 starts), the window reaches three quarters
+/// (rounded up) of the frontmost of those blocks' expert parts: llama.cpp's step 4 puts the
+/// up (or the up and gate) expert tensors of that block on the card ("part of one more
+/// layer"), so the answer stays right within one layer. Step 3 never places part of a
+/// layer, so its placements with fewer units keep the quarter-gap window. When windows
+/// overlap, the nearest placement wins, and of equals the first.
 pub fn explain(sizes: &LayerSizes, gpu_model_bytes: u64) -> Option<(Layers, ExpertsPick)> {
     let order = fit_order(sizes);
     let model_only = PlacementInput {
@@ -406,7 +412,7 @@ pub fn explain(sizes: &LayerSizes, gpu_model_bytes: u64) -> Option<(Layers, Expe
         let after = bytes.get(index + 1).map(|&b| b.abs_diff(at));
         let below = before.or(after).unwrap_or(0) / 4;
         let mut above = after.or(before).unwrap_or(0) / 4;
-        if let Some((_, ExpertsPick::LastLayers(k))) = order.get(index) {
+        if let Some((Layers::All, ExpertsPick::LastLayers(k))) = order.get(index) {
             let frontmost = blocks.saturating_sub(usize::try_from(*k).unwrap_or(usize::MAX));
             if let Some(layer) = sizes.layers.get(frontmost) {
                 above = above.max(layer.expert_bytes - layer.expert_bytes / 4);
@@ -491,24 +497,41 @@ pub enum MemoryKind {
     Unified,
 }
 
-/// The one answer to "will it fit?" (section 4.1): the three-way mark of the panel and the
-/// picture's detail, with fit.rs's margins ([`SPARE_BYTES`] on the main device; the
-/// reserve, already taken out of the room, in computer memory).
+/// The contract's verdict (item 6, section 2.2), which cannot tell a graphics card's own
+/// memory from Apple's shared memory: a [`Room`] holds the same two numbers for both.
 ///
-/// `room` alone cannot tell a graphics card's own memory from Apple's shared memory, so
-/// this checks the computer's part only through the total, as on Apple silicon; a split
-/// with nothing on the graphics side is judged as the processor ([`Room::verdict`] of the
-/// total). Callers that know the backend use [`judge_in`].
+/// It is [`judge_in`] with [`MemoryKind::Unified`] (the computer's part checked only
+/// through the total, as on Apple silicon), and with [`MemoryKind::Processor`] for a split
+/// with nothing on the graphics side ([`Room::verdict`] of the total, measured against
+/// `room.whole`). On a graphics card with its own memory that is wrong: with few layers on
+/// the card, or the conversation memory in computer memory, it says Green for a computer
+/// part that does not fit computer memory. Every caller knows the backend
+/// (`load_settings::Machine`), so it calls [`judge_in`] with the kind instead: Processor
+/// without a graphics device, Unified for Apple graphics (Metal), Separate for every other
+/// graphics card. Kept, deprecated, until the lead amends the contract.
+#[deprecated(
+    note = "cannot tell a graphics card from Apple's shared memory; call judge_in with the \
+            MemoryKind of the backend (Separate for a graphics card)"
+)]
 pub fn judge(split: &Split, room: Room, gpu_choice_is_fit: bool) -> (Verdict, Fits) {
-    let kind = if split.gpu.total() == 0 && split.layers_on_gpu == 0 {
+    judge_in(split, room, gpu_choice_is_fit, contract_kind(split))
+}
+
+/// The kind [`judge`] assumes: the processor when nothing is on the graphics side, else
+/// Apple's shared memory.
+fn contract_kind(split: &Split) -> MemoryKind {
+    if split.gpu.total() == 0 && split.layers_on_gpu == 0 {
         MemoryKind::Processor
     } else {
         MemoryKind::Unified
-    };
-    judge_in(split, room, gpu_choice_is_fit, kind)
+    }
 }
 
-/// [`judge`] for a known kind of memory.
+/// The one answer to "will it fit?" (section 4.1) for a known kind of memory: the
+/// three-way mark of the panel and the picture's detail, with fit.rs's margins
+/// ([`SPARE_BYTES`] on the main device; the reserve, already taken out of the room, in
+/// computer memory). `room` comes from the matching constructor: [`Room::processor`],
+/// [`Room::graphics_card`] (Separate) or [`Room::apple`] (Unified).
 ///
 /// - Processor: [`Room::verdict`] of the total (Green / `fits`, Red / `wontFitAtAll`).
 /// - Red / `wontFitAtAll` when the total with the spare is larger than `room.partial`, or
@@ -632,22 +655,37 @@ fn auto_by(verdict: impl Fn(u64) -> Verdict, floor: u64, cap: u64) -> Option<Aut
     })
 }
 
-/// Automatic (D2b) for a custom placement or conversation memory in computer memory: the
-/// largest context from `floor` to `cap`, as `fit::auto_ctx` chooses them, whose split
-/// (`at(ctx)`) [`judge`] marks Green, else the largest it marks Yellow; `None` when not
-/// even the floor fits. Judged as All of it or a custom placement.
+/// The contract's Automatic for a custom placement (item 6, section 2.2): [`judge`]'s rule,
+/// so on a graphics card with its own memory it can choose a size whose conversation
+/// memory in computer memory does not fit there. Callers use [`auto_ctx_placed_in`] with
+/// the backend's [`MemoryKind`] instead. Kept, deprecated, until the lead amends the
+/// contract.
+#[deprecated(
+    note = "cannot tell a graphics card from Apple's shared memory; call auto_ctx_placed_in \
+            with the MemoryKind of the backend (Separate for a graphics card)"
+)]
 pub fn auto_ctx_placed(
     at: impl Fn(u64) -> Split,
     room: Room,
     floor: u64,
     cap: u64,
 ) -> Option<AutoCtx> {
-    auto_by(|ctx| judge(&at(ctx), room, false).0, floor, cap)
+    auto_by(
+        |ctx| {
+            let split = at(ctx);
+            judge_in(&split, room, false, contract_kind(&split)).0
+        },
+        floor,
+        cap,
+    )
 }
 
-/// [`auto_ctx_placed`] with [`judge_in`] for a known kind of memory and graphics choice
-/// (As much as fits marks a split with part on the processor Yellow, so Green is the
-/// whole model on the card, as `fit::auto_ctx` prefers).
+/// Automatic (D2b) for a custom placement or conversation memory in computer memory: the
+/// largest context from `floor` to `cap`, as `fit::auto_ctx` chooses them, whose split
+/// (`at(ctx)`) [`judge_in`] marks Green for this kind of memory and graphics choice, else
+/// the largest it marks Yellow; `None` when not even the floor fits. As much as fits marks
+/// a split with part on the processor Yellow, so Green is the whole model on the card, as
+/// `fit::auto_ctx` prefers.
 pub fn auto_ctx_placed_in(
     at: impl Fn(u64) -> Split,
     room: Room,

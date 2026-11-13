@@ -2,8 +2,8 @@
 //!
 //! Model files come from the internet, so this treats every length and count as
 //! hostile: nothing is allocated from a length that the rest of the file cannot hold,
-//! large arrays (the tokenizer vocabulary) are skipped without being kept, and only
-//! the keys the app needs are stored.
+//! large arrays (the tokenizer vocabulary) and long strings are skipped without being
+//! kept, and what is kept has a budget (`MAX_KEPT_TOTAL`), whatever the file's size.
 //!
 //! Format: <https://github.com/ggml-org/ggml/blob/master/docs/gguf.md>. Only
 //! little-endian files are read; big-endian GGUF is reported as unsupported.
@@ -26,6 +26,13 @@ const MAX_KEY: u64 = 65_536;
 const MAX_KEPT_ARRAY: u64 = 4096;
 /// Arrays nested deeper than this mean a damaged file.
 const MAX_DEPTH: u32 = 4;
+/// Metadata kept in memory beyond this (keys, strings, and each kept value counted as
+/// [`VALUE_COST`]) is read past instead: a crafted file cannot make the app hold more than
+/// about this much for a header, however large the file. Real headers keep well under
+/// 1 MiB (the vocabulary and merges are skipped as long arrays anyway).
+const MAX_KEPT_TOTAL: u64 = 16 * 1024 * 1024;
+/// What one kept value costs in memory besides its text (a [`Value`] is 32 bytes).
+const VALUE_COST: u64 = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GgufError {
@@ -145,6 +152,7 @@ fn read_inner<R: Read + Seek>(reader: R, len: u64, lenient: bool) -> Result<Gguf
         inner: reader,
         pos: 0,
         len,
+        kept: 0,
     };
     read_header(&mut r, lenient)
 }
@@ -175,9 +183,11 @@ fn read_header<R: Read + Seek>(r: &mut Reader<R>, lenient: bool) -> Result<GgufH
     let mut metadata = BTreeMap::new();
     for _ in 0..kv_count {
         match read_entry(r) {
-            Ok((key, value)) => {
+            Ok(Some((key, value))) => {
                 metadata.insert(key, value);
             }
+            // Past the budget: read past, not kept.
+            Ok(None) => {}
             // A prefix ends mid-entry: keep what was read.
             Err(GgufError::Corrupt(_)) if lenient && !metadata.is_empty() => break,
             Err(e) => return Err(e),
@@ -190,15 +200,23 @@ fn read_header<R: Read + Seek>(r: &mut Reader<R>, lenient: bool) -> Result<GgufH
     })
 }
 
-fn read_entry<R: Read + Seek>(r: &mut Reader<R>) -> Result<(String, Value), GgufError> {
+/// One metadata entry, or `None` when its key no longer fits the budget for kept metadata
+/// (the entry is then read past).
+fn read_entry<R: Read + Seek>(r: &mut Reader<R>) -> Result<Option<(String, Value)>, GgufError> {
     let key_len = r.u64()?;
     if key_len > MAX_KEY {
         return Err(GgufError::Corrupt("metadata key too long".into()));
     }
+    if !r.keep(key_len.saturating_add(VALUE_COST)) {
+        r.skip(key_len)?;
+        let ty = r.u32()?;
+        r.skip_value(ty, 0)?;
+        return Ok(None);
+    }
     let key = r.string(key_len)?;
     let ty = r.u32()?;
     let value = r.value(ty, 0)?;
-    Ok((key, value))
+    Ok(Some((key, value)))
 }
 
 // ---- 0.0.6 item 6: the tensor table (WP10b) ----------------------------------------------
@@ -265,6 +283,7 @@ pub fn read_with_tensors<R: Read + Seek>(
         inner: reader,
         pos: 0,
         len,
+        kept: 0,
     };
     let header = read_header(&mut r, false)?;
     let raw = read_raw_tensors(&mut r, &header)?;
@@ -369,11 +388,25 @@ struct Reader<R> {
     inner: R,
     pos: u64,
     len: u64,
+    /// The part of [`MAX_KEPT_TOTAL`] used by what was kept so far.
+    kept: u64,
 }
 
 impl<R: Read + Seek> Reader<R> {
     fn remaining(&self) -> u64 {
         self.len.saturating_sub(self.pos)
+    }
+
+    /// Takes `cost` from the budget for kept metadata; false, taking nothing, when that
+    /// would go over [`MAX_KEPT_TOTAL`].
+    fn keep(&mut self, cost: u64) -> bool {
+        match self.kept.checked_add(cost) {
+            Some(total) if total <= MAX_KEPT_TOTAL => {
+                self.kept = total;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), GgufError> {
@@ -444,7 +477,7 @@ impl<R: Read + Seek> Reader<R> {
             7 => Value::Bool(self.bytes::<1>()?[0] != 0),
             8 => {
                 let len = self.u64()?;
-                if len > MAX_KEPT_STRING {
+                if len > MAX_KEPT_STRING || !self.keep(len) {
                     self.skip(len)?;
                     Value::SkippedString(len)
                 } else {
@@ -466,7 +499,7 @@ impl<R: Read + Seek> Reader<R> {
                 if count.saturating_mul(min_size) > self.remaining() {
                     return Err(GgufError::Corrupt("array longer than the file".into()));
                 }
-                if count > MAX_KEPT_ARRAY {
+                if count > MAX_KEPT_ARRAY || !self.keep(count.saturating_mul(VALUE_COST)) {
                     match fixed_size(elem) {
                         Some(size) => self.skip(count * size)?,
                         None => {
@@ -1000,6 +1033,105 @@ mod tests {
         Some(first / block * size * rest.iter().product::<u64>())
     }
 
+    /// What a parsed header keeps, counted as the budget counts it.
+    fn kept_cost(h: &GgufHeader) -> u64 {
+        fn value(v: &Value) -> u64 {
+            match v {
+                Value::String(s) => s.len() as u64,
+                Value::Array(items) => items
+                    .iter()
+                    .map(|item| VALUE_COST + value(item))
+                    .sum::<u64>(),
+                _ => 0,
+            }
+        }
+        h.metadata
+            .iter()
+            .map(|(k, v)| k.len() as u64 + VALUE_COST + value(v))
+            .sum()
+    }
+
+    /// A crafted header cannot make the app keep more than `MAX_KEPT_TOTAL` of metadata,
+    /// however large the file (security review, round 1): strings, kept arrays and keys
+    /// past the budget are read past, and what follows them still reads.
+    #[test]
+    fn kept_metadata_has_a_budget() {
+        // Six strings of 4 MiB: three fit the budget of 16 MiB, the rest keep their length.
+        let big = "x".repeat(4 * 1024 * 1024);
+        let mut w = Writer::new().str("general.architecture", "llama");
+        for i in 0..6 {
+            w = w.str(&format!("big.{i}"), &big);
+        }
+        let bytes = w
+            .str("tokenizer.chat_template", "{{ messages }}")
+            .tensor("blk.0.attn_q.weight", 64)
+            .build();
+        let (h, tensors) = read_with_tensors(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+        assert!(kept_cost(&h) <= MAX_KEPT_TOTAL, "{}", kept_cost(&h));
+        assert_eq!(h.architecture(), Some("llama"));
+        for i in 0..3 {
+            assert_eq!(
+                h.get_str(&format!("big.{i}")).map(str::len),
+                Some(big.len())
+            );
+        }
+        for i in 3..6 {
+            assert_eq!(
+                h.get(&format!("big.{i}")),
+                Some(&Value::SkippedString(big.len() as u64))
+            );
+        }
+        // Small values after the big ones still fit what is left.
+        assert_eq!(h.get_str("tokenizer.chat_template"), Some("{{ messages }}"));
+        assert_eq!(tensors.len(), 1);
+        assert_eq!(tensors[0].bytes, 64);
+
+        // Each kept element is a value in memory (32 bytes for 4 in the file): 200 arrays
+        // of 4,096 numbers would be 26 MB kept; those past the budget are skipped.
+        let numbers = vec![7u32; 4096];
+        let mut w = Writer::new();
+        for i in 0..200 {
+            w = w.u32_array(&format!("array.{i:03}"), &numbers);
+        }
+        let bytes = w.u32("after", 5).build();
+        let h = parse(&bytes).unwrap();
+        assert!(kept_cost(&h) <= MAX_KEPT_TOTAL, "{}", kept_cost(&h));
+        let kept = h
+            .metadata
+            .values()
+            .filter(|v| matches!(v, Value::Array(_)))
+            .count();
+        assert!((100..200).contains(&kept), "{kept}");
+        assert_eq!(
+            h.get("array.199"),
+            Some(&Value::SkippedArray {
+                elem_type: 4,
+                len: 4096
+            })
+        );
+        assert_eq!(h.get_u64("after"), Some(5));
+
+        // Keys of 60,000 bytes: 300 of them would be 18 MB; past the budget an entry is
+        // read past and not kept at all, and the tensor table still reads.
+        let mut w = Writer::new().str("general.architecture", "llama");
+        for i in 0..300 {
+            w = w.u32(&format!("{i:03}{}", "k".repeat(59_997)), 1);
+        }
+        let bytes = w.tensor("output.weight", 32).build();
+        let (h, tensors) = read_with_tensors(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+        assert!(kept_cost(&h) <= MAX_KEPT_TOTAL, "{}", kept_cost(&h));
+        assert_eq!(h.architecture(), Some("llama"));
+        assert!(
+            (200..300).contains(&h.metadata.len()),
+            "{}",
+            h.metadata.len()
+        );
+        assert_eq!(tensors.len(), 1);
+        // A prefix is read the same way.
+        let h = read_prefix(&bytes[..bytes.len() / 2]).unwrap();
+        assert!(kept_cost(&h) <= MAX_KEPT_TOTAL);
+    }
+
     /// The real model: every size is the tensor's own bytes plus at most the alignment.
     #[test]
     fn real_model_tensor_table_if_available() {
@@ -1012,6 +1144,7 @@ mod tests {
             inner: BufReader::new(file),
             pos: 0,
             len,
+            kept: 0,
         };
         let header = read_header(&mut r, false).unwrap();
         let raw = read_raw_tensors(&mut r, &header).unwrap();
