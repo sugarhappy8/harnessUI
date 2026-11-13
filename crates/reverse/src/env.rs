@@ -383,7 +383,7 @@ mod tests {
                     part("java", "21.0.13+9", "java-21.0.13+9", Some("bin/java")),
                 ],
             )),
-            rea_entry: Some(Path::new(ROOT).join("rea-6.9.0/scripts/rea.mjs")),
+            rea_entry: Some(path("rea-6.9.0/scripts/rea.mjs")),
             java_home: Some(Path::new(ROOT).join("java-21.0.13+9")),
         }
     }
@@ -425,12 +425,17 @@ mod tests {
         map
     }
 
-    fn p(rel: &str) -> String {
+    /// `ROOT` and `rel`, one part at a time, as the installer joins its relative paths.
+    fn path(rel: &str) -> PathBuf {
         let mut path = PathBuf::from(ROOT);
         for c in rel.split('/') {
             path.push(c);
         }
-        path.to_string_lossy().into_owned()
+        path
+    }
+
+    fn p(rel: &str) -> String {
+        path(rel).to_string_lossy().into_owned()
     }
 
     fn common(flavor: Flavor) -> BTreeMap<String, String> {
@@ -535,10 +540,7 @@ mod tests {
                     Flavor::Windows => assert_eq!(copied, WINDOWS_COPIED, "{flavor:?}"),
                     _ => assert_eq!(copied, UNIX_COPIED, "{flavor:?}"),
                 }
-                assert_eq!(
-                    config.program,
-                    Path::new(ROOT).join("node-24.22.3/bin/node")
-                );
+                assert_eq!(config.program, path("node-24.22.3/bin/node"));
                 assert_eq!(
                     config.args,
                     vec![p("rea-6.9.0/scripts/rea.mjs"), "mcp".into()]

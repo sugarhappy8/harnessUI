@@ -261,12 +261,12 @@ pub fn find_symbols(text: &str, lang: Lang) -> Vec<Symbol> {
     // table) and lines (from this) agree after a `}` in the first column.
     masked.curly = depths;
     let mut scan = Scan::new(lang, &masked, text, all_braces);
-    for i in 0..masked.lines.len() {
+    for (i, line) in masked.lines.iter().enumerate() {
         if scan.out.len() >= MAX_SYMBOLS_PER_FILE {
             break;
         }
         scan.pop_ended(i);
-        if masked.lines[i].trim().is_empty() {
+        if line.trim().is_empty() {
             continue;
         }
         match lang {

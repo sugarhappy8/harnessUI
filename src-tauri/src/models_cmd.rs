@@ -490,11 +490,16 @@ pub async fn set_setting(
 
 /// The backend check: every backend's devices, and with a model, a timed short
 /// generation on each usable backend. The report is saved to the logs folder.
+/// `when_idle` is the answer to the D3 question, as for a reload: the timed generation
+/// replaces the loaded model, so with it the check waits until nothing uses the model
+/// (a wait that is cancelled ends with `load_replaced` and no report); without it,
+/// what uses the model is stopped.
 #[tauri::command]
 pub async fn run_diagnostics(
     app: AppHandle,
     state: State<'_, AppState>,
     model_path: Option<String>,
+    when_idle: bool,
 ) -> AppResult<DiagnosticsReportDto> {
     use std::fmt::Write;
     let mut report = String::new();
@@ -591,11 +596,12 @@ pub async fn run_diagnostics(
     }
     if let Some(path) = model_path.filter(|p| std::path::Path::new(p).is_file()) {
         let _ = writeln!(report, "\ntimed generation with {path}");
-        // The check replaces the loaded model: a reply or model check using it stops
-        // first, and a change waiting for the model is cancelled.
+        // The check replaces the loaded model (D3): as the user answered, it waits until
+        // nothing uses the model, or stops what does first. A change waiting for the
+        // model is replaced, as by a reload.
         state
             .runtime
-            .before_change(&state.model_busy, false)
+            .before_change(&state.model_busy, when_idle)
             .await?;
         let previous = state.runtime.status();
         // Until what was there is back, the check is a model check (D3): a change of what

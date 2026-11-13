@@ -28,7 +28,9 @@ Drives the backend commands the model settings panel uses, in the real app:
   not loaded again; removing the unloaded model forgets it (`unloadedPath`);
 - the backend check counts as a model check: a model picked meanwhile waits for it (or
   stops it with Stop and restart) and is the one loaded afterwards; with nothing loaded,
-  "Unloaded to free memory" is as it was after the check.
+  "Unloaded to free memory" is as it was after the check; the backend check itself, asked
+  to wait ("Restart when it ends") while the model is busy, waits and stops nothing, and the
+  waiting line's Cancel ends it with nothing checked.
 
 The small model sometimes ends the long reply after a few words; a step that needs the
 reply to still stream then tries again with a new reply in a new chat, and a change that
@@ -304,7 +306,7 @@ def check_the_backend_check_keeps_the_unloaded_model(s, home):
     call(s, "load_local_model", {"path": MODEL})
     ready(s)
     call(s, "unload_model")
-    call(s, "run_diagnostics", {"modelPath": MODEL}, timeout=1200)
+    call(s, "run_diagnostics", {"modelPath": MODEL, "whenIdle": True}, timeout=1200)
     st = s.invoke("runtime_status")
     assert st["state"] == "stopped" and st["unloadedPath"] == MODEL, ("not as it was before the check", st)
     assert server_processes(home) == [], server_processes(home)
@@ -323,7 +325,7 @@ def check_a_pick_waits_for_the_backend_check(s):
     call(s, "model_load_info", {"path": str(second)})
     call(s, "load_local_model", {"path": MODEL})
     ready(s)
-    s.execute(FIRE, "__diag", "run_diagnostics", {"modelPath": MODEL})
+    s.execute(FIRE, "__diag", "run_diagnostics", {"modelPath": MODEL, "whenIdle": True})
     s.wait_for(lambda: busy(s)["modelChecks"] == 1 or not pending(s, "__diag"), 300, "the check to start")
     assert pending(s, "__diag") and busy(s)["modelChecks"] == 1, ("the check does not count as a model check", busy(s))
     s.execute(FIRE, "__pick", "load_local_model", {"path": str(second), "settings": None, "whenIdle": True})
@@ -347,7 +349,7 @@ def check_a_pick_waits_for_the_backend_check(s):
 def check_stop_and_restart_stops_the_backend_check(s):
     """A model picked with "Stop and restart" during the backend check stops the check and
     is the one loaded afterwards (the check does not put back what was there before it)."""
-    s.execute(FIRE, "__diag2", "run_diagnostics", {"modelPath": MODEL})
+    s.execute(FIRE, "__diag2", "run_diagnostics", {"modelPath": MODEL, "whenIdle": True})
     s.wait_for(lambda: busy(s)["modelChecks"] == 1 or not pending(s, "__diag2"), 300, "the check to start")
     assert pending(s, "__diag2") and busy(s)["modelChecks"] == 1, ("the check does not count as a model check", busy(s))
     call(s, "load_local_model", {"path": MODEL, "settings": None, "whenIdle": False})
@@ -357,6 +359,32 @@ def check_stop_and_restart_stops_the_backend_check(s):
     time.sleep(1.0)
     st = ready(s)
     assert st["modelPath"] == MODEL and busy(s)["modelChecks"] == 0, ("the check undid the pick", st)
+
+
+def check_the_backend_check_waits_when_asked(s):
+    """The backend check answered "Restart when it ends" (`whenIdle`) while the model is
+    busy, here with another backend check, waits for it and stops nothing (D3); the waiting
+    line's Cancel ends it with `load_replaced`, and the check that was running goes on."""
+    s.execute(FIRE, "__diag3", "run_diagnostics", {"modelPath": MODEL, "whenIdle": True})
+    s.wait_for(lambda: busy(s)["modelChecks"] == 1 or not pending(s, "__diag3"), 300, "the check to start")
+    assert pending(s, "__diag3") and busy(s)["modelChecks"] == 1, ("the check does not count as a model check", busy(s))
+    s.execute(FIRE, "__diag4", "run_diagnostics", {"modelPath": MODEL, "whenIdle": True})
+    seen = {}
+
+    def waits():
+        seen["status"] = s.invoke("runtime_status")
+        return seen["status"]["reloadWaiting"] or not pending(s, "__diag4") or not pending(s, "__diag3")
+
+    s.wait_for(waits, 300, "the second check to wait for the first")
+    assert seen["status"]["reloadWaiting"] and pending(s, "__diag3"), ("the second check did not wait", seen["status"], busy(s))
+    call(s, "cancel_pending_reload")
+    r = fired(s, "__diag4", 60)
+    assert not r.get("ok") and r["error"].get("code") == "load_replaced", ("the cancelled wait did not end", r)
+    r = fired(s, "__diag3", 1200)
+    assert r.get("ok") and "stopped:" not in r["value"]["text"], ("the waiting check stopped the running one", r)
+    st = ready(s)
+    assert st["modelPath"] == MODEL and st["reloadWaiting"] is False, st
+    assert busy(s)["modelChecks"] == 0
 
 
 def main() -> int:
@@ -662,6 +690,9 @@ def main() -> int:
 
         step("Stop and restart stops the backend check; the model picked is the one loaded")
         check_stop_and_restart_stops_the_backend_check(s)
+
+        step("the backend check asked to wait waits for the model and stops nothing")
+        check_the_backend_check_waits_when_asked(s)
 
         step("the 0.0.4 command shape still loads exactly as given")
         old = {"ctx": 4096, "backend": None, "device": None}

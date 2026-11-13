@@ -554,7 +554,7 @@ describe("ToolsPanel: the Coding apps group (0.0.6)", () => {
   it("shows a program path with hidden and right-to-left characters as codes", async () => {
     ipcMock.codingAppsStatus.mockImplementation(async () => ({
       ...FOUND,
-      apps: [{ ...FOUND.apps[0]!, path: "/home/u/bin/‮edualc​", version: "2.1‮" }, FOUND.apps[1]!],
+      apps: [{ ...FOUND.apps[0]!, path: "/home/u/bin/\u202Eedualc\u200B", version: "2.1\u202E" }, FOUND.apps[1]!],
     }));
     ipcMock.listChatTools.mockImplementation(async () => [tool("coding_apps", "ask_claude_code", { enabledInChat: true })]);
     await openPanel();

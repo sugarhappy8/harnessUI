@@ -316,7 +316,7 @@ describe("Models → Installed", () => {
   });
 
   it("shows file names, folders and repos with hidden and right-to-left characters as codes", async () => {
-    const odd = { ...model(3, "X-‮fuug.Q4_K_M.gguf"), repo: "someone/‮evil-GGUF" };
+    const odd = { ...model(3, "X-\u202Efuug.Q4_K_M.gguf"), repo: "someone/\u202Eevil-GGUF" };
     ipcMock.listInstalledModels.mockResolvedValue([odd]);
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     await show();
@@ -329,7 +329,7 @@ describe("Models → Installed", () => {
     expect(screen.getByRole("button", { name: "Add to comparison: X-\\u{202E}fuug.Q4_K_M.gguf" })).toBeTruthy();
     await click(screen.getByRole("button", { name: "Delete X-\\u{202E}fuug.Q4_K_M.gguf" }));
     expect(confirm).toHaveBeenCalledWith("Delete X-\\u{202E}fuug.Q4_K_M.gguf? This removes 1.0 GB from disk.");
-    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("‮");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("\u202E");
     confirm.mockRestore();
   });
 });

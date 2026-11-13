@@ -21,8 +21,8 @@ describe("Models → Downloads", () => {
     ipcMock.listDownloads.mockResolvedValue([
       {
         id: "d1",
-        repo: "someone/‮evil-GGUF",
-        label: "X-‮fuug.Q4_K_M.gguf",
+        repo: "someone/\u202Eevil-GGUF",
+        label: "X-\u202Efuug.Q4_K_M.gguf",
         fileCount: 1,
         bytesDone: 0,
         bytesTotal: 1_000_000_000,
@@ -38,6 +38,6 @@ describe("Models → Downloads", () => {
     const name = screen.getByText("someone/\\u{202E}evil-GGUF · X-\\u{202E}fuug.Q4_K_M.gguf");
     expect(name.tagName).toBe("BDI");
     expect(name.getAttribute("dir")).toBe("ltr");
-    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("‮");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("\u202E");
   });
 });
