@@ -169,6 +169,12 @@ one starts from this file and `README.md`.
   the other batches are on their last refix or check steps. The final-pass script
   (scratchpad v006-final-pass.js: every check and every e2e suite with the real model on
   toolchain 1.100, fixes re-verified) starts when they end.
+- 10:45 UTC: final fix round done (22 items, batches a-g, each fixed, reviewed, refixed and
+  checked; reports in scratchpad reports/final-*.md). Throwaway-file exclude rules removed
+  (no leftovers). Final pass started on toolchain 1.100: wf_f39d4750-b8d (Rust checks and
+  tests incl. real llama-server and real rea; full scripted e2e) and wf_56f91c0c-0cc
+  (frontend checks, milestone e2e, completeness critic and owner checklist). CI started on
+  this commit so Windows and macOS results come in meanwhile.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
