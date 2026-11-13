@@ -68,3 +68,17 @@ Collected while the packages run. Each needs doing (or a decision) before the re
     it (drop guard or a start in its own task).
   - The `reverse-tools` e2e probe's last step expects `{"installed": False, "items": [...]}`;
     WP9h's `reverse_drop.rs` now also returns `groupOn: false`: update the probe (WP9h).
+- **Item 5: WP9a, WP9b, WP9c, WP9d, WP9g, WP9h done; WP9e running (wf_59ddd95e-968).** For the lead:
+  - **Ghidra pin:** `reverse.lock.json` pins Ghidra 12.1.4 as `first-download-only` (GitHub's
+    digest cannot be read from this sandbox). A release build refuses to offer a part without
+    its publisher's check, and `pin_reverse.py --check --release` fails on it, so a release
+    built today shows Ghidra as "Not available in this version of harnessUI." WP9e adds a CI
+    step that reads the digest with the workflow's token; once it confirms, flip the lock to
+    `github-digest` (WP9e's report says how). Otherwise Windows has no decompiler in 0.0.6.
+  - item5-spec's WP9a line still says `(mode & 0o777) | 0o600`; the code uses
+    `(mode & 0o755) | 0o600` (group/other write bits dropped). Update the spec.
+  - WP9a added `UpdateInfo.part` and `ReverseError::ServerError { host, status }`: check WP9d
+    shows "Node.js"/"Java" for a part update and the server-error text.
+  - WP9c (minor, left): a link whose target is not valid text is treated as missing by
+    `follow_links`, so a chain of two such links can still make the system look up a network
+    place and the folder passes. Fix: treat an unreadable link target as refused.

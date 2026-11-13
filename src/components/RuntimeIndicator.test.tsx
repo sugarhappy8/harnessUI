@@ -420,6 +420,24 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     await click(screen.getByRole("button", { name: "Load" }));
     expect(ipcMock.loadLocalModel).toHaveBeenCalledWith("/models/a.gguf", null, true);
   });
+
+  it("says only Load in the narrowest header, where the usage icons keep their room (0.0.6 item 6)", async () => {
+    // jsdom has no layout: the classes are checked here, the real widths in the fine-control e2e.
+    for (const [unloadedPath, words] of [
+      ["/models/a.gguf", "Unloaded to free memory"],
+      [null, "Not loaded"],
+    ] as const) {
+      await show(status({ state: "stopped", modelPath: null, modelName: null, nCtx: null, unloadedPath }));
+      const load = screen.getByRole("button", { name: "Load" });
+      const line = load.parentElement as HTMLElement;
+      expect(line.getAttribute("title")).toBe(words);
+      const shown = screen.getByText(words);
+      expect(shown.className).toContain("@max-xl:hidden");
+      expect((shown.nextElementSibling as HTMLElement).className).toContain("@max-xl:hidden");
+      expect(load.className).not.toContain("hidden");
+      cleanup();
+    }
+  });
 });
 
 describe("RuntimeIndicator: where the model went (0.0.6 item 6)", () => {
@@ -442,6 +460,11 @@ describe("RuntimeIndicator: where the model went (0.0.6 item 6)", () => {
     expect(notes({ placement: placement({ custom: false, layersAbout: true }) })).toEqual([PARTIAL]);
     // All layers on the card, but the expert parts of some on the processor.
     expect(notes({ placement: placement({ custom: false, layersOnGraphics: 41, expertLayersOnProcessor: 19 }) })).toEqual([PARTIAL]);
+    // Only amounts known after As much as fits: the rest is on the processor.
+    expect(notes({ placement: placement({ custom: false, layersAbout: true, layersOnGraphics: null }) })).toEqual([PARTIAL]);
+    expect(notes({ placement: placement({ custom: false, layersAbout: true, layersOnGraphics: null, units: null }) })).toEqual([
+      PARTIAL,
+    ]);
     // Everything on the card: no note.
     expect(notes({ placement: placement({ custom: false, layersOnGraphics: 41 }) })).toEqual([]);
     // The report wins over the old layer counts.
@@ -455,7 +478,7 @@ describe("RuntimeIndicator: where the model went (0.0.6 item 6)", () => {
     expect(notes({ placement: placement({ custom: true }) })).toEqual([]);
     expect(notes({ placement: placement({ custom: true, layersOnGraphics: 41, expertLayersOnProcessor: 20 }) })).toEqual([]);
     expect(notes({ placement: placement({ custom: false, graphics: null, layersOnGraphics: 0 }) })).toEqual([]);
-    // Only amounts known: no claim about layers.
+    // Only amounts known: All of it puts every layer on the card, so no note...
     expect(notes({ placement: placement({ custom: false, layersOnGraphics: null }) })).toEqual([]);
     expect(partOnProcessor(status({ backend: "cpu", placement: placement({ custom: false, layersAbout: true }) }))).toBe(true);
     // Without a report (a backend without item 6) the old layer counts still work.

@@ -126,6 +126,8 @@ one starts from this file and `README.md`.
   xvfb-run) held /tmp/harness-e2e.lock for 38 minutes and blocked three e2e runs; stopped with
   the owner's permission. Use `flock -o` (the lock is not inherited by the children) from now
   on (spec Part 1 and the v3 script updated).
+- 04:30 UTC: item 5's six main packages done (reviewed, fixed, checked); WP9e started
+  (wf_59ddd95e-968). Item 6: WP10d/WP10e in review. Leftover fixes run wf_c6b8dca9-052 in review.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

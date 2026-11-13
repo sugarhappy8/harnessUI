@@ -448,6 +448,127 @@ async fn a_stored_fine_value_outside_the_lists_launches_as_automatic() {
     );
 }
 
+/// A stored Fine control value 0.0.6 cannot read at all (too large for its type, negative,
+/// an unknown choice, `null`, a later version's shape) is Automatic on its own, like a
+/// value outside its range (3.2), and never takes the model's other choices with it.
+#[tokio::test]
+async fn a_stored_fine_value_of_the_wrong_type_resets_only_that_value() {
+    let store = store::Store::open_in_memory().unwrap();
+    let key = settings_key("m.gguf", 16);
+    store
+        .set_setting(
+            &key,
+            &json!({"gpu": "off", "context": {"fixed": 16384}, "saveMemory": "on",
+                    "fine": {"threads": {"count": 70000}, "fastAttention": "off",
+                             "kv": "computerMemory"}}),
+        )
+        .await
+        .unwrap();
+    let o = read_overrides(&store, "m.gguf", 16).await;
+    assert_eq!(
+        (o.gpu, o.context, o.save_memory),
+        (GpuChoice::Off, ContextChoice::Fixed(16384), Toggle::On),
+        "the plain choices are kept"
+    );
+    assert_eq!(
+        o.fine,
+        FineControl {
+            kv: KvPlace::ComputerMemory,
+            fast_attention: FastAttention::Off,
+            ..FineControl::default()
+        },
+        "only the unreadable thread count is Automatic"
+    );
+    // Every unreadable shape, field by field, next to a readable value that is kept.
+    for (field, bad) in [
+        ("layers", json!("all")),
+        ("layers", json!({"count": -1})),
+        ("layers", json!({"count": 5_000_000_000_u64})),
+        ("layers", json!({"count": 2.5})),
+        ("experts", json!({"firstLayers": -3})),
+        ("experts", json!("some")),
+        ("kv", json!("disk")),
+        ("threads", json!({"count": 70000})),
+        ("threads", json!(null)),
+        ("fastAttention", json!(true)),
+        ("leaveFree", json!("lots")),
+        ("leaveFree", json!({"mib": -512})),
+        ("leaveFree", json!({"gib": 2})),
+    ] {
+        let mut row = json!({"gpu": "off", "fine": {"layers": {"count": 7},
+                             "experts": "all", "kv": "computerMemory",
+                             "threads": {"count": 3}, "fastAttention": "on",
+                             "leaveFree": {"mib": 2048}}});
+        row["fine"][field] = bad.clone();
+        store.set_setting(&key, &row).await.unwrap();
+        let o = read_overrides(&store, "m.gguf", 16).await;
+        assert_eq!(o.gpu, GpuChoice::Off, "{field}: {bad}");
+        let mut want = FineControl {
+            layers: LayersChoice::Count(7),
+            experts: ExpertsChoice::All,
+            kv: KvPlace::ComputerMemory,
+            threads: ThreadsChoice::Count(3),
+            fast_attention: FastAttention::On,
+            leave_free: LeaveFree::Mib(2048),
+        };
+        match field {
+            "layers" => want.layers = LayersChoice::Auto,
+            "experts" => want.experts = ExpertsChoice::Auto,
+            "kv" => want.kv = KvPlace::Auto,
+            "threads" => want.threads = ThreadsChoice::Auto,
+            "fastAttention" => want.fast_attention = FastAttention::Auto,
+            _ => want.leave_free = LeaveFree::Auto,
+        }
+        assert_eq!(o.fine, want, "{field}: {bad}");
+    }
+    // A "fine" that is not an object at all is all Automatic; the rest is kept.
+    for bad in [json!(null), json!(5), json!("auto"), json!([1, 2])] {
+        store
+            .set_setting(&key, &json!({"gpu": "off", "fine": bad}))
+            .await
+            .unwrap();
+        let o = read_overrides(&store, "m.gguf", 16).await;
+        assert_eq!((o.gpu, o.fine), (GpuChoice::Off, FineControl::default()), "{bad}");
+    }
+    // Every Fine control value the app saves reads back as it was (the field names of the
+    // lenient reader follow the stored JSON).
+    let full = ModelLoadSettings {
+        gpu: GpuChoice::Fit,
+        fine: FineControl {
+            layers: LayersChoice::Count(12),
+            experts: ExpertsChoice::FirstLayers(4),
+            kv: KvPlace::ComputerMemory,
+            threads: ThreadsChoice::Count(6),
+            fast_attention: FastAttention::Off,
+            leave_free: LeaveFree::Mib(512),
+        },
+        ..ModelLoadSettings::default()
+    };
+    save_overrides(&store, "m.gguf", 16, &full).await.unwrap();
+    assert_eq!(read_overrides(&store, "m.gguf", 16).await, full);
+    // A row that is not readable at all still follows the defaults for all models.
+    store
+        .set_setting(&key, &json!({"gpu": "sideways", "fine": {"threads": {"count": 3}}}))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_overrides(&store, "m.gguf", 16).await.gpu,
+        GpuChoice::Default
+    );
+    store.set_setting(&key, &json!([1, 2])).await.unwrap();
+    assert_eq!(
+        read_overrides(&store, "m.gguf", 16).await,
+        ModelLoadSettings::default()
+    );
+    // Drafts from the webview stay strict: the same shapes are refused, not repaired.
+    assert!(
+        serde_json::from_value::<ModelLoadSettings>(
+            json!({"fine": {"threads": {"count": 70000}}})
+        )
+        .is_err()
+    );
+}
+
 /// Section 3.1, row by row, from the stored choices to the launch's words.
 #[test]
 fn fine_control_resolves_per_row_of_the_table() {
@@ -514,15 +635,65 @@ fn fine_control_resolves_per_row_of_the_table() {
         words(&all(layers(0)), &d, &on_card, dev),
         "--device Vulkan0 -ngl 0 --fit off"
     );
-    // At or above the model's units: every unit.
-    assert_eq!(
-        words(&all(layers(41)), &d, &on_card, dev),
-        "--device Vulkan0 -ngl 41 --fit off"
+    // At or above the model's units: every unit. With All of it that is plain All of it's
+    // own `-ngl all` (no layer count, so the same launch); with As much as fits it is a
+    // custom placement of every unit (`-ngl` of the unit count reads as all of them), not
+    // `--fit on`.
+    let plain_all = resolve(
+        &all(FineControl::default()),
+        &auto_defaults(),
+        None,
+        Some(&d),
+        &on_card,
     );
-    let r50 = resolve(&all(layers(50)), &auto_defaults(), None, Some(&d), &on_card);
-    let r41 = resolve(&all(layers(41)), &auto_defaults(), None, Some(&d), &on_card);
-    assert_eq!(r50.fine.gpu_layers, Some(41));
-    assert!(r50.same_launch(&r41));
+    for n in [41, 50, 1000] {
+        let r = resolve(&all(layers(n)), &auto_defaults(), None, Some(&d), &on_card);
+        assert_eq!(r.fine.gpu_layers, None, "{n}");
+        assert!(r.same_launch(&plain_all), "{n}");
+        assert_eq!(
+            placement_words(&r, dev),
+            "--device Vulkan0 -ngl all --fit off",
+            "{n}"
+        );
+        let r = resolve(&fit(layers(n)), &auto_defaults(), None, Some(&d), &on_card);
+        assert_eq!(r.fine.gpu_layers, Some(41), "{n}");
+        assert_eq!(
+            placement_words(&r, dev),
+            "--device Vulkan0 -ngl 41 --fit off",
+            "{n}"
+        );
+    }
+    assert_eq!(
+        words(&all(layers(40)), &d, &on_card, dev),
+        "--device Vulkan0 -ngl 40 --fit off"
+    );
+    // With expert parts on the processor, every unit is `-ngl all` with either choice.
+    let all_units_experts = FineControl {
+        experts: ExpertsChoice::All,
+        ..layers(49)
+    };
+    for o in [all(all_units_experts), fit(all_units_experts)] {
+        let r = resolve(&o, &auto_defaults(), None, Some(&moe()), &on_card);
+        assert_eq!(r.fine.gpu_layers, None);
+        assert_eq!(
+            placement_words(&r, dev),
+            "--device Vulkan0 -ngl all --fit off --cpu-moe"
+        );
+    }
+    // A model whose units are unknown keeps the count as chosen.
+    let unreadable = ModelFacts {
+        header: None,
+        layers: None,
+        ..dense()
+    };
+    let r = resolve(
+        &all(layers(50)),
+        &auto_defaults(),
+        None,
+        Some(&unreadable),
+        &on_card,
+    );
+    assert_eq!(r.fine.gpu_layers, Some(50));
     // Expert parts only, and with layers.
     let experts = |e| FineControl {
         experts: e,
@@ -732,6 +903,10 @@ fn a_change_that_launches_the_same_is_not_settings_changed() {
         fast_attention: FastAttention::Off,
         ..FineControl::default()
     };
+    let every_layer = FineControl {
+        layers: LayersChoice::Count(41),
+        ..FineControl::default()
+    };
     let off = ModelLoadSettings {
         gpu: GpuChoice::Off,
         ..ModelLoadSettings::default()
@@ -761,6 +936,26 @@ fn a_change_that_launches_the_same_is_not_settings_changed() {
                 fine: fast_off,
                 ..saving.clone()
             },
+        ),
+        (
+            "every layer with All of it",
+            ModelLoadSettings {
+                gpu: GpuChoice::All,
+                ..ModelLoadSettings::default()
+            },
+            ModelLoadSettings {
+                gpu: GpuChoice::All,
+                fine: every_layer,
+                ..ModelLoadSettings::default()
+            },
+        ),
+        (
+            "every layer with All of it from the defaults",
+            ModelLoadSettings::default(),
+            fine(FineControl {
+                layers: LayersChoice::Count(1000),
+                ..FineControl::default()
+            }),
         ),
     ] {
         let loaded = r(&before);
@@ -1039,6 +1234,51 @@ fn fine_facts_say_what_fine_control_may_offer() {
     );
     assert!(info.fine_facts.graphics);
     assert_eq!(info.fine_facts, fine_facts(&dense(), &m));
+}
+
+/// A graphics card's description from the probe goes through the one rule of item 6 2.0
+/// wherever the panel shows it: in "Which graphics card" (`devices`) as in the picture's
+/// graphics bar. Its name, which is only ever matched, stays as the probe wrote it.
+#[test]
+fn device_descriptions_from_the_probe_are_escaped() {
+    let raw = "AMD\u{202E}Radeon\u{200B} RX\u{7}";
+    let long = format!("Card {}", "x".repeat(200));
+    let m = Machine::from_probes(
+        &[
+            probe(
+                runtime::BackendKind::Vulkan,
+                &[
+                    ("Vulkan0", raw, 16_304, 15_000),
+                    ("Vulkan1", long.as_str(), 8_000, 7_000),
+                ],
+            ),
+            probe(runtime::BackendKind::Cpu, &[("CPU", "CPU", 0, 0)]),
+        ],
+        None,
+        Some("Vulkan0"),
+        32 * GB,
+        &Freed::default(),
+    );
+    assert_eq!(m.devices[0].name, "Vulkan0");
+    assert_eq!(
+        m.devices[0].description,
+        "AMD[U+202E]Radeon[U+200B] RX[U+0007]"
+    );
+    assert_eq!(m.devices[0].description, m.gpu_description);
+    assert_eq!(m.devices[1].description, usage::escape_text(&long, 80));
+    assert!(m.devices[1].description.chars().count() <= 80);
+    // The device is still chosen by its name.
+    assert_eq!(
+        validate(
+            &ModelLoadSettings {
+                device: DeviceChoice::Named("Vulkan0".into()),
+                ..ModelLoadSettings::default()
+            },
+            None,
+            &m
+        ),
+        Ok(())
+    );
 }
 
 // ---- Files on disk -------------------------------------------------------------------------

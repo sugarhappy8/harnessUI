@@ -69,7 +69,9 @@ export function partOnProcessor(rt: RuntimeStatus): boolean {
   const p = rt.placement ?? null;
   if (p) {
     if (p.custom || p.graphics === null) return false;
-    const fewer = p.layersOnGraphics !== null && p.units !== null && p.layersOnGraphics < p.units;
+    // Only amounts known (`layersOnGraphics` null): part is on the processor after As much
+    // as fits (the menu says "…, the rest on the processor"); All of it put every layer on the card.
+    const fewer = p.layersOnGraphics === null ? p.layersAbout : p.units !== null && p.layersOnGraphics < p.units;
     return fewer || (p.expertLayersOnProcessor ?? 0) > 0;
   }
   return rt.offloadedLayers !== null && rt.totalLayers !== null && rt.offloadedLayers < rt.totalLayers;
@@ -347,12 +349,17 @@ function Status() {
     return <span className="text-xs whitespace-nowrap text-fg-muted">Unloading…</span>;
   }
 
-  // Stopped: unloaded by the user, or never loaded since the app started.
+  // Stopped: unloaded by the user, or never loaded since the app started. In the narrowest
+  // header, where the usage line's icons keep their room (0.0.6 item 6), only "Load" shows,
+  // whole; the state is its tooltip (and the message box's placeholder says it too).
   const unloaded = runtime.unloadedPath !== null;
+  const stateWords = unloaded ? "Unloaded to free memory" : "Not loaded";
   return (
-    <span className="flex min-w-0 items-center gap-1.5 text-xs whitespace-nowrap text-fg-muted">
-      <span className="truncate">{unloaded ? "Unloaded to free memory" : "Not loaded"}</span>
-      <span aria-hidden>·</span>
+    <span className="flex min-w-0 items-center gap-1.5 text-xs whitespace-nowrap text-fg-muted" title={stateWords}>
+      <span className="truncate @max-xl:hidden">{stateWords}</span>
+      <span aria-hidden className="@max-xl:hidden">
+        ·
+      </span>
       <button
         type="button"
         onClick={() => chatPath && void useApp.getState().pickModel(`local:${chatPath}`)}

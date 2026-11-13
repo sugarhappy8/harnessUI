@@ -146,11 +146,21 @@ describe("FineControl: the finer offloading settings of one model", () => {
   it("shows the layer and graphics settings only when a graphics device is known", () => {
     show({ facts: { graphics: false, expertLayers: 48 } });
     expect(screen.queryByLabelText("Layers on the graphics card")).toBeNull();
-    expect(screen.queryByLabelText("Expert parts on the processor")).toBeNull();
     expect(screen.queryByLabelText("Conversation memory on the graphics card")).toBeNull();
     expect(screen.queryByLabelText("Leave free on the graphics card")).toBeNull();
     expect(screen.getByLabelText("Processor threads")).toBeTruthy();
     expect(screen.getByLabelText("Fast attention")).toBeTruthy();
+    // Expert parts show whenever the model has experts (section 3, row 2), greyed out with
+    // a note when there is no graphics card for them to leave.
+    expect(select("Expert parts on the processor").disabled).toBe(true);
+    expect(screen.getByText("Not used without a graphics card.")).toBeTruthy();
+    cleanup();
+    show({ facts: { graphics: false, expertLayers: 48, apple: true } });
+    expect(select("Expert parts on the processor").disabled).toBe(true);
+    expect(screen.getByText("Not used without Apple graphics.")).toBeTruthy();
+    cleanup();
+    show({ facts: { graphics: false, expertLayers: null } });
+    expect(screen.queryByLabelText("Expert parts on the processor")).toBeNull();
   });
 
   it("fixes fast attention on while Save memory is on", () => {

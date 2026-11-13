@@ -6000,6 +6000,21 @@ def p_fine_control(c, notes):
               whole: form ? form.getBoundingClientRect().right <= br.right + 0.5 : false,
               formWidth: form ? Math.round(form.getBoundingClientRect().width) : 0,
               width: Math.round(br.width),
+              // The header indicator beside it ("Not loaded · Load"): its words show whole or
+              // not at all (only "Load" in the narrowest header), and "Load" shows whole.
+              indicator: (() => {
+                const load = [...h.querySelectorAll('button')].find(e => e.innerText.trim() === 'Load');
+                if (!load) return null;
+                const words = load.parentElement.querySelector('span.truncate');
+                const shown = !!words && getComputedStyle(words).display !== 'none';
+                return {
+                  text: load.parentElement.innerText,
+                  shown,
+                  cut: shown && words.scrollWidth > words.clientWidth + 0.5,
+                  loadWhole: load.getBoundingClientRect().width > 0 && load.scrollWidth <= load.clientWidth + 0.5
+                    && load.getBoundingClientRect().right <= h.getBoundingClientRect().right,
+                };
+              })(),
             };
             """)
 
@@ -6069,6 +6084,13 @@ def p_fine_control(c, notes):
                 assert geo["under"] and not geo["over"], geo
                 if geo["form"] == "icons":
                     assert geo["whole"], geo
+                # The indicator is "Not loaded · Load" here unless another scenario left a model loaded.
+                ind = geo["indicator"]
+                notes.append(f"  indicator: {ind}")
+                if ind is not None:
+                    assert ind["loadWhole"] and not ind["cut"], geo
+                    if geo["form"] == "icons":
+                        assert not ind["shown"] and ind["text"].strip() == "Load", geo
                 # The form follows the header's width: 64rem, 48rem, 36rem (16 px a rem).
                 want = "wide" if geo["header"] >= 1024 else "medium" if geo["header"] >= 768 else "small" if geo["header"] >= 576 else "icons"
                 assert geo["form"] == want, (want, geo)
@@ -6225,7 +6247,7 @@ def p_reverse_describe(c, notes):
     Full access, with no card: a folder that holds the app's own data folder is refused, a
     network place behind dot segments (/tmp/../net/...) is refused, and a folder holding a chain
     of two links whose second names /net is refused; a session tool with no open file is
-    refused. Every call is in the audit log."""
+    refused before policy. Every call that reaches policy is in the audit log."""
     s = c.s
     if os.environ.get("HARNESS_REVERSE_ROOT"):
         notes.append("HARNESS_REVERSE_ROOT is set: the reverse-engineering scenario owns that folder; skipped")
@@ -6337,8 +6359,14 @@ def p_reverse_describe(c, notes):
             s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
         audit = rows(chat)
         notes.append("audit: " + json.dumps(audit))
-        assert sum(1 for r in audit if r[1] == "denied") >= 5, audit
-        assert not any(r[1].startswith("allowed") for r in audit), audit
+        # The user's Deny, then four hard limits; the session call was refused before policy.
+        assert sorted(r[:2] for r in audit) == sorted([
+            ("inspect_pe_imports", "denied"),
+            ("inspect_desktop_application", "refused_by_policy"),
+            ("analyze_javascript_application", "refused_by_policy"),
+            ("inspect_pe_imports", "refused_by_policy"),
+            ("inspect_desktop_application", "refused_by_policy"),
+        ]), audit
         # Nothing was allowed, so rea was never asked to start.
         notes.append("rea: " + json.dumps(s.invoke("reverse_status").get("running")))
     finally:

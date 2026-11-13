@@ -552,7 +552,8 @@ pub struct GpuOption {
 pub struct DeviceOption {
     /// The probe's name (`Vulkan0`): stored in [`DeviceChoice::Named`], never shown.
     pub name: String,
-    /// The device's own name ("AMD Radeon RX 9070 XT").
+    /// The device's own name ("AMD Radeon RX 9070 XT"), hidden characters written as
+    /// `[U+XXXX]` and cut to 80 characters (item 6, 2.0).
     pub description: String,
     pub total_mib: u64,
     pub free_mib: u64,
@@ -738,14 +739,58 @@ async fn page_defaults_with(
 }
 
 /// One model's saved overrides; all `Default` when none are saved or they cannot be read.
+/// Fine control is read field by field ([`lenient_fine`]), so a value of it that cannot be
+/// read at all never takes the model's other choices with it.
 pub async fn read_overrides(store: &store::Store, file_name: &str, size: u64) -> ModelLoadSettings {
-    let stored: ModelLoadSettings = store
+    let stored: Option<serde_json::Value> = store
         .get_setting(&settings_key(file_name, size))
         .await
         .ok()
-        .flatten()
-        .unwrap_or_default();
-    sane_overrides(stored)
+        .flatten();
+    sane_overrides(overrides_from_stored(stored))
+}
+
+/// A stored overrides row as the app reads it: the plain choices as one (all `Default`
+/// when any of them cannot be read, as before item 6), Fine control field by field.
+/// Drafts from the webview stay strict ([`ModelLoadSettings`]'s own `Deserialize`), so
+/// they are refused, never repaired.
+fn overrides_from_stored(stored: Option<serde_json::Value>) -> ModelLoadSettings {
+    let Some(serde_json::Value::Object(mut row)) = stored else {
+        return ModelLoadSettings::default();
+    };
+    let fine = row.remove("fine");
+    let mut overrides: ModelLoadSettings =
+        serde_json::from_value(serde_json::Value::Object(row)).unwrap_or_default();
+    overrides.fine = lenient_fine(fine.as_ref());
+    overrides
+}
+
+/// Stored Fine control, one field at a time (section 3.2: a program can write the
+/// settings row, or a later version a shape 0.0.6 does not know): a value that cannot be
+/// read (too large for its type, negative, a fraction, an unknown choice, `null`) is
+/// Automatic on its own, the other fields are kept. A `fine` that is not an object is all
+/// Automatic. Values that can be read but are outside their lists are [`sane_fine`]'s.
+fn lenient_fine(stored: Option<&serde_json::Value>) -> FineControl {
+    fn field<T: serde::de::DeserializeOwned + Default>(
+        row: &serde_json::Map<String, serde_json::Value>,
+        key: &str,
+    ) -> T {
+        row.get(key)
+            .and_then(|v| T::deserialize(v).ok())
+            .unwrap_or_default()
+    }
+    let Some(serde_json::Value::Object(row)) = stored else {
+        return FineControl::default();
+    };
+    // The JSON keys of `FineControl` (camelCase); a test reads every saved value back.
+    FineControl {
+        layers: field(row, "layers"),
+        experts: field(row, "experts"),
+        kv: field(row, "kv"),
+        threads: field(row, "threads"),
+        fast_attention: field(row, "fastAttention"),
+        leave_free: field(row, "leaveFree"),
+    }
 }
 
 /// Stored overrides as a load may use them: a fixed size outside [`CTX_RANGE`], which
@@ -1268,7 +1313,9 @@ impl Machine {
                 .iter()
                 .map(|d| DeviceOption {
                     name: d.name.clone(),
-                    description: d.description.clone(),
+                    // Shown in "Which graphics card": the one rule of item 6 2.0, as the
+                    // picture's bar. The name is only ever matched, never shown.
+                    description: usage::escape_text(&d.description, DEVICE_NAME_CHARS),
                     total_mib: d.total_mib,
                     free_mib: d.free_mib,
                     recommended: recommended.as_deref() == Some(d.name.as_str()),

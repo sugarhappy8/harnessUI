@@ -403,18 +403,23 @@ describe("0.0.6 item 6: plain words for Fine control, the picture and the usage 
     expect(mac.leaveFree).toBe(
       "With As much as fits, this much of Apple graphics' share of memory is left free for other programs. More free memory means fewer layers on Apple graphics.",
     );
+    expect(mac.experts).toBe(
+      "This model is a mixture of experts: it has many expert parts but uses only a few of them for each word. Keeping expert parts on the processor frees a lot of Apple graphics' share of memory and is often only a little slower. Automatic keeps them on Apple graphics with All of it, and moves them first when As much as fits needs room.",
+    );
     expect(fineHelp(true, null).layers).toContain("share of memory. The rest");
+    // A Mac's help lines, labels and notes say Apple graphics, never graphics card (checklist 19).
     for (const text of [...Object.values(mac), ...Object.values(fineLabels(true)), ...Object.values(fineNotes(true))]) {
-      // "the graphics card" is only in the expert help, which describes the model, not the Mac.
-      if (text !== mac.experts) expect(text, text).not.toMatch(/graphics card/);
+      expect(text, text).not.toMatch(/graphics card/);
     }
     expect(fineNotes(false)).toEqual({
       gpuOff: "Not used while Use the graphics card is Don't use it.",
       leaveFreeAll: "Only used with As much as fits.",
       leaveFreeCustom: "Not used while you choose the layers or expert parts yourself.",
       expertsNoLayers: "Not used while no layers are on the graphics card.",
+      noGraphics: "Not used without a graphics card.",
     });
     expect(fineNotes(true).gpuOff).toBe("Not used while Use Apple graphics is Don't use it.");
+    expect(fineNotes(true).noGraphics).toBe("Not used without Apple graphics.");
     expect(expertsAfterLayersNote(32, 41)).toBe(
       "The first 9 layers already run on the processor. Only expert parts of later layers free graphics memory.",
     );
@@ -479,6 +484,10 @@ describe("0.0.6 item 6: plain words for Fine control, the picture and the usage 
     );
     expect(pictureSourceWords({ kind: "estimate", why: "quick" }, { measuring: true, fineOpen: true })).toBe(
       "Working out exact figures…",
+    );
+    // Fine control is open and the answer is still the quick estimate: it could not be worked out.
+    expect(pictureSourceWords({ kind: "estimate", why: "quick" }, { measuring: false, fineOpen: true })).toBe(
+      "Rough estimate from the model file. Exact figures couldn't be worked out for this file.",
     );
     expect(pictureSourceWords({ kind: "estimate", why: "failed" }, off)).toBe(
       "Rough estimate from the model file. Exact figures couldn't be worked out for this file.",
@@ -600,6 +609,17 @@ describe("0.0.6 item 6: plain words for Fine control, the picture and the usage 
         false,
       ),
     ).toBe("About 12.1 GB of the model is on the graphics card, the rest on the processor.");
+    // Only amounts known: "the rest on the processor" only when part of it is (As much as
+    // fits, or expert parts chosen in Fine control); All of it puts all its layers on the card.
+    expect(placementWords(placement({ custom: false, layersAbout: true, layersOnGraphics: null }), false)).toBe(
+      "About 9.9 GB of the model is on the graphics card, the rest on the processor.",
+    );
+    expect(placementWords(placement({ custom: false, layersAbout: false, layersOnGraphics: null, units: null }), false)).toBe(
+      "About 9.9 GB of the model is on the graphics card.",
+    );
+    expect(placementWords(placement({ custom: false, layersAbout: false, layersOnGraphics: null, units: null }), true)).toBe(
+      "About 9.9 GB of the model is on Apple graphics.",
+    );
     expect(placementWords(placement(), true)).toBe("30 of 41 layers on Apple graphics, 11 on the processor.");
     expect(modelUsesWords(placement().graphics!.use)).toBe(
       "The model uses 11.7 GB: 9.9 GB for itself, 1.2 GB conversation memory, 0.6 GB working space",

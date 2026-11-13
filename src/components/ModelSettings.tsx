@@ -300,15 +300,45 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
   }
 
   /**
+   * The facts for the choices on screen: the saved ones, or the draft's answer. When the
+   * draft's answer has not come yet (or could not be had), it is asked for now, so a quick
+   * Load never goes by the saved choices' answer. Throws when it cannot be had.
+   */
+  async function factsForLoad(): Promise<ModelLoadInfo | null> {
+    if (!info || !draft || !dirty) return info;
+    if (previewNow) return previewNow;
+    setWorking("Working out whether it fits…");
+    try {
+      return await ipc.previewModelLoadSettings(path, draft);
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  /**
    * Before a load with these choices: the latest answer may say it probably won't fit
-   * (item 6, 6.2). Too large or not at all: WP2's question; not on the graphics card: the
-   * same dialog with its own question (Cancel has the focus). Resolves true to go on.
+   * (item 6, 6.2): the measurement when there is one for the choices on screen, else the
+   * estimate. Too large or not at all: WP2's question; not on the graphics card: the same
+   * dialog with its own question (Cancel has the focus). Resolves true to go on; when the
+   * answer cannot be had, nothing loads and the panel says why.
    */
   async function loadAnyway(): Promise<boolean> {
-    if (facts?.tooLarge || picture?.fits === "wontFitAtAll") return askTooLarge();
-    if (picture?.fits === "wontFitGraphics") {
+    let now: ModelLoadInfo | null;
+    try {
+      now = await factsForLoad();
+    } catch (err) {
+      setError(toErrorInfo(err));
+      return false;
+    }
+    const exact =
+      measured && measured.key === draftKey && measured.picture && (!now?.picture || measured.picture.key === now.picture.key)
+        ? measured.picture
+        : null;
+    const answer = exact ?? now?.picture ?? null;
+    if (now?.tooLarge || answer?.fits === "wontFitAtAll") return askTooLarge();
+    if (answer?.fits === "wontFitGraphics") {
       const choice = await ask({
-        text: wontFitQuestion(facts?.fineFacts?.apple ?? apple),
+        text: wontFitQuestion(now?.fineFacts?.apple ?? apple),
         cancel: "Cancel",
         choices: [{ label: "Load anyway", value: "load", tone: "primary" }],
         busy: false,

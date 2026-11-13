@@ -655,6 +655,16 @@ describe("ModelSettings: Fine control and where the model goes (0.0.6 item 6)", 
     await openFine();
     await wait(700);
     expect(text()).toContain("Rough estimate from the model file. Exact figures couldn't be worked out for this file.");
+    cleanup();
+
+    // The measurement answers with the quick estimate (the file changed since, say): Fine
+    // control is open, so it never says "Open Fine control".
+    ipcMock.offloadMeasure.mockResolvedValue(picture({ source: { kind: "estimate", why: "quick" }, custom: false, layersOnGraphics: 41 }));
+    await openPanel(onCard());
+    await openFine();
+    await wait(700);
+    expect(text()).toContain("Rough estimate from the model file. Exact figures couldn't be worked out for this file.");
+    expect(text()).not.toContain("Open Fine control");
   });
 
   it("lets the measurement replace the marks of the selected choices only", async () => {
@@ -800,6 +810,60 @@ describe("ModelSettings: Fine control and where the model goes (0.0.6 item 6)", 
     await click("Apply and restart");
     await click("Load anyway");
     expect(ipcMock.reloadLocalModel).toHaveBeenCalledWith(false, true);
+  });
+
+  it("judges a load by the answer for the choices on screen, asking for it when it has not come yet", async () => {
+    // The saved choices fit (As much as fits); the unsaved All of it won't fit on the card,
+    // and its answer comes 150 ms after the change: a quick Load must not skip the question.
+    const info = onCard("/models/other.gguf");
+    info.overrides = { ...DEFAULTS, gpu: "fit" };
+    info.picture = { ...info.picture, fits: "partial", layersAbout: true };
+    ipcMock.previewModelLoadSettings.mockImplementation(async (path, overrides) => ({
+      ...onCard(path),
+      overrides,
+      picture: picture({ source: { kind: "estimate", why: "quick" }, custom: false, fits: "wontFitGraphics" }),
+    }));
+    await openPanel(info);
+    await choose("Use the graphics card", "all");
+    await click("Load with these settings");
+    expect(ipcMock.previewModelLoadSettings).toHaveBeenCalledWith("/models/other.gguf", { ...DEFAULTS, gpu: "all" });
+    expect(screen.getByText(/This probably won't fit in the graphics card's memory\. If it doesn't/)).toBeTruthy();
+    await click("Cancel");
+    expect(ipcMock.setModelLoadSettings).not.toHaveBeenCalled();
+    expect(ipcMock.loadLocalModel).not.toHaveBeenCalled();
+    cleanup();
+
+    // The same for Apply and restart on the loaded model.
+    const loaded = { ...info, path: "/models/model.gguf", loaded: true };
+    useApp.setState({ runtime: ready(loaded.path) });
+    await openPanel(loaded);
+    await choose("Use the graphics card", "all");
+    await click("Apply and restart");
+    expect(screen.getByText(/This probably won't fit in the graphics card's memory\. If it doesn't/)).toBeTruthy();
+    await click("Cancel");
+    expect(ipcMock.setModelLoadSettings).not.toHaveBeenCalled();
+    expect(ipcMock.reloadLocalModel).not.toHaveBeenCalled();
+  });
+
+  it("loads nothing, and says why, when the answer for the choices on screen cannot be had", async () => {
+    const info = onCard("/models/other.gguf");
+    info.overrides = { ...DEFAULTS, gpu: "fit" };
+    info.picture = { ...info.picture, fits: "partial", layersAbout: true };
+    ipcMock.previewModelLoadSettings.mockRejectedValue({
+      code: "internal",
+      message: "The model file could not be read.",
+      nextStep: "",
+      details: "",
+    });
+    await openPanel(info);
+    await choose("Use the graphics card", "all");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 300));
+    });
+    await click("Load with these settings");
+    expect(text()).toContain("The model file could not be read.");
+    expect(ipcMock.setModelLoadSettings).not.toHaveBeenCalled();
+    expect(ipcMock.loadLocalModel).not.toHaveBeenCalled();
   });
 
   it("counts Fine control all Automatic the same as none", async () => {

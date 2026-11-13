@@ -159,7 +159,10 @@ export function FineControl(props: {
 
   const units = facts.units;
   const showLayers = facts.graphics && units !== null;
-  const showExperts = facts.graphics && facts.expertLayers !== null;
+  // Expert parts show whenever the model has experts (section 3, row 2); with no graphics
+  // device they have nowhere to leave, so the setting is greyed out with a note.
+  const showExperts = facts.expertLayers !== null;
+  const noGraphics = !facts.graphics;
   const layerCount = typeof fine.layers === "object" ? fine.layers.count : null;
 
   // Where a slider starts: what the app would do now (layers), half the experts or threads.
@@ -205,13 +208,15 @@ export function FineControl(props: {
   // 2. Expert parts on the processor.
   const expertsCount = typeof fine.experts === "object" ? fine.experts.firstLayers : null;
   const noLayers = layerCount !== null && layerCount <= 0;
-  const expertsNote = gpuOff
-    ? notes.gpuOff
-    : noLayers
-      ? notes.expertsNoLayers
-      : layerCount !== null && units !== null && layerCount < units
-        ? expertsAfterLayersNote(layerCount, units)
-        : null;
+  const expertsNote = noGraphics
+    ? notes.noGraphics
+    : gpuOff
+      ? notes.gpuOff
+      : noLayers
+        ? notes.expertsNoLayers
+        : layerCount !== null && units !== null && layerCount < units
+          ? expertsAfterLayersNote(layerCount, units)
+          : null;
   const expertsSetting = showExperts && (
     <Setting
       id="fine-experts"
@@ -222,7 +227,7 @@ export function FineControl(props: {
         { value: "all", label: words.expertsAll },
         { value: "some", label: words.expertsSome },
       ]}
-      disabled={disabled || gpuOff || noLayers}
+      disabled={disabled || noGraphics || gpuOff || noLayers}
       onChange={(v) =>
         set({ experts: (v === "auto" ? "auto" : v === "all" ? "all" : { firstLayers: startExperts() }) as ExpertsChoice })
       }
@@ -235,7 +240,7 @@ export function FineControl(props: {
             min={1}
             max={Math.max(1, expertLayers)}
             words={expertLayersWords(clamp(expertsCount, 1, Math.max(1, expertLayers)), expertLayers)}
-            disabled={disabled || gpuOff || noLayers}
+            disabled={disabled || noGraphics || gpuOff || noLayers}
             onChange={(n) => set({ experts: { firstLayers: n } })}
           />
         )

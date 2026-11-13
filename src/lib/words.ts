@@ -396,8 +396,11 @@ export function fineHelp(apple: boolean, limitBytes: number | null) {
     layers: apple
       ? `The model is built from layers. Layers on Apple graphics run much faster than on the processor, as long as they fit in Apple graphics' share of memory${upTo}. The rest run on the processor.`
       : "The model is built from layers. Layers on the graphics card run much faster than on the processor, as long as they fit in its memory. The rest run on the processor.",
-    experts:
-      "This model is a mixture of experts: it has many expert parts but uses only a few of them for each word. Keeping expert parts on the processor frees a lot of graphics memory and is often only a little slower. Automatic keeps them on the graphics card with All of it, and moves them first when As much as fits needs room.",
+    // Section 3 gives no Mac version of this line; the Mac one names Apple graphics' share
+    // of memory, as help lines 1, 3 and 6 do (checklist item 19).
+    experts: apple
+      ? "This model is a mixture of experts: it has many expert parts but uses only a few of them for each word. Keeping expert parts on the processor frees a lot of Apple graphics' share of memory and is often only a little slower. Automatic keeps them on Apple graphics with All of it, and moves them first when As much as fits needs room."
+      : "This model is a mixture of experts: it has many expert parts but uses only a few of them for each word. Keeping expert parts on the processor frees a lot of graphics memory and is often only a little slower. Automatic keeps them on the graphics card with All of it, and moves them first when As much as fits needs room.",
     kv: apple
       ? `On a Mac the processor and Apple graphics share one memory. Keeping the conversation with the processor leaves Apple graphics more of its share${upTo} for layers, but replies slow down as the chat grows.`
       : "Where the model keeps the chat it is working on. On the graphics card is faster. Keeping it in computer memory leaves more room for layers on the graphics card, but replies slow down as the chat grows.",
@@ -455,6 +458,7 @@ export function fineNotes(apple: boolean) {
     leaveFreeAll: "Only used with As much as fits.",
     leaveFreeCustom: "Not used while you choose the layers or expert parts yourself.",
     expertsNoLayers: `Not used while no layers are on ${graphicsPlace(apple)}.`,
+    noGraphics: apple ? "Not used without Apple graphics." : "Not used without a graphics card.",
   } as const;
 }
 
@@ -525,7 +529,10 @@ export function pictureLayerWords(p: OffloadPreview, apple: boolean): string | n
 export function pictureSourceWords(source: PictureSource, opts: { measuring: boolean; fineOpen: boolean }): string {
   if (source.kind === "measured") return "Worked out for these settings.";
   if (opts.measuring) return "Working out exact figures…";
-  switch (source.why) {
+  // With Fine control open, a quick estimate is the measurement's own answer: the exact
+  // figures could not be worked out (the model file changed since, for example).
+  const why = source.why === "quick" && opts.fineOpen ? "failed" : source.why;
+  switch (why) {
     case "quick":
       return "Rough estimate from the model file. Open Fine control to work out exact figures.";
     case "failed":
@@ -637,7 +644,10 @@ export function placementWords(p: Placement, apple: boolean): string {
   const where = graphicsPlace(apple);
   if (p.graphics === null || p.layersOnGraphics === 0) return "On the processor only.";
   if (p.layersOnGraphics === null) {
-    return `About ${amountGb(p.graphics.use.model)} of the model is on ${where}, the rest on the processor.`;
+    // Only amounts known. Part of it is on the processor after As much as fits, or with
+    // expert parts chosen in Fine control; All of it puts every layer on the card.
+    const rest = p.layersAbout || p.custom ? ", the rest on the processor" : "";
+    return `About ${amountGb(p.graphics.use.model)} of the model is on ${where}${rest}.`;
   }
   const n = p.layersOnGraphics;
   let text: string;
