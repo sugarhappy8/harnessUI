@@ -216,7 +216,7 @@ pub async fn get_chat(
 /// that cannot be read is left out: the chat still opens. [0.0.6] The summary is model
 /// output: characters that change how text is shown without being seen (tag characters,
 /// bidirectional overrides, zero-width characters) come as visible escapes, as on approval
-/// cards (`policy::sanitize::visible`), so Show summary shows all of what the model is sent.
+/// cards (`policy::sanitize::visible`); see `visible_summary` for exactly which.
 async fn earlier_summary(
     store: &store::Store,
     chat_id: store::ChatId,
