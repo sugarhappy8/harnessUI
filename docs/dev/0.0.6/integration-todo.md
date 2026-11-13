@@ -273,3 +273,9 @@ release blocker unless the owner says so.
   managed_e2e stack overflow at start; fix batch win wf_e2f37497-e46. macOS: two reverse
   run-temp-folder tests (Linux-only feature; long macOS temp path), runtime fit_params
   "took too long"; fix batch mac wf_9b6c72f9-297. One PR comment each.
+  Done (12:00 UTC): all Windows and macOS fixes landed, each reviewed and checked
+  (scratchpad reports/final-win-*.md, final-mac-*.md): mcp_cmd source test line-ending-proof;
+  layout test Unix-only; zip FIFO fixture recorded as made by Unix plus a hand-made-bytes test
+  (product decides by the recorded system, confirmed in zip 9.5.0); custom test harnesses box
+  each check and run on an 8 MiB thread, Linux holds the main stack to 1 MiB; fit-params limit
+  120 s; run-temp tests on a short base.

@@ -142,8 +142,9 @@ def main() -> int:
             const file = new File([bytes], 'red.png', {type: 'image/png'});
             const dt = new DataTransfer();
             dt.items.add(file);
-            const target = document.querySelector('textarea').closest('.border-t');
-            target.dispatchEvent(new DragEvent('drop', {dataTransfer: dt, bubbles: true, cancelable: true}));
+            // Dropped on the message box; the drop bubbles up to the composer's handler.
+            document.querySelector('textarea').dispatchEvent(
+              new DragEvent('drop', {dataTransfer: dt, bubbles: true, cancelable: true}));
             """,
             png,
         )

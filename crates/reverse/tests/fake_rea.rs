@@ -48,6 +48,24 @@ fn main() {
     println!("fake_rea: skipped: the fake pack starts the fake rea through a shell script");
 }
 
+/// This process's soft limit on its main thread's stack (`RLIMIT_STACK`): the fake rea
+/// records it at start, and the run compares it with its own.
+#[cfg(unix)]
+fn stack_limit() -> Option<libc::rlim_t> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit only writes the struct passed to it.
+    (unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut limit) } == 0).then_some(limit.rlim_cur)
+}
+
+/// No such limit to read here (the checks do not run on this platform).
+#[cfg(not(unix))]
+fn stack_limit() -> Option<u64> {
+    None
+}
+
 /// The pinned catalog fixture (the 255 names, the allow-listed and app-only schemas).
 const CATALOG: &str = include_str!("fixtures/rea-6.9.0-catalog.json");
 
@@ -91,6 +109,7 @@ mod fake {
                     "cwd": std::env::current_dir().ok(),
                     "provider": std::env::var("REA_ANALYSIS_PROVIDER").ok(),
                     "node_options": std::env::var("NODE_OPTIONS").ok(),
+                    "stack_limit": super::stack_limit(),
                 }),
             );
             // A slow start (antivirus scanning a new install, a first start of Ghidra).
@@ -239,7 +258,7 @@ mod calls {
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use mcp_host::{
@@ -263,7 +282,11 @@ mod calls {
 
     use super::{CATALOG, FAKE_FLAG, INJECTION};
 
+    /// The stack limit this run was started with, read before anything else runs.
+    static STARTED_WITH: OnceLock<Option<libc::rlim_t>> = OnceLock::new();
+
     pub fn main(args: &[String]) {
+        STARTED_WITH.get_or_init(super::stack_limit);
         let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
         on_test_thread(move || run_all(&filter));
     }
@@ -332,6 +355,9 @@ mod calls {
             ("a_view_after_rea_stopped_does_not_start_it", || {
                 Box::pin(view_after_stop())
             }),
+            ("rea_gets_the_stack_limit_the_run_started_with", || {
+                Box::pin(inherited_stack_limit())
+            }),
             ("the_real_rea_through_the_server", || Box::pin(real_rea())),
         ];
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -345,23 +371,17 @@ mod calls {
         });
     }
 
-    /// The stack Windows gives a program's main thread (Linux and macOS give 8 MiB). Only
-    /// Linux can hold its main thread to it.
-    #[cfg(target_os = "linux")]
-    const WINDOWS_MAIN_STACK: usize = 1 << 20;
-
     /// The stack the checks run with: what Linux gives a main thread.
     const TEST_STACK: usize = 8 << 20;
 
     /// Runs `tests` on a thread of their own with [`TEST_STACK`], and fails the run if they
-    /// panic: debug builds of async checks like these can need more stack than the 1 MiB
-    /// main thread Windows gives (`mcp-host`'s `managed_e2e` died there with
-    /// STATUS_STACK_OVERFLOW before its first line). On Linux the main thread is first held
-    /// to that same 1 MiB, so anything left on it that would overflow on Windows fails here
-    /// too.
+    /// panic: debug builds of async checks like these can need more stack than a small main
+    /// thread gives (`mcp-host`'s `managed_e2e` died with STATUS_STACK_OVERFLOW on Windows,
+    /// whose main thread has 1 MiB, before its first line). Unlike `managed_e2e`, this run
+    /// leaves the main thread's stack limit alone: its checks never run on Windows, and the
+    /// processes it starts inherit that limit (in the nightly job the real rea, Node.js and
+    /// Kuna, which the app starts with the limit it was given).
     fn on_test_thread(tests: impl FnOnce() + Send + 'static) {
-        #[cfg(target_os = "linux")]
-        hold_main_stack_to(WINDOWS_MAIN_STACK);
         let tests = std::thread::Builder::new()
             .name("tests".into())
             .stack_size(TEST_STACK)
@@ -370,26 +390,6 @@ mod calls {
         if tests.join().is_err() {
             // The panic is already printed; fail the way the default harness does.
             std::process::exit(101);
-        }
-    }
-
-    /// Lowers this process's main-thread stack limit to `bytes` (Linux only), so a stack
-    /// that would overflow on Windows overflows here too. Children started from here (the
-    /// fake rea among them) inherit it.
-    #[cfg(target_os = "linux")]
-    fn hold_main_stack_to(bytes: usize) {
-        let bytes = libc::rlim_t::try_from(bytes).expect("stack size");
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: both calls only read or write the struct passed to them.
-        unsafe {
-            assert_eq!(libc::getrlimit(libc::RLIMIT_STACK, &mut limit), 0);
-            if limit.rlim_cur > bytes {
-                limit.rlim_cur = bytes;
-                assert_eq!(libc::setrlimit(libc::RLIMIT_STACK, &limit), 0);
-            }
         }
     }
 
@@ -2124,6 +2124,23 @@ mod calls {
         );
         p.ok("list_procedures", json!({}), &a).await;
         assert_eq!(p.tools_called(), ["open_binary", "list_procedures"]);
+    }
+
+    /// rea starts with the stack limit this run was started with, the way the app starts it:
+    /// nothing in this harness lowers the limit for rea and what it starts (in the nightly
+    /// job, the real Node.js and Kuna of the next check).
+    async fn inherited_stack_limit() {
+        let started_with = *STARTED_WITH.get().expect("read in main");
+        assert!(started_with.is_some(), "the limit could not be read");
+        assert_eq!(super::stack_limit(), started_with, "this run's own limit");
+        let p = Pack::new(false).await;
+        let a = p.chat(1, &[&p.files]);
+        p.ok("open_binary", open_args("hello-linux-x64"), &a).await;
+        assert_eq!(
+            p.starts()[0]["stack_limit"],
+            json!(started_with),
+            "rea's limit"
+        );
     }
 
     /// The same call path with the real rea, Node.js and Kuna, installed through
