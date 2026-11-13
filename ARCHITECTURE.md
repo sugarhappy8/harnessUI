@@ -62,7 +62,7 @@ Only the first row is in the installer. The others are downloaded on request int
 | Source | Generating | Reading prompts |
 |---|---|---|
 | llama.cpp issue, Windows 11, 8B model | Vulkan 104, ROCm 91 tokens/s | Vulkan 2,866, ROCm 4,199 tokens/s |
-| Community report, March 2026, Windows 10, older build, a current 4B and 9B model | Vulkan 18 vs ROCm 71 (4B); 33 vs 49 (9B). Unresolved | not given |
+| Community report, March 2026, Windows 10, older build, one current model family | Vulkan 18 vs ROCm 71 (4B); 33 vs 49 (9B). Unresolved | not given |
 
 Agent work is prompt-heavy, so prompt reading matters as much as generation. The second report is about the model family the catalog would recommend first for your machines.
 

@@ -118,3 +118,8 @@ Collected while the packages run. Each needs doing (or a decision) before the re
     the tool/stored-picture path decides by the label, so a readable PNG/JPEG labelled
     image/webp is dropped with an untrue note; the per-request total refusal says one picture
     is too large.
+- **Docs written and reviewed (wf_50b56912-278).** 11 `TODO(lead): confirm after WP9e` markers in
+  ARCHITECTURE.md (1.4, 9.3, 13.6, 16, 17, 20) to confirm or remove once WP9e is merged.
+  Flagged by the writer for the release review: rea's `describe` refusals `LINK_OUT` and
+  `DEVICE_IN_FOLDER` name a path inside a folder before any approval, which departs from the
+  13.9 rule that messages before approval never name files from a folder.

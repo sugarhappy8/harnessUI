@@ -211,8 +211,8 @@ the port or the key, in any approval mode.
 - Requests are rebuilt, not passed through: only the fields each API defines, at most
   32 MB, a capped answer length, and pictures, audio, video and files only inline, never as
   a link the model server would fetch. WebP pictures are turned into JPEG or PNG by the same
-  separate helper as in chats, at most 32 in one request. At most 64 connections at once; one
-  that never sent the key gives way first.
+  separate helper as in chats, at most 32 in one request. At most 64 connections at once;
+  one that never sent the key gives way first.
 - Answers have their timing and cache figures removed, because those could show how much
   of a request matches what your own chats sent. The model file's path never appears.
 - Every request that asks the model for an answer is one row in the audit log (server
