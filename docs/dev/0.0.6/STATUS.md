@@ -134,6 +134,11 @@ one starts from this file and `README.md`.
   paths, helper escaping scope, Other apps copy race; wf_6a9d631b-ae5); release docs
   (wf_50b56912-278). Next: whole-release review, version 0.0.6, every check and e2e suite,
   CI on three systems, draft pull request.
+- 06:00 UTC: release review started (script v006-release-review.js; runs wf_7ed6132e-21e gate +
+  untrusted input, wf_0772ffdb-bab processes/network + tests, wf_b0fd1ffe-7a1 integration +
+  portability, wf_16028e05-829 lifecycle + owner/plain words): finders by dimension, dedup,
+  a skeptic per finding. Still finishing: WP9e (fix round), header layout (second fix round).
+  Docs done (ARCHITECTURE, SECURITY, CHANGELOG, README; TODO(lead) markers for WP9e).
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

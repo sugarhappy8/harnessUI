@@ -611,30 +611,95 @@ async fn peak_memory(root: PathBuf, stop: Arc<AtomicBool>, peak: Arc<AtomicU64>)
     }
 }
 
-async fn end_to_end(decompiler: Decompiler) {
+/// The larger program `REAL_REA_LARGE` names: `decompile` for the pack's own Ghidra
+/// decompiler (a C++ program of a few megabytes), or a program's absolute path.
+fn large_program(ghidra_dir: Option<&Path>) -> Option<PathBuf> {
+    let wanted = std::env::var_os("REAL_REA_LARGE")?;
+    if wanted == "decompile" {
+        let os = ghidra_dir?.join("Ghidra/Features/Decompiler/os");
+        let found = std::fs::read_dir(&os)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .flat_map(|d| [d.join("decompile"), d.join("decompile.exe")])
+            .find(|p| p.is_file());
+        assert!(
+            found.is_some(),
+            "no decompile program under {}",
+            os.display()
+        );
+        return found;
+    }
+    let path = PathBuf::from(wanted);
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "REAL_REA_LARGE: {} is not a program file",
+        path.display()
+    );
+    Some(path)
+}
+
+/// The pack, the fixtures and anything rea writes go into `base`: a temporary folder named
+/// `real-rea-…`, or `REAL_REA_DIR/<kuna|ghidra>`; with `Base::DotFolder`, its `.local/share`.
+fn make_base(decompiler: Decompiler, kind: Base) -> (Option<tempfile::TempDir>, PathBuf) {
+    let label = decompiler.label().to_lowercase();
+    let (temp, top) = match std::env::var_os("REAL_REA_DIR") {
+        Some(dir) => {
+            let name = match kind {
+                Base::Plain => label,
+                Base::DotFolder => format!("{label}-dot"),
+            };
+            let top = PathBuf::from(dir).join(name);
+            let _ = std::fs::remove_dir_all(&top);
+            std::fs::create_dir_all(&top).unwrap();
+            (None, top)
+        }
+        None => {
+            let dir = tempfile::Builder::new()
+                .prefix("real-rea-")
+                .tempdir()
+                .unwrap();
+            let top = dir.path().to_path_buf();
+            (Some(dir), top)
+        }
+    };
+    let top = dunce::canonicalize(&top).unwrap();
+    assert!(
+        !dotted(&top),
+        "the test's folder {} has a folder whose name starts with a dot, so rea would move \
+         Ghidra's session out of the pack; set REAL_REA_DIR or TMPDIR to a folder without one",
+        top.display()
+    );
+    let base = match kind {
+        Base::Plain => top,
+        Base::DotFolder => {
+            let base = top.join(".local").join("share");
+            std::fs::create_dir_all(&base).unwrap();
+            base
+        }
+    };
+    (temp, base)
+}
+
+async fn end_to_end(decompiler: Decompiler, kind: Base) {
     let (cache, platform) = match needs(decompiler) {
         Ok(found) => found,
         Err(why) => {
+            let list = std::env::var("REAL_REA_REQUIRE").ok();
+            assert!(
+                !required(decompiler, list.as_deref()),
+                "real_rea: {}: {why}, but REAL_REA_REQUIRE names it",
+                decompiler.label()
+            );
             println!("real_rea: {}: {why}; skipped", decompiler.label());
             return;
         }
     };
     let _one_at_a_time = SERIAL.lock().await;
-    // A temporary folder, or `REAL_REA_DIR/<kuna|ghidra>` when the workflow needs to know the
-    // programs' paths beforehand (Windows firewall rules) and to look at them afterwards.
-    let (_temp, base) = match std::env::var_os("REAL_REA_DIR") {
-        Some(dir) => {
-            let base = PathBuf::from(dir).join(decompiler.label().to_lowercase());
-            let _ = std::fs::remove_dir_all(&base);
-            std::fs::create_dir_all(&base).unwrap();
-            (None, dunce::canonicalize(&base).unwrap())
-        }
-        None => {
-            let dir = tempfile::tempdir().unwrap();
-            let base = dunce::canonicalize(dir.path()).unwrap();
-            (Some(dir), base)
-        }
-    };
+    let full = kind == Base::Plain;
+    let (_temp, base) = make_base(decompiler, kind);
+    println!("real_rea: the pack goes under {}", base.display());
     let root = base.join("reverse");
     let files = base.join("files");
     std::fs::create_dir_all(&files).unwrap();
@@ -689,10 +754,25 @@ async fn end_to_end(decompiler: Decompiler) {
     }
     part_dirs.sort();
     part_dirs.dedup();
+    // A larger program for Ghidra's memory figure, copied beside the fixtures before the
+    // "nothing changed here" snapshot.
+    let ghidra_dir = installed.part("ghidra").map(|p| p.dir.clone());
+    let large = (full && decompiler == Decompiler::Ghidra)
+        .then(|| large_program(ghidra_dir.as_deref()))
+        .flatten()
+        .map(|from| {
+            let to = files.join(format!(
+                "large-{}",
+                from.file_name().unwrap().to_string_lossy()
+            ));
+            std::fs::copy(&from, &to).unwrap();
+            to
+        });
     let mut watched = part_dirs.clone();
     watched.push(files.clone());
     let before = snapshot(&watched);
     let home = home_before();
+    let temp = TempWatch::start();
 
     // Start rea with the app's own environment.
     let process = ReaProcess::new(layout.clone(), platform);
@@ -748,6 +828,7 @@ async fn end_to_end(decompiler: Decompiler) {
     );
 
     // Open the test program, find its function, read its code.
+    temp.phase("open and analysis");
     let (target, function) = open_target();
     println!("real_rea: opening {target}, looking for {function}");
     let hello = files.join(target);
@@ -809,115 +890,161 @@ async fn end_to_end(decompiler: Decompiler) {
         let _ = s.await;
     }
 
-    // binary_session names nothing outside the pack and the fixtures.
-    let session = call(&mut guard, "binary_session", json!({})).await;
-    assert!(!session.is_error, "{}", session.joined_text());
-    let mut outside: Vec<String> = strings_of(&session)
-        .iter()
-        .flat_map(|s| absolute_paths(s))
-        .filter(|p| {
-            let p = Path::new(p);
-            !p.starts_with(&root) && !p.starts_with(&files)
-        })
-        .collect();
-    outside.sort();
-    outside.dedup();
-    // rea's own constants are not about this computer: its remediation texts name
-    // `/usr/bin/prlimit` for tools the app does not offer, and its list of provider candidates
-    // names Hopper's default launcher (checked, never started: REA_ANALYSIS_PROVIDER is fixed).
-    let rea_dir = installation
-        .rea
-        .as_ref()
-        .and_then(|r| r.part("rea"))
-        .map(|p| p.dir.clone())
-        .expect("rea's folder");
-    let (constants, unexplained): (Vec<String>, Vec<String>) =
-        outside.into_iter().partition(|p| in_package(&rea_dir, p));
-    println!("real_rea: binary_session names rea's own constant paths {constants:?}");
-    assert!(
-        unexplained.is_empty(),
-        "binary_session names paths outside the pack and the fixtures: {unexplained:?}"
-    );
+    let mut second_start = None;
+    let mut large_figures = None;
+    if full {
+        // binary_session names nothing outside the pack and the fixtures.
+        temp.phase("binary_session");
+        let session = call(&mut guard, "binary_session", json!({})).await;
+        assert!(!session.is_error, "{}", session.joined_text());
+        let mut outside: Vec<String> = strings_of(&session)
+            .iter()
+            .flat_map(|s| absolute_paths(s))
+            .filter(|p| {
+                let p = Path::new(p);
+                !p.starts_with(&root) && !p.starts_with(&files)
+            })
+            .collect();
+        outside.sort();
+        outside.dedup();
+        // rea's own constants are not about this computer: its remediation texts name
+        // `/usr/bin/prlimit` for tools the app does not offer, and its list of provider
+        // candidates names Hopper's default launcher (checked, never started:
+        // REA_ANALYSIS_PROVIDER is fixed).
+        let rea_dir = installation
+            .rea
+            .as_ref()
+            .and_then(|r| r.part("rea"))
+            .map(|p| p.dir.clone())
+            .expect("rea's folder");
+        let (constants, unexplained): (Vec<String>, Vec<String>) =
+            outside.into_iter().partition(|p| in_package(&rea_dir, p));
+        println!("real_rea: binary_session names rea's own constant paths {constants:?}");
+        assert!(
+            unexplained.is_empty(),
+            "binary_session names paths outside the pack and the fixtures: {unexplained:?}"
+        );
 
-    // The file checks the app offers, on the three fixtures.
-    let imports = call(
-        &mut guard,
-        "inspect_pe_imports",
-        json!({"path": files.join("hello-win-x64.exe").display().to_string()}),
-    )
-    .await;
-    assert!(!imports.is_error, "{}", imports.joined_text());
-    let managed = call(
-        &mut guard,
-        "inspect_managed_members",
-        json!({"path": files.join("hello-dotnet.dll").display().to_string()}),
-    )
-    .await;
-    assert!(!managed.is_error, "{}", managed.joined_text());
-    let exports = call(
-        &mut guard,
-        "inspect_native_exports",
-        json!({"path": hello.display().to_string()}),
-    )
-    .await;
-    assert!(!exports.is_error, "{}", exports.joined_text());
+        // The file checks the app offers, on the three fixtures.
+        temp.phase("file checks");
+        let imports = call(
+            &mut guard,
+            "inspect_pe_imports",
+            json!({"path": files.join("hello-win-x64.exe").display().to_string()}),
+        )
+        .await;
+        assert!(!imports.is_error, "{}", imports.joined_text());
+        let managed = call(
+            &mut guard,
+            "inspect_managed_members",
+            json!({"path": files.join("hello-dotnet.dll").display().to_string()}),
+        )
+        .await;
+        assert!(!managed.is_error, "{}", managed.joined_text());
+        let exports = call(
+            &mut guard,
+            "inspect_native_exports",
+            json!({"path": hello.display().to_string()}),
+        )
+        .await;
+        assert!(!exports.is_error, "{}", exports.joined_text());
+
+        // A larger program: how long Ghidra takes and how much memory Java uses.
+        if let Some(large) = &large {
+            temp.phase("larger program");
+            let size = std::fs::metadata(large).unwrap().len();
+            let stop = Arc::new(AtomicBool::new(false));
+            let peak = Arc::new(AtomicU64::new(0));
+            let sampler = cfg!(target_os = "linux")
+                .then(|| tokio::spawn(peak_memory(root.clone(), stop.clone(), peak.clone())));
+            let started = Instant::now();
+            let opened = call(
+                &mut guard,
+                "open_binary",
+                json!({"path": large.display().to_string()}),
+            )
+            .await;
+            assert!(!opened.is_error, "{}", opened.joined_text());
+            let listed = call_with(
+                &mut guard,
+                "list_procedures",
+                json!({}),
+                Some(Duration::from_secs(1800)),
+            )
+            .await;
+            assert!(!listed.is_error, "{}", listed.joined_text());
+            let took = started.elapsed();
+            stop.store(true, Ordering::SeqCst);
+            if let Some(s) = sampler {
+                let _ = s.await;
+            }
+            large_figures = Some((size, took, peak.load(Ordering::SeqCst)));
+        }
+    }
     let closed = call(&mut guard, "close_binary", json!({})).await;
     assert!(!closed.is_error, "{}", closed.joined_text());
     drop(guard);
 
-    // A stop, then a second start.
-    process.stop(STOP_GRACE).await;
-    assert_eq!(process.state(), RunState::Stopped);
-    let mut guard = process.lock().await;
-    let mut again = config.clone();
-    again.start_timeout = env::START_TIMEOUT;
-    let started = Instant::now();
-    let second = guard
-        .ensure_started(again)
-        .await
-        .unwrap_or_else(|e| panic!("rea did not start again: {e}"));
-    let second_start = started.elapsed();
-    assert!(second.fresh && second.generation > rea.generation);
-    // Stop in the middle of Ghidra's analysis (Java running): the call ends as cancelled.
-    if decompiler == Decompiler::Ghidra {
-        let opened = call(
-            &mut guard,
-            "open_binary",
-            json!({"path": hello.display().to_string()}),
-        )
-        .await;
-        assert!(!opened.is_error, "{}", opened.joined_text());
-        let cancel = CancellationToken::new();
-        let stop = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            stop.cancel();
-        });
+    if full {
+        // A stop, then a second start.
+        temp.phase("second start");
+        process.stop(STOP_GRACE).await;
+        assert_eq!(process.state(), RunState::Stopped);
+        let mut guard = process.lock().await;
+        let mut again = config.clone();
+        again.start_timeout = env::START_TIMEOUT;
         let started = Instant::now();
-        let mut args = Map::new();
-        args.insert("detail".into(), json!("summary"));
-        let outcome = guard
-            .call(
-                &allow::app_list(),
-                "list_procedures",
-                args,
-                Duration::from_secs(600),
-                &cancel,
-                None,
+        let second = guard
+            .ensure_started(again)
+            .await
+            .unwrap_or_else(|e| panic!("rea did not start again: {e}"));
+        second_start = Some(started.elapsed());
+        assert!(second.fresh && second.generation > rea.generation);
+        // Stop in the middle of Ghidra's analysis (Java running): the call ends as cancelled.
+        if decompiler == Decompiler::Ghidra {
+            temp.phase("a call stopped during the analysis");
+            let opened = call(
+                &mut guard,
+                "open_binary",
+                json!({"path": hello.display().to_string()}),
             )
             .await;
-        println!(
-            "real_rea: list_procedures stopped after 3 s: {:?} after {:.1} s",
-            outcome.as_ref().map(|o| o.is_error),
-            started.elapsed().as_secs_f64()
-        );
-        match outcome {
-            Err(reverse::ReverseError::Cancelled) => {}
-            Ok(_) => println!("real_rea: the analysis finished within 3 s; nothing was stopped"),
-            Err(other) => panic!("a stopped call ended as {other}"),
+            assert!(!opened.is_error, "{}", opened.joined_text());
+            let cancel = CancellationToken::new();
+            let stop = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                stop.cancel();
+            });
+            let started = Instant::now();
+            let mut args = Map::new();
+            args.insert("detail".into(), json!("summary"));
+            let outcome = guard
+                .call(
+                    &allow::app_list(),
+                    "list_procedures",
+                    args,
+                    Duration::from_secs(600),
+                    &cancel,
+                    None,
+                )
+                .await;
+            println!(
+                "real_rea: list_procedures stopped after 3 s: {:?} after {:.1} s",
+                outcome.as_ref().map(|o| o.is_error),
+                started.elapsed().as_secs_f64()
+            );
+            match outcome {
+                Err(reverse::ReverseError::Cancelled) => {}
+                Ok(_) => {
+                    println!("real_rea: the analysis finished within 3 s; nothing was stopped")
+                }
+                Err(other) => panic!("a stopped call ended as {other}"),
+            }
         }
+        drop(guard);
     }
-    drop(guard);
+    temp.phase("stop");
     process.restart(RestartReason::Quit).await;
     assert_eq!(process.state(), RunState::Stopped);
     // After the stop nothing from the pack runs any more: not rea, not Kuna, not Java or
@@ -938,17 +1065,66 @@ async fn end_to_end(decompiler: Decompiler) {
     }
 
     println!(
-        "real_rea: {} on {}: first start {:.1} s, second start {:.1} s, open and first analysis {:.1} s{}",
+        "real_rea: {} on {}: first start {:.1} s{}, open and first analysis {:.1} s{}",
         decompiler.label(),
         platform.key(),
         first_start.as_secs_f64(),
-        second_start.as_secs_f64(),
+        second_start
+            .map(|t| format!(", second start {:.1} s", t.as_secs_f64()))
+            .unwrap_or_default(),
         open_time.as_secs_f64(),
         match peak.load(Ordering::SeqCst) {
             0 => String::new(),
             bytes => format!(", Java's peak memory {} MB", bytes / 1_000_000),
         }
     );
+    if let Some((size, took, peak)) = large_figures {
+        println!(
+            "real_rea: a larger program ({} KB) opened and analysed by Ghidra in {:.1} s{}",
+            size / 1000,
+            took.as_secs_f64(),
+            match peak {
+                0 => String::new(),
+                bytes => format!(", Java's peak memory {} MB", bytes / 1_000_000),
+            }
+        );
+    }
+
+    // Nothing of rea's appeared in the system's temporary folders (watched during the run),
+    // and nothing is left there after the stop.
+    let (appeared, left) = temp.finish().await;
+    let (java, others): (Vec<_>, Vec<_>) = appeared.iter().partition(|(p, _)| java_counters(p));
+    if !java.is_empty() {
+        println!(
+            "real_rea: Java's performance counters in the system's temporary folder (the JVM \
+             writes them there whatever its own temporary folder is, and removes them when it \
+             ends): {java:?}"
+        );
+    }
+    let left_over: Vec<&PathBuf> = left.iter().filter(|p| !java_counters(p)).collect();
+    assert!(
+        left_over.is_empty(),
+        "left in the system's temporary folder after the stop: {left_over:?}"
+    );
+    match kind {
+        Base::Plain => assert!(
+            others.is_empty(),
+            "rea wrote outside the pack, into the system's temporary folder (entry and the \
+             phase it appeared in): {others:?}. A `rea-ghidra-socket-` entry means the socket \
+             path inside the pack was longer than 106 bytes (use a shorter REAL_REA_DIR)"
+        ),
+        Base::DotFolder if !others.is_empty() => println!(
+            "real_rea: KNOWN LIMIT: with the pack under a folder whose name starts with a dot \
+             (the app's own folder on Linux is under ~/.local/share), rea puts Ghidra's session \
+             (its project, logs, a copy of the opened file and the bridge socket) in the \
+             system's temporary folder instead of the pack's tmp; it was removed at the stop: \
+             {others:?}"
+        ),
+        Base::DotFolder => println!(
+            "real_rea: with the pack under a folder whose name starts with a dot, nothing of \
+             rea's appeared in the system's temporary folder"
+        ),
+    }
 
     // Everything rea wrote is under home, tmp, cache and work.
     let after = snapshot(&watched);
@@ -995,12 +1171,20 @@ async fn end_to_end(decompiler: Decompiler) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rea_with_kuna() {
-    end_to_end(Decompiler::Kuna).await;
+    end_to_end(Decompiler::Kuna, Base::Plain).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rea_with_ghidra() {
-    end_to_end(Decompiler::Ghidra).await;
+    end_to_end(Decompiler::Ghidra, Base::Plain).await;
+}
+
+/// The app's own folder on Linux is under `~/.local/share`: rea then moves Ghidra's session to
+/// `/tmp`. Whatever it puts there must be gone after the stop (the test prints what it saw).
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rea_with_ghidra_under_a_dot_folder() {
+    end_to_end(Decompiler::Ghidra, Base::DotFolder).await;
 }
 
 #[test]
@@ -1023,4 +1207,37 @@ fn paths_are_found_in_rea_text() {
         .collect();
     found.sort();
     assert_eq!(found, ["/srv/x", r"C:\A\b"]);
+}
+
+#[test]
+fn the_required_list_and_the_temporary_names() {
+    assert!(required(Decompiler::Ghidra, Some("kuna, ghidra")));
+    assert!(required(Decompiler::Kuna, Some("Kuna")));
+    assert!(!required(Decompiler::Ghidra, Some("kuna")));
+    assert!(!required(Decompiler::Kuna, None));
+    assert!(!required(Decompiler::Kuna, Some("")));
+    for name in [
+        "rea-ghidra-Skj3tD",
+        "rea-ghidra-socket-AbC123",
+        ".rea-config-x",
+        "rea-kuna-1",
+        "ghidra_root_Temp",
+        "jna-12345",
+        "Kuna.lock",
+    ] {
+        assert!(rea_temp_name(name), "{name}");
+    }
+    for name in [
+        "real-rea-abc",
+        "thread-dump",
+        "systemd-private-1",
+        "area-51",
+    ] {
+        assert!(!rea_temp_name(name), "{name}");
+    }
+    assert!(java_counters(Path::new("/tmp/hsperfdata_root/1234")));
+    assert!(!java_counters(Path::new("/tmp/rea-ghidra-x")));
+    assert!(dotted(Path::new("/home/u/.local/share/x/reverse")));
+    assert!(!dotted(Path::new("/tmp/real-rea-abc/reverse")));
+    assert!(!dotted(Path::new("/tmp/a.b/reverse")));
 }

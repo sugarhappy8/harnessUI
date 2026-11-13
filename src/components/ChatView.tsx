@@ -262,44 +262,72 @@ export function ChatView() {
           then the chat's buttons. The model's group asks only for its parts at their shortest
           (`w-min`: the name at about 12 characters, the ready line's number, the usage line's
           form for this width) and takes the rest of the row, so the buttons move under it,
-          right-aligned, before anything there is cut. Below @7xl (a window under about 1,560
-          pixels with the sidebar open) Thinking and System prompt show their icon only; the
-          tooltip and the accessible name keep the words. */}
+          right-aligned, before anything there is cut.
+          [header-layout r2] The model's group is a grid whose places follow the header's width,
+          never what is in it, so nothing moves while a reply streams. From @2xl (a header of 42rem,
+          where the whole first row always fits) the meter, the speed and Thinking sit on the
+          name's row as before. Narrower, the name and the model's state have the first row to
+          themselves and the meter, the speed and Thinking go to the right of the usage line;
+          under 22.25rem (the name's 9.75rem, the widest state's 12rem and the gap) the state goes
+          under the name and the speed is left out (it is under the reply when it ends), and under
+          @2xs they go on a row of their own. Thinking always says "On" or "Off" in words, and
+          "Thinking on" with System prompt in words from @5xl (a window from about 1,300 pixels
+          with the sidebar open). */}
       <header className="glass @container z-10 flex flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-border px-3 py-2">
-        <div data-header-model className="flex w-min min-w-0 grow flex-col">
-          <div className="flex min-w-0 items-center gap-1.5">
+        <div
+          data-header-model
+          className="grid w-min min-w-0 grow grid-cols-[minmax(min-content,1fr)_auto] items-center gap-x-1.5"
+        >
+          <div
+            data-model-line
+            className="col-span-2 col-start-1 row-start-1 flex items-center gap-x-1.5 gap-y-1 @max-[22.25rem]:flex-wrap @2xl:col-span-1"
+          >
             <ModelPicker />
             <RuntimeIndicator />
-            {(used !== null || live?.tokensPerSecond != null || (detail && modelRef?.startsWith("local:") && runtime?.thinking)) && (
-              <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                {used !== null && <ContextMeter used={used} nCtx={nCtx} />}
-                {live?.tokensPerSecond != null && (
-                  <span className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums">
-                    {live.tokensPerSecond.toFixed(1)} tokens/s
-                  </span>
-                )}
-                {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
-                  <button
-                    type="button"
-                    aria-pressed={detail.chat.thinking}
-                    aria-label={`Thinking ${detail.chat.thinking ? "on" : "off"}`}
-                    title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
-                    onClick={() =>
-                      void ipc
-                        .setChatThinking(detail.chat.id, !detail.chat.thinking)
-                        .then(() => openChat(detail.chat.id))
-                        .catch((e) => showError(toErrorInfo(e)))
-                    }
-                    className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted ${detail.chat.thinking ? "text-accent" : "text-fg-muted"}`}
-                  >
-                    <Brain size={15} aria-hidden />
-                    <span className="hidden @7xl:inline">Thinking {detail.chat.thinking ? "on" : "off"}</span>
-                  </button>
-                )}
-              </div>
-            )}
           </div>
-          <UsageLine />
+          {(used !== null || live?.tokensPerSecond != null || (detail && modelRef?.startsWith("local:") && runtime?.thinking)) && (
+            <div
+              data-model-status
+              className="col-start-2 row-start-2 flex items-center gap-1.5 justify-self-end @max-2xs:col-span-2 @max-2xs:col-start-1 @max-2xs:row-start-3 @2xl:row-start-1"
+            >
+              {used !== null && <ContextMeter used={used} nCtx={nCtx} />}
+              {live?.tokensPerSecond != null && (
+                <span
+                  data-speed
+                  className="hidden shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums @min-[22.25rem]:inline"
+                >
+                  {live.tokensPerSecond.toFixed(1)} tokens/s
+                </span>
+              )}
+              {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
+                <button
+                  type="button"
+                  aria-pressed={detail.chat.thinking}
+                  aria-label={`Thinking ${detail.chat.thinking ? "on" : "off"}`}
+                  title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
+                  onClick={() =>
+                    void ipc
+                      .setChatThinking(detail.chat.id, !detail.chat.thinking)
+                      .then(() => openChat(detail.chat.id))
+                      .catch((e) => showError(toErrorInfo(e)))
+                  }
+                  // Lower on the usage line's row (under @2xl) than on the name's row.
+                  className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted @max-2xl:py-0.5 ${detail.chat.thinking ? "text-accent" : "text-fg-muted"}`}
+                >
+                  <Brain size={15} aria-hidden />
+                  <span data-thinking="short" className="@5xl:hidden">
+                    {detail.chat.thinking ? "On" : "Off"}
+                  </span>
+                  <span data-thinking="full" className="hidden @5xl:inline">
+                    Thinking {detail.chat.thinking ? "on" : "off"}
+                  </span>
+                </button>
+              )}
+            </div>
+          )}
+          <div className="col-start-1 row-start-2 min-w-0 @max-2xs:col-span-2 @2xl:col-span-2">
+            <UsageLine />
+          </div>
         </div>
         {detail && (
           <div data-header-controls className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1 @md:gap-1.5">
@@ -319,7 +347,7 @@ export function ChatView() {
               aria-label="System prompt"
             >
               <FileText size={15} aria-hidden />
-              <span className="hidden @7xl:inline">System prompt</span>
+              <span className="hidden @5xl:inline">System prompt</span>
             </button>
             <button
               type="button"

@@ -62,11 +62,12 @@ export function ModelPicker() {
         <button
           type="button"
           className={
-            // [0.0.6 header-layout] Gives way to the ready line beside it only down to about 12
-            // characters of the name (8.75rem with its arrow); the header moves its buttons to
-            // a second row before that. The name ends in an ellipsis on its one line; it breaks
-            // anywhere, so the header can count the name at that width and no more.
-            "flex max-w-xs min-w-[8.75rem] items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm font-medium hover:bg-bg-muted " +
+            // [0.0.6 header-layout] Gives way to the ready line beside it only down to 12
+            // characters of the name and the ellipsis (9.75rem with the padding, the gap and the
+            // arrow: about 7rem for the name); the header moves its buttons to a second row before
+            // that. The name ends in an ellipsis on its one line; it breaks anywhere, so the
+            // header can count the name at that width and no more.
+            "flex max-w-xs min-w-[9.75rem] items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm font-medium hover:bg-bg-muted " +
             (current ? "border-transparent" : "border-border bg-surface shadow-soft")
           }
           aria-label="Model for this chat"
