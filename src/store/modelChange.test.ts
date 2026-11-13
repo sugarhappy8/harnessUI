@@ -562,6 +562,7 @@ describe("pickModel (store): the model's own settings, and D3 before a switch", 
     afterEach(() => {
       ipcMock.loadLocalModel.mockReset();
       ipcMock.cancelPendingReload.mockReset();
+      ipcMock.createChat.mockReset();
     });
 
     /** Like the backend's `ChangeGate`: at most one load waits; a newer load or Cancel ends it
@@ -714,6 +715,55 @@ describe("pickModel (store): the model's own settings, and D3 before a switch", 
       await waiting;
       expect(ipcMock.cancelPendingReload).toHaveBeenCalledTimes(1);
       expect(models).toEqual({ 3: "local:/m/a.gguf", 4: "provider:1:fake" });
+    });
+
+    it("with no chat open, the chat the pick makes owns its wait: an endpoint in it cancels the wait", async () => {
+      const models = await twoChats();
+      const backend = oneWaitingLoad();
+      // No chat is open (the Welcome screen, or the open chat was deleted).
+      useApp.setState({ activeChatId: null, detail: null });
+      let made = 9;
+      ipcMock.createChat.mockImplementation(async (ref) => {
+        models[made] = ref;
+        return { id: made, modelRef: ref };
+      });
+      const waiting = useApp.getState().pickModel("local:/m/b.gguf");
+      await answer("Restart when it ends");
+      await flush();
+      await flush();
+      expect(useApp.getState().detail?.chat).toMatchObject({ id: 9, modelRef: "local:/m/b.gguf" });
+      expect(change.useWaiting.getState().kind).toBe("switch");
+
+      // An endpoint in another chat leaves the new chat's wait alone.
+      await useApp.getState().openChat(4);
+      await useApp.getState().pickModel("provider:2:other");
+      expect(ipcMock.cancelPendingReload).not.toHaveBeenCalled();
+
+      await useApp.getState().openChat(9);
+      await useApp.getState().pickModel("provider:3:mine");
+      expect(ipcMock.cancelPendingReload).toHaveBeenCalledTimes(1);
+      await waiting;
+      backend.replyEnds();
+      await flush();
+      expect(backend.loaded).toEqual([]);
+      expect(models).toEqual({ 3: "local:/m/a.gguf", 4: "provider:2:other", 9: "provider:3:mine" });
+      expect(change.useWaiting.getState().kind).toBeNull();
+      expect(useApp.getState().error).toBeNull();
+
+      // A chat the pick made had no model before it, so Cancel leaves it on the model it was
+      // made with (as for a chat that had no model).
+      useApp.setState({ activeChatId: null, detail: null });
+      made = 10;
+      const cancelled = useApp.getState().pickModel("local:/m/c.gguf");
+      await answer("Restart when it ends");
+      await flush();
+      await flush();
+      expect(useApp.getState().activeChatId).toBe(10);
+      await ipcMock.cancelPendingReload();
+      await cancelled;
+      expect(backend.loaded).toEqual([]);
+      expect(models[10]).toBe("local:/m/c.gguf");
+      expect(useApp.getState().error).toBeNull();
     });
   });
 });

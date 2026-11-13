@@ -34,10 +34,12 @@ verifier is missing):
   `--save-release`); `--record` writes `github-digest` into the lock, online, or offline
   with `--from-release <file>`, the record a CI run saved, which goes through the same
   checks as GitHub's answer. Beside it goes `github_digest_run`, the CI run of THIS_REPO
-  that read GitHub's answer (the run in the saved record, or the current one online);
+  that read GitHub's answer (online, the current run; offline, the run the saved record
+  names, whose form alone is checked: a hand-made record naming a run passes too);
   `--record` refuses without one and `--check` refuses `github-digest` without it. A pin
   outside CI keeps the mark only where the old lock recorded the same file with its run.
-  The release workflow runs `github-digest --part ghidra` before every release build.
+  The release workflow runs `github-digest --part ghidra` before every release build, so
+  each release reads GitHub's digest itself.
 
 Every part's builds must carry their own publisher's checks (REQUIRED_CHECKS). Ghidra alone
 may carry `first-download-only` in place of `github-digest` (as it did until CI run
@@ -324,13 +326,18 @@ def publisher_digest(part: str, repo: str, tag: str, asset: str, path: Path, arg
 # fails if it differs from the lock's SHA-256 or size; `--save-release` keeps the release
 # record it read (CI uploads it as an artifact of the run). `--record` then writes
 # `github-digest` into the lock, online, or offline from that saved record
-# (`--from-release <file>`), checked exactly as GitHub's answer is. Nothing offline takes
-# the lock's own values as evidence. Each build marked `github-digest` names the CI run of
-# this repository that read GitHub's answer (`github_digest_run`), and `--check` refuses the
-# mark without it, so a hand-made record cannot set it. The release workflow reads GitHub's
-# digest again before every release build.
+# (`--from-release <file>`), checked exactly as GitHub's answer is; values typed on the
+# command line are not taken. Each build marked `github-digest` names the CI run of this
+# repository whose saved record it came from (`github_digest_run`; for Ghidra, the artifact
+# ghidra-release-record of that run), so a reviewer can check that record, and `--check`
+# refuses the mark without such a run. The script checks only the form of that address: it
+# cannot tell a hand-made record from a CI one. That is why release.yml reads GitHub's
+# digest itself before every release build.
 
 DIGEST_REPOS = {"ghidra": "NationalSecurityAgency/ghidra", "kuna": "Noelo-Lab/kuna"}
+# The artifact a CI run saves the release record in (ci.yml's ghidra-digest job), by part;
+# no CI job saves one for Kuna.
+SAVED_RECORD_ARTIFACT = {"ghidra": "ghidra-release-record"}
 # The repository whose CI runs may vouch for GitHub's digest in the lock.
 THIS_REPO = "sugarhappy8/harnessUI"
 CI_RUN = re.compile(r"https://github\.com/" + re.escape(THIS_REPO) + r"/actions/runs/[0-9]+")
@@ -528,12 +535,14 @@ def cmd_github_digest(args) -> None:
         with open(summary, "a", encoding="utf-8") as f:
             f.write("".join(f"- {line}\n" for line in lines))
     current = [b.get("verified_by") for p in lock["parts"] if p["name"] == args.part for b in p["builds"]]
+    artifact = SAVED_RECORD_ARTIFACT.get(args.part)
     if not args.record:
         if online and any("github-digest" not in (vb or []) for vb in current):
             if not is_ci_run(run):
+                ci_job = f" (ci.yml's ghidra-digest job does, as the artifact {artifact})" if artifact else ""
                 how = (
                     f"a CI run of {THIS_REPO} must read it: run github-digest --part {args.part} "
-                    "--save-release <file> there (ci.yml's ghidra-digest job does), then: python3 -I "
+                    f"--save-release <file> there{ci_job}, then: python3 -I "
                     f"scripts/pin_reverse.py github-digest --part {args.part} --from-release <that file> --record"
                 )
             elif args.save_release:
@@ -555,9 +564,10 @@ def cmd_github_digest(args) -> None:
             f"scripts/pin_reverse.py github-digest --part {args.part} --from-release <that file> --record"
         )
     if not online and (wrong := run_problem(run, args.from_release)):
+        saved_as = f" (CI saves {args.part.capitalize()}'s as the artifact {artifact})" if artifact else ""
         fail(
-            f"{wrong}: only the record a CI run of {THIS_REPO} saved (the artifact "
-            "ghidra-release-record) can record GitHub's digest; nothing was written"
+            f"{wrong}: only a record that names a CI run of {THIS_REPO} can record GitHub's "
+            f"digest{saved_as}; nothing was written"
         )
     print(f"Name this run in the commit that records it: {run}")
     new = with_github_digest(lock, args.part, run)

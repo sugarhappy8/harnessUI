@@ -150,6 +150,9 @@ pub(crate) trait Rea: Send + Sync {
         progress: Option<ProgressFn>,
     ) -> Result<CallOutcome, HostError>;
     async fn stop(&self, grace: Duration);
+    /// Waits until every process this rea started has ended, also a half-started one whose
+    /// start was dropped: the managed server kills that one at once, without waiting.
+    async fn ended(&self);
     fn is_running(&self) -> bool;
     fn ended_unexpectedly(&self) -> bool;
     fn stderr_tail(&self) -> Vec<String>;
@@ -181,6 +184,7 @@ impl Rea for ManagedServer {
     async fn stop(&self, grace: Duration) {
         ManagedServer::stop(self, grace).await;
     }
+    async fn ended(&self) {}
     fn is_running(&self) -> bool {
         ManagedServer::is_running(self)
     }
@@ -1001,6 +1005,10 @@ mod tests {
         fail_start: bool,
         /// `start` never ends (it waits until its caller stops waiting for it).
         start_hangs: bool,
+        /// Its process goes on ending after a start is dropped or a stop, until `end_now`.
+        ends_late: bool,
+        has_ended: AtomicBool,
+        end: tokio::sync::Notify,
         starts: AtomicU64,
         calls: StdMutex<Vec<String>>,
         stops: StdMutex<Vec<Duration>>,
@@ -1066,6 +1074,16 @@ mod tests {
             self.running.store(false, Ordering::SeqCst);
             self.stopped.notify_waiters();
         }
+        async fn ended(&self) {
+            while self.ends_late && !self.has_ended.load(Ordering::SeqCst) {
+                // Registered when made, so an `end_now` from here on is not missed.
+                let end = self.end.notified();
+                if self.has_ended.load(Ordering::SeqCst) {
+                    break;
+                }
+                end.await;
+            }
+        }
         fn is_running(&self) -> bool {
             self.running.load(Ordering::SeqCst) && !self.crashed.load(Ordering::SeqCst)
         }
@@ -1098,14 +1116,20 @@ mod tests {
     }
 
     fn write_part(root: &Path, part: &str, programs: &[&str]) {
+        let files: Vec<(&str, &[u8])> = programs.iter().map(|r| (*r, r.as_bytes())).collect();
+        write_part_with(root, part, &files);
+    }
+
+    /// [`write_part`] with each program's content.
+    fn write_part_with(root: &Path, part: &str, programs: &[(&str, &[u8])]) {
         let p = lock::embedded().part(part).expect("part in the lock");
         let dir = root.join(&p.dir);
         let mut recorded = Vec::new();
-        for rel in programs {
+        for (rel, content) in programs {
             let file = dir.join(rel);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(&file, rel.as_bytes()).unwrap();
-            recorded.push(serde_json::json!({"path": rel, "size": rel.len()}));
+            std::fs::write(&file, content).unwrap();
+            recorded.push(serde_json::json!({"path": rel, "size": content.len()}));
         }
         let marker = serde_json::json!({
             "component": p.component,
@@ -1264,6 +1288,42 @@ mod tests {
     /// with a file left in it by an earlier run.
     #[cfg(unix)]
     fn bench_ghidra_with_run_tmp() -> (Bench, PathBuf) {
+        bench_ghidra_with_run_tmp_using(FakeRea::default)
+    }
+
+    /// [`bench_ghidra_with_run_tmp`] with each rea made by `fake`.
+    #[cfg(unix)]
+    fn bench_ghidra_with_run_tmp_using(fake: fn() -> FakeRea) -> (Bench, PathBuf) {
+        let (dir, layout, run_tmp) = ghidra_layout_with_run_tmp();
+        let launched: Arc<StdMutex<Vec<Arc<FakeRea>>>> = Arc::default();
+        let record = launched.clone();
+        let launch: Launch = Arc::new(move |spec, _lifecycle| -> Arc<dyn Rea> {
+            let rea = Arc::new(fake());
+            *rea.spec.lock().unwrap() = Some(spec);
+            record.lock().unwrap().push(rea.clone());
+            rea
+        });
+        let process = ReaProcess::build(
+            layout.clone(),
+            Platform::LinuxX64,
+            launch,
+            PathBuf::from("/"),
+        );
+        process.set_installer(Arc::new(
+            Installer::new(layout.clone(), Platform::LinuxX64).with_release_rules(false),
+        ));
+        let bench = Bench {
+            _dir: dir,
+            layout,
+            launched,
+            process,
+        };
+        (bench, run_tmp)
+    }
+
+    /// The reverse folder of [`bench_ghidra_with_run_tmp`], and rea's temporary folder.
+    #[cfg(unix)]
+    fn ghidra_layout_with_run_tmp() -> (tempfile::TempDir, ReverseLayout, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let run = dir.path().join("run");
@@ -1286,30 +1346,7 @@ mod tests {
             ],
         );
         write_part(layout.root(), "java", &["bin/java", "bin/javac"]);
-        let launched: Arc<StdMutex<Vec<Arc<FakeRea>>>> = Arc::default();
-        let record = launched.clone();
-        let launch: Launch = Arc::new(move |spec, _lifecycle| -> Arc<dyn Rea> {
-            let rea = Arc::new(FakeRea::default());
-            *rea.spec.lock().unwrap() = Some(spec);
-            record.lock().unwrap().push(rea.clone());
-            rea
-        });
-        let process = ReaProcess::build(
-            layout.clone(),
-            Platform::LinuxX64,
-            launch,
-            PathBuf::from("/"),
-        );
-        process.set_installer(Arc::new(
-            Installer::new(layout.clone(), Platform::LinuxX64).with_release_rules(false),
-        ));
-        let bench = Bench {
-            _dir: dir,
-            layout,
-            launched,
-            process,
-        };
-        (bench, run_tmp)
+        (dir, layout, run_tmp)
     }
 
     #[cfg(unix)]
@@ -1999,6 +2036,178 @@ mod tests {
         assert_eq!(b.process.state(), RunState::Stopped);
         assert!(!b.process.is_busy());
         assert_eq!(*rea.stops.lock().unwrap(), vec![STOP_GRACE]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dropped_start_holds_rea_and_its_runtime_folder_until_its_rea_has_ended() {
+        let (b, run_tmp) = bench_ghidra_with_run_tmp_using(|| FakeRea {
+            start_hangs: true,
+            ends_late: true,
+            ..FakeRea::default()
+        });
+        let config = b.config(Some(Decompiler::Ghidra));
+        {
+            let mut g = b.process.lock().await;
+            let cancel = CancellationToken::new();
+            let stop = async {
+                until_starting(&b.process).await;
+                cancel.cancel();
+            };
+            let start = like_the_agent_loop(g.ensure_started(config), &cancel);
+            let (out, ()) = tokio::join!(start, stop);
+            assert!(out.is_none(), "{out:?}");
+        }
+        let rea = b.last();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rea.stops.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "the half-started rea was never stopped");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Its process is still ending: rea is busy (not Starting) and its folder stays.
+        assert_eq!(b.process.state(), RunState::Stopped);
+        assert!(b.process.is_busy());
+        assert!(run_tmp.is_dir());
+        // A restart meanwhile leaves the folder too: the half-started rea may still use it.
+        b.process.restart(RestartReason::Updated).await;
+        assert!(
+            run_tmp.is_dir(),
+            "removed while the half-started rea could still run"
+        );
+        let early = tokio::time::timeout(Duration::from_millis(200), b.process.lock()).await;
+        assert!(
+            early.is_err(),
+            "another caller got rea while the half-started rea still ran"
+        );
+        assert!(b.process.is_busy());
+        // Once it has ended, rea is free and the folder that start made is gone.
+        rea.has_ended.store(true, Ordering::SeqCst);
+        rea.end.notify_waiters();
+        let g = tokio::time::timeout(Duration::from_secs(5), b.process.lock())
+            .await
+            .expect("rea is free once the half-started rea has ended");
+        assert!(!run_tmp.exists(), "the dropped start's folder is still there");
+        assert_eq!(*rea.stops.lock().unwrap(), vec![STOP_GRACE]);
+        drop(g);
+        assert!(!b.process.is_busy());
+        assert_eq!(b.process.state(), RunState::Stopped);
+    }
+
+    /// A Ghidra bench ([`ghidra_layout_with_run_tmp`]) started through the real managed
+    /// server, whose `node` is a shell script that writes its process id to the returned
+    /// file and then never answers rea's handshake.
+    #[cfg(target_os = "linux")]
+    fn silent_managed_rea() -> (tempfile::TempDir, ReaProcess, RunConfig, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, layout, run_tmp) = ghidra_layout_with_run_tmp();
+        let pid_file = dir.path().join("rea.pid");
+        let script = format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec /bin/sleep 1000\n",
+            pid_file.display()
+        );
+        write_part_with(layout.root(), "node", &[("bin/node", script.as_bytes())]);
+        let node = layout
+            .part_dir(&lock::embedded().part("node").unwrap().dir)
+            .join("bin/node");
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let process = ReaProcess::build(
+            layout.clone(),
+            Platform::LinuxX64,
+            launch_managed(),
+            PathBuf::from("/"),
+        );
+        process.set_installer(Arc::new(
+            Installer::new(layout.clone(), Platform::LinuxX64).with_release_rules(false),
+        ));
+        let installation = process.shared.installer().installation();
+        let config = run_config(
+            &layout,
+            &installation,
+            Some(Decompiler::Ghidra),
+            Flavor::Linux,
+            false,
+        );
+        assert_eq!(config.var("TMPDIR"), run_tmp.to_str());
+        (dir, process, config, run_tmp, pid_file)
+    }
+
+    /// Waits until the script of [`silent_managed_rea`] has written its process id.
+    #[cfg(target_os = "linux")]
+    async fn until_pid(file: &Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(pid) = std::fs::read_to_string(file)
+                .ok()
+                .and_then(|t| t.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "rea's process never started");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_dropped_with_the_managed_server_holds_rea_until_its_process_has_ended() {
+        let (_dir, process, config, run_tmp, pid_file) = silent_managed_rea();
+        let pid = {
+            let mut g = process.lock().await;
+            let cancel = CancellationToken::new();
+            let stop = async {
+                let pid = until_pid(&pid_file).await;
+                assert_eq!(process.state(), RunState::Starting);
+                cancel.cancel();
+                pid
+            };
+            let start = like_the_agent_loop(g.ensure_started(config), &cancel);
+            let (out, pid) = tokio::join!(start, stop);
+            assert!(out.is_none(), "{out:?}");
+            pid
+        };
+        // Dropping the start killed the half-started rea at once. Nobody gets rea before
+        // that process has ended, and then the folder that start made is gone too.
+        assert_eq!(process.state(), RunState::Stopped);
+        let g = tokio::time::timeout(Duration::from_secs(10), process.lock())
+            .await
+            .expect("rea is free once the half-started rea has ended");
+        assert!(
+            !pid_alive(pid),
+            "another caller got rea while the half-started rea {pid} still ran"
+        );
+        assert!(!run_tmp.exists(), "the dropped start's folder is still there");
+        drop(g);
+        assert!(!process.is_busy());
+        assert_eq!(process.state(), RunState::Stopped);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_during_a_managed_start_ends_once_the_half_started_rea_has_ended() {
+        let (_dir, process, config, run_tmp, pid_file) = silent_managed_rea();
+        let process = Arc::new(process);
+        let starter = process.clone();
+        let file = pid_file.clone();
+        let start = tokio::spawn(async move {
+            let mut g = starter.lock().await;
+            let out = g.ensure_started(config).await;
+            let pid = until_pid(&file).await;
+            (out, pid_alive(pid))
+        });
+        let pid = until_pid(&pid_file).await;
+        until_starting(&process).await;
+        process.restart(RestartReason::Updated).await;
+        // The restart returns once the half-started rea has ended, and removes its folder.
+        assert!(
+            !pid_alive(pid),
+            "the restart returned while the half-started rea {pid} still ran"
+        );
+        assert!(!run_tmp.exists());
+        let (out, alive) = start.await.unwrap();
+        assert_eq!(out.unwrap_err(), ReverseError::Stopped);
+        assert!(!alive, "the start ended while its rea still ran");
+        assert!(!process.is_busy());
+        assert_eq!(process.state(), RunState::Stopped);
     }
 
     #[test]

@@ -5,7 +5,8 @@ Pinning needs the network and the publishers' verifiers; these tests check what 
 the committed `reverse.lock.json` passes `--check --release`, and `--check` catches each kind
 of bad lock (a host outside the part's set, a missing check, Kuna offered on Windows or Ghidra
 on a Mac, a minimum above the pin, an unsafe folder or path, a missing fixture, GitHub's
-digest without the CI run that read it); plus the
+digest without the CI run that read it); that the release workflow reads GitHub's digest
+before anything is built; plus the
 version, engine-range and path-name helpers, and the archive survey on small fake archives.
 
     python3 -I scripts/pin_reverse_test.py
@@ -19,6 +20,7 @@ import copy
 import email.message
 import io
 import json
+import re
 import sys
 import tarfile
 import tempfile
@@ -507,9 +509,10 @@ class Pin(unittest.TestCase):
 class GithubDigest(unittest.TestCase):
     """`github-digest` (WP9e): CI compares GitHub's published digest of the pinned Ghidra
     asset with the lock and saves the release record it read; `--record` flips the lock to
-    `github-digest`, online, or offline from that saved record (never from the lock's own
-    values), and names beside it the CI run of sugarhappy8/harnessUI that read GitHub's
-    answer (`github_digest_run`); without such a run it records nothing."""
+    `github-digest`, online, or offline from that saved record (never from values typed on
+    the command line), and names beside it the CI run of sugarhappy8/harnessUI the record
+    names (`github_digest_run`); without such a run it records nothing. Offline only the
+    form of that address is checked, so release.yml reads GitHub's digest itself."""
 
     def release(self, lock=None, **asset_changes):
         a = pr.pinned_assets(lock or committed(), "ghidra")[0]
@@ -738,6 +741,98 @@ class GithubDigest(unittest.TestCase):
             self.assertEqual(b["verified_by"], ["github-digest", "first-download-only"])
             self.assertEqual(b["github_digest_run"], CI_RUN)
         self.assertEqual(pr.check(lock), [])
+
+    def release_of(self, name: str) -> dict:
+        """GitHub's release record of part `name`'s pinned assets, as GitHub answers when they
+        match the lock (every part this test reads has one release)."""
+        assets = pr.pinned_assets(committed(), name)
+        self.assertEqual(len({(a["repo"], a["tag"]) for a in assets}), 1)
+        return {"tag_name": assets[0]["tag"],
+                "assets": [{"name": a["asset"], "digest": "sha256:" + a["sha256"], "size": a["size"],
+                            "state": "uploaded", "browser_download_url": a["url"]} for a in assets]}
+
+    def record_of(self, d: str, file: str, name: str, run) -> str:
+        """A release record of part `name` that matches the lock and names `run` (left out
+        when None), written by hand: nothing here came from a CI run."""
+        a = pr.pinned_assets(committed(), name)[0]
+        record = {"part": name, "releases": [pr.saved_release(self.release_of(name), a["repo"], a["tag"])]}
+        if run is not None:
+            record["run"] = run
+        path = Path(d) / file
+        path.write_text(json.dumps(record))
+        return str(path)
+
+    def test_a_refusal_says_what_the_run_check_reads_and_names_its_own_parts_artifact(self):
+        # The refusal claims no more than the check does (the record names a CI run of this
+        # repository), and names the artifact CI saves only for the part it saves it for.
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("ghidra", "kuna"):
+                saved = self.record_of(d, f"{name}.json", name, None)
+                code, out, lock, sent = self.run_cmd(argv_part=name, record=True, from_release=saved, lock=waiting())
+                self.assertEqual(code, 1, out)
+                self.assertIn("only a record that names a CI run of sugarhappy8/harnessUI can record "
+                              "GitHub's digest", out)
+                self.assertNotIn("the record a CI run of", out)
+                self.assertEqual(lock, waiting(), f"{name}: the lock was written")
+                self.assertEqual(sent, [])
+                if name == "ghidra":
+                    self.assertIn("CI saves Ghidra's as the artifact ghidra-release-record", out)
+                else:
+                    self.assertNotIn("ghidra-release-record", out)
+        # The hint outside CI names ci.yml's job only for Ghidra, the part it reads.
+        code, out, _, _ = self.run_cmd(argv_part="kuna", release=self.release_of("kuna"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("--part kuna --save-release <file> there, then:", out)
+        self.assertNotIn("ghidra", out)
+        code, out, _, _ = self.run_cmd(lock=waiting())
+        self.assertEqual(code, 0, out)
+        self.assertIn("(ci.yml's ghidra-digest job does, as the artifact ghidra-release-record)", out)
+
+    def test_a_hand_made_record_passes_the_run_check_so_every_release_reads_github(self):
+        # Offline, the script checks a record's digests and the form of the run it names. A
+        # record written by hand from the lock's own values, naming a run that never saved
+        # it, passes both: the script cannot tell it from CI's. What stands behind a release
+        # is release.yml, which reads GitHub's digest itself before anything is built.
+        made_up = "https://github.com/sugarhappy8/harnessUI/actions/runs/1"
+        with tempfile.TemporaryDirectory() as d:
+            saved = self.record_of(d, "hand.json", "ghidra", made_up)
+            code, out, lock, _ = self.run_cmd(record=True, from_release=saved, lock=waiting())
+        self.assertEqual(code, 0, out)
+        self.assertTrue(all(b["github_digest_run"] == made_up for b in part(lock, "ghidra")["builds"]))
+        jobs = workflow_jobs(".github/workflows/release.yml")
+        gate = jobs["reverse-pins"]
+        for command in ("python3 -I scripts/pin_reverse.py --check --release",
+                        "python3 -I scripts/pin_reverse.py github-digest --part ghidra"):
+            self.assertIn(f"        run: {command}\n", gate)
+        self.assertNotIn("--from-release", gate)
+        self.assertNotIn("continue-on-error", gate)
+        self.assertIsNone(re.search(r"^\s+if:", gate, re.MULTILINE), "the gate runs on every release")
+        self.assertIn("reverse-pins", workflow_needs(jobs["publish"]))
+        self.assertIsNone(re.search(r"^    if:", jobs["publish"], re.MULTILINE), "publish runs only after the gate")
+        for name, job in jobs.items():
+            if name not in ("keys", "reverse-pins", "publish"):
+                self.assertIn("publish", workflow_needs(job), name)
+
+
+def workflow_jobs(rel: str) -> dict[str, str]:
+    """A workflow's jobs by id (the keys one level under `jobs:`), each with its lines."""
+    body = (pr.ROOT / rel).read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+    out: dict[str, str] = {}
+    name = None
+    for line in body.splitlines(keepends=True):
+        m = re.match(r"^  ([a-z0-9-]+):\s*$", line)
+        if m:
+            name = m.group(1)
+            out[name] = ""
+        elif name and (line.startswith("    ") or not line.strip()):
+            out[name] += line
+    return out
+
+
+def workflow_needs(job: str) -> set[str]:
+    """The jobs a job waits for (`needs: a` or `needs: [a, b]`)."""
+    m = re.search(r"^    needs:\s*(.+?)\s*$", job, re.MULTILINE)
+    return {n.strip() for n in m.group(1).strip("[]").split(",")} if m else set()
 
 
 class FakeWeb:

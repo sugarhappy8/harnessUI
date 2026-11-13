@@ -364,6 +364,23 @@ export const useApp = create<AppState>((set, get) => {
       if (!keep && before !== null) await restoreModel(chatId, modelRef, before);
     }
   };
+  /** Gives the open chat `modelRef`, or with no chat open makes a new chat on it, and opens
+   *  that chat. Returns the chat that has the model (null when none is open and `modelRef` is
+   *  null). */
+  const giveChatModel = async (modelRef: string | null): Promise<number | null> => {
+    const chatId = get().activeChatId;
+    if (chatId === null) {
+      // No chat is open: the model needs one to belong to, or picking it shows nothing.
+      if (modelRef === null) return null;
+      const chat = await ipc.createChat(modelRef);
+      await get().refreshChats();
+      await get().openChat(chat.id);
+      return chat.id;
+    }
+    await ipc.setChatModel(chatId, modelRef);
+    await get().openChat(chatId);
+    return chatId;
+  };
 
   return {
     chats: [],
@@ -478,17 +495,7 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     setChatModel: async (modelRef) => {
-      const chatId = get().activeChatId;
-      if (chatId === null) {
-        // No chat is open: the model needs one to belong to, or picking it shows nothing.
-        if (modelRef === null) return;
-        const chat = await ipc.createChat(modelRef);
-        await get().refreshChats();
-        await get().openChat(chat.id);
-        return;
-      }
-      await ipc.setChatModel(chatId, modelRef);
-      await get().openChat(chatId);
+      await giveChatModel(modelRef);
     },
 
     pickModel: async (modelRef, opts) => {
@@ -520,15 +527,19 @@ export const useApp = create<AppState>((set, get) => {
         }
         const answer = await askBeforeChange(runtime);
         if (answer === null) return;
-        const chatId = get().activeChatId;
+        const opened = get().activeChatId;
         const open = get().detail;
-        const pick = notePick(chatId);
-        await get().setChatModel(modelRef);
+        const pick = notePick(opened);
+        // With no chat open, the pick makes a new chat on the model, and the switch is that
+        // chat's: a pick in it (an endpoint too) replaces the switch as in any other chat.
+        const chatId = await giveChatModel(modelRef);
+        if (opened === null && chatId !== null && !newestPick.has(chatId)) newestPick.set(chatId, pick);
         opts?.onChatSet?.();
         // The model a Cancel puts back: the one the chat had before its first switch that has
-        // not ended, so after b and then c (or b twice) it goes back past both.
-        if (chatId !== null && !beforeSwitch.has(chatId)) {
-          beforeSwitch.set(chatId, open?.chat.id === chatId ? open.chat.modelRef : null);
+        // not ended, so after b and then c (or b twice) it goes back past both. A chat the pick
+        // made had no model before it, so it keeps this one (as a chat that had no model does).
+        if (opened !== null && !beforeSwitch.has(opened)) {
+          beforeSwitch.set(opened, open?.chat.id === opened ? open.chat.modelRef : null);
         }
         const load: LoadPick = { pick, path, chatId, riders: [] };
         newestLoad = load;

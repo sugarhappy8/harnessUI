@@ -114,7 +114,9 @@ Collected while the packages run. Each needs doing (or a decision) before the re
     Done (pick-cancel-minors): an endpoint picked in the chat whose switch waits cancels the
     wait; each chat keeps its model from before its first unfinished switch, and a chat whose
     wait a newer load of the same model took over ends with that load (keeps the model if it
-    loads, goes back on Cancel). Tests in `src/store/modelChange.test.ts`.
+    loads, goes back on Cancel). Tests in `src/store/modelChange.test.ts`. Final round: with
+    no chat open, the chat the pick makes owns the switch (an endpoint in it cancels the
+    wait); it had no model before, so Cancel leaves it on the picked model.
   - helper escaping: a block tag split by a hidden character is missed when a control or tag
     character and a letter follow its name; the docs and report still say summary hidden
     characters are escaped, and the Context tab's summary view changed without a note.
@@ -132,6 +134,11 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   `HOLDS_APP_FOLDERS` are fixed sentences now; the entry's path is only on the card's preview
   and in the audit row (`WalkRefusal::detail`). Tests in `crates/reverse/src/describe/tests.rs`
   and the `reverse-describe` probe; item5-spec section 6 and ARCHITECTURE 13.9 updated.
+  Done (arch-todo-lead): every WP9e and helper-escaping `TODO(lead)` marker is checked against
+  the code, tests and workflows and removed (ARCHITECTURE, SECURITY, README, CHANGELOG); 9.3,
+  13.6, 16 and 17 corrected where they differed; the offline test sentence now names
+  `e2e/m8_offline.py` and puts the built app's network check on the owner checklist (19,
+  item5-spec section 9). `scripts/docs_test.py` (in ci.yml) keeps those sentences in step.
 
 - **Final fix round (07:15 UTC).** Release review processes/network + tests (wf_0772ffdb-bab)
   confirmed 4 minors (scratchpad rr-2.json). The throwaway `crates/reverse/tests/zz_review_wp9c_sec.rs`

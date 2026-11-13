@@ -68,6 +68,9 @@ jobs:
       # Reverse engineering: the pinned downloads (reverse.lock.json) and their fixtures,
       # offline. The real rea runs in reverse.yml.
       - run: python3 -I scripts/pin_reverse.py --check && python3 -I scripts/pin_reverse_test.py
+      # ARCHITECTURE.md's sentences about rea's tests and CI against the workflows and test
+      # files they describe, and no TODO(lead) marker left in it.
+      - run: python3 -I scripts/docs_test.py
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Cache llama.cpp and the test model
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

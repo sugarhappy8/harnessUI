@@ -431,11 +431,16 @@ pub const RENAMED_SERVERS: &str = "mcpRenamedServers";
 
 /// One saved server renamed at start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RenamedServer {
     /// The name it had.
     pub from: String,
     /// The name it has now.
     pub to: String,
+    /// Some of its tools that were on are off now: their new names could not be told for
+    /// sure ([`Carried::Off`]), so the note asks the owner to switch them on again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tools_off: bool,
 }
 
 /// A free name for the owner's server whose name a built-in server now has:
@@ -488,69 +493,155 @@ fn moved_secrets(from: &str, to: &str, config: &Value) -> (Value, Vec<(String, S
     (out, pairs)
 }
 
-/// The name a tool of the saved server `from` is offered under once the server is called
-/// `to`, for a name kept in a chat's choice of tools or in the last choice; `None` when
-/// `name` is not one of `from`'s tools. `from` is a built-in server's name, too short to
-/// be cut in a tool's name. `owners` are the saved servers' names now: a name that also
-/// fits one of them, with more of its name (as "reverse__yours___x" fits "reverse
-/// (yours)"), is that server's tool and stays as it is.
-fn renamed_tool(name: &str, from: &str, to: &str, owners: &[String]) -> Option<String> {
+/// What becomes of a name kept in a chat's choice of tools, or in the last choice, that is
+/// one of a renamed server's tools ([`renamed_tool`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Carried {
+    /// The name the host gives the same tool under the server's new name.
+    To(String),
+    /// Its new name cannot be told for sure, so it is taken out and the tool is off until
+    /// the owner switches it on again. A name of 64 characters may have been cut, and a cut
+    /// name can be another tool's: two long names that start alike are cut to one, and
+    /// the second gets a number. A name another saved server's tool can have may be that
+    /// tool's.
+    Off,
+}
+
+/// True when `name` reads as a tool of the server `server`, with at least `least`
+/// characters of the server's part. A server's part is cut (down to 16 characters) only
+/// in a name of the longest length (names.rs).
+fn fits_server(name: &str, server: &str, least: usize) -> bool {
+    use mcp_host::names::{MAX_TOOL_NAME_LEN, SEPARATOR, sanitize_part};
+    let o = sanitize_part(server);
+    (o.len().min(16)..=o.len())
+        .filter(|&n| n >= least && (n == o.len() || name.len() == MAX_TOOL_NAME_LEN))
+        .any(|n| {
+            name.strip_prefix(&o[..n])
+                .is_some_and(|rest| rest.starts_with(SEPARATOR))
+        })
+}
+
+/// What becomes of `name`, kept in a chat's choice of tools or in the last choice, now
+/// that the saved server `from` is called `to`; `None` when `name` is not one of `from`'s
+/// tools. `from` is a built-in server's name, too short to be cut in a tool's name.
+///
+/// `before` are the other saved servers' names when `name` was saved (the renamed ones
+/// did not have their new names yet): a name that also fits one of them, with more of its
+/// name (as "reverse__yours___x" fits an existing "reverse (yours)"), is that server's
+/// tool and stays as it is. `now` are the saved servers' names now.
+///
+/// The host names a server's tools in the order the server lists them, and a name that is
+/// taken gets the next free number. While no name is cut, each tool's new name is its old
+/// one with the new server name in front, numbers included; so a name is carried only when
+/// its new name is shorter than 64 characters and no other saved server's tool can have it.
+fn renamed_tool(
+    name: &str,
+    from: &str,
+    to: &str,
+    before: &[String],
+    now: &[String],
+) -> Option<Carried> {
     use mcp_host::names::{MAX_TOOL_NAME_LEN, SEPARATOR, exposed_name, sanitize_part};
     let old = sanitize_part(from);
     let tool = name.strip_prefix(old.as_str())?.strip_prefix(SEPARATOR)?;
     if old.is_empty() || tool.is_empty() {
         return None;
     }
-    // A server's part is cut (down to 16 characters) only in a name of the longest length
-    // (names.rs).
-    let theirs = owners.iter().map(|o| sanitize_part(o)).any(|o| {
-        (o.len().min(16)..=o.len())
-            .filter(|&n| n >= old.len() && (n == o.len() || name.len() == MAX_TOOL_NAME_LEN))
-            .any(|n| {
-                name.strip_prefix(&o[..n])
-                    .is_some_and(|rest| rest.starts_with(SEPARATOR))
-            })
-    });
-    if theirs {
+    if before.iter().any(|o| fits_server(name, o, old.len())) {
         return None;
     }
-    Some(exposed_name(to, tool, &|_| false))
+    let new = exposed_name(to, tool, &|_| false);
+    if new.len() >= MAX_TOOL_NAME_LEN || now.iter().any(|o| o != to && fits_server(&new, o, 0)) {
+        return Some(Carried::Off);
+    }
+    Some(Carried::To(new))
 }
 
-/// `name` under its server's new name, when it is a tool of a renamed server.
-fn renamed_name(name: &str, renamed: &[RenamedServer], owners: &[String]) -> Option<String> {
-    renamed
+/// What becomes of `name` when it is a tool of a renamed server, and which server that is.
+/// `owners` are the saved servers' names now.
+fn renamed_name<'a>(
+    name: &str,
+    renamed: &'a [RenamedServer],
+    owners: &[String],
+) -> Option<(&'a RenamedServer, Carried)> {
+    let before: Vec<String> = owners
         .iter()
-        .find_map(|r| renamed_tool(name, &r.from, &r.to, owners))
+        .filter(|o| !renamed.iter().any(|r| &r.to == *o))
+        .cloned()
+        .collect();
+    renamed.iter().find_map(|r| {
+        renamed_tool(name, &r.from, &r.to, &before, owners).map(|carried| (r, carried))
+    })
+}
+
+/// Carries one kept name over ([`renamed_name`]). False when it is to be taken out; then
+/// its server's old name goes into `off`. `changed` is set when anything changed.
+fn carry_name(
+    name: &mut String,
+    renamed: &[RenamedServer],
+    owners: &[String],
+    off: &mut BTreeSet<String>,
+    changed: &mut bool,
+) -> bool {
+    match renamed_name(name, renamed, owners) {
+        None => true,
+        Some((_, Carried::To(new))) => {
+            *name = new;
+            *changed = true;
+            true
+        }
+        Some((server, Carried::Off)) => {
+            off.insert(server.from.clone());
+            *changed = true;
+            false
+        }
+    }
 }
 
 /// A chat's stored tool choices ([`crate::turns::ChatTools`]) with the renamed servers'
 /// tools under their new names: the tools that are on, and those the chat remembers as
-/// shown and found. Everything else stays as stored. True when anything changed.
-fn rename_tools_in_chat(prefs: &mut Value, renamed: &[RenamedServer], owners: &[String]) -> bool {
+/// shown and found. A tool whose new name cannot be told for sure is taken out; when it
+/// was on, its server's old name goes into `off`. Everything else stays as stored. True
+/// when anything changed.
+fn rename_tools_in_chat(
+    prefs: &mut Value,
+    renamed: &[RenamedServer],
+    owners: &[String],
+    off: &mut BTreeSet<String>,
+) -> bool {
     let mut changed = false;
     for key in ["enabled", "shown", "found"] {
         let Some(Value::Array(items)) = prefs.get_mut(key) else {
             continue;
         };
-        for item in items {
-            if let Value::String(name) = item
-                && let Some(new) = renamed_name(name, renamed, owners)
-            {
-                *name = new;
-                changed = true;
-            }
-        }
+        // Only a tool that was on is one the owner has to switch on again.
+        let mut not_on = BTreeSet::new();
+        let off = if key == "enabled" {
+            &mut *off
+        } else {
+            &mut not_on
+        };
+        items.retain_mut(|item| match item {
+            Value::String(name) => carry_name(name, renamed, owners, off, &mut changed),
+            _ => true,
+        });
     }
     changed
 }
 
 /// [0.0.6] Keeps the renamed servers' tools on where they were on. A chat's choice and the
 /// last choice that new chats start with ([`DEFAULT_TOOLS`]) list tools by the name they
-/// are offered under, which starts with the server's name. "Allow for this chat" answers
+/// are offered under, which starts with the server's name. A tool whose new name cannot be
+/// told for sure ([`Carried::Off`]) is switched off instead; the old names of the servers
+/// with such a tool that was on are returned, for the note. "Allow for this chat" answers
 /// need nothing: they are kept in memory only and end when the app quits (D12), so none is
 /// left from before this start, and the owner's server has not run yet.
-async fn carry_tool_choices(store: &store::Store, renamed: &[RenamedServer], owners: &[String]) {
+async fn carry_tool_choices(
+    store: &store::Store,
+    renamed: &[RenamedServer],
+    owners: &[String],
+) -> BTreeSet<String> {
+    let mut off = BTreeSet::new();
     let chats = store
         .list_chats(store::ListChats {
             limit: 0,
@@ -569,7 +660,7 @@ async fn carry_tool_choices(store: &store::Store, renamed: &[RenamedServer], own
             continue;
         };
         let mut prefs = chat.tool_prefs;
-        if rename_tools_in_chat(&mut prefs, renamed, owners)
+        if rename_tools_in_chat(&mut prefs, renamed, owners, &mut off)
             && let Err(e) = store
                 .update_chat(
                     summary.id,
@@ -588,16 +679,12 @@ async fn carry_tool_choices(store: &store::Store, renamed: &[RenamedServer], own
     }
     if let Ok(Some(mut last)) = store.get_setting::<Vec<String>>(DEFAULT_TOOLS).await {
         let mut changed = false;
-        for name in &mut last {
-            if let Some(new) = renamed_name(name, renamed, owners) {
-                *name = new;
-                changed = true;
-            }
-        }
+        last.retain_mut(|name| carry_name(name, renamed, owners, &mut off, &mut changed));
         if changed && let Err(e) = store.set_setting(DEFAULT_TOOLS, &last).await {
             tracing::warn!("could not keep a renamed server's tools in the last choice: {e}");
         }
     }
+    off
 }
 
 /// [0.0.6] Renames the owner's saved servers whose name a built-in server now has
@@ -606,7 +693,8 @@ async fn carry_tool_choices(store: &store::Store, renamed: &[RenamedServer], own
 /// to the new name (when the keychain refuses, it keeps them under the old names, which
 /// still work, and removing the server deletes them all the same:
 /// [`removable_secret_names`]); its tools stay on in the chats and in the last choice
-/// ([`carry_tool_choices`]). What was renamed is added to [`RENAMED_SERVERS`] for
+/// ([`carry_tool_choices`]), except a tool whose new name cannot be told for sure, which
+/// is switched off (`tools_off`). What was renamed is added to [`RENAMED_SERVERS`] for
 /// Settings → MCP.
 pub(crate) async fn rename_clashing_servers(
     store: &store::Store,
@@ -671,7 +759,11 @@ pub(crate) async fn rename_clashing_servers(
                 }
                 tracing::info!(from = %row.name, to = %to, "renamed a saved MCP server: a built-in server has its name");
                 taken.insert(to.clone());
-                renamed.push(RenamedServer { from: row.name, to });
+                renamed.push(RenamedServer {
+                    from: row.name,
+                    to,
+                    tools_off: false,
+                });
             }
             Err(e) => {
                 tracing::warn!(server = %row.name, "could not rename a saved MCP server: {e}");
@@ -684,7 +776,10 @@ pub(crate) async fn rename_clashing_servers(
     if !renamed.is_empty() {
         // The saved servers' names now (a built-in name left is a row not renamed).
         let owners: Vec<String> = taken.difference(builtin).cloned().collect();
-        carry_tool_choices(store, &renamed, &owners).await;
+        let off = carry_tool_choices(store, &renamed, &owners).await;
+        for server in &mut renamed {
+            server.tools_off = off.contains(&server.from);
+        }
         let mut note: Vec<RenamedServer> = store
             .get_setting(RENAMED_SERVERS)
             .await
@@ -2587,11 +2682,13 @@ mod tests {
             vec![
                 RenamedServer {
                     from: "coding_apps".into(),
-                    to: "coding_apps (yours 2)".into()
+                    to: "coding_apps (yours 2)".into(),
+                    tools_off: false,
                 },
                 RenamedServer {
                     from: "reverse".into(),
-                    to: "reverse (yours)".into()
+                    to: "reverse (yours)".into(),
+                    tools_off: false,
                 },
             ]
         );
@@ -2724,6 +2821,8 @@ mod tests {
     /// [0.0.6] A renamed server's tools stay on where they were on: in each chat's own
     /// choice (and in what the chat remembers as shown and found), and in the last choice
     /// new chats start with. A tool of another server whose name starts alike stays as it is.
+    /// A name the host cuts to 64 characters is not carried over (it could be another
+    /// tool's): that tool is switched off, and the note says so.
     #[tokio::test]
     async fn a_renamed_servers_tools_stay_on_in_chats_and_in_new_chats() {
         let store = store::Store::open_in_memory().expect("store");
@@ -2789,6 +2888,10 @@ mod tests {
         let renamed = rename_clashing_servers(&store, &secrets, &builtin).await;
         let to: Vec<&str> = renamed.iter().map(|r| r.to.as_str()).collect();
         assert_eq!(to, ["coding_apps (yours 2)", "reverse (yours)"]);
+        let off: Vec<bool> = renamed.iter().map(|r| r.tools_off).collect();
+        assert_eq!(off, [false, true], "only reverse had a long tool on");
+        let note: Vec<RenamedServer> = store.get_setting(RENAMED_SERVERS).await.unwrap().unwrap();
+        assert_eq!(note, renamed);
 
         // The names the host gives these tools under the new server names.
         let lookup = mcp_host::names::exposed_name("reverse (yours)", "lookup", &free);
@@ -2796,6 +2899,7 @@ mod tests {
         let x = mcp_host::names::exposed_name("coding_apps (yours 2)", "x", &free);
         let new_long = mcp_host::names::exposed_name("reverse (yours)", &long_tool, &free);
         assert_ne!(new_long, old_long);
+        assert_eq!(new_long.len(), 64);
 
         let stored = store.get_chat(chat).await.unwrap().unwrap().tool_prefs;
         let prefs: crate::turns::ChatTools = serde_json::from_value(stored).unwrap();
@@ -2806,10 +2910,10 @@ mod tests {
                 lookup.clone(),
                 "read_file".to_string(),
                 "coding_apps__yours___y".to_string(),
-                new_long,
                 other_long,
             ]
         );
+        assert!(!enabled.contains(&new_long) && !enabled.contains(&old_long));
         assert!(Selection::Chat(&enabled).on(&lookup, "reverse (yours)", false));
         assert_eq!(prefs.shown, vec![lookup.clone()]);
         assert_eq!(prefs.found, vec![x.clone()]);
@@ -2827,16 +2931,12 @@ mod tests {
     #[test]
     fn only_the_renamed_servers_tools_and_secrets_follow_it() {
         let owners = names(&["reverse (yours)", "reverse_", "reverse x"]);
-        let map = |name: &str| renamed_tool(name, "reverse", "reverse (yours 2)", &owners);
-        assert_eq!(
-            map("reverse__lookup").as_deref(),
-            Some("reverse__yours_2___lookup")
-        );
+        let map =
+            |name: &str| renamed_tool(name, "reverse", "reverse (yours 2)", &owners, &owners);
+        let to = |name: &str| Some(Carried::To(name.to_string()));
+        assert_eq!(map("reverse__lookup"), to("reverse__yours_2___lookup"));
         // A name the host made unique stays unique.
-        assert_eq!(
-            map("reverse__lookup_2").as_deref(),
-            Some("reverse__yours_2___lookup_2")
-        );
+        assert_eq!(map("reverse__lookup_2"), to("reverse__yours_2___lookup_2"));
         for theirs in [
             "reverse__yours___lookup",
             "reverse___lookup",
@@ -2848,13 +2948,20 @@ mod tests {
         ] {
             assert_eq!(map(theirs), None, "{theirs}");
         }
-        // Each length of name the host may give, cut or not.
-        for len in [1, 40, 47, 48, 55, 56, 60, 70] {
+        // Each length of name the host may give, cut or not. A new name of 64 characters
+        // may be cut, and so may be another tool's: it is not carried over.
+        for len in [1, 40, 44, 45, 47, 48, 55, 56, 60, 70] {
             let tool = "t".repeat(len);
             let free = |_: &str| false;
             let old = mcp_host::names::exposed_name("reverse", &tool, &free);
             let new = mcp_host::names::exposed_name("reverse (yours 2)", &tool, &free);
-            assert_eq!(map(&old), Some(new), "{len}");
+            assert_eq!(new.len() < 64, len <= 44, "{len}");
+            let carried = if len <= 44 {
+                Carried::To(new)
+            } else {
+                Carried::Off
+            };
+            assert_eq!(map(&old), Some(carried), "{len}");
             let long_owner = mcp_host::names::exposed_name("reverse (yours)", &tool, &free);
             assert_eq!(map(&long_owner), None, "{len}");
         }
@@ -2864,7 +2971,7 @@ mod tests {
         let cut = mcp_host::names::exposed_name("coding_apps (yours)", &"t".repeat(50), &|_| false);
         assert!(cut.starts_with("coding_apps__you__"), "{cut}");
         assert_eq!(
-            renamed_tool(&cut, "coding_apps", "coding_apps (yours 2)", &apps),
+            renamed_tool(&cut, "coding_apps", "coding_apps (yours 2)", &apps, &apps),
             None
         );
         assert_eq!(
@@ -2872,10 +2979,10 @@ mod tests {
                 "coding_apps__you__x",
                 "coding_apps",
                 "coding_apps (yours 2)",
+                &apps,
                 &apps
-            )
-            .as_deref(),
-            Some("coding_apps__yours_2___you__x")
+            ),
+            to("coding_apps__yours_2___you__x")
         );
 
         let builtin: BTreeSet<String> = ["reverse".to_string()].into();
@@ -2890,6 +2997,228 @@ mod tests {
             removable_secret_names("reverse (yours)", &config, &builtin, &[&other]),
             names(&["reverse.A", "reverse__yours_.B"])
         );
+    }
+
+    /// The names the host gives one server's tools, in the order the server lists them
+    /// (host.rs `insert_external_tools`).
+    fn host_names(server: &str, tools: &[&str]) -> Vec<String> {
+        let mut given: Vec<String> = Vec::new();
+        for tool in tools {
+            let name =
+                mcp_host::names::exposed_name(server, tool, &|n| given.iter().any(|g| g == n));
+            given.push(name);
+        }
+        given
+    }
+
+    /// [0.0.6] Two long tool names that start alike. Under the longer server name the host
+    /// cuts both to one name and gives the second tool a number, so the second tool's saved
+    /// name cannot be carried over for sure: it is taken out, and the note says some tools
+    /// were switched off. The first tool, which was off, stays off.
+    #[tokio::test]
+    async fn a_long_tool_name_is_never_carried_to_another_tools_name() {
+        let store = store::Store::open_in_memory().expect("store");
+        let secrets = store::secrets::MemorySecretStore::new();
+        store
+            .upsert_mcp_server(store::McpServerInput {
+                name: "reverse".into(),
+                config: json!({ "command": "rev-mcp" }),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let prefix = "get_organization_repository_security_advisory_";
+        let first = format!("{prefix}list");
+        let second = format!("{prefix}listing_details");
+        let tools = [first.as_str(), second.as_str(), "lookup"];
+        let old = host_names("reverse", &tools);
+        let now = host_names("reverse (yours)", &tools);
+        assert!(old[0] != old[1] && old[0].len() < 64, "{old:?}");
+        assert!(now[1].ends_with("_2") && now[0][..62] == now[1][..62], "{now:?}");
+        // Only the second tool is on, in a chat and in the last choice.
+        let chat = store
+            .create_chat(store::NewChat {
+                title: "long names".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        store
+            .update_chat(
+                chat,
+                store::ChatPatch {
+                    tool_prefs: Some(json!({
+                        "enabled": [old[1], old[2], "read_file"],
+                        "shown": [old[1], old[2]],
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .set_setting(DEFAULT_TOOLS, &vec![old[1].clone(), old[2].clone()])
+            .await
+            .unwrap();
+
+        let host = crate::tool_catalog::tests::builtin_host();
+        let builtin = crate::tool_catalog::builtin_servers(&host);
+        let renamed = rename_clashing_servers(&store, &secrets, &builtin).await;
+        assert_eq!(renamed.len(), 1);
+
+        let stored = store.get_chat(chat).await.unwrap().unwrap().tool_prefs;
+        let prefs: crate::turns::ChatTools = serde_json::from_value(stored).unwrap();
+        let enabled = prefs.enabled.expect("the chat keeps its own choice");
+        assert!(!enabled.contains(&now[0]), "the first tool stays off: {enabled:?}");
+        assert_eq!(enabled, vec![now[2].clone(), "read_file".to_string()]);
+        assert_eq!(prefs.shown, vec![now[2].clone()]);
+        let last: Vec<String> = store.get_setting(DEFAULT_TOOLS).await.unwrap().unwrap();
+        assert_eq!(last, vec![now[2].clone()], "new chats start without it too");
+        assert!(renamed[0].tools_off, "the note says some of its tools were switched off");
+        let note: Vec<RenamedServer> = store.get_setting(RENAMED_SERVERS).await.unwrap().unwrap();
+        assert_eq!(note, renamed);
+        // What Settings → MCP reads; a note saved without the mark reads as nothing off.
+        assert_eq!(
+            serde_json::to_value(&note).unwrap(),
+            json!([{ "from": "reverse", "to": "reverse (yours)", "toolsOff": true }])
+        );
+        let earlier: Vec<RenamedServer> =
+            serde_json::from_value(json!([{ "from": "reverse", "to": "reverse (yours)" }]))
+                .unwrap();
+        assert!(!earlier[0].tools_off);
+        assert_eq!(
+            serde_json::to_value(&earlier).unwrap(),
+            json!([{ "from": "reverse", "to": "reverse (yours)" }])
+        );
+    }
+
+    /// [0.0.6] Whatever a server's tools and their order, a saved name is carried only to
+    /// the name the host now gives the same tool, never to another tool's. Under the longer
+    /// server name the host cuts long names, so two that start alike can be cut to one and
+    /// the next one numbered: such a tool is switched off instead. Numbers the host gave
+    /// tools whose names were alike are carried along.
+    #[test]
+    fn a_renamed_servers_tool_is_carried_only_to_its_own_new_name() {
+        let prefix = "get_organization_repository_security_advisory_";
+        let mut sets: Vec<Vec<String>> = vec![
+            // The review's case, both ways round.
+            vec![format!("{prefix}list"), format!("{prefix}listing_details")],
+            vec![format!("{prefix}listing_details"), format!("{prefix}list")],
+            // A name that just fits, and a longer one cut to it.
+            vec![format!("{prefix}listing"), format!("{prefix}l")],
+            vec![format!("{prefix}l"), format!("{prefix}listing")],
+            // Names made unique before: alike once cleaned, and one that ends in a number.
+            vec!["a b".into(), "a?b".into(), "a_b_2".into(), "lookup".into()],
+            vec!["a_b_2".into(), "a b".into(), "a?b".into()],
+            // A name one short of the limit whose twin gets a number.
+            vec![format!("{}.", "t".repeat(45)), format!("{}?", "t".repeat(45))],
+        ];
+        // Many more, from pieces that make names start alike for up to 60 characters.
+        let starts = ["", "x", "get_", &prefix[..30], prefix, "get_organization_repository_security_advisory_listing_"];
+        let ends = ["", "l", "list", "listing", "listing_details", "_2", " x", "?", "s", "summary_of_everything_here"];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..3000 {
+            let count = 2 + next(3);
+            sets.push(
+                (0..count)
+                    .map(|_| format!("{}{}", starts[next(starts.len())], ends[next(ends.len())]))
+                    .collect(),
+            );
+        }
+        let (mut carried, mut off) = (0, 0);
+        for (from, to) in [
+            ("reverse", "reverse (yours)"),
+            ("coding_apps", "coding_apps (yours 2)"),
+        ] {
+            let renamed = [RenamedServer {
+                from: from.into(),
+                to: to.into(),
+                tools_off: false,
+            }];
+            let owners = names(&[to]);
+            for tools in &sets {
+                let tools: Vec<&str> = tools.iter().map(String::as_str).collect();
+                let old = host_names(from, &tools);
+                let now = host_names(to, &tools);
+                for (i, name) in old.iter().enumerate() {
+                    match renamed_name(name, &renamed, &owners) {
+                        Some((_, Carried::To(new))) => {
+                            assert_eq!(new, now[i], "{to}: {tools:?}, tool {i}");
+                            carried += 1;
+                        }
+                        Some((_, Carried::Off)) => off += 1,
+                        None => panic!("{name} is a tool of {from}"),
+                    }
+                }
+            }
+        }
+        assert!(carried > 1000 && off > 1000, "{carried} carried, {off} off");
+
+        // The review's case: the second tool is switched off, and only in the chat's own
+        // list of tools that are on does that need the owner.
+        let renamed = [RenamedServer {
+            from: "reverse".into(),
+            to: "reverse (yours)".into(),
+            tools_off: false,
+        }];
+        let owners = names(&["reverse (yours)"]);
+        let old = host_names("reverse", &[&sets[0][0], &sets[0][1], "lookup"]);
+        let mut prefs = json!({ "shown": [old[1], old[2]], "found": [old[1]], "enabled": [] });
+        let mut gone = BTreeSet::new();
+        assert!(rename_tools_in_chat(&mut prefs, &renamed, &owners, &mut gone));
+        assert_eq!(
+            prefs,
+            json!({ "shown": ["reverse__yours___lookup"], "found": [], "enabled": [] })
+        );
+        assert!(gone.is_empty(), "it was not on: {gone:?}");
+        let mut prefs = json!({ "enabled": [old[0], old[1], 7] });
+        assert!(rename_tools_in_chat(&mut prefs, &renamed, &owners, &mut gone));
+        let first = host_names("reverse (yours)", &[&sets[0][0]]);
+        assert_eq!(prefs, json!({ "enabled": [first[0], 7] }));
+        assert_eq!(gone, BTreeSet::from(["reverse".to_string()]));
+    }
+
+    /// [0.0.6] A new name that a tool of another saved server can have is not carried over:
+    /// that server could get the name first. A name that only reads like the new server's
+    /// was the old server's tool, so it is carried, and not left to switch on another one.
+    #[test]
+    fn a_name_another_saved_server_can_have_is_not_carried() {
+        let renamed = [RenamedServer {
+            from: "reverse".into(),
+            to: "reverse (yours)".into(),
+            tools_off: false,
+        }];
+        // "reverse (yours" names its tool "_x" "reverse__yours___x", as "reverse (yours)"
+        // names its tool "x".
+        let both = names(&["reverse (yours)", "reverse (yours"]);
+        let free = |_: &str| false;
+        assert_eq!(
+            mcp_host::names::exposed_name("reverse (yours", "_x", &free),
+            mcp_host::names::exposed_name("reverse (yours)", "x", &free)
+        );
+        assert_eq!(
+            renamed_name("reverse__x", &renamed, &both).map(|(_, c)| c),
+            Some(Carried::Off)
+        );
+        assert_eq!(
+            renamed_name("reverse__lookup_tool", &renamed, &both).map(|(_, c)| c),
+            Some(Carried::To("reverse__yours___lookup_tool".into()))
+        );
+        // Before the rename no server was called "reverse (yours)", so this was the old
+        // server's tool "yours___x"; left as it is, it would switch on the tool "x".
+        let only = names(&["reverse (yours)"]);
+        assert_eq!(
+            renamed_name("reverse__yours___x", &renamed, &only).map(|(_, c)| c),
+            Some(Carried::To("reverse__yours___yours___x".into()))
+        );
+        // A server that was there before keeps the names that read as its own.
+        assert_eq!(renamed_name("reverse__yours___x", &renamed, &both), None);
     }
 
     /// A keychain that refuses to read or to write while told to (locked, or the owner
@@ -2970,7 +3299,8 @@ mod tests {
                 renamed,
                 vec![RenamedServer {
                     from: "reverse".into(),
-                    to: "reverse (yours)".into()
+                    to: "reverse (yours)".into(),
+                    tools_off: false,
                 }]
             );
             let row = store

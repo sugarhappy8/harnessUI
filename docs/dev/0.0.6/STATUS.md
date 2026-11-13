@@ -161,6 +161,10 @@ one starts from this file and `README.md`.
   finding, check): batch a wf_bfaa840a-6b8, b wf_55eeb8d4-8e0, c wf_dad2159c-dae (Ghidra pin
   from CI run 43380365172, Linux temp folder, ARCHITECTURE markers), d wf_728c1760-d70, e
   wf_09edf0f5-041; wf_57274b94-12f reviewing its last two. Then the final pass and CI.
+- 08:52 UTC check: final fix round (22 items in batches a-g, v006-final-fixes): every fix
+  written except rea-start-guard (batch g wf_e649f2ab-5a2, started 08:42) and the ARCHITECTURE
+  markers; the rest are in review, refix or check. Next: the final pass (every check, every
+  e2e suite with the real model), CI on three systems, owner hand-off.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
