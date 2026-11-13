@@ -1,4 +1,4 @@
-// Changing what is loaded (0.0.5 D3): Reload, Apply and restart, Unload and picking another
+// Changing what is loaded (0.0.6 D3): Reload, Apply and restart, Unload and picking another
 // local model ask first when the model is busy ("A reply is being written. Stop it and
 // restart the model?"). The backend does the waiting (`when_idle`); this module asks the
 // question, remembers which change waits (for the indicator's waiting line) and notes a

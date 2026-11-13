@@ -21,7 +21,7 @@ pub struct AppState {
     /// "Allow for this chat" grants (memory only, D12). Shared with the policy gate of a
     /// running turn, which reads them on every decision.
     pub grants: Arc<crate::turns::Grants>,
-    /// 0.0.5 D3: everything that is using the local model now (chat turns, model checks
+    /// 0.0.6 D3: everything that is using the local model now (chat turns, model checks
     /// and benchmarks, other apps), so a reload can ask first or wait. Each user holds a
     /// [`BusyGuard`] while it runs.
     pub model_busy: Arc<BusyCounter>,
@@ -47,7 +47,7 @@ pub enum BusyKind {
     OtherApp,
 }
 
-/// The one "model in use" counter (0.0.5 D3). Counts go up with [`BusyCounter::hold`] and
+/// The one "model in use" counter (0.0.6 D3). Counts go up with [`BusyCounter::hold`] and
 /// down when the returned guard is dropped, so a count can never be left behind by an
 /// early return or a panic.
 pub struct BusyCounter {

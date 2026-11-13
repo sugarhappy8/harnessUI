@@ -1724,7 +1724,7 @@ pub(crate) async fn assemble(
     let chat_prefs: ChatTools =
         serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
     input.thinking = !chat_prefs.thinking_off;
-    // [0.0.5] "How long it may think": the local model's own choice, else the defaults for
+    // [0.0.6] "How long it may think": the local model's own choice, else the defaults for
     // all models; a limit on each request, read again for every turn.
     if let Some(path) = req.model_ref.strip_prefix("local:") {
         input.thinking_limit = crate::load_settings::thinking_for(&state, path).await;
@@ -2623,7 +2623,7 @@ mod tests {
         }
     }
 
-    /// [0.0.5] "How long it may think" is read in the shared assembly (so the Context tab
+    /// [0.0.6] "How long it may think" is read in the shared assembly (so the Context tab
     /// shows the request a turn sends), for a local model only, from its load settings,
     /// before its tested settings are applied; a helper's input is a copy of the turn's.
     /// (The assembly needs the running app, so this reads its source.)

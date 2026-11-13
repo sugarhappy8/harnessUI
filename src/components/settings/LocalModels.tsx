@@ -26,7 +26,7 @@ const SIZES = [2048, 4096, 8192, 16_384, 32_768, 65_536];
 const AUTO_ORDER = ["metal", "vulkan"];
 
 /**
- * Settings → Local models: the defaults for all models (0.0.5 D4; the tab keeps its
+ * Settings → Local models: the defaults for all models (0.0.6 D4; the tab keeps its
  * label), the backends found on this computer and the optional backend downloads. A model
  * uses these unless its own settings (the gear next to it) say otherwise.
  */

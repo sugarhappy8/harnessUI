@@ -42,7 +42,7 @@ pub struct ModelSummary {
 /// Bytes per KV-cache element for the default f16 cache type.
 pub const KV_F16_BYTES: u64 = 2;
 
-/// How the conversation memory (the KV cache) is stored (0.0.5 D2c).
+/// How the conversation memory (the KV cache) is stored (0.0.6 D2c).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum KvCacheType {

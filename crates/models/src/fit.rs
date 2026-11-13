@@ -49,7 +49,7 @@ impl Target {
 }
 
 /// What the estimate is made of. `Default` lets callers write `..Default::default()`, so
-/// fields added later (0.0.5 WP1b) need no change at existing call sites.
+/// fields added later (0.0.6 WP1b) need no change at existing call sites.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FitInput {

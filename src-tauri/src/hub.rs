@@ -311,7 +311,7 @@ pub async fn hub_repo(
     for v in &classified.variants {
         let fit = summary.as_ref().map(|s| {
             // Every field is set today; the update keeps this call site unchanged when
-            // fields are added (0.0.5 WP1b).
+            // fields are added (0.0.6 WP1b).
             #[allow(clippy::needless_update)]
             let input = FitInput {
                 weights_bytes: v.total_size,

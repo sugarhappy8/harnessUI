@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "harnessUI",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "identifier": "io.github.sugarhappy8.harnessui",
   "build": {
     "beforeDevCommand": "npm run dev",

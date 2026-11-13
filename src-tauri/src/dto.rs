@@ -282,7 +282,7 @@ impl Default for LocalModelSettings {
     }
 }
 
-/// What is using the local model right now (0.0.5 D3): chat turns, model checks and
+/// What is using the local model right now (0.0.6 D3): chat turns, model checks and
 /// benchmarks, and requests from other apps. The live counter is
 /// [`crate::state::BusyCounter`]; this is a snapshot of it (`model_busy`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

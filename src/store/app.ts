@@ -102,7 +102,7 @@ interface AppState {
   setChatModel: (modelRef: string | null) => Promise<void>;
   /**
    * Makes a model the open chat's (or a new chat's) and loads it when it is local, with the
-   * model's own saved settings. Asks first when the loaded model is busy (0.0.5 D3); a
+   * model's own saved settings. Asks first when the loaded model is busy (0.0.6 D3); a
    * Cancel changes nothing. `onChatSet` runs once the chat has the model, before the load.
    */
   pickModel: (modelRef: string, opts?: { onChatSet?: () => void }) => Promise<void>;

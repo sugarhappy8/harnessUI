@@ -9,10 +9,10 @@
 //!
 //! A load that is replaced by a newer one must end quietly, and a second request for the
 //! load already in progress must wait for it instead of restarting it. "The same load"
-//! compares the resolved choices (0.0.5 D2b): Automatic is Automatic, whatever number it
+//! compares the resolved choices (0.0.6 D2b): Automatic is Automatic, whatever number it
 //! produced.
 //!
-//! [`ChangeGate`] (0.0.5 D3) holds the one change of what is loaded that waits for the
+//! [`ChangeGate`] (0.0.6 D3) holds the one change of what is loaded that waits for the
 //! model to be free ("Restart when it ends"), and the users of the model that "Stop and
 //! restart" stops first.
 
@@ -141,7 +141,7 @@ impl Drop for LoadTicket<'_> {
 pub struct Replaced;
 
 /// The change of what is loaded that waits for the model to be free, and the users of the
-/// model that can be stopped (0.0.5 D3).
+/// model that can be stopped (0.0.6 D3).
 #[derive(Default)]
 pub struct ChangeGate {
     waiting: Mutex<Option<(u64, CancellationToken)>>,

@@ -1,4 +1,4 @@
-// Plain words for the app's technical values (0.0.5 D4, D8). Nothing on screen should show
+// Plain words for the app's technical values (0.0.6 D4, D8). Nothing on screen should show
 // a raw identifier such as "vulkan", "Vulkan0" or "text_model". Every phrase of the model
 // loading screens lives here, so the wording stays the same wherever it appears; the test
 // walks every value of the contract's enums.

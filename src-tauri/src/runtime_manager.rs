@@ -50,7 +50,7 @@ struct Session {
     task: tokio::task::JoinHandle<SupervisorExit>,
 }
 
-/// The model being loaded or loaded, as it was resolved (0.0.5 D2b): what the "already
+/// The model being loaded or loaded, as it was resolved (0.0.6 D2b): what the "already
 /// loaded" check and the "older settings" flag compare, and what Automatic counts as free
 /// when a load replaces it.
 #[derive(Clone, Debug)]
