@@ -63,3 +63,21 @@ describe("one model's settings", () => {
     expect(core.invoke).toHaveBeenLastCalledWith("model_load_info", { path: "/m/a.gguf", overrides: draft });
   });
 });
+
+describe("the backend check", () => {
+  afterEach(() => core.invoke.mockReset());
+
+  it("sends the D3 answer, and resolves to null when its wait was cancelled", async () => {
+    const { runDiagnostics } = await import("./ipc");
+    core.invoke.mockResolvedValue({ text: "report", savedTo: null });
+    await expect(runDiagnostics("/m/a.gguf", true)).resolves.toEqual({ text: "report", savedTo: null });
+    expect(core.invoke).toHaveBeenLastCalledWith("run_diagnostics", { modelPath: "/m/a.gguf", whenIdle: true });
+    await runDiagnostics(null, false);
+    expect(core.invoke).toHaveBeenLastCalledWith("run_diagnostics", { modelPath: null, whenIdle: false });
+    core.invoke.mockRejectedValue(replaced);
+    await expect(runDiagnostics("/m/a.gguf", true)).resolves.toBeNull();
+    const failed = { code: "model_missing", message: "Missing.", hint: "", details: "" };
+    core.invoke.mockRejectedValue(failed);
+    await expect(runDiagnostics("/m/a.gguf", false)).rejects.toBe(failed);
+  });
+});

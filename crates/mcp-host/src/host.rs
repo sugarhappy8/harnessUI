@@ -504,11 +504,19 @@ impl Host {
         }
     }
 
-    /// Removes a server and its tools; an external server is stopped (its process tree
-    /// killed after a short grace period).
+    /// Removes an external server and its tools; it is stopped (its process tree killed
+    /// after a short grace period). A built-in server is refused ([`HostError::BuiltIn`]):
+    /// a saved server that once had its name never takes it away.
     pub async fn remove(&self, name: &str) -> Result<(), HostError> {
         let slot = {
             let mut reg = self.inner.registry();
+            match reg.servers.get(name) {
+                None => return Err(HostError::NotFound(name.to_owned())),
+                Some(ServerSlot::Builtin { .. }) => {
+                    return Err(HostError::BuiltIn(name.to_owned()));
+                }
+                Some(ServerSlot::External(_)) => {}
+            }
             let slot = reg
                 .servers
                 .remove(name)
