@@ -191,6 +191,11 @@ one starts from this file and `README.md`.
   and owner checklist were done). Windows and macOS fixes pushed in fb7f905; CI run
   43422225789 running. PR #5 description updated. When CI is green: hand the owner the
   checklist and the catalog quotes; delete the hourly save task.
+- 12:45 UTC: completeness leftovers done: the context-full advice in error.rs and the pinned
+  advice in pinned.rs point to Model settings (old wording named "Settings → Local models"
+  and "a larger context"); CHANGELOG/SECURITY/README wording corrected; Windows Error
+  Reporting stated as a known limit. Pushed without [skip ci]: the CI run on this commit is
+  the final gate for merge and release.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
