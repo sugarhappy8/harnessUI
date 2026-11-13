@@ -47,7 +47,7 @@ The owner asked for eight things after 0.0.4. The first four (how much each mode
 - The backend check put the model back without its image reader or its thinking setting; it now loads it with the model's own settings.
 
 ### Safety work
-Every part had an independent security review. The main things found and closed: three were also in 0.0.5, the version you have now; the others were in new 0.0.6 code and never reached a release.
+Every part had an independent security review. The main things found and closed are below: three were already in 0.0.5; the others were in new 0.0.6 code and never reached a release.
 - **The model server could start other programs** (also in 0.0.5). Given a video, or a picture it could not read itself, llama-server would start ffmpeg if one was installed. It is now pointed at a folder that does not exist, so it never starts a program; this is why WebP pictures are converted (above). The conversion runs in a separate helper with a memory and time limit.
 - **A crash could start a debugger** (also in 0.0.5, on Linux only, which is not a release system). On Linux, a crashing llama.cpp program started a debugger found on `PATH`. Every llama.cpp program the app starts now has that switched off.
 - **A Windows line ending could hide a command** (also in 0.0.5, on a Mac). `echo \` followed by a Windows line ending and `rm -rf x` read as one harmless `echo`: a grant for `echo` covered it, and Allow all ran it. The app now reads the line the way the shell runs it. A grant for one command no longer covers a line with a Windows line ending in it: Ask first always asks, and Allow all asks if anything in the line deletes files or does one of the other things it always asks about, as the hidden `rm` here does.
