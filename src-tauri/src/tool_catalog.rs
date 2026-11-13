@@ -48,6 +48,27 @@ pub struct Group {
     pub weak: &'static [&'static str],
 }
 
+/// [0.0.6 item 5] Groups that match a request by their listed words only, and only when
+/// one of their `strong` words is there: the words of their tools' names do not count,
+/// and their `weak` words add to a match but never make one. rea's tool names hold
+/// everyday words ("function", "strings", "python", "rust", "view") and its weak words
+/// ("program", "function", "library") are everyday coding words; none of them says a
+/// request is about reverse engineering (item5-spec.md R18).
+pub const OWN_WORDS_ONLY: &[&str] = &[reverse::server::SERVER_NAME];
+
+impl Group {
+    /// Whether the words of its tools' names also point at this group (`tool_select`).
+    pub fn counts_tool_names(&self) -> bool {
+        !OWN_WORDS_ONLY.contains(&self.server)
+    }
+
+    /// Whether only one of its `strong` words makes a request match this group, its `weak`
+    /// words then adding to the match (`tool_select`, `find_tools`).
+    pub fn needs_strong_word(&self) -> bool {
+        OWN_WORDS_ONLY.contains(&self.server)
+    }
+}
+
 /// The skill named in the examples of the skill tools. `find_tools` puts the name of an
 /// enabled skill in its place.
 pub const EXAMPLE_SKILL: &str = "pdf-forms";
@@ -162,6 +183,12 @@ pub const GROUPS: &[Group] = &[
         weak: &[],
     },
     Group {
+        server: "coding_apps",
+        label: "Coding apps",
+        strong: &["claude code", "codex", "coding app"],
+        weak: &["claude"],
+    },
+    Group {
         server: "artifacts",
         label: "Artifacts",
         strong: &[
@@ -238,6 +265,32 @@ pub const GROUPS: &[Group] = &[
         label: "Tool finder",
         strong: &[],
         weak: &[],
+    },
+    // [0.0.6 item 5] rea. Words match whole words, so a file name such as "notepad.exe"
+    // counts through "exe". Only these words count, not the words of the tools' names, and
+    // a weak word only beside a strong one (`OWN_WORDS_ONLY`). "pseudo code" also matches
+    // "pseudo-code", "xref" also "xrefs". Words that also mean ordinary coding
+    // ("assembly", "callers", "callees", "strings", "imports") are left out.
+    Group {
+        server: "reverse",
+        label: "Reverse engineering",
+        strong: &[
+            "decompile",
+            "decompiler",
+            "disassemble",
+            "disassembly",
+            "reverse engineer",
+            "reverse engineering",
+            "binary",
+            "pseudocode",
+            "pseudo code",
+            "xref",
+            "pyc",
+            "exe",
+            "dll",
+            "dylib",
+        ],
+        weak: &["program", "function", "library"],
     },
 ];
 
@@ -432,6 +485,29 @@ pub const ENTRIES: &[Entry] = &[
         rank: 1,
         examples: &[
             r#"{"task": "Read every file in docs and list the ones that mention the old API.", "context": "The project is in the working folder."}"#,
+        ],
+    },
+    // ---- coding apps (0.0.6) ----
+    Entry {
+        name: "ask_claude_code",
+        group: "coding_apps",
+        purpose: "Ask Claude Code on this computer to do a task in the working folder; it works online and asks first, except in Full access.",
+        keywords: &["claude code", "claude", "coding app", "second opinion"],
+        rank: 1,
+        examples: &[
+            r#"{"task": "Find why the tests in tests/test_calc.py fail and explain the cause."}"#,
+            r#"{"task": "Fix the failing test in tests/test_calc.py.", "may_edit": true}"#,
+        ],
+    },
+    Entry {
+        name: "ask_codex",
+        group: "coding_apps",
+        purpose: "Ask Codex on this computer to do a task in the working folder; it works online and asks first, except in Full access.",
+        keywords: &["codex", "coding app", "second opinion"],
+        rank: 1,
+        examples: &[
+            r#"{"task": "Review src/main.rs and list likely bugs."}"#,
+            r#"{"task": "Add a unit test for parse_args in src/cli.rs.", "may_edit": true}"#,
         ],
     },
     // ---- toolfinder ----
@@ -693,6 +769,331 @@ pub const ENTRIES: &[Entry] = &[
         examples: &[
             r#"{"goal": "Fix the failing date tests", "steps": [{"text": "Run the tests", "status": "doing"}, {"text": "Fix the parser", "status": "todo"}], "next_action": "Run the tests"}"#,
             r#"{"steps": [{"text": "Run the tests", "status": "done"}, {"text": "Fix the parser", "status": "doing"}], "next_action": "Fix the parser", "note": "Two tests fail in test_dates.py"}"#,
+        ],
+    },
+    // ---- reverse (0.0.6 item 5, rea; the schemas are `reverse::allow`'s) ----
+    Entry {
+        name: "open_binary",
+        group: "reverse",
+        purpose: "Open a program or library file in rea so the other reverse engineering tools can analyse it.",
+        keywords: &[
+            "open",
+            "decompile",
+            "binary",
+            "exe",
+            "dll",
+            "executable",
+            "program",
+        ],
+        rank: 1,
+        examples: &[r#"{"path": "hello.exe"}"#, r#"{"path": "bin/tool"}"#],
+    },
+    Entry {
+        name: "close_binary",
+        group: "reverse",
+        purpose: "Close the file that is open in rea for this chat.",
+        keywords: &["close"],
+        rank: 1,
+        examples: &[r#"{}"#],
+    },
+    Entry {
+        name: "binary_session",
+        group: "reverse",
+        purpose: "Say which file is open in rea for this chat, with which decompiler.",
+        keywords: &["session", "decompiler", "which"],
+        rank: 2,
+        examples: &[r#"{}"#],
+    },
+    Entry {
+        name: "binary_overview",
+        group: "reverse",
+        purpose: "Summarise the open file: how many functions and strings, and its sections.",
+        keywords: &["overview", "summary", "sections"],
+        rank: 2,
+        examples: &[r#"{}"#],
+    },
+    Entry {
+        name: "list_procedures",
+        group: "reverse",
+        purpose: "List the functions found in the open file, in pages.",
+        keywords: &["functions", "procedures"],
+        rank: 1,
+        examples: &[r#"{}"#],
+    },
+    Entry {
+        name: "search_procedures",
+        group: "reverse",
+        purpose: "Find functions in the open file by name.",
+        keywords: &["function", "find", "name"],
+        rank: 1,
+        examples: &[
+            r#"{"pattern": "main"}"#,
+            r#"{"pattern": "^crypt", "mode": "regex"}"#,
+        ],
+    },
+    Entry {
+        name: "procedure_pseudo_code",
+        group: "reverse",
+        purpose: "Show readable code (pseudocode) worked out for one function of the open file.",
+        keywords: &["pseudocode", "decompile", "readable", "code", "source"],
+        rank: 1,
+        examples: &[r#"{"procedure": "main"}"#, r#"{"procedure": "0x401000"}"#],
+    },
+    Entry {
+        name: "procedure_assembly",
+        group: "reverse",
+        purpose: "Show the machine instructions of one function of the open file.",
+        keywords: &["assembly", "disassemble", "instructions", "asm"],
+        rank: 2,
+        examples: &[r#"{"procedure": "main"}"#],
+    },
+    Entry {
+        name: "procedure_info",
+        group: "reverse",
+        purpose: "Show the facts known about one function of the open file.",
+        keywords: &["signature", "facts"],
+        rank: 2,
+        examples: &[r#"{"procedure": "main"}"#],
+    },
+    Entry {
+        name: "procedure_callers",
+        group: "reverse",
+        purpose: "List the functions that call one function.",
+        keywords: &["callers", "called"],
+        rank: 2,
+        examples: &[r#"{"procedure": "check_license"}"#],
+    },
+    Entry {
+        name: "procedure_callees",
+        group: "reverse",
+        purpose: "List the functions one function calls.",
+        keywords: &["callees", "calls"],
+        rank: 2,
+        examples: &[r#"{"procedure": "main"}"#],
+    },
+    Entry {
+        name: "procedure_references",
+        group: "reverse",
+        purpose: "List where one function is referred to.",
+        keywords: &["references", "used"],
+        rank: 2,
+        examples: &[
+            r#"{"procedure": "main"}"#,
+            r#"{"procedure": "main", "direction": "outgoing"}"#,
+        ],
+    },
+    Entry {
+        name: "list_strings",
+        group: "reverse",
+        purpose: "List the text found in the open file, in pages.",
+        keywords: &["strings", "text"],
+        rank: 2,
+        examples: &[r#"{}"#, r#"{"address": "0x404000"}"#],
+    },
+    Entry {
+        name: "search_strings",
+        group: "reverse",
+        purpose: "Find text in the open file.",
+        keywords: &["strings", "text", "message"],
+        rank: 1,
+        examples: &[r#"{"pattern": "password"}"#],
+    },
+    Entry {
+        name: "list_names",
+        group: "reverse",
+        purpose: "List the named places (symbols) in the open file, in pages.",
+        keywords: &["symbols", "names", "labels"],
+        rank: 2,
+        examples: &[r#"{}"#],
+    },
+    Entry {
+        name: "list_segments",
+        group: "reverse",
+        purpose: "List the sections of the open file.",
+        keywords: &["segments", "sections"],
+        rank: 2,
+        examples: &[r#"{}"#],
+    },
+    Entry {
+        name: "xrefs",
+        group: "reverse",
+        purpose: "List what refers to one address in the open file.",
+        keywords: &["xref", "references", "address"],
+        rank: 2,
+        examples: &[r#"{"address": "0x401000"}"#],
+    },
+    Entry {
+        name: "find_xrefs_to_name",
+        group: "reverse",
+        purpose: "List what refers to one name in the open file.",
+        keywords: &["xref", "references", "name"],
+        rank: 2,
+        examples: &[r#"{"name": "CreateFileW"}"#],
+    },
+    Entry {
+        name: "get_call_graph",
+        group: "reverse",
+        purpose: "Show which functions call which, starting from one function.",
+        keywords: &["call graph", "graph", "calls"],
+        rank: 2,
+        examples: &[
+            r#"{"address": "main"}"#,
+            r#"{"address": "0x401000", "direction": "backward"}"#,
+        ],
+    },
+    Entry {
+        name: "analyze_function",
+        group: "reverse",
+        purpose: "Summarise one function: its code, calls, text and references.",
+        keywords: &["analyse", "analyze", "explain"],
+        rank: 2,
+        examples: &[r#"{"procedure": "main"}"#],
+    },
+    Entry {
+        name: "batch_decompile",
+        group: "reverse",
+        purpose: "Show readable code for up to 20 functions at once.",
+        keywords: &["decompile", "several", "batch"],
+        rank: 2,
+        examples: &[r#"{"addresses": ["main", "0x401200"]}"#],
+    },
+    Entry {
+        name: "trace_call_path",
+        group: "reverse",
+        purpose: "Find a chain of calls from one function to another.",
+        keywords: &["chain", "reach", "path"],
+        rank: 2,
+        examples: &[r#"{"start": "main", "goal": "send_report"}"#],
+    },
+    Entry {
+        name: "trace_feature",
+        group: "reverse",
+        purpose: "Find a word in the open file's functions and text, and what refers to it.",
+        keywords: &["feature", "where", "trace"],
+        rank: 2,
+        examples: &[r#"{"query": "license"}"#],
+    },
+    Entry {
+        name: "inspect_analysis_view",
+        group: "reverse",
+        purpose: "Read more of an earlier rea result in this chat, by the id it gave.",
+        keywords: &["more", "page", "next", "result"],
+        rank: 2,
+        examples: &[
+            r#"{"source": {"kind": "retained-evidence", "evidence_id": "ev_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, "view": {"kind": "summary"}}"#,
+        ],
+    },
+    Entry {
+        name: "inspect_pe_imports",
+        group: "reverse",
+        purpose: "List which functions a Windows program or library uses from other libraries.",
+        keywords: &["imports", "dll", "windows"],
+        rank: 3,
+        examples: &[r#"{"path": "app.exe"}"#],
+    },
+    Entry {
+        name: "inspect_pe_resources",
+        group: "reverse",
+        purpose: "List the resources (icons, version text, manifests) inside a Windows program.",
+        keywords: &["resources", "icon", "version", "manifest"],
+        rank: 3,
+        examples: &[r#"{"path": "app.exe"}"#],
+    },
+    Entry {
+        name: "inspect_pe_certificates",
+        group: "reverse",
+        purpose: "Show who signed a Windows program.",
+        keywords: &["signed", "signature", "certificate", "publisher"],
+        rank: 3,
+        examples: &[r#"{"path": "app.exe"}"#],
+    },
+    Entry {
+        name: "inspect_native_exports",
+        group: "reverse",
+        purpose: "List the functions a program or library offers to others.",
+        keywords: &["exports", "exported"],
+        rank: 3,
+        examples: &[r#"{"path": "lib/plugin.dll"}"#],
+    },
+    Entry {
+        name: "inspect_binary_hardening",
+        group: "reverse",
+        purpose: "Show which built-in protections a program was built with.",
+        keywords: &["hardening", "protections", "aslr", "security"],
+        rank: 3,
+        examples: &[r#"{"path": "bin/server"}"#],
+    },
+    Entry {
+        name: "inspect_go_binary",
+        group: "reverse",
+        purpose: "Show the Go version and modules a Go program was built from.",
+        keywords: &["go", "golang", "modules"],
+        rank: 3,
+        examples: &[
+            r#"{"path": "bin/tool"}"#,
+            r#"{"path": "bin/tool", "architecture": "arm64"}"#,
+        ],
+    },
+    Entry {
+        name: "inspect_rust_binary",
+        group: "reverse",
+        purpose: "Show the Rust packages a Rust program was built from, when it records them.",
+        keywords: &["rust", "crates", "packages"],
+        rank: 3,
+        examples: &[r#"{"path": "bin/tool"}"#],
+    },
+    Entry {
+        name: "inspect_managed_artifact",
+        group: "reverse",
+        purpose: "Show what a .NET program or library is made of.",
+        keywords: &["dotnet", "assembly", "managed"],
+        rank: 3,
+        examples: &[r#"{"path": "App.dll"}"#],
+    },
+    Entry {
+        name: "inspect_managed_members",
+        group: "reverse",
+        purpose: "List the classes and methods of a .NET program or library.",
+        keywords: &["dotnet", "classes", "methods"],
+        rank: 3,
+        examples: &[
+            r#"{"path": "App.dll"}"#,
+            r#"{"path": "App.dll", "type_names": ["App.Program"]}"#,
+        ],
+    },
+    Entry {
+        name: "inspect_python_pyc",
+        group: "reverse",
+        purpose: "Show what a compiled Python file (.pyc) contains.",
+        keywords: &["pyc", "python", "bytecode"],
+        rank: 3,
+        examples: &[r#"{"path": "__pycache__/main.cpython-312.pyc"}"#],
+    },
+    Entry {
+        name: "inspect_desktop_application",
+        group: "reverse",
+        purpose: "Find out what an installed app folder is built with (Electron, .NET, Unity and others).",
+        keywords: &["installed", "app", "electron", "unity", "framework"],
+        rank: 3,
+        examples: &[r#"{"path": "MyApp"}"#],
+    },
+    Entry {
+        name: "inspect_electron_fuses",
+        group: "reverse",
+        purpose: "Show the security switches (fuses) of an Electron app.",
+        keywords: &["electron", "fuses"],
+        rank: 3,
+        examples: &[r#"{"path": "MyApp.app"}"#],
+    },
+    Entry {
+        name: "analyze_javascript_application",
+        group: "reverse",
+        purpose: "Map the code of a JavaScript or Electron app folder or .asar file without running it.",
+        keywords: &["javascript", "asar", "electron", "js"],
+        rank: 3,
+        examples: &[
+            r#"{"input_path": "resources/app.asar"}"#,
+            r#"{"input_path": "app", "source_paths": ["main.js"]}"#,
         ],
     },
 ];
@@ -1005,6 +1406,7 @@ pub(crate) mod tests {
         })));
         host.add_builtin(Arc::new(tools::SkillsServer::new()));
         host.add_builtin(Arc::new(crate::subagent::SubagentsServer));
+        host.add_builtin(Arc::new(crate::outside_agent::listing_both()));
         host.add_builtin(Arc::new(crate::tool_select::ToolFinderServer));
         host.add_builtin(Arc::new(browser::BrowserServer::new(
             browser::BrowserConfig::new(std::env::temp_dir().join("catalog-test-profile")),
@@ -1024,6 +1426,12 @@ pub(crate) mod tests {
             computer::SelfProcess::new(1, Vec::new),
             computer::ComputerConfig::default(),
         )));
+        // [0.0.6 item 5] rea's server, not installed: its 37 tools are always registered,
+        // so every example is checked against the narrowed schemas.
+        host.add_builtin(reverse::ReverseServer::new(
+            reverse::ReverseLayout::new(std::env::temp_dir().join("catalog-test-reverse")),
+            reverse::Platform::current(),
+        ));
         host
     }
 
@@ -1354,5 +1762,207 @@ pub(crate) mod tests {
             .collect();
         let line = arguments_line(&json!({"type": "object", "properties": many}));
         assert!(line.ends_with("and 28 more"), "{line}");
+    }
+
+    /// [0.0.6 item 5] rea's server always offers exactly its 37 allow-listed tools, under
+    /// rea's names and in the `reverse` group. Every other one of the pinned rea's 255
+    /// tools does not exist for the model: absent from the tool list, and "no such tool"
+    /// for a direct call and for one through `call_tool`. An allow-listed tool reaches the
+    /// describer, which answers in plain words while rea is not set up.
+    #[tokio::test]
+    async fn rea_tools_outside_the_allow_list_do_not_exist() {
+        let host = builtin_host();
+        let tools = host.tools();
+        let ours: Vec<&str> = tools
+            .iter()
+            .filter(|t| t.server == "reverse")
+            .map(|t| t.exposed.as_str())
+            .collect();
+        assert_eq!(ours, reverse::allow::MODEL_TOOLS.to_vec());
+        for t in tools.iter().filter(|t| t.server == "reverse") {
+            assert_eq!(t.exposed, t.original, "rea's own name");
+            assert!(t.schema_error.is_none(), "{}", t.exposed);
+            assert_eq!(
+                group(&t.server).map(|g| g.label),
+                Some("Reverse engineering")
+            );
+        }
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/reverse/tests/fixtures/rea-6.9.0-catalog.json"
+        ))
+        .unwrap();
+        let chat = mcp_host::ChatContext {
+            chat_id: 1,
+            full_access: true,
+            approved_folders: vec!["/".into()],
+            ..Default::default()
+        };
+        let routing = crate::tool_select::finder::Routing {
+            host: &host,
+            shown: &tools,
+            hidden: &[],
+        };
+        let mut checked = 0;
+        for name in fixture["tool_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|n| !reverse::allow::MODEL_TOOLS.contains(n))
+        {
+            assert!(
+                !tools.iter().any(|t| t.exposed == name),
+                "{name} is registered"
+            );
+            match host
+                .describe(name, &Map::new(), &chat, mcp_host::ToolPrefs::default())
+                .await
+            {
+                mcp_host::Described::Invalid(why) => {
+                    assert!(why.contains("there is no tool named"), "{name}: {why}")
+                }
+                mcp_host::Described::Action(a) => panic!("{name}: {a:?}"),
+            }
+            let call = json!({"name": name, "arguments": {"path": "/etc/passwd"}});
+            match routing
+                .describe(
+                    crate::tool_select::finder::CALL_TOOL,
+                    call.as_object().unwrap(),
+                    &chat,
+                    &std::collections::HashMap::new(),
+                )
+                .await
+            {
+                mcp_host::Described::Invalid(why) => {
+                    assert!(why.contains("There is no tool named"), "{name}: {why}")
+                }
+                mcp_host::Described::Action(a) => panic!("{name}: {a:?}"),
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 255 - 37);
+        // An allow-listed tool reaches rea's describer.
+        let args = json!({"path": "hello.exe"});
+        match host
+            .describe(
+                "open_binary",
+                args.as_object().unwrap(),
+                &chat,
+                mcp_host::ToolPrefs::default(),
+            )
+            .await
+        {
+            mcp_host::Described::Invalid(why) => {
+                assert_eq!(why, reverse::describe::messages::NOT_SET_UP)
+            }
+            mcp_host::Described::Action(a) => panic!("{a:?}"),
+        }
+        // A path left out fails the schema before anything is described (the two .NET
+        // checks would otherwise reuse an earlier file).
+        for name in ["inspect_managed_members", "inspect_managed_artifact"] {
+            assert!(host.validate(name, &json!({})).is_err(), "{name}");
+            let call = json!({"name": name, "arguments": {}});
+            assert!(
+                routing.unwrap_call(call.as_object().unwrap()).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    /// [0.0.6 item 5] A request about a program file points at the `reverse` group, through
+    /// its words or a file name ending in .exe or .dll.
+    #[test]
+    fn a_request_about_a_program_points_at_reverse_engineering() {
+        let host = builtin_host();
+        let candidates: Vec<crate::tool_select::Candidate> = host
+            .tools()
+            .iter()
+            .map(|t| crate::tool_select::Candidate::of(t, true))
+            .collect();
+        for request in [
+            "Open notepad.exe and show me the readable code of its first function.",
+            "Decompile hello-linux-x64",
+            "Which functions from other libraries does helper.dll use?",
+            "Can you reverse engineer this binary?",
+            "show the pseudocode of main",
+        ] {
+            let groups = crate::tool_select::matching_groups(
+                &candidates,
+                &crate::tool_select::Wording::of(request),
+                &[],
+            );
+            assert!(
+                groups.iter().any(|(g, _)| g == "reverse"),
+                "{request}: {groups:?}"
+            );
+        }
+    }
+
+    /// [0.0.6 item 5] rea working on a chat's open file never asks: its audit row says "no
+    /// approval needed", like the app's own data, except in Full access, where the mode is
+    /// decided first and recorded. Opening a file is an ordinary grantable read.
+    #[test]
+    fn rea_session_work_is_audited_as_needing_no_approval() {
+        use agent::history::{CallRecord, CallStatus, ResultRecord};
+        use agent::turn::CallDecision;
+        let call = CallRecord {
+            id: "c1".into(),
+            name: "procedure_pseudo_code".into(),
+            arguments: serde_json::from_value(json!({"procedure": "main"})).unwrap(),
+            recovered: false,
+        };
+        let result = ResultRecord::synthetic(&call, CallStatus::Ok, Vec::new());
+        let action = |scope: policy::Scope| policy::Action {
+            server: "reverse".into(),
+            tool: "procedure_pseudo_code".into(),
+            summary: String::new(),
+            preview: String::new(),
+            scope,
+            risk: policy::Risk::Normal,
+            read_only: true,
+            outbound: false,
+            keep_asking: None,
+            network: false,
+            hard_limit: None,
+            payload: Value::Null,
+        };
+        let session = action(policy::Scope::FileAnalysisSession);
+        let (label, entry) = crate::turns::audit_entry(
+            7,
+            json!({"procedure": "main"}),
+            &result,
+            &CallDecision::AllowedByGrant,
+            Some(&session),
+            3,
+        );
+        assert_eq!(label, "no approval needed");
+        assert_eq!(entry.decision, store::AuditDecision::AllowedWithoutPrompt);
+        let (label, entry) = crate::turns::audit_entry(
+            7,
+            json!({"procedure": "main"}),
+            &result,
+            &CallDecision::AllowedByFullAccess,
+            Some(&session),
+            3,
+        );
+        assert_eq!(label, "allowed by Full access");
+        assert_eq!(
+            entry.note.as_deref(),
+            Some(crate::approvals::FULL_ACCESS_NOTE)
+        );
+        // Opening a file under a grant is recorded as the grant.
+        let open = action(policy::Scope::FileAnalysis {
+            folder: "/work".into(),
+        });
+        let (label, entry) = crate::turns::audit_entry(
+            7,
+            json!({"path": "/work/a.exe"}),
+            &result,
+            &CallDecision::AllowedByGrant,
+            Some(&open),
+            3,
+        );
+        assert_eq!(label, "allowed by an earlier grant");
+        assert_eq!(entry.decision, store::AuditDecision::AllowedByGrant);
     }
 }

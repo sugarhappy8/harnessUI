@@ -931,11 +931,21 @@ fn the_answer_names_groups_that_are_off_without_listing_their_tools() {
     let host = builtin_host();
     let tools = host.tools();
     let validate = |name: &str, value: &Value| host.validate(name, value);
-    // Git and the browser are off in this chat.
+    // Git and the browser are off in this chat. The groups that are on only when a chat
+    // switches them on (computer, subagents, coding apps since 0.0.5) are not listed.
     let all = listed(
         &tools,
         &["read_file"],
-        &["git", "browser", "computer", "subagents", "skills"],
+        &[
+            "git",
+            "browser",
+            "computer",
+            "subagents",
+            "skills",
+            "coding_apps",
+            // [0.0.6 item 5] rea's group, off in new chats.
+            "reverse",
+        ],
     );
     let off = vec!["git".to_string(), "browser".to_string()];
 
@@ -996,6 +1006,34 @@ fn the_answer_names_groups_that_are_off_without_listing_their_tools() {
         first.contains("a\\nb") && first.chars().count() < 200,
         "{first}"
     );
+}
+
+/// [0.0.6 item 5] A search is about Reverse engineering only through one of its strong
+/// words: its weak ones ("program", "function", "library") are everyday coding words.
+#[test]
+fn a_search_is_about_reverse_engineering_only_through_its_strong_words() {
+    let host = builtin_host();
+    let tools = host.tools();
+    let validate = |name: &str, value: &Value| host.validate(name, value);
+    let all = listed(&tools, &["read_file"], &["reverse"]);
+    let off = vec!["reverse".to_string()];
+    let line = "Reverse engineering tools are off in this chat";
+    let text = render("a function for my program", &[], &all, &off, &[], &validate);
+    assert!(!text.contains(line), "{text}");
+    assert!(
+        text.contains("Also off in this chat: Reverse engineering."),
+        "{text}"
+    );
+    let text = render("decompile the program", &[], &all, &off, &[], &validate);
+    assert!(text.contains(line), "{text}");
+    // A search reaches a rea tool through its own name, words and purpose ("open_binary"
+    // says it opens a program file), not through a weak group word alone: "list_segments"
+    // says nothing about a program.
+    let on = listed(&tools, &["read_file"], &[]);
+    let found = found_names(&search("my program", &on));
+    assert!(!found.contains(&"list_segments".to_string()), "{found:?}");
+    let found = found_names(&search("decompile my program", &on));
+    assert!(found.contains(&"open_binary".to_string()), "{found:?}");
 }
 
 #[test]

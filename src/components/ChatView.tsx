@@ -1,16 +1,20 @@
 import { useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Brain, FileText, PanelRight } from "lucide-react";
+import { ArrowDown, Brain, FileText, PanelRight, Settings2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
+import { aboutWords } from "../lib/words";
 import { useApp, toErrorInfo } from "../store/app";
 import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { ModelPicker } from "./ModelPicker";
 import { RuntimeIndicator } from "./RuntimeIndicator";
+import { UsageLine } from "./UsageLine";
+import { openModelSettings } from "./ModelSettings";
 import { SystemPromptDialog } from "./SystemPromptDialog";
 import { ErrorBanner } from "./ErrorBanner";
 import { ToolCallCard, type ToolCallView } from "./ToolCallCard";
 import { ToolsPanel } from "./ToolsPanel";
 import { ApprovalModeMenu } from "./AllowAllButton";
+import { FolderChip } from "./FolderChip";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
 import { EmptyChat, Welcome } from "./Welcome";
@@ -29,11 +33,28 @@ function LiveReply(props: { text: string }) {
   );
 }
 
+/** [0.0.5 memory] The meter's title: how much of what the model can remember the last
+ *  request used, in tokens and in words. */
+export function contextMeterTitle(used: number, nCtx: number | null): string {
+  const n = (x: number) => x.toLocaleString("en-US");
+  if (!nCtx) {
+    const words = aboutWords(used);
+    return `How much it can remember: ${n(used)} tokens used` + (words > 0 ? ` (about ${n(words)} words)` : "");
+  }
+  // [0.0.6] Under about 130 tokens the words round down to 0: say "fewer than 100" instead.
+  const usedWords = aboutWords(used);
+  const words = usedWords > 0 ? `about ${n(usedWords)} of ${n(aboutWords(nCtx))}` : `fewer than 100 of about ${n(aboutWords(nCtx))}`;
+  return `How much it can remember: ${n(used)} of ${n(nCtx)} tokens used (${words} words)`;
+}
+
 /** How much of the context window the last request filled. */
-function ContextMeter(props: { used: number; nCtx: number | null }) {
+export function ContextMeter(props: { used: number; nCtx: number | null }) {
   if (!props.nCtx) {
     return (
-      <span className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums" title="Context used by the last request">
+      <span
+        className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums"
+        title={contextMeterTitle(props.used, null)}
+      >
         {props.used.toLocaleString()} tokens
       </span>
     );
@@ -43,13 +64,85 @@ function ContextMeter(props: { used: number; nCtx: number | null }) {
   return (
     <span
       className="flex shrink-0 items-center gap-2 text-xs whitespace-nowrap text-fg-muted tabular-nums"
-      title={`Context used by the last request: ${props.used.toLocaleString()} of ${props.nCtx.toLocaleString()} tokens`}
+      title={contextMeterTitle(props.used, props.nCtx)}
     >
       <span className="h-1.5 w-12 overflow-hidden rounded-full bg-bg-muted" aria-hidden>
         <span className={"block h-full rounded-full transition-[width] duration-500 " + tone} style={{ width: `${pct}%` }} />
       </span>
-      {formatCount(props.used)} / {formatCount(props.nCtx)} tokens ({pct}%)
+      {/* [0.0.6 header-layout] By the header's width: every number from @6xl (a window from
+          about 1,430 pixels), the share in a middle header, the bar alone in the narrowest. The
+          tooltip always has them all, in tokens and words. */}
+      <span className="hidden @6xl:inline" data-meter="full">
+        {formatCount(props.used)} / {formatCount(props.nCtx)} tokens ({pct}%)
+      </span>
+      <span className="hidden @md:inline @6xl:hidden" data-meter="short">
+        {pct}%
+      </span>
     </span>
+  );
+}
+
+/** [0.0.5 memory] Where the summary's line goes: under the last shown message it stands
+ *  for (ids grow along a branch, so every message up to `lastMessageId` is covered; a tool
+ *  result's card is drawn in the row of the message that called it). */
+export function summaryDividerAfter(messages: MessageDto[], lastMessageId: number): number | null {
+  let after: number | null = null;
+  for (const m of messages) if (m.id <= lastMessageId) after = m.id;
+  return after;
+}
+
+/** [0.0.5 memory] The lasting line under the last message the summary stands for. The
+ *  summary is model output: it is shown as plain text, never as markup. */
+export function SummaryDivider(props: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="space-y-2 pt-2" data-summary-divider>
+      <div className="flex items-center gap-2 text-xs text-fg-muted">
+        <span className="h-px flex-1 bg-border" aria-hidden />
+        <span>
+          Above this line, the model sees a summary instead of the messages.{" "}
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => setOpen(!open)}
+            className="underline underline-offset-2 hover:text-fg"
+          >
+            {open ? "Hide summary" : "Show summary"}
+          </button>
+        </span>
+        <span className="h-px flex-1 bg-border" aria-hidden />
+      </div>
+      {open && (
+        <div
+          className="rounded-lg border border-border bg-bg-subtle px-3 py-2 text-sm whitespace-pre-wrap break-words text-fg-muted"
+          aria-label="Summary of earlier messages"
+          data-summary-text
+        >
+          {props.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** [0.0.5 memory] Errors about the chat no longer fitting the model's memory, which Model
+ *  settings can help with. [0.0.6] Pinned instructions get a share of the memory, so a
+ *  larger memory helps them fit too. */
+const MEMORY_ERRORS = new Set(["context_full", "context_overflow", "tools_do_not_fit", "pinned_do_not_fit"]);
+
+/** [0.0.5 memory] The button under a "too long" error of a chat on a local model. */
+export function ModelSettingsAction(props: { path: string }) {
+  return (
+    <div className="flex justify-start">
+      <button
+        type="button"
+        onClick={() => openModelSettings(props.path)}
+        className="flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-sm hover:bg-bg-muted"
+      >
+        <Settings2 size={14} aria-hidden />
+        Model settings
+      </button>
+    </div>
   );
 }
 
@@ -101,8 +194,17 @@ export function ChatView() {
   const shown = messages.slice(hidden);
   const live = generation && detail && generation.chatId === detail.chat.id ? generation : null;
   const chatApprovals = approvals.filter((a) => detail && a.chatId === detail.chat.id);
-  const scrollKey =
-    messages.length + (live ? live.text.length + live.tools.length * 1000 + live.reasoning.length : 0) + chatApprovals.length;
+  // What makes the chat follow its end while it is there. [0.0.6 final pass] The reply's notes
+  // count too: one can arrive after an approval card is drawn and push its buttons under the
+  // message box. Joined, not added, so one part growing as another shrinks still counts.
+  const scrollKey = [
+    messages.length,
+    live ? live.text.length : 0,
+    live ? live.tools.length : 0,
+    live ? live.reasoning.length : 0,
+    live ? live.notes.length : 0,
+    chatApprovals.length,
+  ].join(":");
 
   const onScroll = useCallback(() => {
     const el = scrollerRef.current;
@@ -133,6 +235,8 @@ export function ChatView() {
   else if (!modelRef) disabledReason = "Choose a model above to start chatting";
   else if (modelRef.startsWith("local:") && runtime?.state === "starting")
     disabledReason = "The model is still loading…";
+  else if (modelRef.startsWith("local:") && runtime?.state === "stopped" && runtime.unloadedPath)
+    disabledReason = "The model was unloaded to free memory. Choose Load at the top to load it again.";
   else if (modelRef.startsWith("local:") && runtime?.state !== "ready")
     disabledReason = "The model is not loaded. Pick it again from the list above.";
 
@@ -148,6 +252,12 @@ export function ChatView() {
           : null;
   const nCtx = live?.nCtx ?? (modelRef?.startsWith("local:") ? (runtime?.nCtx ?? null) : null);
 
+  // [0.0.5 memory] The summary the model gets instead of the earlier messages, and the
+  // message its line goes under.
+  const summary = detail?.summary ?? null;
+  const dividerAfter = summary ? summaryDividerAfter(messages, summary.lastMessageId) : null;
+  const localPath = modelRef?.startsWith("local:") ? modelRef.slice(6) : null;
+
   // Stable callbacks, so the memoised messages are not rendered again for every token.
   const editResend = useCallback((m: MessageDto, text: string) => void send(text, m.parentId), [send]);
   const onRegenerate = useCallback((id: number) => void regenerate(id), [regenerate]);
@@ -155,66 +265,120 @@ export function ChatView() {
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
-      <header className="glass @container z-10 flex items-center gap-1.5 border-b border-border px-3 py-2">
-        <ModelPicker />
-        <RuntimeIndicator />
-        <div className="flex-1" />
-        {used !== null && <ContextMeter used={used} nCtx={nCtx} />}
-        {live?.tokensPerSecond != null && (
-          <span className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums">
-            {live.tokensPerSecond.toFixed(1)} tokens/s
-          </span>
-        )}
-        {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
-          <button
-            type="button"
-            aria-pressed={detail.chat.thinking}
-            aria-label={`Thinking ${detail.chat.thinking ? "on" : "off"}`}
-            title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
-            onClick={() =>
-              void ipc
-                .setChatThinking(detail.chat.id, !detail.chat.thinking)
-                .then(() => openChat(detail.chat.id))
-                .catch((e) => showError(toErrorInfo(e)))
-            }
-            className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted ${detail.chat.thinking ? "text-accent" : "text-fg-muted"}`}
+      {/* [0.0.6 header-layout] Two groups that share one row while they fit and wrap onto two
+          when they do not: the model with what is known about it (its state or ready line, the
+          meter, the reply's speed, Thinking, and this computer's usage under its name, item 6),
+          then the chat's buttons. The model's group asks only for its parts at their shortest
+          (`w-min`: the name at about 12 characters, the ready line's number, the usage line's
+          form for this width) and takes the rest of the row, so the buttons move under it,
+          right-aligned, before anything there is cut.
+          [header-layout r2] Where the model's parts go follows the header's width, never what is
+          in them, so the meter, the speed and Thinking never jump to another row while a reply
+          streams. From @2xl (a header of 42rem, where the whole first row always fits) the group
+          is a grid: the name and the model's state, then the meter, the speed and Thinking, on
+          the first row (`auto`, which takes the rest of the row, and `min-content`), the usage
+          line under them across both columns.
+          Narrower, it is a column: the name and the model's state have the first row to
+          themselves, and the meter, the speed and Thinking go to the right of the usage line.
+          Under 22.25rem (the name's 9.75rem, the widest state's 12rem and the gap) the state
+          goes under the name and the speed is left out (it is under the reply when it ends);
+          under @2xs the meter and Thinking go under the usage line. Thinking always says "On" or
+          "Off" in words, and System prompt in words from @5xl (a window from about 1,300 pixels
+          with the sidebar open), as does "Thinking on" while there is no meter yet (from @7xl
+          beside it, so the ready line keeps "Remembers about N words" at 1,440 pixels). */}
+      <header className="glass @container z-10 flex flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-border px-3 py-2">
+        <div
+          data-header-model
+          className="flex w-min min-w-0 grow flex-col @2xl:grid @2xl:grid-cols-[auto_min-content] @2xl:items-center @2xl:gap-x-1.5"
+        >
+          <div
+            data-model-line
+            className="flex items-center gap-x-1.5 gap-y-1 @max-[22.25rem]:flex-wrap @2xl:col-start-1 @2xl:row-start-1"
           >
-            <Brain size={15} aria-hidden />
-            <span className="hidden @3xl:inline">Thinking {detail.chat.thinking ? "on" : "off"}</span>
-          </button>
-        )}
+            <ModelPicker />
+            <RuntimeIndicator />
+          </div>
+          {/* The usage line's row below @2xl; from @2xl its two parts are the grid's own, and
+              the usage line fills its row without widening a column (`w-0 min-w-full`). */}
+          <div data-model-below className="flex min-w-0 items-center gap-x-1.5 @max-2xs:flex-wrap @2xl:contents">
+            <div className="min-w-0 grow @2xl:col-span-2 @2xl:col-start-1 @2xl:row-start-2 @2xl:w-0 @2xl:min-w-full">
+              <UsageLine />
+            </div>
+            {(used !== null || live?.tokensPerSecond != null || (detail && modelRef?.startsWith("local:") && runtime?.thinking)) && (
+              <div
+                data-model-status
+                className="ml-auto flex shrink-0 items-center gap-1.5 @2xl:col-start-2 @2xl:row-start-1"
+              >
+                {used !== null && <ContextMeter used={used} nCtx={nCtx} />}
+                {live?.tokensPerSecond != null && (
+                  <span
+                    data-speed
+                    className="hidden shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums @min-[22.25rem]:inline"
+                  >
+                    {live.tokensPerSecond.toFixed(1)} tokens/s
+                  </span>
+                )}
+                {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
+                  <button
+                    type="button"
+                    aria-pressed={detail.chat.thinking}
+                    aria-label={`Thinking ${detail.chat.thinking ? "on" : "off"}`}
+                    title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
+                    onClick={() =>
+                      void ipc
+                        .setChatThinking(detail.chat.id, !detail.chat.thinking)
+                        .then(() => openChat(detail.chat.id))
+                        .catch((e) => showError(toErrorInfo(e)))
+                    }
+                    // Lower on the usage line's row (under @2xl) than on the name's row.
+                    className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted @max-2xl:py-0 ${detail.chat.thinking ? "text-accent" : "text-fg-muted"}`}
+                  >
+                    <Brain size={15} aria-hidden />
+                    {/* "On" or "Off" at every width; "Thinking on" from @5xl while the chat has no
+                        meter yet, from @7xl beside the meter (which takes that room first). */}
+                    <span data-thinking="short" className={used === null ? "@5xl:hidden" : "@7xl:hidden"}>
+                      {detail.chat.thinking ? "On" : "Off"}
+                    </span>
+                    <span data-thinking="full" className={used === null ? "hidden @5xl:inline" : "hidden @7xl:inline"}>
+                      Thinking {detail.chat.thinking ? "on" : "off"}
+                    </span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
         {detail && (
-          <ToolsPanel
-            chatId={detail.chat.id}
-            nCtx={nCtx}
-            workingFolder={detail.chat.workingFolder ?? null}
-            unsupported={!!modelRef?.startsWith("local:") && runtime?.state === "ready" && !runtime.supportsTools}
-          />
-        )}
-        {detail && <ApprovalModeMenu chatId={detail.chat.id} />}
-        {detail && (
-          <button
-            type="button"
-            onClick={() => setPromptOpen(true)}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap text-fg-muted hover:bg-bg-muted hover:text-fg"
-            title="System prompt"
-            aria-label="System prompt"
-          >
-            <FileText size={15} aria-hidden />
-            <span className="hidden @3xl:inline">System prompt</span>
-          </button>
-        )}
-        {detail && (
-          <button
-            type="button"
-            onClick={() => (workbench.open ? closeWorkbench() : openWorkbench())}
-            aria-pressed={workbench.open}
-            aria-label="Panel"
-            title="Artifacts, task, sources and context beside the chat"
-            className={`flex shrink-0 items-center rounded-lg p-1.5 hover:bg-bg-muted ${workbench.open ? "text-accent" : "text-fg-muted hover:text-fg"}`}
-          >
-            <PanelRight size={16} aria-hidden />
-          </button>
+          <div data-header-controls className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1 @md:gap-1.5">
+            <ToolsPanel
+              chatId={detail.chat.id}
+              nCtx={nCtx}
+              workingFolder={detail.chat.workingFolder ?? null}
+              unsupported={!!modelRef?.startsWith("local:") && runtime?.state === "ready" && !runtime.supportsTools}
+            />
+            <FolderChip chatId={detail.chat.id} workingFolder={detail.chat.workingFolder ?? null} />
+            <ApprovalModeMenu chatId={detail.chat.id} />
+            <button
+              type="button"
+              onClick={() => setPromptOpen(true)}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap text-fg-muted hover:bg-bg-muted hover:text-fg"
+              title="System prompt"
+              aria-label="System prompt"
+            >
+              <FileText size={15} aria-hidden />
+              <span className="hidden @5xl:inline">System prompt</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => (workbench.open ? closeWorkbench() : openWorkbench())}
+              aria-pressed={workbench.open}
+              aria-label="Panel"
+              title="Artifacts, task, sources and context beside the chat"
+              className={`flex shrink-0 items-center rounded-lg p-1.5 hover:bg-bg-muted ${workbench.open ? "text-accent" : "text-fg-muted hover:text-fg"}`}
+            >
+              <PanelRight size={16} aria-hidden />
+            </button>
+          </div>
         )}
       </header>
 
@@ -272,6 +436,10 @@ export function ChatView() {
                 const view = waiting && stored.status === "running" ? { ...stored, status: "waiting" } : stored;
                 return <ToolCallCard key={c.id} call={view} />;
               })}
+              {localPath !== null && m.error && MEMORY_ERRORS.has(m.error.code) && (
+                <ModelSettingsAction path={localPath} />
+              )}
+              {summary && dividerAfter === m.id && <SummaryDivider text={summary.text} />}
             </div>
           ))}
           {live && (

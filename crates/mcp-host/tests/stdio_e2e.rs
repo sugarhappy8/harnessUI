@@ -19,6 +19,8 @@
 //! 7. shutdown kills every server.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -51,44 +53,111 @@ fn main() {
     }
     // SAFETY: no other thread exists yet; the runtime is built after this.
     unsafe { std::env::set_var(CANARY, "leaked-from-parent") };
+    on_test_thread(run_all);
+}
+
+/// One check: its name and the function that makes its future. The future is boxed so that
+/// the harness's own stack frame stays small however many checks there are.
+type Check = (&'static str, fn() -> Pin<Box<dyn Future<Output = ()>>>);
+
+fn run_all() {
+    let checks: &[Check] = &[
+        (
+            "lists_and_calls_tools",
+            || Box::pin(lists_and_calls_tools()),
+        ),
+        ("environment_is_scrubbed", || {
+            Box::pin(environment_is_scrubbed())
+        }),
+        ("tool_list_changes_refresh_the_registry", || {
+            Box::pin(tool_list_changes())
+        }),
+        #[cfg(unix)]
+        ("cancel_kills_the_process_tree_and_restarts", || {
+            Box::pin(cancel_kills_tree())
+        }),
+        ("timeout_stops_the_call_and_restarts", || {
+            Box::pin(timeout_restarts())
+        }),
+        ("stop_during_a_slow_restart_returns_promptly", || {
+            Box::pin(stop_during_restart())
+        }),
+        ("stop_while_the_server_is_starting_returns_promptly", || {
+            Box::pin(stop_while_starting())
+        }),
+        ("crash_after_ready_fails_and_restarts", || {
+            Box::pin(crash_after_ready())
+        }),
+        ("garbage_server_fails_with_stderr_tail", || {
+            Box::pin(garbage_fails())
+        }),
+        ("exiting_server_fails_with_exit_code", || {
+            Box::pin(exiting_fails())
+        }),
+        ("modern_only_server_uses_the_fallback", || {
+            Box::pin(modern_only())
+        }),
+        ("shutdown_stops_every_server", || Box::pin(shutdown_stops())),
+    ];
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
     runtime.block_on(async {
-        run("lists_and_calls_tools", lists_and_calls_tools()).await;
-        run("environment_is_scrubbed", environment_is_scrubbed()).await;
-        run(
-            "tool_list_changes_refresh_the_registry",
-            tool_list_changes(),
-        )
-        .await;
-        #[cfg(unix)]
-        run(
-            "cancel_kills_the_process_tree_and_restarts",
-            cancel_kills_tree(),
-        )
-        .await;
-        run("timeout_stops_the_call_and_restarts", timeout_restarts()).await;
-        run(
-            "stop_during_a_slow_restart_returns_promptly",
-            stop_during_restart(),
-        )
-        .await;
-        run(
-            "stop_while_the_server_is_starting_returns_promptly",
-            stop_while_starting(),
-        )
-        .await;
-        run("crash_after_ready_fails_and_restarts", crash_after_ready()).await;
-        run("garbage_server_fails_with_stderr_tail", garbage_fails()).await;
-        run("exiting_server_fails_with_exit_code", exiting_fails()).await;
-        run("modern_only_server_uses_the_fallback", modern_only()).await;
-        run("shutdown_stops_every_server", shutdown_stops()).await;
+        for (name, check) in checks {
+            run(name, check()).await;
+        }
     });
 }
 
-async fn run(name: &str, check: impl std::future::Future<Output = ()>) {
+/// The stack Windows gives a program's main thread (Linux and macOS give 8 MiB). Only
+/// Linux can hold its main thread to it.
+#[cfg(target_os = "linux")]
+const WINDOWS_MAIN_STACK: usize = 1 << 20;
+
+/// The stack the checks run with: what Linux gives a main thread.
+const TEST_STACK: usize = 8 << 20;
+
+/// Runs `tests` on a thread of their own with [`TEST_STACK`], and fails the run if they
+/// panic: on Windows the main thread has only 1 MiB of stack, and debug builds of
+/// async checks like these can need more (`managed_e2e` died there with
+/// STATUS_STACK_OVERFLOW before its first line). On Linux the main thread is first held to
+/// that same size, so anything left on it that would overflow on Windows fails here too.
+fn on_test_thread(tests: fn()) {
+    #[cfg(target_os = "linux")]
+    hold_main_stack_to(WINDOWS_MAIN_STACK);
+    let tests = std::thread::Builder::new()
+        .name("tests".into())
+        .stack_size(TEST_STACK)
+        .spawn(tests)
+        .expect("test thread");
+    if tests.join().is_err() {
+        // The panic is already printed; fail the way the default harness does.
+        std::process::exit(101);
+    }
+}
+
+/// Lowers this process's main-thread stack limit to `bytes` (Linux only), so a stack that
+/// would overflow on Windows overflows here too. Children started from here inherit it, as
+/// the fake servers' main threads have the same 1 MiB on Windows.
+#[cfg(target_os = "linux")]
+fn hold_main_stack_to(bytes: usize) {
+    let bytes = libc::rlim_t::try_from(bytes).expect("stack size");
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: both calls only read or write the struct passed to them.
+    unsafe {
+        assert_eq!(libc::getrlimit(libc::RLIMIT_STACK, &mut limit), 0);
+        if limit.rlim_cur > bytes {
+            limit.rlim_cur = bytes;
+            assert_eq!(libc::setrlimit(libc::RLIMIT_STACK, &limit), 0);
+        }
+    }
+}
+
+async fn run(name: &str, check: impl Future<Output = ()>) {
     let started = Instant::now();
     check.await;
     println!(

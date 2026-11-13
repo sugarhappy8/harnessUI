@@ -6,9 +6,7 @@ import { applyTheme, loadTheme, type ThemeChoice } from "../lib/theme";
 import * as ipc from "../lib/ipc";
 import type { AppInfo } from "../lib/ipc";
 import type {
-  BackendInfo,
   FirstRunInfo,
-  LocalModelSettings,
   Provider,
   ProviderKind,
   UpdateInfo,
@@ -16,8 +14,9 @@ import type {
 } from "../lib/types";
 import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
+import { askBeforeChange, backendWhenIdle, runChange } from "../store/modelChange";
 import { ErrorBanner } from "./ErrorBanner";
-import { BackendDownloads } from "./BackendDownloads";
+import { visibleLines, visiblePath } from "./FolderChip";
 import { AuditLogView, PermissionsSettings } from "./PermissionsSettings";
 import { McpSettings } from "./McpSettings";
 import { SkillsSettings } from "./SkillsSettings";
@@ -27,7 +26,10 @@ import { GitSettings } from "./GitSettings";
 import { SearchSettings } from "./SearchSettings";
 import { Benchmarks } from "./evals/Benchmarks";
 import { ModelCheck } from "./evals/ModelCheck";
-import type { ErrorInfo } from "../lib/types";
+import { LocalModels } from "./settings/LocalModels";
+import { OtherApps } from "./settings/OtherApps";
+import { Reverse } from "./settings/Reverse";
+import type { DiagnosticsReport, ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
   { value: "system", label: "System" },
@@ -37,6 +39,20 @@ const THEMES: { value: ThemeChoice; label: string }[] = [
 
 const tabClass =
   "rounded-md px-3 py-1.5 text-left text-sm data-[state=active]:bg-bg-muted data-[state=active]:font-medium hover:bg-bg-muted";
+
+/** The section list's ref: when the list appears (the dialog opens, or opens on another
+ * section), it scrolls so the chosen section's row is in view, centred. In a short window the
+ * list shows only part of itself, and a link elsewhere (the notice's Permissions link, the
+ * Tools panel's Browser link) opens Settings on a section further down. Layout offsets, not
+ * screen rectangles, because the dialog is scaled while it opens. */
+function showChosenSection(list: HTMLDivElement | null) {
+  const tab = list?.querySelector<HTMLElement>('[role="tab"][data-state="active"]');
+  if (!list || !tab) return;
+  const top = tab.offsetParent === list ? tab.offsetTop : tab.offsetTop - list.offsetTop - list.clientTop;
+  if (top < list.scrollTop || top + tab.offsetHeight > list.scrollTop + list.clientHeight) {
+    list.scrollTop = top - (list.clientHeight - tab.offsetHeight) / 2;
+  }
+}
 
 function General() {
   const [theme, setTheme] = useState<ThemeChoice>(loadTheme);
@@ -363,128 +379,6 @@ function Updates() {
       )}
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
     </section>
-  );
-}
-
-function Runtime() {
-  const [backends, setBackends] = useState<BackendInfo[] | null>(null);
-  const [settings, setSettings] = useState<LocalModelSettings | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<ErrorInfo | null>(null);
-
-  const load = useCallback(async (reprobe: boolean) => {
-    setBusy(true);
-    try {
-      setBackends(await ipc.listBackends(reprobe));
-      setSettings(await ipc.getLocalModelSettings());
-    } catch (err) {
-      setError(toErrorInfo(err));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
-  const reprobe = useCallback(() => void load(true), [load]);
-  useEffect(() => {
-    let alive = true;
-    Promise.all([ipc.listBackends(false), ipc.getLocalModelSettings()])
-      .then(([b, s]) => {
-        if (alive) {
-          setBackends(b);
-          setSettings(s);
-        }
-      })
-      .catch((err) => alive && setError(toErrorInfo(err)));
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  async function save(next: LocalModelSettings) {
-    setSettings(next);
-    try {
-      await ipc.setLocalModelSettings(next);
-    } catch (err) {
-      setError(toErrorInfo(err));
-    }
-  }
-
-  return (
-    <div className="space-y-5">
-      {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
-      {settings && (
-        <div className="grid grid-cols-[10rem_1fr] items-center gap-3 text-sm">
-          <label htmlFor="backend">Backend</label>
-          <select
-            id="backend"
-            value={settings.backend ?? "auto"}
-            onChange={(e) =>
-              void save({ ...settings, backend: e.target.value === "auto" ? null : e.target.value })
-            }
-            className="rounded-md border border-border bg-bg px-2 py-1"
-          >
-            <option value="auto">Auto (recommended)</option>
-            {(backends ?? []).map((b) => (
-              <option key={b.kind} value={b.kind} disabled={!b.available}>
-                {b.kind}
-                {b.available ? "" : " (unavailable)"}
-              </option>
-            ))}
-          </select>
-          <label htmlFor="ctx">Context size</label>
-          <select
-            id="ctx"
-            value={settings.ctx}
-            onChange={(e) => void save({ ...settings, ctx: Number(e.target.value) })}
-            className="rounded-md border border-border bg-bg px-2 py-1"
-          >
-            {[2048, 4096, 8192, 16384, 32768, 65536].map((n) => (
-              <option key={n} value={n}>
-                {n.toLocaleString()} tokens
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-      <p className="text-xs text-fg-muted">
-        Changes apply the next time a model loads. A larger context needs more memory.
-      </p>
-      <section>
-        <div className="mb-2 flex items-center justify-between">
-          <h3 className="text-sm font-medium">Detected backends</h3>
-          <button
-            type="button"
-            onClick={() => void load(true)}
-            disabled={busy}
-            className="flex items-center gap-1 text-xs text-fg-muted hover:text-fg disabled:opacity-40"
-          >
-            <RefreshCw size={12} aria-hidden className={busy ? "animate-spin" : ""} /> Check again
-          </button>
-        </div>
-        <ul className="space-y-2 text-sm">
-          {(backends ?? []).map((b) => (
-            <li key={b.kind} className="rounded-md border border-border px-3 py-2">
-              <div className="flex justify-between">
-                <span className="font-medium">{b.kind}</span>
-                <span className={b.available ? "text-success" : "text-fg-muted"}>
-                  {b.available ? "available" : "unavailable"}
-                </span>
-              </div>
-              {b.devices.map((d) => (
-                <p key={d.name} className="text-xs text-fg-muted">
-                  {d.name}: {d.description}
-                  {d.totalMib > 0 ? ` · ${(d.totalMib / 1024).toFixed(1)} GB` : ""}
-                </p>
-              ))}
-              {b.error && <p className="text-xs text-fg-muted">{b.error}</p>}
-            </li>
-          ))}
-          {backends?.length === 0 && (
-            <li className="text-fg-muted">No llama.cpp runtime was found in this build.</li>
-          )}
-        </ul>
-      </section>
-      <BackendDownloads onChanged={reprobe} />
-    </div>
   );
 }
 
@@ -823,7 +717,7 @@ function HuggingFace() {
   );
 }
 
-function Diagnostics() {
+export function Diagnostics() {
   const [report, setReport] = useState<string | null>(null);
   const [savedTo, setSavedTo] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -831,10 +725,24 @@ function Diagnostics() {
   const runtime = useApp((s) => s.runtime);
 
   async function run() {
-    setBusy(true);
     setError(null);
+    // The timed generation replaces the loaded model: a reply, a model check or another
+    // app's request using it is asked about first, the same as Reload (D3). Cancel runs
+    // nothing; "Restart when it ends" waits, with the waiting line and its Cancel.
+    const answer = await askBeforeChange(runtime);
+    if (!answer) return;
+    setBusy(true);
     try {
-      const r = await ipc.runDiagnostics(runtime?.modelPath ?? null);
+      let r = null as DiagnosticsReport | null;
+      // The check goes on for minutes after its wait, so the waiting line follows the
+      // backend's wait (`reloadWaiting`), named as a restart, and is not kept up for the
+      // whole call: it shows, with a Cancel that works, only while the check waits.
+      await runChange("reload", undefined, async () => {
+        r = await ipc.runDiagnostics(runtime?.modelPath ?? null, backendWhenIdle(answer));
+        return r !== null;
+      });
+      // null: the wait for the model was cancelled, which is not an error.
+      if (r === null) return;
       setReport(r.text);
       setSavedTo(r.savedTo);
     } catch (err) {
@@ -871,12 +779,20 @@ function Diagnostics() {
       </div>
       {report && (
         <>
-          <pre className="max-h-72 overflow-auto rounded-md bg-bg-muted p-3 text-xs whitespace-pre-wrap">{report}</pre>
+          {/* The report names the loaded model's path: hidden and direction-changing characters
+              show as codes, its lines stay. Copy report copies it as it was written. */}
+          <pre className="max-h-72 overflow-auto rounded-md bg-bg-muted p-3 text-xs whitespace-pre-wrap">
+            {visibleLines(report)}
+          </pre>
           <div className="flex gap-3 text-xs">
             <button type="button" className="underline" onClick={() => void writeText(report)}>
               Copy report
             </button>
-            {savedTo && <span className="text-fg-muted">Saved to {savedTo}</span>}
+            {savedTo && (
+              <span className="text-fg-muted">
+                Saved to <bdi dir="ltr">{visiblePath(savedTo)}</bdi>
+              </span>
+            )}
           </div>
         </>
       )}
@@ -893,7 +809,7 @@ export function SettingsDialog(props: {
     <Dialog.Root open={props.open} onOpenChange={props.onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay fixed inset-0" />
-        <Dialog.Content className="fixed top-1/2 left-1/2 flex h-[34rem] w-[48rem] max-w-[94vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-border bg-surface shadow-pop">
+        <Dialog.Content className="fixed top-1/2 left-1/2 flex h-[40rem] max-h-[calc(100vh-9rem)] w-[48rem] max-w-[94vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-border bg-surface shadow-pop">
           <div className="flex items-center justify-between border-b border-border px-5 py-3">
             <Dialog.Title className="text-base font-semibold">Settings</Dialog.Title>
             <Dialog.Close className="rounded-md p-1 text-fg-muted hover:bg-bg-muted hover:text-fg" aria-label="Close settings">
@@ -902,9 +818,11 @@ export function SettingsDialog(props: {
           </div>
           <Dialog.Description className="sr-only">App settings</Dialog.Description>
           <Tabs.Root key={props.initialTab ?? "general"} defaultValue={props.initialTab ?? "general"} orientation="vertical" className="flex min-h-0 flex-1">
-            <Tabs.List className="flex w-44 flex-col gap-1 border-r border-border p-3" aria-label="Settings sections">
+            <Tabs.List ref={showChosenSection} className="flex min-h-0 w-48 flex-col gap-1 overflow-y-auto border-r border-border p-3" aria-label="Settings sections">
               <Tabs.Trigger value="general" className={tabClass}>General</Tabs.Trigger>
               <Tabs.Trigger value="runtime" className={tabClass}>Local models</Tabs.Trigger>
+              <Tabs.Trigger value="reverse" className={tabClass}>Reverse engineering</Tabs.Trigger>
+              <Tabs.Trigger value="otherApps" className={tabClass}>Other apps</Tabs.Trigger>
               <Tabs.Trigger value="endpoints" className={tabClass}>Endpoints</Tabs.Trigger>
               <Tabs.Trigger value="huggingface" className={tabClass}>Hugging Face</Tabs.Trigger>
               <Tabs.Trigger value="mcp" className={tabClass}>MCP servers</Tabs.Trigger>
@@ -919,7 +837,9 @@ export function SettingsDialog(props: {
             </Tabs.List>
             <div className="min-w-0 flex-1 overflow-y-auto p-5">
               <Tabs.Content value="general"><General /></Tabs.Content>
-              <Tabs.Content value="runtime"><Runtime /><ModelCheck /></Tabs.Content>
+              <Tabs.Content value="runtime"><LocalModels /><ModelCheck /></Tabs.Content>
+              <Tabs.Content value="reverse"><Reverse /></Tabs.Content>
+              <Tabs.Content value="otherApps"><OtherApps /></Tabs.Content>
               <Tabs.Content value="endpoints"><Endpoints /></Tabs.Content>
               <Tabs.Content value="huggingface"><HuggingFace /></Tabs.Content>
               <Tabs.Content value="mcp"><McpSettings /></Tabs.Content>

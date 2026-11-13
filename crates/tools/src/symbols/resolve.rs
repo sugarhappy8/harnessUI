@@ -26,11 +26,11 @@ use crate::skill_guard::{self, Reach};
 /// Mentions in one message at most.
 pub const MAX_MENTIONS: usize = 8;
 /// Characters per token, as the file tools count them.
-const CHARS_PER_TOKEN: usize = 3;
+pub const CHARS_PER_TOKEN: usize = 3;
 /// Tokens one mention may take at most.
 const MAX_TOKENS_PER_MENTION: usize = 8_000;
 /// Characters one mention gets at least, however small the context.
-const MIN_CHARS: usize = 600;
+pub const MIN_CHARS: usize = 600;
 
 /// One mention as the webview sends it. Every field is untrusted: the path is checked like
 /// a `read_file` path and the symbol is looked up again in the file as it is now.
@@ -73,13 +73,18 @@ pub struct Resolved {
     pub text: String,
 }
 
-/// The characters each of `count` mentions may take with a context of `n_ctx` tokens: the
-/// smallest of 8,000 tokens, a fifth of the context, and 40% of it shared by the mentions.
-pub fn cap_chars(n_ctx: usize, count: usize) -> usize {
-    let count = count.max(1);
+/// The characters each mention of a message may take with a context of `n_ctx` tokens, when
+/// `shared_by` files (the message's mentions and attached documents together) are sent: the
+/// smallest of 8,000 tokens, a fifth of the context, and 40% of it shared by them all. The
+/// documents are cut by the same share (`attachments::document_cap_chars` in the app), so
+/// together they carry at most 40% of the context, apart from the 600-character floor.
+/// That is by the 3-characters-a-token estimate; for a local model the app also holds each
+/// excerpt to `cap / 3` of the model server's own tokens (`mentions::read_all` in the app).
+pub fn cap_chars(n_ctx: usize, shared_by: usize) -> usize {
+    let shared_by = shared_by.max(1);
     let tokens = MAX_TOKENS_PER_MENTION
         .min(n_ctx / 5)
-        .min(n_ctx * 2 / 5 / count);
+        .min(n_ctx * 2 / 5 / shared_by);
     (tokens * CHARS_PER_TOKEN).max(MIN_CHARS)
 }
 

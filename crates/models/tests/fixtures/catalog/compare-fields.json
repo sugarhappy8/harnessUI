@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "sequence": 2,
+  "generated": "2026-11-12",
+  "note": "Test fixture for the 0.0.6 comparison fields. Every name, repository and number is made up.",
+  "tiers": {
+    "8": {
+      "recommendedCtx": 16384,
+      "models": [
+        "sample-7b-q4km",
+        "sample-plain-q8"
+      ]
+    },
+    "24": {
+      "recommendedCtx": 32768,
+      "models": [
+        "sample-moe-q4km"
+      ]
+    }
+  },
+  "models": {
+    "sample-7b-q4km": {
+      "name": "Sample 7B",
+      "repo": "example-quants/Sample-7B-GGUF",
+      "revision": "1111111111111111111111111111111111111111",
+      "files": [
+        {
+          "path": "Sample-7B-Q4_K_M.gguf",
+          "size": 4400000000,
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "mmproj": {
+        "path": "mmproj-Sample-7B-F16.gguf",
+        "size": 600000000,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "apache-2.0"
+      },
+      "gated": false,
+      "sampling": {},
+      "minLlamaBuild": null,
+      "tested": null,
+      "memoryAtRecommendedCtx": null,
+      "summary": "Sample 7B is a small model made for testing. It answers questions and writes code.",
+      "goodAt": [
+        "chat",
+        "coding",
+        "juggling",
+        "coding",
+        "long-documents",
+        42
+      ],
+      "parameters": 7000000000,
+      "publisher": "Example Labs",
+      "languages": [
+        "en",
+        "fr"
+      ],
+      "released": "2026-03",
+      "source": "https://huggingface.co/example-labs/Sample-7B"
+    },
+    "sample-moe-q4km": {
+      "name": "Sample MoE 30B",
+      "repo": "example-quants/Sample-MoE-30B-GGUF",
+      "revision": "2222222222222222222222222222222222222222",
+      "files": [
+        {
+          "path": "Q4_K_M/Sample-MoE-30B-Q4_K_M-00001-of-00002.gguf",
+          "size": 9000000000,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        {
+          "path": "Q4_K_M/Sample-MoE-30B-Q4_K_M-00002-of-00002.gguf",
+          "size": 9500000000,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "quant": "Q4_K_M",
+      "capabilities": [
+        "tools",
+        "thinking"
+      ],
+      "license": {
+        "spdx": "other",
+        "name": "Example Model License",
+        "url": "https://example.com/model-license"
+      },
+      "summary": "Sample MoE is a mixture of experts. It thinks before it answers.",
+      "goodAt": [
+        "reasoning",
+        "math",
+        "speed"
+      ],
+      "parameters": 30000000000,
+      "activeParameters": 3000000000,
+      "publisher": "Example Labs",
+      "languages": "multilingual",
+      "released": "2026-05-02",
+      "source": "https://huggingface.co/example-labs/Sample-MoE-30B"
+    },
+    "sample-plain-q8": {
+      "name": "Sample Plain",
+      "repo": "example-quants/Sample-Plain-GGUF",
+      "revision": "3333333333333333333333333333333333333333",
+      "files": [
+        {
+          "path": "Sample-Plain-Q8_0.gguf",
+          "size": 1200000000,
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "quant": "Q8_0",
+      "capabilities": [],
+      "license": {
+        "spdx": "mit"
+      },
+      "source": "http://example.com/not-a-model-card",
+      "released": "last spring",
+      "parameters": 1000000000,
+      "activeParameters": 2000000000
+    }
+  }
+}

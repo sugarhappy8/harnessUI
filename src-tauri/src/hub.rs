@@ -18,6 +18,9 @@ use crate::downloads::{DownloadGroupDto, DownloadManager, GroupMeta};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+mod compare;
+use compare::{Hub as _, LiveHub};
+
 const HF_TOKEN_KEY: &str = "hf-token";
 const SETTING_MODELS_DIR: &str = "modelsDir";
 const SETTING_HF_ENDPOINT: &str = "hfEndpoint";
@@ -279,31 +282,46 @@ pub async fn hub_repo(
 ) -> AppResult<RepoView> {
     let client = hf_client(&app).await?;
     let detail = client.repo(&repo_id, None).await.map_err(hf_error)?;
+    // 0.0.6: the comparison reuses this listing and header instead of asking again.
+    let live = LiveHub::new(Some(client.clone()));
+    live.remember_listing(None, Arc::new(detail.clone()));
     let classified = models::classify(&detail.files);
     let fit_context = ctx
         .unwrap_or(u64::from(
-            crate::settings::local_model_settings(&app).await.ctx,
+            crate::load_settings::browse_fit_ctx(&state).await,
         ))
         .max(512);
 
-    // Read the header of the smallest variant to get the model's real parameters.
+    // Read the header of the smallest variant to get the model's real parameters (once
+    // per commit in a session: headers at a commit never change).
     let summary = match classified.variants.iter().min_by_key(|v| v.total_size) {
-        Some(v) => client
-            .fetch_head(&detail.id, &detail.commit, &v.first_file().path, HEAD_BYTES)
+        Some(v) => live
+            .head(&detail.id, &detail.commit, &v.first_file().path)
             .await
             .ok()
-            .and_then(|bytes| models::gguf::read_prefix(&bytes).ok())
-            .map(|h| ModelSummary::from_header(&h)),
+            .map(|s| (*s).clone()),
         None => None,
     };
     let card = client.model_card(&detail.id, &detail.commit).await.ok();
     let (target, _) = detect(&state).await;
     let dir = models_dir(&app).await;
     let projector = classified.projectors.first().cloned();
+    // An installed file is judged as its Compare column judges it (compare-fit-minors).
+    let on_computer: Vec<compare::Installed> = state
+        .store
+        .list_models()
+        .await?
+        .iter()
+        .map(compare::Installed::from_record)
+        .collect();
+    let fit_ctx = u32::try_from(fit_context).unwrap_or(u32::MAX);
 
     let mut variants = Vec::new();
     for v in &classified.variants {
-        let fit = summary.as_ref().map(|s| {
+        let estimate = summary.as_ref().map(|s| {
+            // Every field is set today; the update keeps this call site unchanged when
+            // fields are added (0.0.6 WP1b).
+            #[allow(clippy::needless_update)]
             let input = FitInput {
                 weights_bytes: v.total_size,
                 projector_bytes: projector.as_ref().map_or(0, |p| p.size),
@@ -313,9 +331,19 @@ pub async fn hub_repo(
                 max_ctx: s
                     .context_length
                     .or(detail.gguf.as_ref().and_then(|g| g.context_length)),
+                ..Default::default()
             };
             models::check(&input, &target)
         });
+        let fit = compare::variant_fit(
+            &on_computer,
+            &StatePlans(&state),
+            &detail.id,
+            v,
+            fit_ctx,
+            estimate,
+        )
+        .await;
         let installed = match models::download::destination(&dir, &detail.id, &v.first_file().path)
         {
             Ok(dest) => state
@@ -468,6 +496,7 @@ fn file_spec(repo: &str, commit: &str, f: &models::RepoFile) -> FileSpec {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_group(
     app: &AppHandle,
     repo: &str,
@@ -476,6 +505,7 @@ async fn start_group(
     model_files: &[models::RepoFile],
     projector: Option<&models::RepoFile>,
     catalog_id: Option<String>,
+    facts: Option<(crate::dto::HubFacts, Option<u64>)>,
 ) -> AppResult<String> {
     let dir = models_dir(app).await;
     std::fs::create_dir_all(&dir).map_err(|e| {
@@ -498,6 +528,8 @@ async fn start_group(
         model_files: model_files.iter().map(|f| f.path.clone()).collect(),
         projector: projector.map(|p| p.path.clone()),
         catalog_id,
+        parameters: facts.as_ref().and_then(|(_, p)| *p),
+        hub: facts.map(|(h, _)| h),
     };
     let manager = app.state::<Arc<DownloadManager>>().inner().clone();
     manager.start(app, meta, files).await
@@ -528,6 +560,16 @@ pub async fn download_start(
     } else {
         None
     };
+    // 0.0.6: what the uploader lists, saved with the model for comparing it offline.
+    let facts = (
+        compare::hub_facts(
+            &detail,
+            client
+                .page_url(&detail.id)
+                .unwrap_or_else(|| format!("{}/{}", models::hf::OFFICIAL_ENDPOINT, detail.id)),
+        ),
+        detail.gguf.as_ref().and_then(|g| g.parameters),
+    );
     start_group(
         &app,
         &detail.id,
@@ -536,6 +578,7 @@ pub async fn download_start(
         &variant.files,
         projector,
         None,
+        Some(facts),
     )
     .await
 }
@@ -547,6 +590,11 @@ pub async fn download_catalog_entry(app: AppHandle, entry_id: String) -> AppResu
         .models
         .get(&entry_id)
         .ok_or_else(|| AppError::not_found("catalog entry"))?;
+    // 0.0.6: the uploader's facts, saved with the model for comparing it offline: from
+    // this session's cache, else one listing request at the pinned commit. The download
+    // goes ahead without them when that fails; the catalog id is saved either way.
+    let live = LiveHub::new(hf_client(&app).await.ok());
+    let facts = compare::catalog_download_facts(&live, entry).await;
     start_group(
         &app,
         &entry.repo,
@@ -555,6 +603,7 @@ pub async fn download_catalog_entry(app: AppHandle, entry_id: String) -> AppResu
         &entry.files,
         entry.mmproj.as_ref(),
         Some(entry_id),
+        facts,
     )
     .await
 }
@@ -607,9 +656,63 @@ struct StoredSummary {
     is_moe: bool,
     #[serde(default)]
     projector: Option<String>,
+    // ---- 0.0.6 item 4: for comparing installed models offline. Absent in rows saved
+    // before; each is left out of the JSON when unknown.
+    /// For a mixture of experts: how many experts it has and uses for each token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expert_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expert_used_count: Option<u64>,
+    /// The parameter count Hugging Face gave when it was downloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parameters: Option<u64>,
+    /// The catalog entry it was downloaded from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog_id: Option<String>,
+    /// The file's path in its Hugging Face repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repo_file: Option<String>,
+    /// What the uploader listed when it was downloaded (already made safe to show).
+    #[serde(
+        default,
+        deserialize_with = "lenient_hub",
+        skip_serializing_if = "Option::is_none"
+    )]
+    hub: Option<crate::dto::HubFacts>,
+}
+
+/// Reads saved uploader facts leniently: facts this version cannot read (a field missing
+/// or of another type, written by a later version or edited by hand) are dropped on their
+/// own, instead of making the whole saved value unreadable (the model's summary in
+/// `gguf_summary`, a download group's [`GroupMeta`]).
+pub(crate) fn lenient_hub<'de, D>(d: D) -> Result<Option<crate::dto::HubFacts>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = <Option<serde_json::Value> as serde::Deserialize>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// What a download knows about a model besides its file (0.0.6 item 4), saved with it.
+#[derive(Debug, Clone, Default)]
+pub struct SavedFacts {
+    pub catalog_id: Option<String>,
+    pub repo_file: Option<String>,
+    pub hub: Option<crate::dto::HubFacts>,
+    pub parameters: Option<u64>,
+}
+
+impl SavedFacts {
+    fn is_empty(&self) -> bool {
+        self.catalog_id.is_none()
+            && self.repo_file.is_none()
+            && self.hub.is_none()
+            && self.parameters.is_none()
+    }
 }
 
 /// Adds a model file to the installed list, reading its header for the badges.
+#[allow(clippy::too_many_arguments)]
 pub async fn register_installed(
     state: &AppState,
     path: &Path,
@@ -618,6 +721,34 @@ pub async fn register_installed(
     sha256: Option<String>,
     projector: Option<String>,
     source: ModelSource,
+    saved: SavedFacts,
+) -> AppResult<store::ModelId> {
+    register_installed_in(
+        &state.store,
+        path,
+        repo,
+        size,
+        sha256,
+        projector,
+        source,
+        saved,
+    )
+    .await
+}
+
+/// [`register_installed`] on a store. Registering a file again without saved facts (an
+/// import of a downloaded file) keeps the facts saved before, as long as the file still
+/// has the same size.
+#[allow(clippy::too_many_arguments)]
+async fn register_installed_in(
+    store: &store::Store,
+    path: &Path,
+    repo: Option<String>,
+    size: u64,
+    sha256: Option<String>,
+    projector: Option<String>,
+    source: ModelSource,
+    saved: SavedFacts,
 ) -> AppResult<store::ModelId> {
     let header = models::read_file(path).map_err(|e| {
         AppError::new(
@@ -634,6 +765,24 @@ pub async fn register_installed(
         ));
     }
     let projector = projector.or_else(|| find_projector(path));
+    let path_text = path.display().to_string();
+    let saved = if saved.is_empty() {
+        match store.model_by_path(&path_text).await? {
+            Some(old) if old.size_bytes == size => {
+                let before: StoredSummary =
+                    serde_json::from_value(old.gguf_summary).unwrap_or_default();
+                SavedFacts {
+                    catalog_id: before.catalog_id,
+                    repo_file: before.repo_file,
+                    hub: before.hub,
+                    parameters: before.parameters,
+                }
+            }
+            _ => saved,
+        }
+    } else {
+        saved
+    };
     let stored = StoredSummary {
         is_moe: s.is_moe(),
         architecture: Some(s.architecture),
@@ -643,11 +792,16 @@ pub async fn register_installed(
         template_tools: s.template_tools,
         template_thinking: s.template_thinking,
         projector,
+        expert_count: s.expert_count,
+        expert_used_count: s.expert_used_count,
+        parameters: saved.parameters,
+        catalog_id: saved.catalog_id,
+        repo_file: saved.repo_file,
+        hub: saved.hub,
     };
-    let id = state
-        .store
+    let id = store
         .upsert_model(ModelInput {
-            path: path.display().to_string(),
+            path: path_text,
             repo,
             file_name: path
                 .file_name()
@@ -689,9 +843,13 @@ fn find_projector(model: &Path) -> Option<String> {
     found.first().map(|p| p.display().to_string())
 }
 
-/// The projector recorded for an installed model, if any.
+/// The projector recorded for an installed model, if any, under any spelling of its path
+/// (a link, a mapped drive: 0.0.6 item 8, `model_options::installed_row`).
 pub async fn projector_for(state: &AppState, model_path: &str) -> Option<String> {
-    let rec = state.store.model_by_path(model_path).await.ok().flatten()?;
+    let rec = crate::model_options::installed_row(&state.store, model_path)
+        .await
+        .ok()
+        .flatten()?;
     let stored: StoredSummary = serde_json::from_value(rec.gguf_summary).ok()?;
     stored.projector.filter(|p| Path::new(p).is_file())
 }
@@ -708,12 +866,24 @@ pub struct InstalledModelDto {
     pub projector_path: Option<String>,
     pub summary: Option<serde_json::Value>,
     pub architecture_supported: Option<bool>,
+    /// The path the model loaded or loading now was loaded with, when it is this row's
+    /// file under any spelling (a link, a mapped drive), so Delete asks before unloading it
+    /// (0.0.6 item 8). Sent only then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_as: Option<String>,
 }
 
 #[tauri::command]
 pub async fn list_installed_models(
     state: State<'_, AppState>,
 ) -> AppResult<Vec<InstalledModelDto>> {
+    let status = state.runtime.status();
+    let loaded = matches!(
+        status.state,
+        crate::dto::RuntimeStateDto::Ready | crate::dto::RuntimeStateDto::Starting
+    )
+    .then_some(status.model_path)
+    .flatten();
     let mut out = Vec::new();
     for m in state.store.list_models().await? {
         let stored: StoredSummary =
@@ -737,6 +907,9 @@ pub async fn list_installed_models(
                 .architecture
                 .is_some()
                 .then(|| serde_json::to_value(&stored).unwrap_or_default()),
+            loaded_as: loaded
+                .clone()
+                .filter(|l| crate::model_options::same_file(l, &m.path)),
         });
     }
     Ok(out)
@@ -764,7 +937,17 @@ pub async fn import_model(
             e.to_string(),
         )
     })?;
-    register_installed(&state, &p, None, size, None, None, ModelSource::Import).await?;
+    register_installed(
+        &state,
+        &p,
+        None,
+        size,
+        None,
+        None,
+        ModelSource::Import,
+        SavedFacts::default(),
+    )
+    .await?;
     crate::settings::remember_local_model(&state, &path).await;
     list_installed_models(state)
         .await?
@@ -783,7 +966,10 @@ pub async fn delete_model(
     let Some(rec) = state.store.get_model(store::ModelId(id)).await? else {
         return Err(AppError::not_found("model"));
     };
-    if state.runtime.status().model_path.as_deref() == Some(rec.path.as_str()) {
+    // The same file loaded under another spelling (a link, a mapped drive) is unloaded too,
+    // so its files are never deleted while llama-server has them open (0.0.6 item 8).
+    let loaded = state.runtime.status().model_path;
+    if loaded.is_some_and(|p| crate::model_options::same_file(&p, &rec.path)) {
         state.runtime.unload().await;
     }
     if delete_files && rec.source == ModelSource::Download {
@@ -804,6 +990,8 @@ pub async fn delete_model(
         }
     }
     state.store.delete_model(rec.id).await?;
+    crate::model_options::forget(&state.store, &rec.path).await; // [0.0.6 item 8, WP8]
+    state.runtime.forget_unloaded(&rec.path);
     Ok(())
 }
 
@@ -1064,9 +1252,218 @@ pub async fn refresh_catalog(app: AppHandle, state: State<'_, AppState>) -> AppR
     Ok(catalog.sequence)
 }
 
+// ---- Comparison (0.0.6 item 4, WP4a; the rules are in `compare`) ---------------------
+
+/// The size a comparison is checked at: the one asked for, or the defaults' size (as the
+/// repository page uses it).
+async fn compare_ctx(state: &AppState, ctx: Option<u32>) -> u32 {
+    match ctx {
+        Some(c) => compare::clamp_ctx(c),
+        None => compare::clamp_ctx(crate::load_settings::browse_fit_ctx(state).await),
+    }
+}
+
+/// How a load of an installed model would go now, with its own settings (the plan Installed
+/// and Settings for this model judge), made when a column, a suggestion or a repository
+/// page shows the file, never for every installed model (compare-fit-minors).
+struct StatePlans<'a>(&'a AppState);
+
+impl compare::Plans for StatePlans<'_> {
+    async fn plan(&self, path: &str) -> Option<crate::load_settings::Plan> {
+        Some(crate::load_settings::plan(self.0, path, None).await)
+    }
+}
+
+/// What a comparison needs from this computer: the catalog, the installed models (a plan
+/// for each is made only when it is shown), the hardware and the user's results.
+async fn compare_known<'a>(
+    app: &AppHandle,
+    state: &'a AppState,
+) -> AppResult<compare::Known<StatePlans<'a>>> {
+    let catalog = current_catalog(app).await;
+    let installed: Vec<compare::Installed> = state
+        .store
+        .list_models()
+        .await?
+        .iter()
+        .map(compare::Installed::from_record)
+        .collect();
+    let (target, hardware) = detect(state).await;
+    let profiles = crate::evals::commands::list_profiles(&state.store).await;
+    let app2 = app.clone();
+    // Benchmark runs are files; each with the size its model file has now.
+    let bench = tokio::task::spawn_blocking(move || {
+        crate::evals::commands::saved_bench_runs(&app2)
+            .into_iter()
+            .map(|run| {
+                let size = run
+                    .model_ref
+                    .strip_prefix("local:")
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len());
+                (run, size)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    Ok(compare::Known {
+        catalog,
+        installed,
+        target,
+        usable_bytes: hardware.usable_bytes,
+        results: compare::local_results(&profiles, &bench),
+        plans: StatePlans(state),
+    })
+}
+
+/// The catalog's entries for Suggested models, best for this computer first, each with
+/// one fit verdict at `ctx` (`None`: the defaults' size) when it is known without the
+/// network, its installed path and the user's results. Fetches nothing.
+#[tauri::command]
+pub async fn catalog_list(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ctx: Option<u32>,
+) -> AppResult<Vec<crate::dto::CatalogListEntry>> {
+    crate::commands::only_main_window(window.label())?;
+    let ctx = compare_ctx(&state, ctx).await;
+    let known = compare_known(&app, &state).await?;
+    let hub = LiveHub::new(hf_client(&app).await.ok());
+    Ok(compare::catalog_list(&hub, &known, ctx).await)
+}
+
+/// Facts for each model to compare, in the order given, with one fit verdict per item at
+/// `ctx` (`None`: the defaults' size). At most four items; never fetches more than the one
+/// repository of each item. What cannot be found is named in each item's `problem`.
+#[tauri::command]
+pub async fn compare_facts(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    items: Vec<crate::dto::CompareItem>,
+    ctx: Option<u32>,
+) -> AppResult<Vec<crate::dto::CompareFacts>> {
+    crate::commands::only_main_window(window.label())?;
+    check_compare_items(&items)?;
+    let ctx = compare_ctx(&state, ctx).await;
+    let known = compare_known(&app, &state).await?;
+    let hub = LiveHub::new(hf_client(&app).await.ok());
+    let mut out = Vec::with_capacity(items.len());
+    // One at a time: gentler on Hugging Face's limits than all at once.
+    for item in items {
+        out.push(compare::facts_for(&hub, &known, item, ctx).await);
+    }
+    Ok(out)
+}
+
+/// A comparison holds at most [`compare::COMPARE_LIMIT`] models.
+fn check_compare_items(items: &[crate::dto::CompareItem]) -> AppResult<()> {
+    if items.len() > compare::COMPARE_LIMIT {
+        return Err(AppError::bad_request(
+            "You can compare up to 4 models. Remove one first.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// More than four models is refused before anything is read.
+    #[test]
+    fn a_comparison_holds_at_most_four_models() {
+        use crate::dto::CompareItem;
+        let item = |n: usize| CompareItem::Catalog {
+            catalog_id: format!("id-{n}"),
+        };
+        let four: Vec<CompareItem> = (0..4).map(item).collect();
+        assert!(check_compare_items(&four).is_ok());
+        assert!(check_compare_items(&[]).is_ok());
+        let five: Vec<CompareItem> = (0..5).map(item).collect();
+        let err = check_compare_items(&five).unwrap_err();
+        assert_eq!(err.code, "bad_request");
+        assert!(err.message.contains("up to 4"), "{}", err.message);
+    }
+
+    /// Both comparison commands check the calling window first.
+    #[test]
+    fn comparison_commands_check_the_window_first() {
+        let source = include_str!("hub.rs");
+        for name in ["catalog_list", "compare_facts"] {
+            let start = source
+                .find(&format!("pub async fn {name}("))
+                .unwrap_or_else(|| panic!("{name}"));
+            let body = &source[start..];
+            let body = &body[body.find(") -> ").unwrap()..];
+            let first = body[body.find('{').unwrap() + 1..].trim_start();
+            assert!(
+                first.starts_with("crate::commands::only_main_window(window.label())?;"),
+                "{name}"
+            );
+        }
+    }
+
+    /// Saved facts survive in `gguf_summary`; a row saved before 0.0.6 still reads.
+    #[test]
+    fn stored_summary_old_and_new() {
+        let old: StoredSummary = serde_json::from_value(serde_json::json!({
+            "architecture": "sample", "quantization": "Q4_K_M", "contextLength": 32768,
+            "templateTools": true, "isMoe": false, "projector": null
+        }))
+        .unwrap();
+        assert_eq!(old.architecture.as_deref(), Some("sample"));
+        assert!(old.hub.is_none() && old.catalog_id.is_none() && old.parameters.is_none());
+        // Unknown facts are left out of what is saved.
+        let json = serde_json::to_value(&old).unwrap();
+        for key in ["hub", "catalogId", "repoFile", "parameters", "expertCount"] {
+            assert!(json.get(key).is_none(), "{key}");
+        }
+    }
+
+    /// Saved uploader facts that this version cannot read (a field missing, written by a
+    /// later version or edited by hand) are dropped on their own: the rest of the saved
+    /// summary (the Installed badges, the catalog id) stays.
+    #[test]
+    fn a_saved_hub_this_version_cannot_read_loses_only_itself() {
+        let hub = serde_json::json!({
+            "repo": "example-quants/Sample-7B-GGUF", "author": "example-quants",
+            "pipelineTag": null, "baseModel": null, "languages": [], "license": null,
+            "tags": [], "downloads": 1, "likes": 2, "lastModified": null, "gated": false,
+            "cardUrl": "https://huggingface.co/example-quants/Sample-7B-GGUF"
+        });
+        let summary = |hub: serde_json::Value| {
+            serde_json::json!({
+                "architecture": "sample", "quantization": "Q4_K_M", "isMoe": true,
+                "catalogId": "sample-7b-q4km", "repoFile": "Sample-7B-Q4_K_M.gguf",
+                "hub": hub
+            })
+        };
+        let whole: StoredSummary = serde_json::from_value(summary(hub.clone())).unwrap();
+        assert_eq!(whole.hub.as_ref().map(|h| h.downloads), Some(Some(1)));
+
+        let mut partial = hub.clone();
+        partial.as_object_mut().unwrap().remove("cardUrl");
+        let mut wrong_type = hub.clone();
+        wrong_type["tags"] = serde_json::json!("code");
+        for bad in [
+            partial,
+            wrong_type,
+            serde_json::json!("text"),
+            serde_json::Value::Null,
+        ] {
+            let s: StoredSummary = serde_json::from_value(summary(bad.clone()))
+                .unwrap_or_else(|e| panic!("{bad}: {e}"));
+            assert!(s.hub.is_none(), "{bad}");
+            assert_eq!(s.architecture.as_deref(), Some("sample"));
+            assert_eq!(s.quantization.as_deref(), Some("Q4_K_M"));
+            assert!(s.is_moe);
+            assert_eq!(s.catalog_id.as_deref(), Some("sample-7b-q4km"));
+            assert_eq!(s.repo_file.as_deref(), Some("Sample-7B-Q4_K_M.gguf"));
+        }
+    }
 
     /// The first-run screen reads `intelMac` to say "Intel Mac: models run on the
     /// processor" instead of "No supported GPU found".

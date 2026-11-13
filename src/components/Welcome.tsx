@@ -1,7 +1,9 @@
 import { FileText, FolderOpen, FolderSearch, Globe, HardDrive, ShieldCheck, TerminalSquare, WifiOff } from "lucide-react";
 import { useApp } from "../store/app";
 import { APP_NAME } from "../lib/app";
+import { backendWords, loadStageWords, readyLine } from "../lib/words";
 import { BrandMark } from "./Brand";
+import { visiblePath } from "./FolderChip";
 
 /** Things to try. Choosing one writes it into the message box; nothing is sent. The
  *  wording avoids the labels of buttons elsewhere in the app. */
@@ -66,16 +68,22 @@ function ModelCard(props: { onOpenModels: () => void }) {
 
   if (runtime?.state === "ready" || runtime?.state === "starting") {
     const ready = runtime.state === "ready";
-    const where = [runtime.backend, runtime.device].filter(Boolean).join(" · ");
+    // Plain words (D4): where it runs and how much it remembers, never "vulkan · Vulkan0".
+    const where = runtime.backend ? ` on ${backendWords(runtime.backend)}` : "";
+    const remembers = runtime.nCtx ? ` · ${readyLine(runtime.nCtx, runtime.ctxSource)}` : "";
     return (
       <div className="enter flex w-full items-center gap-3 rounded-xl border border-border bg-surface p-3.5 shadow-soft">
         <span className={"h-2.5 w-2.5 shrink-0 rounded-full " + (ready ? "bg-success" : "pulse bg-warning")} aria-hidden />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{runtime.modelName ?? "Local model"}</p>
+          <p className="truncate text-sm font-medium">
+            <bdi dir="ltr">{visiblePath(runtime.modelName ?? "Local model")}</bdi>
+          </p>
           <p className="truncate text-xs text-fg-muted">
             {ready
-              ? `Ready${where ? ` on ${where}` : ""}${runtime.nCtx ? ` · ${runtime.nCtx.toLocaleString()} context` : ""}`
-              : "Loading…"}
+              ? `Ready${where}${remembers}`
+              : runtime.loadStage
+                ? `Loading · ${loadStageWords(runtime.loadStage)}`
+                : "Loading…"}
           </p>
         </div>
         {ready && runtime.modelPath && (
@@ -101,11 +109,13 @@ function ModelCard(props: { onOpenModels: () => void }) {
             key={o.ref}
             type="button"
             onClick={() => void pickModel(o.ref)}
-            title={o.label}
+            title={visiblePath(o.label)}
             className="flex max-w-full items-center gap-1.5 rounded-lg border border-border bg-bg px-2.5 py-1.5 text-sm hover:border-border-strong hover:bg-bg-muted"
           >
             {o.source === "local" ? <HardDrive size={14} aria-hidden /> : <Globe size={14} aria-hidden />}
-            <span className="truncate">{o.label}</span>
+            <bdi dir="ltr" className="truncate">
+              {visiblePath(o.label)}
+            </bdi>
           </button>
         ))}
         <button

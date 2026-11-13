@@ -83,6 +83,38 @@ pub enum Scope {
     /// a source fetches a page that a search of this chat listed. Unlike [`Scope::AppData`]
     /// it prompts like any other scope.
     WebSearch,
+    /// A task handed to a coding app installed on this computer (0.0.6, `ask_claude_code`
+    /// and `ask_codex`): the app (`claudeCode`, `codex`) and the working folder it runs
+    /// in. It sends the task, and what the app reads, to an online service under the
+    /// user's own account, so it asks every time in Ask first and Allow all, and no grant
+    /// covers it; in Full access it runs without a card (D11 as amended for 0.0.6).
+    CodingApp {
+        app: String,
+        folder: String,
+    },
+    /// rea opening or checking a file (0.0.6, item 5: `open_binary` and the file checks of
+    /// the built-in `reverse` server): a read of a file inside one approved folder (its
+    /// canonical path) by a pinned program on this computer. A grant covers rea opening or
+    /// checking other files in that folder in this chat; a [`Scope::FileRead`] grant does not
+    /// cover it, and it does not cover the file tools.
+    FileAnalysis {
+        folder: String,
+    },
+    /// rea working on the file this chat opened, or reading a result this chat already got
+    /// (0.0.6, item 5). Never prompts and is never granted, like [`Scope::AppData`], but it
+    /// is not the app's own data: what comes back is content from outside the conversation.
+    FileAnalysisSession,
+}
+
+impl Scope {
+    /// Whether the scope is, or holds, a task for a coding app ([`Scope::CodingApp`]).
+    pub fn names_coding_app(&self) -> bool {
+        match self {
+            Scope::CodingApp { .. } => true,
+            Scope::Commands { parts } => parts.iter().any(Scope::names_coding_app),
+            _ => false,
+        }
+    }
 }
 
 /// Why an action still asks while its chat is in Allow all (0.0.4). The describer sets it;
@@ -211,6 +243,14 @@ pub trait Grants {
 
 impl Grants for std::collections::BTreeSet<Scope> {
     fn covers(&self, scope: &Scope) -> bool {
+        // A task for a coding app is never covered, even by a grant for exactly it (D11).
+        if scope.names_coding_app() {
+            return false;
+        }
+        // rea's work on a chat's open file never asks, so nothing grants it (item 5).
+        if matches!(scope, Scope::FileAnalysisSession) {
+            return false;
+        }
         self.contains(scope)
             || match scope {
                 // A per-tool "any arguments" grant covers exact-argument calls.
@@ -250,13 +290,33 @@ pub fn evaluate(action: &Action, turn: &TurnContext, grants: &dyn Grants) -> Dec
             reason: reason.clone(),
         };
     }
-    // Full access (0.0.5): the user chose that nothing asks. Hard limits still hold.
+    // Full access (0.0.5): the user chose that nothing asks. Hard limits still hold. This
+    // also covers a task for a coding app (D11, as amended for 0.0.6): in Full access the
+    // terminal could start those apps without a card, so a card here would protect nothing,
+    // and the owner's rule for Full access is that nothing asks.
     if turn.full_access {
         return Decision::AllowedByFullAccess;
     }
+    // A task for a coding app always asks with Allow once / Deny in Ask first and Allow all,
+    // whatever the describer said (D11).
+    if action.scope.names_coding_app() {
+        return Decision::Ask {
+            card: CardKind::OnceOnly,
+            reason: if turn.allow_all {
+                AskReason::StillAsksInAllowAll
+            } else {
+                AskReason::AlwaysAsk
+            },
+        };
+    }
     // Skills never prompt (D11), but only after the checks above.
-    // The app's own data for the chat never prompts either (0.0.4).
-    if matches!(action.scope, Scope::Skill | Scope::AppData) && action.risk == Risk::Normal {
+    // The app's own data for the chat never prompts either (0.0.4), nor does rea's work on
+    // the file this chat opened (0.0.6, item 5).
+    if matches!(
+        action.scope,
+        Scope::Skill | Scope::AppData | Scope::FileAnalysisSession
+    ) && action.risk == Risk::Normal
+    {
         return Decision::AllowedByGrant;
     }
     // Allow all (0.0.4): the engine answers the card itself, unless the action is one that
@@ -922,6 +982,127 @@ mod tests {
         );
     }
 
+    /// A task for a coding app (0.0.6, D11 as amended) asks with Allow once / Deny in Ask
+    /// first and Allow all, after a grant for exactly it, with or without untrusted
+    /// content, native call or recovered from text, and runs without a card in Full access.
+    /// The engine holds to this even for an action whose describer left out the always-ask
+    /// facts. Steps 1 and 2 still come first, in every mode.
+    #[test]
+    fn a_coding_app_task_always_asks_and_no_grant_covers_it() {
+        let scope = Scope::CodingApp {
+            app: "claudeCode".into(),
+            folder: "/p".into(),
+        };
+        let granted: BTreeSet<Scope> = [scope.clone()].into();
+        assert!(
+            !granted.covers(&scope),
+            "a grant for exactly it must not cover it"
+        );
+        let both = Scope::Commands {
+            parts: vec![scope.clone()],
+        };
+        assert!(!BTreeSet::from([scope.clone(), both.clone()]).covers(&both));
+        struct Everything;
+        impl Grants for Everything {
+            fn covers(&self, _: &Scope) -> bool {
+                true
+            }
+        }
+        let full = Action {
+            server: "coding_apps".into(),
+            tool: "ask_claude_code".into(),
+            keep_asking: Some(KeepAsking::Publish),
+            network: true,
+            ..action(scope.clone(), Risk::AlwaysAsk, false, true)
+        };
+        // A describer that forgot every fact: the scope alone decides.
+        let bare = action(scope.clone(), Risk::Normal, true, false);
+        for a in [&full, &bare] {
+            for (untrusted, recovered) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let ask = TurnContext {
+                    untrusted_in_turn: untrusted,
+                    recovered_from_text: recovered,
+                    ..ready()
+                };
+                assert_eq!(
+                    evaluate(a, &ask, &Everything),
+                    Decision::Ask {
+                        card: CardKind::OnceOnly,
+                        reason: AskReason::AlwaysAsk
+                    },
+                    "Ask mode, untrusted {untrusted}, recovered {recovered}"
+                );
+                let all = TurnContext {
+                    allow_all: true,
+                    ..ask
+                };
+                assert_eq!(
+                    evaluate(a, &all, &Everything),
+                    Decision::Ask {
+                        card: CardKind::OnceOnly,
+                        reason: AskReason::StillAsksInAllowAll
+                    },
+                    "Allow all, untrusted {untrusted}, recovered {recovered}"
+                );
+                // Full access (D11 as amended for 0.0.6, D12): nothing asks, with or
+                // without Allow all, a grant or untrusted content.
+                for allow_all in [false, true] {
+                    let full_access = TurnContext {
+                        full_access: true,
+                        allow_all,
+                        ..ask
+                    };
+                    for grants in [&Everything as &dyn Grants, &BTreeSet::<Scope>::new()] {
+                        assert_eq!(
+                            evaluate(a, &full_access, grants),
+                            Decision::AllowedByFullAccess,
+                            "Full access, allow_all {allow_all}, untrusted {untrusted}, recovered {recovered}"
+                        );
+                    }
+                }
+            }
+        }
+        // Steps 1 and 2 come first in every mode, Full access included.
+        for (allow_all, full_access) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mode = TurnContext {
+                allow_all,
+                full_access,
+                ..ready()
+            };
+            let mut off = mode;
+            off.tool_enabled = false;
+            assert!(
+                matches!(evaluate(&full, &off, &Everything), Decision::Refused { .. }),
+                "group off, allow_all {allow_all}, full access {full_access}"
+            );
+            let mut not_ready = mode;
+            not_ready.server_ready = false;
+            assert!(
+                matches!(
+                    evaluate(&full, &not_ready, &Everything),
+                    Decision::Refused { .. }
+                ),
+                "not ready, allow_all {allow_all}, full access {full_access}"
+            );
+            let mut limited = full.clone();
+            limited.hard_limit = Some("the program is inside an approved folder".into());
+            assert!(
+                matches!(
+                    evaluate(&limited, &mode, &Everything),
+                    Decision::Denied { .. }
+                ),
+                "hard limit, allow_all {allow_all}, full access {full_access}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&scope).unwrap(),
+            serde_json::json!({"type": "codingApp", "app": "claudeCode", "folder": "/p"})
+        );
+    }
+
     #[test]
     fn skills_do_not_prompt_but_respect_steps_1_and_2() {
         let s = action(Scope::Skill, Risk::Normal, true, false);
@@ -941,5 +1122,136 @@ mod tests {
             evaluate(&s2, &ready(), &BTreeSet::new()),
             Decision::Denied { .. }
         ));
+    }
+
+    /// rea (0.0.6, item 5) in the three modes. Opening or checking a file
+    /// ([`Scope::FileAnalysis`]) is a read: in Ask first a card with "Allow for this chat",
+    /// whose grant covers only rea in that folder (not the file tools, and a read grant does
+    /// not cover rea); in Allow all and Full access it runs, also after untrusted content and
+    /// when recovered from text, since it sends nothing out. Work on the chat's open file
+    /// ([`Scope::FileAnalysisSession`]) never asks and is never granted; Full access is
+    /// decided first, so it is recorded as Full access there. Steps 1 and 2 hold everywhere.
+    #[test]
+    fn file_analysis_is_a_grantable_read_and_session_work_never_asks() {
+        let folder = || Scope::FileAnalysis {
+            folder: "/p".into(),
+        };
+        let open = Action {
+            server: "reverse".into(),
+            tool: "open_binary".into(),
+            ..action(folder(), Risk::Normal, true, false)
+        };
+        let session = Action {
+            server: "reverse".into(),
+            tool: "procedure_pseudo_code".into(),
+            ..action(Scope::FileAnalysisSession, Risk::Normal, true, false)
+        };
+        let none: BTreeSet<Scope> = BTreeSet::new();
+        let granted: BTreeSet<Scope> = [folder()].into();
+        let read_granted: BTreeSet<Scope> = [Scope::FileRead {
+            folder: "/p".into(),
+        }]
+        .into();
+        let card = Decision::Ask {
+            card: CardKind::Grantable,
+            reason: AskReason::Normal,
+        };
+        let turns = |allow_all: bool, full_access: bool| {
+            [(false, false), (true, false), (false, true), (true, true)].map(
+                |(untrusted, recovered)| TurnContext {
+                    untrusted_in_turn: untrusted,
+                    recovered_from_text: recovered,
+                    allow_all,
+                    full_access,
+                    ..ready()
+                },
+            )
+        };
+
+        // Ask first: a card that offers "Allow for this chat"; the grant covers the folder.
+        for t in turns(false, false) {
+            assert_eq!(evaluate(&open, &t, &none), card, "{t:?}");
+            assert_eq!(evaluate(&open, &t, &granted), Decision::AllowedByGrant);
+            assert_eq!(evaluate(&open, &t, &read_granted), card, "{t:?}");
+            assert_eq!(evaluate(&session, &t, &none), Decision::AllowedByGrant);
+        }
+        assert!(!granted.covers(&Scope::FileRead {
+            folder: "/p".into()
+        }));
+        assert!(!granted.covers(&Scope::FileAnalysis {
+            folder: "/q".into()
+        }));
+        assert!(!read_granted.covers(&folder()));
+        // Allow all: runs, grant or not, untrusted content or not.
+        for t in turns(true, false) {
+            for grants in [&none, &granted] {
+                assert_eq!(
+                    evaluate(&open, &t, grants),
+                    Decision::AllowedByMode,
+                    "{t:?}"
+                );
+            }
+            assert_eq!(evaluate(&session, &t, &none), Decision::AllowedByGrant);
+        }
+        // Full access: runs, and session work is recorded as Full access.
+        for allow_all in [false, true] {
+            for t in turns(allow_all, true) {
+                assert_eq!(
+                    evaluate(&open, &t, &none),
+                    Decision::AllowedByFullAccess,
+                    "{t:?}"
+                );
+                assert_eq!(
+                    evaluate(&session, &t, &none),
+                    Decision::AllowedByFullAccess,
+                    "{t:?}"
+                );
+            }
+        }
+        // Session work is never granted, even when the scope is in the set, and a describer
+        // that raised it to always-ask gets Allow once / Deny only.
+        let set: BTreeSet<Scope> = [Scope::FileAnalysisSession].into();
+        assert!(!set.covers(&Scope::FileAnalysisSession));
+        let raised = Action {
+            risk: Risk::AlwaysAsk,
+            ..session.clone()
+        };
+        assert_eq!(
+            evaluate(&raised, &ready(), &set),
+            Decision::Ask {
+                card: CardKind::OnceOnly,
+                reason: AskReason::AlwaysAsk
+            }
+        );
+        // Steps 1 and 2 first, in every mode.
+        for (allow_all, full_access) in [(false, false), (true, false), (false, true)] {
+            let mode = TurnContext {
+                allow_all,
+                full_access,
+                ..ready()
+            };
+            for a in [&open, &session] {
+                let mut off = mode;
+                off.tool_enabled = false;
+                assert!(matches!(
+                    evaluate(a, &off, &granted),
+                    Decision::Refused { .. }
+                ));
+                let mut limited = a.clone();
+                limited.hard_limit = Some("That file is in harnessUI's own folders.".into());
+                assert!(matches!(
+                    evaluate(&limited, &mode, &granted),
+                    Decision::Denied { .. }
+                ));
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(folder()).unwrap(),
+            serde_json::json!({"type": "fileAnalysis", "folder": "/p"})
+        );
+        assert_eq!(
+            serde_json::to_value(Scope::FileAnalysisSession).unwrap(),
+            serde_json::json!({"type": "fileAnalysisSession"})
+        );
     }
 }

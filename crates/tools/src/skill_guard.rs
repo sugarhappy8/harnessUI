@@ -103,3 +103,21 @@ pub(crate) fn check(
         None => Ok(()),
     }
 }
+
+/// [`check`] of `path`, with a refusal that names `said` instead: the path as the model
+/// gave it, for a message given before approval, which never names where a link on the
+/// way leads (13.9, [`crate::errors::said_path`]).
+pub(crate) fn check_as(
+    path: &str,
+    said: &str,
+    roots: &[String],
+    flavor: Flavor,
+    reach: Reach,
+) -> Result<(), String> {
+    match skill_root_for(path, roots, flavor, reach, &policy::path::RealFs, &|p| {
+        policy::path::volume_case(p)
+    }) {
+        Some((root, inside)) => Err(refusal(said, &root, inside)),
+        None => Ok(()),
+    }
+}

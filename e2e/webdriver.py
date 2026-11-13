@@ -127,11 +127,27 @@ class Session:
             return el or False
 
         el = self.wait_for(find, timeout, f"menu item {label!r}")
-        element_id = next(iter(el.values()))
-        try:
-            self.click(element_id)
-        except WebDriverError:
-            self.execute("arguments[0].click();", el)
+        self._pointer_click(find, el)
+
+    def _pointer_click(self, find, el, wait: float = 5.0):
+        """A real pointer click on `el` (as `find` returned it). A click refused because a
+        dialog or menu that is closing still covers the element (its fade-out ends later on a
+        busy machine) is tried again, with the element found afresh, until nothing covers it,
+        for up to `wait` seconds; a refused click sends no events, so none is doubled. Only
+        then, or for any other refusal (off screen), a DOM click: that reaches click handlers
+        only, and menu triggers and tabs act when the pointer goes down, so a covered click
+        that fell straight back to it did nothing."""
+        end = time.time() + wait
+        while True:
+            try:
+                self.click(next(iter(el.values())))
+                return
+            except WebDriverError as e:
+                if "element click intercepted" not in str(e) or time.time() >= end:
+                    self.execute("arguments[0].click();", el)
+                    return
+            time.sleep(0.2)
+            el = find() or el
 
     def click_button(self, label: str, timeout: float = 20):
         """Clicks (with a real pointer click) the first visible button or menu item whose
@@ -150,9 +166,4 @@ class Session:
             return el or False
 
         el = self.wait_for(find, timeout, f"button {label!r}")
-        element_id = next(iter(el.values()))
-        try:
-            self.click(element_id)
-        except WebDriverError:
-            # Covered by an overlay or off screen: fall back to a DOM click.
-            self.execute("arguments[0].click();", el)
+        self._pointer_click(find, el)

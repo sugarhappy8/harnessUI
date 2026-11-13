@@ -2,8 +2,8 @@
 //!
 //! Model files come from the internet, so this treats every length and count as
 //! hostile: nothing is allocated from a length that the rest of the file cannot hold,
-//! large arrays (the tokenizer vocabulary) are skipped without being kept, and only
-//! the keys the app needs are stored.
+//! large arrays (the tokenizer vocabulary) and long strings are skipped without being
+//! kept, and what is kept has a budget (`MAX_KEPT_TOTAL`), whatever the file's size.
 //!
 //! Format: <https://github.com/ggml-org/ggml/blob/master/docs/gguf.md>. Only
 //! little-endian files are read; big-endian GGUF is reported as unsupported.
@@ -26,6 +26,13 @@ const MAX_KEY: u64 = 65_536;
 const MAX_KEPT_ARRAY: u64 = 4096;
 /// Arrays nested deeper than this mean a damaged file.
 const MAX_DEPTH: u32 = 4;
+/// Metadata kept in memory beyond this (keys, strings, and each kept value counted as
+/// [`VALUE_COST`]) is read past instead: a crafted file cannot make the app hold more than
+/// about this much for a header, however large the file. Real headers keep well under
+/// 1 MiB (the vocabulary and merges are skipped as long arrays anyway).
+const MAX_KEPT_TOTAL: u64 = 16 * 1024 * 1024;
+/// What one kept value costs in memory besides its text (a [`Value`] is 32 bytes).
+const VALUE_COST: u64 = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GgufError {
@@ -145,7 +152,14 @@ fn read_inner<R: Read + Seek>(reader: R, len: u64, lenient: bool) -> Result<Gguf
         inner: reader,
         pos: 0,
         len,
+        kept: 0,
     };
+    read_header(&mut r, lenient)
+}
+
+/// Reads the header from the start of `r`, leaving `r` just after the metadata (where the
+/// tensor table starts).
+fn read_header<R: Read + Seek>(r: &mut Reader<R>, lenient: bool) -> Result<GgufHeader, GgufError> {
     let mut magic = [0u8; 4];
     r.read_exact(&mut magic).map_err(|_| GgufError::NotGguf)?;
     if magic != MAGIC {
@@ -168,10 +182,12 @@ fn read_inner<R: Read + Seek>(reader: R, len: u64, lenient: bool) -> Result<Gguf
     }
     let mut metadata = BTreeMap::new();
     for _ in 0..kv_count {
-        match read_entry(&mut r) {
-            Ok((key, value)) => {
+        match read_entry(r) {
+            Ok(Some((key, value))) => {
                 metadata.insert(key, value);
             }
+            // Past the budget: read past, not kept.
+            Ok(None) => {}
             // A prefix ends mid-entry: keep what was read.
             Err(GgufError::Corrupt(_)) if lenient && !metadata.is_empty() => break,
             Err(e) => return Err(e),
@@ -184,26 +200,213 @@ fn read_inner<R: Read + Seek>(reader: R, len: u64, lenient: bool) -> Result<Gguf
     })
 }
 
-fn read_entry<R: Read + Seek>(r: &mut Reader<R>) -> Result<(String, Value), GgufError> {
+/// One metadata entry, or `None` when its key no longer fits the budget for kept metadata
+/// (the entry is then read past).
+fn read_entry<R: Read + Seek>(r: &mut Reader<R>) -> Result<Option<(String, Value)>, GgufError> {
     let key_len = r.u64()?;
     if key_len > MAX_KEY {
         return Err(GgufError::Corrupt("metadata key too long".into()));
     }
+    if !r.keep(key_len.saturating_add(VALUE_COST)) {
+        r.skip(key_len)?;
+        let ty = r.u32()?;
+        r.skip_value(ty, 0)?;
+        return Ok(None);
+    }
     let key = r.string(key_len)?;
     let ty = r.u32()?;
     let value = r.value(ty, 0)?;
-    Ok((key, value))
+    Ok(Some((key, value)))
+}
+
+// ---- 0.0.6 item 6: the tensor table (WP10b) ----------------------------------------------
+
+/// Tensor tables longer than this mean a damaged file (the largest models llama.cpp loads
+/// have a few thousand tensors).
+const MAX_TENSORS: u64 = 65_536;
+/// Tensor names longer than this mean a damaged file (llama.cpp itself allows 63 bytes).
+const MAX_TENSOR_NAME: u64 = 256;
+/// Dimensions per tensor (ggml's `GGML_MAX_DIMS`).
+const MAX_DIMS: u32 = 4;
+/// The data alignment when the file names none (`GGUF_DEFAULT_ALIGNMENT`).
+const DEFAULT_ALIGNMENT: u64 = 32;
+/// The smallest entry of the tensor table: an empty name, no dimensions, a type, an offset.
+const MIN_TENSOR_ENTRY: u64 = 8 + 4 + 4 + 8;
+
+/// One tensor of a model file: its name and the bytes it takes in the file, worked out
+/// from the gap to the next tensor's offset (the last one runs to the end of the file), so
+/// it includes the padding llama.cpp's writer puts after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TensorEntry {
+    pub name: String,
+    pub bytes: u64,
+}
+
+/// A tensor table entry as written in the file, before sizes are known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RawTensor {
+    name: String,
+    /// ggml's type number (only the tests look at it, to check the sizes).
+    #[cfg_attr(not(test), allow(dead_code))]
+    ggml_type: u32,
+    /// The element count per dimension (only the tests look at it).
+    #[cfg_attr(not(test), allow(dead_code))]
+    dims: Vec<u64>,
+    /// Offset from the start of the data section.
+    offset: u64,
+}
+
+/// Reads the tensor table of the GGUF file at `path`: every tensor's name and size.
+/// A split model has one table per file; read each file.
+///
+/// Refused as damaged: more than 65,536 tensors, a name longer than 256 bytes or not UTF-8,
+/// more than four dimensions, an alignment that is not a power of two, and offsets that
+/// overflow, lie beyond the end of the file or do not increase. A file cut off inside its
+/// last tensor is not noticed (no type table is kept); llama.cpp refuses to load it.
+pub fn read_tensor_table(path: &Path) -> Result<Vec<TensorEntry>, GgufError> {
+    read_file_with_tensors(path).map(|(_, tensors)| tensors)
+}
+
+/// [`read_file`] and [`read_tensor_table`] in one pass over the file.
+pub fn read_file_with_tensors(path: &Path) -> Result<(GgufHeader, Vec<TensorEntry>), GgufError> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    read_with_tensors(BufReader::with_capacity(256 * 1024, file), len)
+}
+
+/// [`read`] followed by the tensor table, from `reader`, which holds `len` bytes in total.
+pub fn read_with_tensors<R: Read + Seek>(
+    reader: R,
+    len: u64,
+) -> Result<(GgufHeader, Vec<TensorEntry>), GgufError> {
+    let mut r = Reader {
+        inner: reader,
+        pos: 0,
+        len,
+        kept: 0,
+    };
+    let header = read_header(&mut r, false)?;
+    let raw = read_raw_tensors(&mut r, &header)?;
+    let tensors = sizes_from_offsets(&raw, r.pos, len, alignment(&header)?)?;
+    Ok((header, tensors))
+}
+
+/// The data alignment the file names (`general.alignment`, an unsigned integer that is a
+/// power of two), or the default.
+fn alignment(header: &GgufHeader) -> Result<u64, GgufError> {
+    match header.get("general.alignment") {
+        None => Ok(DEFAULT_ALIGNMENT),
+        Some(Value::U64(a)) if a.is_power_of_two() => Ok(*a),
+        Some(_) => Err(GgufError::Corrupt("bad data alignment".into())),
+    }
+}
+
+/// The tensor table entries, read from just after the metadata.
+fn read_raw_tensors<R: Read + Seek>(
+    r: &mut Reader<R>,
+    header: &GgufHeader,
+) -> Result<Vec<RawTensor>, GgufError> {
+    let count = header.tensor_count;
+    if count > MAX_TENSORS || count.saturating_mul(MIN_TENSOR_ENTRY) > r.remaining() {
+        return Err(GgufError::Corrupt(format!("{count} tensors")));
+    }
+    // At most 65,536 by the check above.
+    let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    for _ in 0..count {
+        let name_len = r.u64()?;
+        if name_len > MAX_TENSOR_NAME {
+            return Err(GgufError::Corrupt("tensor name too long".into()));
+        }
+        let name = r.utf8(name_len)?;
+        let n_dims = r.u32()?;
+        if n_dims > MAX_DIMS {
+            return Err(GgufError::Corrupt(format!(
+                "tensor with {n_dims} dimensions"
+            )));
+        }
+        let mut dims = Vec::with_capacity(4);
+        for _ in 0..n_dims {
+            dims.push(r.u64()?);
+        }
+        let ggml_type = r.u32()?;
+        let offset = r.u64()?;
+        out.push(RawTensor {
+            name,
+            ggml_type,
+            dims,
+            offset,
+        });
+    }
+    Ok(out)
+}
+
+/// Sizes from the gaps between the offsets: the data section starts at `table_end`
+/// rounded up to `alignment`, offsets must increase, and the last tensor runs to `len`.
+fn sizes_from_offsets(
+    raw: &[RawTensor],
+    table_end: u64,
+    len: u64,
+    alignment: u64,
+) -> Result<Vec<TensorEntry>, GgufError> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let data_start = table_end
+        .checked_next_multiple_of(alignment)
+        .ok_or_else(|| GgufError::Corrupt("data section beyond any file".into()))?;
+    let mut starts = Vec::with_capacity(raw.len());
+    for t in raw {
+        let start = data_start
+            .checked_add(t.offset)
+            .ok_or_else(|| GgufError::Corrupt("tensor offset overflows".into()))?;
+        if start > len {
+            return Err(GgufError::Corrupt(
+                "tensor beyond the end of the file".into(),
+            ));
+        }
+        if starts.last().is_some_and(|&previous| start <= previous) {
+            return Err(GgufError::Corrupt("tensor offsets do not increase".into()));
+        }
+        starts.push(start);
+    }
+    Ok(raw
+        .iter()
+        .zip(&starts)
+        .enumerate()
+        .map(|(i, (t, &start))| {
+            let end = starts.get(i + 1).copied().unwrap_or(len);
+            TensorEntry {
+                name: t.name.clone(),
+                // Offsets increase and none is beyond `len`.
+                bytes: end.saturating_sub(start),
+            }
+        })
+        .collect())
 }
 
 struct Reader<R> {
     inner: R,
     pos: u64,
     len: u64,
+    /// The part of [`MAX_KEPT_TOTAL`] used by what was kept so far.
+    kept: u64,
 }
 
 impl<R: Read + Seek> Reader<R> {
     fn remaining(&self) -> u64 {
         self.len.saturating_sub(self.pos)
+    }
+
+    /// Takes `cost` from the budget for kept metadata; false, taking nothing, when that
+    /// would go over [`MAX_KEPT_TOTAL`].
+    fn keep(&mut self, cost: u64) -> bool {
+        match self.kept.checked_add(cost) {
+            Some(total) if total <= MAX_KEPT_TOTAL => {
+                self.kept = total;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), GgufError> {
@@ -249,6 +452,19 @@ impl<R: Read + Seek> Reader<R> {
         Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 
+    /// A string that must be UTF-8 (tensor names), at most `len` bytes as checked by the
+    /// caller.
+    fn utf8(&mut self, len: u64) -> Result<String, GgufError> {
+        if len > self.remaining() {
+            return Err(GgufError::Corrupt("string longer than the file".into()));
+        }
+        let size =
+            usize::try_from(len).map_err(|_| GgufError::Corrupt("length overflow".into()))?;
+        let mut buf = vec![0u8; size];
+        self.read_exact(&mut buf)?;
+        String::from_utf8(buf).map_err(|_| GgufError::Corrupt("tensor name is not UTF-8".into()))
+    }
+
     fn value(&mut self, ty: u32, depth: u32) -> Result<Value, GgufError> {
         Ok(match ty {
             0 => Value::U64(u64::from(self.bytes::<1>()?[0])),
@@ -261,7 +477,7 @@ impl<R: Read + Seek> Reader<R> {
             7 => Value::Bool(self.bytes::<1>()?[0] != 0),
             8 => {
                 let len = self.u64()?;
-                if len > MAX_KEPT_STRING {
+                if len > MAX_KEPT_STRING || !self.keep(len) {
                     self.skip(len)?;
                     Value::SkippedString(len)
                 } else {
@@ -283,7 +499,7 @@ impl<R: Read + Seek> Reader<R> {
                 if count.saturating_mul(min_size) > self.remaining() {
                     return Err(GgufError::Corrupt("array longer than the file".into()));
                 }
-                if count > MAX_KEPT_ARRAY {
+                if count > MAX_KEPT_ARRAY || !self.keep(count.saturating_mul(VALUE_COST)) {
                     match fixed_size(elem) {
                         Some(size) => self.skip(count * size)?,
                         None => {
@@ -357,21 +573,39 @@ fn fixed_size(ty: u32) -> Option<u64> {
 /// Builds GGUF headers for tests (here and in other crates' tests).
 #[doc(hidden)]
 pub mod testing {
-    /// A minimal GGUF v3 writer for metadata.
+    /// A minimal GGUF v3 writer for metadata and, with [`Writer::tensor`], a tensor table
+    /// and its (zero-filled) data.
     #[derive(Default)]
     pub struct Writer {
         kvs: Vec<u8>,
         count: u64,
         tensors: u64,
+        /// Tensors added with [`Writer::tensor`]: name and data size in bytes.
+        table: Vec<(String, u64)>,
+        /// The data alignment ([`Writer::alignment`]); 0 means the default of 32.
+        align: u64,
     }
 
     impl Writer {
         pub fn new() -> Self {
             Self::default()
         }
+        /// Sets the tensor count written in the header (without a table).
         pub fn tensors(mut self, n: u64) -> Self {
             self.tensors = n;
             self
+        }
+        /// Adds a tensor of `bytes` bytes (written as one dimension of 8-bit integers).
+        /// With any tensor added, the header's tensor count is the number added and the
+        /// file ends with the table, padding and the data, as llama.cpp writes it.
+        pub fn tensor(mut self, name: &str, bytes: u64) -> Self {
+            self.table.push((name.to_string(), bytes));
+            self
+        }
+        /// Writes `general.alignment` and pads the data to it.
+        pub fn alignment(mut self, a: u32) -> Self {
+            self.align = u64::from(a);
+            self.u32("general.alignment", a)
         }
         fn key(&mut self, k: &str, ty: u32) {
             self.kvs.extend((k.len() as u64).to_le_bytes());
@@ -428,9 +662,34 @@ pub mod testing {
             let mut out = Vec::new();
             out.extend(*b"GGUF");
             out.extend(3u32.to_le_bytes());
-            out.extend(self.tensors.to_le_bytes());
+            let tensors = if self.table.is_empty() {
+                self.tensors
+            } else {
+                self.table.len() as u64
+            };
+            out.extend(tensors.to_le_bytes());
             out.extend(self.count.to_le_bytes());
             out.extend(self.kvs);
+            if self.table.is_empty() {
+                return out;
+            }
+            let align = if self.align == 0 { 32 } else { self.align };
+            let pad = |n: u64| n.div_ceil(align) * align;
+            let mut offset = 0u64;
+            for (name, bytes) in &self.table {
+                out.extend((name.len() as u64).to_le_bytes());
+                out.extend(name.as_bytes());
+                out.extend(1u32.to_le_bytes());
+                out.extend(bytes.to_le_bytes());
+                // GGML_TYPE_I8: one byte per element.
+                out.extend(24u32.to_le_bytes());
+                out.extend(offset.to_le_bytes());
+                offset += pad(*bytes);
+            }
+            out.resize(pad(out.len() as u64) as usize, 0);
+            for (_, bytes) in &self.table {
+                out.resize(out.len() + pad(*bytes) as usize, 0);
+            }
             out
         }
     }
@@ -600,6 +859,316 @@ mod tests {
         }
         b.extend([0u8; 64]);
         assert!(parse(&b).is_err());
+    }
+
+    // ---- the tensor table (0.0.6 item 6) ------------------------------------------------
+
+    fn table(bytes: &[u8]) -> Result<Vec<TensorEntry>, GgufError> {
+        read_with_tensors(Cursor::new(bytes), bytes.len() as u64).map(|(_, t)| t)
+    }
+
+    fn entries(list: &[(&str, u64)]) -> Vec<TensorEntry> {
+        list.iter()
+            .map(|&(name, bytes)| TensorEntry {
+                name: name.to_string(),
+                bytes,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tensor_table_sizes_come_from_the_offsets() {
+        let bytes = Writer::new()
+            .str("general.architecture", "llama")
+            .u32("llama.block_count", 2)
+            .tensor("token_embd.weight", 4096)
+            .tensor("blk.0.attn_q.weight", 1024)
+            .tensor("blk.1.attn_q.weight", 1024)
+            .tensor("output_norm.weight", 64)
+            .build();
+        let (header, tensors) = read_with_tensors(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+        assert_eq!(header.tensor_count, 4);
+        assert_eq!(header.arch_u64("block_count"), Some(2));
+        assert_eq!(
+            tensors,
+            entries(&[
+                ("token_embd.weight", 4096),
+                ("blk.0.attn_q.weight", 1024),
+                ("blk.1.attn_q.weight", 1024),
+                ("output_norm.weight", 64),
+            ])
+        );
+        // The header reader still reads the same file.
+        assert_eq!(parse(&bytes).unwrap().tensor_count, 4);
+        // A file with no tensors has an empty table.
+        let none = Writer::new().str("general.architecture", "llama").build();
+        assert_eq!(table(&none).unwrap(), Vec::new());
+    }
+
+    /// Sizes include the padding to the alignment, which the file may choose.
+    #[test]
+    fn tensor_sizes_include_the_padding() {
+        let bytes = Writer::new()
+            .str("general.architecture", "llama")
+            .tensor("a", 100)
+            .tensor("b", 7)
+            .build();
+        assert_eq!(table(&bytes).unwrap(), entries(&[("a", 128), ("b", 32)]));
+        let bytes = Writer::new()
+            .str("general.architecture", "llama")
+            .alignment(64)
+            .tensor("a", 100)
+            .tensor("b", 7)
+            .build();
+        assert_eq!(table(&bytes).unwrap(), entries(&[("a", 128), ("b", 64)]));
+        for bad in [Writer::new().alignment(0), Writer::new().alignment(48)] {
+            let bytes = bad.tensor("a", 32).build();
+            assert!(matches!(table(&bytes), Err(GgufError::Corrupt(_))));
+        }
+        let bytes = Writer::new()
+            .str("general.alignment", "32")
+            .tensor("a", 32)
+            .build();
+        assert!(matches!(table(&bytes), Err(GgufError::Corrupt(_))));
+    }
+
+    /// A file whose tensor table is written by hand: each entry's name bytes, dimension
+    /// count and offset, then the data section of `data` bytes.
+    fn hand_table(list: &[(&[u8], u32, u64)], data: usize) -> Vec<u8> {
+        let mut b = Writer::new()
+            .str("general.architecture", "llama")
+            .tensors(list.len() as u64)
+            .build();
+        for &(name, n_dims, offset) in list {
+            b.extend((name.len() as u64).to_le_bytes());
+            b.extend(name);
+            b.extend(n_dims.to_le_bytes());
+            for _ in 0..n_dims {
+                b.extend(1u64.to_le_bytes());
+            }
+            b.extend(0u32.to_le_bytes());
+            b.extend(offset.to_le_bytes());
+        }
+        b.resize(b.len().div_ceil(32) * 32 + data, 0);
+        b
+    }
+
+    #[test]
+    fn hostile_tensor_tables_are_refused() {
+        let corrupt = |bytes: &[u8]| matches!(table(bytes), Err(GgufError::Corrupt(_)));
+        // The hand-written table itself is fine.
+        assert_eq!(
+            table(&hand_table(&[(b"a", 1, 0), (b"b", 2, 64)], 96)).unwrap(),
+            entries(&[("a", 64), ("b", 32)])
+        );
+        // More tensors than allowed, and more than the file can hold.
+        assert!(corrupt(
+            &Writer::new()
+                .str("general.architecture", "llama")
+                .tensors(MAX_TENSORS + 1)
+                .build()
+        ));
+        assert_eq!(table(&hand_table(&[], 0)).unwrap(), Vec::new());
+        let mut many = Writer::new().tensors(1000).build();
+        many.extend([0u8; 512]);
+        assert!(corrupt(&many));
+        assert!(corrupt(&Writer::new().tensors(u64::MAX).build()));
+        // Offsets backwards, equal, beyond the end, overflowing with the data start.
+        assert!(corrupt(&hand_table(&[(b"a", 1, 64), (b"b", 1, 0)], 96)));
+        assert!(corrupt(&hand_table(&[(b"a", 1, 0), (b"b", 1, 0)], 96)));
+        assert!(corrupt(&hand_table(&[(b"a", 1, 0), (b"b", 1, 97)], 96)));
+        assert!(corrupt(&hand_table(&[(b"a", 1, u64::MAX - 8)], 96)));
+        assert!(corrupt(&hand_table(&[(b"a", 1, u64::MAX)], 96)));
+        // A name of 10 KB, a name that is not UTF-8, five dimensions.
+        let long = vec![b'x'; 10 * 1024];
+        assert!(corrupt(&hand_table(&[(&long, 1, 0)], 96)));
+        assert!(corrupt(&hand_table(&[(&[0xff, 0xfe], 1, 0)], 96)));
+        assert!(corrupt(&hand_table(&[(b"a", 5, 0)], 96)));
+        // A name length of 2^63.
+        let mut b = Writer::new().tensors(1).build();
+        b.extend((1u64 << 63).to_le_bytes());
+        b.extend([0u8; 64]);
+        assert!(corrupt(&b));
+    }
+
+    /// Cut anywhere before the last tensor's data, the file is refused, never a panic.
+    /// Cut inside the last tensor, the last size is short (no type table is kept).
+    #[test]
+    fn truncated_tensor_table_is_refused() {
+        let bytes = Writer::new()
+            .str("general.architecture", "qwen3")
+            .tensor("token_embd.weight", 256)
+            .tensor("blk.0.attn_q.weight", 128)
+            .tensor("output.weight", 256)
+            .build();
+        let last_start = bytes.len() - 256;
+        for cut in 0..last_start {
+            assert!(table(&bytes[..cut]).is_err(), "cut at {cut} parsed");
+        }
+        for cut in last_start..=bytes.len() {
+            let t = table(&bytes[..cut]).unwrap();
+            assert_eq!(t[2].bytes, (cut - last_start) as u64);
+            assert_eq!((t[0].bytes, t[1].bytes), (256, 128));
+        }
+    }
+
+    /// The bytes of a tensor as ggml lays it out, for the types a test model uses.
+    fn ggml_nbytes(ggml_type: u32, dims: &[u64]) -> Option<u64> {
+        let (block, size) = match ggml_type {
+            0 => (1, 4),
+            1 | 30 => (1, 2),
+            2 => (32, 18),
+            3 => (32, 20),
+            6 => (32, 22),
+            7 => (32, 24),
+            8 => (32, 34),
+            10 => (256, 84),
+            11 => (256, 110),
+            12 => (256, 144),
+            13 => (256, 176),
+            14 => (256, 210),
+            _ => return None,
+        };
+        let (first, rest) = dims.split_first()?;
+        Some(first / block * size * rest.iter().product::<u64>())
+    }
+
+    /// What a parsed header keeps, counted as the budget counts it.
+    fn kept_cost(h: &GgufHeader) -> u64 {
+        fn value(v: &Value) -> u64 {
+            match v {
+                Value::String(s) => s.len() as u64,
+                Value::Array(items) => items
+                    .iter()
+                    .map(|item| VALUE_COST + value(item))
+                    .sum::<u64>(),
+                _ => 0,
+            }
+        }
+        h.metadata
+            .iter()
+            .map(|(k, v)| k.len() as u64 + VALUE_COST + value(v))
+            .sum()
+    }
+
+    /// A crafted header cannot make the app keep more than `MAX_KEPT_TOTAL` of metadata,
+    /// however large the file (security review, round 1): strings, kept arrays and keys
+    /// past the budget are read past, and what follows them still reads.
+    #[test]
+    fn kept_metadata_has_a_budget() {
+        // Six strings of 4 MiB: three fit the budget of 16 MiB, the rest keep their length.
+        let big = "x".repeat(4 * 1024 * 1024);
+        let mut w = Writer::new().str("general.architecture", "llama");
+        for i in 0..6 {
+            w = w.str(&format!("big.{i}"), &big);
+        }
+        let bytes = w
+            .str("tokenizer.chat_template", "{{ messages }}")
+            .tensor("blk.0.attn_q.weight", 64)
+            .build();
+        let (h, tensors) = read_with_tensors(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+        assert!(kept_cost(&h) <= MAX_KEPT_TOTAL, "{}", kept_cost(&h));
+        assert_eq!(h.architecture(), Some("llama"));
+        for i in 0..3 {
+            assert_eq!(
+                h.get_str(&format!("big.{i}")).map(str::len),
+                Some(big.len())
+            );
+        }
+        for i in 3..6 {
+            assert_eq!(
+                h.get(&format!("big.{i}")),
+                Some(&Value::SkippedString(big.len() as u64))
+            );
+        }
+        // Small values after the big ones still fit what is left.
+        assert_eq!(h.get_str("tokenizer.chat_template"), Some("{{ messages }}"));
+        assert_eq!(tensors.len(), 1);
+        assert_eq!(tensors[0].bytes, 64);
+
+        // Each kept element is a value in memory (32 bytes for 4 in the file): 200 arrays
+        // of 4,096 numbers would be 26 MB kept; those past the budget are skipped.
+        let numbers = vec![7u32; 4096];
+        let mut w = Writer::new();
+        for i in 0..200 {
+            w = w.u32_array(&format!("array.{i:03}"), &numbers);
+        }
+        let bytes = w.u32("after", 5).build();
+        let h = parse(&bytes).unwrap();
+        assert!(kept_cost(&h) <= MAX_KEPT_TOTAL, "{}", kept_cost(&h));
+        let kept = h
+            .metadata
+            .values()
+            .filter(|v| matches!(v, Value::Array(_)))
+            .count();
+        assert!((100..200).contains(&kept), "{kept}");
+        assert_eq!(
+            h.get("array.199"),
+            Some(&Value::SkippedArray {
+                elem_type: 4,
+                len: 4096
+            })
+        );
+        assert_eq!(h.get_u64("after"), Some(5));
+
+        // Keys of 60,000 bytes: 300 of them would be 18 MB; past the budget an entry is
+        // read past and not kept at all, and the tensor table still reads.
+        let mut w = Writer::new().str("general.architecture", "llama");
+        for i in 0..300 {
+            w = w.u32(&format!("{i:03}{}", "k".repeat(59_997)), 1);
+        }
+        let bytes = w.tensor("output.weight", 32).build();
+        let (h, tensors) = read_with_tensors(Cursor::new(&bytes), bytes.len() as u64).unwrap();
+        assert!(kept_cost(&h) <= MAX_KEPT_TOTAL, "{}", kept_cost(&h));
+        assert_eq!(h.architecture(), Some("llama"));
+        assert!(
+            (200..300).contains(&h.metadata.len()),
+            "{}",
+            h.metadata.len()
+        );
+        assert_eq!(tensors.len(), 1);
+        // A prefix is read the same way.
+        let h = read_prefix(&bytes[..bytes.len() / 2]).unwrap();
+        assert!(kept_cost(&h) <= MAX_KEPT_TOTAL);
+    }
+
+    /// The real model: every size is the tensor's own bytes plus at most the alignment.
+    #[test]
+    fn real_model_tensor_table_if_available() {
+        let Ok(path) = std::env::var("TEST_GGUF") else {
+            return;
+        };
+        let len = std::fs::metadata(&path).unwrap().len();
+        let file = File::open(&path).unwrap();
+        let mut r = Reader {
+            inner: BufReader::new(file),
+            pos: 0,
+            len,
+            kept: 0,
+        };
+        let header = read_header(&mut r, false).unwrap();
+        let raw = read_raw_tensors(&mut r, &header).unwrap();
+        let data_start = r.pos.next_multiple_of(alignment(&header).unwrap());
+        let (_, tensors) = read_file_with_tensors(Path::new(&path)).unwrap();
+        assert_eq!(tensors.len() as u64, header.tensor_count);
+        assert!(tensors.len() > 100);
+        let sum: u64 = tensors.iter().map(|t| t.bytes).sum();
+        assert_eq!(sum, len - data_start);
+        let mut exact = 0u64;
+        for (t, raw) in tensors.iter().zip(&raw) {
+            assert_eq!(t.name, raw.name);
+            let n = ggml_nbytes(raw.ggml_type, &raw.dims)
+                .unwrap_or_else(|| panic!("type {} of {}", raw.ggml_type, raw.name));
+            assert!(
+                t.bytes >= n && t.bytes - n < 32,
+                "{}: {} vs {n}",
+                t.name,
+                t.bytes
+            );
+            exact += n;
+        }
+        // Within 1% of the file size less the header.
+        assert!(sum - exact <= (len - data_start) / 100, "{sum} vs {exact}");
     }
 
     /// Reads a real model when `TEST_GGUF` points at one (CI sets it).

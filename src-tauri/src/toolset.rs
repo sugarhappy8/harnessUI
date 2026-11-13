@@ -61,6 +61,9 @@ pub async fn build_host(
     host.add_builtin(skills);
     // Lists `run_subagent` (the "Subagents" group, off in a new chat); the turn runs it.
     host.add_builtin(Arc::new(crate::subagent::SubagentsServer));
+    // The "Coding apps" group (0.0.6): lists nothing until the user turns it on and the
+    // programs are found (`outside_agent::find_coding_apps`, and at start the saved ones).
+    host.add_builtin(Arc::new(crate::outside_agent::CodingAppsServer::unchecked()));
     // The "Artifacts" group (0.0.4): documents, pages and diagrams shown beside the chat.
     host.add_builtin(Arc::new(crate::artifacts::ArtifactsServer::new(
         app.clone(),
@@ -73,6 +76,20 @@ pub async fn build_host(
     host.add_builtin(Arc::new(crate::outputs::OutputsServer::new(app.clone())));
     // `update_task` (0.0.4): the chat's task state, offered with any other tool.
     host.add_builtin(Arc::new(crate::task::TaskServer::new(app.clone())));
+    // The "Reverse engineering" group (0.0.6, item 5): rea behind the app's allow-list. One
+    // server for the app, shared with Settings → Reverse engineering and the Tools panel.
+    if let Ok(local_data) = app.path().app_local_data_dir() {
+        let reverse = reverse::ReverseServer::new(
+            reverse::ReverseLayout::for_app(&local_data),
+            reverse::Platform::current(),
+        );
+        reverse
+            .process()
+            .set_log_dir(app.path().app_log_dir().ok().as_deref());
+        reverse::server::set_handle(reverse.clone());
+        app.manage(reverse::ReverseHandle(reverse.clone()));
+        host.add_builtin(reverse);
+    }
     host
 }
 
@@ -403,6 +420,10 @@ pub async fn reload_skills(app: &AppHandle) {
 /// Starts the user's saved, enabled servers (each in the background).
 pub async fn start_saved_servers(app: &AppHandle) {
     let state = app.state::<AppState>();
+    // [0.0.6] A saved server whose name a built-in server now has is renamed first, so it
+    // starts under its new name instead of being skipped.
+    let builtin = crate::tool_catalog::builtin_servers(&state.host);
+    crate::mcp_cmd::rename_clashing_servers(&state.store, state.secrets.as_ref(), &builtin).await;
     let servers = match state.store.list_mcp_servers().await {
         Ok(s) => s,
         Err(e) => {

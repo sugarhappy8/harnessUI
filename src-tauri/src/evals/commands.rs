@@ -374,6 +374,12 @@ pub async fn start_capability_check(
     only_main_window(window.label())?;
     let (model, identity) = model_for(&state, &model_ref).await?;
     let (_running, cancel) = start_run()?;
+    let _busy = crate::runtime_manager::use_local_model(
+        &state,
+        &model_ref,
+        crate::state::BusyKind::ModelCheck,
+        &cancel,
+    );
     let left = super::workspace::remove_leftovers();
     if left > 0 {
         tracing::info!(left, "removed folders left by earlier runs");
@@ -520,6 +526,12 @@ pub async fn start_benchmark(
     let (model, identity) = model_for(&state, &model_ref).await?;
     let dir = bench_dir(&app)?;
     let (_running, cancel) = start_run()?;
+    let _busy = crate::runtime_manager::use_local_model(
+        &state,
+        &model_ref,
+        crate::state::BusyKind::ModelCheck,
+        &cancel,
+    );
     let left = super::workspace::remove_leftovers();
     if left > 0 {
         tracing::info!(left, "removed folders left by earlier runs");
@@ -628,6 +640,36 @@ pub async fn get_bench_run(
         .ok_or_else(|| AppError::not_found("benchmark run"))
 }
 
+// ---- 0.0.6 item 4: "Your results" in the comparison -----------------------------------
+
+/// Every saved model check of the current format, with its settings key, for the
+/// comparison's "Your test results" (`hub::compare`). A row whose key is not its own
+/// identity's, or of another format, is left out. Reads only; not a command.
+pub async fn list_profiles(store: &store::Store) -> Vec<(String, Profile)> {
+    let Ok(rows) = store.settings_with_prefix(profile::KEY_PREFIX).await else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter(|(key, _)| is_profile_key(key))
+        .filter_map(|(key, value)| {
+            let p: Profile = serde_json::from_value(value).ok()?;
+            (p.version == profile::VERSION && p.identity.key() == key).then_some((key, p))
+        })
+        .collect()
+}
+
+/// Every saved benchmark run, newest first (blocking file reads: call it off the async
+/// threads). For the comparison's "Your test results"; not a command.
+pub fn saved_bench_runs(app: &AppHandle) -> Vec<BenchRun> {
+    let Ok(dir) = bench_dir(app) else {
+        return Vec::new();
+    };
+    bench::list(&dir)
+        .into_iter()
+        .filter_map(|s| bench::load(&dir, &s.id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,5 +761,44 @@ mod tests {
         token.cancel();
         drop(guard);
         let (_again, _) = start_run().unwrap();
+    }
+
+    /// The comparison lists only real profiles, each under its own key.
+    #[tokio::test]
+    async fn list_profiles_keeps_only_real_profiles() {
+        let store = store::Store::open_in_memory().unwrap();
+        let identity = |file: &str| Identity::Local {
+            file: file.into(),
+            size: 42,
+            backend: "cpu".into(),
+        };
+        let profile = |id: &Identity| Profile {
+            version: profile::VERSION,
+            identity: id.clone(),
+            label: id.label(),
+            checked_at: 7,
+            chosen: None,
+            defaults: None,
+            results: Vec::new(),
+        };
+        let a = identity("a.gguf");
+        store.set_setting(&a.key(), &profile(&a)).await.unwrap();
+        // Under another identity's key: left out.
+        let b = identity("b.gguf");
+        store.set_setting(&b.key(), &profile(&a)).await.unwrap();
+        // Another format: left out.
+        let c = identity("c.gguf");
+        let mut old = profile(&c);
+        old.version = profile::VERSION + 1;
+        store.set_setting(&c.key(), &old).await.unwrap();
+        // Not a profile key, or not a profile: left out.
+        store
+            .set_setting("modelProfile:../x", &profile(&a))
+            .await
+            .unwrap();
+        let d = identity("d.gguf");
+        store.set_setting(&d.key(), &"text").await.unwrap();
+        let got = list_profiles(&store).await;
+        assert_eq!(got, vec![(a.key(), profile(&a))]);
     }
 }

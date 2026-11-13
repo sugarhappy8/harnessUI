@@ -1,0 +1,3 @@
+{"type":"log","time":11632,"level":"info","msg":"llama_fit_params: printing estimated memory in MiB to stdout (device, model, context, compute) ...\n"}
+{"type":"fit_memory_breakdown","data":{"unit":"MiB","rows":[{"kind":"host","name":"Host","self":918,"model":157,"context":448,"compute":312},{"kind":"buffer_type","name":"AMX","self":674,"model":674,"context":0,"compute":0}]}}
+Host 157 448 312 

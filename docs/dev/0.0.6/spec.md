@@ -1,6 +1,10 @@
-# 0.0.5: specification (revision 2, after three independent critiques)
+# 0.0.6: specification (revision 3)
 
-The owner's four requests (verbatim):
+Revision 2 was written for "0.0.5" after three independent critiques; the work was paused
+on 2026-11-12 and 0.0.5 shipped Full access instead. Revision 3 (this file) moves the plan to
+0.0.6, adds the third approval mode, amends D4 and D11, and adds items 5 to 8 (Part 3b).
+
+The owner's first four requests (verbatim; items 5 to 8 are in Part 3b):
 
 1. allow per model on loading context window setting and it auto compresses.
 2. More and more model loading setting and model reloading but simplify it to normal human language.
@@ -15,8 +19,8 @@ The owner is not technical. They use the app on a Windows PC with an AMD Radeon 
 graphics card (Vulkan) and on a 16 GB Apple silicon Mac. This build machine is Linux with no
 graphics card.
 
-Background reading, in this order: this file; `docs/dev/0.0.5/map.md` (combined map of the
-code); `docs/dev/0.0.5/map-details.md` (the readers' findings with file:line references as
+Background reading, in this order: this file; `docs/dev/0.0.6/map.md` (combined map of the
+code); `docs/dev/0.0.6/map-details.md` (the readers' findings with file:line references as
 of commit 226bf13; item 3 lists the verified variable names and flags of the outside apps);
 the `ARCHITECTURE.md` sections your package names. The critiques that shaped this revision
 are summarised in Part 5.
@@ -50,10 +54,12 @@ are summarised in Part 5.
   (`e2e/scripted_agent.py`; read `e2e/README.md` and one short scenario first). The runner
   starts its own dev server when port 1420 is free. Runs take turns through a lock:
   `cargo +1.99 build -p app` then
-  `flock /tmp/harness-e2e.lock env PROBES=<name> E2E_OUT=<your own scratch folder> timeout 1200 xvfb-run -a python3 -I e2e/scripted_agent.py`.
-  Add `E2E_TRACE=1` to see what the app did. A real small model is at
-  `/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf` with llama-server in
-  `/home/user/llama-dev/llama-b12110/` (see `e2e/m1_chat.py` for how a script loads it).
+  `flock -o /tmp/harness-e2e.lock env PROBES=<name> E2E_OUT=<your own scratch folder> timeout 1200 xvfb-run -a python3 -I e2e/scripted_agent.py`.
+  Add `E2E_TRACE=1` to see what the app did. The pinned llama-server is in
+  `.cache/llama-linux/` and a real small model in `.cache/models/` (fetched by
+  `scripts/fetch_llama.py linux` and `scripts/fetch_test_model.py .cache/models`); the
+  contract tests and the m1/m3/m9/m10 suites find them through `LLAMA_SERVER_BIN` and
+  `TEST_GGUF` (see `.github/workflows/ci.yml` and `e2e/m1_chat.py`).
   Claude Code 2.1.322 is installed on this machine (`claude`); Codex is not.
 - Tests are part of the work. Write the test first where practical and say which tests you
   saw fail first. Never weaken or delete an existing test to get green. If a test pins
@@ -160,6 +166,7 @@ and every TODO.
     Long. Help: "Longer thinking can give better answers but takes more time." This is a
     **per-request** limit applied by the agent loop (`limit_thinking`), not a launch flag.
   - Never shown: threads, batch sizes, slots, rope, tensor split, free-text arguments, paths.
+    (Amended for 0.0.6 by item 6, Part 3b: some of these move under Fine control.)
     Every setting is a typed value from a fixed list. The backend stays one global choice
     (shown in plain words, see `words.ts`).
 - **D5 Item 3 is experimental in both directions** and says so. Both are off by default.
@@ -180,25 +187,48 @@ and every TODO.
   updates every pinning test and e2e line (shared files included) and lists them. Kept on
   purpose: the tab label "Local models", the loading line starting "Loading model".
 - **D8 Names of outside apps.** The 0.0.4 rule against names of AI models or assistants in
-  code, comments, tests and docs is amended for 0.0.5: the product and program names of the
+  code, comments, tests and docs is amended for 0.0.6: the product and program names of the
   outside apps the owner asked to integrate (Claude Code, the Claude app, Codex, and in the
   classifier other coding-assistant programs) may appear in the policy classifier, the
   outside-app modules, their setup text, their UI labels (Tools panel, Other apps page,
   approval cards) and their tests. Model names still never appear in code.
-- **D9 No database schema change in 0.0.5.** New data goes in the `settings` table (JSON) or
+- **D9 No database schema change in 0.0.6.** New data goes in the `settings` table (JSON) or
   existing JSON columns. Audit rows reuse existing `decision` values.
 - **D10 Direction A uses a small proxy owned by the app** on a loopback port chosen at random
   from a high range on first switch-on and then kept; llama-server stays on its random port
   with its private key.
-- **D11 Direction B always asks.** Every hand-off shows a card, in every approval mode and
-  after any grant ("Allow for this chat" never covers it).
+- **D11 Direction B asks, except in Full access** (amended for 0.0.6; the owner confirmed it).
+  In Ask first and Allow all every hand-off shows a card with Allow once / Deny, after any
+  grant ("Allow for this chat" never covers it), with or without untrusted content. In Full
+  access nothing asks: the owner's rule for that mode is "run absolutely everything", and
+  the terminal could start those programs anyway. Steps 1 and 2 still come first (the tool
+  group off, a program inside an approved folder, a swapped file, a working folder that is
+  not approved). As merged in `crates/policy/src/engine.rs` (Full access is checked before
+  the coding-app rule). The tool group stays off in new chats and is never offered to
+  helpers in any mode.
+- **D12 Three approval modes** (0.0.5; ARCHITECTURE.md 13.3 "Full access (0.0.5)",
+  SECURITY.md, `docs/dev/0.0.5/full-access-review.md`). Ask first; Allow all (keep-asking
+  actions and outbound actions after untrusted content still ask); Full access (nothing
+  asks; the file, terminal and git tools reach the whole computer except the app's own
+  folders and the system's key stores; a saved Full access default asks again at every
+  start). Every package that adds a tool action or a card states what it does in all three
+  modes and tests all three: `TurnContext::full_access` is the field, decision
+  `AllowedByFullAccess`, audit note `Full access`. In particular:
+  - WP6: as D11. The card text in Full access is never shown (it runs); the Tools panel
+    still shows the resolved program paths and "Experimental".
+  - WP5a: the proxy is not a tool action and is not changed by the mode; its switch is
+    changed only by the user in every mode, Full access included.
+  - Model settings, sharing switch, approved folders and modes stay out of reach of every
+    tool in every mode (`set_setting` allow-list unchanged; the app's folders are forbidden).
+  - Item 5 (Part 3b): running the decompiler is a tool action like any other; Item 7 shows
+    the mode's reach in plain words.
 
 ### Storage (settings keys; no migration)
 - `localModel` (`LocalModelSettings`, `src-tauri/src/dto.rs`), the **defaults for all
   models**. `ctx: u32` **stays**; new fields are added beside it, each `#[serde(default)]`:
   `context_auto: bool` (absent + ctx 8192 → Automatic per D2), `gpu`, `save_memory`,
-  `keep_in_memory`, `thinking_limit`. Two tests: 0.0.4 JSON read by 0.0.5, and 0.0.5 JSON
-  read by the 0.0.4 struct (extra fields ignored, backend kept). The 0.0.4 command shape
+  `keep_in_memory`, `thinking_limit`. Two tests: 0.0.4/0.0.5 JSON read by 0.0.6, and 0.0.6 JSON
+  read by the 0.0.5 struct (extra fields ignored, backend kept). The 0.0.4 command shape
   `{ctx, backend, device}` (e2e scripts) still works.
 - `modelLoad:<first 16 hex of SHA-256("local\n<file name>\n<size in bytes>")>`: one model's
   overrides (`ModelLoadSettings`). Each field uses an explicit enum with a `Default` variant
@@ -257,7 +287,7 @@ each), `src/components/ModelsDialog.tsx` (one tab each), `Cargo.toml`, `src-taur
 ---------------------------------------------------------------------------------------
 
 ### Amendments after WP0 (binding)
-- **The contract** is the section "CONTRACT (updated)" of `docs/dev/0.0.5/report-WP0-fix.md`
+- **The contract** is the section "CONTRACT (updated)" of `docs/dev/0.0.6/report-WP0-fix.md`
   (types, fields, command signatures, sample data). Build against it; do not change a
   contract type or signature without the lead.
 - **Owners of files WP0 added:** `crates/runtime/src/llama/stage.rs` → WP1a;
@@ -592,7 +622,8 @@ Coding apps switch in `src/components/ToolsPanel.tsx`.
   their absolute resolved path in the panel and on every card; a program whose resolved path
   is inside any approved folder is refused; before each run the file's identity (device and
   inode or file id, size, modified time) must be unchanged. On Windows run the real `.exe`
-  if there is one; a `.cmd` shim only with fixed words (the task never goes on the command
+  if there is one (on `PATH`, else `~\.local\bin\<name>.exe`, before a `.cmd` shim on
+  `PATH`); a `.cmd` shim only with fixed words (the task never goes on the command
   line). When neither is found: "Claude Code and Codex are not installed on this computer."
 - Tools `ask_claude_code {task, may_edit?}` and `ask_codex {task, may_edit?}` (short
   definitions). Action: risk `AlwaysAsk`, `keep_asking` set, `network` and `outbound` true,
@@ -624,6 +655,26 @@ Coding apps switch in `src/components/ToolsPanel.tsx`.
   app's environment or the outside app's user settings point it at the sharing port (WP5),
   say so on the card ("Claude Code is set up to use the model in harnessUI, so this task
   goes to your local model, not online.").
+  *Lead decision (release fix round):* that line needs sharing switched on and listening on
+  that port now (Sharing's live state, not the saved port); otherwise the call is refused
+  before any card ("<App> is set up to use the model in harnessUI, and sharing is off, so
+  <App> was not asked. The user can turn on sharing in Settings → Other apps, then ask
+  again.", or "…but sharing is not working now…" when it is on but not listening). When it
+  listens, the run gets exactly one extra variable: the sharing key, read from where the app
+  keeps it (never from the owner's environment), under the name the outside app's own setup
+  reads it from (`ANTHROPIC_AUTH_TOKEN` when Claude Code's `ANTHROPIC_BASE_URL` is the live
+  address; the chosen Codex provider's `env_key` when its `base_url` is, and only if that
+  name looks like a secret's). Everything else stays stripped. The live address is exactly
+  `127.0.0.1` at the port the proxy listens on (it binds no other address). Any other
+  address of this computer is refused before any card too: the sharing port under another
+  name such as `localhost` or `[::1]` ("<App> is set up to use the model in harnessUI at
+  <host>, but harnessUI listens only at 127.0.0.1, so <App> was not asked. The user can copy
+  <App>'s setup again from Settings → Other apps, then ask again."), or another port, such
+  as the one sharing used before the user changed it ("<App> is set up to send tasks to
+  port N on this computer, and harnessUI does not share its model there, so <App> was not
+  asked. The user can copy <App>'s setup again from Settings → Other apps, then ask
+  again."). Variable names are compared without case only on Windows. Both checks run again
+  before the run, and a run whose destination no longer matches the card does not start.
 **Tests:** argument building per template and mode, the forbidden-token and required-flag
 test, task on stdin with quotes, `%` and line breaks, task starting with `-`, program inside
 an approved folder refused, swapped file refused, always asks in Ask first and Allow all, with
@@ -636,12 +687,91 @@ expected arguments and the task on stdin and returns its output.
 
 ---------------------------------------------------------------------------------------
 
+## Part 3b. Items 5 to 8 (added in revision 3)
+
+### Item 5. rea with a free decompiler
+Designed: `item5-spec.md` (work packages WP9a to WP9h, binding, with the owner's answers at
+the top; WP9f dropped by the owner's answer Q2 = B). Research: `item5-rea-research.md`. Whatever is chosen: rea is an MCP server, so it runs through
+the existing MCP client and policy gate (D12), starts as a process through `crates/runtime`,
+and its files and any decompiler or runtime it needs are listed in the notices.
+
+**The owner's answers (2026-11-12):**
+- **rea with both Kuna and Ghidra**; the owner picks which one rea uses.
+- **How it is installed:** like the ROCm pack. A tab of its own in Settings, next to "Local
+  models", where the owner may optionally install rea, Kuna and Ghidra (with the Java it
+  needs). Nothing in the installer; nothing downloaded until the owner chooses it there.
+  After that it works offline.
+- **Reach:** only files the owner points at, inside approved folders (or anywhere in Full
+  access, except the app's own folders). No attaching to running programs: rea's debugger,
+  Frida and live-process tools are not offered.
+
+### Item 6. Usage view and finer offloading controls
+Designed: `item6-spec.md` (work packages WP10a to WP10e, binding, with the owner's answers
+at the top). Earlier sketch: `item6-usage-offloading.md`. **D4 is amended (the owner
+chose: Fine control inside each model's settings, live usage always visible under the model
+name):** the plain controls stay the default, unchanged;
+layers on the graphics card, expert parts on the processor, conversation memory on the
+graphics card, processor threads, fast attention and the memory to leave free appear only
+under a closed **Fine control** section, each a typed value from a fixed list or range;
+batch sizes, slots, rope, tensor overrides, free text and paths stay never shown. Live usage
+is read on this computer only and says "Not available" where the system gives nothing.
+
+### Item 7. Show which folders the chat can use (WP7, small, frontend)
+**Owns:** a new `src/components/FolderChip.tsx` (+ test), one mount in the chat header of
+`src/components/ChatView.tsx` (beside `ApprovalModeMenu`), and nothing in the backend (it
+uses the folder commands the Tools panel already uses).
+**Build:**
+- A chip in the chat header, always visible when a chat is open: a folder icon and the
+  working folder's last name ("harnessUI"), the full path in its menu, never truncated in
+  the menu. With more than one approved folder: "harnessUI + 2 more".
+- No folder: "No folder · Choose" (the file tools have nowhere to work).
+- Full access: "Whole computer" in the warning colour of the mode menu; the menu says "Full
+  access is on, so the file and terminal tools can reach every folder on this computer
+  except harnessUI's own. Working folder: <path>."
+- The menu lists the approved folders with the working one marked, **Make this the working
+  folder**, **Add a folder…** (the existing folder picker and approval command), **Remove**,
+  and **Open in Tools panel**. Every change goes through the same main-window commands as
+  the Tools panel; nothing new is reachable by a tool or the model.
+- The message box's placeholder names the working folder when there is one ("Ask anything.
+  Files: harnessUI").
+**Tests:** chip text for none / one / several / Full access; menu actions call the existing
+wrappers; a path with right-to-left or zero-width characters is shown escaped. **e2e:** a
+line in an existing scenario that reads the chip after the Tools panel approves a folder.
+
+### Item 8. New downloads appear in the chat's model list (WP8, small)
+**Cause** (README item 8): `list_model_options` (`src-tauri/src/models_cmd.rs`) lists only
+`recentLocalModels`, the files loaded recently; a finished download is not added.
+**Owns:** `list_model_options` in `src-tauri/src/models_cmd.rs`, `remember_local_model` in
+`src-tauri/src/settings.rs`, `src/components/ModelPicker.tsx`, the `download-progress`
+listener in `src/store/app.ts`.
+**Build:**
+- "On this computer" lists every installed model (`store.list_models()`, the same rows as
+  Installed), recently used first, then the rest by name; files that no longer exist are
+  left out.
+- The list is read again when a download finishes (`download-progress` with every file
+  done) and when Installed imports or deletes a model, not only when the menu opens.
+- Duplicates: entries are keyed by the file's canonical path (case-insensitive on Windows
+  and macOS); `remember_local_model` stores the canonical path and drops older spellings of
+  the same file. When two different files have the same name, each shows the end of its
+  folder in small text ("Q8_0.gguf · Downloads\\models" vs "… · harnessUI\\models"). Which of
+  the two the owner's screenshot shows is unknown (two spellings of one path, or two
+  copies); the build covers both and a test pins each.
+**Tests:** Rust: a registered model never loaded is listed; a missing file is not; two
+spellings of one path give one entry (Windows-style case test that does not assume the build
+system's case rules); two copies give two entries with folder hints. Frontend: the picker
+refreshes on a finished download event. **e2e:** a line in the downloads or model-settings
+scenario: register a model, open the picker, see it without loading it first.
+
+---------------------------------------------------------------------------------------
+
 ## Part 4. Order, integration and the owner checklist
 1. WP0 alone.
 2. All other packages in parallel, against WP0's contract.
 3. Independent reviews of every package (security and correctness), then fixes.
 4. The lead integrates: runs the end-to-end steps that needed two packages (WP2 with WP1b,
-   WP5b with WP5a, WP4b with WP4a), all suites, docs, version 0.0.5.
+   WP5b with WP5a, WP4b with WP4a), all suites, docs, version 0.0.6 (`package.json`,
+   `package-lock.json`, `src-tauri/tauri.conf.json`, the workspace version in `Cargo.toml`,
+   `Cargo.lock`, CHANGELOG).
 
 **Owner checklist (things only the owner's computers can show; each package adds its own):**
 GPU choices (All of it, As much as fits, Don't use it) and the device list on the RX 9070

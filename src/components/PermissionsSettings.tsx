@@ -7,6 +7,7 @@ import { toErrorInfo } from "../store/app";
 import { useApprovalMode, type ApprovalModeName } from "../lib/approvalMode";
 import { APPROVAL_MODES, AllowAllConfirm, FullAccessConfirm, MODE_LOOK } from "./AllowAllButton";
 import { ErrorBanner } from "./ErrorBanner";
+import { visiblePath } from "./FolderChip";
 
 /** Approved folders for every chat, and the stop hotkey. */
 export function PermissionsSettings() {
@@ -71,10 +72,15 @@ export function PermissionsSettings() {
         <ul className="space-y-1">
           {folders.map((f) => (
             <li key={f.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-1.5">
-              <span className="min-w-0 flex-1 truncate font-mono text-xs" title={f.path}>
-                {f.path}
-              </span>
-              <button type="button" aria-label={`Remove ${f.path}`} onClick={() => void remove(f.id)} className="text-fg-muted hover:text-danger">
+              <bdi dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs" title={visiblePath(f.path)}>
+                {visiblePath(f.path)}
+              </bdi>
+              <button
+                type="button"
+                aria-label={`Remove ${visiblePath(f.path)}`}
+                onClick={() => void remove(f.id)}
+                className="text-fg-muted hover:text-danger"
+              >
                 <Trash2 size={13} aria-hidden />
               </button>
             </li>

@@ -19,6 +19,11 @@ fn main() {
         Some(flag) if flag == tools::git::WORKER_FLAG => {
             tools::git::worker_main();
         }
+        // [0.0.6] WebP pictures are decoded in this binary as a short-lived worker with a
+        // memory cap: a crafted file can make the decoder take gigabytes (attachments.rs).
+        Some(flag) if flag == app_lib::PICTURE_WORKER_FLAG => {
+            app_lib::picture_worker_main();
+        }
         _ => {}
     }
     app_lib::run();

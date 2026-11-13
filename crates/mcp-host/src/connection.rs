@@ -213,6 +213,15 @@ pub(crate) enum Target {
     },
 }
 
+/// How a stopped server process ended ([`Connection::close_with_grace`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Closed {
+    /// It ended by itself within the grace.
+    Exited(ExitInfo),
+    /// It was still running after the grace, so its tree was killed.
+    Killed,
+}
+
 /// A live connection.
 pub(crate) struct Connection {
     pub service: RunningService<RoleClient, HostClient>,
@@ -293,15 +302,37 @@ impl Connection {
     /// Stops the connection: closes the transport (for a process, its stdin), gives a
     /// process [`STOP_GRACE`] to exit and then kills its whole tree.
     pub(crate) async fn close(&self) {
+        self.close_with_grace(STOP_GRACE).await;
+    }
+
+    /// [`Self::close`] with its own `grace` (rea's managed server gives 3 s, so rea can
+    /// end the programs it started itself; item5-spec.md WP9b). Returns how the process
+    /// ended, when there is one: on its own within the grace, or killed after it.
+    pub(crate) async fn close_with_grace(&self, grace: Duration) -> Option<Closed> {
+        self.close_with_grace_then(grace, |_| {}).await
+    }
+
+    /// [`Self::close_with_grace`]; when the grace runs out, `before_kill` gets the process
+    /// id while the process still runs, right before its tree is killed (rea's managed
+    /// server ends the groups its children lead there).
+    pub(crate) async fn close_with_grace_then(
+        &self,
+        grace: Duration,
+        before_kill: impl FnOnce(u32),
+    ) -> Option<Closed> {
         self.stopping.store(true, Ordering::SeqCst);
         self.abort_tasks();
         self.service.cancellation_token().cancel();
-        if let Some(process) = &self.process
-            && process.wait_exit(STOP_GRACE).await.is_none()
-        {
-            process.kill();
-            let _ = process.wait_exit(Duration::from_secs(2)).await;
+        let process = self.process.as_ref()?;
+        if let Some(exit) = process.wait_exit(grace).await {
+            return Some(Closed::Exited(exit));
         }
+        if let Some(pid) = process.pid() {
+            before_kill(pid);
+        }
+        process.kill();
+        let _ = process.wait_exit(Duration::from_secs(2)).await;
+        Some(Closed::Killed)
     }
 
     /// Kills the connection at once (after a cancelled call, 4.2).

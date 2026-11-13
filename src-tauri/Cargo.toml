@@ -40,6 +40,8 @@ policy = { workspace = true }
 tools = { workspace = true }
 browser = { workspace = true }
 search = { workspace = true }
+# Reverse engineering with rea (item5-spec.md): pinned downloads, rea's process, the `reverse` server.
+reverse = { workspace = true }
 computer = { workspace = true }
 mcp-host = { workspace = true }
 # Signed, opt-in updates (registered only when the build carries the updater key).
@@ -52,10 +54,28 @@ dunce = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
+# 0.0.6: WebP pictures become JPEG or PNG before they reach the model (attachments.rs, in a
+# worker process): llama-server reads WebP only through ffmpeg, which the app never lets it
+# start. Pure Rust decoder. jpeg: an opaque picture becomes JPEG, many times smaller than
+# PNG (zune-jpeg is already in the lock through tiff).
+image = { workspace = true, features = ["webp", "jpeg"] }
+# 0.0.5 sharing proxy (share/proxy.rs): a small HTTP/1 server on a loopback port that
+# checks, rebuilds and forwards other apps' requests. hyper, hyper-util and http-body-util
+# are already in the lock through reqwest; the server feature adds only httpdate.
+hyper = { version = "1.12", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+http-body-util = { version = "0.1.5", features = ["channel"] }
+http = { workspace = true }
+bytes = { workspace = true }
+# 0.0.5 setup text for Codex (share/setup_text.rs) is written with the TOML serialiser.
+toml = { workspace = true, features = ["display"] }
+# 0.0.6 item 6: the usage line's readers (crates/usage, WP10c).
+usage = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Reading the Windows build number (ROCm needs Windows 11 25H2); same major as Tauri.
-windows = { version = "0.62", features = ["Win32_System_Registry", "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+# 0.0.6 Win32_Storage_FileSystem: a coding app's file identity (outside_agent/identity.rs).
+windows = { version = "0.62", features = ["Win32_System_Registry", "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem"] }
 
 [lints]
 workspace = true

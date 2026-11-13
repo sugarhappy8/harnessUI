@@ -26,6 +26,10 @@
 //!    or that cannot be fully broken down and can hide what it runs
 //!    ([`may_hide_or_reach`]). A line that only has a glob, a redirection to a file or a
 //!    variable as an argument still shows every program it runs, and is judged by them.
+//! 9. (0.0.6) A coding assistant (Claude Code, Codex and the like) or a token that turns
+//!    off one's permission checks ([`crate::command::coding_apps`]): it asks in Ask first
+//!    and Allow all, runs in Full access (D11 as amended for 0.0.6), and counts as reaching
+//!    the network. Sensitive places (rule 4) include their settings.
 //!
 //! Like the terminal classifier it builds on, this is a guard against accidents and
 //! obvious abuse, not a security boundary. It reads the command line. What a script file
@@ -49,6 +53,11 @@ pub struct CommandFacts {
     pub network: bool,
     /// The command could not be fully broken down (its text was scanned for words).
     pub opaque: bool,
+    /// 0.0.6: why the command starts a coding assistant or turns off one's permission
+    /// checks ([`crate::command::coding_apps`]). Such a command asks in Ask first and Allow
+    /// all, runs in Full access (D11 as amended for 0.0.6), and counts as reaching the
+    /// network.
+    pub coding_app: Option<String>,
 }
 
 /// Programs that delete or empty files, beyond [`DELETES`]. That list also decides what a
@@ -73,7 +82,7 @@ const MORE_SYSTEM: &[&str] = &["netsh", "set-mppreference", "set-executionpolicy
 /// Programs that run another program, beyond [`WRAPPERS`]. Package runners such as `npx`
 /// are not here: `npx vitest run` is a plain test run, and what they are handed is read
 /// like any other program's arguments (`npx rimraf dist` asks).
-const MORE_WRAPPERS: &[&str] = &[
+pub(crate) const MORE_WRAPPERS: &[&str] = &[
     "busybox",
     "toybox",
     "forfiles",
@@ -259,6 +268,7 @@ struct Found {
     sensitive: Option<String>,
     network: bool,
     opaque: bool,
+    coding_app: Option<String>,
 }
 
 impl Found {
@@ -294,6 +304,7 @@ impl Found {
             keep_asking,
             network: self.network,
             opaque: self.opaque,
+            coding_app: self.coding_app,
         }
     }
 }
@@ -301,6 +312,15 @@ impl Found {
 /// The Allow-all facts of a command line. `strict` is what [`crate::command::parse`]
 /// made of it.
 pub fn command_facts(shell: Shell, line: &str, strict: &Parsed) -> CommandFacts {
+    // The text is read as the POSIX shell reads it: two lines joined by a backslash are
+    // one (as `parse` reads them).
+    let joined;
+    let line = if shell == Shell::Posix {
+        joined = crate::command::join_lines(line);
+        joined.as_ref()
+    } else {
+        line
+    };
     // For this mode a PowerShell double-quoted string with nothing to expand is the
     // literal it is; on Windows almost every quoted argument is written that way.
     let lenient;
@@ -343,6 +363,14 @@ pub fn command_facts(shell: Shell, line: &str, strict: &Parsed) -> CommandFacts 
     if hides {
         // Rule 8: it may reach the network.
         found.network = true;
+    }
+    // Rule 9 (0.0.6): a coding assistant, or a token that turns off its permission checks.
+    // It works online with the user's account and can change files on its own, so it asks
+    // and counts as reaching the network.
+    if let Some(why) = crate::command::coding_apps::find(line, parsed) {
+        found.network = true;
+        found.note(KeepAsking::Hidden, || why.clone());
+        found.coding_app = Some(why);
     }
     if !only_reads && !found.any() {
         sensitive_place(line, &mut found);
@@ -1204,7 +1232,15 @@ fn sensitive_place(line: &str, found: &mut Found) {
         });
         return;
     }
-    const FOLDERS: &[&str] = &[".git", ".ssh", ".gnupg", "launchagents", "launchdaemons"];
+    const FOLDERS: &[&str] = &[
+        ".git",
+        ".ssh",
+        ".gnupg",
+        "launchagents",
+        "launchdaemons",
+        ".claude",
+        ".codex",
+    ];
     for word in lower.split(|c: char| {
         c.is_whitespace()
             || matches!(

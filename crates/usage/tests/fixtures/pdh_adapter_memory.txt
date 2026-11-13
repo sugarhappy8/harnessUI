@@ -1,0 +1,6 @@
+# \GPU Adapter Memory(*)\Dedicated Usage: instance<TAB>bytes
+luid_0x00000000_0x0000E2F0_phys_0	12884901888
+luid_0x00000001_0x0000D1E5_phys_0	536870912
+luid_0x00000000_0x0000E2F0_phys_1	1073741824
+garbage	5
+luid_0x00000000_0x00001111_phys_0	-5

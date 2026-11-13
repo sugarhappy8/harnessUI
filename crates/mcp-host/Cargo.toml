@@ -44,5 +44,12 @@ name = "stdio_e2e"
 path = "tests/stdio_e2e.rs"
 harness = false
 
+# The app's own managed server (rea, item5-spec.md WP9b); doubles as a hand-written fake
+# MCP server that records every line it receives (see the file header).
+[[test]]
+name = "managed_e2e"
+path = "tests/managed_e2e.rs"
+harness = false
+
 [lints]
 workspace = true

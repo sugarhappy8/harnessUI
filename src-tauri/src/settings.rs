@@ -55,6 +55,9 @@ pub fn provider_models_key(provider_id: store::ProviderId) -> String {
     format!("providerModels:{}", provider_id.0)
 }
 
+/// 0.0.5: without the upgrade rule; loads read `load_settings::read_defaults` instead.
+/// No caller is left; the lead may remove it.
+#[allow(dead_code, reason = "0.0.6 WP1b: no callers left")]
 pub async fn local_model_settings(app: &AppHandle) -> LocalModelSettings {
     let state = app.state::<AppState>();
     state
@@ -66,21 +69,11 @@ pub async fn local_model_settings(app: &AppHandle) -> LocalModelSettings {
         .unwrap_or_default()
 }
 
-/// Remembers a model file so it appears in the model picker.
+/// Remembers a model file so it appears first in the model picker: its canonical path,
+/// with any older spelling of the same file dropped (0.0.6 item 8, `model_options`). The
+/// chat that opened it through a link or a mapped drive still sees that spelling there.
 pub async fn remember_local_model(state: &AppState, path: &str) {
-    let mut recent: Vec<String> = state
-        .store
-        .get_setting(RECENT_LOCAL_MODELS)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    recent.retain(|p| p != path);
-    recent.insert(0, path.to_string());
-    recent.truncate(20);
-    if let Err(e) = state.store.set_setting(RECENT_LOCAL_MODELS, &recent).await {
-        tracing::warn!("could not save recent models: {e}");
-    }
+    crate::model_options::remember(&state.store, path).await;
 }
 
 #[cfg(test)]

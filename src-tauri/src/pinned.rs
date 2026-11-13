@@ -155,7 +155,7 @@ fn texts(read: Result<Vec<store::Pin>, store::StoreError>) -> AppResult<Vec<Stri
 /// choose a remote endpoint's context size.
 pub fn next_step(local: bool) -> &'static str {
     if local {
-        "Remove or shorten pinned instructions in the Context tab, or load the model with a larger context."
+        "Remove or shorten pinned instructions in the Context tab, or choose Model settings to let this model remember more."
     } else {
         "Remove or shorten pinned instructions in the Context tab. If the server's model has a larger context, set it in Settings → Endpoints."
     }

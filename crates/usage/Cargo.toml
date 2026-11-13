@@ -1,0 +1,45 @@
+[package]
+name = "usage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Live usage of this computer's graphics card and processor, read on request (item 6: the usage line)."
+
+[lib]
+name = "usage"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+# One log line per reader thread when a system call fails (item 6, section 5).
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# PDH counters (Task Manager's figures), DXGI adapter enumeration without creating a device,
+# GetSystemTimes and the processor count. Same major as Tauri and the other crates.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Performance",
+    "Win32_Graphics_Dxgi",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The IORegistry's PerformanceStatistics dictionary (a subset of crates/computer's features).
+objc2-core-foundation = { workspace = true, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
+# host_statistics (processor ticks) and sysctl (thread count).
+libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# sysconf (thread count).
+libc = { workspace = true }
+
+[dev-dependencies]
+# The JSON shape the webview reads (item 6, section 2.5).
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

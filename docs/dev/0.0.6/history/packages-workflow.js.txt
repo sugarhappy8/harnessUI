@@ -1,0 +1,96 @@
+export const meta = {
+  name: 'v005-packages',
+  description: 'Build 0.0.5 work packages, review each one for security and for correctness, then fix what the reviews found',
+  phases: [
+    { title: 'Build', detail: 'one developer per work package' },
+    { title: 'Review', detail: 'security and correctness reviews per package, in parallel' },
+    { title: 'Fix', detail: 'the developer\'s fixes for what the reviews found' },
+  ],
+}
+
+// Kept for 0.0.6 (2026-11-12): the script that built the work packages before they were
+// paused. Their briefs are `args.packages` (see resume-args.json beside this file, one entry
+// per earlier run; `resume: true` tells a developer that part of the package is already in
+// the tree). ROOT and SCRATCH below are the paths of the session that ran it: set them to
+// your checkout and a scratch folder of your own before running it again.
+
+const ROOT = '/home/user/harnissUI'
+const SCRATCH = '/tmp/claude-0/-home-user-harnissUI/23ef2267-cb6f-5325-b082-a4b40b3ccb19/scratchpad/v005'
+const ALL = 'WP1a, WP1b, WP2, WP3a, WP3b, WP4a, WP4b, WP4c, WP5a, WP5b, WP6'
+const pkgs = args.packages
+
+const READ = `Read ${ROOT}/docs/dev/0.0.6/spec.md completely first: Part 1 (rules, binding), Part 2 (shared decisions, storage, shared contracts, shared files, and "Amendments after WP0", binding), Part 3 (your package, and the Owns lists of all the others), Part 4 (owner checklist). Then the section "CONTRACT (updated)" of ${ROOT}/docs/dev/0.0.6/report-WP0-fix.md, which is the exact contract you build against. Use ${ROOT}/docs/dev/0.0.6/map.md and map-details.md for orientation (line numbers there are from before the groundwork). Then read the code you will change.`
+
+function buildPrompt(p) {
+  return `You are the developer of work package ${p.key} of version 0.0.5 of a desktop app (Tauri 2; Rust in crates/* and src-tauri/; React and TypeScript in src/) that runs local AI models with tools. Repository: ${ROOT}.
+
+${READ}
+
+Other developers are building the other packages (${ALL}) in this same working tree at the same time. Follow the Part 1 rules for shared files, mid-edit build failures and the shared build lock exactly. The groundwork package WP0 is finished; its stubs return fixed sample data where another package's real code is not in yet.
+
+Build everything in your package's section of Part 3, including its tests and its end-to-end scenario, to the standard Part 1 sets. ${p.extra}
+
+${p.resume ? 'THIS IS A RESUMED RUN: an earlier developer of this package was interrupted (the usage limit ended the session). Part of the package may already be in the tree, uncommitted or committed with [skip ci]. First find what exists (git log, git diff aabd67e -- your files, the tests), keep what works, and finish the rest; do not start over. ' : ''}Your scratch folder for end-to-end output: ${SCRATCH}/e2e-${p.key}. Your final message is your report, exactly as Part 1 "Your final message" describes; it is the only thing the lead and the reviewers will see of your work besides the code.`
+}
+
+const FINDINGS = {
+  type: 'object',
+  properties: {
+    lens: { type: 'string' },
+    findings: { type: 'array', items: { type: 'object', properties: {
+      severity: { type: 'string', enum: ['blocker', 'major', 'minor'] },
+      title: { type: 'string' },
+      location: { type: 'string', description: 'file:line' },
+      scenario: { type: 'string', description: 'concrete inputs or steps and what goes wrong' },
+      evidence: { type: 'string', description: 'test or command you ran and its output, or "read only"' },
+      verified: { type: 'boolean' },
+      fix: { type: 'string', description: 'smallest change that fixes it' },
+    }, required: ['severity', 'title', 'location', 'scenario', 'evidence', 'verified', 'fix'] } },
+    checks_run: { type: 'array', items: { type: 'string' } },
+    sound: { type: 'array', items: { type: 'string' }, description: 'what you checked and found sound' },
+  },
+  required: ['lens', 'findings', 'checks_run', 'sound'],
+}
+
+function reviewPrompt(p, lens, report) {
+  const common = `You are an independent reviewer of work package ${p.key} of version 0.0.5 in ${ROOT}. ${READ}
+
+Then review what ${p.key} built. The developer's report is below; do not trust it: read the code (git diff aabd67e -- <the package's files>, read-only git only; never change git state or edit tracked files) and test your suspicions (cargo +1.99 test -p <crate> <filter> with export CARGO_INCREMENTAL=0; npm test; throwaway test files only under ${SCRATCH}/review-${p.key}-${lens} or as untracked files you delete before finishing). Other developers are still editing other packages in the tree: a build failure in a file outside ${p.key} is not this package's fault; wait and retry. Prefer a few confirmed findings over many guesses; for each give location, a concrete scenario, the evidence (what you ran and saw), whether you confirmed it, and the smallest fix. List what you checked and found sound.`
+  const focus = lens === 'security'
+    ? `LENS: SECURITY AND SAFETY. Use the rules of Part 1 "Rules that are never traded away" and ARCHITECTURE.md section 13 as the bar. ${p.security}`
+    : `LENS: CORRECTNESS AND COMPLETENESS AGAINST THE SPEC. Check every requirement of ${p.key}'s section in Part 3 and the decisions of Part 2 that apply (D1-D11, storage, amendments): is it built, does it work, is it tested, is the user-facing wording exactly as specified and plain? Re-run the package's tests and its checks (clippy for its crates, its unit tests, frontend tests if it has frontend code) and, if practical, its end-to-end scenario; report failures. Check edge cases (empty, huge, unusual input; Windows and macOS paths and behaviour as far as reading shows; old saved data). Check that existing tests were not weakened and that labels pinned by tests were updated everywhere per D7. ${p.correctness || ''}`
+  return `${common}
+
+${focus}
+
+DEVELOPER REPORT:
+${report}`
+}
+
+function fixPrompt(p, report, reviews) {
+  return `You are the developer of work package ${p.key} of version 0.0.5 in ${ROOT}, fixing what two independent reviewers found. ${READ}
+
+${p.resume ? 'This may be a resumed run after an interruption: check what is already fixed in the tree before changing anything. ' : ''}Your earlier report and the reviews are below. Fix every blocker and major finding, and the minor ones that are cheap and safe. If you believe a finding is wrong, do not change the code for it: explain precisely why, with evidence. Write a test that fails before each fix where practical. Other developers are still editing other packages in this tree; follow the Part 1 rules. Then re-run your package's checks (fmt, clippy for your crates, your tests, frontend checks if you have frontend code, your end-to-end scenario). Your final message: per finding, what you did (fixed / not changed and why), the tests added, the check results with counts, and then your complete updated report in the Part 1 format (so the lead has one current report).
+
+YOUR EARLIER REPORT:
+${report}
+
+REVIEWS:
+${JSON.stringify(reviews, null, 1)}`
+}
+
+const results = await pipeline(
+  pkgs,
+  p => agent(buildPrompt(p), { label: `build:${p.key}`, phase: 'Build' }),
+  (report, p) => parallel([
+    () => agent(reviewPrompt(p, 'security', report), { label: `security:${p.key}`, phase: 'Review', schema: FINDINGS }),
+    () => agent(reviewPrompt(p, 'correctness', report), { label: `correctness:${p.key}`, phase: 'Review', schema: FINDINGS }),
+  ]).then(reviews => ({ report, reviews: reviews.filter(Boolean) })),
+  (x, p) => {
+    const serious = x.reviews.flatMap(r => r.findings || []).filter(f => f.severity !== 'minor' || f.verified)
+    if (!serious.length) { log(`${p.key}: reviews found nothing to fix`); return { key: p.key, ...x, fix: null } }
+    return agent(fixPrompt(p, x.report, x.reviews), { label: `fix:${p.key}`, phase: 'Fix' })
+      .then(fix => ({ key: p.key, ...x, fix }))
+  },
+)
+return results

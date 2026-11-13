@@ -4,6 +4,7 @@ import { FlaskConical } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import type { ModelOption, Provider } from "../../lib/types";
 import { useApp } from "../../store/app";
+import { visiblePath } from "../FolderChip";
 import type { EvalProgress } from "./types";
 
 /** Clicks on the start button are ignored for this long after the dialog opens. */
@@ -113,7 +114,7 @@ export function ModelSelect(props: {
     >
       {props.options.map((o) => (
         <option key={o.ref} value={o.ref}>
-          {o.source === "local" ? `${o.label} (loaded)` : o.label}
+          {o.source === "local" ? `${visiblePath(o.label)} (loaded)` : visiblePath(o.label)}
         </option>
       ))}
     </select>
@@ -174,7 +175,9 @@ export function RunConfirm(props: {
               <FlaskConical size={18} className="shrink-0 text-accent" aria-hidden />
               {props.title}
             </AlertDialog.Title>
-            <AlertDialog.Description className="mt-2 text-fg-muted">Model: {props.model}</AlertDialog.Description>
+            <AlertDialog.Description className="mt-2 text-fg-muted">
+              Model: <bdi dir="ltr">{visiblePath(props.model)}</bdi>
+            </AlertDialog.Description>
             <ul aria-label="What happens" className="mt-3 list-disc space-y-1 pl-5 text-fg-muted">
               {props.lines.map((line) => (
                 <li key={line}>{line}</li>

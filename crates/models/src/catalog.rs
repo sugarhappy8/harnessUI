@@ -88,9 +88,144 @@ pub struct Entry {
     /// Measured memory at the tier's recommended context, in bytes.
     #[serde(default)]
     pub memory_at_recommended_ctx: Option<u64>,
+
+    // ---- 0.0.6 item 4 (comparison): all optional, so older catalogs still read and
+    // older parsers (which ignore unknown fields) still read newer catalogs. What a
+    // model is good at comes only from the publisher's own model card (D6).
+    /// A verbatim quote of at most two sentences from the publisher's model card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Keys from [`GOOD_AT`], each backed by a phrase on the publisher's card. Unknown
+    /// keys (and anything that is not a string) are dropped when read, never an error.
+    #[serde(
+        default,
+        deserialize_with = "good_at_keys",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub good_at: Vec<String>,
+    /// Parameters, in units (9 billion is 9000000000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<u64>,
+    /// For a mixture of experts: the parameters used at a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_parameters: Option<u64>,
+    /// Who made the model (not who converted it to GGUF).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    /// Language codes from the publisher's card (`en`, `fr`, or `multilingual`). A single
+    /// string is read as a list of one; anything that is not a string is dropped.
+    #[serde(
+        default,
+        deserialize_with = "string_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub languages: Vec<String>,
+    /// Release date, `YYYY-MM-DD` or `YYYY-MM` (see [`Entry::released_date`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released: Option<String>,
+    /// The publisher's model card on huggingface.co that `summary` and `goodAt` come
+    /// from (see [`Entry::source_repo`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// What a model can be "good at" (0.0.6 item 4), in the order the specification lists
+/// them. The webview has a phrase for each (`src/lib/abilities.ts`).
+pub const GOOD_AT: [&str; 10] = [
+    "chat",
+    "writing",
+    "coding",
+    "reasoning",
+    "math",
+    "tools",
+    "images",
+    "long-documents",
+    "languages",
+    "speed",
+];
+
+/// Reads `goodAt` leniently: the known keys of a list, once each, in the order given.
+fn good_at_keys<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let mut out: Vec<String> = Vec::new();
+    for key in strings_of(&v) {
+        if GOOD_AT.contains(&key) && !out.iter().any(|k| k == key) {
+            out.push(key.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Reads a string or a list of strings; other values are dropped.
+fn string_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(strings_of(&v).map(str::to_string).collect())
+}
+
+fn strings_of(v: &serde_json::Value) -> impl Iterator<Item = &str> {
+    let items: Vec<&serde_json::Value> = match v {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        other => vec![other],
+    };
+    items.into_iter().filter_map(serde_json::Value::as_str)
 }
 
 impl Entry {
+    /// The `owner/name` of the publisher's model card, when `source` is an https link
+    /// to a repository page on huggingface.co; `None` otherwise (the link is not shown).
+    pub fn source_repo(&self) -> Option<String> {
+        let url = reqwest::Url::parse(self.source.as_deref()?.trim()).ok()?;
+        if url.scheme() != "https"
+            || url.host_str() != Some("huggingface.co")
+            || url.port().is_some()
+            || !url.username().is_empty()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        let path = url.path().trim_matches('/');
+        validate_repo_id(path).ok()?;
+        Some(path.to_string())
+    }
+
+    /// The publisher's model card link, only when [`Self::source_repo`] accepts it.
+    pub fn source_url(&self) -> Option<String> {
+        self.source_repo()
+            .map(|repo| format!("https://huggingface.co/{repo}"))
+    }
+
+    /// `released` when it is a date the app can show (`YYYY-MM-DD` or `YYYY-MM`).
+    pub fn released_date(&self) -> Option<&str> {
+        let r = self.released.as_deref()?.trim();
+        let b = r.as_bytes();
+        let digits = |range: std::ops::Range<usize>| b[range].iter().all(u8::is_ascii_digit);
+        let month_ok = |m: &[u8]| matches!(m, [b'0', b'1'..=b'9'] | [b'1', b'0'..=b'2']);
+        let ok = match b.len() {
+            7 => digits(0..4) && b[4] == b'-' && month_ok(&b[5..7]),
+            10 => {
+                digits(0..4)
+                    && b[4] == b'-'
+                    && month_ok(&b[5..7])
+                    && b[7] == b'-'
+                    && digits(8..10)
+                    && (b"01".as_slice()..=b"31".as_slice()).contains(&&b[8..10])
+            }
+            _ => false,
+        };
+        ok.then_some(r)
+    }
+
+    /// `active_parameters` only when it is smaller than `parameters` (a mixture of
+    /// experts); a value that cannot be right is not shown.
+    pub fn active_parameters_checked(&self) -> Option<u64> {
+        let active = self.active_parameters?;
+        match self.parameters {
+            Some(total) if active > 0 && active < total => Some(active),
+            _ => None,
+        }
+    }
+
     pub fn weights_bytes(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }
@@ -389,6 +524,276 @@ mod tests {
         use base64::Engine;
         let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
         assert!(verify_refresh(TEST_CATALOG, &b64(TEST_SIG), Some(&b64(TEST_PUBKEY)), 1).is_ok());
+    }
+
+    // ---- 0.0.6 item 4: comparison fields ---------------------------------------------
+
+    /// A catalog with the comparison fields (made-up names and numbers).
+    const COMPARE_CATALOG: &str = include_str!("../tests/fixtures/catalog/compare-fields.json");
+
+    #[test]
+    fn new_fields_are_read() {
+        let c = Catalog::parse(COMPARE_CATALOG).unwrap();
+        let e = &c.models["sample-7b-q4km"];
+        assert_eq!(
+            e.summary.as_deref(),
+            Some(
+                "Sample 7B is a small model made for testing. It answers questions and writes code."
+            )
+        );
+        assert_eq!(e.parameters, Some(7_000_000_000));
+        assert_eq!(e.active_parameters, None);
+        assert_eq!(e.publisher.as_deref(), Some("Example Labs"));
+        assert_eq!(e.languages, ["en", "fr"]);
+        assert_eq!(e.released_date(), Some("2026-03"));
+        assert_eq!(e.source_repo().as_deref(), Some("example-labs/Sample-7B"));
+        assert_eq!(
+            e.source_url().as_deref(),
+            Some("https://huggingface.co/example-labs/Sample-7B")
+        );
+
+        let moe = &c.models["sample-moe-q4km"];
+        assert_eq!(moe.active_parameters_checked(), Some(3_000_000_000));
+        assert_eq!(moe.released_date(), Some("2026-05-02"));
+        // A single string is a list of one.
+        assert_eq!(moe.languages, ["multilingual"]);
+        assert_eq!(moe.license.name.as_deref(), Some("Example Model License"));
+    }
+
+    /// `goodAt` keeps the known keys once each, in order, and drops the rest without
+    /// rejecting the catalog.
+    #[test]
+    fn good_at_vocabulary() {
+        let c = Catalog::parse(COMPARE_CATALOG).unwrap();
+        assert_eq!(
+            c.models["sample-7b-q4km"].good_at,
+            ["chat", "coding", "long-documents"]
+        );
+        assert_eq!(
+            c.models["sample-moe-q4km"].good_at,
+            ["reasoning", "math", "speed"]
+        );
+        assert!(c.models["sample-plain-q8"].good_at.is_empty());
+        // Every key of the vocabulary is accepted; a lone string, an object or null
+        // are not lists of keys but do not break the catalog.
+        let mut v: serde_json::Value = serde_json::from_str(COMPARE_CATALOG).unwrap();
+        v["models"]["sample-plain-q8"]["goodAt"] = serde_json::json!(GOOD_AT);
+        let c = Catalog::parse(&v.to_string()).unwrap();
+        assert_eq!(c.models["sample-plain-q8"].good_at, GOOD_AT);
+        for odd in [
+            serde_json::json!("coding"),
+            serde_json::json!({"coding": true}),
+            serde_json::Value::Null,
+        ] {
+            v["models"]["sample-plain-q8"]["goodAt"] = odd.clone();
+            let c = Catalog::parse(&v.to_string()).unwrap();
+            let keys = &c.models["sample-plain-q8"].good_at;
+            assert!(keys.is_empty() || keys == &["coding"], "{odd}: {keys:?}");
+        }
+    }
+
+    /// Values the app cannot show are left out at use, never a reason to reject the
+    /// catalog (a bundled catalog that did not parse would stop the app).
+    #[test]
+    fn unusable_values_are_left_out() {
+        let c = Catalog::parse(COMPARE_CATALOG).unwrap();
+        let plain = &c.models["sample-plain-q8"];
+        assert_eq!(plain.source_repo(), None, "http and another host");
+        assert_eq!(plain.source_url(), None);
+        assert_eq!(plain.released_date(), None);
+        assert_eq!(
+            plain.active_parameters_checked(),
+            None,
+            "more than the total"
+        );
+        let with = |source: &str| Entry {
+            source: Some(source.into()),
+            ..plain.clone()
+        };
+        for bad in [
+            "https://huggingface.co/",
+            "https://huggingface.co/only-owner",
+            "https://huggingface.co/a/b/tree/main",
+            "https://huggingface.co.evil.example/a/b",
+            "https://user@huggingface.co/a/b",
+            "https://huggingface.co:8443/a/b",
+            "https://huggingface.co/a/b?x=1",
+            "https://huggingface.co/a/..",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert_eq!(with(bad).source_repo(), None, "{bad}");
+        }
+        assert_eq!(
+            with("https://huggingface.co/a-b/c.d_e/")
+                .source_repo()
+                .as_deref(),
+            Some("a-b/c.d_e")
+        );
+        let on = |released: &str| Entry {
+            released: Some(released.into()),
+            ..plain.clone()
+        };
+        for good in ["2026-01", "2026-12", "2026-02-28", "2025-10-31"] {
+            assert_eq!(on(good).released_date(), Some(good));
+        }
+        for bad in [
+            "2026-13",
+            "2026-00",
+            "2026-1",
+            "2026-01-32",
+            "2026-01-00",
+            "26-01",
+        ] {
+            assert_eq!(on(bad).released_date(), None, "{bad}");
+        }
+    }
+
+    /// The catalog as 0.0.5 parsed it, field for field (no `deny_unknown_fields`, as
+    /// then): a 0.0.5 app reading a 0.0.6 catalog ignores the new fields.
+    mod v005 {
+        #![allow(dead_code)]
+        use std::collections::BTreeMap;
+
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct Catalog {
+            pub schema_version: u32,
+            pub sequence: u64,
+            pub generated: String,
+            #[serde(default)]
+            pub note: Option<String>,
+            pub tiers: BTreeMap<String, Tier>,
+            pub models: BTreeMap<String, Entry>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct Tier {
+            pub recommended_ctx: u64,
+            pub models: Vec<String>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct License {
+            pub spdx: String,
+            #[serde(default)]
+            pub name: Option<String>,
+            #[serde(default)]
+            pub url: Option<String>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct Tested {
+            pub llama_build: String,
+            pub date: String,
+            #[serde(default)]
+            pub hardware: Option<String>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct Entry {
+            pub name: String,
+            pub repo: String,
+            pub revision: String,
+            pub files: Vec<crate::files::RepoFile>,
+            #[serde(default)]
+            pub mmproj: Option<crate::files::RepoFile>,
+            pub quant: String,
+            #[serde(default)]
+            pub capabilities: Vec<String>,
+            pub license: License,
+            #[serde(default)]
+            pub gated: bool,
+            #[serde(default)]
+            pub sampling: BTreeMap<String, serde_json::Value>,
+            #[serde(default)]
+            pub min_llama_build: Option<String>,
+            #[serde(default)]
+            pub tested: Option<Tested>,
+            #[serde(default)]
+            pub memory_at_recommended_ctx: Option<u64>,
+        }
+    }
+
+    #[test]
+    fn an_older_parser_reads_a_catalog_with_the_new_fields() {
+        let old: v005::Catalog = serde_json::from_str(COMPARE_CATALOG).unwrap();
+        assert_eq!(old.schema_version, 1);
+        assert_eq!(old.sequence, 2);
+        assert_eq!(old.models.len(), 3);
+        let e = &old.models["sample-moe-q4km"];
+        assert_eq!(e.files.len(), 2);
+        assert_eq!(e.license.spdx, "other");
+        assert_eq!(old.tiers["24"].models, ["sample-moe-q4km"]);
+        assert_eq!(e.name, "Sample MoE 30B");
+        // And the bundled catalog, whatever it holds now.
+        let bundled: v005::Catalog = serde_json::from_str(BUNDLED).unwrap();
+        assert_eq!(bundled.models.len(), Catalog::bundled().models.len());
+    }
+
+    /// A catalog without the new fields (the signed 0.0.5 test catalog) reads with
+    /// every new field empty; writing it again leaves them out.
+    #[test]
+    fn a_catalog_without_the_new_fields_still_reads() {
+        let c = Catalog::parse(TEST_CATALOG).unwrap();
+        for e in c.models.values() {
+            assert!(e.summary.is_none() && e.good_at.is_empty() && e.parameters.is_none());
+            assert!(e.publisher.is_none() && e.languages.is_empty() && e.source.is_none());
+            assert!(e.released.is_none() && e.active_parameters.is_none());
+        }
+        let again = serde_json::to_value(&c).unwrap();
+        let first = again["models"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap();
+        for key in [
+            "summary",
+            "goodAt",
+            "parameters",
+            "publisher",
+            "languages",
+            "source",
+        ] {
+            assert!(first.get(key).is_none(), "{key}");
+        }
+        // The new fields survive a round trip.
+        let c = Catalog::parse(COMPARE_CATALOG).unwrap();
+        let back = Catalog::parse(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c);
+    }
+
+    /// What the bundled catalog says in the new fields is what the app shows: a link,
+    /// date or count it would leave out is a mistake in the catalog (WP4c's content).
+    #[test]
+    fn bundled_comparison_fields_are_usable() {
+        let c = Catalog::bundled();
+        for (id, e) in &c.models {
+            if e.source.is_some() {
+                assert!(e.source_repo().is_some(), "{id}: source {:?}", e.source);
+            }
+            if e.released.is_some() {
+                assert!(
+                    e.released_date().is_some(),
+                    "{id}: released {:?}",
+                    e.released
+                );
+            }
+            if e.active_parameters.is_some() {
+                assert!(
+                    e.active_parameters_checked().is_some(),
+                    "{id}: active parameters"
+                );
+            }
+            if let Some(s) = &e.summary {
+                assert!(
+                    !s.trim().is_empty() && s.chars().count() <= 600,
+                    "{id}: summary"
+                );
+                assert!(!s.chars().any(char::is_control), "{id}: summary");
+            }
+        }
     }
 
     #[test]

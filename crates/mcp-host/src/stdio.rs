@@ -49,6 +49,46 @@ pub(crate) struct Prepared {
     pub command: String,
     /// The `PATH` the command was looked up in.
     pub search: OsString,
+    /// Counts the processes started from this until their tree has ended (the app's own
+    /// managed server waits on it for a process it no longer holds).
+    pub processes: Option<ProcessCount>,
+}
+
+/// How many processes started from one [`Prepared`] have not been seen to end: counted just
+/// before one is spawned (so whoever sees it run sees it counted), and no longer once its
+/// supervisor has seen its tree end (or is dropped), or when the spawn fails. A start whose
+/// future is dropped drops its [`ChildProcess`], and the supervisor then kills the tree
+/// without anyone waiting; this is how the owner waits for it.
+#[derive(Clone)]
+pub(crate) struct ProcessCount(Arc<watch::Sender<usize>>);
+
+impl Default for ProcessCount {
+    fn default() -> Self {
+        Self(Arc::new(watch::Sender::new(0)))
+    }
+}
+
+impl ProcessCount {
+    /// Counts one more process until the returned value is dropped.
+    fn count(&self) -> Counted {
+        self.0.send_modify(|n| *n += 1);
+        Counted(self.clone())
+    }
+
+    /// Waits until none of them runs.
+    pub(crate) async fn none_left(&self) {
+        let mut count = self.0.subscribe();
+        let _ = count.wait_for(|n| *n == 0).await;
+    }
+}
+
+/// One process counted in a [`ProcessCount`].
+struct Counted(ProcessCount);
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.0.send_modify(|n| *n = n.saturating_sub(1));
+    }
 }
 
 /// Resolves the command, arguments, environment and working folder of a stdio server.
@@ -105,6 +145,7 @@ pub(crate) fn prepare(
         program,
         command: command.trim().to_owned(),
         search,
+        processes: None,
     })
 }
 
@@ -467,6 +508,8 @@ pub(crate) fn spawn(
     #[cfg(not(windows))]
     let _ = &prepared.raw_args;
     runtime::spawn::init_parent_error_mode();
+    // Before the spawn: the child may run before `spawn` returns.
+    let counted = prepared.processes.as_ref().map(ProcessCount::count);
     let child = wrap.spawn()?;
     let pid = child.id();
     let mut guard = Guard {
@@ -474,6 +517,7 @@ pub(crate) fn spawn(
         pid,
         exited: false,
         reaper_pgid: None,
+        _counted: counted,
     };
     guard.register_with_reaper();
     let stdin = guard
@@ -540,6 +584,8 @@ struct Guard {
     pid: Option<u32>,
     exited: bool,
     reaper_pgid: Option<u32>,
+    /// No longer counts the child once the guard goes (after its exit was seen).
+    _counted: Option<Counted>,
 }
 
 impl Guard {
@@ -784,6 +830,7 @@ mod tests {
             program: PathBuf::from(program),
             command: command.to_owned(),
             search: OsString::from(search),
+            processes: None,
         }
     }
 

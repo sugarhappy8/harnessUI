@@ -8,10 +8,12 @@
 pub mod backend;
 pub mod devices;
 pub mod failure;
+pub mod fit_params;
 pub mod launch;
 pub mod lock;
 pub mod props;
 pub mod protocol;
 pub mod server;
+pub mod stage;
 
 mod lines;

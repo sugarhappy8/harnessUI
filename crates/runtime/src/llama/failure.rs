@@ -32,7 +32,7 @@ impl LoadFailure {
     /// A short plain-language explanation.
     pub fn user_message(&self) -> &'static str {
         match self {
-            Self::OutOfMemory => "This model doesn't fit in the available memory.",
+            Self::OutOfMemory => "This model needs more memory than is free.",
             Self::InvalidDevice(_) => {
                 "The selected graphics device isn't available to this backend."
             }
@@ -42,17 +42,22 @@ impl LoadFailure {
                 "The model file couldn't be read. It may be incomplete, damaged, not a GGUF model, or a kind of model this version can't run."
             }
             Self::ContextTooLarge => {
-                "The model loaded, but the chosen context length doesn't fit in memory."
+                "The model loaded, but there isn't enough memory left for how much it should remember."
             }
             Self::Unknown => "The model runner stopped while loading the model.",
         }
     }
 
     /// What the user can do about it.
+    ///
+    /// For the memory failures it names only what is left for the user: before one is
+    /// shown, the supervisor has already put less of the model on the graphics card and
+    /// tried the processor where it could (0.0.6, see
+    /// [`Supervisor`](super::server::Supervisor)).
     pub fn next_step(&self) -> &'static str {
         match self {
             Self::OutOfMemory => {
-                "Use a smaller context, run part of the model on the CPU, or pick a smaller model."
+                "Close other programs or pick a smaller download. Lowering How much it can remember in Model settings also helps."
             }
             Self::InvalidDevice(_) => {
                 "Choose another device or backend in Settings, or switch to CPU for now."
@@ -62,7 +67,9 @@ impl LoadFailure {
             }
             Self::PortInUse => "Restart the app.",
             Self::ModelFileInvalid => "Download the model again, or choose a different file.",
-            Self::ContextTooLarge => "Lower the context length and try again.",
+            Self::ContextTooLarge => {
+                "In Model settings, lower How much it can remember, or turn on Save memory if it is off."
+            }
             Self::Unknown => "Copy the details and check the logs, or try the CPU backend.",
         }
     }
@@ -71,6 +78,25 @@ impl LoadFailure {
     /// down"). A broken model file or a port problem fails the same way on any backend.
     pub fn may_succeed_on_another_backend(&self) -> bool {
         !matches!(self, Self::ModelFileInvalid | Self::PortInUse)
+    }
+
+    /// Whether Save memory (flash attention with a q8_0 conversation memory) may have
+    /// caused the failure, so a retry with it off is worth one attempt (0.0.6 D2c).
+    ///
+    /// A device or driver that cannot do it shows as a failed context (llama.cpp refuses a
+    /// q8_0 memory without flash attention) or as a crash. A failure to allocate the
+    /// weights ([`LoadFailure::OutOfMemory`]) happens before the context exists, so Save
+    /// memory cannot cause it; turning it off would only need more memory. The supervisor
+    /// asks this only while a graphics card is in use; anywhere else it retries without
+    /// Save memory only when the log shows the model refusing it ([`save_memory_refused`]).
+    pub fn save_memory_may_be_the_cause(&self) -> bool {
+        matches!(self, Self::ContextTooLarge | Self::Unknown)
+    }
+
+    /// Whether a device ran out of memory, for the weights or for the context, so putting
+    /// less of the model on the graphics card may help.
+    pub fn is_out_of_memory(&self) -> bool {
+        matches!(self, Self::OutOfMemory | Self::ContextTooLarge)
     }
 }
 
@@ -150,6 +176,39 @@ pub fn classify(stderr_tail: &[String], exit_code: Option<i32>) -> LoadFailure {
         return LoadFailure::ModelFileInvalid;
     }
     LoadFailure::Unknown
+}
+
+/// Lines the pinned build logs when the **model** cannot take Save memory's settings
+/// (`-fa on -ctk q8_0 -ctv q8_0`), on every backend, the processor included
+/// (`llama_init_from_model` and `llama_context` in `src/llama-context.cpp` at b12110):
+/// - a q8_0 block of 32 values does not divide the model's attention head size (80 in
+///   some model families): "K cache type q8_0 with block size 32 does not divide
+///   n_embd_head_k=80", and the same for V;
+/// - the model cannot use flash attention, which a quantized V memory needs: "flash_attn
+///   is not compatible with Grok - forcing off" followed by "quantized V cache requires
+///   flash_attn to be enabled", or "quantized V cache was requested, but this requires
+///   Flash Attention".
+///
+/// Each is followed by "failed to create context", so [`classify`] still says
+/// [`LoadFailure::ContextTooLarge`]. Not here: "enabling flash_attn since it is required
+/// for quantized V cache", which only `-fa auto` prints.
+const SAVE_MEMORY_REFUSALS: &[&str] = &[
+    "does not divide n_embd_head",
+    "quantized v cache requires flash_attn",
+    "quantized v cache was requested, but this requires flash attention",
+];
+
+/// Whether the last lines of a failed load show the model refusing Save memory
+/// ([`SAVE_MEMORY_REFUSALS`]). Then a retry without it can load the model on any backend,
+/// while for a plain memory failure on the processor it would only need more memory
+/// (0.0.6 D2c, see [`Supervisor`](super::server::Supervisor)).
+pub fn save_memory_refused(stderr_tail: &[String]) -> bool {
+    stderr_tail.iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        SAVE_MEMORY_REFUSALS
+            .iter()
+            .any(|needle| lower.contains(needle))
+    })
 }
 
 /// Extracts `X` from `... invalid device: X`.
@@ -330,6 +389,93 @@ mod tests {
         assert!(!LoadFailure::ModelFileInvalid.may_succeed_on_another_backend());
         assert!(!LoadFailure::PortInUse.may_succeed_on_another_backend());
         assert!(LoadFailure::OutOfMemory.may_succeed_on_another_backend());
+    }
+
+    /// Which failures make the supervisor retry on the same backend (0.0.6 D2c and the
+    /// step-down): Save memory off for what an unsupported flash attention or q8_0 memory
+    /// looks like, less of the model on the graphics card for running out of its memory.
+    #[test]
+    fn which_failures_retry_on_the_same_backend() {
+        let table = [
+            // (failure, Save memory may be the cause, out of memory)
+            (LoadFailure::OutOfMemory, false, true),
+            (LoadFailure::ContextTooLarge, true, true),
+            (LoadFailure::Unknown, true, false),
+            (LoadFailure::InvalidDevice("Vulkan0".into()), false, false),
+            (LoadFailure::MissingRuntimeDll, false, false),
+            (LoadFailure::PortInUse, false, false),
+            (LoadFailure::ModelFileInvalid, false, false),
+        ];
+        for (failure, save_memory, memory) in table {
+            assert_eq!(
+                failure.save_memory_may_be_the_cause(),
+                save_memory,
+                "{failure:?}"
+            );
+            assert_eq!(failure.is_out_of_memory(), memory, "{failure:?}");
+        }
+    }
+
+    /// The lines the pinned build (b12110, `llama_init_from_model` and `llama_context` in
+    /// `src/llama-context.cpp`) logs when the model refuses flash attention with a q8_0
+    /// memory, on any backend; and lines that look alike but are not a refusal.
+    #[test]
+    fn save_memory_refusals_from_the_pinned_build() {
+        for line in [
+            "E llama_init_from_model: K cache type q8_0 with block size 32 does not divide n_embd_head_k=80",
+            "E llama_init_from_model: V cache type q8_0 with block size 32 does not divide n_embd_head_v=80",
+            "E llama_init_from_model: quantized V cache requires flash_attn to be enabled",
+            "E llama_init_from_model: failed to initialize the context: quantized V cache was requested, but this requires Flash Attention",
+        ] {
+            let tail = lines(&format!(
+                "I llama_context: constructing llama_context\n{line}\nE common_init_result: failed to create context with model 'm.gguf'"
+            ));
+            assert!(save_memory_refused(&tail), "{line}");
+            // The classification is unchanged: the context could not be made.
+            assert_eq!(classify(&tail, Some(1)), LoadFailure::ContextTooLarge);
+        }
+        for line in [
+            // A warning; the refusal, if any, is the next line.
+            "W llama_init_from_model: flash_attn is not compatible with Grok - forcing off",
+            // Printed only with `-fa auto`, never with Save memory's `-fa on`.
+            "I llama_init_from_model: enabling flash_attn since it is required for quantized V cache",
+            "E llama_init_from_model: failed to create context",
+            "llama_kv_cache: size =  127.00 MiB (  2048 cells,  28 layers,  1/1 seqs), K (q8_0):   63.50 MiB, V (q8_0):   63.50 MiB",
+        ] {
+            assert!(!save_memory_refused(&lines(line)), "{line}");
+        }
+        assert!(!save_memory_refused(&[]));
+    }
+
+    /// By the time an out-of-memory failure is shown, the app has already tried less of
+    /// the model on the graphics card and the processor, so the text offers only what is
+    /// left for the user, in the words of Model settings.
+    #[test]
+    fn out_of_memory_texts_match_what_the_app_does() {
+        assert_eq!(
+            LoadFailure::OutOfMemory.user_message(),
+            "This model needs more memory than is free."
+        );
+        assert_eq!(
+            LoadFailure::OutOfMemory.next_step(),
+            "Close other programs or pick a smaller download. Lowering How much it can remember in Model settings also helps."
+        );
+        assert_eq!(
+            LoadFailure::ContextTooLarge.user_message(),
+            "The model loaded, but there isn't enough memory left for how much it should remember."
+        );
+        // Save memory may already be on in the user's settings: the app turns it off only
+        // for the load that failed with it, so the text must not tell them to turn it on.
+        assert_eq!(
+            LoadFailure::ContextTooLarge.next_step(),
+            "In Model settings, lower How much it can remember, or turn on Save memory if it is off."
+        );
+        for failure in [LoadFailure::OutOfMemory, LoadFailure::ContextTooLarge] {
+            let text = format!("{} {}", failure.user_message(), failure.next_step());
+            for jargon in ["CPU", "processor", "part of the model", "context", "!"] {
+                assert!(!text.contains(jargon), "{jargon:?} in {text:?}");
+            }
+        }
     }
 
     #[test]

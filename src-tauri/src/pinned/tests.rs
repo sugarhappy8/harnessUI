@@ -254,7 +254,7 @@ fn the_turn_sets_the_pins_before_the_helpers_copy_and_explains_a_refusal() {
     for local in [true, false] {
         assert!(next_step(local).contains("in the Context tab"));
     }
-    assert!(next_step(true).contains("larger context"));
+    assert!(next_step(true).contains("choose Model settings"));
     assert!(next_step(false).contains("Settings → Endpoints"));
 }
 

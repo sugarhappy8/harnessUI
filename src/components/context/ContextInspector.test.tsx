@@ -88,6 +88,10 @@ describe("ContextInspector", () => {
     expect(within(row("tools")).getByText("300 tokens")).toBeTruthy();
     expect(within(row("tools")).getByText("2 shown: read_file, list_dir")).toBeTruthy();
     expect(screen.getByText("About 1,234 of 8,192 tokens")).toBeTruthy();
+    // [0.0.5 memory] Tokens come with words, and making room is said plainly.
+    const totals = document.querySelector("[data-inspector-totals]")!.textContent!;
+    expect(totals).toContain("about 900 of 6,000 words");
+    expect(totals).toMatch(/older parts are shortened or summarised from \d/);
     expect(screen.getByText(/Pinned instructions: 40 of 1,512 tokens allowed/)).toBeTruthy();
     expect(screen.getByText(/Fixed part without pins: 900 of 2,419/)).toBeTruthy();
     expect(screen.getByText("Nothing is left out now.")).toBeTruthy();
@@ -183,6 +187,31 @@ describe("ContextInspector", () => {
       useApp.setState({ generation: null });
     });
     expect(apiMock.inspectContext).toHaveBeenCalledTimes(6);
+  });
+
+  // [0.0.6 WP3b] The loop's newer stage: a summary written when the model could remember
+  // more is rewritten shorter before the next request (src-tauri/src/context_cmd.rs).
+  it("shows the stage that rewrites a summary too long for this model's memory, as plain text", async () => {
+    const refold =
+      "The summary of earlier messages was written when the model could remember more. Before the next request, " +
+      "the model rewrites it shorter; it is shown here cut to that length. Nothing is left out now.";
+    const summaryRow = {
+      id: "summary",
+      title: "Summary of earlier messages",
+      detail:
+        "Written by the model to stand for the messages left out. Too long for this model's memory now: the next " +
+        "request has it rewritten shorter",
+      tokens: 512,
+      text: "Goal: <b>tidy</b> the notes.",
+    };
+    const v = view({ nextDrop: refold, sections: [...view().sections, summaryRow] });
+    await show(v);
+    expect(document.querySelector("[data-inspector-next]")!.textContent).toBe(`Left out next: ${refold}`);
+    expect(within(row("summary")).getByText(summaryRow.detail)).toBeTruthy();
+    fireEvent.click(within(row("summary")).getByRole("button"));
+    expect(row("summary").querySelector("pre")!.textContent).toBe("Goal: <b>tidy</b> the notes.");
+    expect(row("summary").querySelector("b")).toBeNull();
+    expect(copyAllText(v)).toContain(`Left out next: ${refold}`);
   });
 
   it("shows the app's error as text", async () => {

@@ -46,10 +46,40 @@ impl Target {
             Target::Cpu { .. } => "your computer has".to_string(),
         }
     }
+    /// Where the model would run, for [`FitResult::device`].
+    fn device(&self) -> FitDevice {
+        match self {
+            Target::Gpu { .. } => FitDevice::GraphicsCard,
+            Target::AppleUnified { .. } => FitDevice::AppleGraphics,
+            Target::Cpu { .. } => FitDevice::Processor,
+        }
+    }
+    /// The free memory there as the system reports it, for [`FitResult::available_bytes`]:
+    /// the processor's figure before [`RAM_RESERVE_BYTES`] is kept back.
+    fn free_bytes(&self) -> u64 {
+        match *self {
+            Target::Gpu { free_bytes, .. } => free_bytes,
+            Target::AppleUnified { working_set_bytes } => working_set_bytes,
+            Target::Cpu { ram_free_bytes } => ram_free_bytes,
+        }
+    }
 }
 
-/// What the estimate is made of.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Where an estimate puts the model (0.0.6, compare-fit-words: the screens say it in words).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FitDevice {
+    /// A graphics card with its own memory.
+    GraphicsCard,
+    /// Apple silicon: the share of memory Apple graphics may use.
+    AppleGraphics,
+    /// The processor, from the computer's memory.
+    Processor,
+}
+
+/// What the estimate is made of. `Default` lets callers write `..Default::default()`, so
+/// fields added later (0.0.6 WP1b) need no change at existing call sites.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FitInput {
     /// Sum of the model's file sizes.
@@ -68,7 +98,7 @@ pub struct FitInput {
 impl FitInput {
     /// Output-logits buffer (`vocab × ubatch × 4 bytes`) plus a fixed allowance.
     pub fn compute_bytes(&self) -> u64 {
-        COMPUTE_BASE_BYTES + self.vocab_size.saturating_mul(UBATCH).saturating_mul(4)
+        COMPUTE_BASE_BYTES.saturating_add(self.vocab_size.saturating_mul(UBATCH).saturating_mul(4))
     }
     pub fn needed_at(&self, ctx: u64) -> u64 {
         self.weights_bytes
@@ -90,13 +120,32 @@ pub enum Verdict {
 #[serde(rename_all = "camelCase")]
 pub struct FitResult {
     pub verdict: Verdict,
+    /// What the model needs in the memory that holds it (on a graphics card, the card's
+    /// share).
     pub needed_bytes: u64,
+    /// The free memory there as the system reports it: the graphics card's, the Metal
+    /// working set, or the computer's (the verdict also keeps [`RAM_RESERVE_BYTES`] of the
+    /// computer's memory for other programs).
     pub available_bytes: u64,
     /// A smaller context that fits, for yellow verdicts.
     pub suggested_ctx: Option<u64>,
     /// Some layers would run on the CPU (yellow, discrete GPU only).
     pub partial_offload: bool,
-    /// One sentence for the UI.
+    /// Where the model would run.
+    pub device: FitDevice,
+    /// On a graphics card, what the model needs besides in the computer's memory when its
+    /// placement is known (an installed file); 0 otherwise: on Apple graphics and the
+    /// processor [`Self::needed_bytes`] counts all of it, and this estimate does not split.
+    pub computer_bytes: u64,
+    /// With [`Self::computer_bytes`] known, the computer's free memory as the system reports
+    /// it (the settings panel's second bar); 0 otherwise.
+    pub computer_free_bytes: u64,
+    /// Red on a graphics card because the part in the computer's memory is larger than its
+    /// free memory less [`RAM_RESERVE_BYTES`] (`placement::judge_in`), not only because the
+    /// whole does not fit: the screen then names the computer's memory as what is short.
+    pub computer_short: bool,
+    /// The 0.0.4 sentence (logs and scripts). The 0.0.6 screens word the figures instead
+    /// (`fitLine` in src/lib/words.ts); empty when the placement judge made the result.
     pub sentence: String,
 }
 
@@ -121,6 +170,126 @@ fn largest_ctx(input: &FitInput, available: u64) -> Option<u64> {
     (ctx >= MIN_USEFUL_CTX).then_some(ctx)
 }
 
+// ---- 0.0.5: Automatic sizing and fit marks per choice (D2b, WP1b) -------------------
+
+/// The smallest context Automatic picks, unless the model was trained for less (D2b).
+pub const AUTO_FLOOR_CTX: u64 = 4096;
+/// The largest context Automatic picks (D2b): a longer one leaves less memory for the
+/// rest of the computer, and most chats never need it.
+pub const AUTO_CAP_CTX: u64 = 32_768;
+
+/// The memory a model may use on this computer for one way of loading it, in bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Room {
+    /// With the whole model on the main device: free graphics memory, the Metal working
+    /// set, or system memory less [`RAM_RESERVE_BYTES`] on the processor.
+    pub whole: u64,
+    /// With part of the model on the processor ("As much as fits", which the step-down
+    /// after a graphics-card memory failure also reaches): `whole` plus system memory less
+    /// the reserve. The same as `whole` when the model runs on the processor.
+    pub partial: u64,
+}
+
+impl Room {
+    /// The processor only: system memory less the reserve kept for the OS and other apps.
+    pub fn processor(ram_free_bytes: u64) -> Self {
+        let whole = ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES);
+        Self {
+            whole,
+            partial: whole,
+        }
+    }
+
+    /// A graphics card with its own memory; the rest of the model may spill into system
+    /// memory.
+    pub fn graphics_card(free_bytes: u64, ram_free_bytes: u64) -> Self {
+        Self {
+            whole: free_bytes,
+            partial: free_bytes.saturating_add(ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES)),
+        }
+    }
+
+    /// Apple silicon: the graphics side may use the Metal working set; layers beyond it
+    /// run on the processor from the same memory, so the partial room is all of system
+    /// memory less the reserve (never less than the working set).
+    pub fn apple(working_set_bytes: u64, ram_free_bytes: u64) -> Self {
+        Self {
+            whole: working_set_bytes,
+            partial: working_set_bytes.max(ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES)),
+        }
+    }
+
+    /// The mark for something that needs `needed` bytes: green when it fits on the main
+    /// device with [`SPARE_BYTES`] to spare, yellow when it fits only with part of it on
+    /// the processor, red otherwise.
+    pub fn verdict(&self, needed: u64) -> Verdict {
+        let needed = needed.saturating_add(SPARE_BYTES);
+        if needed <= self.whole {
+            Verdict::Green
+        } else if needed <= self.partial {
+            Verdict::Yellow
+        } else {
+            Verdict::Red
+        }
+    }
+}
+
+/// The fit mark of `input` at a context of `ctx` tokens.
+pub fn verdict_at(input: &FitInput, ctx: u64, room: Room) -> Verdict {
+    room.verdict(input.needed_at(ctx))
+}
+
+/// What Automatic picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoCtx {
+    /// The context in tokens.
+    pub ctx: u64,
+    /// Green: the whole model fits on the main device; yellow: only with part of it on
+    /// the processor.
+    pub verdict: Verdict,
+}
+
+/// Automatic (D2b): the largest context that fits with [`SPARE_BYTES`] to spare, a
+/// multiple of 1,024 between the floor ([`AUTO_FLOOR_CTX`], or the trained length when it
+/// is smaller) and the cap ([`AUTO_CAP_CTX`], or the trained length when it is smaller).
+/// The whole model on the main device is preferred: only when not even the floor fits
+/// there is the partial room used. `None` when not even the floor fits at all.
+/// `input.ctx` is not used; `input.max_ctx` is the trained length.
+pub fn auto_ctx(input: &FitInput, room: Room) -> Option<AutoCtx> {
+    auto_ctx_with_margin(input, room, SPARE_BYTES)
+}
+
+/// [`auto_ctx`] leaving `spare_bytes` free instead of [`SPARE_BYTES`] (0.0.6 item 6: As
+/// much as fits with "Leave free on the graphics card" set).
+pub fn auto_ctx_with_margin(input: &FitInput, room: Room, spare_bytes: u64) -> Option<AutoCtx> {
+    let floor = input
+        .max_ctx
+        .map_or(AUTO_FLOOR_CTX, |m| m.min(AUTO_FLOOR_CTX));
+    let cap = input.max_ctx.map_or(AUTO_CAP_CTX, |m| m.min(AUTO_CAP_CTX));
+    // The largest context that leaves the spare free in `available`, if it reaches the
+    // floor.
+    let largest = |available: u64| {
+        let fixed = input.needed_at(0).saturating_add(spare_bytes);
+        let left = available.checked_sub(fixed)?;
+        let tokens = left
+            .checked_div(input.kv_bytes_per_token)
+            .unwrap_or(u64::MAX);
+        (tokens >= floor).then(|| (tokens / 1024 * 1024).max(floor).min(cap))
+    };
+    if let Some(ctx) = largest(room.whole) {
+        return Some(AutoCtx {
+            ctx,
+            verdict: Verdict::Green,
+        });
+    }
+    largest(room.partial).map(|ctx| AutoCtx {
+        ctx,
+        verdict: Verdict::Yellow,
+    })
+}
+
 pub fn check(input: &FitInput, target: &Target) -> FitResult {
     let needed = input.needed_at(input.ctx);
     let available = target.primary_bytes();
@@ -128,9 +297,13 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
     let base = |verdict, suggested_ctx, partial_offload, sentence| FitResult {
         verdict,
         needed_bytes: needed,
-        available_bytes: available,
+        available_bytes: target.free_bytes(),
         suggested_ctx,
         partial_offload,
+        device: target.device(),
+        computer_bytes: 0,
+        computer_free_bytes: 0,
+        computer_short: false,
         sentence,
     };
 
@@ -335,6 +508,245 @@ mod tests {
         }
     }
 
+    // ---- 0.0.5 Automatic on fixed hardware numbers -----------------------------------
+
+    /// An 8B-class model at Q4_K_M: 4.9 GB, f16 cache 131,072 bytes per token (q8_0:
+    /// 69,632), trained for 131,072 tokens.
+    fn eight_b(kv: u64) -> FitInput {
+        FitInput {
+            weights_bytes: 4_900_000_000,
+            kv_bytes_per_token: kv,
+            vocab_size: 128_256,
+            max_ctx: Some(131_072),
+            ..Default::default()
+        }
+    }
+    const F16: u64 = 131_072;
+    const Q8: u64 = 69_632;
+
+    #[test]
+    fn room_marks() {
+        let room = Room::graphics_card(10 * GB, 32 * GB);
+        assert_eq!(room.partial, 10 * GB + 30 * GB);
+        assert_eq!(room.verdict(9 * GB), Verdict::Green);
+        assert_eq!(room.verdict(9 * GB + 1), Verdict::Yellow);
+        assert_eq!(room.verdict(39 * GB), Verdict::Yellow);
+        assert_eq!(room.verdict(39 * GB + 1), Verdict::Red);
+        // The processor has no second place to spill to.
+        let cpu = Room::processor(12 * GB);
+        assert_eq!((cpu.whole, cpu.partial), (10 * GB, 10 * GB));
+        assert_eq!(cpu.verdict(9 * GB), Verdict::Green);
+        assert_eq!(cpu.verdict(9 * GB + 1), Verdict::Red);
+        // Apple: the working set, then the rest of the same memory.
+        let mac = Room::apple(11 * GB, 12 * GB);
+        assert_eq!((mac.whole, mac.partial), (11 * GB, 11 * GB));
+        let mac = Room::apple(11 * GB, 15 * GB);
+        assert_eq!(mac.partial, 13 * GB);
+        // Less free memory than the reserve leaves nothing, never an underflow.
+        assert_eq!(Room::processor(GB), Room::default());
+    }
+
+    /// The processor (16 GB computer, 12 GB available): 10 GB after the reserve.
+    #[test]
+    fn automatic_on_the_processor() {
+        let room = Room::processor(12 * GB);
+        let i = eight_b(F16);
+        // 10 GB − 4.9 GB weights − 0.53 GB compute − 1 GB spare = 3.57 GB of cache:
+        // 27,228 tokens, rounded down to 26 × 1,024.
+        let fixed = i.needed_at(0) + SPARE_BYTES;
+        assert_eq!((10 * GB - fixed) / F16, 27_228);
+        assert_eq!(
+            auto_ctx(&i, room),
+            Some(AutoCtx {
+                ctx: 26_624,
+                verdict: Verdict::Green
+            })
+        );
+        assert!(i.needed_at(26_624) + SPARE_BYTES <= room.whole);
+        assert!(i.needed_at(26_624 + 1024) + SPARE_BYTES > room.whole);
+        // Save memory: the same memory holds the cap.
+        assert_eq!(auto_ctx(&eight_b(Q8), room).map(|a| a.ctx), Some(32_768));
+    }
+
+    /// A discrete graphics card (16 GB, 15 GB free; and an 8 GB card with 7.5 GB free).
+    #[test]
+    fn automatic_on_a_discrete_graphics_card() {
+        let big = Room::graphics_card(15 * GB, 24 * GB);
+        assert_eq!(
+            auto_ctx(&eight_b(F16), big),
+            Some(AutoCtx {
+                ctx: 32_768,
+                verdict: Verdict::Green
+            }),
+            "capped at 32,768 although 65,000 tokens would fit"
+        );
+        let small = Room::graphics_card(7_500_000_000, 24 * GB);
+        // 7.5 − 6.43 GB = 1.07 GB of cache: 8,155 tokens → 7,168.
+        assert_eq!(
+            auto_ctx(&eight_b(F16), small),
+            Some(AutoCtx {
+                ctx: 7_168,
+                verdict: Verdict::Green
+            })
+        );
+        // Save memory nearly doubles it on the same card (15,350 tokens → 14,336).
+        assert_eq!(auto_ctx(&eight_b(Q8), small).map(|a| a.ctx), Some(14_336));
+        // A card too small for even the floor: the whole model is preferred, so the
+        // partial room is used only now, and the mark says part runs on the processor.
+        let tiny = Room::graphics_card(4 * GB, 24 * GB);
+        assert_eq!(
+            auto_ctx(&eight_b(F16), tiny),
+            Some(AutoCtx {
+                ctx: 32_768,
+                verdict: Verdict::Yellow
+            })
+        );
+        // No system memory to spill into either: not even the floor fits.
+        assert_eq!(
+            auto_ctx(&eight_b(F16), Room::graphics_card(4 * GB, GB)),
+            None
+        );
+    }
+
+    /// Apple unified memory: a 16 GB Mac whose Metal working set is about 11 GB.
+    #[test]
+    fn automatic_on_apple_unified_memory() {
+        let room = Room::apple(11 * GB, 9 * GB);
+        assert_eq!(auto_ctx(&eight_b(F16), room).map(|a| a.ctx), Some(32_768));
+        // A 14B-class model (8.4 GB, 48 layers: 196,608 cache bytes per token).
+        let fourteen = FitInput {
+            weights_bytes: 8_400_000_000,
+            kv_bytes_per_token: 196_608,
+            vocab_size: 152_064,
+            max_ctx: Some(40_960),
+            ..Default::default()
+        };
+        // 11 − 8.4 − 0.58 − 1 GB = 1.02 GB of cache: 5,180 tokens → 5,120.
+        assert_eq!(
+            auto_ctx(&fourteen, room),
+            Some(AutoCtx {
+                ctx: 5_120,
+                verdict: Verdict::Green
+            })
+        );
+        // A 24 GB model does not fit in 16 GB at all.
+        let big = FitInput {
+            weights_bytes: 24 * GB,
+            ..fourteen
+        };
+        assert_eq!(auto_ctx(&big, room), None);
+    }
+
+    /// The floor and the cap follow a short trained length; an unknown cache size (no
+    /// attention layers, or an unreadable header) takes the cap when the rest fits.
+    #[test]
+    fn automatic_follows_the_trained_length() {
+        let room = Room::processor(12 * GB);
+        let short = FitInput {
+            max_ctx: Some(2048),
+            ..eight_b(F16)
+        };
+        assert_eq!(auto_ctx(&short, room).map(|a| a.ctx), Some(2048));
+        let odd = FitInput {
+            max_ctx: Some(20_000),
+            ..eight_b(F16)
+        };
+        assert_eq!(auto_ctx(&odd, room).map(|a| a.ctx), Some(20_000));
+        let unknown_length = FitInput {
+            max_ctx: None,
+            ..eight_b(Q8)
+        };
+        assert_eq!(auto_ctx(&unknown_length, room).map(|a| a.ctx), Some(32_768));
+        let no_cache = FitInput {
+            kv_bytes_per_token: 0,
+            ..eight_b(F16)
+        };
+        assert_eq!(auto_ctx(&no_cache, room).map(|a| a.ctx), Some(32_768));
+        // Just above the floor rounds down to the floor, never below it.
+        let fixed = eight_b(F16).needed_at(0) + SPARE_BYTES;
+        let tight = Room {
+            whole: fixed + F16 * 4_500,
+            partial: fixed + F16 * 4_500,
+        };
+        assert_eq!(auto_ctx(&eight_b(F16), tight).map(|a| a.ctx), Some(4096));
+        let too_tight = Room {
+            whole: fixed + F16 * 4_095,
+            partial: fixed + F16 * 4_095,
+        };
+        assert_eq!(auto_ctx(&eight_b(F16), too_tight), None);
+        assert_eq!(verdict_at(&eight_b(F16), 4096, too_tight), Verdict::Red);
+        assert_eq!(verdict_at(&eight_b(F16), 4095, too_tight), Verdict::Green);
+    }
+
+    /// 0.0.6 item 6: the margin can be chosen; at SPARE_BYTES it is `auto_ctx` itself.
+    #[test]
+    fn auto_ctx_with_margin_equals_auto_ctx_at_the_spare() {
+        let rooms = [
+            Room::processor(12 * GB),
+            Room::graphics_card(15 * GB, 24 * GB),
+            Room::graphics_card(7_500_000_000, 24 * GB),
+            Room::graphics_card(4 * GB, 24 * GB),
+            Room::apple(11 * GB, 9 * GB),
+            Room::default(),
+            Room {
+                whole: u64::MAX,
+                partial: u64::MAX,
+            },
+        ];
+        let inputs = [
+            eight_b(F16),
+            eight_b(Q8),
+            FitInput {
+                max_ctx: Some(2048),
+                ..eight_b(F16)
+            },
+            FitInput {
+                kv_bytes_per_token: 0,
+                ..eight_b(F16)
+            },
+            FitInput {
+                weights_bytes: u64::MAX,
+                kv_bytes_per_token: u64::MAX,
+                vocab_size: u64::MAX,
+                ..eight_b(F16)
+            },
+        ];
+        for room in rooms {
+            for input in &inputs {
+                assert_eq!(
+                    auto_ctx_with_margin(input, room, SPARE_BYTES),
+                    auto_ctx(input, room)
+                );
+                // Never a panic, whatever the margin.
+                let _ = auto_ctx_with_margin(input, room, u64::MAX);
+            }
+        }
+        // A hostile vocabulary size saturates the working space (it overflowed before).
+        assert_eq!(inputs[4].compute_bytes(), u64::MAX);
+        // 4 GB left free instead of 1 GB: 7,168 tokens on the 7.5 GB card drop below the
+        // floor, so only the partial room is left; half a GB free gives more.
+        let small = Room::graphics_card(7_500_000_000, 24 * GB);
+        assert_eq!(
+            auto_ctx_with_margin(&eight_b(F16), small, 4 * GB),
+            Some(AutoCtx {
+                ctx: 32_768,
+                verdict: Verdict::Yellow
+            })
+        );
+        // 7.5 − 6.43 + 0.5 GB = 1.57 GB of cache: 11,970 tokens → 11,264.
+        assert_eq!(
+            auto_ctx_with_margin(&eight_b(F16), small, 500_000_000),
+            Some(AutoCtx {
+                ctx: 11_264,
+                verdict: Verdict::Green
+            })
+        );
+        assert_eq!(
+            auto_ctx_with_margin(&eight_b(F16), Room::processor(12 * GB), u64::MAX),
+            None
+        );
+    }
+
     #[test]
     fn example_sentence_shape() {
         let i = FitInput {
@@ -356,6 +768,59 @@ mod tests {
         assert_eq!(
             r.sentence,
             "Needs about 11.3 GB; your GPU has 15.2 GB free. Fits."
+        );
+    }
+
+    /// compare-fit-words: the screens word the figures themselves, so the result says where
+    /// the model would run and what is free there as the system reports it (the processor's
+    /// figure before the reserve); the verdict is unchanged.
+    #[test]
+    fn says_where_and_the_free_memory_there() {
+        let i = input(4 * GB, 4096);
+        let gpu = check(
+            &i,
+            &Target::Gpu {
+                name: "RX".into(),
+                free_bytes: 15 * GB,
+                ram_free_bytes: 30 * GB,
+            },
+        );
+        assert_eq!(
+            (gpu.device, gpu.available_bytes, gpu.verdict),
+            (FitDevice::GraphicsCard, 15 * GB, Verdict::Green)
+        );
+        let mac = check(
+            &i,
+            &Target::AppleUnified {
+                working_set_bytes: 10 * GB,
+            },
+        );
+        assert_eq!(
+            (mac.device, mac.available_bytes),
+            (FitDevice::AppleGraphics, 10 * GB)
+        );
+        // 6 GB free: 4 GB after the reserve, which the verdict keeps back.
+        let cpu = check(
+            &i,
+            &Target::Cpu {
+                ram_free_bytes: 6 * GB,
+            },
+        );
+        assert_eq!(
+            (cpu.device, cpu.available_bytes, cpu.verdict),
+            (FitDevice::Processor, 6 * GB, Verdict::Red)
+        );
+        assert!(
+            cpu.sentence
+                .ends_with("only 4.0 GB. Too large for this computer.")
+        );
+        assert_eq!(
+            serde_json::to_value(&gpu).unwrap()["device"],
+            serde_json::json!("graphicsCard")
+        );
+        assert_eq!(
+            serde_json::to_value(&cpu).unwrap()["device"],
+            serde_json::json!("processor")
         );
     }
 }

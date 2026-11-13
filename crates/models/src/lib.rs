@@ -15,3 +15,8 @@ pub mod catalog;
 pub mod download;
 pub mod hardware;
 pub mod hf;
+// 0.0.6 item 6 (WP10b): what each part of a model weighs and where it goes.
+pub mod layers;
+pub mod placement;
+pub use gguf::{TensorEntry, read_tensor_table};
+pub use layers::{LayerSize, LayerSizes};

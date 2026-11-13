@@ -1,0 +1,7 @@
+# description<TAB>flags<TAB>dedicated bytes<TAB>luid high<TAB>luid low
+AMD Radeon(TM) Graphics	0	536870912	0x00000001	0x0000D1E5
+AMD Radeon RX 9070 XT	0	17095983104	0x00000000	0x0000E2F0
+Microsoft Basic Render Driver	2	0	0x00000000	0x00001234
+Microsoft Basic Render Driver	0	0	0x00000000	0x00001235
+Parsec Virtual Display Adapter	0	0	0x00000000	0x00001236
+Software Rasterizer With Lots Of Memory	2	34359738368	0x00000000	0x00001237

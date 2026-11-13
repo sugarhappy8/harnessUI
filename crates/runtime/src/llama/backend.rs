@@ -150,11 +150,14 @@ pub fn path_with_vulkan_fallback(
 }
 
 impl Backend {
-    /// The variables every llama-server of this backend gets on top of the minimal
-    /// environment: on Windows, `PATH` with the bundled Vulkan runtime as the last entry
-    /// when the runtime directory has one.
+    /// The variables every llama.cpp program of this backend gets on top of the minimal
+    /// environment (the device probe, llama-server and `llama-fit-params`):
+    /// `GGML_NO_BACKTRACE=1`, so a crash never starts a debugger
+    /// ([`NO_BACKTRACE_ENV`](super::launch::NO_BACKTRACE_ENV), item 6 I6-8), and on Windows
+    /// `PATH` with the bundled Vulkan runtime as the last entry when the runtime directory
+    /// has one.
     pub fn base_env(&self) -> crate::spawn::EnvSpec {
-        let env = crate::spawn::EnvSpec::minimal();
+        let env = crate::spawn::EnvSpec::minimal().set(super::launch::NO_BACKTRACE_ENV, "1");
         if !cfg!(windows) {
             return env;
         }

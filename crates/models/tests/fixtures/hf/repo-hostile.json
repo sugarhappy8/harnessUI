@@ -1,0 +1,58 @@
+{
+  "id": "evil-uploads/Totally-Official-GGUF",
+  "author": "evil\u202euploads",
+  "sha": "5555555555555555555555555555555555555555",
+  "lastModified": "yesterday <b>evening</b>",
+  "gated": "manual",
+  "downloads": 5,
+  "likes": 0,
+  "pipeline_tag": "Text Generation <script>",
+  "tags": [
+    "gguf",
+    "license:other",
+    "<img src=x onerror=alert(1)>",
+    "uncensored",
+    "region:us",
+    "base_model:example-labs/Sample-7B"
+  ],
+  "cardData": {
+    "base_model": [
+      "example-labs/Sample-7B",
+      "not a repo id",
+      "x/y\u200b",
+      "a/b",
+      "c/d",
+      "e/f",
+      "g/h",
+      "i/j"
+    ],
+    "language": [
+      "en",
+      "<script>alert(1)</script>",
+      "english language",
+      7,
+      "multilingual"
+    ],
+    "license": "other",
+    "license_name": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB\nB",
+    "license_link": "javascript:alert(1)"
+  },
+  "siblings": [
+    {
+      "rfilename": "Totally-Official-Q4_K_M.gguf",
+      "size": 4400000000,
+      "lfs": {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 4400000000
+      }
+    },
+    {
+      "rfilename": "Totally-Official-Q5_K_M.gguf",
+      "size": 5100000000,
+      "lfs": {
+        "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "size": 5100000000
+      }
+    }
+  ]
+}

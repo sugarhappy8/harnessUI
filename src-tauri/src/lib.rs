@@ -21,21 +21,29 @@ mod git_cmd;
 mod gpu;
 mod hotkey;
 mod hub;
+mod load_settings;
 mod load_tracker;
 mod logging;
 mod mcp_cmd;
 mod mentions;
+mod model_options;
 mod models_cmd;
 mod navigation;
+// 0.0.6 item 6 (WP10d): "Where the model goes" and the usage line.
+mod offload;
 mod outputs;
+mod outside_agent;
 mod overlay;
 mod packs_cmd;
 mod permissions;
 mod pinned;
 mod providers;
+mod reverse_cmd;
+mod reverse_drop;
 mod runtime_manager;
 mod search_cmd;
 mod settings;
+mod share;
 mod skills_cmd;
 mod state;
 mod subagent;
@@ -45,12 +53,14 @@ mod tool_select;
 mod toolset;
 mod turns;
 mod updates;
+mod usage_cmd;
 
 use std::sync::Arc;
 
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, RunEvent, WebviewWindowBuilder};
 
+pub use attachments::{PICTURE_WORKER_FLAG, picture_worker_main};
 pub use children::REAPER_FLAG;
 
 /// Window labels. The capability files bind permissions to these labels.
@@ -260,6 +270,36 @@ pub fn run() {
             evals::commands::start_benchmark,
             evals::commands::list_bench_runs,
             evals::commands::get_bench_run,
+            models_cmd::model_load_info,
+            models_cmd::set_model_load_settings,
+            models_cmd::reset_model_load_settings,
+            models_cmd::reload_local_model,
+            models_cmd::cancel_pending_reload,
+            models_cmd::model_busy,
+            hub::catalog_list,
+            hub::compare_facts,
+            share::share_status,
+            share::set_share_enabled,
+            share::set_share_port,
+            share::reveal_share_key,
+            share::new_share_key,
+            share::share_setup,
+            outside_agent::coding_apps_status,
+            outside_agent::find_coding_apps,
+            // 0.0.6 item 5: Settings → Reverse engineering (rea, Kuna, Ghidra).
+            reverse_cmd::reverse_status,
+            reverse_cmd::reverse_download,
+            reverse_cmd::reverse_cancel,
+            reverse_cmd::reverse_discard_partial,
+            reverse_cmd::reverse_remove,
+            reverse_cmd::reverse_set_decompiler,
+            reverse_cmd::reverse_clear_cache,
+            reverse_cmd::reverse_install_apple_tools,
+            // 0.0.6 item 5: a program file dropped on the message box (WP9h).
+            reverse_drop::reverse_dropped,
+            // 0.0.6 item 6 (WP10d): llama.cpp's measurement and the usage line.
+            models_cmd::offload_measure,
+            usage_cmd::usage_now,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -320,8 +360,24 @@ pub fn run() {
                 host: host.clone(),
                 skills,
                 grants: Default::default(),
+                model_busy: Default::default(),
+                offload: Default::default(),
+                usage: Default::default(),
             });
             app.manage(turns::PendingApprovals::default());
+            // 0.0.6 item 5: the decompiler chosen in Settings → Reverse engineering.
+            reverse_cmd::load_saved_choice(&handle);
+            // 0.0.5: sharing the loaded model with other apps; listens again only if the
+            // user left it on.
+            app.manage(share::Sharing::default());
+            share::start_saved(&handle);
+            // 0.0.5: the coding apps found when the user last turned that group on.
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(
+                    async move { outside_agent::register_saved(&handle).await },
+                );
+            }
             // "Allow all in every chat", if the user switched it on (a saved setting).
             approvals::load_default(&handle);
             // Before the startup check below, which records what it finds here.
@@ -394,6 +450,10 @@ pub fn run() {
                     server.shutdown();
                 }
                 tauri::async_runtime::block_on(async move {
+                    // 0.0.6 item 5: rea gets its grace to end Kuna or Java itself (WP9g).
+                    if let Some(rea) = reverse::handle() {
+                        rea.restart(reverse::RestartReason::Quit).await;
+                    }
                     if let Some(b) = browser {
                         b.shutdown().await;
                     }

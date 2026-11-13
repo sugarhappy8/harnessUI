@@ -29,11 +29,17 @@ pub enum PdfError {
 
 /// Caps the worker's own memory before it parses anything.
 fn limit_memory() {
+    limit_own_memory(MEMORY_CAP_BYTES);
+}
+
+/// Caps this process's own memory at `cap` bytes. [0.0.6] Also used by the app's picture
+/// worker (`src-tauri/src/attachments.rs`), before it reads a WebP picture.
+pub fn limit_own_memory(cap: u64) {
     #[cfg(unix)]
     {
         let lim = libc::rlimit {
-            rlim_cur: MEMORY_CAP_BYTES as libc::rlim_t,
-            rlim_max: MEMORY_CAP_BYTES as libc::rlim_t,
+            rlim_cur: cap as libc::rlim_t,
+            rlim_max: cap as libc::rlim_t,
         };
         // SAFETY: setrlimit only reads the struct; failure is harmless (the timeout and
         // the process boundary still apply).
@@ -58,7 +64,7 @@ fn limit_memory() {
             if let Ok(job) = CreateJobObjectW(None, None) {
                 let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-                info.ProcessMemoryLimit = MEMORY_CAP_BYTES as usize;
+                info.ProcessMemoryLimit = cap as usize;
                 let _ = SetInformationJobObject(
                     job,
                     JobObjectExtendedLimitInformation,

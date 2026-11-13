@@ -3,6 +3,7 @@ import * as ipc from "../../lib/ipc";
 import type { ErrorInfo } from "../../lib/types";
 import { toErrorInfo } from "../../store/app";
 import { ErrorBanner } from "../ErrorBanner";
+import { visiblePath } from "../FolderChip";
 import {
   checkConfirm,
   useEndpointHost,
@@ -125,7 +126,7 @@ export function ModelCheck() {
       {profile && !running && (
         <div className="space-y-2">
           <p className="text-xs text-fg-muted">
-            Checked {new Date(profile.checkedAt).toLocaleString()} · {profile.label}
+            Checked {new Date(profile.checkedAt).toLocaleString()} · <bdi dir="ltr">{visiblePath(profile.label)}</bdi>
           </p>
           <p aria-label="Chosen settings" className="text-sm">
             {chosenWords(profile)}

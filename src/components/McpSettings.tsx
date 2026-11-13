@@ -5,6 +5,7 @@ import * as ipc from "../lib/ipc";
 import type { McpImportPreview, McpServerDto, ToolDto } from "../lib/types";
 import { toErrorInfo } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
+import { visiblePath } from "./FolderChip";
 import type { ErrorInfo } from "../lib/types";
 
 /** What to install when a server's runtime is missing (section 15). */
@@ -110,8 +111,9 @@ function ServerRow(props: { server: McpServerDto; onChange: () => void; onError:
           <div className="font-medium">
             {s.name} {s.builtin && <span className="text-xs font-normal text-fg-muted">built in</span>}
           </div>
-          <div className="truncate font-mono text-xs text-fg-muted" title={s.summary}>
-            {s.summary}
+          {/* The program and its arguments with hidden and right-to-left characters as codes. */}
+          <div className="truncate font-mono text-xs text-fg-muted" title={visiblePath(s.summary)}>
+            <bdi dir="ltr">{visiblePath(s.summary)}</bdi>
           </div>
         </div>
         <span className={`text-xs ${st.tone}`}>{st.text}</span>
@@ -265,7 +267,9 @@ function AddServers(props: { onDone: () => void; onError: (e: ErrorInfo) => void
                     <span className="font-medium">{p.name}</span>{" "}
                     <span className="text-xs text-fg-muted">{p.kind}</span>
                     {p.exists && <span className="ml-2 text-xs text-warning">a server with this name exists</span>}
-                    <span className="block font-mono text-xs break-all text-fg-muted">{p.summary}</span>
+                    <bdi dir="ltr" className="block font-mono text-xs break-all text-fg-muted">
+                      {visiblePath(p.summary)}
+                    </bdi>
                     {p.findings.length > 0 && (
                       <span className="block text-xs text-warning">
                         Looks like credentials: {p.findings.map((f) => f.what).join("; ")}
@@ -317,6 +321,49 @@ function AddServers(props: { onDone: () => void; onError: (e: ErrorInfo) => void
   );
 }
 
+/** [0.0.6] Setting: the owner's saved servers renamed at start because a built-in server now has their name. */
+const RENAMED_SERVERS = "mcpRenamedServers";
+
+interface RenamedServer {
+  from: string;
+  to: string;
+  /** Some of its tools that were on are off now: their new names could not be told for sure. */
+  toolsOff?: boolean;
+}
+
+/** Says once which saved servers have a new name, until the owner closes the note. */
+function RenamedNote() {
+  const [renamed, setRenamed] = useState<RenamedServer[]>([]);
+  useEffect(() => {
+    void ipc
+      .getSetting<RenamedServer[]>(RENAMED_SERVERS)
+      .then((v) => setRenamed(Array.isArray(v) ? v : []))
+      .catch(() => setRenamed([]));
+  }, []);
+  if (renamed.length === 0) return null;
+  const close = () => {
+    setRenamed([]);
+    void ipc.setSetting(RENAMED_SERVERS, []).catch(() => undefined);
+  };
+  return (
+    <div role="status" className="flex items-start gap-2 rounded-md border border-border p-2 text-sm">
+      <div className="min-w-0 flex-1 space-y-1">
+        {renamed.map((r) => (
+          <p key={`${r.from}\n${r.to}`}>
+            Your server "{r.from}" is now called "{r.to}", because the app now has a built-in server with that name.
+            {r.toolsOff
+              ? " It works as before, with the same settings, but some of its tools were switched off because their names changed too. Switch them on again in a chat's Tools panel."
+              : " It works as before, with the same settings."}
+          </p>
+        ))}
+      </div>
+      <button type="button" onClick={close} className="rounded-md border border-border px-2 py-0.5 text-xs">
+        OK
+      </button>
+    </div>
+  );
+}
+
 export function McpSettings() {
   const [servers, setServers] = useState<McpServerDto[]>([]);
   const [adding, setAdding] = useState(false);
@@ -351,6 +398,7 @@ export function McpSettings() {
         )}
       </div>
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+      <RenamedNote />
       {adding && (
         <AddServers
           onDone={() => {

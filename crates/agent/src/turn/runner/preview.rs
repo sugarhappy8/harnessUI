@@ -3,10 +3,11 @@
 //! The same [`Turn`] is set up from the same input; the fixed overhead is measured and the
 //! fit checks run as in [`Turn::measure`]; the request is built as [`Turn::prepare`] builds
 //! it, applying stage 1 when the request needs it (that only changes the copy being built).
-//! Stage 2 needs the model to write a summary, so it is reported, never run. Policy,
-//! approvals and the sink are inert: nothing is decided, asked or recorded.
-
-use std::collections::HashSet;
+//! Stage 2 needs the model to write a summary, so it is reported, never run; what it would
+//! summarise next is chosen by the loop's own code ([`Turn::plan_summary`]). A stored summary
+//! too long for this context, which the turn has the model rewrite first, is cut to the cap
+//! instead, the form the turn falls back to (`applied` gets 2). Policy, approvals and the
+//! sink are inert: nothing is decided, asked or recorded.
 
 use crate::estimate::estimate_tokens;
 use crate::turn::{NextCompaction, SystemBlock, SystemBlockKind, TurnPreview};
@@ -41,16 +42,9 @@ pub(in crate::turn) async fn preview(
     sanitizer: &crate::prompt::Sanitizer,
     input: TurnInput,
 ) -> TurnPreview {
-    // What the summary replaces: the stored messages it covers.
-    let covered: HashSet<i64> = input
-        .summary
-        .as_ref()
-        .map(|s| s.covered_ids.iter().copied().collect())
-        .unwrap_or_default();
-    let left_out: Vec<HistoryMessage> = normalize(input.history.clone())
-        .into_iter()
-        .filter(|m| m.id.is_some_and(|id| covered.contains(&id)))
-        .collect();
+    // What the summary replaces: the stored messages it covers, with the results of the
+    // calls it covers, as the turn leaves them out.
+    let (left_out, _) = split_covered(input.history.clone(), &covered_ids(&input));
     let deps = TurnDeps {
         client,
         tools,
@@ -166,29 +160,39 @@ impl Turn<'_> {
             .collect()
     }
 
-    /// What the stages of [`Turn::prepare`] would remove next, in their order.
-    fn next_compaction(&self) -> NextCompaction {
+    /// What the stages of [`Turn::prepare`] would remove next, in their order, decided by the
+    /// loop's own code: over the trigger, stage 2 is what the next summary round would
+    /// replace ([`Turn::plan_summary`]), and when no summary request can fit, the loop's next
+    /// stage after it.
+    async fn next_compaction(&self, over_trigger: bool) -> NextCompaction {
         let earlier = &self.earlier[self.earlier_skip..];
-        if !self.stub_earlier && has_results(earlier) {
+        if self.can_shorten_earlier() {
             return NextCompaction::ShortenEarlierResults {
                 results: earlier.iter().map(|m| m.tool_results().count()).sum(),
             };
         }
         if !earlier.is_empty() && !self.summary_failed {
-            let mut earlier = earlier.to_vec();
-            if self.stub_earlier {
-                stub_results(&mut earlier, |_| true, self.chars_per_token());
+            if over_trigger {
+                // A plan that fails here is the loop's failed summary: it goes on to stage 3.
+                if let Ok(SummaryPlan::Round { prefix, .. }) = self.plan_summary().await {
+                    return NextCompaction::SummariseEarlier { messages: prefix };
+                }
+            } else {
+                let mut earlier = earlier.to_vec();
+                if self.stub_earlier {
+                    stub_results(&mut earlier, |_| true, self.chars_per_token());
+                }
+                // While everything fits: what the loop would choose now, or the oldest
+                // whole turn, the least a summary replaces.
+                let messages = match self.summarisable(&earlier) {
+                    0 => turn_starts(&earlier)
+                        .into_iter()
+                        .find(|cut| *cut > 0)
+                        .unwrap_or(earlier.len()),
+                    wanted => wanted,
+                };
+                return NextCompaction::SummariseEarlier { messages };
             }
-            // What the loop would choose now, or (while everything fits) the oldest whole
-            // turn, the least a summary replaces.
-            let messages = match self.summarisable(&earlier) {
-                0 => turn_starts(&earlier)
-                    .into_iter()
-                    .find(|cut| *cut > 0)
-                    .unwrap_or(earlier.len()),
-                wanted => wanted,
-            };
-            return NextCompaction::SummariseEarlier { messages };
         }
         if call_groups(&self.turn, 0).len() > 1 {
             return NextCompaction::ShortenTurnResults;
@@ -197,6 +201,14 @@ impl Turn<'_> {
     }
 
     async fn preview(&mut self, left_out: Vec<HistoryMessage>) -> TurnPreview {
+        let mut applied = Vec::new();
+        // A summary written for a larger context: the turn first has the model rewrite it
+        // under this context's cap. A preview never asks the model, so it shows the summary
+        // cut to that length, the form the turn falls back to.
+        if self.summary_oversized() {
+            self.cut_oversized_summary();
+            applied.push(CompactionStage::SummariseEarlier.number());
+        }
         // The fit checks, with the loop's own refusal.
         let refusal = self.measure().await.err();
         let fixed = self.budget.fixed_overhead;
@@ -212,18 +224,13 @@ impl Turn<'_> {
             self.overhead_or_estimate(plain, true).await
         };
         // The request as `prepare` builds it, stage 1 applied when it needs it.
-        let mut applied = Vec::new();
         let (request, count, view) = loop {
             let view = self.view();
             let mut request = self.request_for_view(&view, ToolChoice::Auto, false);
             let count = self.count_or_estimate(&request).await;
-            if count > self.budget.trigger
-                && refusal.is_none()
-                && !self.stub_earlier
-                && has_results(&self.earlier[self.earlier_skip..])
-            {
+            if count > self.budget.trigger && refusal.is_none() && self.can_shorten_earlier() {
                 self.stub_earlier = true;
-                applied.push(1);
+                applied.push(CompactionStage::ShortenEarlierResults.number());
                 continue;
             }
             let max_tokens = self.budget.max_tokens(count);
@@ -245,6 +252,7 @@ impl Turn<'_> {
                 (m, tokens)
             })
             .collect();
+        let next = self.next_compaction(count > self.budget.trigger).await;
         TurnPreview {
             system_blocks: self.system_blocks(),
             budget: self.budget,
@@ -266,7 +274,7 @@ impl Turn<'_> {
             applied,
             over_trigger: count > self.budget.trigger,
             over_budget: count > self.budget.budget,
-            next: self.next_compaction(),
+            next,
             request,
         }
     }

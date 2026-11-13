@@ -1,6 +1,7 @@
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
+import { askBeforeChange, backendWhenIdle, isLoadedNow, runChange, useWaiting } from "./modelChange";
 import type {
   ApprovalRequest,
   ChatDetail,
@@ -99,8 +100,12 @@ interface AppState {
   setRuntime: (s: RuntimeStatus) => void;
   refreshModelOptions: () => Promise<void>;
   setChatModel: (modelRef: string | null) => Promise<void>;
-  /** Makes a model the open chat's (or a new chat's) and loads it when it is local. */
-  pickModel: (modelRef: string) => Promise<void>;
+  /**
+   * Makes a model the open chat's (or a new chat's) and loads it when it is local, with the
+   * model's own saved settings. Asks first when the loaded model is busy (0.0.6 D3); a
+   * Cancel changes nothing. `onChatSet` runs once the chat has the model, before the load.
+   */
+  pickModel: (modelRef: string, opts?: { onChatSet?: () => void }) => Promise<void>;
   /** Asks for a .gguf file and picks it. */
   openModelFile: () => Promise<void>;
   setSystemPrompt: (prompt: string | null) => Promise<void>;
@@ -108,6 +113,34 @@ interface AppState {
   addApproval: (r: ApprovalRequest) => void;
   removeApproval: (id: string) => void;
   decideApproval: (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) => Promise<void>;
+}
+
+/** [0.0.5 memory] What the chat says when a reply had to make room, by the stage of the
+ *  agent loop's `Compacted` event (1: earlier tool results, 2: a summary of earlier
+ *  messages, written or rewritten shorter, 3: this reply's own older steps). */
+export function compactionNote(stage: number): string {
+  switch (stage) {
+    case 1:
+      return "Older tool results were shortened to make room.";
+    case 2:
+      return "Earlier messages were summarised to make room.";
+    case 3:
+      return "Older steps of this reply were shortened to make room.";
+    default:
+      return "Earlier parts of this chat were shortened to make room.";
+  }
+}
+
+/** [0.0.5 memory] The loop's notes while it writes a summary and when it could not
+ *  (`agent::turn::SUMMARISING_NOTE`, `SUMMARY_FAILED_NOTE`). */
+const SUMMARISING_NOTE = "Summarising earlier messages to make room.";
+const SUMMARY_FAILED_NOTE =
+  "Could not summarise earlier messages. The reply goes on, but this chat may run out of room soon.";
+
+/** [0.0.5 memory] `notes` without the newest "Summarising…" note: what happened takes its place. */
+function withoutSummarising(notes: string[]): string[] {
+  const at = notes.lastIndexOf(SUMMARISING_NOTE);
+  return at < 0 ? notes : [...notes.slice(0, at), ...notes.slice(at + 1)];
 }
 
 /** Turns anything thrown by `invoke` into the four-part error the UI shows. */
@@ -131,6 +164,24 @@ function lastMessageId(detail: ChatDetail | null): number | null {
 
 /** The tabs of the panel beside the chat. */
 export type WorkbenchTab = "artifacts" | "task" | "sources" | "context";
+
+/** [0.0.6 item 8] Counts reads of the chat's model list, so an older answer never replaces a newer one. */
+let modelOptionsRead = 0;
+
+/** A chat's pick that switches it to a model that must load (pickModel). */
+interface SwitchOf {
+  chatId: number;
+  pick: number;
+}
+
+/** A pick that loads a model (see `newestLoad` in the store). */
+interface LoadPick {
+  pick: number;
+  path: string;
+  chatId: number | null;
+  riders: SwitchOf[];
+  keep?: boolean;
+}
 
 export const useApp = create<AppState>((set, get) => {
   /** Re-reads a chat after a stream event. Never rejects: the chat may have been deleted
@@ -232,14 +283,22 @@ export const useApp = create<AppState>((set, get) => {
         }));
         return;
       case "note":
-        updateGen(chatId, (g) => ({ ...g, notes: [...g.notes, e.text] }));
-        return;
-      case "compacted":
         updateGen(chatId, (g) => ({
           ...g,
-          notes: [...g.notes, "Earlier messages were summarised to make room in the context."],
+          // [0.0.5 memory] A summary that failed replaces the note shown while it was written.
+          notes: [...(e.text === SUMMARY_FAILED_NOTE ? withoutSummarising(g.notes) : g.notes), e.text],
         }));
         return;
+      case "compacted": {
+        // [0.0.5 memory] What the loop did, once per kind (a stage can run several times); a
+        // summary written replaces the note shown while it was written.
+        const note = compactionNote(e.stage);
+        updateGen(chatId, (g) => {
+          const notes = e.stage === 2 ? withoutSummarising(g.notes) : g.notes;
+          return { ...g, notes: notes.includes(note) ? notes : [...notes, note] };
+        });
+        return;
+      }
       case "finished":
         if (e.message && e.status !== "error") {
           set({
@@ -267,6 +326,61 @@ export const useApp = create<AppState>((set, get) => {
         return;
     }
   }
+
+  /** Counts the picks that changed a chat's model, so a switch can tell a newer pick replaced it. */
+  let picks = 0;
+  /** The newest pick of each chat (by chat id): only a newer pick in its own chat replaces a
+   *  switch's change of that chat; picks in other chats do not. */
+  const newestPick = new Map<number, number>();
+  /** The newest pick that loads a model, of any chat. `chatId` is the chat that picked it;
+   *  `riders` are the chats whose own load of the same model it replaced, which now wait on
+   *  this one; `keep` is set when it ends: true when it loaded (or failed with the error
+   *  shown), false when it was cancelled or replaced. */
+  let newestLoad: LoadPick | null = null;
+  /** For each chat with a switch that has not ended (loaded, or put back): the model it had
+   *  before the first of them, which a Cancel puts back even after newer picks. */
+  const beforeSwitch = new Map<number, string | null>();
+  const notePick = (chatId: number | null): number => {
+    picks += 1;
+    if (chatId !== null) newestPick.set(chatId, picks);
+    return picks;
+  };
+  /** Gives chat `chatId` back the model it had (`before`) after its switch to `modelRef` was
+   *  cancelled, whether the chat is open or not, unless it was given another model since. */
+  const restoreModel = async (chatId: number, modelRef: string, before: string) => {
+    const saved = await ipc.getChat(chatId);
+    if (saved.chat.modelRef !== modelRef) return;
+    await ipc.setChatModel(chatId, before);
+    if (get().activeChatId === chatId) await get().openChat(chatId);
+  };
+  /** Ends the switches of `chats` to `modelRef`: each keeps it, or (`keep` false) goes back to
+   *  the model it had before its first switch. A chat whose newer pick replaced its switch is
+   *  left to that pick. */
+  const endSwitches = async (chats: SwitchOf[], modelRef: string, keep: boolean) => {
+    for (const { chatId, pick } of chats) {
+      if (newestPick.get(chatId) !== pick) continue;
+      const before = beforeSwitch.get(chatId) ?? null;
+      beforeSwitch.delete(chatId);
+      if (!keep && before !== null) await restoreModel(chatId, modelRef, before);
+    }
+  };
+  /** Gives the open chat `modelRef`, or with no chat open makes a new chat on it, and opens
+   *  that chat. Returns the chat that has the model (null when none is open and `modelRef` is
+   *  null). */
+  const giveChatModel = async (modelRef: string | null): Promise<number | null> => {
+    const chatId = get().activeChatId;
+    if (chatId === null) {
+      // No chat is open: the model needs one to belong to, or picking it shows nothing.
+      if (modelRef === null) return null;
+      const chat = await ipc.createChat(modelRef);
+      await get().refreshChats();
+      await get().openChat(chat.id);
+      return chat.id;
+    }
+    await ipc.setChatModel(chatId, modelRef);
+    await get().openChat(chatId);
+    return chatId;
+  };
 
   return {
     chats: [],
@@ -323,6 +437,8 @@ export const useApp = create<AppState>((set, get) => {
 
     deleteChat: async (chatId) => {
       await ipc.deleteChat(chatId);
+      newestPick.delete(chatId);
+      beforeSwitch.delete(chatId);
       if (get().activeChatId === chatId) set({ activeChatId: null, detail: null });
       await get().refreshChats();
     },
@@ -371,32 +487,90 @@ export const useApp = create<AppState>((set, get) => {
     setRuntime: (s) => set({ runtime: s }),
 
     refreshModelOptions: async () => {
-      const modelOptions = await ipc.listModelOptions();
-      set({ modelOptions });
+      // [0.0.6 item 8] The open chat's own model file is listed the way the chat names it (a
+      // link, a mapped drive). Of two reads that cross, the newer one is kept.
+      const read = ++modelOptionsRead;
+      const modelOptions = await ipc.listModelOptions(get().detail?.chat.modelRef ?? null);
+      if (read === modelOptionsRead) set({ modelOptions });
     },
 
     setChatModel: async (modelRef) => {
-      const chatId = get().activeChatId;
-      if (chatId === null) {
-        // No chat is open: the model needs one to belong to, or picking it shows nothing.
-        if (modelRef === null) return;
-        const chat = await ipc.createChat(modelRef);
-        await get().refreshChats();
-        await get().openChat(chat.id);
-        return;
-      }
-      await ipc.setChatModel(chatId, modelRef);
-      await get().openChat(chatId);
+      await giveChatModel(modelRef);
     },
 
-    pickModel: async (modelRef) => {
+    pickModel: async (modelRef, opts) => {
       try {
-        await get().setChatModel(modelRef);
-        if (modelRef.startsWith("local:")) {
-          const settings = await ipc.getLocalModelSettings();
-          await ipc.loadLocalModel(modelRef.slice(6), settings);
-          await get().refreshModelOptions();
+        const path = modelRef.startsWith("local:") ? modelRef.slice(6) : null;
+        const runtime = get().runtime;
+        // An endpoint, or the local model already loaded (or loading): nothing to load. Its
+        // changed settings wait for Apply and restart (D3).
+        if (path === null || isLoadedNow(runtime, path)) {
+          const chatId = get().activeChatId;
+          // Whether the switch that waits is this chat's own newest pick (not one that another
+          // chat's load of the same model took over).
+          const own =
+            chatId !== null &&
+            newestLoad !== null &&
+            newestLoad.keep === undefined &&
+            newestLoad.chatId === chatId &&
+            newestPick.get(chatId) === newestLoad.pick;
+          notePick(chatId);
+          if (chatId !== null) beforeSwitch.delete(chatId);
+          // While a switch to another model waits, picking the loaded model again (in any
+          // chat) or an endpoint in the chat whose switch it is cancels the wait: the loaded
+          // model stays, and each other chat that waited for that switch goes back to the
+          // model it had before (which can be an endpoint).
+          if (useWaiting.getState().kind === "switch" && (path !== null || own)) await ipc.cancelPendingReload();
+          await get().setChatModel(modelRef);
+          opts?.onChatSet?.();
+          return;
         }
+        const answer = await askBeforeChange(runtime);
+        if (answer === null) return;
+        const opened = get().activeChatId;
+        const open = get().detail;
+        const pick = notePick(opened);
+        // With no chat open, the pick makes a new chat on the model, and the switch is that
+        // chat's: a pick in it (an endpoint too) replaces the switch as in any other chat.
+        const chatId = await giveChatModel(modelRef);
+        if (opened === null && chatId !== null && !newestPick.has(chatId)) newestPick.set(chatId, pick);
+        opts?.onChatSet?.();
+        // The model a Cancel puts back: the one the chat had before its first switch that has
+        // not ended, so after b and then c (or b twice) it goes back past both. A chat the pick
+        // made had no model before it, so it keeps this one (as a chat that had no model does).
+        if (opened !== null && !beforeSwitch.has(opened)) {
+          beforeSwitch.set(opened, open?.chat.id === opened ? open.chat.modelRef : null);
+        }
+        const load: LoadPick = { pick, path, chatId, riders: [] };
+        newestLoad = load;
+        const switches = (): SwitchOf[] => [...(chatId !== null ? [{ chatId, pick }] : []), ...load.riders];
+        let done: boolean;
+        try {
+          done = await runChange("switch", answer.whenIdle, () =>
+            ipc.loadLocalModel(path, null, backendWhenIdle(answer)),
+          );
+        } catch (err) {
+          // A load that failed (its error is shown) leaves its chats on the model they picked.
+          load.keep = true;
+          await endSwitches(switches(), modelRef, true);
+          throw err;
+        }
+        load.keep = done;
+        // A switch that was cancelled changes nothing, whether the user asked it to wait or
+        // the backend waited on its own (no question was asked), and whether its chat is open
+        // or not: the chat goes back to the model it had before its first switch, unless a
+        // newer pick in that chat replaced this one (that pick decides) or it was given
+        // another model since. When a newer load of the same model replaced this one (a pick
+        // in another chat, or a pick of that model again), this chat and those that waited on
+        // this load wait on the newer one and end with it: they keep the model if it loads.
+        const newer: LoadPick | null = newestLoad;
+        if (!done && newer !== null && newer !== load && newer.path === path && newer.keep === undefined) {
+          newer.riders.push(...switches());
+        } else {
+          const keep = done || (newer !== null && newer !== load && newer.path === path && newer.keep === true);
+          await endSwitches(switches(), modelRef, keep);
+        }
+        await get().refreshModelOptions();
       } catch (err) {
         set({ error: toErrorInfo(err) });
       }
@@ -436,3 +610,14 @@ export const useApp = create<AppState>((set, get) => {
     },
   };
 });
+
+/** [0.0.6 item 8] The `download-progress` listener: a finished download (every file of it
+ *  done) is a new model "On this computer", so the chat's model list is read again then, not
+ *  only when its menu opens. Returns the function that stops listening; outside the app it
+ *  listens to nothing. */
+export function refreshModelsAfterDownloads(): Promise<() => void> {
+  if (!ipc.isTauri()) return Promise.resolve(() => undefined);
+  return ipc.onDownloadProgress((g) => {
+    if (g.status === "done") useApp.getState().refreshModelOptions().catch(() => undefined);
+  });
+}

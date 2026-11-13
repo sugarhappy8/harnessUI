@@ -198,11 +198,24 @@ fn repo_paths(repo: &Repository) -> Result<RepoPaths, String> {
     })
 }
 
+/// The end of the refusal of a folder that is in no repository.
+pub(crate) const NOT_INSIDE_A_REPOSITORY: &str = " is not inside a git repository";
+
+/// Why [`discover`] found no repository to work on. The caller words the refusal, naming
+/// the folder as the model gave it (13.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NoRepository {
+    /// The folder is in no repository.
+    NotInside,
+    /// The folder is in a bare repository, this git folder, which has no working tree.
+    Bare(PathBuf),
+}
+
 /// The repository containing `start`, searching upward like `git rev-parse`.
-pub(crate) fn discover(start: &Path) -> Result<RepoPaths, String> {
+pub(crate) fn discover(start: &Path) -> Result<RepoPaths, NoRepository> {
     let repo = Repository::open_ext(start, RepositoryOpenFlags::empty(), &[] as &[&str])
-        .map_err(|_| format!("{} is not inside a git repository", start.display()))?;
-    repo_paths(&repo)
+        .map_err(|_| NoRepository::NotInside)?;
+    repo_paths(&repo).map_err(|_| NoRepository::Bare(clean(repo.path())))
 }
 
 /// Opens exactly the repository whose working tree is `root` (no search, no `GIT_DIR`).

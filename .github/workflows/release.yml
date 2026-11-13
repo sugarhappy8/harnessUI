@@ -39,8 +39,31 @@ jobs:
             echo "Updater key: not set"
           fi
 
+  # Before anything is built or published: reverse.lock.json must carry every publisher
+  # check a release needs, and the digest GitHub publishes for the pinned Ghidra download
+  # (recorded from CI run 43380365172) must still match it. Each release build reads that
+  # digest itself, with the workflow's token, read-only in this job.
+  reverse-pins:
+    name: Reverse-engineering downloads are checked
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: reverse.lock.json is ready for a release
+        run: python3 -I scripts/pin_reverse.py --check --release
+      - name: Ghidra's release digest on GitHub matches reverse.lock.json
+        timeout-minutes: 5
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/pin_reverse.py github-digest --part ghidra
+
   publish:
     name: Publish (${{ matrix.name }})
+    needs: reverse-pins
     strategy:
       fail-fast: false
       matrix:

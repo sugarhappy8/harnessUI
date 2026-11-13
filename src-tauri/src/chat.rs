@@ -207,7 +207,53 @@ pub async fn get_chat(
     Ok(ChatDetailDto {
         chat: dto,
         messages,
+        summary: earlier_summary(&state.store, chat_id, &path).await, // [0.0.5 memory]
     })
+}
+
+/// [0.0.5 memory] The summary the model is sent instead of the earlier messages of `path`
+/// (the shown branch), chosen as a turn chooses it (`turns::latest_summary`). A summary
+/// that cannot be read is left out: the chat still opens. [0.0.6] The summary is model
+/// output: characters that change how text is shown without being seen (tag characters,
+/// bidirectional overrides, zero-width characters) come as visible escapes, as on approval
+/// cards (`policy::sanitize::visible`); see `visible_summary` for exactly which.
+async fn earlier_summary(
+    store: &store::Store,
+    chat_id: store::ChatId,
+    path: &[store::Message],
+) -> Option<crate::dto::EarlierSummaryDto> {
+    let ids: Vec<store::MessageId> = path.iter().map(|m| m.id).collect();
+    let summary = store
+        .latest_summary_on_path(chat_id, &ids)
+        .await
+        .ok()
+        .flatten()?;
+    Some(crate::dto::EarlierSummaryDto {
+        last_message_id: summary.last_message_id,
+        text: visible_summary(&summary.text),
+    })
+}
+
+/// [0.0.6] A summary as Show summary shows it: the characters `policy::sanitize::visible`
+/// escapes, plus the soft hyphen and the combining grapheme joiner, as visible escapes, and
+/// Windows line ends as plain ones. Other hidden characters stay as written: the blank
+/// Braille pattern, the Arabic number signs and the other format controls outside that
+/// set, and the reserved code points U+FFF0..FFF8, U+E0080..E00FF and U+E01F0..E0FFF. The
+/// model gets the text as `agent::prompt::defang_app_notes` leaves it: chat-template
+/// control tokens broken, block tags (also when split by hidden characters) escaped,
+/// "[App note]" markers bracketed, control and tag characters and the default-ignorable
+/// code points assigned to nothing (those reserved ones included) escaped, and other
+/// hidden characters escaped only in and right next to a marker or a split block tag.
+fn visible_summary(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in policy::sanitize::visible(&text.replace("\r\n", "\n")).chars() {
+        if matches!(c, '\u{00AD}' | '\u{034F}') {
+            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[tauri::command]
@@ -353,11 +399,31 @@ pub async fn send_message(
     let n_ctx = target
         .n_ctx
         .unwrap_or(crate::settings::DEFAULT_REMOTE_CONTEXT) as usize;
-    let mention_parts = crate::mentions::attach(&app, &state, chat_id, mentions, n_ctx).await?;
+    // [0.0.5 memory] A document's share of the context counts the message's mentions too,
+    // and [0.0.6] a mention's share counts its documents: 40% of the context for them all.
+    let shared_by = documents.len() + mentions.len();
+    // [0.0.6] A local model's server counts each share in its own tokens, documents' and
+    // mentions' alike.
+    let counter = target.local.then_some(&target.client);
+    let mention_parts = crate::mentions::attach(
+        &app,
+        &state,
+        chat_id,
+        mentions,
+        n_ctx,
+        documents.len(),
+        counter,
+    )
+    .await?;
     let mut content = text_content(&text);
     if let Some(parts) = content.as_array_mut() {
         parts.extend(crate::attachments::save_images(&app, &state, chat_id, &images).await?);
-        parts.extend(crate::attachments::save_documents(&app, &state, chat_id, &documents).await?);
+        parts.extend(
+            crate::attachments::save_documents(
+                &app, &state, chat_id, &documents, n_ctx, shared_by, counter,
+            )
+            .await?,
+        );
         parts.extend(mention_parts);
     }
     let user_id = state
@@ -543,6 +609,12 @@ async fn generate(
             String::new(),
         ));
     };
+    let _busy = crate::runtime_manager::use_local_model(
+        state,
+        &target.model_ref,
+        crate::state::BusyKind::ChatTurn,
+        &cancel,
+    );
     let (caps, template) = turn_settings(state, &target);
     let req = crate::turns::TurnRequest {
         chat: chat.clone(),
@@ -614,5 +686,144 @@ mod tests {
         chat.working_folder = None;
         let v = serde_json::to_value(chat_dto(&chat)).unwrap();
         assert_eq!(v["workingFolder"], serde_json::Value::Null);
+    }
+
+    /// [0.0.6] The summary is model output that can carry hidden text copied from a web page
+    /// or a file (tag characters, a right-to-left override, zero-width characters). Show
+    /// summary is where the user sees what the model is sent instead of the messages, so
+    /// those characters come as visible escapes, as on approval cards; line breaks and tabs
+    /// stay.
+    #[tokio::test]
+    async fn the_chat_detail_shows_hidden_characters_of_the_summary() {
+        let store = store::Store::open_in_memory().unwrap();
+        let chat = store
+            .create_chat(store::NewChat {
+                title: "t".into(),
+                model_ref: None,
+                system_prompt: None,
+            })
+            .await
+            .unwrap();
+        let first = store
+            .insert_message(store::NewMessage {
+                chat_id: chat,
+                parent_id: None,
+                role: store::Role::User,
+                content: text_content("question"),
+                reasoning: None,
+                status: store::MessageStatus::Complete,
+                model_ref: None,
+                search_text: "question".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .insert_summary(store::NewSummary {
+                chat_id: chat,
+                last_message_id: first,
+                text: "Goal: tidy up.\u{E0049}\u{E0047}\u{E004E}\r\n\tDone: \u{202E}txt.exe \
+                       a\u{200B}b re\u{00AD}ad"
+                    .into(),
+            })
+            .await
+            .unwrap();
+        let path = store.path_to(chat, first).await.unwrap();
+        let summary = earlier_summary(&store, chat, &path)
+            .await
+            .expect("a summary");
+        assert_eq!(
+            summary.text,
+            "Goal: tidy up.\\u{E0049}\\u{E0047}\\u{E004E}\n\tDone: \\u{202E}txt.exe \
+             a\\u{200B}b re\\u{00AD}ad"
+        );
+    }
+
+    /// [0.0.5 memory] The chat detail carries the summary of the shown branch, with the
+    /// last message it stands for (where the chat draws its line), as `summary`
+    /// (src/lib/types.ts `ChatDetail`); a branch the summary is not on gets none.
+    #[tokio::test]
+    async fn the_chat_detail_carries_the_summary_of_the_shown_branch() {
+        let store = store::Store::open_in_memory().unwrap();
+        let chat = store
+            .create_chat(store::NewChat {
+                title: "t".into(),
+                model_ref: None,
+                system_prompt: None,
+            })
+            .await
+            .unwrap();
+        let mut parent = None;
+        let mut ids = Vec::new();
+        for (role, text) in [
+            (store::Role::User, "first question"),
+            (store::Role::Assistant, "first answer"),
+            (store::Role::User, "second question"),
+        ] {
+            let id = store
+                .insert_message(store::NewMessage {
+                    chat_id: chat,
+                    parent_id: parent,
+                    role,
+                    content: text_content(text),
+                    reasoning: None,
+                    status: store::MessageStatus::Complete,
+                    model_ref: None,
+                    search_text: text.into(),
+                })
+                .await
+                .unwrap();
+            parent = Some(id);
+            ids.push(id);
+        }
+        let path = store.path_to(chat, ids[2]).await.unwrap();
+        assert_eq!(earlier_summary(&store, chat, &path).await, None);
+        store
+            .insert_summary(store::NewSummary {
+                chat_id: chat,
+                last_message_id: ids[1],
+                text: "Goal: <b>answer</b> two questions.".into(),
+            })
+            .await
+            .unwrap();
+        let summary = earlier_summary(&store, chat, &path)
+            .await
+            .expect("a summary");
+        assert_eq!(summary.last_message_id, ids[1]);
+        let dto = ChatDetailDto {
+            chat: chat_dto(&store.get_chat(chat).await.unwrap().unwrap()),
+            messages: Vec::new(),
+            summary: Some(summary),
+        };
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["summary"]["lastMessageId"], json!(ids[1].0));
+        // The text as the model wrote it: escaping is the webview's (plain text).
+        assert_eq!(
+            v["summary"]["text"],
+            json!("Goal: <b>answer</b> two questions.")
+        );
+        // Another branch from the first question has no summary.
+        let other = store
+            .insert_message(store::NewMessage {
+                chat_id: chat,
+                parent_id: Some(ids[0]),
+                role: store::Role::Assistant,
+                content: text_content("another answer"),
+                reasoning: None,
+                status: store::MessageStatus::Complete,
+                model_ref: None,
+                search_text: String::new(),
+            })
+            .await
+            .unwrap();
+        let other_path = store.path_to(chat, other).await.unwrap();
+        assert_eq!(earlier_summary(&store, chat, &other_path).await, None);
+        let none = ChatDetailDto {
+            summary: None,
+            ..dto
+        };
+        assert_eq!(
+            serde_json::to_value(&none).unwrap()["summary"],
+            serde_json::Value::Null
+        );
     }
 }

@@ -21,7 +21,8 @@
 //! - [`prompt`]: the single system message, delimited tool results, the projection of history
 //!   onto the current model, and the one [`Sanitizer`] for untrusted text;
 //! - [`context`]: the context budget, compaction and truncation;
-//! - [`turn`]: [`run_turn`], one agent turn from the user's message to the final answer.
+//! - [`turn`]: [`run_turn`], one agent turn from the user's message to the final answer;
+//! - [`thinking`]: [`ThinkingLimit`], the per-request limit on thinking (0.0.6).
 
 #![warn(missing_docs)]
 
@@ -34,6 +35,7 @@ pub mod parse;
 pub mod prompt;
 pub mod sse;
 pub mod stream;
+pub mod thinking;
 pub mod turn;
 pub mod types;
 
@@ -51,6 +53,7 @@ pub use stream::{
     AccumulatedToolCall, ArgumentsStatus, ChunkParser, FinishReason, StreamDecoder, StreamEvent,
     Timings, ToolCallAccumulator, Usage,
 };
+pub use thinking::ThinkingLimit;
 pub use turn::{
     Approval, ApprovalRequest, Approver, CallDecision, CompactionSummary, ModelCaps, PolicyGate,
     RequestTemplate, ToolHost, TurnDeps, TurnEvent, TurnInput, TurnOutcome, TurnSink, TurnStatus,

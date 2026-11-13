@@ -108,6 +108,14 @@ body,
   height: 100%;
 }
 
+/* The app is one stacking layer: what it raises inside (the chat's header bar is z-10) stays
+   inside it, so dialogs, which Radix puts at the end of <body>, are always drawn above all of
+   it. Without this the header bar was drawn over the top of a dialog that reached it, such as
+   the Settings title and Close button when the header is two or three rows tall. */
+#root {
+  isolation: isolate;
+}
+
 body {
   margin: 0;
   background: var(--bg);

@@ -304,9 +304,52 @@ fn next_drop_says_each_stage_plainly() {
     assert!(next_drop(&full).contains("no longer fits"));
     let turn = TurnPreview {
         next: NextCompaction::ShortenTurnResults,
-        ..base
+        ..base.clone()
     };
     assert!(next_drop(&turn).contains("current turn"));
+    // [0.0.5 memory] A summary written for a larger context: the new stage is named
+    // first, in plain words, and the summary's row says so too.
+    let refold = TurnPreview {
+        applied: vec![2],
+        next: NextCompaction::SummariseEarlier { messages: 2 },
+        ..base.clone()
+    };
+    let said = next_drop(&refold);
+    assert!(said.starts_with(SUMMARY_TOO_LONG), "{said}");
+    assert!(said.contains("Nothing is left out now."), "{said}");
+    let v = view(&inspected(&refold, Ok(model_line(true, 8_192))));
+    let row = v.sections.iter().find(|s| s.id == "summary").unwrap();
+    // No summary text in this made-up preview: the row says "None" as before.
+    assert_eq!(row.detail, "None");
+    // The plain words of the full chat.
+    assert_eq!(
+        next_drop(&full),
+        "The chat no longer fits what the model can remember, and nothing is left to shorten. \
+         Start a new chat, or let the model remember more."
+    );
+    assert!(!next_drop(&full).contains("context"));
+}
+
+/// [0.0.5 memory] A chat summarised under a large context and inspected at 4,096 tokens:
+/// the loop's preview cuts the summary (stage 2), and the tab names that stage in the next
+/// drop and in the summary's row.
+#[tokio::test]
+async fn a_summary_too_long_for_a_smaller_context_is_named() {
+    let mut input = chat_input(4_096);
+    input.summary = Some(agent::turn::CompactionSummary {
+        text: "Goal: tidy the notes. ".repeat(190),
+        covered_ids: vec![1, 2, 3, 4],
+    });
+    let p = preview(input).await;
+    assert!(p.applied.contains(&2), "{:?}", p.applied);
+    let v = view(&inspected(&p, Ok(model_line(true, 4_096))));
+    assert!(v.next_drop.starts_with(SUMMARY_TOO_LONG), "{}", v.next_drop);
+    let row = v.sections.iter().find(|s| s.id == "summary").unwrap();
+    assert!(
+        row.detail.contains("Too long for this model's memory now"),
+        "{}",
+        row.detail
+    );
 }
 
 /// The commands are granted to the main window alone and check it again.

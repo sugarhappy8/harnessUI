@@ -197,4 +197,21 @@ describe("BrowserSettings: the agent's own browser", () => {
     expect(screen.queryByText("A browser for the agent")).toBeNull();
     expect(screen.getByRole("button", { name: "Use the installed one" })).toBeTruthy();
   });
+
+  it("shows the browser's path with hidden and right-to-left characters as codes", async () => {
+    statusNow = status({ found: "/opt/X-\u202Eemorhc/chrome", kind: "Google Chrome", unavailable: null });
+    await show();
+    const found = screen.getByText("/opt/X-\\u{202E}emorhc/chrome");
+    expect(found.tagName).toBe("BDI");
+    expect(found.getAttribute("dir")).toBe("ltr");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("\u202E");
+    cleanup();
+    statusNow = status({
+      settings: { path: "/opt/X-\u202Eemorhc", loopbackPort: false, allowPrivateNetworks: false, strictSites: [] },
+      unavailable: "The browser chosen in Settings (/opt/X-\u202Eemorhc) was not found.",
+    });
+    await show();
+    expect(screen.getByText("The browser chosen in Settings (/opt/X-\\u{202E}emorhc) was not found.")).toBeTruthy();
+    expect(new XMLSerializer().serializeToString(document.body)).not.toContain("\u202E");
+  });
 });

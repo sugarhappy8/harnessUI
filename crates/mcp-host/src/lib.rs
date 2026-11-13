@@ -21,6 +21,9 @@ pub mod describe;
 mod error;
 mod host;
 mod http;
+// rea's own server: spawn, handshake, allow-listed calls, cancel with a grace (item5-spec.md
+// WP9b).
+pub mod managed;
 pub mod names;
 mod result;
 pub mod schema;
@@ -44,6 +47,10 @@ pub use host::{
     MAX_DESCRIPTION_CHARS, RegisteredTool, ServerKind, ServerState, ServerStatus,
 };
 pub use http::{CONNECT_TIMEOUT, MAX_SSE_EVENT_BYTES};
+pub use managed::{
+    CANCEL_GRACE, CallOutcome, MAX_CALL_FACTOR, ManagedServer, ManagedSpec, STOP_AFTER_CANCEL,
+    StopOutcome, ToolAllowList,
+};
 pub use result::MAX_RESULT_BYTES;
 pub use schema::{CompiledSchema, SchemaError, canonical_json, simplify_for_llama};
 pub use secrets::SecretResolver;

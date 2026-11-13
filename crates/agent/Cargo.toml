@@ -28,6 +28,8 @@ uuid.workspace = true
 # network or file `$ref` resolution, as in mcp-host).
 jsonschema.workspace = true
 proptest.workspace = true
+# Starts the real llama-server for tests/llama_memory.rs as the app does (scripts/check-spawn.sh).
+runtime.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 

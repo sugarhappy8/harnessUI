@@ -129,6 +129,10 @@ def render() -> str:
         "Optional GPU backends (CUDA, ROCm) are not part of the installer. They are downloaded only when you",
         "click Download in Settings, after their licenses are shown.",
         "",
+        "Reverse engineering (rea, Node.js, Kuna, Ghidra and Eclipse Temurin) is not part of the installer.",
+        "Each is downloaded from its publisher only when you click Download in Settings → Reverse engineering,",
+        "after its licenses are shown.",
+        "",
         "## Rust crates",
         "",
     ]

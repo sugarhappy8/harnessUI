@@ -1,0 +1,5 @@
+Device Utilization %	37
+Renderer Utilization %	35
+Tiler Utilization %	21
+In use system memory	2147483648
+Alloc system memory	3221225472

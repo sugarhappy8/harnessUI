@@ -11,7 +11,8 @@
 //!   `turns::AppTools::run_subagent`). Its cards and audit rows say they come from a
 //!   subagent, and its audit rows point at the `run_subagent` call's row.
 //! - A helper cannot start a helper: the tool is not offered to it, and a call to it is
-//!   refused ([`NoNesting`]).
+//!   refused ([`NoNesting`]). Nor can it hand a task to a coding app (0.0.6), in any
+//!   approval mode: those tools are left out and refused the same way.
 //! - The helper starts where the turn is: if untrusted content already entered the turn,
 //!   or the `run_subagent` call itself was recovered from text, the helper's calls are
 //!   decided as such from its first one ([`InheritedGate`], D9 and 8.3).
@@ -64,6 +65,23 @@ pub fn is_tool(tool: &mcp_host::RegisteredTool) -> bool {
 /// Whether an action is a `run_subagent` call.
 pub fn is_action(action: &policy::Action) -> bool {
     action.server == SERVER_NAME && action.tool == TOOL_NAME
+}
+
+/// Whether a tool of the chat is offered to a helper: every one but `run_subagent` and
+/// the coding apps (0.0.6: a helper never hands a task to Claude Code or Codex).
+pub fn offered_to_helper(tool: &mcp_host::RegisteredTool) -> bool {
+    !is_tool(tool) && !crate::outside_agent::is_tool(tool)
+}
+
+/// What a helper is told for a tool it may not use, if it is one.
+fn not_for_helpers(name: &str) -> Option<&'static str> {
+    if name == TOOL_NAME {
+        Some(NESTED_REFUSAL)
+    } else if crate::outside_agent::is_tool_name(name) {
+        Some(crate::outside_agent::HELPER_REFUSAL)
+    } else {
+        None
+    }
 }
 
 /// The summary line of an approval card raised by a helper.
@@ -208,8 +226,8 @@ pub fn running_in(chat: i64) -> Option<Option<store::AuditId>> {
 
 // ---- The helper's view of the chat's tools and policy ---------------------------------
 
-/// The chat's tools without `run_subagent`: it is not offered to a helper, and a call to
-/// it is refused whatever the wrapped host would do.
+/// The chat's tools without `run_subagent` and the coding apps (0.0.6): they are not
+/// offered to a helper, and a call to one is refused whatever the wrapped host would do.
 struct NoNesting(Arc<dyn ToolHost>);
 
 #[async_trait]
@@ -218,24 +236,24 @@ impl ToolHost for NoNesting {
         self.0
             .tools()
             .into_iter()
-            .filter(|tool| tool.name != TOOL_NAME)
+            .filter(|tool| not_for_helpers(&tool.name).is_none())
             .collect()
     }
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
-        if name == TOOL_NAME {
-            return Err(vec![NESTED_REFUSAL.to_owned()]);
+        if let Some(refusal) = not_for_helpers(name) {
+            return Err(vec![refusal.to_owned()]);
         }
         self.0.validate(name, args)
     }
     fn llama_schema(&self, name: &str) -> Option<Value> {
-        if name == TOOL_NAME {
+        if not_for_helpers(name).is_some() {
             return None;
         }
         self.0.llama_schema(name)
     }
     async fn describe(&self, name: &str, args: &Map<String, Value>) -> Described {
-        if name == TOOL_NAME {
-            return Described::Invalid(NESTED_REFUSAL.to_owned());
+        if let Some(refusal) = not_for_helpers(name) {
+            return Described::Invalid(refusal.to_owned());
         }
         self.0.describe(name, args).await
     }
@@ -248,6 +266,10 @@ impl ToolHost for NoNesting {
     ) -> ToolOutput {
         if name == TOOL_NAME || is_action(action) {
             return ToolOutput::error(NESTED_REFUSAL);
+        }
+        // Also through `call_tool`, which is described as the tool it names.
+        if crate::outside_agent::is_tool_name(name) || crate::outside_agent::is_action(action) {
+            return ToolOutput::error(crate::outside_agent::HELPER_REFUSAL);
         }
         self.0.execute(name, args, action, cancel).await
     }
@@ -281,6 +303,11 @@ impl PolicyGate for InheritedGate {
         if tool == TOOL_NAME || is_action(action) {
             return policy::Decision::Refused {
                 reason: NESTED_REFUSAL.to_owned(),
+            };
+        }
+        if crate::outside_agent::is_tool_name(tool) || crate::outside_agent::is_action(action) {
+            return policy::Decision::Refused {
+                reason: crate::outside_agent::HELPER_REFUSAL.to_owned(),
             };
         }
         self.inner.decide(
@@ -496,52 +523,27 @@ pub struct Helper {
 }
 
 /// The helper's one user message: the app's framing, then the task and the context as the
-/// model wrote them (cleaned of chat-template control tokens, like any model-made text
-/// that goes back into a prompt).
+/// model wrote them (cleaned of chat-template control tokens, as the summary block is).
+///
+/// The system prompt tells the model that lines starting with `[App note]` come from the
+/// app, and the task is not inside a delimited block, so without care the main model,
+/// steered by something it read, could pass an instruction to the helper as the app's own
+/// `[App note]` marker. The task and context therefore go through the summary block's own
+/// cleaning ([`agent::prompt::defang_app_notes`]): every `[App note]` marker (any letter
+/// case, any spacing or hidden characters inside, full-width brackets too) gets round
+/// brackets, a block tag split by hidden characters is escaped like a plain one, the
+/// hidden characters in and right next to either are shown as visible escapes, and control
+/// and tag characters and the default-ignorable code points assigned to nothing are shown
+/// as escapes anywhere. The rest reaches the helper word for
+/// word, in any script; text that only resembles the marker (`[App notes]`) is not changed.
 fn handover_message(task: &str, context: &str, sanitizer: &Sanitizer) -> String {
-    let clean = |text: &str| defang_app_notes(&sanitizer.clean(text));
+    let clean = |text: &str| agent::prompt::defang_app_notes(text, sanitizer);
     let mut text = format!("{HANDOVER}\n\nTask:\n{}", clean(task));
     if !context.is_empty() {
         text.push_str("\n\nContext:\n");
         text.push_str(&clean(context));
     }
     text
-}
-
-/// Breaks every `[App note]` marker in model-written text (any letter case, any spacing
-/// inside the brackets) by turning its brackets into parentheses. The system prompt tells
-/// the model that lines starting with `[App note]` come from the app, and the task is not
-/// inside a delimited block, so without this the main model, steered by something it read,
-/// could pass an instruction to the helper as the app's own.
-fn defang_app_notes(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(open) = rest.find('[') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        let marker = after.find(']').filter(|&close| {
-            let inner: String = after[..close]
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>()
-                .to_lowercase();
-            inner == "appnote"
-        });
-        match marker {
-            Some(close) => {
-                out.push('(');
-                out.push_str(&after[..close]);
-                out.push(')');
-                rest = &after[close + 1..];
-            }
-            None => {
-                out.push('[');
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Runs one helper to its end and returns its final answer as the tool result. Failures

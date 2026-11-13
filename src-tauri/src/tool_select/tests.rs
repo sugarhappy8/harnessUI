@@ -288,6 +288,78 @@ fn matching_groups_are_ordered_by_score() {
     assert!(scores[0].1 > scores[1].1, "{scores:?}");
 }
 
+/// [0.0.6 item 5] Reverse engineering matches by its own listed words only (item5-spec.md
+/// R18): rea's tool names hold everyday words ("function", "strings", "python", "rust",
+/// "view"), so counting them would bring the group into ordinary coding requests once rea
+/// is on. The other groups still match by the words of their tools' names, and so does an
+/// added server that happens to be called "reverse".
+#[test]
+fn reverse_engineering_matches_by_its_own_words_only() {
+    let all: Vec<Candidate> = on(&[
+        "files",
+        "terminal",
+        "git",
+        "browser",
+        "computer",
+        "artifacts",
+        "search",
+        "reverse",
+    ])
+    .into_iter()
+    .filter(|t| !is_always_shown(t) && !is_core(t))
+    .collect();
+    let groups = |tools: &[Candidate], text: &str| -> BTreeSet<String> {
+        matching_groups(tools, &Wording::of(text), &[])
+            .into_iter()
+            .map(|(g, _)| g)
+            .collect()
+    };
+    let set = |list: &[&str]| -> BTreeSet<String> { list.iter().map(|s| s.to_string()).collect() };
+    // Everyday requests that only share words with rea's tool names.
+    assert_eq!(groups(&all, "Write a Python function"), set(&["terminal"]));
+    assert_eq!(groups(&all, "view the strings in this rust file"), set(&[]));
+    assert_eq!(groups(&all, "what does this function do?"), set(&[]));
+    // Its weak words ("program", "function", "library") are everyday coding words: without
+    // one of its strong words they bring nothing in.
+    assert_eq!(groups(&all, "Write a function for my program"), set(&[]));
+    assert!(!groups(&all, "add a function to this library").contains("reverse"));
+    assert!(!groups(&all, "link this library into my program").contains("reverse"));
+    // Its own words still bring it in.
+    assert_eq!(groups(&all, "decompile this program"), set(&["reverse"]));
+    assert!(groups(&all, "disassemble notepad.exe").contains("reverse"));
+    // Plain ways to ask for what only rea does, which used to count through its tools'
+    // names (procedure_pseudo_code, xrefs, inspect_python_pyc).
+    for text in [
+        "show me the pseudo code of main",
+        "show me the pseudo-code of main",
+        "find the xrefs to main",
+        "what is in this .pyc file",
+    ] {
+        assert!(groups(&all, text).contains("reverse"), "{text}");
+    }
+    // A weak word still adds to a match that a strong word made.
+    let score = |text: &str| -> u32 {
+        matching_groups(&all, &Wording::of(text), &[])
+            .into_iter()
+            .find(|(g, _)| g == "reverse")
+            .map_or(0, |(_, s)| s)
+    };
+    assert!(score("decompile this program") > score("decompile this"));
+    // "screenshot" and "drag" are only in the names of browser and computer tools.
+    assert_eq!(
+        groups(&all, "take a screenshot"),
+        set(&["browser", "computer"])
+    );
+    assert_eq!(groups(&all, "drag it to the left"), set(&["computer"]));
+    // An added server named like rea's group is an ordinary group: its tools' names count.
+    let added = vec![external(
+        "reverse",
+        "list_strings",
+        "Print the printable text found in a file.",
+    )];
+    assert_eq!(groups(&added, "list the strings"), set(&["reverse"]));
+}
+
 // ---- the shown set ------------------------------------------------------------------------
 
 /// [0.0.5 full access] A request to organise brings in the tools that create and move
@@ -1010,4 +1082,109 @@ fn the_allowance_follows_the_loops_own_limit() {
     // More context, more room.
     assert!(allowance(8_192, 200) > 2 * allowance(4_096, 200));
     assert!(allowance(32_768, 200) > 8_000);
+}
+
+/// [0.0.5 memory] The summary of earlier messages is part of the fixed part: it counts
+/// with its lines, and the tools get that much less room. A chat summarised under a large
+/// context and continued at 4,096 tokens then shows fewer tools instead of refusing the
+/// turn because its fixed part no longer fits.
+#[test]
+fn the_summary_takes_from_the_tools_share() {
+    let prompt = "You are a helpful assistant.";
+    let without = fixed_tokens(prompt, None);
+    assert_eq!(without, agent::estimate::estimate_tokens(prompt) + 220);
+    // Nothing to count for an empty summary.
+    assert_eq!(fixed_tokens(prompt, Some("  \n")), without);
+    // A summary of about 300 tokens.
+    let summary = "Goal: plan the trip. ".repeat(43);
+    let with = fixed_tokens(prompt, Some(&summary));
+    assert_eq!(
+        with,
+        without + agent::estimate::estimate_tokens(summary.trim()) + SUMMARY_LINES_TOKENS
+    );
+    // At 4,096 tokens the tools get exactly that much less room.
+    let room_without = allowance(4_096, without);
+    let room_with = allowance(4_096, with);
+    assert!(room_with > 0);
+    assert_eq!(room_without - room_with, with - without);
+    // The longest summary the loop writes at 32,768 tokens (1,024 tokens, 4,096
+    // characters), counted whole, would leave the tools no room of their own at 4,096 ...
+    let longest = "x".repeat(4_096);
+    assert_eq!(allowance(4_096, fixed_tokens(prompt, Some(&longest))), 0);
+    // ... but a turn counts it as the loop sends it (next test).
+    let sent = summary_as_sent(&longest, 4_096);
+    assert!(allowance(4_096, fixed_tokens(prompt, Some(&sent))) > 0);
+}
+
+/// [0.0.5 memory] A summary written when the model could remember more is folded again
+/// under the smaller context's cap before the loop measures anything (or cut to it when
+/// the model cannot fold it), so a turn counts it at that length: the tools are not
+/// crowded out by text the request will not carry. A summary that fits is counted as it is.
+#[test]
+fn a_summary_is_counted_as_the_loop_sends_it() {
+    let cap = |n_ctx| agent::context::ContextBudget::new(n_ctx, 0).summary_max_chars();
+    let longest = format!(
+        "Goal: fix the build.\n{}Exact paths and identifiers: /p/src/main.rs",
+        "Work done: a step.\n".repeat(180)
+    );
+    assert!(longest.chars().count() > cap(4_096));
+    assert!(longest.chars().count() <= cap(32_768));
+    // At 32,768 tokens it fits: unchanged.
+    assert_eq!(summary_as_sent(&longest, 32_768), longest.trim());
+    // At 4,096 tokens it is held to that context's cap.
+    let sent = summary_as_sent(&longest, 4_096);
+    assert!(
+        sent.chars().count() <= cap(4_096),
+        "{}",
+        sent.chars().count()
+    );
+    assert!(sent.starts_with("Goal: fix the build."));
+    // The tools get the room the folded summary leaves them.
+    let prompt = "You are a helpful assistant.";
+    let whole = allowance(4_096, fixed_tokens(prompt, Some(&longest)));
+    let folded = allowance(4_096, fixed_tokens(prompt, Some(&sent)));
+    assert!(folded > whole, "{folded} > {whole}");
+    assert!(
+        folded
+            >= allowance(4_096, fixed_tokens(prompt, None))
+                - agent::estimate::estimate_tokens(&"x".repeat(cap(4_096)))
+                - SUMMARY_LINES_TOKENS
+    );
+    // A short summary is never changed.
+    assert_eq!(summary_as_sent("Goal: x.", 4_096), "Goal: x.");
+}
+
+/// [0.0.6] The Tools panel reads the fixed part before it knows the context
+/// ([`other_fixed`]) and counts it for the context it then knows, with the summary as a turn
+/// in that context sends it: after a chat summarised at 32,768 tokens moves to a 4,096-token
+/// model, the panel marks the tools the next turn shows, not none.
+#[test]
+fn the_tools_panel_counts_the_summary_as_a_turn_sends_it() {
+    let prompt = "You are a helpful assistant.";
+    // The longest summary the loop writes at 32,768 tokens.
+    let longest = "x".repeat(4_096);
+    let fixed = OtherFixed {
+        text: prompt.to_owned(),
+        summary: Some(longest.clone()),
+    };
+    let turn = allowance(
+        4_096,
+        fixed_tokens(prompt, Some(&summary_as_sent(&longest, 4_096))),
+    );
+    assert!(turn > 0);
+    assert_eq!(allowance(4_096, fixed.clone()), turn);
+    // Where it fits, it is counted whole.
+    assert_eq!(
+        allowance(32_768, fixed),
+        allowance(32_768, fixed_tokens(prompt, Some(&longest)))
+    );
+    // Without a summary, the text alone.
+    let none = OtherFixed {
+        text: prompt.to_owned(),
+        summary: None,
+    };
+    assert_eq!(
+        allowance(4_096, none),
+        allowance(4_096, fixed_tokens(prompt, None))
+    );
 }

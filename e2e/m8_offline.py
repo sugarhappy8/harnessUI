@@ -33,6 +33,8 @@ OUT = pathlib.Path(os.environ.get("E2E_OUT", tempfile.mkdtemp(prefix="e2e-m8-"))
 SETTINGS_PAGES = [
     "General",
     "Local models",
+    "Reverse engineering",
+    "Other apps",
     "Endpoints",
     "Hugging Face",
     "MCP servers",

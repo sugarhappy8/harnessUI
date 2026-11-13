@@ -64,6 +64,8 @@ in the menu, so pick a model with `click_menu_item(name)`.
 | `scripted_agent.py` | No model needed: a fake endpoint with scripted replies (text, thinking, tool calls, HTTP errors, dropped and unfinished streams). Markdown safety, every settings page, per-chat folders and working folder, skill loading and unloading, terminal and git cards (a push URL's token never shown), failed turns (one error message, partial text kept, fitting advice), stop, regenerate, edit-and-resend, switching or deleting a chat mid-reply, recovered tool calls, forgetting grants, MCP config refusals, subagents (off in a new chat, switched on in the Tools panel; the helper's fresh history and tool list, its approval card and audit rows, nothing of it stored in the chat or counted in its context; a nested call refused; Stop during the helper), the step limit (refused values, the wrap-up request, the notice with Continue, the setting in Settings → General) |
 | `m9_model_check.py` | 0.0.4: "Check this model" with the real test model: every setting listed with a mark per probe (passing is not required), temporary folders gone, audit rows with no chat, nothing written outside the temporary folders; then a benchmark ended early with "End the benchmark", which must stop within a few seconds and save the partial run |
 | `m8_offline.py` | Start, a local chat and every settings page with all proxies pointing at a recorder that refuses everything: no outbound request |
+| `m10_model_settings.py` | 0.0.6: one model's load settings with the real test model: Automatic on a fresh install and the 0.0.4 upgrade rule, unsaved choices previewed, a saved context, Save memory and Keep in memory reaching llama-server's command line, Apply and restart, Reload, Unload, the backend check waiting for a busy model |
+| `m11_fine_control.py` | 0.0.6: Fine control with the real test model on the processor: the picture before loading, llama.cpp's own measurement for an unsaved draft (cached, nothing saved, no process left), Fine control choices at load, the usage line |
 
 `scripted_agent.py` also has one scenario per 0.0.4 feature. `PROBES=name,name` runs only
 those (for example `PROBES=mentions xvfb-run -a python3 -I e2e/scripted_agent.py`). Step 1
@@ -77,6 +79,22 @@ added `allow-all`, `artifacts`, `search` and `tool-selection`; steps 2 and 3 add
 | `pinned` | Pins for this chat and for every chat typed in the Context tab; the exact block, once, after the system prompt; another chat gets only the every-chat pin; pins survive a reload |
 | `context-inspector` | What the fake endpoint receives equals what the inspector showed just before (system message, tools in order, messages, task note); two inspections change no database row |
 | `capability-check` | The model check's confirmation, two settings by three probes, the saved profile (and `set_setting` refusing its key), audit rows with no chat, temporary folders removed, `temperature: 0.2` in a chat turn and none after Forget; a benchmark run through *Settings → Diagnostics*, saved, listed and loaded |
+
+0.0.6 added one scenario per feature (some need `TEST_GGUF`; `share-webp` also needs a
+vision model in `TEST_VISION_GGUF` and is skipped without one):
+
+| Scenario | Covers |
+|---|---|
+| `model-settings` | Settings for this model from the picker's gear and from Installed, the ready line, the busy question while a reply streams (Cancel, Restart when it ends), Unload and Load |
+| `chat-memory` | A long chat on a small context is summarised: the notes, the line with Show summary (also after a reload), a failed summary, a long document cut with a note |
+| `compare-models` | Models → Compare offline and through a stand-in for Hugging Face: suggestions, catalog and installed columns, Compare at, file choice, four at most, rate limit and gated answers |
+| `share-proxy`, `other-apps` | Other apps using the model: the proxy's checks before the key, all four APIs with the real model, audit rows, the Other apps page (switch, key, warning, setup cards) |
+| `share-webp`, `webp-picture` | WebP pictures turned into JPEG or PNG, from the composer and through the sharing proxy; broken and oversized ones refused in plain words |
+| `coding-apps` | Fake `claude` and `codex` on `PATH`: the group off in a new chat, the card, Deny runs nothing, Allow once runs the fake with the task on standard input |
+| `folder-chip`, `header-layout` | The folder chip and its menu, escaped paths, Full access; the header from 720 to 1,440 pixels wide |
+| `model-list` | A downloaded model in the chat's model list without loading it; two copies of one name |
+| `fine-control` | The usage line, Where the model goes and Fine control in Settings for this model |
+| `reverse-settings`, `reverse-tools`, `reverse-describe`, `reverse-engineering` | Settings → Reverse engineering (nothing downloaded), the Tools panel group and dropped program files, the approval gate for rea's tools, and a whole turn with a fake rea (`e2e/fake_rea.py`) |
 
 The scenarios with a model use Qwen3 0.6B, which sometimes answers without calling the
 tool it was asked to use; those steps ask again up to three times.
