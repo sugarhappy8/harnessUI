@@ -345,7 +345,8 @@ fn measure_row(row: &Value) -> Result<Option<MemoryRow>, FitParamsError> {
 /// Each run that started writes one log entry: the last [`LOG_LINES_KEPT`] warning and
 /// error records of its log stream and the last [`LOG_LINES_KEPT`] stderr lines, escaped
 /// and cut ([`log_records`]). On a broken file the reason is in those records, not on
-/// stderr.
+/// stderr, when llama.cpp's log thread wrote it before the abort (most runs; in 6 of 40
+/// runs on the build machine it did not, and stdout held only the first info record).
 pub async fn measure(
     backend: &Backend,
     cfg: &MeasureConfig,

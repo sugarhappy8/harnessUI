@@ -605,6 +605,16 @@ describe("the decompiler choice", () => {
     expect(screen.getByText(/^Saved analysis: 0 MB\./)).toBeTruthy();
   });
 
+  it("one installed but broken: still says which one is used, beside its Repair", async () => {
+    // `decompiler` is the usable one (none here); `chosen` is the owner's choice.
+    await show(
+      status({ decompiler: null, chosen: "ghidra" }, { rea: INSTALLED, ghidra: { state: { kind: "broken", why: "missing" } } }),
+    );
+    expect(screen.getByText("Decompiling uses Ghidra.")).toBeTruthy();
+    expect(screen.queryByText(NO_DECOMPILER)).toBeNull();
+    expect(within(rowOf("Ghidra")).getByRole("button", { name: "Repair" })).toBeTruthy();
+  });
+
   it("no saved-analysis line without Kuna", async () => {
     await show(status({ decompiler: "ghidra", chosen: "ghidra" }, { rea: INSTALLED, ghidra: INSTALLED }));
     expect(screen.queryByText(/Saved analysis/)).toBeNull();

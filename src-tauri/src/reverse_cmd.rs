@@ -135,9 +135,9 @@ impl ReverseProgressDto {
 // ---------------------------------------------------------------------------------------
 // The app's server.
 
-/// The app's `reverse` server: the one `toolset::build_host` registered (WP9g). Until that
-/// line is in, the tab uses a server of its own over the same folders, so the tab works
-/// whichever lands first; it is set as the app's server, so there is still only one.
+/// The app's `reverse` server: the one `toolset::build_host` registered (WP9g). Only if that
+/// did not happen (the app's data folder could not be named then) does the tab make one
+/// over the same folders; it is set as the app's server, so there is still only one.
 fn server(app: &AppHandle) -> AppResult<Arc<ReverseServer>> {
     if let Some(server) = reverse::handle() {
         return Ok(server);
@@ -576,6 +576,42 @@ pub(crate) async fn after_install(
     }))
 }
 
+/// Whether a download of `component` replaces or retires files rea uses now: an Update or a
+/// Repair of rea itself or of the decompiler rea uses.
+pub(crate) fn replaces_files_rea_uses(server: &ReverseServer, component: Component) -> bool {
+    let uses = component == Component::Rea
+        || server.chosen_decompiler().map(Decompiler::component) == Some(component);
+    if !uses {
+        return false;
+    }
+    match server.installer().state(component) {
+        ComponentState::Broken { .. } | ComponentState::NeedsUpdate { .. } => true,
+        ComponentState::Installed => server.installer().status(component).update.is_some(),
+        _ => false,
+    }
+}
+
+/// Stops rea when it runs and is idle, the way the idle stop does: while holding rea, so no
+/// chat's call is cut, and a chat's open file opens again by itself on its next call (R21).
+/// Before an Update or a Repair, so rea's files are not open while they are replaced or the
+/// old version is deleted (Windows refuses to delete files a running program holds). When
+/// rea is busy it is left alone: the download goes on and rea restarts once it is free.
+/// Returns whether rea was stopped.
+pub(crate) async fn stop_if_idle(server: &ReverseServer) -> bool {
+    if server.process().state() != reverse::RunState::Ready {
+        return false;
+    }
+    let Ok(_guard) = tokio::time::timeout(Duration::from_millis(50), server.process().lock()).await
+    else {
+        return false;
+    };
+    if server.process().state() != reverse::RunState::Ready {
+        return false;
+    }
+    server.process().stop(reverse::process::STOP_GRACE).await;
+    true
+}
+
 /// Restarts rea once it is free (a chat's call is never cut by a download finishing).
 /// Gives up after `wait`; returns whether it restarted.
 pub(crate) async fn restart_when_free(
@@ -757,6 +793,9 @@ pub async fn reverse_download(
         let emit = |p: ReverseProgressDto| {
             let _ = app.emit_to(crate::MAIN_WINDOW, PROGRESS_EVENT, p);
         };
+        if replaces_files_rea_uses(&server, component) {
+            stop_if_idle(&server).await;
+        }
         let result = run_download(&server, component, &token, &emit).await;
         if let Ok(mut map) = DOWNLOADS.lock() {
             map.remove(&component);

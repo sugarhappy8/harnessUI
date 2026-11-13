@@ -660,11 +660,12 @@ export function Reverse() {
                 </button>
               ))}
             </div>
-          ) : status.decompiler ? (
-            <p>{`Decompiling uses ${label(status.decompiler)}.`}</p>
-          ) : decompilersOnDisk.length === 0 ? (
+          ) : decompilersOnDisk.length === 1 ? (
+            // The owner's choice, also while it is broken or needs an update (its row says so).
+            <p>{`Decompiling uses ${label(status.chosen ?? status.decompiler ?? decompilersOnDisk[0] ?? "kuna")}.`}</p>
+          ) : (
             <p className="text-fg-muted">{NO_DECOMPILER}</p>
-          ) : null}
+          )}
           {onDisk(row("kuna")) && (
             <div className="flex items-center gap-2">
               <p className="flex-1 text-xs text-fg-muted">
