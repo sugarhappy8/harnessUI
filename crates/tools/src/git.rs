@@ -876,9 +876,12 @@ impl BuiltinServer for GitServer {
             Err(r) => return Self::deny_with(tool, with_advice(tool, r.why), r.detail),
         };
         // The repository as the folder given names it; the root git found is on the card.
-        if let Err(why) =
-            self.skill_check_as(tool, &root, &format!("The git repository holding {said}"), chat)
-        {
+        if let Err(why) = self.skill_check_as(
+            tool,
+            &root,
+            &format!("The git repository holding {said}"),
+            chat,
+        ) {
             let detail = format!(
                 "The repository's root folder is {}.",
                 policy::sanitize::visible(&root)
@@ -2591,7 +2594,11 @@ mod tests {
             else {
                 panic!("{tool} {repo}: not described")
             };
-            assert_eq!(refused.hard_limit.as_deref(), Some(expected.as_str()), "{repo}");
+            assert_eq!(
+                refused.hard_limit.as_deref(),
+                Some(expected.as_str()),
+                "{repo}"
+            );
             assert_eq!(refused.preview, preview, "{repo}");
         }
     }
@@ -2636,7 +2643,10 @@ mod tests {
                 policy::sanitize::visible(&key)
             )
         );
-        assert_ne!(refused.preview, format!("The repository's config sets {key}."));
+        assert_ne!(
+            refused.preview,
+            format!("The repository's config sets {key}.")
+        );
     }
 }
 
@@ -3997,7 +4007,11 @@ printf '@@harness-git-worker@@ {"kind":"done","text":"%s"}\n' "$r""#;
             let Described::Action(refused) = describe(&s, &c, tool, &a).await else {
                 panic!("{tool} {repo}: not described")
             };
-            assert_eq!(refused.hard_limit.as_deref(), Some(expected.as_str()), "{repo}");
+            assert_eq!(
+                refused.hard_limit.as_deref(),
+                Some(expected.as_str()),
+                "{repo}"
+            );
             assert_eq!(refused.preview, preview, "{repo}");
         }
     }

@@ -1026,17 +1026,14 @@ fn a_search_is_about_reverse_engineering_only_through_its_strong_words() {
     );
     let text = render("decompile the program", &[], &all, &off, &[], &validate);
     assert!(text.contains(line), "{text}");
-    // A search finds a rea tool through its own words, not through a weak group word.
+    // A search reaches a rea tool through its own name, words and purpose ("open_binary"
+    // says it opens a program file), not through a weak group word alone: "list_segments"
+    // says nothing about a program.
     let on = listed(&tools, &["read_file"], &[]);
-    let from_reverse = |query: &str| -> Vec<String> {
-        search(query, &on)
-            .into_iter()
-            .filter(|l| l.tool.server == "reverse")
-            .map(|l| l.tool.exposed.clone())
-            .collect()
-    };
-    assert!(from_reverse("my program").is_empty());
-    assert!(!from_reverse("decompile my program").is_empty());
+    let found = found_names(&search("my program", &on));
+    assert!(!found.contains(&"list_segments".to_string()), "{found:?}");
+    let found = found_names(&search("decompile my program", &on));
+    assert!(found.contains(&"open_binary".to_string()), "{found:?}");
 }
 
 #[test]

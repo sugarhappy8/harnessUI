@@ -1123,7 +1123,11 @@ mod tests {
             else {
                 panic!("{tool} {a}: not described")
             };
-            assert_eq!(refused.hard_limit.as_deref(), Some(expected.as_str()), "{tool} {a}");
+            assert_eq!(
+                refused.hard_limit.as_deref(),
+                Some(expected.as_str()),
+                "{tool} {a}"
+            );
             assert_eq!(
                 refused.preview,
                 format!("{given}\nThat path leads to {}.", leads.display()),

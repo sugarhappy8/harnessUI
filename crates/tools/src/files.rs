@@ -414,12 +414,7 @@ impl FilesServer {
     /// [`Self::hard_limit`] of a path the sandbox let through but a rule refuses. The
     /// preview, and so the audit row, also says where the path leads when a link on the way
     /// leads somewhere else (`leads`, [`errors::leads_to`]); `why` never does (13.9).
-    fn hard_limit_at(
-        tool: &str,
-        path: &str,
-        why: String,
-        leads: Option<String>,
-    ) -> Described {
+    fn hard_limit_at(tool: &str, path: &str, why: String, leads: Option<String>) -> Described {
         let mut refused = Self::hard_limit(tool, path, why);
         if let (Described::Action(action), Some(leads)) = (&mut refused, leads) {
             action.preview.push('\n');
