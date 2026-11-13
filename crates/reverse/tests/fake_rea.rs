@@ -1429,7 +1429,7 @@ mod calls {
                     // still a card without it).
                     let recovered = TurnContext {
                         recovered_from_text: true,
-                        ..turn.clone()
+                        ..turn
                     };
                     assert_eq!(
                         policy::evaluate(&check, &recovered, &granted),
@@ -1720,6 +1720,17 @@ mod calls {
             .with_fetch(Arc::new(DirFetch::new(&cache)));
         if !installer.status(Component::Kuna).available {
             println!("fake_rea: Kuna is not offered here; the real rea check is skipped");
+            return;
+        }
+        let lock = reverse::lock::embedded();
+        let missing: Vec<String> = ["rea", "node", "kuna"]
+            .iter()
+            .filter_map(|part| lock.part(part)?.build_for(platform))
+            .map(|b| b.file.name.clone())
+            .filter(|name| !cache.join(name).is_file())
+            .collect();
+        if !missing.is_empty() {
+            println!("fake_rea: the cache lacks {missing:?}; the real rea check is skipped");
             return;
         }
         let started = Instant::now();

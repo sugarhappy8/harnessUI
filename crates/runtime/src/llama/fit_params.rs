@@ -869,7 +869,7 @@ mod tests {
             record(r#"[1,2]"#),
         ] {
             assert_eq!(
-                parse_measure_output(&[line.clone()]),
+                parse_measure_output(std::slice::from_ref(&line)),
                 Err(FitParamsError::NoReport),
                 "{line}"
             );
@@ -955,7 +955,7 @@ mod tests {
                     r#"{{"kind":"device","name":"Vulkan0","{field}":{value}}},{{"kind":"host","name":"Host","model":1}}"#
                 ));
                 assert_eq!(
-                    parse_measure_output(&[line.clone()]),
+                    parse_measure_output(std::slice::from_ref(&line)),
                     Err(FitParamsError::NoReport),
                     "{line}"
                 );
@@ -964,7 +964,7 @@ mod tests {
                 r#"{{"kind":"gpu","model":{value}}},{{"kind":"host","name":"Host","model":1}}"#
             ));
             assert_eq!(
-                parse_measure_output(&[unknown.clone()]),
+                parse_measure_output(std::slice::from_ref(&unknown)),
                 Err(FitParamsError::NoReport),
                 "{unknown}"
             );

@@ -17,11 +17,14 @@
 //!    offers, and must match what was approved: the same canonical arguments, the same
 //!    file identity (or a folder walked again), the same decompiler, binding and result
 //!    id. A session call also checks its file's identity (or walks its `.app` folder);
+//!    The model's `close_binary` for a file rea no longer holds (an idle stop, a crash)
+//!    ends the binding here, without starting rea or opening the file again;
 //! 4. rea is started if needed (a new start grows the store epoch and runs the live check
 //!    of rea's tool list against the installed version's fixture);
 //! 5. a session call whose file rea lost (an idle stop, a crash) opens it again first,
 //!    without a card (R21); `inspect_analysis_view` needs its id in the current epoch;
-//! 6. `open_binary` first clears rea when another chat used it (R12 step 6);
+//! 6. `open_binary` first clears rea when another chat used it (R12 step 6), unless rea
+//!    was started for this very call (a new process holds nothing);
 //! 7. the call is forwarded with the canonical arguments and the fixed `detail` only, the
 //!    tool's time limit, the turn's Stop and the app's own progress line; the result's ids
 //!    are recorded for this chat, the binding is updated, and the result is cleaned
