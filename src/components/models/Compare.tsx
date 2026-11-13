@@ -21,7 +21,7 @@ import {
   sizeAnswer,
   tagWords,
 } from "../../lib/abilities";
-import { backendWords, tokensWithWords } from "../../lib/words";
+import { backendWords, FIT_WORDS, tokensWithWords } from "../../lib/words";
 import {
   COMPARE_FULL,
   COMPARE_LIMIT,
@@ -1026,7 +1026,7 @@ function FileChange(props: {
                 {current && <Check size={11} className="mr-1 inline" aria-hidden />}
                 {/* A label without a quantisation is the uploader's file name. */}
                 <Outside text={fileWords(v.label) ?? v.label} cap={80} /> · {formatBytes(v.totalSize)}
-                {v.fit ? ` · ${FIT_LABEL[v.fit.verdict]}` : ""}
+                {v.fit ? ` · ${FIT_WORDS[v.fit.verdict]}` : ""}
               </button>
             );
           })}
@@ -1035,8 +1035,6 @@ function FileChange(props: {
     </div>
   );
 }
-
-const FIT_LABEL = { green: "Fits", yellow: "Fits with limits", red: "Too large" } as const;
 
 /** Suggested models shown before "Show N more" (the catalog's best for this computer first). */
 export const SUGGESTED_SHOWN = 4;

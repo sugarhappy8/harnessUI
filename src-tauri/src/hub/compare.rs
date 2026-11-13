@@ -18,8 +18,11 @@
 //!   [`CompareProblem`], never an error for the whole call.
 //! - **The GGUF header** (`From the model file`): the installed file itself, or the first
 //!   bytes of one file of the repository (the same file the repository page reads).
-//! - **The fit** (one verdict per column at the chosen size): the same estimate as the
-//!   repository page, from that column's own file only.
+//! - **The fit** (one verdict per column at the chosen size): an installed file is judged
+//!   as Installed and Settings for this model judge it ([`installed_fit`]: its own
+//!   settings, `placement::judge_in`, the settings panel's amounts); a file that is not
+//!   downloaded gets the same estimate as the repository page, from that column's own
+//!   file only. The screen words the figures (`fitLine` in src/lib/words.ts).
 //! - **Your results**: saved model checks and benchmark runs with the same file name and
 //!   size as the column's file.
 //!
@@ -31,9 +34,11 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use models::Verdict;
 use models::catalog::{Catalog, Entry};
-use models::fit::{FitInput, Target};
+use models::fit::{FitDevice, FitInput, Target};
 use models::hf::{Gated, HfClient, HfError, RepoDetail, UPLOADER_TEXT_CAP, uploader_text};
+use models::placement::{Fits, MemoryKind};
 use models::summary::ModelSummary;
 
 use super::StoredSummary;
@@ -43,6 +48,7 @@ use crate::dto::{
 };
 use crate::evals::bench::BenchRun;
 use crate::evals::profile::{Identity, Profile};
+use crate::load_settings::Plan;
 
 /// The most models one comparison holds (the screen's limit, `COMPARE_LIMIT` in
 /// `src/store/compare.ts`). A longer list is refused: it would be a bulk fetch.
@@ -112,6 +118,9 @@ pub struct Known {
     /// Memory the model may use, for the order of Suggested models.
     pub usable_bytes: u64,
     pub results: Vec<LocalResult>,
+    /// How a load of each installed model would go now, with its own settings, by path:
+    /// what Installed and Settings for this model judge ([`installed_fit`]).
+    pub plans: HashMap<String, Plan>,
 }
 
 /// Two SHA-256 values that are both known and differ: certainly not the same file.
@@ -733,7 +742,71 @@ fn stored_file_facts(st: &StoredSummary, vision: bool) -> Option<FileFacts> {
     })
 }
 
-/// One fit verdict at `ctx`: the same estimate as the repository page.
+/// "Will it fit on this computer?" for an installed file at `ctx` tokens, judged as
+/// Installed and Settings for this model judge it (`load_settings::build_info`'s marks):
+/// with the model's own settings on this computer (Use the graphics card, Save memory,
+/// Fine control), through `placement::judge_in` when the model's sizes are known, else
+/// fit.rs's rule on the same memory. The amounts are the settings panel's picture's: what
+/// the model needs in the memory that holds it (a graphics card's own memory, else all of
+/// it) and what is free there. The smaller size that leaves room is Automatic's pick, when
+/// the same judge marks it green. `None` without the file's header: Settings for this
+/// model shows no mark then either.
+pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
+    let facts = plan.facts.as_ref()?;
+    let (r, machine) = (&plan.resolved, &plan.machine);
+    let input = facts.fit_input(r.save_memory)?;
+    let (gpu, fine) = (r.gpu, &r.fine);
+    let kind = machine.memory_kind(gpu);
+    let placer = crate::offload::Placer::new(facts, machine, r.save_memory);
+    let tokens = u64::from(ctx);
+    let mark = |n: u64| match &placer {
+        Some(p) => p.judge(n, gpu, fine).0,
+        None => models::fit::verdict_at(&input, n, machine.room(gpu)),
+    };
+    let (verdict, partial_offload, needed_bytes) = match &placer {
+        Some(p) => {
+            let split = p.work(tokens, gpu, fine).split;
+            let (verdict, fits) = p.judge_split(&split, gpu, fine);
+            let needed = match kind {
+                MemoryKind::Separate => split.gpu.total(),
+                MemoryKind::Unified | MemoryKind::Processor => {
+                    split.gpu.total().saturating_add(split.cpu.total())
+                }
+            };
+            let partial = matches!(fits, Fits::Partial | Fits::WontFitGraphics);
+            (verdict, partial, needed)
+        }
+        // The picture without the model's sizes: everything on the device that holds it.
+        None => {
+            let verdict = mark(tokens);
+            (verdict, verdict == Verdict::Yellow, input.needed_at(tokens))
+        }
+    };
+    let suggested_ctx = if verdict == Verdict::Green {
+        None
+    } else {
+        crate::load_settings::automatic(Some(facts), machine, gpu, r.save_memory, fine)
+            .map(|a| a.ctx)
+            .filter(|&n| n < tokens && mark(n) == Verdict::Green)
+    };
+    let (device, available_bytes) = match kind {
+        MemoryKind::Separate => (FitDevice::GraphicsCard, machine.gpu_free_bytes),
+        MemoryKind::Unified => (FitDevice::AppleGraphics, machine.gpu_free_bytes),
+        MemoryKind::Processor => (FitDevice::Processor, machine.ram_free_bytes),
+    };
+    Some(models::FitResult {
+        verdict,
+        needed_bytes,
+        available_bytes,
+        suggested_ctx,
+        partial_offload,
+        device,
+        sentence: String::new(),
+    })
+}
+
+/// One fit verdict at `ctx` for a file that is not on this computer: the same estimate as
+/// the repository page.
 fn fit_for(
     s: &ModelSummary,
     weights_bytes: u64,
@@ -819,19 +892,14 @@ fn fill_from_installed(f: &mut CompareFacts, rec: &Installed, known: &Known, ctx
         .quantization
         .clone()
         .or_else(|| models::quant_label(&rec.file_name));
-    match local_header(rec) {
-        Some(s) => {
-            f.fit = Some(fit_for(
-                &s,
-                rec.size,
-                installed_projector_bytes(rec),
-                ctx,
-                &known.target,
-            ));
-            f.file_facts = Some(file_facts(&s, rec.stored.parameters, vision, quant));
-        }
-        None => f.file_facts = stored_file_facts(&rec.stored, vision),
-    }
+    f.fit = known
+        .plans
+        .get(&rec.path)
+        .and_then(|p| installed_fit(p, ctx));
+    f.file_facts = match local_header(rec) {
+        Some(s) => Some(file_facts(&s, rec.stored.parameters, vision, quant)),
+        None => stored_file_facts(&rec.stored, vision),
+    };
     if f.hub.is_none() {
         f.hub = rec.stored.hub.clone();
     }
@@ -1131,15 +1199,10 @@ pub fn catalog_list(hub: &impl Hub, known: &Known, ctx: u32) -> Vec<CatalogListE
             let installed = known.installed_for_entry(id, e);
             let projector = e.mmproj.as_ref().map_or(0, |m| m.size);
             let fit = match installed {
-                Some(rec) => local_header(rec).map(|s| {
-                    fit_for(
-                        &s,
-                        rec.size,
-                        installed_projector_bytes(rec),
-                        ctx,
-                        &known.target,
-                    )
-                }),
+                Some(rec) => known
+                    .plans
+                    .get(&rec.path)
+                    .and_then(|p| installed_fit(p, ctx)),
                 None => hub
                     .cached_head(&e.repo, &e.revision, &first.path)
                     .map(|s| fit_for(&s, e.weights_bytes(), projector, ctx, &known.target)),

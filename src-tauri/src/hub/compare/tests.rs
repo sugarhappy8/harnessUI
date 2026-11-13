@@ -6,7 +6,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
+use crate::dto::LocalModelSettings;
 use crate::hub::{SavedFacts, register_installed_in};
+use crate::load_settings::{
+    ContextChoice, ContextSize, GpuChoice, HeaderFacts, LayerFacts, Machine, ModelFacts,
+    ModelLoadSettings,
+};
 
 const CATALOG: &str =
     include_str!("../../../../crates/models/tests/fixtures/catalog/compare-fields.json");
@@ -175,6 +180,93 @@ fn known(installed: Vec<Installed>, results: Vec<LocalResult>) -> Known {
         target: target(),
         usable_bytes: 16 * GB,
         results,
+        plans: HashMap::new(),
+    }
+}
+
+/// A graphics card with `free` bytes free and 32 GB of computer memory free: [`target`]'s
+/// computer, as Settings for this model sees it.
+fn card(free: u64) -> Machine {
+    Machine {
+        backend: Some(runtime::BackendKind::Vulkan),
+        gpu_free_bytes: free,
+        gpu_total_bytes: 16 * GB,
+        ram_free_bytes: 32 * GB,
+        ram_total_bytes: 64 * GB,
+        ..Machine::default()
+    }
+}
+
+/// No graphics device: the processor, with `free` bytes of computer memory free.
+fn processor(free: u64) -> Machine {
+    Machine {
+        backend: Some(runtime::BackendKind::Cpu),
+        ram_free_bytes: free,
+        ram_total_bytes: 64 * GB,
+        ..Machine::default()
+    }
+}
+
+/// The defaults of a fresh install (Automatic), and the model's own `overrides`.
+fn plan_with(facts: Option<ModelFacts>, machine: Machine, overrides: ModelLoadSettings) -> Plan {
+    let defaults = LocalModelSettings {
+        context_auto: true,
+        ..LocalModelSettings::default()
+    };
+    let resolved =
+        crate::load_settings::resolve(&overrides, &defaults, None, facts.as_ref(), &machine);
+    Plan {
+        resolved,
+        facts,
+        machine,
+        overrides,
+        defaults,
+        saved: true,
+    }
+}
+
+fn plan_for(facts: ModelFacts, machine: Machine) -> Plan {
+    plan_with(Some(facts), machine, ModelLoadSettings::default())
+}
+
+/// A header written for the test as the resolver reads it, without the model's sizes (no
+/// tensor table): fit.rs's rule decides, as for such a file in Settings for this model.
+fn header_facts(file_name: &str, bytes: &[u8], size: u64) -> ModelFacts {
+    let s = summary(bytes);
+    ModelFacts {
+        file_name: file_name.into(),
+        size_bytes: size,
+        weights_bytes: size,
+        projector_bytes: 0,
+        header: Some(HeaderFacts::from_summary(&s)),
+        layers: LayerFacts::from_summary(&s, None),
+    }
+}
+
+/// [`dense_bytes`] with its sizes known (32 blocks of 120 MB, input and output 300 MB each,
+/// 4.44 GB in all): `placement::judge_in` decides, as for a real file.
+fn sized_facts() -> ModelFacts {
+    let s = summary(&dense_bytes());
+    let sizes = models::LayerSizes {
+        input_bytes: 300_000_000,
+        output_bytes: 300_000_000,
+        layers: vec![
+            models::LayerSize {
+                dense_bytes: 120_000_000,
+                expert_bytes: 0,
+            };
+            32
+        ],
+        other_bytes: 0,
+    };
+    let total = sizes.total();
+    ModelFacts {
+        file_name: "Sample-7B-Q4_K_M.gguf".into(),
+        size_bytes: total,
+        weights_bytes: total,
+        projector_bytes: 0,
+        header: Some(HeaderFacts::from_summary(&s)),
+        layers: LayerFacts::from_summary(&s, Some(sizes)),
     }
 }
 
@@ -368,12 +460,18 @@ async fn an_installed_catalog_item_needs_no_network() {
         stored,
     );
     let hub = FakeHub::default();
-    let k = known(vec![rec], Vec::new());
+    let mut k = known(vec![rec], Vec::new());
+    let plan = plan_for(
+        header_facts("Sample-7B-Q4_K_M.gguf", &dense_bytes(), 4_400_000_000),
+        card(16 * GB),
+    );
+    k.plans.insert(path.clone(), plan.clone());
     let f = facts_for(&hub, &k, catalog_item("sample-7b-q4km"), CTX).await;
     assert_eq!(f.installed_path.as_deref(), Some(path.as_str()));
     assert_eq!(f.problem, None);
-    let s = summary(&dense_bytes());
-    assert_eq!(f.fit, Some(fit_for(&s, 4_400_000_000, 0, CTX, &target())));
+    // The fit of Installed and Settings for this model, not the repository page's.
+    assert!(f.fit.is_some());
+    assert_eq!(f.fit, installed_fit(&plan, CTX));
     let ff = f.file_facts.unwrap();
     assert_eq!(ff.parameters, Some(7 * GB), "from the size label");
     assert!(!ff.vision, "no projector beside it");
@@ -847,7 +945,12 @@ async fn an_installed_repo_item_offline() {
         None,
         stored,
     );
-    let k = known(vec![rec], Vec::new());
+    let mut k = known(vec![rec], Vec::new());
+    let plan = plan_for(
+        header_facts("Sample-7B-Q8_0.gguf", &moe_bytes(), 7_700_000_000),
+        card(16 * GB),
+    );
+    k.plans.insert(path.clone(), plan.clone());
     let f = facts_for(
         &FakeHub::default(),
         &k,
@@ -858,6 +961,7 @@ async fn an_installed_repo_item_offline() {
     assert_eq!(f.installed_path.as_deref(), Some(path.as_str()));
     assert_eq!(f.problem, None);
     assert!(f.fit.is_some() && f.file_facts.is_some());
+    assert_eq!(f.fit, installed_fit(&plan, CTX));
     assert_eq!(f.size_bytes, Some(7_700_000_000));
     std::fs::remove_dir_all(dir).ok();
 }
@@ -979,6 +1083,180 @@ async fn an_installed_item_whose_file_is_gone() {
     assert_eq!(f.fit, None);
 }
 
+// ---- "Will it fit on this computer?" for an installed file (compare-fit-words) ----------
+
+/// What Settings for this model shows for `plan` with its context fixed at `ctx`: the
+/// panel's mark and its picture.
+fn settings_panel(plan: &Plan) -> crate::load_settings::ModelLoadInfo {
+    crate::load_settings::build_info(
+        "/models/Sample-7B-Q4_K_M.gguf",
+        plan.facts.as_ref().unwrap(),
+        plan.overrides.clone(),
+        plan.defaults.clone(),
+        plan.resolved.clone(),
+        &plan.machine,
+        None,
+    )
+}
+
+fn fixed(ctx: u32, gpu: GpuChoice) -> ModelLoadSettings {
+    ModelLoadSettings {
+        context: ContextChoice::Fixed(ctx),
+        gpu,
+        ..ModelLoadSettings::default()
+    }
+}
+
+/// An installed column is judged by the one verdict of Installed and Settings for this
+/// model (`placement::judge_in` with the model's own settings), with the settings panel's
+/// amounts, not by the repository page's estimate: with 7.7 GB free on the card the model
+/// fits there with the spare (its input layer stays on the processor), which fit.rs's
+/// whole-model estimate calls "Fits with limits".
+#[tokio::test]
+async fn an_installed_column_is_judged_as_settings_for_this_model() {
+    let facts = sized_facts();
+    let plan = plan_with(
+        Some(facts.clone()),
+        card(7_700_000_000),
+        fixed(CTX, GpuChoice::Default),
+    );
+    let info = settings_panel(&plan);
+    let rec = installed(
+        "/models/Sample-7B-Q4_K_M.gguf",
+        None,
+        facts.weights_bytes,
+        None,
+        StoredSummary::default(),
+    );
+    let mut k = known(vec![rec], Vec::new());
+    k.plans
+        .insert("/models/Sample-7B-Q4_K_M.gguf".into(), plan.clone());
+    let f = facts_for(
+        &FakeHub::default(),
+        &k,
+        CompareItem::Installed {
+            installed_path: "/models/Sample-7B-Q4_K_M.gguf".into(),
+        },
+        CTX,
+    )
+    .await;
+    let fit = f.fit.expect("a fit");
+    // The panel's mark for this size, its picture's mark and its graphics bar's figures.
+    assert_eq!(Some(fit.verdict), info.fit);
+    assert_eq!(fit.verdict, Verdict::Green);
+    let option = info
+        .context_options
+        .iter()
+        .find(|o| o.choice == ContextSize::Fixed(CTX))
+        .unwrap();
+    assert_eq!(fit.verdict, option.fit);
+    assert_eq!(fit.verdict, info.picture.mark);
+    let bar = info.picture.graphics.as_ref().expect("a graphics card bar");
+    assert_eq!(fit.needed_bytes, bar.need.total());
+    assert_eq!(fit.available_bytes, bar.free_bytes);
+    assert_eq!(fit.device, FitDevice::GraphicsCard);
+    assert!(!fit.partial_offload && fit.suggested_ctx.is_none());
+    // The repository page's estimate for the same file and computer says otherwise.
+    let old = fit_for(
+        &summary(&dense_bytes()),
+        facts.weights_bytes,
+        0,
+        CTX,
+        &Target::Gpu {
+            name: "Test graphics card".into(),
+            free_bytes: 7_700_000_000,
+            ram_free_bytes: 32 * GB,
+        },
+    );
+    assert_eq!(old.verdict, Verdict::Yellow);
+}
+
+/// The other answers follow the same judge: part of the model on the processor with As
+/// much as fits; a card too small for All of it at this size, with the size Automatic
+/// would choose (which the same judge marks green); the processor only, with all of the
+/// model in computer memory; a file whose header cannot be read gets no answer, as in
+/// Settings for this model.
+#[test]
+fn installed_answers_follow_the_one_verdict() {
+    let facts = sized_facts();
+    let check = |plan: &Plan| {
+        let fit = installed_fit(plan, CTX).unwrap();
+        let info = settings_panel(plan);
+        assert_eq!(Some(fit.verdict), info.fit, "{fit:?}");
+        assert_eq!(fit.verdict, info.picture.mark, "{fit:?}");
+        (fit, info)
+    };
+
+    let (fit, info) = check(&plan_with(
+        Some(facts.clone()),
+        card(4 * GB),
+        fixed(CTX, GpuChoice::Fit),
+    ));
+    assert_eq!(fit.verdict, Verdict::Yellow);
+    assert!(fit.partial_offload, "part of it on the processor");
+    assert_eq!(fit.suggested_ctx, None, "no size puts all of it on the card");
+    let bar = info.picture.graphics.unwrap();
+    assert_eq!(
+        (fit.needed_bytes, fit.available_bytes),
+        (bar.need.total(), bar.free_bytes)
+    );
+
+    let small = plan_with(
+        Some(facts.clone()),
+        card(6_500_000_000),
+        fixed(CTX, GpuChoice::All),
+    );
+    let (fit, _) = check(&small);
+    assert_eq!(fit.verdict, Verdict::Yellow);
+    assert!(fit.partial_offload, "the step-down would put part on the processor");
+    let shorter = fit.suggested_ctx.expect("a shorter memory that fits");
+    assert!(shorter < u64::from(CTX), "{shorter}");
+    let at_shorter = crate::offload::Placer::new(&facts, &small.machine, false)
+        .unwrap()
+        .judge(shorter, small.resolved.gpu, &small.resolved.fine);
+    assert_eq!(at_shorter.0, Verdict::Green);
+
+    let (fit, info) = check(&plan_with(
+        Some(facts.clone()),
+        processor(12 * GB),
+        fixed(CTX, GpuChoice::Default),
+    ));
+    assert_eq!(fit.device, FitDevice::Processor);
+    assert!(info.picture.graphics.is_none());
+    assert_eq!(
+        (fit.needed_bytes, fit.available_bytes),
+        (info.picture.computer.need.total(), 12 * GB)
+    );
+
+    // Without the model's sizes: fit.rs's rule on the same memory, as the panel's marks.
+    let plain = plan_with(
+        Some(header_facts(
+            "Sample-7B-Q4_K_M.gguf",
+            &dense_bytes(),
+            4_440_000_000,
+        )),
+        card(7_700_000_000),
+        fixed(CTX, GpuChoice::Default),
+    );
+    let (fit, _) = check(&plain);
+    assert_eq!(fit.device, FitDevice::GraphicsCard);
+
+    let unreadable = ModelFacts {
+        header: None,
+        layers: None,
+        ..facts
+    };
+    assert_eq!(
+        installed_fit(&plan_for(unreadable, card(16 * GB)), CTX),
+        None
+    );
+    assert_eq!(
+        installed_fit(&plan_with(None, card(16 * GB), ModelLoadSettings::default()), CTX),
+        None,
+        "the file is gone"
+    );
+}
+
 // ---- Suggested models -----------------------------------------------------------------
 
 /// The catalog list asks nothing of the network: a fit where the header is known
@@ -999,7 +1277,12 @@ fn catalog_list_fetches_nothing() {
         size: 1_200_000_000,
         result: result(YourResultKind::Benchmark, "20261101-101010-abcd", 1, 1, 2),
     };
-    let k = known(vec![rec], vec![mine.clone()]);
+    let mut k = known(vec![rec], vec![mine.clone()]);
+    let plan = plan_for(
+        header_facts("Sample-Plain-Q8_0.gguf", &dense_bytes(), 1_200_000_000),
+        card(16 * GB),
+    );
+    k.plans.insert(path.clone(), plan.clone());
     let mut hub = FakeHub::default();
     hub.cached_heads.insert(
         "example-quants/Sample-MoE-30B-GGUF".into(),
@@ -1017,6 +1300,7 @@ fn catalog_list_fetches_nothing() {
     let plain = by_id("sample-plain-q8");
     assert_eq!(plain.installed_path.as_deref(), Some(path.as_str()));
     assert!(plain.fit.is_some());
+    assert_eq!(plain.fit, installed_fit(&plan, CTX), "as Installed judges it");
     assert_eq!(plain.results, vec![mine.result]);
     assert_eq!(plain.quant, "Q8_0");
     assert_eq!(plain.catalog.source, None, "an http link is not shown");

@@ -47,8 +47,20 @@ const {
 } = await import("./Compare");
 const { useCompare } = await import("../../store/compare");
 
-function fit(verdict: Verdict, sentence = "Needs about 4.4 GB; your GPU has 15.2 GB free."): FitResult {
-  return { verdict, neededBytes: 4.4e9, availableBytes: 15.2e9, suggestedCtx: null, partialOffload: false, sentence };
+const GIB = 1024 ** 3;
+
+// `sentence` is the backend's 0.0.4 sentence, which the screen never shows (compare-fit-words).
+function fit(verdict: Verdict, over: Partial<FitResult> = {}): FitResult {
+  return {
+    verdict,
+    neededBytes: 4.1 * GIB,
+    availableBytes: 14.2 * GIB,
+    suggestedCtx: null,
+    partialOffload: false,
+    device: "graphicsCard",
+    sentence: "Needs about 4.4 GB; your GPU has 15.2 GB free. Fits.",
+    ...over,
+  };
 }
 
 function catalog(id: string, over: Partial<CatalogFacts> = {}): CatalogFacts {
@@ -761,7 +773,7 @@ describe("Compare: columns as the backend fills them", () => {
         catalog: null,
         hub: null,
         fileFacts: fileFacts({ parameters: 6e8, contextLength: 40960, tools: true, thinking: true, quantization: "Q8_0" }),
-        fit: fit("green", "Needs about 5.0 GB; your computer has 11.4 GB free. Fits."),
+        fit: fit("green", { device: "processor", neededBytes: 5 * GIB, availableBytes: 11.4 * GIB }),
       });
     useCompare.setState({ entries: [{ installedPath: "/models/local-Q8_0.gguf" }] });
     await show();
@@ -777,8 +789,9 @@ describe("Compare: columns as the backend fills them", () => {
     expect(cell("How big is it?").textContent).toBe(
       `600 million parameters. Bigger models are usually smarter but slower.${SOURCE.file}`,
     );
-    expect(cell("Will it fit on this computer?").textContent).toContain("your computer has 11.4 GB free");
-    expect(within(cell("Will it fit on this computer?")).getByText(fitSource(32768))).toBeTruthy();
+    expect(cell("Will it fit on this computer?").textContent).toBe(
+      `Fits. Needs about 5 GB; this computer has 11.4 GB free. It would run on the processor.${fitSource(32768)}`,
+    );
     expect(cell("Download size").textContent).toBe(`639 MB${SOURCE.disk}`);
     expect(cell("Can it use tools?").textContent).toBe(`Yes${SOURCE.file}`);
     expect(cell("Can it read images?").textContent).toBe(`No${SOURCE.file}`);
@@ -791,6 +804,28 @@ describe("Compare: columns as the backend fills them", () => {
     }
     // Nothing on this screen downloads or loads a model.
     expect(screen.queryByRole("button", { name: /Download|Load|Use/ })).toBeNull();
+  });
+
+  it("answers \"Will it fit on this computer?\" in plain words, the verdict once, never the 0.0.4 sentence", async () => {
+    factsFor = (item, ctx) =>
+      facts(item, ctx, {
+        ctx: 32768,
+        fit: fit("yellow", {
+          neededBytes: 9.5 * GIB,
+          availableBytes: 14.6 * GIB,
+          suggestedCtx: 16384,
+          sentence: "Needs about 10.2 GB at this context; your GPU has 15.7 GB. Fits with a context of 16384 tokens.",
+        }),
+      });
+    useCompare.setState({ entries: [{ catalogId: "one" }] });
+    await show();
+    const answer = cell("Will it fit on this computer?").textContent;
+    expect(answer).toBe(
+      "Fits with limits. Needs about 9.5 GB; this computer has 14.6 GB free on the graphics card. " +
+        `It has room if it remembers up to 16,384 tokens, about 12,000 words.${fitSource(32768)}`,
+    );
+    expect(answer).not.toMatch(/GPU|context|16384/);
+    expect(answer!.match(/Fits/g)).toHaveLength(1);
   });
 
   it("names the catalog's publisher model as what a matched file is made from, over the uploader's claim", async () => {
@@ -848,13 +883,16 @@ describe("Compare: suggested models", () => {
 
   it("says which suggestions are already on this computer, with their fit", async () => {
     ipcMock.catalogList.mockImplementation(async () => [
-      { ...listEntry("a"), installedPath: "/models/a.gguf", fit: fit("yellow", "Needs a shorter memory here.") },
+      { ...listEntry("a"), installedPath: "/models/a.gguf", fit: fit("yellow", { neededBytes: 15 * GIB, partialOffload: true }) },
       { ...listEntry("b"), fit: null },
     ]);
     await show();
     const items = screen.getAllByRole("listitem");
     expect(items[0]!.textContent).toContain("Q4_K_M: smaller file, good quality · 2.7 GB download · On this computer");
-    expect(items[0]!.textContent).toContain("Fits with limits.");
+    expect(items[0]!.textContent).toContain(
+      "Fits with limits. Needs about 15 GB; this computer has 14.2 GB free on the graphics card. Part of it would run on the processor, which is slower.",
+    );
+    expect(items[0]!.textContent).not.toContain("your GPU");
     expect(items[1]!.textContent).not.toContain("On this computer");
     expect(items[1]!.textContent).not.toContain("Fits");
   });

@@ -237,8 +237,10 @@ async fn earlier_summary(
 /// [0.0.6] A summary as Show summary shows it: the hidden characters as visible escapes
 /// (`policy::sanitize::visible`, plus the soft hyphen and the combining grapheme joiner),
 /// Windows line ends as plain ones, so a person sees everything the text holds. The model
-/// gets the text as written, with only its "[App note]" markers and control and tag
-/// characters changed (`agent::prompt::defang_app_notes`).
+/// gets the text as `agent::prompt::defang_app_notes` leaves it: chat-template control
+/// tokens broken, block tags (also when split by hidden characters) escaped, "[App note]"
+/// markers bracketed, control and tag characters escaped, and other hidden characters
+/// escaped only in and right next to a marker or a split block tag.
 fn visible_summary(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in policy::sanitize::visible(&text.replace("\r\n", "\n")).chars() {

@@ -762,17 +762,6 @@ fn points_at(url: &str, port: u16) -> bool {
     local && parsed.port_or_known_default() == Some(port)
 }
 
-/// Whether the app would send this task to the model the app shares on `port` (WP5)
-/// rather than online ([`shared_setup`]).
-pub fn uses_shared_model(
-    app: CodingApp,
-    env: &BTreeMap<String, String>,
-    home: Option<&Path>,
-    port: Option<u16>,
-) -> bool {
-    shared_setup(app, env, home, port).is_some()
-}
-
 /// How an app set up for the model shared on a port reads the sharing key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedSetup {
@@ -891,8 +880,7 @@ enum Destination {
 
 /// Reads what Sharing (WP5) says now: the kept port, the switch, the port it listens on
 /// and, while it listens, the sharing key ([`ShareNow`]).
-pub type ReadShare =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ShareNow> + Send>> + Send + Sync>;
+pub type ReadShare = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ShareNow> + Send>> + Send + Sync>;
 
 /// The folders the user approved, read from the store when a call is checked.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

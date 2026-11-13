@@ -320,9 +320,20 @@ def publisher_digest(part: str, repo: str, tag: str, asset: str, path: Path, arg
 # record it read (CI uploads it as an artifact of the run). `--record` then writes
 # `github-digest` into the lock, online, or offline from that saved record
 # (`--from-release <file>`), checked exactly as GitHub's answer is. Nothing offline takes
-# the lock's own values as evidence.
+# the lock's own values as evidence. Each build marked `github-digest` names the CI run of
+# this repository that read GitHub's answer (`github_digest_run`), and `--check` refuses the
+# mark without it, so a hand-made record cannot set it. The release workflow reads GitHub's
+# digest again before every release build.
 
 DIGEST_REPOS = {"ghidra": "NationalSecurityAgency/ghidra", "kuna": "Noelo-Lab/kuna"}
+# The repository whose CI runs may vouch for GitHub's digest in the lock.
+THIS_REPO = "sugarhappy8/harnessUI"
+CI_RUN = re.compile(r"https://github\.com/" + re.escape(THIS_REPO) + r"/actions/runs/[0-9]+")
+
+
+def is_ci_run(run: object) -> bool:
+    """Whether `run` is the address of a GitHub Actions run of THIS_REPO."""
+    return isinstance(run, str) and CI_RUN.fullmatch(run) is not None
 RELEASE_ASSET_URL = re.compile(
     r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/releases/download/([A-Za-z0-9_.+-]+)/([A-Za-z0-9_.+-]+)$"
 )
@@ -388,10 +399,10 @@ def digest_problems(expected: dict, release: dict) -> tuple[str | None, list[str
     return got, problems
 
 
-def with_github_digest(lock: dict, name: str) -> dict:
+def with_github_digest(lock: dict, name: str, run: str) -> dict:
     """A copy of `lock` whose builds of part `name` record `github-digest` (in place of
     `first-download-only`; Kuna keeps it, as `pin` records it: its releases carry no
-    signature)."""
+    signature), and beside it `run`, the CI run that read GitHub's answer."""
     out = copy.deepcopy(lock)
     for p in out["parts"]:
         if p["name"] != name:
@@ -402,6 +413,7 @@ def with_github_digest(lock: dict, name: str) -> dict:
             if name == "kuna":
                 vb.append("first-download-only")
             b["verified_by"] = vb
+            b["github_digest_run"] = run
     return out
 
 
@@ -430,9 +442,9 @@ def ci_run() -> str | None:
     return None
 
 
-def read_saved_releases(path: str, assets: list[dict]) -> tuple[dict[tuple[str, str], dict], str | None]:
+def read_saved_releases(path: str, assets: list[dict]) -> tuple[dict[tuple[str, str], dict], object]:
     """The release records a CI run saved with `--save-release`, by (repository, tag), and
-    the run that saved them."""
+    the run the file names, as written (`is_ci_run` checks it)."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
@@ -450,8 +462,16 @@ def read_saved_releases(path: str, assets: list[dict]) -> tuple[dict[tuple[str, 
     for a in assets:
         if (a["repo"], a["tag"]) not in out:
             fail(f"{path} holds no release record of {a['repo']} {a['tag']}")
-    run = data.get("run")
-    return out, run if isinstance(run, str) else None
+    return out, data.get("run")
+
+
+def run_problem(run: object, where: str) -> str | None:
+    """Why `run` cannot be named beside `github-digest`, or None when it can."""
+    if is_ci_run(run):
+        return None
+    if not isinstance(run, str) or not run:
+        return f"{where} names no CI run of {THIS_REPO}"
+    return f"{where}: {run!r} is not a CI run of {THIS_REPO} (https://github.com/{THIS_REPO}/actions/runs/<number>)"
 
 
 def cmd_github_digest(args) -> None:
@@ -463,13 +483,13 @@ def cmd_github_digest(args) -> None:
     lines = []
     online = args.from_release is None
     if online:
+        run = ci_run()
         token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or None
         releases: dict[tuple[str, str], dict] = {}
         for a in assets:
             key = (a["repo"], a["tag"])
             if key not in releases:
                 releases[key] = github_release(a["repo"], a["tag"], token)
-        run = ci_run()
         if args.save_release:
             Path(args.save_release).write_text(json.dumps({
                 "what": "GitHub's release records read by scripts/pin_reverse.py github-digest",
@@ -482,7 +502,7 @@ def cmd_github_digest(args) -> None:
         # Offline: the release record a CI run read from GitHub and saved; it goes through
         # exactly the checks GitHub's own answer goes through.
         releases, run = read_saved_releases(args.from_release, assets)
-        source = f"GitHub's release record saved by {run or args.from_release} gives"
+        source = f"GitHub's release record saved by {run if is_ci_run(run) else args.from_release} gives"
     found = []
     for a in assets:
         got, wrong = digest_problems(a, releases[(a["repo"], a["tag"])])
@@ -503,19 +523,37 @@ def cmd_github_digest(args) -> None:
     current = [b.get("verified_by") for p in lock["parts"] if p["name"] == args.part for b in p["builds"]]
     if not args.record:
         if online and any("github-digest" not in (vb or []) for vb in current):
-            how = (
-                f"download the record this run saved{f' ({run})' if run else ''} and run: "
-                f"python3 -I scripts/pin_reverse.py github-digest --part {args.part} "
-                f"--from-release <the saved file> --record"
-                if args.save_release else
-                "run this command again with --record (or with --save-release <file>, then "
-                "--from-release <file> --record where GitHub's API cannot be reached)"
-            )
+            if not is_ci_run(run):
+                how = (
+                    f"a CI run of {THIS_REPO} must read it: run github-digest --part {args.part} "
+                    "--save-release <file> there (ci.yml's ghidra-digest job does), then: python3 -I "
+                    f"scripts/pin_reverse.py github-digest --part {args.part} --from-release <that file> --record"
+                )
+            elif args.save_release:
+                how = (
+                    f"download the record this run saved ({run}) and run: "
+                    f"python3 -I scripts/pin_reverse.py github-digest --part {args.part} "
+                    f"--from-release <the saved file> --record"
+                )
+            else:
+                how = "run this command again with --record"
             print(f"reverse.lock.json records {current[0]} for {args.part}. To record GitHub's digest, {how}")
         return
-    if run:
-        print(f"Name this run in the commit that records it: {run}")
-    new = with_github_digest(lock, args.part)
+    # The run that read GitHub's answer is named beside `github-digest` (`--check` refuses
+    # the mark without it).
+    if online and (wrong := run_problem(run, "this command")):
+        fail(
+            f"--record names the CI run that read GitHub's digest, and {wrong} (nothing was written). "
+            f"In a CI run of {THIS_REPO}, use --save-release <file>; then, anywhere: python3 -I "
+            f"scripts/pin_reverse.py github-digest --part {args.part} --from-release <that file> --record"
+        )
+    if not online and (wrong := run_problem(run, args.from_release)):
+        fail(
+            f"{wrong}: only the record a CI run of {THIS_REPO} saved (the artifact "
+            "ghidra-release-record) can record GitHub's digest; nothing was written"
+        )
+    print(f"Name this run in the commit that records it: {run}")
+    new = with_github_digest(lock, args.part, run)
     problems = check(new)
     if problems:
         fail("the lock with github-digest does not pass --check (nothing was written):\n  " + "\n  ".join(problems))
@@ -1180,6 +1218,39 @@ def assemble_parts(raw: dict, rea_version: str, old: dict | None, minimums: list
     return parts
 
 
+def settle_digest_runs(parts: list[dict], old: dict | None) -> None:
+    """A pin keeps `github-digest` only with the CI run that vouches for it
+    (`github_digest_run`): the old lock's run when it recorded the very same file, or this
+    run when the pin runs in a CI run of THIS_REPO. Elsewhere GitHub's digest matched, but
+    nothing links that to a CI run, so the mark is dropped (Ghidra: `first-download-only`)
+    until `github-digest --record` records it from a CI run's saved record."""
+    run = ci_run()
+    old_builds = {
+        (p.get("name"), b.get("platform")): b
+        for p in (old or {}).get("parts", []) for b in p.get("builds", [])
+    }
+    for p in parts:
+        dropped = False
+        for b in p["builds"]:
+            o = old_builds.get((p["name"], b["platform"]), {})
+            if "github-digest" not in b["verified_by"]:
+                b.pop("github_digest_run", None)
+            elif o.get("file") == b["file"] and "github-digest" in o.get("verified_by", []) and is_ci_run(o.get("github_digest_run")):
+                b["github_digest_run"] = o["github_digest_run"]
+            elif is_ci_run(run):
+                b["github_digest_run"] = run
+            else:
+                b["verified_by"] = [v for v in b["verified_by"] if v != "github-digest"] or ["first-download-only"]
+                b.pop("github_digest_run", None)
+                dropped = True
+        if dropped:
+            print(
+                f"  {p['name']}: GitHub's digest matched, but only a CI run of {THIS_REPO} can record it: "
+                f"run github-digest --part {p['name']} --save-release <file> there, then "
+                f"github-digest --part {p['name']} --from-release <that file> --record"
+            )
+
+
 def cmd_pin(args) -> None:
     scratch = Path(args.scratch).resolve()
     if scratch == ROOT or ROOT in scratch.parents:
@@ -1201,6 +1272,7 @@ def cmd_pin(args) -> None:
     java = pin_java(args.java, facts["java_major"], scratch)
     raw = {"rea": rea, "node": node, "kuna": kuna, "ghidra": ghidra, "java": java}
     parts = assemble_parts(raw, args.rea, old, args.minimum or [], args.reason)
+    settle_digest_runs(parts, old)
     lock = {
         "schema": SCHEMA,
         "comment": (
@@ -1331,6 +1403,11 @@ def check(lock: dict, fixtures: dict | None = None, release: bool = False) -> li
                 if not waiting:
                     need = [k for k in REQUIRED_CHECKS.get(name, ("?",)) if not has_check(vb, k)]
                     out.append(f"{bw}: verified_by {vb} lacks {need}")
+            run = b.get("github_digest_run")
+            if "github-digest" in vb and run is None:
+                out.append(f"{bw}: github-digest without github_digest_run, the CI run of {THIS_REPO} that read it")
+            elif run is not None and not is_ci_run(run):
+                out.append(f"{bw}: github_digest_run {run!r} is not a CI run of {THIS_REPO}")
     rea = parts.get("rea", {})
     if not rea.get("entry") or not safe_name(rea.get("entry", "")):
         out.append("rea: entry")

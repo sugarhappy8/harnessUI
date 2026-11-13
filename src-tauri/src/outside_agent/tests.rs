@@ -68,6 +68,16 @@ fn no_share() -> ReadShare {
     share_is(ShareNow::default())
 }
 
+/// Whether the app would send a task to the model shared on `port` rather than online.
+fn uses_shared_model(
+    app: CodingApp,
+    env: &BTreeMap<String, String>,
+    home: Option<&Path>,
+    port: Option<u16>,
+) -> bool {
+    shared_setup(app, env, home, port).is_some()
+}
+
 /// The sharing key Sharing holds in these tests.
 const SHARING_KEY: &str = "harnessui-share-0123456789abcdef0123456789abcdef";
 
@@ -1548,11 +1558,18 @@ async fn with_sharing_off_an_app_set_up_for_it_is_not_asked() {
     local.share = share_is(live(51234));
     for (described_by, run_by) in [(&online, &local), (&local, &online)] {
         let _ = std::fs::remove_file(bin.join("args.txt"));
-        let a = describe(described_by, CLAUDE_TOOL, json!({"task": "x"}), &chat(&work)).await;
+        let a = describe(
+            described_by,
+            CLAUDE_TOOL,
+            json!({"task": "x"}),
+            &chat(&work),
+        )
+        .await;
         let (out, _) = call(run_by, &a, &chat(&work)).await;
         assert!(out.is_error, "{out:?}");
         assert!(
-            out.joined_text().contains("changed after the request was approved"),
+            out.joined_text()
+                .contains("changed after the request was approved"),
             "{out:?}"
         );
         assert!(!bin.join("args.txt").exists());
@@ -1595,7 +1612,10 @@ fn codex_uses_openai_base_url_only_for_its_built_in_provider() {
     }
     // No config.toml: the built-in provider, moved by OPENAI_BASE_URL; it reads no key
     // this app could fill.
-    env.insert("CODEX_HOME".into(), temp("codex-empty").display().to_string());
+    env.insert(
+        "CODEX_HOME".into(),
+        temp("codex-empty").display().to_string(),
+    );
     assert_eq!(
         shared_setup(CodingApp::Codex, &env, None, Some(51234)),
         Some(SharedSetup { key_variable: None })
@@ -1755,7 +1775,10 @@ async fn the_sharing_key_reaches_only_an_app_set_up_for_the_live_port() {
         let seen = std::fs::read_to_string(bin.join("env.txt")).unwrap();
         assert!(seen.contains("PLAIN_SETTING=kept-value"), "{seen}");
         assert!(seen.contains("PATH=/usr/bin:/bin"), "{seen}");
-        assert!(!seen.contains("owner-"), "an owner's secret reached {tool}: {seen}");
+        assert!(
+            !seen.contains("owner-"),
+            "an owner's secret reached {tool}: {seen}"
+        );
         (a, secrets_seen(&bin))
     };
 
@@ -1763,7 +1786,10 @@ async fn the_sharing_key_reaches_only_an_app_set_up_for_the_live_port() {
     let mut claude = owner.clone();
     claude.insert("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:51234".into());
     let (a, seen) = run(&claude, CLAUDE_TOOL, live(51234)).await;
-    assert!(a.preview.contains(&online_line(CodingApp::ClaudeCode, true)));
+    assert!(
+        a.preview
+            .contains(&online_line(CodingApp::ClaudeCode, true))
+    );
     assert_eq!(seen, vec![format!("ANTHROPIC_AUTH_TOKEN={SHARING_KEY}")]);
 
     // Codex set up for the live port through its config.toml, as the setup card writes it.
@@ -1792,7 +1818,11 @@ async fn the_sharing_key_reaches_only_an_app_set_up_for_the_live_port() {
         (CODEX_TOOL, CodingApp::Codex),
     ] {
         let (a, seen) = run(&other, tool, live(51234)).await;
-        assert!(a.preview.contains(&online_line(app, false)), "{}", a.preview);
+        assert!(
+            a.preview.contains(&online_line(app, false)),
+            "{}",
+            a.preview
+        );
         assert!(seen.is_empty(), "{tool}: {seen:?}");
     }
 

@@ -3496,6 +3496,21 @@ def p_compare_models(c, notes):
             assert answer("Longest conversation it was made for", 1) == f"{words_tokens(ctx_len)}\nFrom the model file"
             fit = answer("Will it fit on this computer?", 1)
             assert "Estimate for this computer at " in fit and ("Fits" in fit or "Too large" in fit), fit
+            # compare-fit-words: the verdict word once, then one plain line (words.ts), never
+            # the 0.0.4 sentence; and the verdict Settings for this model gives the same size.
+            said = fit.splitlines()[0]
+            assert re.match(r"(Fits|Fits with limits|Too large)\. Needs about [\d.]+ GB; ", said), said
+            assert said.count("Fits") <= 1 and not re.search(r"GPU|CPU|context|layers|\d{4}", said), said
+            column = s.invoke("compare_facts", {"items": [{"installedPath": m["path"]}], "ctx": None})[0]
+            info = s.invoke("model_load_info", {"path": m["path"]})
+            marks = [o["fit"] for o in info["contextOptions"] if o["choice"] == {"fixed": column["ctx"]}]
+            if marks:
+                assert column["fit"]["verdict"] == marks[0], (column["fit"], info["contextOptions"])
+                words = {"green": "Fits.", "yellow": "Fits with limits.", "red": "Too large."}[marks[0]]
+                assert said.startswith(words), (said, marks[0])
+                notes.append(f"installed fit at {column['ctx']}: {marks[0]}, as Settings for this model")
+            else:
+                notes.append(f"Settings for this model offers no {column['ctx']}-token size: verdicts not compared")
             assert answer("How big is it?", 1).endswith("From the model file"), answer("How big is it?", 1)
             assert answer("Can it use tools?", 1) == ("Yes" if m["summary"]["templateTools"] else "No") + "\nFrom the model file"
             assert answer("Download size", 1).endswith("On this computer")
@@ -6800,14 +6815,17 @@ def p_header_layout(c, notes):
             time.sleep(0.8)
             speed_shown = "const e = document.querySelector('main header [data-speed]'); return !!e && e.innerText.includes('tokens/s');"
             for attempt in (1, 2):
-                send(s, "Count from 1 to 2000, separated by spaces. /no_think")
+                send(s, "Count from 1 to 400, separated by spaces.")
                 try:
                     s.wait_for(lambda: s.execute(speed_shown), 180, "the reply's speed in the header")
                     break
                 except WebDriverError:
-                    # A reload by the dev server (see still_open) loses the reply on the page.
-                    if attempt == 2 or still_open():
+                    # The small model can answer in a few words, and a reload by the dev server
+                    # (see still_open) loses the reply on the page: asked once more.
+                    if attempt == 2:
                         raise
+                    notes.append("streaming: no speed in the header during the first reply; asked again")
+                    still_open()
                     wait_idle(s, 300)
             for width, with_panel in widths:
                 if not still_open():

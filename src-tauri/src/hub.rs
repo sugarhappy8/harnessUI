@@ -1245,17 +1245,23 @@ async fn compare_ctx(state: &AppState, ctx: Option<u32>) -> u32 {
     }
 }
 
-/// What a comparison needs from this computer: the catalog, the installed models, the
+/// What a comparison needs from this computer: the catalog, the installed models with how
+/// a load of each would go now (the plan Installed and Settings for this model judge), the
 /// hardware and the user's results.
 async fn compare_known(app: &AppHandle, state: &AppState) -> AppResult<compare::Known> {
     let catalog = current_catalog(app).await;
-    let installed = state
+    let installed: Vec<compare::Installed> = state
         .store
         .list_models()
         .await?
         .iter()
         .map(compare::Installed::from_record)
         .collect();
+    let mut plans = std::collections::HashMap::new();
+    for rec in &installed {
+        let plan = crate::load_settings::plan(state, &rec.path, None).await;
+        plans.insert(rec.path.clone(), plan);
+    }
     let (target, hardware) = detect(state).await;
     let profiles = crate::evals::commands::list_profiles(&state.store).await;
     let app2 = app.clone();
@@ -1281,6 +1287,7 @@ async fn compare_known(app: &AppHandle, state: &AppState) -> AppResult<compare::
         target,
         usable_bytes: hardware.usable_bytes,
         results: compare::local_results(&profiles, &bench),
+        plans,
     })
 }
 

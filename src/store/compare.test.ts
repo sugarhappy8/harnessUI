@@ -14,7 +14,7 @@ import {
 } from "./compare";
 
 function fit(verdict: Verdict): FitResult {
-  return { verdict, neededBytes: 1, availableBytes: 2, suggestedCtx: null, partialOffload: false, sentence: "" };
+  return { verdict, neededBytes: 1, availableBytes: 2, suggestedCtx: null, partialOffload: false, device: "graphicsCard", sentence: "" };
 }
 
 function variant(label: string, size: number, verdict: Verdict | null, parts = 1): VariantView {

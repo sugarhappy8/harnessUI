@@ -328,12 +328,19 @@ export interface RepoFile {
 
 export type Verdict = "green" | "yellow" | "red";
 
+/** Where a fit estimate puts the model (0.0.6, compare-fit-words). */
+export type FitDevice = "graphicsCard" | "appleGraphics" | "processor";
+
 export interface FitResult {
   verdict: Verdict;
+  /** What the model needs in the memory that holds it. */
   neededBytes: number;
+  /** Free memory there: the graphics card's, what Apple graphics may use, or the computer's. */
   availableBytes: number;
   suggestedCtx: number | null;
   partialOffload: boolean;
+  device: FitDevice;
+  /** The backend's 0.0.4 sentence; the screens word the figures with `fitLine` (words.ts). */
   sentence: string;
 }
 

@@ -7,6 +7,8 @@ import type {
   BackendKind,
   ContextSource,
   DeviceOption,
+  FitDevice,
+  FitResult,
   GpuUse,
   LoadFailure,
   LoadStage,
@@ -317,6 +319,36 @@ export function amountNumber(bytes: number): string {
 /** An amount in use or needed (binary gigabytes, I6-10): "11.7 GB", "12 GB". */
 export function amountGb(bytes: number): string {
   return `${amountNumber(bytes)} GB`;
+}
+
+/** Where a fit estimate's free memory is, after "Needs about 4.1 GB; ". */
+const FIT_HAS: Record<FitDevice, (free: string) => string> = {
+  graphicsCard: (free) => `this computer has ${free} free on the graphics card.`,
+  appleGraphics: (free) => `Apple graphics can use up to ${free} on this Mac.`,
+  processor: (free) => `this computer has ${free} free. It would run on the processor.`,
+};
+
+/**
+ * The line after the verdict word of "Will it fit on this computer?" (Compare, the repository
+ * page; compare-fit-words): what the model needs and what is free where it would run, counted
+ * the way Task Manager counts memory (I6-10), then what a yellow or red verdict means: a
+ * shorter memory that leaves room (tokens with words), part of it on the processor, or only
+ * just. It never repeats the verdict word and never shows the backend's 0.0.4 sentence.
+ */
+export function fitLine(fit: FitResult): string {
+  const parts = [`Needs about ${amountGb(fit.neededBytes)}; ${(FIT_HAS[fit.device] ?? FIT_HAS.processor)(amountGb(fit.availableBytes))}`];
+  if (fit.verdict !== "green") {
+    if (fit.suggestedCtx !== null && fit.suggestedCtx > 0) {
+      parts.push(`It has room if it remembers up to ${tokensWithWords(fit.suggestedCtx)}.`);
+    } else if (fit.partialOffload) {
+      parts.push("Part of it would run on the processor, which is slower.");
+    } else if (fit.verdict === "yellow") {
+      parts.push("It only just fits.");
+    } else if (fit.device === "processor" && fit.neededBytes <= fit.availableBytes) {
+      parts.push("Part of that memory is kept free for other programs.");
+    }
+  }
+  return parts.join(" ");
 }
 
 /**

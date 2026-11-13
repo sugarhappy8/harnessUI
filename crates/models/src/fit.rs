@@ -46,6 +46,35 @@ impl Target {
             Target::Cpu { .. } => "your computer has".to_string(),
         }
     }
+    /// Where the model would run, for [`FitResult::device`].
+    fn device(&self) -> FitDevice {
+        match self {
+            Target::Gpu { .. } => FitDevice::GraphicsCard,
+            Target::AppleUnified { .. } => FitDevice::AppleGraphics,
+            Target::Cpu { .. } => FitDevice::Processor,
+        }
+    }
+    /// The free memory there as the system reports it, for [`FitResult::available_bytes`]:
+    /// the processor's figure before [`RAM_RESERVE_BYTES`] is kept back.
+    fn free_bytes(&self) -> u64 {
+        match *self {
+            Target::Gpu { free_bytes, .. } => free_bytes,
+            Target::AppleUnified { working_set_bytes } => working_set_bytes,
+            Target::Cpu { ram_free_bytes } => ram_free_bytes,
+        }
+    }
+}
+
+/// Where an estimate puts the model (0.0.6, compare-fit-words: the screens say it in words).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FitDevice {
+    /// A graphics card with its own memory.
+    GraphicsCard,
+    /// Apple silicon: the share of memory Apple graphics may use.
+    AppleGraphics,
+    /// The processor, from the computer's memory.
+    Processor,
 }
 
 /// What the estimate is made of. `Default` lets callers write `..Default::default()`, so
@@ -91,13 +120,20 @@ pub enum Verdict {
 #[serde(rename_all = "camelCase")]
 pub struct FitResult {
     pub verdict: Verdict,
+    /// What the model needs in the memory that holds it.
     pub needed_bytes: u64,
+    /// The free memory there as the system reports it: the graphics card's, the Metal
+    /// working set, or the computer's (the verdict also keeps [`RAM_RESERVE_BYTES`] of the
+    /// computer's memory for other programs).
     pub available_bytes: u64,
     /// A smaller context that fits, for yellow verdicts.
     pub suggested_ctx: Option<u64>,
     /// Some layers would run on the CPU (yellow, discrete GPU only).
     pub partial_offload: bool,
-    /// One sentence for the UI.
+    /// Where the model would run.
+    pub device: FitDevice,
+    /// The 0.0.4 sentence (logs and scripts). The 0.0.6 screens word the figures instead
+    /// (`fitLine` in src/lib/words.ts); empty when the placement judge made the result.
     pub sentence: String,
 }
 
@@ -249,9 +285,10 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
     let base = |verdict, suggested_ctx, partial_offload, sentence| FitResult {
         verdict,
         needed_bytes: needed,
-        available_bytes: available,
+        available_bytes: target.free_bytes(),
         suggested_ctx,
         partial_offload,
+        device: target.device(),
         sentence,
     };
 
@@ -716,6 +753,56 @@ mod tests {
         assert_eq!(
             r.sentence,
             "Needs about 11.3 GB; your GPU has 15.2 GB free. Fits."
+        );
+    }
+
+    /// compare-fit-words: the screens word the figures themselves, so the result says where
+    /// the model would run and what is free there as the system reports it (the processor's
+    /// figure before the reserve); the verdict is unchanged.
+    #[test]
+    fn says_where_and_the_free_memory_there() {
+        let i = input(4 * GB, 4096);
+        let gpu = check(
+            &i,
+            &Target::Gpu {
+                name: "RX".into(),
+                free_bytes: 15 * GB,
+                ram_free_bytes: 30 * GB,
+            },
+        );
+        assert_eq!(
+            (gpu.device, gpu.available_bytes, gpu.verdict),
+            (FitDevice::GraphicsCard, 15 * GB, Verdict::Green)
+        );
+        let mac = check(
+            &i,
+            &Target::AppleUnified {
+                working_set_bytes: 10 * GB,
+            },
+        );
+        assert_eq!(
+            (mac.device, mac.available_bytes),
+            (FitDevice::AppleGraphics, 10 * GB)
+        );
+        // 6 GB free: 4 GB after the reserve, which the verdict keeps back.
+        let cpu = check(
+            &i,
+            &Target::Cpu {
+                ram_free_bytes: 6 * GB,
+            },
+        );
+        assert_eq!(
+            (cpu.device, cpu.available_bytes, cpu.verdict),
+            (FitDevice::Processor, 6 * GB, Verdict::Red)
+        );
+        assert!(cpu.sentence.ends_with("only 4.0 GB. Too large for this computer."));
+        assert_eq!(
+            serde_json::to_value(&gpu).unwrap()["device"],
+            serde_json::json!("graphicsCard")
+        );
+        assert_eq!(
+            serde_json::to_value(&cpu).unwrap()["device"],
+            serde_json::json!("processor")
         );
     }
 }

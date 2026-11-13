@@ -110,6 +110,10 @@ Collected while the packages run. Each needs doing (or a decision) before the re
     same model, or b then c in one chat) can leave a chat on a model that never loaded; keep
     each chat's model from before its first unfinished switch. Fix the comment ("goes back to
     the model it had before", which can be an endpoint).
+    Done (pick-cancel-minors): an endpoint picked in the chat whose switch waits cancels the
+    wait; each chat keeps its model from before its first unfinished switch, and a chat whose
+    wait a newer load of the same model took over ends with that load (keeps the model if it
+    loads, goes back on Cancel). Tests in `src/store/modelChange.test.ts`.
   - helper escaping: a block tag split by a hidden character is missed when a control or tag
     character and a letter follow its name; the docs and report still say summary hidden
     characters are escaped, and the Context tab's summary view changed without a note.

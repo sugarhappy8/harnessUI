@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { BackendKind, ContextSource, LoadFailure, LoadStage, ModelBusy, Verdict } from "./types";
+import type { BackendKind, ContextSource, FitResult, LoadFailure, LoadStage, ModelBusy, Verdict } from "./types";
 import {
   aboutWords,
   adjustmentWords,
@@ -11,6 +11,7 @@ import {
   CONTEXT_SOURCE_WORDS,
   deviceLabel,
   FIT_WORDS,
+  fitLine,
   gpuHelp,
   gpuLabel,
   GPU_USE_WORDS,
@@ -686,6 +687,60 @@ describe("0.0.6 item 6: plain words for Fine control, the picture and the usage 
       for (const what of ["graphicsBusy", "graphicsMemory", "processor", "memory"] as const) {
         plain(usageGapWords(gap, what, false));
         expect(usageGapWords(gap, what, true)).not.toMatch(/graphics card's|its graphics card/);
+      }
+    }
+  });
+});
+
+describe("compare-fit-words: \"Will it fit on this computer?\" in plain words", () => {
+  const GIB = 1024 ** 3;
+  // The 0.0.4 sentence the backend still sends: never shown.
+  const fit = (over: Partial<FitResult>): FitResult => ({
+    verdict: "green",
+    neededBytes: 4.1 * GIB,
+    availableBytes: 14.6 * GIB,
+    suggestedCtx: null,
+    partialOffload: false,
+    device: "graphicsCard",
+    sentence: "Needs about 4.4 GB; your GPU has 15.7 GB free. Fits.",
+    ...over,
+  });
+
+  it("says what it needs and what is free where it would run, counted the way Task Manager counts memory", () => {
+    expect(fitLine(fit({}))).toBe("Needs about 4.1 GB; this computer has 14.6 GB free on the graphics card.");
+    expect(fitLine(fit({ device: "appleGraphics", availableBytes: 10.7 * GIB }))).toBe(
+      "Needs about 4.1 GB; Apple graphics can use up to 10.7 GB on this Mac.",
+    );
+    expect(fitLine(fit({ device: "processor", availableBytes: 11.2 * GIB }))).toBe(
+      "Needs about 4.1 GB; this computer has 11.2 GB free. It would run on the processor.",
+    );
+  });
+
+  it("says what a yellow or red verdict means, with token counts in words, and never repeats the verdict", () => {
+    const card = "this computer has 14.6 GB free on the graphics card.";
+    expect(fitLine(fit({ verdict: "yellow", neededBytes: 9.5 * GIB, suggestedCtx: 16384 }))).toBe(
+      `Needs about 9.5 GB; ${card} It has room if it remembers up to 16,384 tokens, about 12,000 words.`,
+    );
+    expect(fitLine(fit({ verdict: "yellow", neededBytes: 18.3 * GIB, partialOffload: true }))).toBe(
+      `Needs about 18.3 GB; ${card} Part of it would run on the processor, which is slower.`,
+    );
+    expect(fitLine(fit({ verdict: "yellow", neededBytes: 14 * GIB }))).toBe(`Needs about 14 GB; ${card} It only just fits.`);
+    expect(fitLine(fit({ verdict: "red", neededBytes: 48 * GIB }))).toBe(`Needs about 48 GB; ${card}`);
+    // On the processor some memory is kept for other programs, so "has more free than it
+    // needs" can still be too large: said, not left as a puzzle.
+    expect(fitLine(fit({ verdict: "red", device: "processor", neededBytes: 10.5 * GIB, availableBytes: 11.2 * GIB }))).toBe(
+      "Needs about 10.5 GB; this computer has 11.2 GB free. It would run on the processor. Part of that memory is kept free for other programs.",
+    );
+    for (const verdict of Object.keys(VERDICTS) as Verdict[]) {
+      for (const device of ["graphicsCard", "appleGraphics", "processor"] as const) {
+        for (const extra of [{}, { suggestedCtx: 8192 }, { partialOffload: true }]) {
+          const line = fitLine(fit({ verdict, device, ...extra }));
+          plain(line);
+          expect(line).not.toMatch(/Fits|GPU|CPU|context|layer|your /);
+          // Token counts always come with words, never as a bare number.
+          expect(line).not.toMatch(/\d{4}/);
+          expect(line.endsWith(".")).toBe(true);
+        }
       }
     }
   });
