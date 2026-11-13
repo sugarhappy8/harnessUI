@@ -1073,6 +1073,99 @@ async fn the_busy_counter_is_held_while_webp_pictures_are_turned() {
     assert_eq!(results[2].0, "ok", "{rows:?}");
 }
 
+/// [0.0.6 webp-other-paths, last round] When the model is stopped or changed while another
+/// app's request still has WebP pictures being turned, or waits its turn behind other
+/// requests' pictures (D3's "Stop its request and restart"), the request ends at once with
+/// the loading, no-model or did-not-answer reply. It no longer holds the busy count over the
+/// new model until its pictures are done (the slow worker waits 3 s before it starts), and
+/// it never reaches either server.
+#[tokio::test]
+async fn a_model_change_ends_requests_whose_webp_pictures_are_turned() {
+    use crate::attachments::tests::{LOSSY_WEBP, test_worker};
+    let h = Harness::with_pictures(test_worker("slow")).await;
+    let ready = h.model.current().await;
+    let body = json!({"messages": [{"role": "user", "content": [{"type": "image_url",
+        "image_url": {"url": format!("data:image/webp;base64,{}", b64(LOSSY_WEBP))}}]}]});
+    let send = || tokio::spawn(h.post("/v1/chat/completions", &body).send());
+    // Well before the slow worker would even start turning a picture.
+    let at_once = Duration::from_secs(2);
+    let ended = async |request: tokio::task::JoinHandle<reqwest::Result<reqwest::Response>>,
+                       status: u16,
+                       message: &str| {
+        let response = request.await.unwrap().unwrap();
+        assert_eq!(response.status(), status);
+        let answer: Value = response.json().await.unwrap();
+        assert_eq!(answer["error"]["message"], message, "{answer}");
+    };
+
+    // Three requests: two have their pictures turned, the third waits its turn. A reload
+    // stops the old server before it starts the new one.
+    let requests: Vec<_> = (0..3).map(|_| send()).collect();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while h.busy.snapshot().other_apps < 3 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(h.busy.snapshot().other_apps, 3);
+    assert_eq!(h.counters.active(), 3);
+    let changed = Instant::now();
+    h.model.set(Upstream::Loading);
+    for request in requests {
+        ended(request, 503, proxy::LOADING).await;
+    }
+    assert!(changed.elapsed() < at_once, "ended {:?} after", changed.elapsed());
+    assert!(!h.busy.is_busy(), "still counted after the change");
+    assert_eq!(h.counters.active(), 0);
+
+    // The model is unloaded.
+    h.model.set(ready.clone());
+    let request = send();
+    counted_while_turning(&h, 0).await;
+    let changed = Instant::now();
+    h.model.set(Upstream::NotLoaded);
+    ended(request, 503, proxy::NO_MODEL).await;
+    assert!(changed.elapsed() < at_once, "ended {:?} after", changed.elapsed());
+    assert!(!h.busy.is_busy(), "still counted after the change");
+
+    // Another model is loaded (a new server, port and key).
+    let other = FakeLlama::default();
+    let other_addr = other.start().await;
+    h.model.set(ready);
+    let request = send();
+    counted_while_turning(&h, 0).await;
+    let changed = Instant::now();
+    h.model.set(FakeModel::ready(other_addr, 8192));
+    ended(request, 502, "The model in harnessUI did not answer. Try again.").await;
+    assert!(changed.elapsed() < at_once, "ended {:?} after", changed.elapsed());
+    assert!(!h.busy.is_busy(), "still counted after the change");
+    assert_eq!(h.counters.active(), 0);
+    assert!(h.llama.seen().is_empty());
+    assert!(other.seen().is_empty());
+
+    let rows = h.audit_done(5).await;
+    let mut results: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.result_status.clone().unwrap_or_default(),
+                r.result_summary.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    results.sort();
+    let not_run = |summary: &str| ("not_run".to_owned(), summary.to_owned());
+    assert_eq!(
+        results,
+        [
+            not_run("No model was loaded."),
+            not_run("The model was changed while the request waited."),
+            not_run("The model was still loading."),
+            not_run("The model was still loading."),
+            not_run("The model was still loading."),
+        ],
+        "{rows:?}"
+    );
+}
+
 #[tokio::test]
 async fn streams_come_back_cleaned_event_by_event() {
     let h = Harness::new().await;

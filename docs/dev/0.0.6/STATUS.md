@@ -165,6 +165,10 @@ one starts from this file and `README.md`.
   written except rea-start-guard (batch g wf_e649f2ab-5a2, started 08:42) and the ARCHITECTURE
   markers; the rest are in review, refix or check. Next: the final pass (every check, every
   e2e suite with the real model), CI on three systems, owner hand-off.
+- 09:53 UTC check: final fix round nearly done: batch g (rea start guard) finished and checked;
+  the other batches are on their last refix or check steps. The final-pass script
+  (scratchpad v006-final-pass.js: every check and every e2e suite with the real model on
+  toolchain 1.100, fixes re-verified) starts when they end.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

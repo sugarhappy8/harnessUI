@@ -1335,6 +1335,8 @@ fn advice(tool: &str, text: &str) -> Option<String> {
         && !has(&["does not appear to be a git repository"])
     {
         "Pass a folder inside a repository as repo. A new repository is made with git init (run_command) or git_clone.".to_string()
+    } else if has(&["bare repository", "must be run in a work tree"]) {
+        "That repository has no working tree, so the git tools cannot work in it. Pass a folder inside an ordinary clone as repo.".to_string()
     } else if has(&[
         "authentication failed",
         "could not read username",
@@ -1842,6 +1844,19 @@ mod tests {
             said("git_log", "/w/notes is not inside a git repository"),
             said("git_status", "fatal: not a git repository"),
         );
+        // A repository with no working tree (both backends' wordings).
+        for text in [
+            "/w/notes is in a bare repository; the git tools need a working tree",
+            "fatal: this operation must be run in a work tree",
+        ] {
+            assert_eq!(
+                said("git_status", text).as_deref(),
+                Some(
+                    "That repository has no working tree, so the git tools cannot work in it. Pass a folder inside an ordinary clone as repo."
+                ),
+                "{text}"
+            );
+        }
         // Nothing to commit.
         assert_eq!(
             said(
@@ -3966,7 +3981,7 @@ printf '@@harness-git-worker@@ {"kind":"done","text":"%s"}\n' "$r""#;
                 "git_status",
                 "to-bare",
                 format!(
-                    "{} (through a link) is in a bare repository; the git tools need a working tree",
+                    "{} (through a link) is in a bare repository; the git tools need a working tree. That repository has no working tree, so the git tools cannot work in it. Pass a folder inside an ordinary clone as repo.",
                     at("to-bare")
                 ),
                 format!("The bare repository is {}.", bare.display()),

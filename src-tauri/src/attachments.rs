@@ -422,6 +422,9 @@ const PICTURE_LEFT_OUT: &str = "[a WebP picture could not be read and was left o
 /// [0.0.6] As [`PICTURE_LEFT_OUT`], for a picture too large once turned into JPEG or PNG.
 const PICTURE_LEFT_OUT_TOO_LARGE: &str =
     "[a WebP picture was left out: it is larger than 20 MB as JPEG or PNG]";
+/// [0.0.6 webp-other-paths, last round] What the model gets instead of data labelled WebP
+/// that is neither WebP nor PNG, JPEG or GIF by its first bytes.
+const PICTURE_UNKNOWN_LEFT_OUT: &str = "[a picture could not be read and was left out]";
 
 /// [0.0.6 webp-other-paths] Whether base64 `data` holds a WebP file, read from its first 12
 /// bytes (whitespace skipped). llama-server goes by a picture's bytes, not by the type it is
@@ -2263,8 +2266,10 @@ pub(crate) mod tests {
     /// WebP reaches the model byte for byte under the type it really is, where it used to be
     /// left out with a note that wrongly called it a WebP picture. A real WebP picture is
     /// still turned into JPEG or PNG, and only one that cannot be read is left out, with the
-    /// note. Data that is no picture this app knows keeps its label and goes as it came, as
-    /// it does under any other label.
+    /// note. Data labelled WebP that is neither WebP nor PNG, JPEG or GIF (here 3 zero bytes)
+    /// is left out too, with a note that does not call it WebP: llama-server would refuse
+    /// every later request in the chat over it. The same data under another label still goes
+    /// as it came (`webp_pictures_under_another_type_become_jpeg_or_png`).
     #[tokio::test]
     async fn pictures_labelled_webp_are_known_by_their_bytes() {
         use agent::history::{CallStatus, Part, ResultRecord};
@@ -2310,7 +2315,12 @@ pub(crate) mod tests {
                 text: PICTURE_LEFT_OUT.into()
             }
         );
-        assert_eq!(out.content[5], image("image/webp", "AAAA".into()));
+        assert_eq!(
+            out.content[5],
+            Content::Text {
+                text: PICTURE_UNKNOWN_LEFT_OUT.into()
+            }
+        );
 
         let mut parts = vec![
             Part::Image {
@@ -2325,10 +2335,15 @@ pub(crate) mod tests {
                 images: vec![
                     ("image/webp".into(), png.clone()),
                     ("image/webp".into(), b64(LOSSLESS_WEBP)),
+                    ("image/webp".into(), "AAAA".into()),
                 ],
                 source: None,
                 notes: Vec::new(),
             }),
+            Part::Image {
+                mime: "image/webp".into(),
+                data_base64: "AAAA".into(),
+            },
         ];
         stored_pictures_with(&worker, &mut parts).await;
         assert_eq!(
@@ -2341,9 +2356,11 @@ pub(crate) mod tests {
         let Part::ToolResult(result) = &parts[1] else {
             panic!("{:?}", parts[1])
         };
-        assert_eq!(result.text, "here");
+        assert_eq!(result.text, format!("here\n{PICTURE_UNKNOWN_LEFT_OUT}"));
+        assert_eq!(result.images.len(), 2);
         assert_eq!(result.images[0], ("image/png".to_owned(), png));
         assert_eq!(result.images[1].0, "image/png");
         assert_eq!(png_pixels(&unb64(&result.images[1].1)).dimensions(), (3, 2));
+        assert_eq!(parts[2], Part::Text(PICTURE_UNKNOWN_LEFT_OUT.into()));
     }
 }

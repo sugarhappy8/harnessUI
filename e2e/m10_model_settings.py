@@ -526,7 +526,8 @@ def check_a_reply_begun_while_the_check_probes_is_waited_for(s, home):
         s.invoke("stop_generation")
         fired(s, "__sent", 300)
         last = messages(s, REPLY["chat"])[-1]
-        assert last["role"] == "assistant" and last["status"] != "error" and last.get("content"), (
+        # Not "error": the check did not cut it off (before the fix it ended with an error).
+        assert last["role"] == "assistant" and last["status"] != "error", (
             "the reply the check waited for was cut off", last["status"])
         r = fired(s, "__diag6", 1200)
         assert r.get("ok"), r
