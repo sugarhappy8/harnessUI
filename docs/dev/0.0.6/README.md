@@ -86,10 +86,11 @@ use `claude/0.0.5-paused` for anything any more; it is kept only as a record.
 ## How to pick it up
 **0.0.6 is complete, pending the owner's review and CI on all three systems.** All eight
 items are built, the version is 0.0.6 everywhere, and the docs (CHANGELOG, ARCHITECTURE,
-SECURITY, README) describe it. The last step on Linux was a final pass: every check and
-every end-to-end suite with the real model, with each failure fixed (its outcome is in
-`STATUS.md`). Draft pull request #5 (`claude/0.0.6` into `main`) carries it. Nothing is
-left to build unless the final pass, the owner's review or CI finds something.
+SECURITY, README) describe it. Every package and fix was tested with the real model on
+Linux; the last local final pass was stopped at the owner's request once Linux CI had
+passed in full, so CI on all three systems is the last gate. Pull request #5
+(`claude/0.0.6` into `main`) carries it. Nothing is left to build unless the owner's review
+or CI finds something.
 
 1. **Read `STATUS.md` (last entries) and the latest CI run on pull request #5.** The first
    CI run (43380365172) stopped at a Linux clippy finding, since fixed. In run 43409122542

@@ -89,7 +89,7 @@ impl From<agent::ProviderError> for AppError {
         };
         let next = match &e {
             agent::ProviderError::ContextOverflow { .. } => {
-                "Start a new chat, or raise the context size in Settings → Local models and reload the model."
+                "Start a new chat. For a model on this computer, choose Model settings to let it remember more; for a server, set its context in Settings → Endpoints."
             }
             agent::ProviderError::Unauthorized => {
                 "Check the API key for this endpoint in Settings → Endpoints."

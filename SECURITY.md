@@ -377,8 +377,9 @@ build machine, and its Windows and macOS jobs have not run at all.
 
 - API keys, the Hugging Face token, MCP secrets and the sharing key are kept in the
   operating system's keychain, never in plain files. The database stores only references.
-- No telemetry, no crash upload, no account. With no model downloaded and nothing
-  clicked, the app makes no network request. Every network use is listed in
+- No telemetry, no crash upload, no account. (On Windows, a crash of a program the app
+  starts is handled by Windows Error Reporting as your Windows settings say; the app itself
+  uploads nothing.) With no model downloaded and nothing clicked, the app makes no network request. Every network use is listed in
   ARCHITECTURE.md 13.6. 0.0.6 adds two of its own, both only when you ask: Compare looks
   up the models you add on Hugging Face, and Settings → Reverse engineering downloads what
   you click. A task you let the model hand to Claude Code or Codex also leaves this
