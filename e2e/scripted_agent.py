@@ -6339,8 +6339,8 @@ def p_reverse_describe(c, notes):
         notes.append("audit: " + json.dumps(audit))
         assert sum(1 for r in audit if r[1] == "denied") >= 5, audit
         assert not any(r[1].startswith("allowed") for r in audit), audit
-        # rea was never started: nothing to start, and nothing allowed.
-        assert s.invoke("reverse_status")["running"] in ("stopped", {"state": "stopped"}, None) or True
+        # Nothing was allowed, so rea was never asked to start.
+        notes.append("rea: " + json.dumps(s.invoke("reverse_status").get("running")))
     finally:
         try:
             s.invoke("reverse_remove", {"component": "kuna", "force": True})
