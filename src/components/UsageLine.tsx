@@ -21,6 +21,8 @@ import { openModelSettings } from "./ModelSettings";
 
 /** The usage line asks every 1.5 seconds while the window is visible (I6-9). */
 const usageDelay = () => 1500;
+/** One reading (looked up when called, so a missing command is just a failed reading). */
+const readUsage = () => ipc.usageNow();
 
 const ICON = { graphics: Gpu, processor: Cpu, memory: MemoryStick } as const;
 
@@ -133,7 +135,7 @@ function UsageMenu(props: { now: UsageNow; localPath: string | null }) {
  */
 export function UsageLine() {
   const visible = usePageVisible();
-  const now = usePoll<UsageNow>(visible, ipc.usageNow, usageDelay);
+  const now = usePoll<UsageNow>(visible, readUsage, usageDelay);
   const modelRef = useApp((s) => s.detail?.chat.modelRef ?? null);
   const localPath = modelRef?.startsWith("local:") ? modelRef.slice(6) : null;
 

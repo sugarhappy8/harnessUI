@@ -5,20 +5,16 @@
 //!
 //! - **Masking** ([`Masker`]): the folder as written and as resolved on disk, both slash
 //!   styles, JSON-escaped (`\\` and `\/`), with the `\\?\` (and `//?/`) prefix, its 8.3
-//!   short form on Windows (`GetShortPathNameW`), ASCII case-insensitively on Windows and
-//!   macOS, and percent-encoded, as in the file URLs of Node's stack traces
-//!   (`file:///Users/ann/Library/Application%20Support/…`; any `%XX` in the text is read
-//!   as the byte it stands for, in either case of hex digits). Applied to text blocks,
-//!   `full_text`, every string (and key) of `ui`, error text and the stderr tail.
+//!   short form on Windows (`GetShortPathNameW`), and ASCII case-insensitively on Windows
+//!   and macOS. Applied to text blocks, `full_text`, every string (and key) of `ui`, error
+//!   text and the stderr tail.
 //! - **Sanitising:** [`policy::sanitize::visible`] after masking, so invisible and control
 //!   characters show as escapes everywhere. The cleaned text is held to the host's 1 MiB
 //!   result cap again (escapes can make it longer).
-//! - **Lines the app adds** ([`app_lines`]): one plain line per known failure, matched on
-//!   rea's own text pinned from rea 6.9.0 ([`failures`]), to error results only (a hostile
-//!   file's text in a successful listing cannot trigger them); and the settings hint
-//!   whenever a result names a `REA_…` setting (rea names its settings in successful
-//!   results too, `binary_session` for one; a hostile file can at most add that one
-//!   harmless line). They come first, so shortening never cuts them.
+//! - **Lines the app adds** ([`app_lines`]), to error results only (a hostile file's text in
+//!   a successful listing cannot trigger them): one plain line per known failure, matched
+//!   on rea's own text pinned from rea 6.9.0 ([`failures`]), and the settings hint when the
+//!   error names a `REA_…` setting. They come first, so shortening never cuts them.
 //! - **Result ids** ([`evidence_ids`]): every `ev_` followed by exactly 64 lowercase hex
 //!   digits, for the chat's ledger ([`crate::session`]).
 
@@ -33,7 +29,7 @@ use crate::platform::{self, Os, Platform};
 /// What the reverse folder reads as in anything rea says.
 pub const MASK: &str = "[harnessUI's rea folder]";
 
-/// The hint added when a result names one of rea's `REA_…` settings.
+/// The hint added when an error names one of rea's `REA_…` settings.
 pub const SETTINGS_HINT: &str = "(harnessUI manages rea's settings; the user can change the decompiler in Settings → Reverse engineering.)";
 
 /// Largest `ui` value kept after cleaning (the host keeps at most 64 KiB of structured
@@ -187,7 +183,8 @@ impl Masker {
             let found = if self.first[usize::from(key)] {
                 self.needles
                     .iter()
-                    .find_map(|n| self.match_len(bytes, i, n))
+                    .find(|n| self.matches_at(bytes, i, n))
+                    .map(Vec::len)
             } else {
                 None
             };
@@ -208,45 +205,19 @@ impl Masker {
         out
     }
 
-    /// How many bytes of the text at `at` spell `needle`, if they do. A `%XX` escape in the
-    /// text counts as the byte it stands for (file URLs percent-encode spaces, non-ASCII
-    /// letters, `%`, `#` and others). The first byte of a needle is never an escape: roots
-    /// start with `/`, `\` or a drive letter, which file URLs keep as they are.
-    fn match_len(&self, bytes: &[u8], at: usize, needle: &[u8]) -> Option<usize> {
-        let mut j = at;
-        for &n in needle {
-            let b = *bytes.get(j)?;
-            if b == b'%'
-                && let Some(d) = escaped_byte(bytes, j)
-                && self.same(d, n)
-            {
-                j += 3;
-            } else if self.same(b, n) {
-                j += 1;
-            } else {
-                return None;
-            }
-        }
+    fn matches_at(&self, bytes: &[u8], at: usize, needle: &[u8]) -> bool {
+        let Some(window) = bytes.get(at..at + needle.len()) else {
+            return false;
+        };
+        let ok = if self.insensitive {
+            window.eq_ignore_ascii_case(needle)
+        } else {
+            window == needle
+        };
         // A match must end on a character boundary (needles are whole characters, so this
         // only fails for a needle cut by an ASCII-only comparison of different bytes).
-        (j == bytes.len() || !is_continuation(bytes[j])).then_some(j - at)
+        ok && (at + needle.len() == bytes.len() || !is_continuation(bytes[at + needle.len()]))
     }
-
-    fn same(&self, a: u8, b: u8) -> bool {
-        if self.insensitive {
-            a.eq_ignore_ascii_case(&b)
-        } else {
-            a == b
-        }
-    }
-}
-
-/// The byte a `%XX` escape at `at` stands for (either case of hex digits).
-fn escaped_byte(bytes: &[u8], at: usize) -> Option<u8> {
-    let hex = |c: u8| (c as char).to_digit(16);
-    let hi = hex(*bytes.get(at + 1)?)?;
-    let lo = hex(*bytes.get(at + 2)?)?;
-    u8::try_from(hi * 16 + lo).ok()
 }
 
 fn utf8_len(first: u8) -> usize {
@@ -337,23 +308,14 @@ fn all_text(output: &ToolOutput) -> String {
     out
 }
 
-/// The lines the app adds to a result from rea, for this platform: the known failures'
-/// lines (error results only), then the settings hint (any result naming a setting).
+/// The lines the app adds to an error result from rea (empty for a successful one), for
+/// this platform.
 pub fn app_lines(output: &ToolOutput, platform: Platform) -> Vec<String> {
-    let text = all_text(output);
-    let mut lines = failure_lines(output, &text, platform);
-    if names_a_setting(&text) {
-        lines.push(SETTINGS_HINT.to_string());
-    }
-    lines
-}
-
-/// One plain line per known failure in an error result (none for a successful one).
-fn failure_lines(output: &ToolOutput, text: &str, platform: Platform) -> Vec<String> {
-    let mut lines = Vec::new();
     if !output.is_error {
-        return lines;
+        return Vec::new();
     }
+    let text = all_text(output);
+    let mut lines = Vec::new();
     use failures as f;
     if text.contains(f::KUNA_FORMAT) || text.contains(f::KUNA_UNIVERSAL) {
         let ghidra_here =
@@ -377,6 +339,9 @@ fn failure_lines(output: &ToolOutput, text: &str, platform: Platform) -> Vec<Str
     if text.contains(f::WINDOWS_ADDON_REFUSED) || text.contains(f::WINDOWS_ADDON_MISSING) {
         lines.push(f::WINDOWS_BLOCKED_LINE.to_string());
     }
+    if names_a_setting(&text) {
+        lines.push(SETTINGS_HINT.to_string());
+    }
     lines
 }
 
@@ -399,7 +364,7 @@ fn names_a_setting(text: &str) -> bool {
 }
 
 /// A result from rea, cleaned for the model, the card and storage: masked and sanitised
-/// everywhere, the app's lines first, held to the 1 MiB cap. `notes` are the
+/// everywhere, the app's lines first on an error, held to the 1 MiB cap. `notes` are the
 /// app's own lines about this call (housekeeping it did first), put first too.
 pub fn clean_with(
     output: ToolOutput,
@@ -598,64 +563,6 @@ mod tests {
         );
     }
 
-    /// Node prints module paths in stack traces as file URLs, percent-encoded (security
-    /// review, WP9g r1: a Mac root holds "Application Support"; a Windows user name may
-    /// hold a space or a non-ASCII letter).
-    #[test]
-    fn percent_encoded_file_urls_are_masked() {
-        let mac_root = "/Users/ann/Library/Application Support/com.harnessui.app/reverse";
-        let mac = Masker::from_spellings(&[mac_root.to_string()], Platform::MacosArm64);
-        let url = "at f (file:///Users/ann/Library/Application%20Support/com.harnessui.app/reverse/rea-6.9.0/dist/mcp/main.js:592:9)";
-        assert_eq!(
-            mac.mask(url),
-            format!("at f (file://{MASK}/rea-6.9.0/dist/mcp/main.js:592:9)")
-        );
-        // Lowercase hex digits and other letter case (macOS compares case-insensitively).
-        assert_eq!(
-            mac.mask("file:///users/ann/library/application%20support/COM.HARNESSUI.APP/reverse"),
-            format!("file://{MASK}")
-        );
-        // JSON-escaped slashes around an encoded space.
-        assert_eq!(
-            mac.mask(r"file:\/\/\/Users\/ann\/Library\/Application%20Support\/com.harnessui.app\/reverse\/x"),
-            format!(r"file:\/\/{MASK}\/x")
-        );
-        let win = Masker::from_spellings(
-            &[r"C:\Users\Ann Lee\AppData\Local\com.harnessui.app\reverse".to_string()],
-            Platform::WindowsX64,
-        );
-        assert_eq!(
-            win.mask("file:///C:/Users/Ann%20Lee/AppData/Local/com.harnessui.app/reverse/rea-6.9.0/dist/mcp/main.js:1"),
-            format!("file:///{MASK}/rea-6.9.0/dist/mcp/main.js:1")
-        );
-        // A user name with a non-ASCII letter, as Node encodes it (UTF-8 bytes).
-        let jorg = Masker::from_spellings(
-            &["/home/x/App Support Jörg/reverse".to_string()],
-            Platform::LinuxX64,
-        );
-        assert_eq!(
-            jorg.mask("file:///home/x/App%20Support%20J%C3%B6rg/reverse/rea/dist/main.mjs:1"),
-            format!("file://{MASK}/rea/dist/main.mjs:1")
-        );
-        assert_eq!(
-            jorg.mask("file:///home/x/App%20Support%20J%c3%b6rg/reverse"),
-            format!("file://{MASK}")
-        );
-        // A literal `%` in the root, written plainly or encoded as `%25`.
-        let pct = Masker::from_spellings(&["/srv/100%/reverse".to_string()], Platform::LinuxX64);
-        assert_eq!(pct.mask("/srv/100%/reverse/x"), format!("{MASK}/x"));
-        assert_eq!(
-            pct.mask("file:///srv/100%25/reverse/x"),
-            format!("file://{MASK}/x")
-        );
-        // Not the root: nothing changes; a broken escape is left alone.
-        assert_eq!(
-            jorg.mask("file:///home/x/App%20Support%20Jo/reverse"),
-            "file:///home/x/App%20Support%20Jo/reverse"
-        );
-        assert_eq!(jorg.mask("/home/x/App%2"), "/home/x/App%2");
-    }
-
     #[test]
     fn short_or_empty_roots_mask_nothing() {
         let m = Masker::from_spellings(&["/".to_string(), String::new()], Platform::LinuxX64);
@@ -757,22 +664,14 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_hint_for_any_result_naming_a_setting() {
+    fn the_settings_hint_only_for_errors_naming_a_setting() {
         let p = Platform::LinuxX64;
         let e = output(
             "Set REA_KUNA_TIMEOUT_MS in the environment that starts REA",
             true,
         );
         assert_eq!(app_lines(&e, p), vec![SETTINGS_HINT.to_string()]);
-        // rea's binary_session names its settings in a successful result (real rea 6.9.0).
-        let session = output(
-            "Set REA_IDA_MCP_CONFIG to an upstream IDA MCP server to enable IDA.",
-            false,
-        );
-        assert_eq!(app_lines(&session, p), vec![SETTINGS_HINT.to_string()]);
-        let c = clean_with(session, &win(), p, &[]);
-        assert!(c.joined_text().starts_with(SETTINGS_HINT), "the hint first");
-        assert!(app_lines(&output("PREA_X and REA_ alone", false), p).is_empty());
+        assert!(app_lines(&output("Set REA_KUNA_TIMEOUT_MS", false), p).is_empty());
         assert!(app_lines(&output("PREA_X and REA_ alone", true), p).is_empty());
         assert!(app_lines(&output("no settings here", true), p).is_empty());
         let mut structured = output("failed", true);
