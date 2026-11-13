@@ -128,6 +128,12 @@ one starts from this file and `README.md`.
   on (spec Part 1 and the v3 script updated).
 - 04:30 UTC: item 5's six main packages done (reviewed, fixed, checked); WP9e started
   (wf_59ddd95e-968). Item 6: WP10d/WP10e in review. Leftover fixes run wf_c6b8dca9-052 in review.
+- 05:10 UTC: item 6 done (WP10a, WP10b, WP10d, WP10e reviewed, fixed, checked). Leftover fixes
+  run A done (6 fixes). Running: WP9e (wf_59ddd95e-968); leftover fixes B (header layout, rea
+  link text; wf_3b4d80b6-e9b) and C (per-chat model switch cancel, WebP on the proxy and tool
+  paths, helper escaping scope, Other apps copy race; wf_6a9d631b-ae5); release docs
+  (wf_50b56912-278). Next: whole-release review, version 0.0.6, every check and e2e suite,
+  CI on three systems, draft pull request.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

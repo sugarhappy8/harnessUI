@@ -15,7 +15,7 @@ It is started by the fake pack's `node` program exactly as the app starts rea:
 comes from the first argument. Files in `<root>`:
 
 - `fake-calls.jsonl` (written): one JSON object per line. `{"event": "start", "pid",
-  "argv", "cwd", "env"}` (the whole environment it got), `{"event": "call", "tool",
+  "argv", "cwd", "env"}` (the whole environment it was started with), `{"event": "call", "tool",
   "args", "id"}`, `{"event": "slow", "tool", "pid", "child"}`, `{"event": "cancelled",
   "requestId"}`, `{"event": "stdin-closed"}`.
 - `fake.json` (read at each call, optional): `{"slow": ["tool", ...]}` makes those calls
@@ -169,10 +169,21 @@ def handle(msg):
         send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"no method {method}"}})
 
 
+def started_with():
+    """The environment this process was started with. Python itself may add to os.environ
+    (LC_CTYPE when it coerces the C locale), so /proc's copy is read where there is one."""
+    try:
+        raw = pathlib.Path("/proc/self/environ").read_bytes()
+    except OSError:
+        return dict(os.environ)
+    pairs = (item.decode("utf-8", "replace").partition("=") for item in raw.split(b"\0") if item)
+    return {k: v for k, _, v in pairs}
+
+
 def main():
     record({
         "event": "start", "pid": os.getpid(), "argv": sys.argv[1:], "cwd": os.getcwd(),
-        "env": dict(os.environ),
+        "env": started_with(),
     })
     for line in sys.stdin:
         line = line.strip()
