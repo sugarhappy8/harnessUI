@@ -550,6 +550,20 @@ describe("ToolsPanel: the Coding apps group (0.0.6)", () => {
     await openPanel();
     expect(screen.getByText(changed)).toBeTruthy();
   });
+
+  it("shows a program path with hidden and right-to-left characters as codes", async () => {
+    ipcMock.codingAppsStatus.mockImplementation(async () => ({
+      ...FOUND,
+      apps: [{ ...FOUND.apps[0]!, path: "/home/u/bin/‮edualc​", version: "2.1‮" }, FOUND.apps[1]!],
+    }));
+    ipcMock.listChatTools.mockImplementation(async () => [tool("coding_apps", "ask_claude_code", { enabledInChat: true })]);
+    await openPanel();
+    const path = screen.getByText("/home/u/bin/\\u{202E}edualc\\u{200B}");
+    expect(path.tagName).toBe("BDI");
+    expect(path.getAttribute("dir")).toBe("ltr");
+    expect(screen.getByText("2.1\\u{202E}")).toBeTruthy();
+    expect(document.body.innerHTML).not.toMatch(/[‮​]/);
+  });
 });
 
 describe("ToolsPanel: the Reverse engineering group (0.0.6)", () => {

@@ -273,4 +273,13 @@ describe("UsageLine: this computer's usage under the model name", () => {
     expect(screen.queryByRole("button", { name: "Computer usage" })).toBeNull();
     expect(document.querySelector('[data-usage="waiting"]')).toBeTruthy();
   });
+
+  it("shows a graphics card name with hidden and right-to-left characters as codes", async () => {
+    const now = usage();
+    if (now.graphics.kind === "value") now.graphics.value.name = "Card\u202Eevil";
+    await show(now);
+    await openMenu();
+    expect(menu()).toContain("Graphics card · Card\\u{202E}evil");
+    expect(document.body.innerHTML).not.toContain("\u202E");
+  });
 });

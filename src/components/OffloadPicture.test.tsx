@@ -134,4 +134,12 @@ describe("OffloadPicture: where the model goes, before it loads", () => {
     expect(text()).toContain("Memory is counted the way Activity Monitor counts it");
     expect(text()).not.toContain("graphics card");
   });
+
+  it("shows a graphics card name with hidden and right-to-left characters as codes", () => {
+    show(picture({ graphics: graphicsBar({ name: "Card\u202Eevil\u200B" }) }));
+    expect(text()).toContain("Graphics card · Card\\u{202E}evil\\u{200B} · 16 GB");
+    const bar = document.querySelector('[data-bar="graphics"] [role="img"]') as HTMLElement;
+    expect(bar.getAttribute("aria-label")).toMatch(/^Graphics card · Card\\u\{202E\}evil\\u\{200B\} · 16 GB: /);
+    expect(document.body.innerHTML).not.toMatch(/[\u202E\u200B]/);
+  });
 });
