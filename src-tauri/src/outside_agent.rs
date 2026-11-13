@@ -1505,6 +1505,13 @@ async fn run(
             ));
         }
     };
+    let started = Instant::now();
+    // The card says the app is working at once, before anything it prints. The ticker below
+    // repeats the line every `tick`; a first tick of its own would need the clock to turn
+    // first, and a quick answer could end the run before it came.
+    if let Some(p) = &ctx.progress {
+        p(format!("{label} is working… 0 min · Stop\n"));
+    }
     // The task, then the end of input.
     if let Some(mut stdin) = child.take_stdin() {
         tokio::spawn(async move {
@@ -1567,10 +1574,10 @@ async fn run(
             }
         }));
     }
-    let started = Instant::now();
     let ticker = progress.clone().map(|p| {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tick);
+            let first = tokio::time::Instant::from_std(started) + tick;
+            let mut interval = tokio::time::interval_at(first, tick);
             loop {
                 interval.tick().await;
                 let minutes = started.elapsed().as_secs() / 60;

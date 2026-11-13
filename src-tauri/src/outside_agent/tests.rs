@@ -2273,6 +2273,44 @@ async fn the_task_goes_on_standard_input_and_the_answer_comes_back() {
     }
 }
 
+/// The card says the app is working as soon as it has started, before anything it prints,
+/// and not only once the clock has ticked: a run that ends at once (here Stop was already
+/// pressed, so it ends before the first tick could come) still showed the line. A quick
+/// answer used to race the first tick and sometimes left the card without it.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_working_line_comes_as_soon_as_the_app_starts() {
+    let bin = temp("working-bin");
+    let work = temp("working-work");
+    for (app, name, output) in [
+        (CodingApp::ClaudeCode, "claude", CLAUDE_OK),
+        (CodingApp::Codex, "codex", CODEX_OK),
+    ] {
+        let program = fake(&bin, name, output);
+        let progress = Arc::new(Mutex::new(String::new()));
+        let sink = progress.clone();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let spec = runtime::SpawnSpec::new(&program, &work)
+            .stdin(runtime::StdioMode::Piped)
+            .stdout(runtime::StdioMode::Piped)
+            .stderr(runtime::StdioMode::Piped);
+        let ctx = CallContext {
+            chat: chat(&work),
+            cancel,
+            progress: Some(Arc::new(move |t: String| sink.lock().unwrap().push_str(&t))),
+        };
+        let out = run(app, spec, "x".into(), ctx, MAX_RUN, TICK, 64 * 1024).await;
+        assert!(out.is_error, "{out:?}");
+        assert!(out.joined_text().contains("was stopped"), "{out:?}");
+        let progress = progress.lock().unwrap().clone();
+        assert!(
+            progress.starts_with(&format!("{} is working… 0 min · Stop\n", app.label())),
+            "{progress:?}"
+        );
+    }
+}
+
 /// Names the folder where this test binary, started as a fake app by a shim
 /// ([`shim_to_this_binary`]), records its run.
 const FAKE_RECORD_ENV: &str = "HARNESS_TEST_CODING_APP_RECORD";
