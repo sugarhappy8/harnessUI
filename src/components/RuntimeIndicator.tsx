@@ -341,34 +341,40 @@ function Status() {
       runtime.error?.message ||
       runtime.adjustments.map(adjustmentWords).find((t): t is string => t !== null) ||
       null;
-    // [0.0.6 header-layout] In a crowded header the buttons after "Didn't load" drop whole onto
-    // the row's hidden second line (Try again first); both are in the model menu too (the
-    // gear's Settings for this model, and picking the model again).
+    // [0.0.6 header-layout r2] Both actions always show, so the keyboard never lands on one that
+    // cannot be seen: "Didn't load · Model settings…" on the first line (the line asks the header
+    // for that much, `min-w`), and "Try again" after the reason on the second, the way a note's
+    // action follows its words. The reason shows in two lines at most; its tooltip has it whole.
     return (
-      <div data-header-state="failed" className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 text-xs leading-tight">
-        <span className="flex h-4 min-w-0 flex-wrap items-center gap-x-1.5 overflow-hidden leading-4 whitespace-nowrap">
+      <div
+        data-header-state="failed"
+        className="flex min-w-[10.5rem] flex-1 flex-col justify-center gap-0.5 text-xs leading-tight"
+      >
+        <span data-failed-line className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap">
           <span className="shrink-0 text-danger">Didn't load</span>
-          <span className="flex items-center gap-1.5">
-            <span aria-hidden className="text-fg-muted">
-              ·
-            </span>
-            <button type="button" onClick={settings} className="text-fg-muted underline hover:text-fg">
-              Model settings…
-            </button>
+          <span aria-hidden className="text-fg-muted">
+            ·
           </span>
-          {runtime.modelPath && (
-            <button
-              type="button"
-              onClick={() => runtime.modelPath && void switchModel(runtime, runtime.modelPath).catch(fail)}
-              className="text-fg-muted underline hover:text-fg"
-            >
-              Try again
-            </button>
-          )}
+          <button type="button" onClick={settings} className="shrink-0 text-fg-muted underline hover:text-fg">
+            Model settings…
+          </button>
         </span>
-        {why && (
-          <span className="line-clamp-2 max-w-[34rem] text-[11px] text-fg-muted" role="status" title={why}>
-            {why}
+        {(why || runtime.modelPath) && (
+          <span className="flex max-w-[34rem] min-w-0 items-start gap-1.5 text-[11px] text-fg-muted">
+            {why && (
+              <span className="line-clamp-2 min-w-0" role="status" title={why}>
+                {why}
+              </span>
+            )}
+            {runtime.modelPath && (
+              <button
+                type="button"
+                onClick={() => runtime.modelPath && void switchModel(runtime, runtime.modelPath).catch(fail)}
+                className="shrink-0 underline hover:text-fg"
+              >
+                Try again
+              </button>
+            )}
           </span>
         )}
       </div>

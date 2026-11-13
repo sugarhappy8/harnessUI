@@ -1113,7 +1113,7 @@ async fn end_to_end(decompiler: Decompiler, kind: Base) {
              phase it appeared in): {others:?}. A `rea-ghidra-socket-` entry means the socket \
              path inside the pack was longer than 106 bytes (use a shorter REAL_REA_DIR)"
         ),
-        Base::DotFolder if !others.is_empty() => println!(
+        Base::DotFolder if !others.is_empty() => panic!(
             "real_rea: KNOWN LIMIT: with the pack under a folder whose name starts with a dot \
              (the app's own folder on Linux is under ~/.local/share), rea puts Ghidra's session \
              (its project, logs, a copy of the opened file and the bridge socket) in the \
