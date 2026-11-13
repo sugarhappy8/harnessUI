@@ -175,6 +175,11 @@ one starts from this file and `README.md`.
   tests incl. real llama-server and real rea; full scripted e2e) and wf_56f91c0c-0cc
   (frontend checks, milestone e2e, completeness critic and owner checklist). CI started on
   this commit so Windows and macOS results come in meanwhile.
+- 10:53 UTC check: CI run 43409122542 on 4c850e7: Linux lint and test passed (clippy 1.100,
+  workspace tests with the llama-server contract tests, cargo-deny), Ghidra digest passed;
+  Windows and macOS installer jobs running their workspace tests. Final pass: completeness
+  critic done (owner checklist written), its verify running; Rust, scripted e2e, frontend and
+  milestone e2e running.
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

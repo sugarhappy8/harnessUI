@@ -91,10 +91,11 @@ every end-to-end suite with the real model, with each failure fixed (its outcome
 `STATUS.md`). Draft pull request #5 (`claude/0.0.6` into `main`) carries it. Nothing is
 left to build unless the final pass, the owner's review or CI finds something.
 
-1. **Read `STATUS.md` (last entries) and the latest CI run on pull request #5.** Windows and
-   macOS have never run 0.0.6's tests: the first CI run (43380365172) stopped at a Linux
-   clippy finding, since fixed. A failure on Windows or macOS is a real bug to fix
-   test-first; do not skip or weaken a test to get green.
+1. **Read `STATUS.md` (last entries) and the latest CI run on pull request #5.** The first
+   CI run (43380365172) stopped at a Linux clippy finding, since fixed. In run 43409122542
+   (2026-11-13, 10:45 UTC) Linux had passed and the Windows and macOS jobs, which also run
+   the tests there for the first time, were still running. A failure on Windows or macOS is
+   a real bug to fix test-first; do not skip or weaken a test to get green.
 2. **The owner's review.** Give the owner `owner-checklist.md` and these with it: the
    "rea test files" folder (artifact `rea-test-files` of the macOS job of the *Reverse
    engineering* workflow, `reverse.yml`), and the table of publisher quotes behind the
