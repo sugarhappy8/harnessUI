@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ChatDetail, ErrorInfo, MessageDto, RuntimeStatus } from "../lib/types";
 
 // The header's own components talk to the backend; the chat's layout is what is tested here.
@@ -226,11 +226,99 @@ describe("the header (header-layout)", () => {
     expect(controls.querySelector("[data-folder-chip]")).toBeTruthy();
     expect(controls.contains(screen.getByRole("button", { name: "System prompt" }))).toBe(true);
     expect(controls.contains(screen.getByRole("button", { name: "Panel" }))).toBe(true);
-    // Below @7xl Thinking and System prompt show their icon; their names and tooltips keep the words.
-    for (const name of ["Thinking on", "System prompt"]) {
-      const words = screen.getByRole("button", { name }).querySelector("span") as HTMLElement;
-      expect(words.className).toBe("hidden @7xl:inline");
+    // [r2] System prompt says its name from @5xl (a window from about 1,300 pixels); below, the
+    // icon, with the name as its accessible name and tooltip.
+    const prompt = screen.getByRole("button", { name: "System prompt" }).querySelector("span") as HTMLElement;
+    expect(prompt.className).toBe("hidden @5xl:inline");
+  });
+
+  it("says whether Thinking is on in words at every width, never by its colour alone (header-layout r2)", () => {
+    const answered: MessageDto = { ...message(2, "assistant", "ok"), promptTokens: 50, completionTokens: 10 };
+    for (const on of [true, false]) {
+      for (const messages of [[], [message(1, "user", "hi"), answered]]) {
+        useApp.setState({ runtime: { state: "ready", nCtx: 4_096, thinking: true, supportsTools: true } as RuntimeStatus });
+        const d = detail("local:/models/a.gguf", null, messages);
+        show({ ...d, chat: { ...d.chat, thinking: on } });
+        const button = screen.getByRole("button", { name: on ? "Thinking on" : "Thinking off" });
+        expect(button.getAttribute("aria-pressed")).toBe(String(on));
+        // "On" or "Off" beside the icon in every header (no class hides it below a width), and
+        // "Thinking on" or "Thinking off" in a wide one; one of the two shows at any width.
+        // Beside the meter (a chat with messages) the long form waits for a wider header.
+        const meter = document.querySelector("[title^='How much it can remember']");
+        expect(!!meter).toBe(messages.length > 0);
+        const wide = meter ? "@7xl" : "@5xl";
+        const short = button.querySelector("[data-thinking='short']") as HTMLElement;
+        const full = button.querySelector("[data-thinking='full']") as HTMLElement;
+        expect(short.textContent).toBe(on ? "On" : "Off");
+        expect(short.className).toBe(`${wide}:hidden`);
+        expect(full.textContent).toBe(on ? "Thinking on" : "Thinking off");
+        expect(full.className).toBe(`hidden ${wide}:inline`);
+        cleanup();
+      }
     }
+  });
+
+  it("places the model's parts by the header's width only, so nothing moves while a reply streams (header-layout r2)", () => {
+    useApp.setState({ runtime: { state: "ready", nCtx: 4_096, thinking: true, supportsTools: true } as RuntimeStatus });
+    const answered: MessageDto = { ...message(2, "assistant", "ok"), promptTokens: 50, completionTokens: 10 };
+    show(detail("local:/models/a.gguf", null, [message(1, "user", "hi"), answered]));
+    act(() =>
+      useApp.setState({
+        generation: {
+          chatId: 1,
+          text: "",
+          reasoning: "",
+          tools: [],
+          notes: [],
+          step: 0,
+          tokensPerSecond: 12.5,
+          promptTokens: 60,
+          completionTokens: 5,
+          contextUsed: null,
+          nCtx: 4_096,
+        },
+      }),
+    );
+    const header = document.querySelector("main header") as HTMLElement;
+    const model = header.querySelector("[data-header-model]") as HTMLElement;
+    const classes = (e: Element | null) => (e as HTMLElement).className.split(" ");
+    // Below @2xl a column: the name's row, then the usage line's row with the meter, speed and
+    // Thinking at its right. From @2xl a grid: the name's row (`auto`, the rest of the row) with
+    // the meter, speed and Thinking (`min-content`) on the first row, the usage line under both.
+    // No `fr` column and no part across both that widens one.
+    for (const c of ["flex", "flex-col", "@2xl:grid", "@2xl:grid-cols-[auto_min-content]"]) {
+      expect(classes(model)).toContain(c);
+    }
+    const line = model.querySelector("[data-model-line]") as HTMLElement;
+    const below = model.querySelector("[data-model-below]") as HTMLElement;
+    expect([...model.children]).toEqual([line, below]);
+    const usage = below.firstElementChild as HTMLElement;
+    const status = below.querySelector("[data-model-status]") as HTMLElement;
+    expect([...below.children]).toEqual([usage, status]);
+    // (The usage line keeps its row's height while its first reading is on its way.)
+    expect(usage.querySelector("[data-usage]")).toBeTruthy();
+    // The name and the model's state on the first row; under 22.25rem the state goes under the
+    // name.
+    for (const c of ["@2xl:col-start-1", "@2xl:row-start-1", "@max-[22.25rem]:flex-wrap"]) {
+      expect(classes(line)).toContain(c);
+    }
+    // The usage line's row: a flex row below @2xl (the meter, speed and Thinking go under the
+    // usage line only under @2xs), its parts the grid's own from @2xl.
+    for (const c of ["flex", "@max-2xs:flex-wrap", "@2xl:contents"]) expect(classes(below)).toContain(c);
+    // The usage line takes the row's room, and from @2xl spans both columns without widening one.
+    for (const c of ["grow", "min-w-0", "@2xl:col-span-2", "@2xl:row-start-2", "@2xl:w-0", "@2xl:min-w-full"]) {
+      expect(classes(usage)).toContain(c);
+    }
+    // The meter, speed and Thinking: right-aligned beside the usage line, on the name's row from
+    // @2xl.
+    for (const c of ["ml-auto", "shrink-0", "@2xl:col-start-2", "@2xl:row-start-1"]) expect(classes(status)).toContain(c);
+    expect(status.querySelector("[title^='How much it can remember']")).toBeTruthy();
+    expect(status.contains(screen.getByRole("button", { name: "Thinking on" }))).toBe(true);
+    // The reply's speed, left out under 22.25rem (the reply shows it when it ends).
+    const speed = status.querySelector("[data-speed]") as HTMLElement;
+    expect(speed.textContent).toBe("12.5 tokens/s");
+    expect(classes(speed)).toContain("hidden");
+    expect(classes(speed)).toContain("@min-[22.25rem]:inline");
   });
 
   it("shows the meter's numbers by the header's width, every one of them in its tooltip", () => {

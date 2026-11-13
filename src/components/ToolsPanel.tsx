@@ -290,7 +290,21 @@ export function ToolsPanel(props: {
           className="flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap text-fg-muted hover:bg-bg-muted hover:text-fg"
           title="Tools for this chat"
         >
-          <Wrench size={15} aria-hidden /> {props.unsupported ? "Tools (unavailable)" : `Tools (${enabled.length})`}
+          <Wrench size={15} aria-hidden />{" "}
+          {props.unsupported ? (
+            // [0.0.6 header-layout r2] Shorter in the narrowest header (under @md, the smallest
+            // window), so the chat's buttons still fit on one row there; the panel says why.
+            <>
+              <span data-tools-label="full" className="@max-md:hidden">
+                Tools (unavailable)
+              </span>
+              <span data-tools-label="short" className="hidden @max-md:inline">
+                No tools
+              </span>
+            </>
+          ) : (
+            `Tools (${enabled.length})`
+          )}
         </button>
       </Popover.Trigger>
       <Popover.Portal>

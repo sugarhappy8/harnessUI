@@ -362,7 +362,7 @@ function Status() {
         {(why || runtime.modelPath) && (
           <span className="flex max-w-[34rem] min-w-0 items-start gap-1.5 text-[11px] text-fg-muted">
             {why && (
-              <span className="line-clamp-2 min-w-0" role="status" title={why}>
+              <span className="line-clamp-2 min-w-0 wrap-anywhere" role="status" title={why}>
                 {why}
               </span>
             )}

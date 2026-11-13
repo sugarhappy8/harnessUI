@@ -79,10 +79,11 @@ describe("ModelPicker: a gear on each local model", () => {
     // The button's text is the name alone (the menu has it whole too); its tooltip says it whole.
     expect(button.textContent).toBe(name);
     expect(button.title).toBe(name);
-    // A crowded header never squeezes it below about 12 characters (jsdom has no layout: the
-    // e2e scenario header-layout measures it). A longer name ends in an ellipsis on one line,
-    // and the header wraps its buttons onto a second row before it shrinks the name further.
-    expect(button.className.split(" ")).toContain("min-w-[8.75rem]");
+    // A crowded header never squeezes it below 12 characters and the ellipsis (jsdom has no
+    // layout: the e2e scenario header-layout measures it, also with the Panel open). A longer
+    // name ends in an ellipsis on one line, and the header wraps its buttons onto a second row
+    // before it shrinks the name further.
+    expect(button.className.split(" ")).toContain("min-w-[9.75rem]");
     const shown = button.querySelector("[data-model-name]") as HTMLElement;
     expect(shown.textContent).toBe(name);
     for (const c of ["line-clamp-1", "break-all"]) expect(shown.className.split(" ")).toContain(c);

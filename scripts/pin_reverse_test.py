@@ -15,12 +15,15 @@ Standard library only.
 import argparse
 import contextlib
 import copy
+import email.message
 import io
 import json
 import sys
 import tarfile
 import tempfile
 import unittest
+import urllib.request
+import urllib.response
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -393,7 +396,9 @@ class Pin(unittest.TestCase):
 
 class GithubDigest(unittest.TestCase):
     """`github-digest` (WP9e): CI compares GitHub's published digest of the pinned Ghidra
-    asset with the lock; `--record` flips the lock to `github-digest`, online or offline."""
+    asset with the lock and saves the release record it read; `--record` flips the lock to
+    `github-digest`, online, or offline from that saved record (never from the lock's own
+    values)."""
 
     def release(self, lock=None, **asset_changes):
         a = pr.pinned_assets(lock or committed(), "ghidra")[0]
@@ -402,7 +407,8 @@ class GithubDigest(unittest.TestCase):
         asset.update(asset_changes)
         return {"tag_name": a["tag"], "assets": [{"name": "other.zip", "digest": None}, asset]}
 
-    def run_cmd(self, argv_part="ghidra", record=False, confirmed=None, size=None, release=None, lock=None):
+    def run_cmd(self, argv_part="ghidra", record=False, release=None, lock=None, save_release=None,
+                from_release=None, env=None):
         """Runs the command against a copy of the lock; returns (exit code, stdout+stderr,
         the lock afterwards, the headers sent to GitHub)."""
         with tempfile.TemporaryDirectory() as d:
@@ -415,10 +421,11 @@ class GithubDigest(unittest.TestCase):
                 sent.append((url, dict(extra or {})))
                 return json.dumps(release if release is not None else self.release()).encode()
 
-            args = argparse.Namespace(part=argv_part, record=record, confirmed=confirmed, size=size)
+            args = argparse.Namespace(part=argv_part, record=record, save_release=save_release,
+                                      from_release=from_release)
             out = io.StringIO()
             code = 0
-            env = {"GITHUB_TOKEN": "ghs_secret-token-value"}
+            env = {"GITHUB_TOKEN": "ghs_secret-token-value", **(env or {})}
             with mock.patch.object(pr, "ROOT", root), mock.patch.object(pr, "LOCK", path), \
                     mock.patch.object(pr, "http_get", side_effect=fake_get), \
                     mock.patch.dict(pr.os.environ, env, clear=False), \
@@ -452,7 +459,8 @@ class GithubDigest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("GitHub publishes sha256:ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db "
                       "and 569649598 bytes for ghidra_12.1.4_PUBLIC_20260921.zip", out)
-        self.assertIn("--confirmed ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db --size 569649598 --record", out)
+        self.assertIn("run this command again with --record", out)
+        self.assertNotIn("--confirmed", out)
         self.assertEqual(lock, committed(), "nothing is written without --record")
         # One request, to the release by tag, with the token as a bearer header; the token is
         # never printed.
@@ -490,27 +498,144 @@ class GithubDigest(unittest.TestCase):
             if p["name"] != "ghidra":
                 self.assertEqual(p, part(committed(), p["name"]))
 
-    def test_record_offline_from_the_values_ci_printed(self):
-        code, out, lock, sent = self.run_cmd(
-            record=True, confirmed="DDAC49F903DA9D5BAC833E5CC79395098B9C33CFD3279BE5F31BD00387D2D4DB", size=569649598)
-        self.assertEqual(code, 0, out)
-        self.assertEqual(sent, [], "the offline form asks nothing of the network")
-        self.assertTrue(all(b["verified_by"] == ["github-digest"] for b in part(lock, "ghidra")["builds"]))
-        for confirmed, size in (("0" * 64, 569649598), ("ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db", 1),
-                                ("not-hex", 569649598), ("ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db", None)):
-            code, out, lock, _ = self.run_cmd(record=True, confirmed=confirmed, size=size)
-            self.assertEqual(code, 1, (confirmed, size, out))
-            self.assertEqual(lock, committed())
+    def test_record_offline_from_the_release_record_ci_saved(self):
+        run = {"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/harnessUI",
+               "GITHUB_RUN_ID": "123456"}
+        with tempfile.TemporaryDirectory() as d:
+            saved = str(Path(d) / "ghidra-release.json")
+            # CI: online, saves what GitHub answered, and says how to record it from there.
+            code, out, lock, sent = self.run_cmd(save_release=saved, env=run)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(len(sent), 1)
+            self.assertIn("download the record this run saved (https://github.com/o/harnessUI/actions/runs/123456)", out)
+            self.assertIn("--from-release <the saved file> --record", out)
+            record = json.loads(Path(saved).read_text())
+            self.assertEqual(record["run"], "https://github.com/o/harnessUI/actions/runs/123456")
+            self.assertNotIn("ghs_secret-token-value", Path(saved).read_text())
+            # The lead, offline: the saved record goes through GitHub's checks; nothing is asked.
+            code, out, lock, sent = self.run_cmd(record=True, from_release=saved)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(sent, [], "the offline form asks nothing of the network")
+            self.assertIn("saved by https://github.com/o/harnessUI/actions/runs/123456 gives sha256:ddac49f9", out)
+            self.assertIn("Name this run in the commit", out)
+            self.assertTrue(all(b["verified_by"] == ["github-digest"] for b in part(lock, "ghidra")["builds"]))
+            # An offline run without --record prints no ready command.
+            code, out, lock, _ = self.run_cmd(from_release=saved)
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("--record", out)
+
+    def test_a_saved_record_that_does_not_match_records_nothing(self):
+        a = pr.pinned_assets(committed(), "ghidra")[0]
+        bad = [
+            ("not json", None),
+            (json.dumps({"releases": "x"}), None),
+            (json.dumps({"releases": []}), "holds no release record"),
+            (json.dumps({"releases": [pr.saved_release({**self.release(), "tag_name": "Ghidra_12.1.3_build"},
+                                                        a["repo"], "Ghidra_12.1.3_build")]}),
+             "holds no release record"),
+            (json.dumps({"releases": [{**pr.saved_release(self.release(), a["repo"], a["tag"]), "tag_name": "x"}]}),
+             "is GitHub's release 'x'"),
+            (json.dumps({"releases": [pr.saved_release(self.release(digest="sha256:" + "0" * 64), a["repo"], a["tag"])]}),
+             "differs from the lock's"),
+            (json.dumps({"releases": [pr.saved_release(self.release(digest=None), a["repo"], a["tag"])]}),
+             "publishes no SHA-256 digest"),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            for i, (text, words) in enumerate(bad):
+                saved = Path(d) / f"r{i}.json"
+                saved.write_text(text)
+                code, out, lock, sent = self.run_cmd(record=True, from_release=str(saved))
+                self.assertEqual(code, 1, (text, out))
+                if words:
+                    self.assertIn(words, out, text)
+                self.assertEqual(lock, committed(), f"{text}: the lock was written")
+                self.assertEqual(sent, [])
+
+    def test_the_lock_values_alone_are_no_longer_accepted(self):
+        a = pr.pinned_assets(committed(), "ghidra")[0]
+        argv = ["pin_reverse.py", "github-digest", "--part", "ghidra", "--confirmed", a["sha256"],
+                "--size", str(a["size"]), "--record"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit) as e:
+            pr.main()
+        self.assertEqual(e.exception.code, 2)
 
     def test_kuna_keeps_its_first_download_mark(self):
         lock = pr.with_github_digest(committed(), "kuna")
         for b in part(lock, "kuna")["builds"]:
             self.assertEqual(b["verified_by"], ["github-digest", "first-download-only"])
         self.assertEqual(pr.check(lock), [])
-        # The offline form takes one asset; Kuna has three.
-        code, out, after, _ = self.run_cmd(argv_part="kuna", record=True, confirmed="0" * 64, size=1)
-        self.assertEqual(code, 1)
-        self.assertIn("takes one", out)
+
+
+class FakeWeb:
+    """Fake https and http handlers for `http_get` (through `OPENER_HANDLERS`): `routes` maps
+    a URL to (status, Location or None, body); every request is recorded with its headers
+    (plain and unredirected)."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.seen = []
+        web = self
+
+        def answer(req, scheme):
+            web.seen.append((scheme, req.full_url, {k.lower(): v for k, v in req.header_items()}))
+            status, location, body = web.routes.get(req.full_url, (404, None, b""))
+            headers = email.message.Message()
+            if location:
+                headers["Location"] = location
+            resp = urllib.response.addinfourl(io.BytesIO(body), headers, req.full_url, status)
+            resp.msg = {200: "OK", 302: "Found"}.get(status, "Not Found")
+            return resp
+
+        class Https(urllib.request.HTTPSHandler):
+            def https_open(self, req):
+                return answer(req, "https")
+
+        class Http(urllib.request.HTTPHandler):
+            def http_open(self, req):
+                return answer(req, "http")
+
+        self.handlers = [urllib.request.ProxyHandler({}), Https(), Http()]
+
+
+class HttpGetRedirects(unittest.TestCase):
+    """`http_get` follows redirects only to https, and the headers it is given in `extra`
+    (the GitHub token) never go on to a redirect's target."""
+
+    API = "https://api.github.com/repos/o/r/releases/tags/t"
+    EXTRA = {"Authorization": "Bearer ghs_REVIEW_CANARY", "X-GitHub-Api-Version": "2022-11-28"}
+
+    def get(self, routes):
+        web = FakeWeb(routes)
+        out = io.StringIO()
+        with mock.patch.object(pr, "OPENER_HANDLERS", web.handlers), contextlib.redirect_stderr(out):
+            try:
+                body = pr.http_get(self.API, accept="application/json", extra=self.EXTRA)
+            except SystemExit as e:
+                body = e
+        return body, web.seen, out.getvalue()
+
+    def test_the_token_goes_to_the_api_only(self):
+        body, seen, _ = self.get({self.API: (200, None, b"{}")})
+        self.assertEqual(body, b"{}")
+        self.assertEqual(seen[0][2]["authorization"], "Bearer ghs_REVIEW_CANARY")
+
+    def test_a_redirect_to_plain_http_is_refused(self):
+        body, seen, err = self.get({self.API: (302, "http://127.0.0.1:9/steal", b"")})
+        self.assertIsInstance(body, SystemExit)
+        self.assertEqual([s for s, _, _ in seen], ["https"], "nothing was sent over plain http")
+        self.assertIn("non-https", err)
+        self.assertNotIn("ghs_REVIEW_CANARY", err)
+
+    def test_a_redirect_to_another_host_carries_no_token(self):
+        other = "https://objects.example/asset"
+        body, seen, _ = self.get({self.API: (302, other, b""), other: (200, None, b"ok")})
+        self.assertEqual(body, b"ok")
+        self.assertEqual([u for _, u, _ in seen], [self.API, other])
+        followed = seen[1][2]
+        self.assertNotIn("authorization", followed)
+        self.assertNotIn("x-github-api-version", followed)
+        self.assertEqual(followed["user-agent"], pr.USER_AGENT)
 
 
 class Helpers(unittest.TestCase):

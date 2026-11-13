@@ -437,6 +437,35 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect((document.querySelector("[data-loading-line]") as HTMLElement).title).toBe("Loading model…");
   });
 
+  it("keeps both actions of a failed load in sight, never on a hidden line (header-layout r2)", async () => {
+    await show(
+      status({
+        state: "failed",
+        error: { code: "load_failed", message: "Could not read /models/a-very-long-name.gguf", nextStep: "", details: "" },
+      }),
+    );
+    const box = document.querySelector("[data-header-state='failed']") as HTMLElement;
+    // The line asks the header for "Didn't load · Model settings…" (jsdom has no layout: the
+    // e2e scenario header-layout measures it at 720 pixels).
+    expect(box.className.split(" ")).toContain("min-w-[10.5rem]");
+    const settings = screen.getByRole("button", { name: "Model settings…" });
+    const again = screen.getByRole("button", { name: "Try again" });
+    const first = box.querySelector("[data-failed-line]") as HTMLElement;
+    expect(first.textContent).toBe("Didn't load·Model settings…");
+    expect(first.contains(settings)).toBe(true);
+    // No row that clips what does not fit: nothing focusable can sit where it cannot be seen.
+    for (const c of ["overflow-hidden", "h-4", "flex-wrap"]) expect(first.className.split(" ")).not.toContain(c);
+    // Try again follows the reason on the second line, like a note's action.
+    const reason = screen.getByRole("status");
+    expect(reason.textContent).toBe("Could not read /models/a-very-long-name.gguf");
+    expect(reason.parentElement).toBe(again.parentElement);
+    expect(again.className.split(" ")).toContain("shrink-0");
+    for (const b of [settings, again]) {
+      expect(b.tabIndex).toBe(0);
+      expect(b.closest(".overflow-hidden")).toBeNull();
+    }
+  });
+
   it("offers Model settings… after a failed load, and Load after Unload", async () => {
     await show(
       status({

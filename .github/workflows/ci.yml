@@ -68,16 +68,6 @@ jobs:
       # Reverse engineering: the pinned downloads (reverse.lock.json) and their fixtures,
       # offline. The real rea runs in reverse.yml.
       - run: python3 -I scripts/pin_reverse.py --check && python3 -I scripts/pin_reverse_test.py
-      # Ghidra 12.1.4 was pinned "first-download-only" because GitHub's API could not be read
-      # where it was pinned, and a release build does not offer Ghidra until the digest GitHub
-      # publishes for the asset is checked. This reads it with the workflow's read-only token
-      # and fails if it or the size differs from the lock; the log prints the command that
-      # records the check in the lock (scripts/pin_reverse.py github-digest --record).
-      - name: Ghidra's release digest on GitHub matches reverse.lock.json
-        timeout-minutes: 5
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 -I scripts/pin_reverse.py github-digest --part ghidra
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Cache llama.cpp and the test model
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -99,6 +89,33 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories bans licenses sources
+
+  # Ghidra 12.1.4 was pinned "first-download-only" because GitHub's API could not be read
+  # where it was pinned, and a release build does not offer Ghidra until the digest GitHub
+  # publishes for the asset is checked. This reads it with the workflow's read-only token and
+  # fails if it or the size differs from the lock. GitHub's release record it read is kept as
+  # the artifact "ghidra-release-record"; the log says how to record the check in the lock
+  # from it (scripts/pin_reverse.py github-digest --from-release <file> --record). A job of
+  # its own, so an answer from GitHub's API never hides the other checks.
+  ghidra-digest:
+    name: Ghidra's release digest on GitHub
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Ghidra's release digest on GitHub matches reverse.lock.json
+        timeout-minutes: 5
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/pin_reverse.py github-digest --part ghidra --save-release "$RUNNER_TEMP/ghidra-release-record.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: ghidra-release-record
+          path: ${{ runner.temp }}/ghidra-release-record.json
+          if-no-files-found: ignore
 
   build:
     name: Build installer (${{ matrix.name }})

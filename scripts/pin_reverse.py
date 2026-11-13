@@ -16,7 +16,7 @@ files are read in memory.
     pin_reverse.py --check [--release]
     pin_reverse.py --download-to DIR     (downloads and verifies this computer's parts)
     pin_reverse.py github-digest [--part ghidra|kuna] [--record]
-                       [--confirmed SHA256 --size BYTES]
+                       [--save-release FILE | --from-release FILE]
 
 Publisher checks (each one recorded in `verified_by`; the pin stops when one fails or its
 verifier is missing):
@@ -30,8 +30,10 @@ verifier is missing):
   as the asset). Where GitHub's API cannot be reached, `--first-download-only <part>`
   records `first-download-only` instead (Kuna always is: its releases carry no signature).
   `github-digest` checks such a pin later against GitHub's digest and size (CI runs it with
-  the workflow's read-only `GITHUB_TOKEN`); `--record` writes `github-digest` into the lock,
-  online, or offline with `--confirmed <sha256> --size <bytes>` copied from that CI run.
+  the workflow's read-only `GITHUB_TOKEN` and saves GitHub's release record it read with
+  `--save-release`); `--record` writes `github-digest` into the lock, online, or offline
+  with `--from-release <file>`, the record a CI run saved, which goes through the same
+  checks as GitHub's answer.
 
 Every part's builds must carry their own publisher's checks (REQUIRED_CHECKS). Ghidra alone
 may carry `first-download-only` in place of `github-digest` while 0.0.6 is developed:
@@ -162,22 +164,39 @@ def version_key(version: str) -> tuple[int, ...]:
 # Network
 
 
+class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to an https URL. urllib copies a request's plain headers to
+    the redirected request but not its unredirected ones, which is how `http_get` adds the
+    `extra` headers (the GitHub token)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not str(newurl).startswith("https://"):
+            fail(f"refusing a redirect from {req.full_url} to a non-https URL: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+OPENER_HANDLERS: list = []  # tests add fake handlers here
+
+
 def http_get(
     url: str, dest: Path | None = None, accept: str | None = None, extra: dict | None = None
 ) -> bytes:
-    """Fetches `url` (https only). With `dest`, streams into that file and returns b''.
-    `extra` adds request headers (never printed)."""
+    """Fetches `url` (https only, also after redirects). With `dest`, streams into that file
+    and returns b''. `extra` adds request headers that are never printed and never sent on
+    to a redirect's target."""
     if not url.startswith("https://"):
         fail(f"refusing a non-https URL: {url}")
     headers = {"User-Agent": USER_AGENT}
     if accept:
         headers["Accept"] = accept
-    headers.update(extra or {})
+    opener = urllib.request.build_opener(HttpsOnlyRedirect, *OPENER_HANDLERS)
     last: Exception | None = None
     for _ in range(3):
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            for k, v in (extra or {}).items():
+                req.add_unredirected_header(k, v)
+            with opener.open(req, timeout=120) as resp:
                 if dest is None:
                     return resp.read()
                 tmp = dest.with_name(dest.name + ".tmp")
@@ -297,9 +316,11 @@ def publisher_digest(part: str, repo: str, tag: str, asset: str, path: Path, arg
 # Where GitHub's API cannot be read at pin time, Ghidra is pinned `first-download-only`
 # and a release build does not offer it. CI reads the digest GitHub publishes for the
 # release asset with the workflow's read-only token (`github-digest --part ghidra`) and
-# fails if it differs from the lock's SHA-256 or size; `--record` then writes
-# `github-digest` into the lock, online, or offline from the values that run printed
-# (`--confirmed <sha256> --size <bytes>`).
+# fails if it differs from the lock's SHA-256 or size; `--save-release` keeps the release
+# record it read (CI uploads it as an artifact of the run). `--record` then writes
+# `github-digest` into the lock, online, or offline from that saved record
+# (`--from-release <file>`), checked exactly as GitHub's answer is. Nothing offline takes
+# the lock's own values as evidence.
 
 DIGEST_REPOS = {"ghidra": "NationalSecurityAgency/ghidra", "kuna": "Noelo-Lab/kuna"}
 RELEASE_ASSET_URL = re.compile(
@@ -384,6 +405,55 @@ def with_github_digest(lock: dict, name: str) -> dict:
     return out
 
 
+RELEASE_RECORD_FIELDS = ("name", "digest", "size", "state", "browser_download_url")
+
+
+def saved_release(release: dict, repo: str, tag: str) -> dict:
+    """The parts of GitHub's release record the digest check reads, for `--save-release`."""
+    return {
+        "repo": repo,
+        "tag": tag,
+        "tag_name": release.get("tag_name"),
+        "assets": [
+            {k: a.get(k) for k in RELEASE_RECORD_FIELDS}
+            for a in release.get("assets", [])
+            if isinstance(a, dict)
+        ],
+    }
+
+
+def ci_run() -> str | None:
+    """This GitHub Actions run's address, when the command runs in one."""
+    server, repo, run = (os.environ.get(k) for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
+    if server and repo and run and re.fullmatch(r"[0-9]+", run):
+        return f"{server}/{repo}/actions/runs/{run}"
+    return None
+
+
+def read_saved_releases(path: str, assets: list[dict]) -> tuple[dict[tuple[str, str], dict], str | None]:
+    """The release records a CI run saved with `--save-release`, by (repository, tag), and
+    the run that saved them."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        fail(f"{path}: not a release record saved by github-digest --save-release ({e})")
+    if not isinstance(data, dict) or not isinstance(data.get("releases"), list):
+        fail(f"{path}: not a release record saved by github-digest --save-release")
+    out = {}
+    for r in data["releases"]:
+        if not isinstance(r, dict) or not isinstance(r.get("assets"), list):
+            fail(f"{path}: a release record without its assets")
+        key = (r.get("repo"), r.get("tag"))
+        if r.get("tag_name") != r.get("tag"):
+            fail(f"{path}: the record of {key[0]} {key[1]} is GitHub's release {r.get('tag_name')!r}")
+        out[key] = r
+    for a in assets:
+        if (a["repo"], a["tag"]) not in out:
+            fail(f"{path} holds no release record of {a['repo']} {a['tag']}")
+    run = data.get("run")
+    return out, run if isinstance(run, str) else None
+
+
 def cmd_github_digest(args) -> None:
     lock = json.loads(LOCK.read_text())
     problems = check(lock)
@@ -391,38 +461,39 @@ def cmd_github_digest(args) -> None:
         fail("reverse.lock.json does not pass --check:\n  " + "\n  ".join(problems))
     assets = pinned_assets(lock, args.part)
     lines = []
-    if args.confirmed is not None:
-        # Offline: the values a CI run of this command printed, typed in by the lead.
-        if len(assets) != 1:
-            fail(f"{args.part} pins {len(assets)} assets; --confirmed takes one (run online instead)")
-        if not re.fullmatch(r"[0-9a-f]{64}", args.confirmed.lower()) or args.size is None:
-            fail("--confirmed needs the 64 hex digits of the SHA-256 and --size the bytes, as CI printed them")
-        a = assets[0]
-        found = []
-        if args.confirmed.lower() != a["sha256"]:
-            found.append(f"{a['asset']}: the confirmed digest {args.confirmed.lower()} differs from the lock's {a['sha256']}")
-        if args.size != a["size"]:
-            found.append(f"{a['asset']}: the confirmed size {args.size} differs from the lock's {a['size']}")
-        if found:
-            fail("\n".join(found))
-        lines.append(f"{args.part}: the confirmed digest sha256:{a['sha256']} and size {a['size']} match {a['asset']} in reverse.lock.json")
-    else:
+    online = args.from_release is None
+    if online:
         token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or None
         releases: dict[tuple[str, str], dict] = {}
-        found = []
         for a in assets:
             key = (a["repo"], a["tag"])
             if key not in releases:
                 releases[key] = github_release(a["repo"], a["tag"], token)
-            got, wrong = digest_problems(a, releases[key])
-            found += wrong
-            if not wrong:
-                lines.append(
-                    f"{args.part}: GitHub publishes sha256:{got} and {a['size']} bytes for {a['asset']} "
-                    f"({a['repo']} {a['tag']}, for {', '.join(a['platforms'])}): they match reverse.lock.json"
-                )
-        if found:
-            fail("\n".join(found))
+        run = ci_run()
+        if args.save_release:
+            Path(args.save_release).write_text(json.dumps({
+                "what": "GitHub's release records read by scripts/pin_reverse.py github-digest",
+                "part": args.part,
+                "run": run,
+                "releases": [saved_release(r, repo, tag) for (repo, tag), r in releases.items()],
+            }, indent=2) + "\n", encoding="utf-8")
+        source = "GitHub publishes"
+    else:
+        # Offline: the release record a CI run read from GitHub and saved; it goes through
+        # exactly the checks GitHub's own answer goes through.
+        releases, run = read_saved_releases(args.from_release, assets)
+        source = f"GitHub's release record saved by {run or args.from_release} gives"
+    found = []
+    for a in assets:
+        got, wrong = digest_problems(a, releases[(a["repo"], a["tag"])])
+        found += wrong
+        if not wrong:
+            lines.append(
+                f"{args.part}: {source} sha256:{got} and {a['size']} bytes for {a['asset']} "
+                f"({a['repo']} {a['tag']}, for {', '.join(a['platforms'])}): they match reverse.lock.json"
+            )
+    if found:
+        fail("\n".join(found))
     for line in lines:
         print(line)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -431,15 +502,19 @@ def cmd_github_digest(args) -> None:
             f.write("".join(f"- {line}\n" for line in lines))
     current = [b.get("verified_by") for p in lock["parts"] if p["name"] == args.part for b in p["builds"]]
     if not args.record:
-        if any("github-digest" not in (vb or []) for vb in current):
-            command = ["python3", "-I", "scripts/pin_reverse.py", "github-digest", "--part", args.part]
-            if len(assets) == 1:
-                command += ["--confirmed", assets[0]["sha256"], "--size", str(assets[0]["size"])]
-            print(
-                f"reverse.lock.json records {current[0]} for {args.part}. To record GitHub's digest "
-                f"(offline, from these values): {' '.join(command + ['--record'])}"
+        if online and any("github-digest" not in (vb or []) for vb in current):
+            how = (
+                f"download the record this run saved{f' ({run})' if run else ''} and run: "
+                f"python3 -I scripts/pin_reverse.py github-digest --part {args.part} "
+                f"--from-release <the saved file> --record"
+                if args.save_release else
+                "run this command again with --record (or with --save-release <file>, then "
+                "--from-release <file> --record where GitHub's API cannot be reached)"
             )
+            print(f"reverse.lock.json records {current[0]} for {args.part}. To record GitHub's digest, {how}")
         return
+    if run:
+        print(f"Name this run in the commit that records it: {run}")
     new = with_github_digest(lock, args.part)
     problems = check(new)
     if problems:
@@ -1339,8 +1414,12 @@ def main() -> None:
     )
     gd.add_argument("--part", choices=sorted(DIGEST_REPOS), default="ghidra")
     gd.add_argument("--record", action="store_true", help="write github-digest into the lock once it matches")
-    gd.add_argument("--confirmed", metavar="SHA256", help="offline: the digest a CI run of this command printed")
-    gd.add_argument("--size", type=int, help="with --confirmed: the size in bytes that run printed")
+    where = gd.add_mutually_exclusive_group()
+    where.add_argument("--save-release", metavar="FILE", help="online: also save GitHub's release record it read")
+    where.add_argument(
+        "--from-release", metavar="FILE",
+        help="offline: check the release record a CI run saved with --save-release, instead of asking GitHub",
+    )
     pin = sub.add_parser("pin", help="pin the parts and write the lock and the fixture")
     pin.add_argument("--scratch", required=True, help="download folder (outside the repository)")
     pin.add_argument("--rea", default="6.9.0")

@@ -3,7 +3,9 @@
 # pinned archives once (`scripts/pin_reverse.py --download-to`, which checks every archive
 # against reverse.lock.json; cached by the lock's hash), installs them through the app's own
 # unpacker and runs crates/reverse/tests/real_rea.rs against them, while the job records
-# every connection attempt of the test's processes and fails on anything but loopback.
+# every connection attempt of the test's processes and fails on anything but loopback (on
+# Linux also on any name lookup, any program started from outside the pack but `ps`, and any
+# write outside the test's folder). Each recorder is first shown a connection it must catch.
 #
 # Manual and nightly: the downloads are about 900 MB on Linux and Windows.
 
@@ -29,9 +31,14 @@ jobs:
   linux:
     name: Real rea (Linux)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 100
+    env:
+      # A skipped decompiler fails the job instead of passing quietly.
+      REAL_REA_REQUIRE: kuna,ghidra
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: The lock and its fixtures (offline)
@@ -50,6 +57,8 @@ jobs:
       - name: strace
         timeout-minutes: 10
         run: command -v strace || { sudo timeout 300 apt-get update && sudo timeout 300 apt-get install -y --no-install-recommends strace; }
+      # The tests put the pack in a known folder (no folder name starting with a dot), so the
+      # checker below knows where writes are allowed.
       - name: Build the contract tests
         run: |
           cargo test -p reverse --test real_rea --no-run
@@ -57,40 +66,204 @@ jobs:
             | jq -r 'select(.reason == "compiler-artifact" and .target.name == "real_rea" and .executable != null) | .executable')
           test -x "$bin"
           echo "REAL_REA_BIN=$bin" >> "$GITHUB_ENV"
-      # Every connect, sendto and sendmsg of the test and everything it starts (rea, Kuna,
-      # Java, Ghidra's decompiler): only Unix sockets, netlink and loopback are allowed. A
-      # name lookup (port 53), even through the loopback resolver, is reported.
-      - name: Kuna and Ghidra under strace (no connection but loopback or a Unix socket)
+          echo "REAL_REA_DIR=$RUNNER_TEMP/real-rea" >> "$GITHUB_ENV"
+      # The checker reads an strace log of the test and everything it starts (rea, Kuna, Java,
+      # Ghidra's decompiler). It fails on any connection, send or bind that is not loopback,
+      # a Unix socket or netlink; on any name lookup (port 53, even through the loopback
+      # resolver); on any program started from outside the pack except `ps`, which rea runs to
+      # list its own processes; and on any file or folder created, written, renamed or linked
+      # outside the test's folder, except devices, /proc and Java's performance counters
+      # (/tmp/hsperfdata_<user>/<pid>). It prints every program started.
+      - name: The strace checker, and a control it must catch
         run: |
-          REVERSE_PACK_CACHE="$PWD/.cache/reverse" strace -f -qq --seccomp-bpf -e trace=connect,sendto,sendmsg -e signal=none \
-            -o "$RUNNER_TEMP/strace.log" "$REAL_REA_BIN" --nocapture --test-threads=1
-          python3 -I - "$RUNNER_TEMP/strace.log" <<'EOF'
-          import re, sys
-          bad, lookups, seen = [], [], 0
-          for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-              if not re.search(r"\b(connect|sendto|sendmsg)\(", line):
+          cat > "$RUNNER_TEMP/check_strace.py" <<'EOF'
+          import os, re, sys
+          from collections import Counter
+
+          log, base, start_cwd, test_bin = sys.argv[1:5]
+          base = os.path.realpath(base)
+          test_bin = os.path.realpath(test_bin)
+          # rea lists its own processes with `ps`, found through the fixed PATH.
+          EXEC_OK = {"/usr/bin/ps", "/bin/ps"}
+          # Devices and the kernel's files, and Java's performance counters, which the JVM writes to
+          # /tmp/hsperfdata_<user> whatever its own temporary folder is.
+          WRITE_OK = re.compile(r"^(/dev/|/proc/|/tmp/hsperfdata_[^/]+(/[0-9]+)?$)")
+          QUOTED = r'"((?:[^"\\]|\\.)*)"'
+          DIRFD = r"(?:AT_FDCWD|-?\d+)(?:<([^>]*)>)?"
+          LINE = re.compile(r"^(\d+)\s+(.*)$")
+
+
+          def records():
+              pending = {}
+              with open(log, encoding="utf-8", errors="replace") as f:
+                  for raw in f:
+                      m = LINE.match(raw.rstrip("\n"))
+                      if not m:
+                          continue
+                      pid, rest = m.groups()
+                      if rest.endswith("<unfinished ...>"):
+                          pending[pid] = rest[: -len("<unfinished ...>")]
+                          continue
+                      r = re.match(r"^<\.\.\. \w+ resumed>(.*)$", rest)
+                      if r:
+                          rest = pending.pop(pid, "") + r.group(1)
+                      yield pid, rest
+
+
+          def unquote(s):
+              return s.encode("latin-1", "replace").decode("unicode_escape", "replace")
+
+
+          def result(call):
+              m = re.search(r"\)\s+=\s+(-?\d+)(?:<([^>]*)>)?", call)
+              return (int(m.group(1)), m.group(2)) if m else (None, None)
+
+
+          # Pass 1: which process started which (clone, fork, vfork results).
+          parent = {}
+          for pid, call in records():
+              if re.match(r"^(clone3?|v?fork)\(", call):
+                  code, _ = result(call)
+                  if code and code > 0:
+                      parent.setdefault(str(code), pid)
+
+          cwd = {}
+          first = None
+
+
+          def cwd_of(pid):
+              if pid not in cwd:
+                  p = parent.get(pid)
+                  cwd[pid] = cwd_of(p) if p else (start_cwd if pid == first or first is None else None)
+              return cwd[pid]
+
+
+          def resolve(path, dirfd_path, pid):
+              path = unquote(path)
+              if path.startswith("/"):
+                  return os.path.normpath(path)
+              where = dirfd_path if dirfd_path is not None else cwd_of(pid)
+              return os.path.normpath(os.path.join(where, path)) if where else None
+
+
+          def inside(path):
+              return path == base or path.startswith(base + os.sep)
+
+
+          bad, notes, lookups, programs, seen_net = [], [], [], Counter(), 0
+          for pid, call in records():
+              if first is None:
+                  first = pid
+                  cwd[pid] = start_cwd
+              name = re.match(r"^(\w+)\(", call)
+              if not name:
                   continue
-              seen += 1
-              family = re.search(r"sa_family=(AF_[A-Z0-9]+)", line)
-              if family is None or family.group(1) in ("AF_UNIX", "AF_LOCAL", "AF_NETLINK", "AF_UNSPEC"):
-                  continue  # a connected socket's send names no address; its connect was checked
-              loopback = re.search(r'inet_addr\("127\.|"::1"|"::ffff:127\.', line) is not None
-              if "htons(53)" in line:
-                  lookups.append(line.strip())
-              if family.group(1) not in ("AF_INET", "AF_INET6") or not loopback:
-                  bad.append(line.strip())
-          print(f"{seen} connect/sendto/sendmsg calls recorded")
-          for line in lookups:
-              print(f"::warning::a name lookup through the loopback resolver: {line[:300]}")
+              name = name.group(1)
+              code, fd_path = result(call)
+              ok = code is not None and code >= 0
+              if name in ("connect", "sendto", "sendmsg", "sendmmsg", "bind"):
+                  seen_net += 1
+                  family = re.search(r"sa_family=(AF_[A-Z0-9]+)", call)
+                  if family is None or family.group(1) in ("AF_UNIX", "AF_LOCAL", "AF_NETLINK", "AF_UNSPEC"):
+                      continue  # a connected socket's send names no address; its connect was checked
+                  loopback = re.search(r'inet_addr\("127\.|"::1"|"::ffff:127\.', call) is not None
+                  if "htons(53)" in call:
+                      lookups.append(call.strip())
+                      bad.append(f"a name lookup: {call.strip()}")
+                  elif family.group(1) not in ("AF_INET", "AF_INET6") or not loopback:
+                      bad.append(f"{'listens on' if name == 'bind' else 'reaches'} a non-loopback address: {call.strip()}")
+              elif name in ("execve", "execveat"):
+                  m = re.search(QUOTED, call)
+                  path = resolve(m.group(1), None, pid) if m else None
+                  if not ok or path is None:
+                      continue
+                  if inside(path):
+                      programs["<pack>" + path[len(base):]] += 1
+                  else:
+                      programs[path] += 1
+                      if path != test_bin and path not in EXEC_OK:
+                          bad.append(f"started a program outside the pack: {call.strip()[:300]}")
+              elif name in ("chdir", "fchdir"):
+                  if ok:
+                      if name == "chdir":
+                          m = re.search(QUOTED, call)
+                          new = resolve(m.group(1), None, pid) if m else None
+                      else:
+                          m = re.match(r"^fchdir\(" + DIRFD, call)
+                          new = m.group(1) if m else None
+                      cwd_of(pid)
+                      cwd[pid] = new
+              else:
+                  target = None
+                  if name in ("open", "creat"):
+                      flags = call if name == "open" else "O_CREAT"
+                      if re.search(r"O_WRONLY|O_RDWR|O_CREAT|O_TRUNC", flags):
+                          m = re.match(r"^\w+\(" + QUOTED, call)
+                          target = fd_path or (resolve(m.group(1), None, pid) if m else None)
+                      else:
+                          continue
+                  elif name == "openat":
+                      m = re.match(r"^openat\(" + DIRFD + r", " + QUOTED + r", ([A-Z_|0-9]+)", call)
+                      if not m or not re.search(r"O_WRONLY|O_RDWR|O_CREAT|O_TRUNC", m.group(3)):
+                          continue
+                      target = fd_path or resolve(m.group(2), m.group(1), pid)
+                  elif name in ("mkdir",):
+                      m = re.match(r"^mkdir\(" + QUOTED, call)
+                      target = resolve(m.group(1), None, pid) if m else None
+                  elif name == "mkdirat":
+                      m = re.match(r"^mkdirat\(" + DIRFD + r", " + QUOTED, call)
+                      target = resolve(m.group(2), m.group(1), pid) if m else None
+                  elif name in ("rename", "link", "symlink"):
+                      m = re.match(r"^\w+\(" + QUOTED + r", " + QUOTED, call)
+                      target = resolve(m.group(2), None, pid) if m else None
+                  elif name in ("renameat", "renameat2", "linkat"):
+                      m = re.match(r"^\w+\(" + DIRFD + r", " + QUOTED + r", " + DIRFD + r", " + QUOTED, call)
+                      target = resolve(m.group(4), m.group(3), pid) if m else None
+                  elif name == "symlinkat":
+                      m = re.match(r"^symlinkat\(" + QUOTED + r", " + DIRFD + r", " + QUOTED, call)
+                      target = resolve(m.group(3), m.group(2), pid) if m else None
+                  else:
+                      continue
+                  if not ok:
+                      continue
+                  if target is None:
+                      notes.append(f"a write whose folder is not known: {call.strip()[:300]}")
+                  elif not inside(target) and not WRITE_OK.match(target):
+                      bad.append(f"wrote outside the test's folder: {target} ({call.strip()[:200]})")
+
+          print(f"{seen_net} connect/sendto/sendmsg/sendmmsg/bind calls recorded")
+          print("Programs started (successful execve), with counts:")
+          for p, n in sorted(programs.items()):
+              print(f"  {n:4d}  {p}")
+          for n in notes[:50]:
+              print(f"::warning::{n}")
           if bad:
-              print("Connection attempts that are not loopback or a Unix socket:")
-              print("\n".join(bad[:50]))
+              print("Not allowed (network, programs or writes outside the test's folder):")
+              print("\n".join(bad[:80]))
               sys.exit(1)
+          print("Only loopback or Unix sockets, only the pack's programs (and ps), and writes only inside the test's folder.")
           EOF
-      # The same tests with no network at all: everything works offline once downloaded.
+          echo "127.0.1.1 $(hostname)" | sudo tee -a /etc/hosts
+          strace -f -qq -y --seccomp-bpf -e trace=connect,sendto,sendmsg,sendmmsg,bind -e signal=none \
+            -o "$RUNNER_TEMP/control.log" python3 -I -c 'import socket; s = socket.socket(); s.settimeout(2); s.connect_ex(("192.0.2.1", 9))'
+          if python3 -I "$RUNNER_TEMP/check_strace.py" "$RUNNER_TEMP/control.log" "$RUNNER_TEMP/none" "$PWD" "$(command -v python3)"; then
+            echo "The checker did not catch a connection to 192.0.2.1"; exit 1
+          fi
+      - name: Kuna and Ghidra under strace (loopback and Unix sockets only, the pack's programs only, writes only in the test's folder)
+        run: |
+          REVERSE_PACK_CACHE="$PWD/.cache/reverse" strace -f -qq -y --seccomp-bpf \
+            -e trace=connect,sendto,sendmsg,sendmmsg,bind,execve,execveat,open,openat,creat,mkdir,mkdirat,rename,renameat,renameat2,link,linkat,symlink,symlinkat,chdir,fchdir,clone,clone3,fork,vfork \
+            -e signal=none -o "$RUNNER_TEMP/strace.log" \
+            "$REAL_REA_BIN" --nocapture --test-threads=1 --skip rea_with_ghidra_under_a_dot_folder
+          python3 -I "$RUNNER_TEMP/check_strace.py" "$RUNNER_TEMP/strace.log" "$REAL_REA_DIR" "$PWD" "$REAL_REA_BIN"
+      # The same tests with no network at all: everything works offline once downloaded. Here
+      # also the pack under a folder whose name starts with a dot (the app's folder on Linux,
+      # ~/.local/share), where rea moves Ghidra's session to /tmp (the test prints it and
+      # checks it is gone after the stop), and a larger program for Ghidra's memory figure.
       - name: Kuna and Ghidra with no network (a network namespace of their own)
         run: |
           sudo unshare --net -- sudo -E -u "$(id -un)" env REVERSE_PACK_CACHE="$PWD/.cache/reverse" \
+            REAL_REA_DIR="$REAL_REA_DIR" REAL_REA_REQUIRE="$REAL_REA_REQUIRE" REAL_REA_LARGE=decompile \
             "$REAL_REA_BIN" --nocapture --test-threads=1
       # The `reverse` server's whole call path (WP9g) with the real rea and Kuna.
       - name: The reverse server with the real rea and Kuna
@@ -110,8 +283,12 @@ jobs:
     env:
       # A fixed folder, so the firewall rules can name the pack's programs before they exist.
       REAL_REA_DIR: C:\real-rea
+      # A skipped decompiler fails the job instead of passing quietly.
+      REAL_REA_REQUIRE: ghidra
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Cache the pinned downloads
@@ -134,8 +311,10 @@ jobs:
           "REAL_REA_BIN=$bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       # The pack's programs may not send anything: outbound block rules by path, with blocked
       # packets logged, and the Windows Filtering Platform's audit of blocked connections
-      # (event 5157, which names the program).
-      - name: Block and log the pack's programs in the firewall
+      # (event 5157, which names the program). A control first: a copy of curl.exe under a
+      # rule of its own must be blocked, and its event must be found, or nothing would be
+      # seen either for the pack.
+      - name: Block and log the pack's programs in the firewall, and a control
         shell: pwsh
         run: |
           $pack = Join-Path $env:REAL_REA_DIR 'ghidra\reverse'
@@ -152,8 +331,25 @@ jobs:
           }
           Set-NetFirewallProfile -All -Enabled True -LogBlocked True -LogMaxSizeKilobytes 32767
           auditpol /set /subcategory:"{0CCE9226-69AE-11D9-BED3-505054503030}" /failure:enable
-          (Get-Date).ToString('o') | Out-File -FilePath "$env:RUNNER_TEMP\real-rea-start.txt"
-      - name: Ghidra with every listening socket watched
+          if ($LASTEXITCODE -ne 0) { throw "auditpol failed" }
+          $start = Get-Date
+          $start.ToString('o') | Out-File -FilePath "$env:RUNNER_TEMP\real-rea-start.txt"
+          $control = Join-Path $env:REAL_REA_DIR 'control\curl.exe'
+          New-Item -ItemType Directory -Force -Path (Split-Path $control) | Out-Null
+          Copy-Item "$env:SystemRoot\System32\curl.exe" $control
+          New-NetFirewallRule -DisplayName 'real rea: control' -Direction Outbound -Program $control -Action Block | Out-Null
+          & $control -s -m 5 http://192.0.2.1/ | Out-Null
+          if ($LASTEXITCODE -eq 0) { throw "The control connection was not blocked" }
+          $global:LASTEXITCODE = 0
+          $seen = $null
+          for ($i = 0; $i -lt 30 -and -not $seen; $i++) {
+            Start-Sleep -Seconds 1
+            $seen = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5157; StartTime = $start } -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'real-rea\\control\\curl\.exe' } | Select-Object -First 1
+          }
+          if (-not $seen) { throw "The control's blocked connection left no event 5157: the audit would see nothing of the pack either" }
+          Write-Host "The control was blocked and audited."
+      - name: Ghidra with every listening socket watched (TCP and UDP)
         shell: pwsh
         run: |
           $flag = Join-Path $env:RUNNER_TEMP 'real-rea-done'
@@ -161,9 +357,11 @@ jobs:
             param($flag)
             $seen = @{}
             while (-not (Test-Path $flag)) {
-              Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
-                $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
-                if ($p -and $p.Path -like '*\real-rea\*') { $seen["$($p.Path) $($_.LocalAddress):$($_.LocalPort)"] = $_.LocalAddress }
+              $sockets = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object { @{ Kind = 'TCP'; Address = $_.LocalAddress; Port = $_.LocalPort; Owner = $_.OwningProcess } }) +
+                @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue | ForEach-Object { @{ Kind = 'UDP'; Address = $_.LocalAddress; Port = $_.LocalPort; Owner = $_.OwningProcess } })
+              foreach ($s in $sockets) {
+                $p = Get-Process -Id $s.Owner -ErrorAction SilentlyContinue
+                if ($p -and $p.Path -like '*\real-rea\ghidra\*') { $seen["$($s.Kind) $($p.Path) $($s.Address):$($s.Port)"] = $s.Address }
               }
               Start-Sleep -Milliseconds 500
             }
@@ -175,7 +373,7 @@ jobs:
           New-Item -ItemType File -Path $flag | Out-Null
           $seen = Receive-Job -Job $watch -Wait
           if ($null -eq $seen) { $seen = @{} }
-          Write-Host "Listening sockets of the pack's programs while the tests ran:"
+          Write-Host "Sockets the pack's programs listened on or bound while the tests ran:"
           $seen.Keys | ForEach-Object { Write-Host "  $_" }
           $wide = $seen.GetEnumerator() | Where-Object { $_.Value -notin @('127.0.0.1', '::1') }
           if ($wide) { throw "A program from the pack listened on another address than loopback: $($wide.Name -join ', ')" }
@@ -186,9 +384,9 @@ jobs:
         run: |
           $start = [datetime]::Parse((Get-Content "$env:RUNNER_TEMP\real-rea-start.txt" -ErrorAction SilentlyContinue))
           $events = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5157; StartTime = $start } -ErrorAction SilentlyContinue |
-            Where-Object { $_.Message -match 'real-rea' }
+            Where-Object { $_.Message -match 'real-rea' -and $_.Message -notmatch 'real-rea\\control\\' }
           $log = "$env:SystemRoot\System32\LogFiles\Firewall\pfirewall.log"
-          $drops = if (Test-Path $log) { Get-Content $log | Where-Object { $_ -match ' DROP ' -and $_ -match ' SEND' } } else { @() }
+          $drops = if (Test-Path $log) { Get-Content $log | Where-Object { $_ -match ' DROP ' -and $_ -match ' SEND' -and $_ -notmatch ' 192\.0\.2\.1 ' } } else { @() }
           $left = Get-Process | Where-Object { $_.Path -like '*\real-rea\*' }
           $failed = $false
           if ($events) { Write-Host "Blocked connections of the pack's programs:"; $events | ForEach-Object { Write-Host $_.Message }; $failed = $true }
@@ -201,8 +399,13 @@ jobs:
     name: Real rea (macOS, Apple silicon)
     runs-on: macos-26
     timeout-minutes: 90
+    env:
+      # A skipped decompiler fails the job instead of passing quietly.
+      REAL_REA_REQUIRE: kuna
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Cache the pinned downloads
@@ -236,8 +439,11 @@ jobs:
           test -x "$bin"
           echo "REAL_REA_BIN=$bin" >> "$GITHUB_ENV"
       # The tests run as a user of their own whose packets pf blocks and logs, except on
-      # loopback; tcpdump records pflog0, and any packet there fails the job.
-      - name: A test user whose traffic pf blocks and logs
+      # loopback; tcpdump records pflog0, and any packet there fails the job. The main ruleset
+      # is loaded first, so the anchor the rule goes into is evaluated. A control first: the
+      # test user's connection to 192.0.2.1 must be blocked and logged, or nothing would be
+      # seen either for the pack.
+      - name: A test user whose traffic pf blocks and logs, and a control
         run: |
           sudo dscl . -create /Users/reatest
           sudo dscl . -create /Users/reatest UserShell /bin/bash
@@ -248,16 +454,23 @@ jobs:
           # The test user reads the workspace, the cache and the test binary.
           d="$GITHUB_WORKSPACE"; while [ "$d" != "/" ]; do sudo chmod a+x "$d"; d=$(dirname "$d"); done
           sudo chmod -R a+rX "$GITHUB_WORKSPACE/.cache/reverse" "$GITHUB_WORKSPACE/crates/reverse/tests/fixtures" "$(dirname "$REAL_REA_BIN")"
+          sudo pfctl -f /etc/pf.conf
           echo 'block drop out log quick on ! lo0 proto { tcp, udp } all user reatest' > "$RUNNER_TEMP/pf.rules"
           sudo pfctl -a com.apple/real-rea -f "$RUNNER_TEMP/pf.rules"
+          sudo pfctl -a com.apple/real-rea -s rules
           sudo pfctl -E 2>&1 | tee "$RUNNER_TEMP/pf-token.txt"
           sudo ifconfig pflog0 create || true
-          sudo nohup tcpdump -n -i pflog0 -w "$RUNNER_TEMP/pflog.pcap" > "$RUNNER_TEMP/tcpdump.log" 2>&1 &
-          sleep 2
+          sudo nohup tcpdump -U -n -i pflog0 -w "$RUNNER_TEMP/pflog.pcap" > "$RUNNER_TEMP/tcpdump.log" 2>&1 &
+          sleep 3
+          if sudo -u reatest /usr/bin/nc -z -w 3 192.0.2.1 9; then echo "The control connection was not blocked"; exit 1; fi
+          sleep 3
+          control=$(sudo tcpdump -n -r "$RUNNER_TEMP/pflog.pcap" host 192.0.2.1 2>/dev/null | wc -l | tr -d ' ')
+          echo "Packets of the control that pf blocked and logged: $control"
+          if [ "$control" = "0" ]; then echo "pf logged nothing for the control: it would log nothing for the pack either"; exit 1; fi
       - name: Kuna as the test user
         run: |
-          sudo -u reatest env HOME=/Users/reatest TMPDIR=/tmp REVERSE_PACK_CACHE="$GITHUB_WORKSPACE/.cache/reverse" \
-            "$REAL_REA_BIN" --nocapture --test-threads=1
+          sudo -u reatest env HOME=/Users/reatest TMPDIR=/tmp REAL_REA_REQUIRE="$REAL_REA_REQUIRE" \
+            REVERSE_PACK_CACHE="$GITHUB_WORKSPACE/.cache/reverse" "$REAL_REA_BIN" --nocapture --test-threads=1
       - name: The reverse server with the real rea and Kuna
         run: REVERSE_PACK_CACHE="$GITHUB_WORKSPACE/.cache/reverse" cargo test -p reverse --test fake_rea
       - name: No packet logged and nothing left running
@@ -266,9 +479,9 @@ jobs:
           sleep 2
           sudo pkill tcpdump || true
           sleep 1
-          packets=$(sudo tcpdump -n -r "$RUNNER_TEMP/pflog.pcap" 2>/dev/null | wc -l | tr -d ' ')
-          echo "Packets pf blocked for the test user: $packets"
-          if [ "$packets" != "0" ]; then sudo tcpdump -n -e -r "$RUNNER_TEMP/pflog.pcap" | head -50; exit 1; fi
+          packets=$(sudo tcpdump -n -r "$RUNNER_TEMP/pflog.pcap" not host 192.0.2.1 2>/dev/null | wc -l | tr -d ' ')
+          echo "Packets pf blocked for the test user (the control left out): $packets"
+          if [ "$packets" != "0" ]; then sudo tcpdump -n -e -r "$RUNNER_TEMP/pflog.pcap" not host 192.0.2.1 | head -50; exit 1; fi
           if pgrep -lf '/reverse/(kuna-[^/]+/kuna|node-[^/]+/bin/node)'; then
             echo "A program from the test's pack is still running."
             exit 1

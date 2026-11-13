@@ -6422,6 +6422,15 @@ const chip = h.querySelector('[data-folder-chip]');
 const mode = h.querySelector('button[aria-label="Ask first"], button[aria-label="Allow all"], button[aria-label="Full access"]');
 const loading = h.querySelector('[data-loading-line]');
 const meter = h.querySelector('[title^="How much it can remember"]');
+// [header-layout r2] Thinking's words, the buttons' row, the Tools label, a failed load's
+// actions, the reply's speed, where the meter's group and the name's row sit, and a note.
+const think = h.querySelector('button[aria-label^="Thinking "]');
+const controls = h.querySelector('[data-header-controls]');
+const toolsButton = h.querySelector('button[title="Tools for this chat"]');
+const failedBox = h.querySelector('[data-header-state="failed"]');
+const speed = h.querySelector('[data-speed]');
+const where = e => { if (!e) return null; const b = e.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
+const noteBox = h.querySelector('[data-header-state="ready"] [role="status"]');
 // Everything one can click or read on its own: none of them may cover another.
 const parts = [...h.querySelectorAll('button, [title^="How much it can remember"], [data-loading-line]')].filter(shown);
 const overlaps = [];
@@ -6462,23 +6471,42 @@ return {
   mode: mode && { text: shownText(mode), label: mode.getAttribute('aria-label') },
   loading: loading && { text: shownText(loading), title: loading.title, cut: [...loading.querySelectorAll('[data-loading]')].filter(cut).map(e => e.dataset.loading) },
   meter: meter && { text: shownText(meter), title: meter.title, cut: cut(meter) },
+  thinking: think && { text: shownText(think), label: think.getAttribute('aria-label') },
+  prompt: (() => { const b = h.querySelector('button[aria-label="System prompt"]'); return b && shownText(b); })(),
+  controls: controls && { height: Math.round(controls.getBoundingClientRect().height) },
+  tools: toolsButton && shownText(toolsButton),
+  failed: failedBox && { text: shownText(failedBox),
+    buttons: [...failedBox.querySelectorAll('button')].map(b => ({ text: text(b), shown: shown(b), cut: cut(b), focusable: b.tabIndex >= 0 })) },
+  speed: speed && { shown: shown(speed), text: text(speed) },
+  line: where(h.querySelector('[data-model-line]')),
+  status: where(h.querySelector('[data-model-status]')),
+  note: noteBox && shownText(noteBox),
+  content: Math.round(h.clientWidth - parseFloat(getComputedStyle(h).paddingLeft) - parseFloat(getComputedStyle(h).paddingRight)),
 };
 """
 
 HEADER_WIDTHS = (720, 900, 1024, 1200, 1366, 1440)
+# [header-layout r2] With the Panel open beside the chat: a chat area of about 300, 390 and 480
+# pixels at these windows (the sidebar open too).
+HEADER_PANEL_WIDTHS = (1024, 1200, 1366)
 
 
 @probe("header-layout")
 def p_header_layout(c, notes):
     """0.0.6 integration (finding header-layout): the chat header at windows 720, 900, 1,024,
-    1,200, 1,366 and 1,440 pixels wide, with and without messages, in Ask first and Full
-    access, for a model on an endpoint, the real small model loaded (the ready line) and that
-    model loading (a load event sent to the page). At every width nothing runs past the header
-    or covers anything else; the model's name shows at least about 12 characters and whole in
-    its tooltip; Full access says "Whole computer" in words; the folder chip shows the
-    folder's name; the ready line, the usage line and the loading line show whole phrases only
-    (never cut in a word), and whatever they leave out is in their tooltip. A screenshot is
-    taken at every width."""
+    1,200, 1,366 and 1,440 pixels wide, and (r2) at 1,024, 1,200 and 1,366 with the Panel open,
+    with and without messages, in Ask first and Full access, for a model on an endpoint, the
+    real small model loaded (the ready line) and that model loading (a load event sent to the
+    page); also (r2) with a note under the ready line, a model without a tool-calling format, a
+    failed load and a reply streaming. At every width nothing runs past the header or covers
+    anything else; the model's name shows at least 12 characters and whole in its tooltip;
+    Thinking says on or off in words; Full access says "Whole computer" in words; the folder
+    chip shows the folder's name; the ready line, the usage line and the loading line show
+    whole phrases only (never cut in a word), and whatever they leave out is in their tooltip.
+    With the Panel closed the header is two rows at most and the chat's buttons one row
+    (without a note or a failed load; the Panel leaves too little room for that). A failed
+    load's two actions are always in sight. While a reply streams, below @2xl the model's
+    parts stay where they were. A screenshot is taken at every width."""
     s = c.s
     model = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
     folder = c.work.name
@@ -6493,18 +6521,27 @@ def p_header_layout(c, notes):
             ".find(b => b.innerText.includes(arguments[0])); a && a.click();", title)
         time.sleep(1.0)
 
+    def panel(on):
+        """Opens or closes the Panel beside the chat with its header button."""
+        pressed = s.execute(
+            "const b = document.querySelector('main header button[aria-label=\"Panel\"]'); return b ? b.getAttribute('aria-pressed') : null;")
+        if pressed is not None and (pressed == "true") != on:
+            s.execute("document.querySelector('main header button[aria-label=\"Panel\"]').click();")
+            time.sleep(0.8)
+
     problems = []
 
-    def check(state, local, mode, r):
+    def check(state, local, mode, r, with_panel=False):
         """One width of one state: what must hold (each miss is noted, and the scenario fails at
         its end with all of them), with what the header showed in the notes."""
-        where = f"{state} at {r['inner']} px"
+        where = f"{state} at {r['inner']} px{' with the Panel' if with_panel else ''}"
         p, u, rd, lo = r["picker"] or {}, r["usage"], r["ready"], r["loading"]
         notes.append(f"{where}: height {r['height']} | model {p.get('text', '')[:30]!r} {p.get('width')} px"
                      f"{' whole' if p.get('whole') else ''} | ready {rd and rd['line']!r} | "
                      f"usage {u and u['form']} {u and u['text']!r} | chip {r['chip'] and r['chip']['text']!r} | "
                      f"mode {r['mode'] and r['mode']['text']!r} | loading {lo and lo['text']!r} | "
-                     f"meter {r['meter'] and r['meter']['text']!r}")
+                     f"meter {r['meter'] and r['meter']['text']!r} | thinking {r['thinking'] and r['thinking']['text']!r} | "
+                     f"tools {r['tools']!r} | buttons {r['controls'] and r['controls']['height']} px")
 
         def need(ok, what):
             if not ok:
@@ -6512,8 +6549,12 @@ def p_header_layout(c, notes):
 
         need(not r["over"], f"runs past the header: {r['outside']}")
         need(not r["overlaps"], f"parts cover each other: {r['overlaps']}")
-        # Two rows at most: the model with its lines, then the buttons.
-        need(r["height"] <= 112, f"the header is {r['height']} px high")
+        tall = state.startswith(("note", "failed"))
+        if not with_panel and not tall:
+            # Two rows at most: the model with its lines, then the buttons, on one row.
+            need(r["height"] <= 112, f"the header is {r['height']} px high")
+            if r["controls"]:
+                need(r["controls"]["height"] <= 40, f"the chat's buttons take {r['controls']['height']} px (more than one row)")
         need(p.get("text") and p.get("title") == p.get("text"), f"the model's full name is not its tooltip: {p}")
         need(p.get("whole") or p.get("width", 0) + 0.5 >= p.get("twelve", 1e9),
              f"the model's name shows fewer than 12 characters: {p}")
@@ -6527,12 +6568,29 @@ def p_header_layout(c, notes):
                  f"the chip does not show the folder's name: {r['chip']}")
         if r["meter"] is not None:
             need(not r["meter"]["cut"], f"the meter is cut: {r['meter']}")
+        if r["thinking"] is not None:
+            # [r2] Its state in words at every width, never by its colour alone, and the long form
+            # in a wide header (from 64rem) while the chat has no meter yet.
+            word = r["thinking"]["label"].split(" ")[-1]
+            need(r["thinking"]["text"] in (word.capitalize(), f"Thinking {word}"), f"Thinking does not say {word}: {r['thinking']}")
+            if r["content"] >= 1024 and r["meter"] is None:
+                need(r["thinking"]["text"] == f"Thinking {word}", f"Thinking is short in a wide header: {r['thinking']}")
+        if r["prompt"] is not None and r["content"] >= 1024:
+            # [r2] System prompt in words in a wide header (from 64rem).
+            need(r["prompt"] == "System prompt", f"System prompt is not in words: {r['prompt']!r}")
         if not local:
             need(rd is None and lo is None, f"a local model's line in an endpoint chat: {rd} {lo}")
             return
         if state.startswith("loading"):
             need(lo and lo["text"].startswith("Loading model") and not lo["cut"], f"the loading line is cut: {lo}")
             need(lo and lo["title"] == "Loading model · Reading the model file 45%", f"the loading line's tooltip: {lo}")
+            return
+        if state.startswith("failed"):
+            f = r["failed"]
+            need(f and f["text"].startswith("Didn't load"), f"no failed line: {f}")
+            for b in (f or {}).get("buttons", []):
+                need(b["shown"] and not b["cut"] and b["focusable"], f"a failed load's action is out of sight: {b}")
+            need(f and [b["text"] for b in f["buttons"]] == ["Model settings…", "Try again"], f"a failed load's actions: {f}")
             return
         if not rd:
             need(False, "no ready line")
@@ -6548,19 +6606,26 @@ def p_header_layout(c, notes):
                  f"the reason without the whole line: {rd}")
         if tiers:
             need(words[tiers[0]].lower() in full.lower(), f"the ready line shows other words: {rd}")
+        if state.startswith("note"):
+            need(r["note"] and r["note"].startswith("Settings changed"), f"the note is not shown: {r['note']}")
 
-    def at_widths(state, local, mode, before=None):
+    def sizes(widths=HEADER_WIDTHS, panel_widths=HEADER_PANEL_WIDTHS):
+        return [(w, False) for w in widths] + [(w, True) for w in panel_widths]
+
+    def at_widths(state, local, mode, before=None, widths=None):
         rect = s._req("GET", s._s("/window/rect"))
         try:
-            for width in HEADER_WIDTHS:
+            for width, with_panel in widths or sizes():
+                panel(with_panel)
                 s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
                 time.sleep(1.0)
                 if before:
                     before()
                 r = s.wait_for(lambda: s.execute(HEADER_CHECK), 10, "the chat header")
-                s.screenshot(str(OUT / f"header-{state}-{width}.png"))
-                check(state, local, mode, r)
+                s.screenshot(str(OUT / f"header-{state}-{width}{'-panel' if with_panel else ''}.png"))
+                check(state, local, mode, r, with_panel)
         finally:
+            panel(False)
             s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
             time.sleep(0.8)
 
@@ -6573,23 +6638,87 @@ def p_header_layout(c, notes):
             at_widths(f"{state}-{'full' if mode == 'fullAccess' else 'ask'}", local, mode, before)
         s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
 
-    def loading(chat, state):
-        """The local model loading, as the page sees it: a load event with a stage and 45%, sent
-        again before each width (the app sends the real state now and then); the real state is
-        sent again afterwards."""
-        real = s.invoke("runtime_status")
-        fake = dict(real, state="starting", progress=0.45, loadStage={"kind": "readingModel"})
-
+    def emitting(payload):
+        """Sends a runtime state to the page (the app sends the real state now and then, so it is
+        sent again before each width) and waits until the header shows it."""
         def again():
-            s.invoke("plugin:event|emit", {"event": "runtime-status", "payload": fake})
-            s.wait_for(lambda: s.execute("return !!document.querySelector('main header [data-loading-line]');"), 10, "the loading line")
+            s.invoke("plugin:event|emit", {"event": "runtime-status", "payload": payload})
+            want = {"starting": "[data-loading-line]", "failed": '[data-header-state="failed"]'}.get(payload["state"], '[data-header-state="ready"]')
+            s.wait_for(lambda: s.execute("return !!document.querySelector(arguments[0]);", "main header " + want), 10, f"the header in {payload['state']}")
+            time.sleep(0.3)
+        return again
 
+    def with_state(chat, state, patch, modes=("ask", "fullAccess"), widths=None):
+        """The local model in another state, as the page sees it (a runtime event); the real state
+        is sent again afterwards."""
+        real = s.invoke("runtime_status")
+        again = emitting(dict(real, **patch))
         try:
             again()
-            both_modes(chat, state, True, again)
+            for mode in modes:
+                s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": mode})
+                chip = "Folders for this chat: " + ("Whole computer" if mode == "fullAccess" else folder)
+                s.wait_for(lambda chip=chip: folder_chip(s) == chip, 10, f"the folder chip in {mode}")
+                time.sleep(0.4)
+                at_widths(f"{state}-{'full' if mode == 'fullAccess' else 'ask'}", True, mode, again, widths)
         finally:
+            s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
             s.invoke("plugin:event|emit", {"event": "runtime-status", "payload": s.invoke("runtime_status")})
             time.sleep(0.5)
+
+    def streaming(chat):
+        """[r2] A reply streaming on the real model: the reply's speed in the header. Below @2xl
+        (a header under 42rem) the model's parts stay where they were before the reply started;
+        at every width nothing runs past the header."""
+        s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "fullAccess"})
+        s.invoke("set_chat_thinking", {"chatId": chat, "on": False})
+        open_chat("Header remote")
+        widths = [(720, False), (1024, False), (1200, False), (1200, True), (1366, True)]
+        rect = s._req("GET", s._s("/window/rect"))
+        idle = {}
+        try:
+            for width, with_panel in widths:
+                panel(with_panel)
+                s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
+                time.sleep(1.0)
+                idle[(width, with_panel)] = s.execute(HEADER_CHECK)
+            panel(False)
+            s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
+            time.sleep(0.8)
+            send(s, "Count from 1 to 2000, separated by spaces. /no_think")
+            s.wait_for(lambda: s.execute("const e = document.querySelector('main header [data-speed]'); return !!e && e.innerText.includes('tokens/s');"),
+                       180, "the reply's speed in the header")
+            for width, with_panel in widths:
+                panel(with_panel)
+                s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
+                time.sleep(1.0)
+                r = s.execute(HEADER_CHECK)
+                if not (r["speed"] or {}).get("text"):
+                    notes.append(f"streaming at {width} px: the reply ended before it was measured")
+                    break
+                s.screenshot(str(OUT / f"header-streaming-full-{width}{'-panel' if with_panel else ''}.png"))
+                check("streaming-full", True, "fullAccess", r, with_panel)
+                before = idle[(width, with_panel)]
+                narrow = r["content"] < 672  # below @2xl (42rem)
+                notes.append(f"streaming at {width} px{' with the Panel' if with_panel else ''}: speed {r['speed']} | "
+                             f"line {before['line']} -> {r['line']} | status {before['status']} -> {r['status']} | "
+                             f"height {before['height']} -> {r['height']}")
+                if narrow:
+                    where = f"streaming at {width} px{' with the Panel' if with_panel else ''}"
+                    if r["line"] != before["line"] or (before["status"] and r["status"][1] != before["status"][1]) or r["height"] != before["height"]:
+                        problems.append(f"{where}: the model's parts moved when the reply started: {before['line']} {before['status']} "
+                                        f"{before['height']} -> {r['line']} {r['status']} {r['height']}")
+        finally:
+            panel(False)
+            s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
+            time.sleep(0.8)
+            try:
+                s.click_button("Stop", 5)
+            except Exception as e:  # noqa: BLE001 (the reply may have ended)
+                notes.append(f"streaming: no Stop to press ({str(e)[:80]})")
+            wait_idle(s, 120)
+            s.invoke("set_chat_thinking", {"chatId": chat, "on": True})
+            s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
 
     chat = new_chat(c)
     s.invoke("rename_chat", {"chatId": chat, "title": "Header remote"})
@@ -6621,7 +6750,7 @@ def p_header_layout(c, notes):
         s.wait_for(lambda: "Remembers about" in s.execute("return document.querySelector('main header button[aria-label=\"Model menu\"]').title;"),
                    20, "the ready line")
         both_modes(local["id"], "ready-empty", True)
-        loading(local["id"], "loading-empty")
+        with_state(local["id"], "loading-empty", {"state": "starting", "progress": 0.45, "loadStage": {"kind": "readingModel"}})
         # The chat with messages on the local model: the meter has its longest form.
         s.invoke("set_chat_model", {"chatId": chat, "modelRef": f"local:{model}"})
         open_chat("Header remote")
@@ -6630,7 +6759,17 @@ def p_header_layout(c, notes):
             "const m = document.querySelector('main header [title^=\"How much it can remember\"]'); return m ? m.title : '';") or ""),
             10, "the meter against the local model's size")
         both_modes(chat, "ready-messages", True)
-        loading(chat, "loading-messages")
+        with_state(chat, "loading-messages", {"state": "starting", "progress": 0.45, "loadStage": {"kind": "readingModel"}})
+        # [r2] A note under the ready line (its widest form), a model without a tool-calling
+        # format in Full access ("Tools (unavailable)", the longest Tools label) and a failed load.
+        with_state(chat, "note-messages", {"settingsChanged": True}, modes=("fullAccess",))
+        with_state(chat, "notools-messages", {"supportsTools": False}, modes=("fullAccess",),
+                   widths=sizes((720, 900, 1024), (1200,)))
+        with_state(chat, "failed-messages", {"state": "failed", "error": {
+            "code": "load_failed", "nextStep": "", "details": "",
+            "message": "Could not read /home/user/models/Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-with-a-long-name.gguf"}},
+            modes=("fullAccess",), widths=sizes((720, 1024, 1200), (1200,)))
+        streaming(chat)
         notes.extend("miss: " + p for p in problems)
         assert not problems, f"{len(problems)} misses (each in a note)"
     finally:
@@ -7159,7 +7298,8 @@ def p_reverse_engineering(c, notes):
         finally:
             s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
 
-        # 9. Stop during a slow call ends the fake rea and its child (as rea starts Kuna).
+        # 9. Stop during a slow call ends the fake rea and its child, which leads a process
+        # group and session of its own, as Kuna and Java do under rea.
         starts = len(records("start"))
         steer({"slow": ["procedure_pseudo_code"]})
         Fake.queue.append(call("procedure_pseudo_code", {"procedure": "main"}))
@@ -7167,6 +7307,7 @@ def p_reverse_engineering(c, notes):
         send(s, "show the pseudocode of main again")
         slow = s.wait_for(lambda: records("slow"), 30, "the slow call")[-1]
         assert not gone(slow["pid"]) and not gone(slow["child"]), slow
+        assert os.getsid(slow["child"]) == slow["child"] != os.getsid(slow["pid"]), slow
         s.execute("document.querySelector('button[aria-label=\"Stop\"]').click();")
         wait_idle(s, 30)
         s.wait_for(lambda: gone(slow["pid"]) and gone(slow["child"]), 30, "the fake rea and its child to end")

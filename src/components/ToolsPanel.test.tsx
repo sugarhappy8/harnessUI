@@ -720,3 +720,41 @@ describe("ToolsPanel: the Reverse engineering group (0.0.6)", () => {
     expect(ipcMock.setChatTools).toHaveBeenCalledWith(CHAT, ["computer_screenshot"]);
   });
 });
+
+describe("ToolsPanel: the header button (header-layout r2)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listChatTools.mockImplementation(async () => []);
+    ipcMock.listApprovedFolders.mockImplementation(async () => []);
+    ipcMock.loadedSkills.mockImplementation(async () => []);
+  });
+  afterEach(cleanup);
+
+  it("says No tools in the narrowest header for a model that can't use tools, and why in the panel", async () => {
+    await act(async () => {
+      render(<ToolsPanel chatId={CHAT} nCtx={8192} unsupported />);
+    });
+    const button = screen.getByTitle("Tools for this chat");
+    const full = button.querySelector("[data-tools-label='full']") as HTMLElement;
+    const short = button.querySelector("[data-tools-label='short']") as HTMLElement;
+    // jsdom has no layout: the classes are checked here, the real 720-pixel window in the e2e
+    // scenario header-layout (the chat's buttons stay on one row there in Full access).
+    expect(full.textContent).toBe("Tools (unavailable)");
+    expect(full.className).toBe("@max-md:hidden");
+    expect(short.textContent).toBe("No tools");
+    expect(short.className).toBe("hidden @max-md:inline");
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(screen.getByText(/This model's chat template has no tool-calling format/)).toBeTruthy();
+  });
+
+  it("counts the tools that are on otherwise, at every width", async () => {
+    await act(async () => {
+      render(<ToolsPanel chatId={CHAT} nCtx={8192} />);
+    });
+    const button = screen.getByTitle("Tools for this chat");
+    expect(button.textContent).toBe(" Tools (0)");
+    expect(button.querySelector("[data-tools-label]")).toBeNull();
+  });
+});

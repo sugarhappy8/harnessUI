@@ -119,10 +119,12 @@ def call(rid, params):
     record({"event": "call", "tool": name, "args": args, "id": rid})
     cfg = config()
     if name in cfg.get("slow", []):
-        # As rea starts Kuna: a child in rea's own process group, then no answer at all.
+        # As rea starts Kuna and Java: a child in a process group (and session) of its own,
+        # which a kill of rea's group alone does not reach; then no answer at all.
         child = subprocess.Popen(
             [sys.executable, "-I", "-c", "import time\nwhile True:\n    time.sleep(1)"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         slow_calls.append(child)
         record({"event": "slow", "tool": name, "pid": os.getpid(), "child": child.pid})
