@@ -425,4 +425,136 @@ describe("pickModel (store): the model's own settings, and D3 before a switch", 
     expect(order).toEqual(["chat", "closed", "load"]);
     expect(useApp.getState().error?.code).toBe("model_missing");
   });
+
+  // Two chats, each with its saved model in `models` as the backend keeps it; chat 3 is open,
+  // model a is loaded and a reply is being written.
+  async function twoChats(): Promise<Record<number, string | null>> {
+    const models: Record<number, string | null> = { 3: "local:/m/a.gguf", 4: "provider:1:fake" };
+    ipcMock.setChatModel.mockImplementation(async (id, ref) => {
+      models[id] = ref;
+    });
+    ipcMock.getChat.mockImplementation(async (id: number) => ({ chat: { id, modelRef: models[id] ?? null }, messages: [] }));
+    await useApp.getState().openChat(3);
+    useApp.setState({ runtime: runtime("ready", "/m/a.gguf") });
+    ipcMock.modelBusy.mockResolvedValue(REPLY);
+    return models;
+  }
+
+  /** The next load waits until the returned function ends it (false: cancelled or replaced). */
+  function waitingLoad(): { end: (done: boolean) => void } {
+    const handle: { end: (done: boolean) => void } = { end: () => undefined };
+    ipcMock.loadLocalModel.mockImplementationOnce(() => new Promise((resolve) => (handle.end = resolve)));
+    return handle;
+  }
+
+  it("two chats: a quick pick in the other chat does not stop the waiting chat going back on Cancel", async () => {
+    const models = await twoChats();
+    const load = waitingLoad();
+    const waiting = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Restart when it ends");
+    await flush();
+    expect(models[3]).toBe("local:/m/b.gguf");
+
+    // In the other chat, a pick that loads nothing (an endpoint); then back to the first chat.
+    await useApp.getState().openChat(4);
+    await useApp.getState().pickModel("provider:2:other");
+    await useApp.getState().openChat(3);
+
+    // Cancel on the waiting line: the backend ends the wait with load_replaced (false).
+    load.end(false);
+    await waiting;
+    expect(models[3]).toBe("local:/m/a.gguf");
+    expect(models[4]).toBe("provider:2:other");
+    expect(useApp.getState().detail?.chat.modelRef).toBe("local:/m/a.gguf");
+    expect(useApp.getState().error).toBeNull();
+  });
+
+  it("puts the waiting chat back when Cancel is pressed while another chat is open, and leaves the open chat alone", async () => {
+    const models = await twoChats();
+    let load = waitingLoad();
+    let waiting = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Restart when it ends");
+    await flush();
+    await useApp.getState().openChat(4);
+
+    load.end(false);
+    await waiting;
+    expect(models[3]).toBe("local:/m/a.gguf");
+    expect(useApp.getState().activeChatId).toBe(4);
+    expect(useApp.getState().detail?.chat).toMatchObject({ id: 4, modelRef: "provider:1:fake" });
+    expect(useApp.getState().error).toBeNull();
+
+    // A model the chat was given another way since is kept.
+    await useApp.getState().openChat(3);
+    load = waitingLoad();
+    waiting = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Restart when it ends");
+    await flush();
+    await useApp.getState().openChat(4);
+    models[3] = "provider:1:fake";
+    load.end(false);
+    await waiting;
+    expect(models[3]).toBe("provider:1:fake");
+  });
+
+  it("re-picking the loaded model while a switch waits cancels the wait, from the same chat or another", async () => {
+    const models = await twoChats();
+    let load = waitingLoad();
+    // The backend ends the waiting load when its wait is cancelled.
+    ipcMock.cancelPendingReload.mockImplementation(async () => void load.end(false));
+
+    let waiting = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Restart when it ends");
+    await flush();
+    await useApp.getState().pickModel("local:/m/a.gguf");
+    expect(ipcMock.cancelPendingReload).toHaveBeenCalledTimes(1);
+    await waiting;
+    expect(ipcMock.loadLocalModel).toHaveBeenCalledTimes(1);
+    expect(models[3]).toBe("local:/m/a.gguf");
+    expect(useApp.getState().detail?.chat.modelRef).toBe("local:/m/a.gguf");
+
+    // From the other chat: the waiting chat goes back to the loaded model too.
+    load = waitingLoad();
+    waiting = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Restart when it ends");
+    await flush();
+    await useApp.getState().openChat(4);
+    await useApp.getState().pickModel("local:/m/a.gguf");
+    expect(ipcMock.cancelPendingReload).toHaveBeenCalledTimes(2);
+    await waiting;
+    expect(models).toEqual({ 3: "local:/m/a.gguf", 4: "local:/m/a.gguf" });
+    expect(ipcMock.modelBusy).toHaveBeenCalledTimes(2);
+    expect(useApp.getState().error).toBeNull();
+    ipcMock.cancelPendingReload.mockReset();
+  });
+
+  it("re-picking the loaded model leaves a waiting Apply and restart alone", async () => {
+    await twoChats();
+    let endReload: (done: boolean) => void = () => undefined;
+    ipcMock.reloadLocalModel.mockImplementationOnce(() => new Promise((resolve) => (endReload = resolve)));
+    const reload = change.reloadModel(useApp.getState().runtime, false);
+    await answer("Restart when it ends");
+    await flush();
+    await useApp.getState().pickModel("local:/m/a.gguf");
+    expect(ipcMock.cancelPendingReload).not.toHaveBeenCalled();
+    endReload(true);
+    await expect(reload).resolves.toBe(true);
+  });
+
+  it("keeps a chat on the model it waited for when another chat loads that same model", async () => {
+    const models = await twoChats();
+    const load = waitingLoad();
+    const waiting = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Restart when it ends");
+    await flush();
+    await useApp.getState().openChat(4);
+    // That pick asks too (the reply still runs) and is told to stop it; its load replaces the wait.
+    const second = useApp.getState().pickModel("local:/m/b.gguf");
+    await answer("Stop and restart");
+    await second;
+    load.end(false);
+    await waiting;
+    expect(models).toEqual({ 3: "local:/m/b.gguf", 4: "local:/m/b.gguf" });
+    expect(ipcMock.loadLocalModel).toHaveBeenLastCalledWith("/m/b.gguf", null, false);
+  });
 });

@@ -60,7 +60,8 @@ pub enum EntryKind {
 pub trait WalkFs: Fs + Send + Sync {
     /// The names inside a folder.
     fn read_dir(&self, path: &str) -> Result<Vec<String>, String>;
-    /// A link's own text, never resolved; `None` when `path` is not a link.
+    /// A link's own text, never resolved; `None` when `path` is not a link; an error when
+    /// it is missing or its text cannot be read (not valid text).
     fn read_link(&self, path: &str) -> Result<Option<String>, String>;
     /// What `path` is, without following a link; `None` when it does not exist.
     fn kind(&self, path: &str) -> Option<EntryKind>;
@@ -427,6 +428,11 @@ pub fn follow_links(fs: &dyn WalkFs, path: &str, flavor: Flavor) -> Hops {
         let text = match fs.read_link(&here) {
             Ok(Some(text)) => text,
             Ok(None) => continue,
+            // Something is there, but its link text cannot be read (not valid text: bytes
+            // on Linux and macOS, unpaired surrogates on Windows): the system would still
+            // follow it, perhaps to a network place, so it is refused, never taken for a
+            // missing name. `kind` does not follow it, and nothing before it is a link.
+            Err(_) if fs.kind(&here).is_some() => return Hops::Unclear,
             // Missing (or not reachable): the system stops here too.
             Err(_) => return Hops::Clear,
         };
@@ -657,6 +663,10 @@ pub(crate) mod fake {
         /// A folder that can be entered but not listed (`d-wx--x--x`).
         Locked,
         Link(String),
+        /// A link the system follows to the text it holds, but whose text is not valid
+        /// text (bytes on Linux and macOS, unpaired surrogates on Windows), so `read_link`
+        /// fails, as it does on the real file system.
+        LinkNotText(String),
         Device,
         Pipe,
         Socket,
@@ -780,7 +790,7 @@ pub(crate) mod fake {
                 let here = cur.to_string();
                 match self.node(&here) {
                     None => return Ok(None),
-                    Some(Node::Link(target)) => {
+                    Some(Node::Link(target) | Node::LinkNotText(target)) => {
                         hops += 1;
                         if hops > 40 {
                             return Err("too many levels of links".into());
@@ -821,7 +831,10 @@ pub(crate) mod fake {
         }
         fn is_symlink(&self, path: &str) -> Option<bool> {
             self.note("is_symlink", path);
-            Some(matches!(self.node(path)?, Node::Link(_)))
+            Some(matches!(
+                self.node(path)?,
+                Node::Link(_) | Node::LinkNotText(_)
+            ))
         }
     }
 
@@ -852,6 +865,7 @@ pub(crate) mod fake {
             self.note("read_link", path);
             match self.node(path) {
                 Some(Node::Link(t)) => Ok(Some(t)),
+                Some(Node::LinkNotText(_)) => Err("a link whose target is not valid text".into()),
                 Some(_) => Ok(None),
                 None => Err("missing".into()),
             }
@@ -861,7 +875,7 @@ pub(crate) mod fake {
             Some(match self.node(path)? {
                 Node::File(_) => EntryKind::File,
                 Node::Dir | Node::Locked => EntryKind::Dir,
-                Node::Link(_) => EntryKind::Link,
+                Node::Link(_) | Node::LinkNotText(_) => EntryKind::Link,
                 Node::Device => EntryKind::Device,
                 Node::Pipe => EntryKind::Pipe,
                 Node::Socket => EntryKind::Socket,
@@ -1503,5 +1517,152 @@ mod tests {
             walk_folder(&RealWalkFs, &s(&app), &sb(&[&app]), false),
             Err(WalkRefusal::Device { .. })
         ));
+    }
+
+    /// A link whose text cannot be read (not valid text: bytes on Linux and macOS, unpaired
+    /// surrogates on Windows) is refused, never taken for a missing name: the system would
+    /// still follow it, perhaps to a network place. Nothing is resolved through it, whether
+    /// it is the path itself, at the end of a chain of links, or inside a walked folder.
+    #[test]
+    fn a_link_whose_text_is_not_valid_text_is_refused() {
+        let p = Flavor::Posix;
+        let bad = || {
+            app()
+                .special("/w/bad", Node::LinkNotText("//server/share".into()))
+                .link("/w/a", "/w/bad")
+        };
+        let resolved = |fs: &FakeFs, also: &str| -> Vec<String> {
+            fs.accessed()
+                .into_iter()
+                .filter(|a| {
+                    a.contains("server")
+                        || a == "canonicalize /w/bad"
+                        || a.starts_with("canonicalize /w/bad/")
+                        || a == "canonicalize /w/a"
+                        || a.starts_with("canonicalize /w/a/")
+                        || a == &format!("canonicalize {also}")
+                })
+                .collect()
+        };
+        let fs = bad().link("/w/app/to-bad", "../bad/x");
+        for path in ["/w/bad", "/w/bad/x", "/w/a", "/w/a/x", "/w/app/to-bad"] {
+            fs.clear();
+            assert_eq!(follow_links(&fs, path, p), Hops::Unclear, "{path}");
+            let looked = resolved(&fs, path);
+            assert!(looked.is_empty(), "{path}: {looked:?}");
+        }
+        // A missing name is still missing.
+        assert_eq!(follow_links(&fs, "/w/missing/x", p), Hops::Clear);
+        // In a walked folder, in every mode: such a link itself, one link to it, and a chain
+        // of two links to it are each refused as a link to a place the chat can't reach.
+        for (link, target) in [
+            ("/w/app/lib/direct", None),
+            ("/w/app/lib/one", Some("../../bad/x")),
+            ("/w/app/lib/two", Some("/w/a")),
+        ] {
+            for approved in [&["/w"][..], &["/w", "/"][..]] {
+                let fs = match target {
+                    None => bad().special(link, Node::LinkNotText("//server/share".into())),
+                    Some(t) => bad().link(link, t),
+                };
+                let sb = sandbox(&fs, approved, &[]);
+                fs.clear();
+                assert_eq!(
+                    walk_folder(&fs, "/w/app", &sb, approved.len() > 1),
+                    Err(WalkRefusal::LinkOut { link: link.into() }),
+                    "{link} {approved:?}"
+                );
+                let looked = resolved(&fs, link);
+                assert!(looked.is_empty(), "{link} {approved:?}: {looked:?}");
+            }
+        }
+        // Windows: a junction to a link whose text holds an unpaired surrogate.
+        let w = Flavor::Windows;
+        let fs = FakeFs::windows()
+            .special(
+                "C:\\Users\\me\\bad",
+                Node::LinkNotText("\\\\server\\share".into()),
+            )
+            .link("C:\\Users\\me\\j", "\\\\?\\C:\\Users\\me\\bad");
+        for path in ["C:\\Users\\me\\bad\\x.exe", "C:\\Users\\me\\j\\x.exe"] {
+            fs.clear();
+            assert_eq!(follow_links(&fs, path, w), Hops::Unclear, "{path}");
+            assert!(
+                !fs.accessed()
+                    .iter()
+                    .any(|a| a.starts_with("canonicalize") || a.to_lowercase().contains("server")),
+                "{path}: {:?}",
+                fs.accessed()
+            );
+        }
+    }
+
+    /// The real file system (Unix): a link whose text is raw bytes that are not valid text,
+    /// as the path itself, at the end of a chain of links and inside a walked folder, is
+    /// refused (before the fix the folder passed as if the link were missing). Skipped where
+    /// the system cannot make such a link.
+    #[cfg(unix)]
+    #[test]
+    fn the_real_file_system_a_link_whose_text_is_not_valid_text() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let s = |p: &Path| p.display().to_string();
+        let not_text = OsStr::from_bytes(b"//server/share/\xff");
+        let bad = root.join("bad");
+        if let Err(e) = symlink(not_text, &bad) {
+            eprintln!("skipped: this system cannot make a link whose text is not valid text: {e}");
+            return;
+        }
+        if RealWalkFs.read_link(&s(&bad)).is_ok() {
+            eprintln!("skipped: this system keeps the link's text as valid text");
+            return;
+        }
+        symlink(&bad, root.join("a")).unwrap();
+        let p = Flavor::Posix;
+        for path in [bad.clone(), bad.join("x"), root.join("a"), root.join("a/x")] {
+            assert_eq!(
+                follow_links(&RealWalkFs, &s(&path), p),
+                Hops::Unclear,
+                "{}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            follow_links(&RealWalkFs, &s(&root.join("missing/x")), p),
+            Hops::Clear
+        );
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("main.js"), "x").unwrap();
+        let sb = |approved: &[String]| {
+            PathSandbox::new(Flavor::Posix, approved, &[], &RealWalkFs, &|p| {
+                RealWalkFs.case_of(p)
+            })
+            .0
+        };
+        assert_eq!(
+            walk_folder(&RealWalkFs, &s(&app), &sb(&[s(&root)]), false),
+            Ok(())
+        );
+        for (name, target) in [
+            ("direct", not_text),
+            ("one", OsStr::new("../bad/x")),
+            ("two", OsStr::new("../a")),
+        ] {
+            let link = app.join(name);
+            symlink(target, &link).unwrap();
+            for approved in [vec![s(&root)], vec![s(&root), "/".to_string()]] {
+                let full = approved.len() > 1;
+                assert_eq!(
+                    walk_folder(&RealWalkFs, &s(&app), &sb(&approved), full),
+                    Err(WalkRefusal::LinkOut { link: s(&link) }),
+                    "{name} {approved:?}"
+                );
+            }
+            std::fs::remove_file(&link).unwrap();
+        }
     }
 }

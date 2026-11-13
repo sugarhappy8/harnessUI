@@ -1,7 +1,7 @@
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
-import { askBeforeChange, backendWhenIdle, isLoadedNow, runChange } from "./modelChange";
+import { askBeforeChange, backendWhenIdle, isLoadedNow, runChange, useWaiting } from "./modelChange";
 import type {
   ApprovalRequest,
   ChatDetail,
@@ -314,6 +314,24 @@ export const useApp = create<AppState>((set, get) => {
 
   /** Counts the picks that changed a chat's model, so a switch can tell a newer pick replaced it. */
   let picks = 0;
+  /** The newest pick of each chat (by chat id): only a newer pick in its own chat replaces a
+   *  switch's change of that chat; picks in other chats do not. */
+  const newestPick = new Map<number, number>();
+  /** The newest pick that loads a model, of any chat. */
+  let newestLoad: { pick: number; path: string } | null = null;
+  const notePick = (chatId: number | null): number => {
+    picks += 1;
+    if (chatId !== null) newestPick.set(chatId, picks);
+    return picks;
+  };
+  /** Gives chat `chatId` back the model it had (`before`) after its switch to `modelRef` was
+   *  cancelled, whether the chat is open or not, unless it was given another model since. */
+  const restoreModel = async (chatId: number, modelRef: string, before: string) => {
+    const saved = await ipc.getChat(chatId);
+    if (saved.chat.modelRef !== modelRef) return;
+    await ipc.setChatModel(chatId, before);
+    if (get().activeChatId === chatId) await get().openChat(chatId);
+  };
 
   return {
     chats: [],
@@ -370,6 +388,7 @@ export const useApp = create<AppState>((set, get) => {
 
     deleteChat: async (chatId) => {
       await ipc.deleteChat(chatId);
+      newestPick.delete(chatId);
       if (get().activeChatId === chatId) set({ activeChatId: null, detail: null });
       await get().refreshChats();
     },
@@ -446,7 +465,10 @@ export const useApp = create<AppState>((set, get) => {
         // An endpoint, or the local model already loaded (or loading): nothing to load. Its
         // changed settings wait for Apply and restart (D3).
         if (path === null || isLoadedNow(runtime, path)) {
-          picks += 1;
+          notePick(get().activeChatId);
+          // The loaded model picked again while a switch to another one waits: the wait is
+          // cancelled, so the loaded model stays (and the waiting chat goes back to it).
+          if (path !== null && useWaiting.getState().kind === "switch") await ipc.cancelPendingReload();
           await get().setChatModel(modelRef);
           opts?.onChatSet?.();
           return;
@@ -456,21 +478,22 @@ export const useApp = create<AppState>((set, get) => {
         const chatId = get().activeChatId;
         const open = get().detail;
         const before = chatId !== null && open?.chat.id === chatId ? open.chat.modelRef : null;
-        const pick = ++picks;
+        const pick = notePick(chatId);
         await get().setChatModel(modelRef);
         opts?.onChatSet?.();
+        newestLoad = { pick, path };
         const done = await runChange("switch", answer.whenIdle, () =>
           ipc.loadLocalModel(path, null, backendWhenIdle(answer)),
         );
         // A switch that was cancelled changes nothing, whether the user asked it to wait or
-        // the backend waited on its own (no question was asked): the chat goes back to the
-        // model that is still loaded, unless a newer pick has changed it since (even to the
-        // same model, whose newer load is the one that replaced this one).
-        const now = get().detail;
-        const unchanged = now?.chat.id === chatId && now.chat.modelRef === modelRef;
-        if (!done && pick === picks && chatId !== null && before !== null && unchanged) {
-          await ipc.setChatModel(chatId, before);
-          await get().openChat(chatId);
+        // the backend waited on its own (no question was asked), and whether its chat is open
+        // or not: the chat goes back to the model it had, unless a newer pick in that chat
+        // has changed it since (even to the same model, whose newer load is the one that
+        // replaced this one), or a newer load of the same model, from another chat, replaced
+        // this one and brings the model this chat picked.
+        const sameLoad = newestLoad !== null && newestLoad.pick !== pick && newestLoad.path === path;
+        if (!done && chatId !== null && before !== null && newestPick.get(chatId) === pick && !sameLoad) {
+          await restoreModel(chatId, modelRef, before);
         }
         await get().refreshModelOptions();
       } catch (err) {

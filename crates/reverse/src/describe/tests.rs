@@ -1524,3 +1524,147 @@ fn tools_rea_cannot_run_with_kuna_say_so() {
         assert_eq!(action(&d).scope, Scope::FileAnalysisSession, "{tool}");
     }
 }
+
+/// A link whose text cannot be read (not valid text: bytes on Linux and macOS, unpaired
+/// surrogates on Windows) is refused, never taken for a missing file, and nothing is
+/// resolved through it: the path given is such a link, or a link to one, and a folder holds
+/// a link to one.
+#[test]
+fn a_link_whose_text_cannot_be_read_is_refused_never_missing() {
+    let fs = tree()
+        .special(
+            "/home/me/work/bad.exe",
+            Node::LinkNotText("/net/server/share/x.exe".into()),
+        )
+        .link("/home/me/work/c.exe", "/home/me/work/bad.exe")
+        .link("/home/me/work/app/lib/to-bad", "../../bad.exe");
+    let resolved = |fs: &FakeFs| -> Vec<String> {
+        fs.accessed()
+            .into_iter()
+            .filter(|a| {
+                a.contains(" /net")
+                    || a.starts_with("canonicalize /home/me/work/bad.exe")
+                    || a.starts_with("canonicalize /home/me/work/c.exe")
+                    || a == "canonicalize /home/me/work/app/lib/to-bad"
+            })
+            .collect()
+    };
+    for platform in [LINUX, Platform::MacosArm64] {
+        for mode in MODES {
+            let c = chat(mode, &[WORK]);
+            for (given, shown) in [
+                ("bad.exe", "/home/me/work/bad.exe"),
+                ("/home/me/work/bad.exe", "/home/me/work/bad.exe"),
+                ("c.exe", "/home/me/work/c.exe"),
+            ] {
+                fs.clear();
+                let d = run_with(
+                    platform,
+                    &fs,
+                    &c,
+                    "inspect_pe_imports",
+                    json!({"path": given}),
+                    &ready(),
+                    &SessionView::default(),
+                );
+                assert_eq!(
+                    invalid(&d),
+                    format!("{}{shown}.", m::UNREADABLE_FILE),
+                    "{platform:?} {mode:?} {given}"
+                );
+                let looked = resolved(&fs);
+                assert!(looked.is_empty(), "{mode:?} {given}: {looked:?}");
+            }
+            fs.clear();
+            let d = run_with(
+                platform,
+                &fs,
+                &c,
+                "inspect_desktop_application",
+                json!({"path": "app"}),
+                &ready(),
+                &SessionView::default(),
+            );
+            assert_eq!(
+                denied_with(&d, mode),
+                format!("{}/home/me/work/app/lib/to-bad.", m::LINK_OUT),
+                "{platform:?} {mode:?}"
+            );
+            let looked = resolved(&fs);
+            assert!(looked.is_empty(), "{mode:?} folder: {looked:?}");
+        }
+    }
+}
+
+/// The real file system (Unix): the path given is a link whose text is raw bytes that are
+/// not valid text, or a link to one, or a folder holds a chain of two links to one: each is
+/// refused, never "There is no file". Skipped where the system cannot make such a link.
+#[cfg(unix)]
+#[test]
+fn a_link_whose_text_cannot_be_read_on_the_real_file_system() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
+    let bad = root.join("bad.exe");
+    if let Err(e) = symlink(OsStr::from_bytes(b"//server/share/\xff.exe"), &bad) {
+        eprintln!("skipped: this system cannot make a link whose text is not valid text: {e}");
+        return;
+    }
+    if std::fs::read_link(&bad).is_ok_and(|t| t.into_os_string().into_string().is_ok()) {
+        eprintln!("skipped: this system keeps the link's text as valid text");
+        return;
+    }
+    symlink(&bad, root.join("c.exe")).unwrap();
+    symlink(root.join("c.exe"), root.join("d")).unwrap();
+    let app = root.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("main.js"), "x").unwrap();
+    symlink("../d", app.join("two")).unwrap();
+    let folder = root.display().to_string();
+    let session = SessionView::default();
+    let availability = ready();
+    let env = DescribeEnv {
+        fs: &crate::walk::RealWalkFs,
+        session: &session,
+        availability: &availability,
+    };
+    for full in [false, true] {
+        let mut approved = vec![folder.clone()];
+        if full {
+            approved.push("/".into());
+        }
+        let c = ChatContext {
+            chat_id: 1,
+            approved_folders: approved,
+            working_folder: Some(folder.clone()),
+            full_access: full,
+            ..ChatContext::default()
+        };
+        for given in ["bad.exe", "c.exe"] {
+            let d = describe(
+                "inspect_pe_imports",
+                &args(json!({"path": given})),
+                &c,
+                &env,
+            );
+            assert_eq!(
+                invalid(&d),
+                format!("{}{}.", m::UNREADABLE_FILE, root.join(given).display()),
+                "{given} full {full}"
+            );
+        }
+        let d = describe(
+            "analyze_javascript_application",
+            &args(json!({"input_path": app.display().to_string()})),
+            &c,
+            &env,
+        );
+        assert_eq!(
+            action(&d).hard_limit.as_deref(),
+            Some(format!("{}{}.", m::LINK_OUT, app.join("two").display()).as_str()),
+            "full {full}"
+        );
+    }
+}

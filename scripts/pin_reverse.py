@@ -15,6 +15,8 @@ files are read in memory.
                        [--minimum PART=VERSION --reason TEXT]
     pin_reverse.py --check [--release]
     pin_reverse.py --download-to DIR     (downloads and verifies this computer's parts)
+    pin_reverse.py github-digest [--part ghidra|kuna] [--record]
+                       [--confirmed SHA256 --size BYTES]
 
 Publisher checks (each one recorded in `verified_by`; the pin stops when one fails or its
 verifier is missing):
@@ -27,6 +29,9 @@ verifier is missing):
 - Ghidra and Kuna: the SHA-256 digest GitHub publishes for the release asset (same origin
   as the asset). Where GitHub's API cannot be reached, `--first-download-only <part>`
   records `first-download-only` instead (Kuna always is: its releases carry no signature).
+  `github-digest` checks such a pin later against GitHub's digest and size (CI runs it with
+  the workflow's read-only `GITHUB_TOKEN`); `--record` writes `github-digest` into the lock,
+  online, or offline with `--confirmed <sha256> --size <bytes>` copied from that CI run.
 
 Every part's builds must carry their own publisher's checks (REQUIRED_CHECKS). Ghidra alone
 may carry `first-download-only` in place of `github-digest` while 0.0.6 is developed:
@@ -43,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -156,13 +162,17 @@ def version_key(version: str) -> tuple[int, ...]:
 # Network
 
 
-def http_get(url: str, dest: Path | None = None, accept: str | None = None) -> bytes:
-    """Fetches `url` (https only). With `dest`, streams into that file and returns b''."""
+def http_get(
+    url: str, dest: Path | None = None, accept: str | None = None, extra: dict | None = None
+) -> bytes:
+    """Fetches `url` (https only). With `dest`, streams into that file and returns b''.
+    `extra` adds request headers (never printed)."""
     if not url.startswith("https://"):
         fail(f"refusing a non-https URL: {url}")
     headers = {"User-Agent": USER_AGENT}
     if accept:
         headers["Accept"] = accept
+    headers.update(extra or {})
     last: Exception | None = None
     for _ in range(3):
         try:
@@ -279,6 +289,165 @@ def publisher_digest(part: str, repo: str, tag: str, asset: str, path: Path, arg
         return ["first-download-only"]
     fail(f"{asset}: GitHub's digest is needed (or pass --first-download-only {part})")
     return []
+
+
+# --------------------------------------------------------------------------------------
+# GitHub's digest for a pin recorded as first-download-only (WP9e)
+#
+# Where GitHub's API cannot be read at pin time, Ghidra is pinned `first-download-only`
+# and a release build does not offer it. CI reads the digest GitHub publishes for the
+# release asset with the workflow's read-only token (`github-digest --part ghidra`) and
+# fails if it differs from the lock's SHA-256 or size; `--record` then writes
+# `github-digest` into the lock, online, or offline from the values that run printed
+# (`--confirmed <sha256> --size <bytes>`).
+
+DIGEST_REPOS = {"ghidra": "NationalSecurityAgency/ghidra", "kuna": "Noelo-Lab/kuna"}
+RELEASE_ASSET_URL = re.compile(
+    r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/releases/download/([A-Za-z0-9_.+-]+)/([A-Za-z0-9_.+-]+)$"
+)
+
+
+def pinned_assets(lock: dict, name: str) -> list[dict]:
+    """The release assets a part's builds pin (one per distinct file), with the repository
+    and tag read from the pinned URL, which must be on the part's own repository."""
+    part = next((p for p in lock.get("parts", []) if p.get("name") == name), None)
+    if part is None or name not in DIGEST_REPOS:
+        fail(f"{name}: not a part whose release assets GitHub publishes digests for")
+    out: dict[str, dict] = {}
+    for b in part.get("builds", []):
+        f = b.get("file", {})
+        m = RELEASE_ASSET_URL.match(str(f.get("url", "")))
+        if not m or m.group(1) != DIGEST_REPOS[name] or m.group(3) != f.get("name"):
+            fail(f"{name} {b.get('platform')}: {f.get('url')!r} is not a release asset of {DIGEST_REPOS[name]}")
+        a = out.setdefault(f["url"], {
+            "part": name, "repo": m.group(1), "tag": m.group(2), "asset": f["name"],
+            "url": f["url"], "sha256": f["sha256"], "size": f["size"], "platforms": [],
+        })
+        if (a["sha256"], a["size"]) != (f["sha256"], f["size"]):
+            fail(f"{name}: two builds pin {f['name']} with different digests or sizes")
+        a["platforms"].append(b.get("platform"))
+    return list(out.values())
+
+
+def github_release(repo: str, tag: str, token: str | None) -> dict:
+    """GitHub's release record for `tag` (the API, with the token when there is one)."""
+    url = f"https://api.github.com/repos/{repo}/releases/tags/{urllib.parse.quote(tag, safe='')}"
+    extra = {"X-GitHub-Api-Version": "2022-11-28"}
+    if token:
+        extra["Authorization"] = f"Bearer {token}"
+    try:
+        data = json.loads(http_get(url, accept="application/vnd.github+json", extra=extra))
+    except urllib.error.HTTPError as e:
+        fail(f"GitHub's API answered HTTP {e.code} for {repo} {tag}")
+    except RuntimeError as e:
+        fail(str(e))
+    if not isinstance(data, dict):
+        fail(f"GitHub's API sent something unexpected for {repo} {tag}")
+    return data
+
+
+def digest_problems(expected: dict, release: dict) -> tuple[str | None, list[str]]:
+    """GitHub's SHA-256 for the pinned asset, and how it or the asset differs from the lock."""
+    asset = next((a for a in release.get("assets", []) if a.get("name") == expected["asset"]), None)
+    if asset is None:
+        return None, [f"{expected['asset']} is not an asset of {expected['repo']} {expected['tag']}"]
+    digest = str(asset.get("digest") or "")
+    problems = []
+    got = digest[len("sha256:"):].lower() if digest.startswith("sha256:") else None
+    if got is None or not re.fullmatch(r"[0-9a-f]{64}", got):
+        problems.append(f"GitHub publishes no SHA-256 digest for {expected['asset']} ({digest!r})")
+    elif got != expected["sha256"]:
+        problems.append(f"{expected['asset']}: GitHub's digest {got} differs from the lock's {expected['sha256']}")
+    if asset.get("size") != expected["size"]:
+        problems.append(f"{expected['asset']}: GitHub's size {asset.get('size')} differs from the lock's {expected['size']}")
+    if asset.get("state", "uploaded") != "uploaded":
+        problems.append(f"{expected['asset']}: GitHub's asset state is {asset.get('state')!r}")
+    if asset.get("browser_download_url") != expected["url"]:
+        problems.append(f"{expected['asset']}: GitHub's download link {asset.get('browser_download_url')!r} is not the lock's")
+    return got, problems
+
+
+def with_github_digest(lock: dict, name: str) -> dict:
+    """A copy of `lock` whose builds of part `name` record `github-digest` (in place of
+    `first-download-only`; Kuna keeps it, as `pin` records it: its releases carry no
+    signature)."""
+    out = copy.deepcopy(lock)
+    for p in out["parts"]:
+        if p["name"] != name:
+            continue
+        for b in p["builds"]:
+            vb = [v for v in b.get("verified_by", []) if v not in ("github-digest", "first-download-only")]
+            vb.insert(0, "github-digest")
+            if name == "kuna":
+                vb.append("first-download-only")
+            b["verified_by"] = vb
+    return out
+
+
+def cmd_github_digest(args) -> None:
+    lock = json.loads(LOCK.read_text())
+    problems = check(lock)
+    if problems:
+        fail("reverse.lock.json does not pass --check:\n  " + "\n  ".join(problems))
+    assets = pinned_assets(lock, args.part)
+    lines = []
+    if args.confirmed is not None:
+        # Offline: the values a CI run of this command printed, typed in by the lead.
+        if len(assets) != 1:
+            fail(f"{args.part} pins {len(assets)} assets; --confirmed takes one (run online instead)")
+        if not re.fullmatch(r"[0-9a-f]{64}", args.confirmed.lower()) or args.size is None:
+            fail("--confirmed needs the 64 hex digits of the SHA-256 and --size the bytes, as CI printed them")
+        a = assets[0]
+        found = []
+        if args.confirmed.lower() != a["sha256"]:
+            found.append(f"{a['asset']}: the confirmed digest {args.confirmed.lower()} differs from the lock's {a['sha256']}")
+        if args.size != a["size"]:
+            found.append(f"{a['asset']}: the confirmed size {args.size} differs from the lock's {a['size']}")
+        if found:
+            fail("\n".join(found))
+        lines.append(f"{args.part}: the confirmed digest sha256:{a['sha256']} and size {a['size']} match {a['asset']} in reverse.lock.json")
+    else:
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or None
+        releases: dict[tuple[str, str], dict] = {}
+        found = []
+        for a in assets:
+            key = (a["repo"], a["tag"])
+            if key not in releases:
+                releases[key] = github_release(a["repo"], a["tag"], token)
+            got, wrong = digest_problems(a, releases[key])
+            found += wrong
+            if not wrong:
+                lines.append(
+                    f"{args.part}: GitHub publishes sha256:{got} and {a['size']} bytes for {a['asset']} "
+                    f"({a['repo']} {a['tag']}, for {', '.join(a['platforms'])}): they match reverse.lock.json"
+                )
+        if found:
+            fail("\n".join(found))
+    for line in lines:
+        print(line)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write("".join(f"- {line}\n" for line in lines))
+    current = [b.get("verified_by") for p in lock["parts"] if p["name"] == args.part for b in p["builds"]]
+    if not args.record:
+        if any("github-digest" not in (vb or []) for vb in current):
+            command = ["python3", "-I", "scripts/pin_reverse.py", "github-digest", "--part", args.part]
+            if len(assets) == 1:
+                command += ["--confirmed", assets[0]["sha256"], "--size", str(assets[0]["size"])]
+            print(
+                f"reverse.lock.json records {current[0]} for {args.part}. To record GitHub's digest "
+                f"(offline, from these values): {' '.join(command + ['--record'])}"
+            )
+        return
+    new = with_github_digest(lock, args.part)
+    problems = check(new)
+    if problems:
+        fail("the lock with github-digest does not pass --check (nothing was written):\n  " + "\n  ".join(problems))
+    LOCK.write_text(json.dumps(new, indent=2) + "\n")
+    print(f"wrote {LOCK.relative_to(ROOT)}: {args.part} is verified by GitHub's digest")
+    for b in release_blockers(new):
+        print(f"NOT READY FOR A RELEASE: {b}")
 
 
 # --------------------------------------------------------------------------------------
@@ -1164,6 +1333,14 @@ def main() -> None:
     )
     parser.add_argument("--download-to", metavar="DIR", help="download and verify this computer's parts")
     sub = parser.add_subparsers(dest="command")
+    gd = sub.add_parser(
+        "github-digest",
+        help="compare GitHub's published digest of a pinned release asset with the lock (and record it)",
+    )
+    gd.add_argument("--part", choices=sorted(DIGEST_REPOS), default="ghidra")
+    gd.add_argument("--record", action="store_true", help="write github-digest into the lock once it matches")
+    gd.add_argument("--confirmed", metavar="SHA256", help="offline: the digest a CI run of this command printed")
+    gd.add_argument("--size", type=int, help="with --confirmed: the size in bytes that run printed")
     pin = sub.add_parser("pin", help="pin the parts and write the lock and the fixture")
     pin.add_argument("--scratch", required=True, help="download folder (outside the repository)")
     pin.add_argument("--rea", default="6.9.0")
@@ -1190,6 +1367,8 @@ def main() -> None:
             print("reverse.lock.json and its fixtures pass" + (" (not ready for a release)" if blockers else ""))
     elif args.download_to:
         cmd_download_to(args.download_to)
+    elif args.command == "github-digest":
+        cmd_github_digest(args)
     elif args.command == "pin":
         args.first_download_only = {p.strip() for p in args.first_download_only.split(",") if p.strip()}
         cmd_pin(args)

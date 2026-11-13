@@ -391,6 +391,128 @@ class Pin(unittest.TestCase):
             self.assertIn("NOT READY FOR A RELEASE: ghidra", out)
 
 
+class GithubDigest(unittest.TestCase):
+    """`github-digest` (WP9e): CI compares GitHub's published digest of the pinned Ghidra
+    asset with the lock; `--record` flips the lock to `github-digest`, online or offline."""
+
+    def release(self, lock=None, **asset_changes):
+        a = pr.pinned_assets(lock or committed(), "ghidra")[0]
+        asset = {"name": a["asset"], "digest": "sha256:" + a["sha256"], "size": a["size"],
+                 "state": "uploaded", "browser_download_url": a["url"]}
+        asset.update(asset_changes)
+        return {"tag_name": a["tag"], "assets": [{"name": "other.zip", "digest": None}, asset]}
+
+    def run_cmd(self, argv_part="ghidra", record=False, confirmed=None, size=None, release=None, lock=None):
+        """Runs the command against a copy of the lock; returns (exit code, stdout+stderr,
+        the lock afterwards, the headers sent to GitHub)."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            path = root / "reverse.lock.json"
+            path.write_text(json.dumps(lock or committed(), indent=2) + "\n")
+            sent = []
+
+            def fake_get(url, dest=None, accept=None, extra=None):
+                sent.append((url, dict(extra or {})))
+                return json.dumps(release if release is not None else self.release()).encode()
+
+            args = argparse.Namespace(part=argv_part, record=record, confirmed=confirmed, size=size)
+            out = io.StringIO()
+            code = 0
+            env = {"GITHUB_TOKEN": "ghs_secret-token-value"}
+            with mock.patch.object(pr, "ROOT", root), mock.patch.object(pr, "LOCK", path), \
+                    mock.patch.object(pr, "http_get", side_effect=fake_get), \
+                    mock.patch.dict(pr.os.environ, env, clear=False), \
+                    mock.patch.dict(pr.os.environ, {"GITHUB_STEP_SUMMARY": str(root / "summary.md")}), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                try:
+                    pr.cmd_github_digest(args)
+                except SystemExit as e:
+                    code = e.code
+            summary = (root / "summary.md").read_text() if (root / "summary.md").exists() else ""
+            return code, out.getvalue() + summary, json.loads(path.read_text()), sent
+
+    def test_the_pinned_ghidra_asset_is_one_file_for_both_systems(self):
+        assets = pr.pinned_assets(committed(), "ghidra")
+        self.assertEqual(len(assets), 1)
+        a = assets[0]
+        self.assertEqual((a["repo"], a["tag"]), ("NationalSecurityAgency/ghidra", "Ghidra_12.1.4_build"))
+        self.assertEqual(sorted(a["platforms"]), ["linux-x86_64", "windows-x86_64"])
+        self.assertEqual(a["sha256"], "ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db")
+        self.assertEqual(len(pr.pinned_assets(committed(), "kuna")), 3)
+
+    def test_an_asset_of_another_repository_is_refused(self):
+        lock = copy.deepcopy(committed())
+        f = part(lock, "ghidra")["builds"][0]["file"]
+        f["url"] = f["url"].replace("NationalSecurityAgency/ghidra", "someone/ghidra")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            pr.pinned_assets(lock, "ghidra")
+
+    def test_a_matching_digest_passes_and_says_what_it_read(self):
+        code, out, lock, sent = self.run_cmd()
+        self.assertEqual(code, 0, out)
+        self.assertIn("GitHub publishes sha256:ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db "
+                      "and 569649598 bytes for ghidra_12.1.4_PUBLIC_20260921.zip", out)
+        self.assertIn("--confirmed ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db --size 569649598 --record", out)
+        self.assertEqual(lock, committed(), "nothing is written without --record")
+        # One request, to the release by tag, with the token as a bearer header; the token is
+        # never printed.
+        self.assertEqual([u for u, _ in sent],
+                         ["https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/tags/Ghidra_12.1.4_build"])
+        self.assertEqual(sent[0][1]["Authorization"], "Bearer ghs_secret-token-value")
+        self.assertNotIn("ghs_secret-token-value", out)
+
+    def test_each_difference_fails(self):
+        a = pr.pinned_assets(committed(), "ghidra")[0]
+        cases = [
+            ({"digest": "sha256:" + "0" * 64}, "differs from the lock's"),
+            ({"digest": None}, "publishes no SHA-256 digest"),
+            ({"digest": "sha512:" + "0" * 128}, "publishes no SHA-256 digest"),
+            ({"size": a["size"] + 1}, "GitHub's size"),
+            ({"state": "starter"}, "asset state"),
+            ({"browser_download_url": a["url"] + "x"}, "download link"),
+            ({"name": "renamed.zip"}, "is not an asset of"),
+        ]
+        for change, words in cases:
+            code, out, lock, _ = self.run_cmd(record=True, release=self.release(**change))
+            self.assertEqual(code, 1, (change, out))
+            self.assertIn(words, out, change)
+            self.assertEqual(lock, committed(), f"{change}: the lock was written")
+
+    def test_record_online_flips_ghidra_to_githubs_digest(self):
+        code, out, lock, _ = self.run_cmd(record=True)
+        self.assertEqual(code, 0, out)
+        for b in part(lock, "ghidra")["builds"]:
+            self.assertEqual(b["verified_by"], ["github-digest"])
+        self.assertEqual(pr.check(lock, release=True), [])
+        self.assertEqual(pr.release_blockers(lock), [])
+        # Nothing else changed.
+        for p in lock["parts"]:
+            if p["name"] != "ghidra":
+                self.assertEqual(p, part(committed(), p["name"]))
+
+    def test_record_offline_from_the_values_ci_printed(self):
+        code, out, lock, sent = self.run_cmd(
+            record=True, confirmed="DDAC49F903DA9D5BAC833E5CC79395098B9C33CFD3279BE5F31BD00387D2D4DB", size=569649598)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sent, [], "the offline form asks nothing of the network")
+        self.assertTrue(all(b["verified_by"] == ["github-digest"] for b in part(lock, "ghidra")["builds"]))
+        for confirmed, size in (("0" * 64, 569649598), ("ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db", 1),
+                                ("not-hex", 569649598), ("ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db", None)):
+            code, out, lock, _ = self.run_cmd(record=True, confirmed=confirmed, size=size)
+            self.assertEqual(code, 1, (confirmed, size, out))
+            self.assertEqual(lock, committed())
+
+    def test_kuna_keeps_its_first_download_mark(self):
+        lock = pr.with_github_digest(committed(), "kuna")
+        for b in part(lock, "kuna")["builds"]:
+            self.assertEqual(b["verified_by"], ["github-digest", "first-download-only"])
+        self.assertEqual(pr.check(lock), [])
+        # The offline form takes one asset; Kuna has three.
+        code, out, after, _ = self.run_cmd(argv_part="kuna", record=True, confirmed="0" * 64, size=1)
+        self.assertEqual(code, 1)
+        self.assertIn("takes one", out)
+
+
 class Helpers(unittest.TestCase):
     def test_versions(self):
         self.assertEqual(pr.version_key("21.0.13+9"), (21, 0, 13, 9))

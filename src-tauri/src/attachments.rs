@@ -1104,7 +1104,7 @@ pub async fn get_attachment(state: State<'_, AppState>, id: i64) -> AppResult<St
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1445,7 +1445,7 @@ mod tests {
     }
 
     /// A 4 x 3 lossy WebP picture (made with Pillow): left half red, right half blue.
-    const LOSSY_WEBP: &[u8] = &[
+    pub(crate) const LOSSY_WEBP: &[u8] = &[
         0x52, 0x49, 0x46, 0x46, 0x5c, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
         0x20, 0x50, 0x00, 0x00, 0x00, 0x70, 0x03, 0x00, 0x9d, 0x01, 0x2a, 0x04, 0x00, 0x03, 0x00,
         0x00, 0xc0, 0x12, 0x25, 0xa8, 0x02, 0x74, 0xba, 0x01, 0x40, 0x03, 0xf0, 0x02, 0xb4, 0x03,
@@ -1456,7 +1456,7 @@ mod tests {
     ];
     /// A 3 x 2 lossless WebP picture with see-through parts (made with Pillow): green, the
     /// top left pixel clear and the bottom right one (10, 20, 30) half see-through.
-    const LOSSLESS_WEBP: &[u8] = &[
+    pub(crate) const LOSSLESS_WEBP: &[u8] = &[
         0x52, 0x49, 0x46, 0x46, 0x36, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
         0x4c, 0x2a, 0x00, 0x00, 0x00, 0x2f, 0x02, 0x40, 0x00, 0x10, 0x17, 0x20, 0x90, 0x4d, 0x0e,
         0x11, 0x76, 0xfe, 0x13, 0x12, 0x24, 0x64, 0xff, 0x6f, 0x35, 0x0b, 0x04, 0x92, 0x48, 0xf6,
@@ -1517,7 +1517,7 @@ mod tests {
 
     /// This test binary as the picture worker, running only [`picture_worker_process`] as
     /// `mode` says (libtest's own line comes before the worker's mark).
-    fn test_worker(mode: &str) -> PictureWorker {
+    pub(crate) fn test_worker(mode: &str) -> PictureWorker {
         PictureWorker {
             args: [
                 "attachments::tests::picture_worker_process",
@@ -1591,7 +1591,7 @@ mod tests {
     }
 
     /// A valid lossless WebP picture of one colour, `w` x `h` pixels: tiny however large.
-    fn plain_webp(w: u32, h: u32) -> Vec<u8> {
+    pub(crate) fn plain_webp(w: u32, h: u32) -> Vec<u8> {
         let pixels = vec![90u8; (w * h * 3) as usize];
         let mut out = Vec::new();
         image::codecs::webp::WebPEncoder::new_lossless(&mut out)
@@ -2110,6 +2110,92 @@ mod tests {
             .decode(&result.images[0].1)
             .unwrap();
         assert_eq!(jpeg_pixels(&bytes).dimensions(), (4, 3));
+        assert_eq!(result.images[1], ("image/png".to_owned(), png));
+    }
+
+    /// [0.0.6 webp-other-paths] llama-server reads a picture by its bytes, not by the type it
+    /// is given, so a WebP picture that an MCP tool (or a chat stored by an earlier version)
+    /// labels PNG, JPEG or GIF fails the request just the same. It is known by its first
+    /// bytes and becomes JPEG or PNG too; a crafted one too large to decode is left out with
+    /// the note. Other pictures are kept as they are.
+    #[tokio::test]
+    async fn webp_pictures_under_another_type_become_jpeg_or_png() {
+        use agent::history::{CallStatus, Part, ResultRecord};
+        use mcp_host::Content;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let unb64 = |data: &str| {
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .unwrap()
+        };
+        let image = |mime: &str, data: String| Content::Image {
+            mime: mime.into(),
+            data_base64: data,
+        };
+        let png = b64(b"\x89PNG\r\n\x1a\nkept as it is");
+        let worker = test_worker("convert");
+
+        let mut out = mcp_host::ToolOutput {
+            content: vec![
+                image("image/png", b64(LOSSY_WEBP)),
+                image("image/jpeg", b64(LOSSLESS_WEBP)),
+                image("image/png", b64(&plain_webp(10_000, 8))),
+                image("image/png", png.clone()),
+                image("image/png", "AAAA".into()),
+            ],
+            ..Default::default()
+        };
+        tool_pictures_with(&worker, &mut out).await;
+        let Content::Image { mime, data_base64 } = &out.content[0] else {
+            panic!("{:?}", out.content[0])
+        };
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(jpeg_pixels(&unb64(data_base64)).dimensions(), (4, 3));
+        let Content::Image { mime, data_base64 } = &out.content[1] else {
+            panic!("{:?}", out.content[1])
+        };
+        assert_eq!(mime, "image/png");
+        let px = png_pixels(&unb64(data_base64));
+        assert_eq!(px.get_pixel(2, 1).0, [10, 20, 30, 128]);
+        assert_eq!(
+            out.content[2],
+            Content::Text {
+                text: PICTURE_LEFT_OUT.into()
+            }
+        );
+        assert_eq!(out.content[3], image("image/png", png.clone()));
+        assert_eq!(out.content[4], image("image/png", "AAAA".into()));
+
+        let mut parts = vec![
+            Part::Image {
+                mime: "image/gif".into(),
+                data_base64: b64(LOSSY_WEBP),
+            },
+            Part::ToolResult(ResultRecord {
+                call_id: "c1".into(),
+                name: "screenshot".into(),
+                status: CallStatus::Ok,
+                text: "here".into(),
+                images: vec![
+                    ("image/png".into(), b64(LOSSLESS_WEBP)),
+                    ("image/png".into(), png.clone()),
+                ],
+                source: None,
+                notes: Vec::new(),
+            }),
+        ];
+        stored_pictures_with(&worker, &mut parts).await;
+        let Part::Image { mime, data_base64 } = &parts[0] else {
+            panic!("{:?}", parts[0])
+        };
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(jpeg_pixels(&unb64(data_base64)).dimensions(), (4, 3));
+        let Part::ToolResult(result) = &parts[1] else {
+            panic!("{:?}", parts[1])
+        };
+        assert_eq!(result.text, "here");
+        assert_eq!(result.images[0].0, "image/png");
+        assert_eq!(png_pixels(&unb64(&result.images[0].1)).dimensions(), (3, 2));
         assert_eq!(result.images[1], ("image/png".to_owned(), png));
     }
 }

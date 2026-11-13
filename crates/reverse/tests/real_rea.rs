@@ -366,6 +366,25 @@ async fn call(guard: &mut ReaGuard, tool: &str, args: Value) -> ToolOutput {
     out
 }
 
+/// The processes (pid and program) running a program from under `root`, zombies left out
+/// (Linux; reads /proc).
+fn running_from(root: &Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    for p in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(exe) = std::fs::read_link(p.path().join("exe")) else {
+            continue;
+        };
+        let zombie = std::fs::read_to_string(p.path().join("stat"))
+            .ok()
+            .and_then(|s| s.rsplit_once(')').map(|(_, rest)| rest.trim_start().starts_with('Z')))
+            .unwrap_or(true);
+        if exe.starts_with(root) && !zombie {
+            out.push((p.file_name().to_string_lossy().into_owned(), exe));
+        }
+    }
+    out
+}
+
 /// The highest peak resident memory (`VmHWM`) of any process running a program from under
 /// `root`, sampled until `stop` (Linux only; reads /proc, starts nothing).
 async fn peak_memory(root: PathBuf, stop: Arc<AtomicBool>, peak: Arc<AtomicU64>) {
@@ -400,8 +419,21 @@ async fn end_to_end(decompiler: Decompiler) {
         }
     };
     let _one_at_a_time = SERIAL.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let base = dunce::canonicalize(dir.path()).unwrap();
+    // A temporary folder, or `REAL_REA_DIR/<kuna|ghidra>` when the workflow needs to know the
+    // programs' paths beforehand (Windows firewall rules) and to look at them afterwards.
+    let (_temp, base) = match std::env::var_os("REAL_REA_DIR") {
+        Some(dir) => {
+            let base = PathBuf::from(dir).join(decompiler.label().to_lowercase());
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            (None, dunce::canonicalize(&base).unwrap())
+        }
+        None => {
+            let dir = tempfile::tempdir().unwrap();
+            let base = dunce::canonicalize(dir.path()).unwrap();
+            (Some(dir), base)
+        }
+    };
     let root = base.join("reverse");
     let files = base.join("files");
     std::fs::create_dir_all(&files).unwrap();
@@ -644,9 +676,64 @@ async fn end_to_end(decompiler: Decompiler) {
         .unwrap_or_else(|e| panic!("rea did not start again: {e}"));
     let second_start = started.elapsed();
     assert!(second.fresh && second.generation > rea.generation);
+    // Stop in the middle of Ghidra's analysis (Java running): the call ends as cancelled.
+    if decompiler == Decompiler::Ghidra {
+        let opened = call(
+            &mut guard,
+            "open_binary",
+            json!({"path": hello.display().to_string()}),
+        )
+        .await;
+        assert!(!opened.is_error, "{}", opened.joined_text());
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            stop.cancel();
+        });
+        let started = Instant::now();
+        let mut args = Map::new();
+        args.insert("detail".into(), json!("summary"));
+        let outcome = guard
+            .call(
+                &allow::app_list(),
+                "list_procedures",
+                args,
+                Duration::from_secs(600),
+                &cancel,
+                None,
+            )
+            .await;
+        println!(
+            "real_rea: list_procedures stopped after 3 s: {:?} after {:.1} s",
+            outcome.as_ref().map(|o| o.is_error),
+            started.elapsed().as_secs_f64()
+        );
+        match outcome {
+            Err(reverse::ReverseError::Cancelled) => {}
+            Ok(_) => println!("real_rea: the analysis finished within 3 s; nothing was stopped"),
+            Err(other) => panic!("a stopped call ended as {other}"),
+        }
+    }
     drop(guard);
     process.restart(RestartReason::Quit).await;
     assert_eq!(process.state(), RunState::Stopped);
+    // After the stop nothing from the pack runs any more: not rea, not Kuna, not Java or
+    // Ghidra's decompiler (Linux reads /proc; the workflow checks the other systems).
+    if cfg!(target_os = "linux") {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let left = running_from(&root);
+            if left.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "still running after the stop: {left:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 
     println!(
         "real_rea: {} on {}: first start {:.1} s, second start {:.1} s, open and first analysis {:.1} s{}",
