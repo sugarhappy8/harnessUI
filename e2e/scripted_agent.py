@@ -3970,25 +3970,30 @@ def p_model_settings(c, notes):
             const h = document.querySelector('main header');
             const b = h && h.querySelector('button[aria-label="Model menu"]');
             if (!b) return null;
-            const tier = [...b.querySelectorAll('[data-ready]')].find(e => getComputedStyle(e).display !== 'none');
-            const num = tier.dataset.ready === 'remembers' ? tier.firstElementChild : tier;
+            // [0.0.6 header-layout] The form shown is the one with a box (the others, or the
+            // wrapper of "Remembers about …" and its reason, are display: none); the reason
+            // shows whole or sits on the row's hidden second line.
+            const tier = [...b.querySelectorAll('[data-ready]')].find(e => e.dataset.ready !== 'reason' && e.getClientRects().length > 0);
+            const num = tier;
             const box = b.getBoundingClientRect();
             const numWhole = num.scrollWidth <= num.clientWidth + 0.5 && num.getBoundingClientRect().right <= box.right + 0.5;
-            const reason = tier.dataset.ready === 'remembers' ? tier.lastElementChild : null;
+            const reason = b.querySelector('[data-ready="reason"]');
             const picker = h.querySelector('button[aria-label="Model for this chat"]');
-            const indicator = b.closest('main header > *');
+            const indicator = b.closest('[data-header-state]');
             const last = h.lastElementChild.getBoundingClientRect();
-            const row = b.closest('.flex-wrap');
+            const row = b.closest('[data-ready-line]');
             const ch = [...row.querySelectorAll('button')].find(x => x.innerText.trim() === 'Change');
             return {
               inner: window.innerWidth,
               tier: tier.dataset.ready,
               text: tier.textContent,
               numWhole,
-              reasonCut: !!reason && reason.scrollWidth > reason.clientWidth + 0.5,
+              reasonShown: !!reason && reason.getClientRects().length > 0
+                && reason.getBoundingClientRect().top < reason.parentElement.getBoundingClientRect().bottom - 1
+                && reason.getBoundingClientRect().right <= box.right + 0.5,
               over: h.scrollWidth > h.clientWidth + 0.5 || last.right > h.getBoundingClientRect().right + 0.5,
               overlap: picker.getBoundingClientRect().right > indicator.getBoundingClientRect().left + 0.5,
-              name: Math.round(picker.querySelector('span').getBoundingClientRect().width),
+              name: Math.round(picker.querySelector('[data-model-name]').getBoundingClientRect().width),
               clipped: getComputedStyle(b).overflowX === 'hidden',
               title: b.title,
               change: !!ch && ch.getBoundingClientRect().top < row.getBoundingClientRect().bottom - 1,
@@ -4001,7 +4006,7 @@ def p_model_settings(c, notes):
         geo = header_geometry()
         assert geo and geo["clipped"] and not geo["over"] and not geo["overlap"], geo
         assert geo["tier"] == "remembers" and geo["numWhole"], f"the ready line is cut short: {geo!r}"
-        notes.append(f"shown whole: {geo['text']!r}; reason cut: {geo['reasonCut']}; '· Change' shown: {geo['change']}; "
+        notes.append(f"shown whole: {geo['text']!r}; reason shown: {geo['reasonShown']}; '· Change' shown: {geo['change']}; "
                      f"model name {geo['name']} px")
         return geo["title"].split("\n")[0]
 
@@ -4111,15 +4116,21 @@ def p_model_settings(c, notes):
     # Without thinking, so the short reply ends quickly on a busy computer; on again after.
     s.invoke("set_chat_thinking", {"chatId": chat["id"], "on": False})
     send(s, "Say hi in one word.")
+
+    # [0.0.6 header-layout] The meter shows its numbers by the header's width (only the share
+    # below a window of about 1,430 pixels); it is found by its tooltip, which has them all.
+    def meter_shown():
+        return s.execute("return !!document.querySelector('main header [title^=\"How much it can remember\"]');")
+
     try:
         wait_idle(s, 180)
-        s.wait_for(lambda: " tokens" in header(), 10, "the context meter")
+        s.wait_for(meter_shown, 10, "the context meter")
     except WebDriverError:
         notes.append("the short reply was still being written after 180 s; ended with Stop")
         s.click_button("Stop")
         wait_idle(s, 60)
     s.wait_for(lambda: "The first reply after a restart takes longer" not in header(), 10, "the restart note gone")
-    notes.append("context meter shown: " + str(" tokens" in header()))
+    notes.append("context meter shown: " + str(meter_shown()))
     header_with_messages()
     s.invoke("set_chat_thinking", {"chatId": chat["id"], "on": True})
 
@@ -5173,8 +5184,9 @@ def p_folder_chip(c, notes):
         # Full access: the whole computer, said plainly, with the working folder.
         s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "fullAccess"})
         s.wait_for(lambda: folder_chip(s) == label + "Whole computer", 10, "the chip in Full access")
-        # Below the breakpoint only the chip's red icon shows; the mode button beside it still reads Full access.
-        check_shown("Whole computer", "")
+        # [0.0.6 header-layout] In words at every width, also in the narrowest window, beside the
+        # mode button's Full access.
+        check_shown("Whole computer", "Whole computer")
         w, mode_shown = at_width(720, lambda: s.execute(
             "const b = document.querySelector('button[aria-label=\"Full access\"]'); return b ? b.innerText.trim() : null;"))
         if w <= 760:
@@ -5202,7 +5214,7 @@ def p_folder_chip(c, notes):
         for f in s.invoke("list_approved_folders", {"chatId": chat}):
             s.invoke("remove_approved_folder", {"id": f["id"]})
         s.wait_for(lambda: folder_chip(s) == label + "No folder · Choose", 10, "the chip with no folder")
-        check_shown("No folder · Choose", "No folder")
+        check_shown("No folder · Choose", "No folder · Choose")  # [0.0.6 header-layout] whole at every width
     finally:
         s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
         shutil.rmtree(odd, ignore_errors=True)
@@ -6358,6 +6370,364 @@ def p_webp_picture(c, notes):
 
 
 PROBES.append(p_webp_picture)  # [0.0.6 integration, WebP]
+
+
+# [0.0.6 integration, header-layout] What the chat header shows, read in the page: whether
+# anything runs past the header or covers something else, and each part's shown text. A part
+# counts as shown when it has a box and is not on a line a clipping row hides (the ready line
+# drops "· Change", the reason and "· Used by another app" whole that way); it counts as cut
+# when an ellipsis or a clipping box takes part of it.
+HEADER_CHECK = r"""
+const h = document.querySelector('main header');
+if (!h) return null;
+const hr = h.getBoundingClientRect();
+const boxed = e => { const r = e.getBoundingClientRect(); return r.width > 0.5 && r.height > 0.5; };
+// The nearest clipping box between an element and the header.
+const clips = e => {
+  const out = [];
+  for (let p = e.parentElement; p && p !== h; p = p.parentElement) {
+    const st = getComputedStyle(p);
+    if (st.overflowX !== 'visible' || st.overflowY !== 'visible') out.push(p.getBoundingClientRect());
+  }
+  return out;
+};
+const hiddenByClip = e => { const r = e.getBoundingClientRect();
+  return clips(e).some(c => r.top >= c.bottom - 0.5 || r.bottom <= c.top + 0.5 || r.left >= c.right - 0.5 || r.right <= c.left + 0.5); };
+const shown = e => !!e && boxed(e) && !hiddenByClip(e);
+const cutByClip = e => { const r = e.getBoundingClientRect();
+  return clips(e).some(c => r.left < c.left - 0.5 || r.right > c.right + 0.5); };
+const ellipsis = e => e.scrollWidth > e.clientWidth + 0.5 || e.scrollHeight > e.clientHeight + 0.5;
+const cut = e => shown(e) && (ellipsis(e) || cutByClip(e));
+const text = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+// The words a part shows: its text without the pieces that are not shown.
+const shownText = e => {
+  if (!e || !shown(e)) return '';
+  const copy = e.cloneNode(true);
+  const all = [...e.querySelectorAll('*')], mine = [...copy.querySelectorAll('*')];
+  all.forEach((x, i) => { if (getComputedStyle(x).display === 'none' || (boxed(x) && hiddenByClip(x)) || (!boxed(x) && x.children.length === 0 && x.textContent.trim())) mine[i].remove(); });
+  return (copy.textContent || '').replace(/\s+/g, ' ').trim();
+};
+const widthOf = (font, s) => {
+  const p = document.createElement('span');
+  p.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:' + font;
+  p.textContent = s; document.body.appendChild(p);
+  const w = p.getBoundingClientRect().width; p.remove(); return w;
+};
+const picker = h.querySelector('button[aria-label="Model for this chat"]');
+const name = picker && picker.querySelector('[data-model-name]');
+const ready = h.querySelector('button[aria-label="Model menu"]');
+const usage = h.querySelector('button[aria-label="Computer usage"]');
+const usageForm = usage && [...usage.querySelectorAll('[data-usage]')].find(e => getComputedStyle(e).display !== 'none');
+const chip = h.querySelector('[data-folder-chip]');
+const mode = h.querySelector('button[aria-label="Ask first"], button[aria-label="Allow all"], button[aria-label="Full access"]');
+const loading = h.querySelector('[data-loading-line]');
+const meter = h.querySelector('[title^="How much it can remember"]');
+// Everything one can click or read on its own: none of them may cover another.
+const parts = [...h.querySelectorAll('button, [title^="How much it can remember"], [data-loading-line]')].filter(shown);
+const overlaps = [];
+for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
+  const a = parts[i], b = parts[j];
+  if (a.contains(b) || b.contains(a)) continue;
+  const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+  const x = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left), y = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
+  if (x > 1 && y > 1) overlaps.push([text(a) || a.getAttribute('aria-label') || a.title, text(b) || b.getAttribute('aria-label') || b.title]);
+}
+const outside = [...h.querySelectorAll('*')].filter(e => shown(e) && e.children.length === 0 && text(e))
+  .filter(e => { const r = e.getBoundingClientRect(); return r.left < hr.left - 0.5 || r.right > hr.right + 0.5; }).map(text);
+const readyBox = ready && (ready.closest('[data-header-state]') || ready.parentElement.parentElement.parentElement);
+const readyPieces = readyBox ? [...readyBox.querySelectorAll('[data-ready]')] : [];
+return {
+  inner: window.innerWidth,
+  height: Math.round(hr.height),
+  over: h.scrollWidth > h.clientWidth + 0.5 || outside.length > 0,
+  outside,
+  overlaps,
+  picker: picker && {
+    title: picker.title,
+    text: name ? text(name) : '',
+    whole: !!name && !ellipsis(name),
+    width: name ? Math.round(name.clientWidth) : 0,
+    twelve: name ? Math.round(widthOf(getComputedStyle(name).font, text(name).slice(0, 12))) : 0,
+  },
+  ready: ready && {
+    title: ready.title,
+    shown: readyPieces.filter(shown).map(e => [e.dataset.ready, text(e)]),
+    cut: readyPieces.filter(cut).map(e => e.dataset.ready),
+    line: shownText(ready.closest('[data-ready-line]') || readyBox),
+  },
+  // The usage line is one line of text: cut means its words run past its right edge.
+  usage: usage && { form: usageForm ? usageForm.dataset.usage : null, text: usageForm ? text(usageForm) : '', title: usage.title,
+                    cut: usage.scrollWidth > usage.clientWidth + 0.5 || cutByClip(usage) || (!!usageForm && usageForm.getBoundingClientRect().right > usage.getBoundingClientRect().right + 0.5) },
+  chip: chip && { text: shownText(chip), label: chip.getAttribute('aria-label'), cut: [...chip.querySelectorAll('*')].some(cut) },
+  mode: mode && { text: shownText(mode), label: mode.getAttribute('aria-label') },
+  loading: loading && { text: shownText(loading), title: loading.title, cut: [...loading.querySelectorAll('[data-loading]')].filter(cut).map(e => e.dataset.loading) },
+  meter: meter && { text: shownText(meter), title: meter.title, cut: cut(meter) },
+};
+"""
+
+HEADER_WIDTHS = (720, 900, 1024, 1200, 1366, 1440)
+
+
+@probe("header-layout")
+def p_header_layout(c, notes):
+    """0.0.6 integration (finding header-layout): the chat header at windows 720, 900, 1,024,
+    1,200, 1,366 and 1,440 pixels wide, with and without messages, in Ask first and Full
+    access, for a model on an endpoint, the real small model loaded (the ready line) and that
+    model loading (a load event sent to the page). At every width nothing runs past the header
+    or covers anything else; the model's name shows at least about 12 characters and whole in
+    its tooltip; Full access says "Whole computer" in words; the folder chip shows the
+    folder's name; the ready line, the usage line and the loading line show whole phrases only
+    (never cut in a word), and whatever they leave out is in their tooltip. A screenshot is
+    taken at every width."""
+    s = c.s
+    model = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
+    folder = c.work.name
+
+    def open_chat(title):
+        s.execute("window.location.reload();")
+        time.sleep(1.5)
+        s.wait_for(lambda: title in s.page_text(), 20, f"the chat {title!r} in the sidebar")
+        s.execute(HOOK)
+        s.execute(
+            "const a = [...document.querySelectorAll('nav[aria-label=\"Chat history\"] button')]"
+            ".find(b => b.innerText.includes(arguments[0])); a && a.click();", title)
+        time.sleep(1.0)
+
+    problems = []
+
+    def check(state, local, mode, r):
+        """One width of one state: what must hold (each miss is noted, and the scenario fails at
+        its end with all of them), with what the header showed in the notes."""
+        where = f"{state} at {r['inner']} px"
+        p, u, rd, lo = r["picker"] or {}, r["usage"], r["ready"], r["loading"]
+        notes.append(f"{where}: height {r['height']} | model {p.get('text', '')[:30]!r} {p.get('width')} px"
+                     f"{' whole' if p.get('whole') else ''} | ready {rd and rd['line']!r} | "
+                     f"usage {u and u['form']} {u and u['text']!r} | chip {r['chip'] and r['chip']['text']!r} | "
+                     f"mode {r['mode'] and r['mode']['text']!r} | loading {lo and lo['text']!r} | "
+                     f"meter {r['meter'] and r['meter']['text']!r}")
+
+        def need(ok, what):
+            if not ok:
+                problems.append(f"{where}: {what}")
+
+        need(not r["over"], f"runs past the header: {r['outside']}")
+        need(not r["overlaps"], f"parts cover each other: {r['overlaps']}")
+        # Two rows at most: the model with its lines, then the buttons.
+        need(r["height"] <= 112, f"the header is {r['height']} px high")
+        need(p.get("text") and p.get("title") == p.get("text"), f"the model's full name is not its tooltip: {p}")
+        need(p.get("whole") or p.get("width", 0) + 0.5 >= p.get("twelve", 1e9),
+             f"the model's name shows fewer than 12 characters: {p}")
+        if u is not None:
+            need(u["form"] and u["text"] and not u["cut"], f"the usage line is cut: {u}")
+        if mode == "fullAccess":
+            need(r["chip"] and r["chip"]["text"] == "Whole computer", f"the chip does not say Whole computer: {r['chip']}")
+            need(r["mode"] and r["mode"]["text"] == "Full access", f"the mode does not say Full access: {r['mode']}")
+        else:
+            need(r["chip"] and r["chip"]["text"].startswith(folder) and not r["chip"]["cut"],
+                 f"the chip does not show the folder's name: {r['chip']}")
+        if r["meter"] is not None:
+            need(not r["meter"]["cut"], f"the meter is cut: {r['meter']}")
+        if not local:
+            need(rd is None and lo is None, f"a local model's line in an endpoint chat: {rd} {lo}")
+            return
+        if state.startswith("loading"):
+            need(lo and lo["text"].startswith("Loading model") and not lo["cut"], f"the loading line is cut: {lo}")
+            need(lo and lo["title"] == "Loading model · Reading the model file 45%", f"the loading line's tooltip: {lo}")
+            return
+        if not rd:
+            need(False, "no ready line")
+            return
+        tiers = [k for k, _ in rd["shown"] if k in ("remembers", "about", "words")]
+        need(len(tiers) == 1 and not rd["cut"], f"the ready line is cut or shows no form: {rd}")
+        full = rd["title"].split("\n")[0]
+        need(full.startswith("Remembers about ") and full.endswith(")"), f"the ready line's tooltip: {rd}")
+        # What it shows is the start of the whole line, or its number in words, in whole phrases.
+        words = dict(rd["shown"])
+        if "reason" in words:
+            need(tiers == ["remembers"] and full == words.get("remembers", "") + " " + words["reason"],
+                 f"the reason without the whole line: {rd}")
+        if tiers:
+            need(words[tiers[0]].lower() in full.lower(), f"the ready line shows other words: {rd}")
+
+    def at_widths(state, local, mode, before=None):
+        rect = s._req("GET", s._s("/window/rect"))
+        try:
+            for width in HEADER_WIDTHS:
+                s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
+                time.sleep(1.0)
+                if before:
+                    before()
+                r = s.wait_for(lambda: s.execute(HEADER_CHECK), 10, "the chat header")
+                s.screenshot(str(OUT / f"header-{state}-{width}.png"))
+                check(state, local, mode, r)
+        finally:
+            s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
+            time.sleep(0.8)
+
+    def both_modes(chat, state, local, before=None):
+        for mode in ("ask", "fullAccess"):
+            s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": mode})
+            s.wait_for(lambda: folder_chip(s) == "Folders for this chat: " + ("Whole computer" if mode == "fullAccess" else folder),
+                       10, f"the folder chip in {mode}")
+            time.sleep(0.4)
+            at_widths(f"{state}-{'full' if mode == 'fullAccess' else 'ask'}", local, mode, before)
+        s.invoke("set_chat_approval_mode", {"chatId": chat, "mode": "ask"})
+
+    def loading(chat, state):
+        """The local model loading, as the page sees it: a load event with a stage and 45%, sent
+        again before each width (the app sends the real state now and then); the real state is
+        sent again afterwards."""
+        real = s.invoke("runtime_status")
+        fake = dict(real, state="starting", progress=0.45, loadStage={"kind": "readingModel"})
+
+        def again():
+            s.invoke("plugin:event|emit", {"event": "runtime-status", "payload": fake})
+            s.wait_for(lambda: s.execute("return !!document.querySelector('main header [data-loading-line]');"), 10, "the loading line")
+
+        try:
+            again()
+            both_modes(chat, state, True, again)
+        finally:
+            s.invoke("plugin:event|emit", {"event": "runtime-status", "payload": s.invoke("runtime_status")})
+            time.sleep(0.5)
+
+    chat = new_chat(c)
+    s.invoke("rename_chat", {"chatId": chat, "title": "Header remote"})
+    open_chat("Header remote")
+    try:
+        both_modes(chat, "remote-empty", False)
+        send(s, "hello")
+        wait_idle(s)
+        s.wait_for(lambda: s.execute("return !!document.querySelector('main header [title^=\"How much it can remember\"]');"), 10, "the meter")
+        both_modes(chat, "remote-messages", False)
+        if not os.path.isfile(model):
+            notes.append(f"the local model's states were skipped: no test model at {model}")
+            notes.extend("miss: " + p for p in problems)
+            assert not problems, f"{len(problems)} misses (each in a note)"
+            return
+        try:
+            s.invoke("import_model", {"path": model})
+        except WebDriverError as e:
+            notes.append(f"import: {str(e)[:120]}")
+        s.execute(
+            "window.__headerLoad = null; window.__TAURI_INTERNALS__.invoke('load_local_model', {path: arguments[0], settings: null, whenIdle: null})"
+            ".then(() => { window.__headerLoad = {ok: true}; }).catch(e => { window.__headerLoad = {ok: false, error: e}; });", model)
+        s.wait_for(lambda: s.execute("return window.__headerLoad;"), 300, "the model loaded")
+        assert s.execute("return window.__headerLoad;").get("ok"), s.execute("return window.__headerLoad;")
+        local = s.invoke("create_chat", {"modelRef": f"local:{model}"})
+        s.invoke("set_chat_tools", {"chatId": local["id"], "enabled": c.default_tools})
+        s.invoke("rename_chat", {"chatId": local["id"], "title": "Header local"})
+        open_chat("Header local")
+        s.wait_for(lambda: "Remembers about" in s.execute("return document.querySelector('main header button[aria-label=\"Model menu\"]').title;"),
+                   20, "the ready line")
+        both_modes(local["id"], "ready-empty", True)
+        loading(local["id"], "loading-empty")
+        # The chat with messages on the local model: the meter has its longest form.
+        s.invoke("set_chat_model", {"chatId": chat, "modelRef": f"local:{model}"})
+        open_chat("Header remote")
+        # The meter against the local model's size ("… 60 of 32,768 tokens used …"), with its bar.
+        s.wait_for(lambda: " of " in (s.execute(
+            "const m = document.querySelector('main header [title^=\"How much it can remember\"]'); return m ? m.title : '';") or ""),
+            10, "the meter against the local model's size")
+        both_modes(chat, "ready-messages", True)
+        loading(chat, "loading-messages")
+        notes.extend("miss: " + p for p in problems)
+        assert not problems, f"{len(problems)} misses (each in a note)"
+    finally:
+        for chat_id in (chat,):
+            try:
+                s.invoke("set_chat_approval_mode", {"chatId": chat_id, "mode": "ask"})
+            except WebDriverError:
+                pass
+        try:
+            s.invoke("unload_model", {})
+        except WebDriverError:
+            pass
+
+
+PROBES.append(p_header_layout)  # [0.0.6 integration, header-layout]
+
+
+@probe("share-webp")
+def p_share_webp(c, notes):
+    """[0.0.6 webp-other-paths] WebP pictures that other apps send through the sharing port,
+    in the real app with a real vision model (TEST_VISION_GGUF, its mmproj file beside it;
+    skipped without one). llama-server cannot read WebP (it never runs ffmpeg), so the proxy
+    turns each one into JPEG or PNG with the app's picture worker before forwarding, in all
+    three API shapes, and the model answers. A crafted one that would take gigabytes to
+    decode is refused with a plain message in the API's own shape, its audit row names the
+    rule, and the proxy goes on answering."""
+    import base64
+    s = c.s
+    model = os.environ.get("TEST_VISION_GGUF", "")
+    if not os.path.isfile(model):
+        notes.append("skipped: set TEST_VISION_GGUF to a vision model with its mmproj file beside it")
+        return
+
+    def b64(data):
+        return base64.b64encode(data).decode()
+
+    s.invoke("unload_model", {})
+    s.invoke("import_model", {"path": model})
+    s.execute(
+        """
+        const [path] = arguments;
+        window.__webpLoad = 'pending';
+        window.__TAURI_INTERNALS__.invoke('load_local_model', {path, settings: null})
+          .then(() => { window.__webpLoad = {ok: true}; })
+          .catch(e => { window.__webpLoad = {ok: false, error: e}; });
+        """,
+        model)
+    s.wait_for(lambda: s.execute("return window.__webpLoad !== 'pending';"), 240, "the model load")
+    loaded = s.execute("return window.__webpLoad;")
+    assert loaded.get("ok"), loaded
+    on = s.invoke("set_share_enabled", {"on": True})
+    port = on["port"]
+    key = s.invoke("reveal_share_key")
+    try:
+        ask = "What colours are in this picture? Answer in three words."
+        halves = "data:image/webp;base64," + b64(WEBP_HALVES)
+        requests = [
+            ("/v1/chat/completions", True, {"model": "x", "max_tokens": 16, "messages": [{"role": "user", "content": [
+                {"type": "text", "text": ask}, {"type": "image_url", "image_url": {"url": halves}}]}]}),
+            ("/v1/messages", False, {"model": "x", "max_tokens": 16, "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": b64(WEBP_CLEAR)}},
+                {"type": "text", "text": ask}]}]}),
+            ("/v1/responses", True, {"model": "x", "max_output_tokens": 16, "input": [{"role": "user", "content": [
+                {"type": "input_text", "text": ask}, {"type": "input_image", "image_url": halves}]}]}),
+        ]
+        for path, bearer, body in requests:
+            status, text = share_call(port, "POST", path, body, key=key, bearer=bearer)
+            assert status == 200, (path, status, text[:400])
+            notes.append(f"{path} with a WebP picture: 200 {text[:200]!r}")
+
+        crafted = webp_many_groups(65_536)
+        started = time.time()
+        status, text = share_call(port, "POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [
+            {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/webp",
+                                                                       "data": b64(crafted)}}]}]}, key=key)
+        took = time.time() - started
+        answer = json.loads(text)
+        assert status == 400 and answer["type"] == "error", (status, text[:400])
+        assert answer["error"] == {"type": "invalid_request_error", "message":
+                                   "A WebP picture in this request could not be read. Send a PNG or JPEG instead."}, answer
+        notes.append(f"crafted WebP ({len(crafted):,} bytes): refused after {took:.1f} s: {answer['error']['message']!r}")
+        status, text = share_call(port, "POST", "/v1/chat/completions", {"model": "x", "max_tokens": 8, "messages": [
+            {"role": "user", "content": "Say hi."}]}, key=key, bearer=True)
+        assert status == 200, ("the proxy stopped answering after the crafted picture", status, text[:300])
+
+        def rows():
+            return [a for a in s.invoke("list_audit", {"filter": {"limit": 500}}) if a["server"] == "other-apps"]
+        s.wait_for(lambda: all(a["result_status"] for a in rows()), 15, "the audit rows")
+        refused = [a for a in rows() if a["result_summary"] == "Refused: a WebP picture could not be read."]
+        assert len(refused) == 1 and refused[0]["decision"] == "refused_by_policy", refused
+        assert "UklGR" not in json.dumps(rows()), "a picture is in the audit log"
+    finally:
+        s.invoke("set_share_enabled", {"on": False})
+        s.invoke("unload_model", {})
+
+
+PROBES.append(p_share_webp)  # [0.0.6 integration, webp-other-paths]
 
 
 @probe("reverse-describe")

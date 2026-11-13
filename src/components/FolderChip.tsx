@@ -248,12 +248,13 @@ export function FolderChip(props: { chatId: number; workingFolder: string | null
           }
         >
           <Icon size={15} className="shrink-0" aria-hidden />
-          {/* Below @2xl (a header under 42rem: a window under about 950 pixels with the sidebar
-              open) the chip keeps the folder's name and the count, and in Full access its red
-              icon while the mode button beside it still reads "Full access"; the spec's words
-              come back above it. The accessible name and the title always hold all of them. */}
+          {/* [0.0.6 header-layout] "Whole computer" and "No folder · Choose" show in words at
+              every width (the header moves its buttons to a second row to keep room for them).
+              Below @2xl (a header under 42rem: a window under about 950 pixels with the sidebar
+              open) only " more" waits, after the folder's name and the count. The accessible
+              name and the title always hold all of it. */}
           {full ? (
-            <span className="hidden @2xl:inline">{WHOLE_COMPUTER}</span>
+            <span>{WHOLE_COMPUTER}</span>
           ) : working ? (
             <>
               <bdi dir="ltr" className="max-w-[5rem] truncate @3xl:max-w-[14rem]">
@@ -273,10 +274,8 @@ export function FolderChip(props: { chatId: number; workingFolder: string | null
             folders && (
               <span>
                 No folder
-                <span className="hidden @2xl:inline">
-                  {" · "}
-                  <span className="text-accent">Choose</span>
-                </span>
+                {" · "}
+                <span className="text-accent">Choose</span>
               </span>
             )
           )}

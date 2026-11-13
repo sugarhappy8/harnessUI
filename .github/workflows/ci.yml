@@ -65,6 +65,19 @@ jobs:
       - run: python3 scripts/notices.py --check
       # The macOS llama.cpp build needs a Mac; its plan, file names and checks do not.
       - run: python3 scripts/fetch_llama_test.py
+      # Reverse engineering: the pinned downloads (reverse.lock.json) and their fixtures,
+      # offline. The real rea runs in reverse.yml.
+      - run: python3 -I scripts/pin_reverse.py --check && python3 -I scripts/pin_reverse_test.py
+      # Ghidra 12.1.4 was pinned "first-download-only" because GitHub's API could not be read
+      # where it was pinned, and a release build does not offer Ghidra until the digest GitHub
+      # publishes for the asset is checked. This reads it with the workflow's read-only token
+      # and fails if it or the size differs from the lock; the log prints the command that
+      # records the check in the lock (scripts/pin_reverse.py github-digest --record).
+      - name: Ghidra's release digest on GitHub matches reverse.lock.json
+        timeout-minutes: 5
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/pin_reverse.py github-digest --part ghidra
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Cache llama.cpp and the test model
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

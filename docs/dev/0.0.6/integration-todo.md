@@ -101,3 +101,20 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   - `tool_catalog.rs:250` TODO(0.0.6) (tool selection counting words of tool names; rea's
     names) and `attachments.rs:643` TODO(0.0.6) (documents in the mentions' share): decide
     before release, or keep with a reason.
+- **Leftover fixes run C (wf_6a9d631b-ae5) done** (per-chat model switch cancel, WebP on the
+  proxy and tool paths, helper escaping scope, Other apps copy race). Minors found by its
+  reviews, for the final fix round (with the release review's findings):
+  - pick-cancel: picking an endpoint in the chat whose switch waits leaves the wait (the old
+    model is unloaded and the new one loads after the reply although no chat uses it); cancel
+    the wait on any pick in that chat. A wait taken over by a newer wait (two chats picking the
+    same model, or b then c in one chat) can leave a chat on a model that never loaded; keep
+    each chat's model from before its first unfinished switch. Fix the comment ("goes back to
+    the model it had before", which can be an endpoint).
+  - helper escaping: a block tag split by a hidden character is missed when a control or tag
+    character and a letter follow its name; the docs and report still say summary hidden
+    characters are escaped, and the Context tab's summary view changed without a note.
+  - webp (proxy): conversion runs before the busy counter and after the upstream snapshot, so
+    D3 and "Used by another app" do not cover it and the request can go to a stopped server;
+    the tool/stored-picture path decides by the label, so a readable PNG/JPEG labelled
+    image/webp is dropped with an untrue note; the per-request total refusal says one picture
+    is too large.

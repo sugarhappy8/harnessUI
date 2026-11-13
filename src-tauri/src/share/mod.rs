@@ -288,6 +288,7 @@ impl Sharing {
             store: env.store.clone(),
             busy: env.busy.clone(),
             counters: self.counters.clone(),
+            pictures: crate::attachments::PictureWorker::app(),
         }
     }
 

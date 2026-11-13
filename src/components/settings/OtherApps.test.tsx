@@ -1066,6 +1066,36 @@ describe("OtherApps: setup cards", () => {
     expect(screen.queryByText(OLD_KEY)).toBeNull();
   });
 
+  it("lists an app whose step with the old key was still being copied when the new key was made", async () => {
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    // Codex was set up with the old key.
+    await click(screen.getByRole("button", { name: "Codex" }));
+    await click(firstCopy());
+    // Claude Code's step (with the old key) goes to the clipboard slowly; a new key is made meanwhile.
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    const write = deferred<undefined>();
+    browserClipboard.mockImplementationOnce(() => write.promise);
+    await click(firstCopy());
+    expect(browserClipboard).toHaveBeenLastCalledWith(`$env:A = '${KEY}'\nclaude`);
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    expect(screen.getByText("Apps to set up again: Codex.")).toBeTruthy();
+    // That copy ends: Claude Code now has the old key too.
+    await act(async () => write.resolve(undefined));
+    expect(screen.getByText(OLD_KEY)).toBeTruthy();
+    expect(screen.getByText("Apps to set up again: Claude Code and Codex.")).toBeTruthy();
+    // Codex set up with the new key: the note stays for Claude Code.
+    await click(screen.getByRole("button", { name: "Codex" }));
+    await click(firstCopy());
+    expect(screen.getByText(OLD_KEY)).toBeTruthy();
+    expect(screen.getByText("Apps to set up again: Claude Code.")).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    await click(firstCopy());
+    expect(screen.queryByText(OLD_KEY)).toBeNull();
+    expect(screen.queryByText(/Apps to set up again/)).toBeNull();
+  });
+
   it("forgets a card (and the key in it) when its app is closed or sharing is switched off", async () => {
     statusNow = ON({ modelCtx: 32_768 });
     await show();

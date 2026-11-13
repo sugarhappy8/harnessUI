@@ -28,6 +28,13 @@
 //!   alias, and every image, audio, video or file inline: a `data:` URL or base64, never a
 //!   link or a file id, in all three API shapes and in every field llama-server's media
 //!   loader reads (round 1: `input_audio`, `input_video` and `video_url` too).
+//! - **WebP pictures become JPEG or PNG** (0.0.6 webp-other-paths): llama-server reads WebP
+//!   only through ffmpeg, which the app never lets it start, so every WebP picture (known
+//!   by its first bytes, whatever type it is given) is turned into JPEG or PNG in the
+//!   picture worker (`attachments.rs`: its own process, with its memory, size and time
+//!   limits) after the checks above and before forwarding. At most [`MAX_WEBP_PICTURES`] a
+//!   request and [`MAX_CONVERTED`] bytes of converted pictures in all; one that cannot be
+//!   turned refuses the request with a plain message in the API's own shape.
 //! - **Forwarded with a fixed header list** (`authorization` with the private key,
 //!   `content-type`, `accept`) through a client with no system proxy and no redirects.
 //! - **Answers are cleaned**: `timings`, `system_fingerprint` and cached-token counters are
@@ -578,6 +585,240 @@ fn is_data_url(url: &str) -> bool {
         .is_some_and(|s| s.eq_ignore_ascii_case("data:"))
 }
 
+// ---- WebP pictures (0.0.6 webp-other-paths) ------------------------------------------
+
+/// The most WebP pictures one request may hold; each is turned into JPEG or PNG in the
+/// picture worker before the request is forwarded.
+pub const MAX_WEBP_PICTURES: usize = 32;
+/// What one request's converted pictures may add up to, as base64.
+pub const MAX_CONVERTED: usize = MAX_BODY;
+/// How long turning one request's WebP pictures into JPEG or PNG may take in all (each
+/// picture also has the worker's own time limit).
+const PICTURES_TIMEOUT: Duration = Duration::from_secs(120);
+/// Requests whose WebP pictures are turned at the same time; the others wait their turn, so
+/// the workers cannot take the computer's memory between them.
+const PICTURES_AT_ONCE: usize = 2;
+
+/// Limits on turning one request's WebP pictures (smaller in tests).
+#[derive(Debug, Clone, Copy)]
+struct PictureLimits {
+    count: usize,
+    total: usize,
+    time: Duration,
+}
+
+const PICTURE_LIMITS: PictureLimits = PictureLimits {
+    count: MAX_WEBP_PICTURES,
+    total: MAX_CONVERTED,
+    time: PICTURES_TIMEOUT,
+};
+
+/// Why a request's WebP pictures were not turned into JPEG or PNG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PictureRefusal {
+    /// More than [`MAX_WEBP_PICTURES`].
+    TooMany,
+    /// Not valid base64, broken, larger than the picture worker's limits, too slow, or the
+    /// worker failed.
+    Unreadable,
+    /// Larger than 20 MB once turned, or the turned pictures over [`MAX_CONVERTED`] in all.
+    TooLarge,
+}
+
+impl PictureRefusal {
+    fn message(self) -> &'static str {
+        match self {
+            Self::TooMany => {
+                "This request has more than 32 WebP pictures. Send PNG or JPEG pictures instead."
+            }
+            Self::Unreadable => {
+                "A WebP picture in this request could not be read. Send a PNG or JPEG instead."
+            }
+            Self::TooLarge => {
+                "A WebP picture in this request is too large to turn into PNG or JPEG. Send a smaller picture, or a PNG or JPEG."
+            }
+        }
+    }
+
+    /// What the audit row says (never anything from the request itself).
+    fn audit_summary(self) -> &'static str {
+        match self {
+            Self::TooMany => "Refused: more than 32 WebP pictures.",
+            Self::Unreadable => "Refused: a WebP picture could not be read.",
+            Self::TooLarge => "Refused: a WebP picture was too large to turn into PNG or JPEG.",
+        }
+    }
+}
+
+/// A place in a request where llama-server reads a picture from.
+enum PictureSlot<'a> {
+    /// `image_url` (OpenAI Chat's `url` in it, or OpenAI Responses' string): a `data:` URL
+    /// or plain base64.
+    Url(&'a mut String),
+    /// An Anthropic `source` of type `base64` (`media_type` and `data`).
+    Source(&'a mut Map<String, Value>),
+}
+
+impl PictureSlot<'_> {
+    /// The base64 of the picture here when it is a WebP file (by its bytes).
+    fn webp(&self) -> Option<&str> {
+        let data = match self {
+            Self::Url(url) if is_data_url(url) => {
+                let (head, data) = url.split_once(',')?;
+                let base64 = head
+                    .get(head.len().saturating_sub(6)..)
+                    .is_some_and(|end| end.eq_ignore_ascii_case("base64"));
+                base64.then_some(data)?
+            }
+            Self::Url(url) => url.as_str(),
+            Self::Source(source) => source.get("data")?.as_str()?,
+        };
+        crate::attachments::base64_is_webp(data).then_some(data)
+    }
+
+    /// Puts the turned picture here.
+    fn replace(self, mime: &str, data: String) {
+        match self {
+            Self::Url(url) => *url = format!("data:{mime};base64,{data}"),
+            Self::Source(source) => {
+                source.insert("media_type".into(), json!(mime));
+                source.insert("data".into(), Value::String(data));
+            }
+        }
+    }
+}
+
+/// Calls `f` on every picture slot of `req`, wherever [`check_inline`] looks, in the same
+/// order every time.
+fn each_picture(api: Api, req: &mut Value, f: &mut dyn FnMut(PictureSlot<'_>)) {
+    let Some(req) = req.as_object_mut() else {
+        return;
+    };
+    if api == Api::Responses {
+        picture_parts(req.get_mut("input"), f);
+        return;
+    }
+    if api.anthropic() {
+        picture_parts(req.get_mut("system"), f);
+    }
+    if let Some(Value::Array(messages)) = req.get_mut("messages") {
+        for message in messages {
+            picture_parts(message.get_mut("content"), f);
+        }
+    }
+}
+
+fn picture_parts(content: Option<&mut Value>, f: &mut dyn FnMut(PictureSlot<'_>)) {
+    if let Some(Value::Array(parts)) = content {
+        for part in parts {
+            picture_part(part, f);
+        }
+    }
+}
+
+/// One content part, item or block ([`check_part`] lists the shapes).
+fn picture_part(part: &mut Value, f: &mut dyn FnMut(PictureSlot<'_>)) {
+    let Some(obj) = part.as_object_mut() else {
+        return;
+    };
+    match obj.get_mut("image_url") {
+        Some(Value::String(url)) => f(PictureSlot::Url(url)),
+        Some(Value::Object(image)) => {
+            if let Some(Value::String(url)) = image.get_mut("url") {
+                f(PictureSlot::Url(url));
+            }
+        }
+        _ => {}
+    }
+    if let Some(Value::Object(source)) = obj.get_mut("source") {
+        let kind = source.get("type").and_then(Value::as_str);
+        let (base64, nested) = (kind == Some("base64"), kind == Some("content"));
+        if base64 {
+            f(PictureSlot::Source(source));
+        } else if nested {
+            picture_parts(source.get_mut("content"), f);
+        }
+    }
+    for key in ["content", "output"] {
+        picture_parts(obj.get_mut(key), f);
+    }
+}
+
+/// Turns every WebP picture in `req` into JPEG or PNG with the picture worker, in place
+/// (see the module header); other pictures are left as they are. `at_once` holds back the
+/// requests over [`PICTURES_AT_ONCE`]; a request without WebP pictures never waits.
+pub async fn convert_webp(
+    api: Api,
+    req: &mut Value,
+    worker: &crate::attachments::PictureWorker,
+    at_once: &tokio::sync::Semaphore,
+) -> Result<(), PictureRefusal> {
+    convert_webp_within(api, req, worker, at_once, PICTURE_LIMITS).await
+}
+
+async fn convert_webp_within(
+    api: Api,
+    req: &mut Value,
+    worker: &crate::attachments::PictureWorker,
+    at_once: &tokio::sync::Semaphore,
+    limits: PictureLimits,
+) -> Result<(), PictureRefusal> {
+    use crate::attachments::NotConverted;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    // The WebP pictures, in order: their bytes, or `None` when the base64 does not decode.
+    let mut found = Vec::new();
+    let mut count = 0usize;
+    each_picture(api, req, &mut |slot| {
+        let Some(data) = slot.webp() else {
+            return;
+        };
+        count += 1;
+        if count <= limits.count {
+            let compact: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+            found.push(STANDARD.decode(compact).ok());
+        }
+    });
+    if count > limits.count {
+        return Err(PictureRefusal::TooMany);
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    let _turn = at_once.acquire().await;
+    let turning = async {
+        let mut turned = Vec::with_capacity(found.len());
+        let mut total = 0usize;
+        for bytes in found {
+            let bytes = bytes.ok_or(PictureRefusal::Unreadable)?;
+            let (mime, picture) = worker.convert(&bytes).await.map_err(|e| match e {
+                NotConverted::TooLarge => PictureRefusal::TooLarge,
+                NotConverted::Unreadable(_) => PictureRefusal::Unreadable,
+            })?;
+            let data = STANDARD.encode(picture);
+            total = total.saturating_add(data.len());
+            if total > limits.total {
+                return Err(PictureRefusal::TooLarge);
+            }
+            turned.push((mime, data));
+        }
+        Ok::<_, PictureRefusal>(turned)
+    };
+    let turned = tokio::time::timeout(limits.time, turning)
+        .await
+        .map_err(|_| PictureRefusal::Unreadable)??;
+    // The same walk over the same request meets the same pictures in the same order.
+    let mut turned = turned.into_iter();
+    each_picture(api, req, &mut |slot| {
+        if slot.webp().is_some()
+            && let Some((mime, data)) = turned.next()
+        {
+            slot.replace(&mime, data);
+        }
+    });
+    Ok(())
+}
+
 // ---- Cleaning answers --------------------------------------------------------------
 
 /// Token counts seen in an answer, for the audit row.
@@ -1061,11 +1302,15 @@ pub struct Deps {
     pub store: store::Store,
     pub busy: Arc<BusyCounter>,
     pub counters: Arc<Counters>,
+    /// Turns WebP pictures into JPEG or PNG (0.0.6 webp-other-paths).
+    pub pictures: crate::attachments::PictureWorker,
 }
 
 struct Shared {
     deps: Deps,
     client: reqwest::Client,
+    /// Requests whose WebP pictures are being turned ([`PICTURES_AT_ONCE`]).
+    pictures_at_once: tokio::sync::Semaphore,
 }
 
 impl Shared {
@@ -1141,7 +1386,11 @@ pub fn serve(listener: TcpListener, deps: Deps) -> io::Result<Running> {
         .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
         .build()
         .map_err(io::Error::other)?;
-    let shared = Arc::new(Shared { deps, client });
+    let shared = Arc::new(Shared {
+        deps,
+        client,
+        pictures_at_once: tokio::sync::Semaphore::new(PICTURES_AT_ONCE),
+    });
     let cancel = CancellationToken::new();
     let task = tokio::spawn(accept_loop(listener, shared, cancel.clone()));
     Ok(Running { port, cancel, task })
@@ -1363,7 +1612,7 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
             .await;
         }
     };
-    let rebuilt = match rebuild_request(api, &body, n_ctx) {
+    let mut rebuilt = match rebuild_request(api, &body, n_ctx) {
         Ok(rebuilt) => rebuilt,
         Err(bad) => {
             return unforwarded(
@@ -1376,6 +1625,18 @@ async fn forward(req: Request<Incoming>, api: Api, shared: &Shared) -> Response<
         }
     };
     drop(body);
+    // [0.0.6 webp-other-paths] llama-server cannot read WebP: such pictures become JPEG or PNG.
+    let pictures = &shared.deps.pictures;
+    let turned = convert_webp(api, &mut rebuilt.body, pictures, &shared.pictures_at_once).await;
+    if let Err(refusal) = turned {
+        return unforwarded(
+            StatusCode::BAD_REQUEST,
+            refusal.message(),
+            None,
+            NotForwarded::Refused(refusal.audit_summary()),
+        )
+        .await;
+    }
     let fail = |status: StatusCode, message: &str| {
         json_response(status, &error_body(Some(api), status, message, None))
     };
@@ -2695,5 +2956,180 @@ mod tests {
         let body = models_body();
         assert_eq!(body["data"][0]["id"], json!(MODEL_ALIAS));
         assert_eq!(body["data"].as_array().unwrap().len(), 1);
+    }
+
+    // ---- WebP pictures (0.0.6 webp-other-paths) --------------------------------------
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+    }
+
+    fn webp_count(api: Api, body: &Value) -> usize {
+        let mut body = body.clone();
+        let mut n = 0;
+        each_picture(api, &mut body, &mut |slot| {
+            n += usize::from(slot.webp().is_some())
+        });
+        n
+    }
+
+    /// [0.0.6 webp-other-paths] Every place llama-server reads a picture from is looked at,
+    /// in all three shapes, and a WebP file is known by its bytes whatever type it is given;
+    /// other pictures, text and tool-call arguments are not touched.
+    #[test]
+    fn webp_pictures_are_found_wherever_llama_server_reads_a_picture() {
+        use crate::attachments::tests::LOSSY_WEBP;
+        let webp = b64(LOSSY_WEBP);
+        let mut spaced = webp.clone();
+        spaced.insert(6, '\n');
+        let url = format!("data:image/webp;base64,{webp}");
+        let as_png = format!("data:image/png;base64,{spaced}");
+        let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA";
+        let source =
+            |data: &str| json!({"type": "base64", "media_type": "image/png", "data": data});
+
+        let chat = json!({"messages": [
+            {"role": "system", "content": "data:image/webp;base64,UklGRlwAAABXRUJQ"},
+            {"role": "user", "content": [
+                {"type": "text", "text": url},
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "image_url", "image_url": {"url": as_png}},
+                {"type": "image_url", "image_url": webp},
+                {"type": "image_url", "image_url": {"url": png}},
+                {"type": "image_url", "image_url": {"url": format!("data:image/webp,{webp}")}},
+                {"type": "input_audio", "input_audio": {"data": webp, "format": "wav"}},
+            ]},
+            {"role": "assistant", "tool_calls": [{"id": "c", "type": "function",
+                "function": {"name": "f", "arguments": json!({"image_url": url}).to_string()}}]},
+            {"role": "tool", "tool_call_id": "c", "content": [{"type": "image_url", "image_url": {"url": url}}]},
+        ]});
+        assert_eq!(webp_count(Api::ChatCompletions, &chat), 4);
+
+        let responses = json!({"input": [
+            {"role": "user", "content": [{"type": "input_image", "image_url": url}, {"type": "input_image", "image_url": png}]},
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": json!({"image_url": url}).to_string()},
+            {"type": "function_call_output", "call_id": "c", "output": [{"type": "input_image", "image_url": as_png}]},
+        ]});
+        assert_eq!(webp_count(Api::Responses, &responses), 2);
+        assert_eq!(webp_count(Api::Responses, &json!({"input": url})), 0);
+
+        let messages = json!({
+            "system": [{"type": "image", "source": source(&webp)}],
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": source(&spaced)},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAA"}},
+                {"type": "tool_use", "id": "t", "name": "f", "input": {"image_url": url, "source": source(&webp)}},
+                {"type": "tool_result", "tool_use_id": "t", "content": [{"type": "image", "source": source(&webp)}]},
+                {"type": "document", "source": {"type": "content", "content": [{"type": "image", "source": source(&webp)}]}},
+                {"type": "image", "source": {"type": "url", "url": url}},
+            ]}],
+        });
+        assert_eq!(webp_count(Api::Messages, &messages), 4);
+        assert_eq!(webp_count(Api::CountTokens, &messages), 4);
+        // OpenAI shapes have no Anthropic system blocks.
+        assert_eq!(
+            webp_count(Api::ChatCompletions, &json!({"system": messages["system"]})),
+            0
+        );
+    }
+
+    /// [0.0.6 webp-other-paths] The limits on turning one request's WebP pictures hold, and a
+    /// refused request is left as it came: more pictures than allowed (refused before any is
+    /// decoded), converted pictures over the total, too slow, and base64 that does not
+    /// decode past a WebP start. Within them, every picture is turned.
+    #[tokio::test]
+    async fn the_limits_on_turning_webp_pictures_hold() {
+        use crate::attachments::tests::{LOSSY_WEBP, test_worker};
+        let worker = test_worker("convert");
+        let no_worker = test_worker("hang");
+        let at_once = tokio::sync::Semaphore::new(PICTURES_AT_ONCE);
+        let url = format!("data:image/webp;base64,{}", b64(LOSSY_WEBP));
+        let part = |url: &str| json!({"type": "image_url", "image_url": {"url": url}});
+        let two = json!({"messages": [{"role": "user", "content": [part(&url), part(&url)]}]});
+        let limits = |count, total, time| PictureLimits { count, total, time };
+        let minute = Duration::from_secs(60);
+        for (worker, limits, body, refusal) in [
+            (
+                &no_worker,
+                limits(1, MAX_CONVERTED, minute),
+                &two,
+                PictureRefusal::TooMany,
+            ),
+            (
+                &worker,
+                limits(2, 100, minute),
+                &two,
+                PictureRefusal::TooLarge,
+            ),
+            (
+                &no_worker,
+                limits(2, MAX_CONVERTED, Duration::from_millis(300)),
+                &two,
+                PictureRefusal::Unreadable,
+            ),
+            (
+                &worker,
+                limits(2, MAX_CONVERTED, minute),
+                &json!({"messages": [{"role": "user", "content": [part("data:image/webp;base64,UklGRlwAAABXRUJQ!!!!")]}]}),
+                PictureRefusal::Unreadable,
+            ),
+        ] {
+            let mut sent = body.clone();
+            let got =
+                convert_webp_within(Api::ChatCompletions, &mut sent, worker, &at_once, limits)
+                    .await;
+            assert_eq!(got, Err(refusal));
+            assert_eq!(&sent, body, "{refusal:?}");
+        }
+        let mut sent = two.clone();
+        let got = convert_webp_within(
+            Api::ChatCompletions,
+            &mut sent,
+            &worker,
+            &at_once,
+            limits(2, MAX_CONVERTED, minute),
+        )
+        .await;
+        assert_eq!(got, Ok(()));
+        for n in 0..2 {
+            let url = sent["messages"][0]["content"][n]["image_url"]["url"]
+                .as_str()
+                .unwrap();
+            assert!(url.starts_with("data:image/jpeg;base64,/9j/"), "{url:.40}");
+        }
+        // Nothing to turn: no worker is started (this one would never answer).
+        let mut plain = json!({"messages": [{"role": "user", "content": [part("data:image/png;base64,iVBORw0KGgo=")]}]});
+        let started = std::time::Instant::now();
+        assert_eq!(
+            convert_webp(Api::ChatCompletions, &mut plain, &no_worker, &at_once).await,
+            Ok(())
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// [0.0.6 webp-other-paths] The refusals are in plain words and name the real limit.
+    #[test]
+    fn the_webp_refusals_are_plain_and_name_the_limit() {
+        let all = [
+            PictureRefusal::TooMany,
+            PictureRefusal::Unreadable,
+            PictureRefusal::TooLarge,
+        ];
+        for refusal in all {
+            for text in [refusal.message(), refusal.audit_summary()] {
+                assert!(
+                    text.contains("WebP") && text.ends_with('.') && !text.contains('!'),
+                    "{text}"
+                );
+            }
+        }
+        let limit = MAX_WEBP_PICTURES.to_string();
+        assert!(PictureRefusal::TooMany.message().contains(&limit));
+        assert!(PictureRefusal::TooMany.audit_summary().contains(&limit));
+        assert!(
+            PictureRefusal::Unreadable
+                .message()
+                .ends_with("Send a PNG or JPEG instead.")
+        );
     }
 }

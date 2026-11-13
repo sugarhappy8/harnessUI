@@ -152,7 +152,7 @@ fn webp_sides_within_limits(bytes: &[u8]) -> bool {
 
 /// [0.0.6] Why a WebP picture was not turned into JPEG or PNG.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum NotConverted {
+pub(crate) enum NotConverted {
     /// Broken, larger than the decoding limits, too slow, or the worker failed: what went
     /// wrong, for the details.
     Unreadable(String),
@@ -292,7 +292,7 @@ pub fn picture_worker_main() -> ! {
 /// [`PICTURE_WORKER_FLAG`] and no other argument, through the runtime spawn module; the
 /// picture goes in on stdin and comes back on stdout. Tests start their own binary instead.
 #[derive(Debug, Clone)]
-struct PictureWorker {
+pub(crate) struct PictureWorker {
     program: PathBuf,
     args: Vec<std::ffi::OsString>,
     env: runtime::EnvSpec,
@@ -304,7 +304,7 @@ struct PictureWorker {
 impl PictureWorker {
     /// The app's own binary as the worker. Without its path the worker cannot start, and
     /// the picture counts as unreadable.
-    fn app() -> Self {
+    pub(crate) fn app() -> Self {
         Self::of(std::env::current_exe().unwrap_or_default())
     }
 
@@ -322,7 +322,7 @@ impl PictureWorker {
     /// ([`picture_worker_main`]), so a crafted file can cost the app neither its memory
     /// nor its life. A worker that fails, aborts or takes longer than its time is killed
     /// with its process tree, and the picture counts as unreadable.
-    async fn convert(&self, webp: &[u8]) -> Result<(String, Vec<u8>), NotConverted> {
+    pub(crate) async fn convert(&self, webp: &[u8]) -> Result<(String, Vec<u8>), NotConverted> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let failed = NotConverted::Unreadable;
         let cwd = self
@@ -423,9 +423,24 @@ const PICTURE_LEFT_OUT: &str = "[a WebP picture could not be read and was left o
 const PICTURE_LEFT_OUT_TOO_LARGE: &str =
     "[a WebP picture was left out: it is larger than 20 MB as JPEG or PNG]";
 
+/// [0.0.6 webp-other-paths] Whether base64 `data` holds a WebP file, read from its first 12
+/// bytes (whitespace skipped). llama-server goes by a picture's bytes, not by the type it is
+/// given, so a WebP picture labelled PNG or JPEG fails there as surely as one labelled WebP.
+pub(crate) fn base64_is_webp(data: &str) -> bool {
+    let head: String = data
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .take(16)
+        .collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(head)
+        .is_ok_and(|b| b.len() == 12 && b.starts_with(b"RIFF") && b.ends_with(b"WEBP"))
+}
+
 /// [0.0.6] A picture from a tool or stored inline in a chat, as the model gets it.
 enum InlinePicture {
-    /// Not WebP (or not base64, which the agent replaces with its own note): sent as it is.
+    /// Not WebP by its type or its first bytes (or not base64, which the agent replaces
+    /// with its own note): sent as it is.
     Keep,
     /// The MIME type and base64 of the picture as JPEG or PNG.
     Converted(String, String),
@@ -435,7 +450,7 @@ enum InlinePicture {
 }
 
 async fn inline_picture(worker: &PictureWorker, mime: &str, data_base64: &str) -> InlinePicture {
-    if !mime.trim().eq_ignore_ascii_case("image/webp") {
+    if !mime.trim().eq_ignore_ascii_case("image/webp") && !base64_is_webp(data_base64) {
         return InlinePicture::Keep;
     }
     let compact: String = data_base64

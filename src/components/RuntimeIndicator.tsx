@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { DropdownMenu } from "radix-ui";
-import { ChevronDown, RotateCcw, Settings2, PowerOff } from "lucide-react";
+import { RotateCcw, Settings2, PowerOff } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import type { LoadStage, ModelBusy, RuntimeStatus, ShareStatus } from "../lib/types";
 import {
@@ -155,22 +155,44 @@ function Status() {
 
   if (runtime.state === "starting") {
     const pct = runtime.progress !== null ? Math.round(runtime.progress * 100) : null;
+    const stage = runtime.loadStage ? ` · ${loadStageWords(runtime.loadStage)}` : "";
+    const end = pct !== null ? ` ${pct}%` : "…";
+    // [0.0.6 header-layout] The bar first, where the ready line's dot will be, then the words
+    // on a row one line high: what does not fit moves onto its hidden second line whole (the
+    // percentage, which the bar also shows, then the stage), so "Loading model" is never cut.
+    // The whole line is the tooltip. The line asks the header for the bar and "Loading model…"
+    // only (`min-w`, a size container), and takes what the row has left.
     return (
-      <div className="enter-fade flex min-w-0 items-center gap-2 text-xs whitespace-nowrap text-fg-muted" aria-live="polite">
-        <span className="truncate">
-          Loading model{runtime.loadStage ? ` · ${loadStageWords(runtime.loadStage)}` : ""}
-          {pct !== null ? ` ${pct}%` : "…"}
-        </span>
+      <div
+        data-header-state="loading"
+        data-loading-line
+        title={`Loading model${stage}${end}`}
+        className="@container/loading enter-fade flex min-w-[10rem] flex-1 items-center gap-2 text-xs whitespace-nowrap text-fg-muted"
+        aria-live="polite"
+      >
         {pct !== null ? (
-          <div className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-bg-muted" aria-hidden>
+          <div className="h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-bg-muted" aria-hidden>
             <div
               className="brand-gradient h-full rounded-full transition-[width] duration-300 ease-out"
               style={{ width: `${pct}%` }}
             />
           </div>
         ) : (
-          <div className="progress-indeterminate h-1.5 w-24 shrink-0 rounded-full bg-bg-muted" aria-hidden />
+          <div className="progress-indeterminate h-1.5 w-12 shrink-0 rounded-full bg-bg-muted" aria-hidden />
         )}
+        <span className="flex h-4 min-w-0 flex-wrap items-center overflow-hidden leading-4">
+          <span data-loading="start" className="shrink-0">
+            Loading model
+          </span>
+          {stage && (
+            <span data-loading="stage" className="whitespace-pre">
+              {stage}
+            </span>
+          )}
+          <span data-loading="progress" className="whitespace-pre">
+            {end}
+          </span>
+        </span>
       </div>
     );
   }
@@ -180,92 +202,95 @@ function Status() {
     const top = notes[0] ?? null;
     const run = (action: NoteAction) =>
       action === "reload" ? reload(true) : action === "apply" ? reload(false) : settings();
-    // The ready line in a header that other labels crowd (D1). The indicator is a size
-    // container: it asks for the room its whole line and "· Change" need, gives way in step
-    // with the model picker beside it, and never makes the header wider. What it shows
-    // follows the room it gets: "Remembers about N words" with the reason, which shortens
-    // first; then "About N words"; then "N words" (the number always whole). "· Change"
-    // and "· Used by another app" show only when they fit whole (they wrap onto a clipped
-    // second row otherwise). The whole line is always in the menu and the tooltip.
+    // The ready line (D1) in a header that other parts crowd ([0.0.6 header-layout]). The
+    // indicator is a size container that asks the header only for "About N words" (`min-w`;
+    // the number alone in the narrowest header, more with a note under it) and takes what the
+    // row has left; the header moves its buttons to a second row before it gives less. What it shows follows the room it gets,
+    // in whole phrases, never cut inside a word: "Remembers about N words" with its reason, then
+    // without the reason, then "About N words", then "N words". The reason, "· Used by another
+    // app" and "· Change" sit on rows one line high that move what does not fit whole onto a
+    // hidden second line ("· Change" goes first, then the reason). The whole line is always in
+    // the menu and the tooltip, and "Change" is the menu's Model settings….
     const parts = runtime.nCtx ? readyLineParts(runtime.nCtx, runtime.ctxSource) : null;
     const full = parts ? parts.remembers + parts.reason : "Ready";
     const shared = share?.inUse ?? false;
-    // About 0.42rem a character of the line, plus the dot, the arrow and "· Change"; a
-    // second line (a note, or the waiting line) asks for more.
-    const room = `calc(${((full.length + (shared ? 22 : 0)) * 0.42).toFixed(2)}rem + 5.75rem)`;
-    const basis = top || waitingLine ? `max(28rem, ${room})` : room;
     return (
       <div
-        className="@container/ready enter-fade flex min-w-0 shrink flex-col justify-center gap-0.5 text-xs leading-tight"
-        style={{ flexBasis: basis }}
+        data-header-state="ready"
+        className={
+          "@container/ready enter-fade flex flex-1 flex-col justify-center gap-0.5 text-xs leading-tight " +
+          (top || waitingLine ? "min-w-[12rem]" : "min-w-[6.25rem] @md:min-w-[9.5rem]")
+        }
       >
-        <div className="flex h-4 min-w-0 flex-wrap content-start items-center gap-x-1.5 overflow-hidden whitespace-nowrap text-fg-muted">
-          <span className="flex max-w-full min-w-0 items-center gap-1">
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-hidden />
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <button
-                  type="button"
-                  aria-label="Model menu"
-                  title={[full, shared ? "Used by another app" : null, runtime.modelPath].filter(Boolean).join("\n")}
-                  className="flex min-w-0 items-center gap-1 overflow-hidden rounded hover:text-fg focus-visible:underline"
+        <div
+          data-ready-line
+          className="flex h-4 min-w-0 flex-wrap content-start items-center gap-x-1.5 overflow-hidden leading-4 whitespace-nowrap text-fg-muted"
+        >
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                type="button"
+                aria-label="Model menu"
+                title={[full, shared ? "Used by another app" : null, runtime.modelPath].filter(Boolean).join("\n")}
+                className="flex max-w-full min-w-0 items-center gap-1 overflow-hidden rounded hover:text-fg hover:underline focus-visible:underline"
+              >
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-hidden />
+                {parts ? (
+                  <>
+                    <span className="hidden h-4 min-w-0 flex-wrap items-center overflow-hidden leading-4 @min-[13.5rem]/ready:flex">
+                      <span className="shrink-0" data-ready="remembers">
+                        {parts.remembers}
+                      </span>
+                      {parts.reason && (
+                        <span className="whitespace-pre" data-ready="reason">
+                          {parts.reason}
+                        </span>
+                      )}
+                    </span>
+                    <span className="hidden @min-[9.5rem]/ready:inline @min-[13.5rem]/ready:hidden" data-ready="about">
+                      {parts.about}
+                    </span>
+                    <span className="@min-[9.5rem]/ready:hidden" data-ready="words">
+                      {parts.words}
+                    </span>
+                  </>
+                ) : (
+                  <span>{full}</span>
+                )}
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                align="start"
+                sideOffset={4}
+                className="z-50 max-w-sm min-w-64 rounded-xl border border-border bg-surface p-1.5 shadow-pop"
+              >
+                <DropdownMenu.Label className="px-2.5 py-1 text-xs text-fg-muted">
+                  {runtime.modelName ?? "Local model"} · runs on {backendWords(runtime.backend)}
+                  <span className="block">{full}</span>
+                  {shared && <span className="block text-accent">Used by another app</span>}
+                </DropdownMenu.Label>
+                {notes.map((n) => (
+                  <p key={n.text} className="px-2.5 py-1 text-xs text-warning">
+                    {n.text}
+                  </p>
+                ))}
+                <DropdownMenu.Separator className="my-1 h-px bg-border" />
+                <DropdownMenu.Item className={MENU_ITEM} onSelect={() => reload(true)}>
+                  <RotateCcw size={14} aria-hidden /> Reload
+                </DropdownMenu.Item>
+                <DropdownMenu.Item className={MENU_ITEM} onSelect={settings}>
+                  <Settings2 size={14} aria-hidden /> Model settings…
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className={MENU_ITEM}
+                  onSelect={() => void unloadModel(useApp.getState().runtime).catch(fail)}
                 >
-                  {parts ? (
-                    <>
-                      <span className="hidden min-w-0 @min-[13rem]/ready:flex" data-ready="remembers">
-                        <span className="shrink-0">{parts.remembers}</span>
-                        <span className="min-w-0 overflow-hidden text-ellipsis whitespace-pre">{parts.reason}</span>
-                      </span>
-                      <span
-                        className="hidden min-w-0 truncate @min-[9rem]/ready:inline @min-[13rem]/ready:hidden"
-                        data-ready="about"
-                      >
-                        {parts.about}
-                      </span>
-                      <span className="min-w-0 truncate @min-[9rem]/ready:hidden" data-ready="words">
-                        {parts.words}
-                      </span>
-                    </>
-                  ) : (
-                    <span className="min-w-0 truncate">{full}</span>
-                  )}
-                  {/* In the least room the number keeps the arrow's place. */}
-                  <ChevronDown size={12} className="shrink-0 @max-[9rem]/ready:hidden" aria-hidden />
-                </button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content
-                  align="start"
-                  sideOffset={4}
-                  className="z-50 max-w-sm min-w-64 rounded-xl border border-border bg-surface p-1.5 shadow-pop"
-                >
-                  <DropdownMenu.Label className="px-2.5 py-1 text-xs text-fg-muted">
-                    {runtime.modelName ?? "Local model"} · runs on {backendWords(runtime.backend)}
-                    <span className="block">{full}</span>
-                    {shared && <span className="block text-accent">Used by another app</span>}
-                  </DropdownMenu.Label>
-                  {notes.map((n) => (
-                    <p key={n.text} className="px-2.5 py-1 text-xs text-warning">
-                      {n.text}
-                    </p>
-                  ))}
-                  <DropdownMenu.Separator className="my-1 h-px bg-border" />
-                  <DropdownMenu.Item className={MENU_ITEM} onSelect={() => reload(true)}>
-                    <RotateCcw size={14} aria-hidden /> Reload
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Item className={MENU_ITEM} onSelect={settings}>
-                    <Settings2 size={14} aria-hidden /> Model settings…
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Item
-                    className={MENU_ITEM}
-                    onSelect={() => void unloadModel(useApp.getState().runtime).catch(fail)}
-                  >
-                    <PowerOff size={14} aria-hidden /> Unload to free memory
-                  </DropdownMenu.Item>
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
-          </span>
+                  <PowerOff size={14} aria-hidden /> Unload to free memory
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
           {shared && (
             <span className="flex items-center gap-1.5 text-accent">
               <span aria-hidden>·</span>Used by another app
@@ -316,16 +341,21 @@ function Status() {
       runtime.error?.message ||
       runtime.adjustments.map(adjustmentWords).find((t): t is string => t !== null) ||
       null;
+    // [0.0.6 header-layout] In a crowded header the buttons after "Didn't load" drop whole onto
+    // the row's hidden second line (Try again first); both are in the model menu too (the
+    // gear's Settings for this model, and picking the model again).
     return (
-      <div className="flex min-w-0 flex-col justify-center gap-0.5 text-xs leading-tight">
-        <span className="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
-          <span className="text-danger">Didn't load</span>
-          <span aria-hidden className="text-fg-muted">
-            ·
+      <div data-header-state="failed" className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 text-xs leading-tight">
+        <span className="flex h-4 min-w-0 flex-wrap items-center gap-x-1.5 overflow-hidden leading-4 whitespace-nowrap">
+          <span className="shrink-0 text-danger">Didn't load</span>
+          <span className="flex items-center gap-1.5">
+            <span aria-hidden className="text-fg-muted">
+              ·
+            </span>
+            <button type="button" onClick={settings} className="text-fg-muted underline hover:text-fg">
+              Model settings…
+            </button>
           </span>
-          <button type="button" onClick={settings} className="text-fg-muted underline hover:text-fg">
-            Model settings…
-          </button>
           {runtime.modelPath && (
             <button
               type="button"

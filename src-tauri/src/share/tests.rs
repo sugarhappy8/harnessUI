@@ -205,6 +205,8 @@ impl Harness {
                 store: store.clone(),
                 busy: busy.clone(),
                 counters: counters.clone(),
+                // This test binary as the picture worker (`attachments::tests`).
+                pictures: crate::attachments::tests::test_worker("convert"),
             },
         )
         .unwrap();
@@ -767,6 +769,193 @@ async fn image_links_are_refused_before_forwarding() {
         for part in ["example.com", "169.254", "127.0.0.1:1", "x.png"] {
             assert!(!text.contains(part), "{part} in {text}");
         }
+    }
+}
+
+// ---- WebP pictures (0.0.6 webp-other-paths) ------------------------------------------
+
+fn b64(bytes: &[u8]) -> String {
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+}
+
+/// The picture a `data:` URL or plain base64 holds: its format, read from its bytes, and
+/// its size in pixels.
+fn picture_in(data: &Value) -> (image::ImageFormat, (u32, u32)) {
+    let data = data.as_str().unwrap_or_else(|| panic!("{data}"));
+    let data = data.split_once(',').map_or(data, |(_, d)| d);
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).unwrap();
+    let picture = image::load_from_memory(&bytes).unwrap();
+    (
+        image::guess_format(&bytes).unwrap(),
+        (picture.width(), picture.height()),
+    )
+}
+
+/// [0.0.6 webp-other-paths] llama-server cannot read WebP (it would need ffmpeg, which the
+/// app never lets it start), so a WebP picture another app sends is turned into JPEG
+/// (opaque) or PNG (see-through parts) in the picture worker before the request is
+/// forwarded: in all three API shapes, as a `data:` URL, as plain base64, as an Anthropic
+/// base64 source, inside tool results, and under another type's name (llama-server goes by
+/// the bytes). Other pictures are forwarded as they came.
+#[tokio::test]
+async fn webp_pictures_are_forwarded_as_jpeg_or_png() {
+    use crate::attachments::tests::{LOSSLESS_WEBP, LOSSY_WEBP};
+    use image::ImageFormat::{Jpeg, Png};
+    let h = Harness::new().await;
+    let png = "data:image/png;base64,iVBORw0KGgo=";
+    let webp_url = |bytes: &[u8]| format!("data:image/webp;base64,{}", b64(bytes));
+    let requests = [
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": [
+                {"type": "text", "text": "What is in these?"},
+                {"type": "image_url", "image_url": {"url": webp_url(LOSSY_WEBP)}},
+                {"type": "image_url", "image_url": {"url": png}},
+            ]}]}),
+        ),
+        (
+            "/v1/responses",
+            json!({"input": [
+                {"role": "user", "content": [{"type": "input_image", "image_url": webp_url(LOSSLESS_WEBP)}]},
+                {"type": "function_call_output", "call_id": "c1", "output": [
+                    {"type": "input_image", "image_url": b64(LOSSY_WEBP)}]},
+            ]}),
+        ),
+        (
+            "/v1/messages",
+            json!({"messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": b64(LOSSLESS_WEBP)}},
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(LOSSY_WEBP)}}]},
+            ]}]}),
+        ),
+    ];
+    for (path, body) in &requests {
+        let response = h.post(path, body).send().await.unwrap();
+        let status = response.status();
+        let text = response.text().await.unwrap();
+        assert_eq!(status, 200, "{path}: {text}");
+    }
+    let seen = h.llama.seen();
+    assert_eq!(seen.len(), 3);
+    for s in &seen {
+        let text = s.body.to_string();
+        // "UklGR" is "RIFF" in base64: no WebP file is forwarded, under any name.
+        assert!(
+            !text.contains("image/webp") && !text.contains("UklGR"),
+            "{}: {}",
+            s.target,
+            &text[..text.len().min(300)]
+        );
+    }
+
+    let chat = &seen[0].body["messages"][0]["content"];
+    let url = &chat[1]["image_url"]["url"];
+    assert!(url.as_str().unwrap().starts_with("data:image/jpeg;base64,"));
+    assert_eq!(picture_in(url), (Jpeg, (4, 3)));
+    assert_eq!(chat[2]["image_url"]["url"], png);
+    assert_eq!(chat[0]["text"], "What is in these?");
+
+    let input = &seen[1].body["input"];
+    let url = &input[0]["content"][0]["image_url"];
+    assert!(url.as_str().unwrap().starts_with("data:image/png;base64,"));
+    assert_eq!(picture_in(url), (Png, (3, 2)));
+    let url = &input[1]["output"][0]["image_url"];
+    assert!(url.as_str().unwrap().starts_with("data:image/jpeg;base64,"));
+    assert_eq!(picture_in(url), (Jpeg, (4, 3)));
+
+    let content = &seen[2].body["messages"][0]["content"];
+    let source = &content[0]["source"];
+    assert_eq!(source["type"], "base64");
+    assert_eq!(source["media_type"], "image/png");
+    assert_eq!(picture_in(&source["data"]), (Png, (3, 2)));
+    let source = &content[1]["content"][0]["source"];
+    assert_eq!(source["media_type"], "image/jpeg");
+    assert_eq!(picture_in(&source["data"]), (Jpeg, (4, 3)));
+
+    let rows = h.audit_done(3).await;
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|r| r.result_status.as_deref() == Some("ok")),
+        "{rows:?}"
+    );
+}
+
+/// [0.0.6 webp-other-paths] A WebP picture that cannot be turned into JPEG or PNG is refused
+/// before anything is forwarded, with a plain message in the API's own error shape and an
+/// audit row that names the rule (never anything from the request): a crafted picture far
+/// larger than the limits (refused before it is decoded), a broken one, and more WebP
+/// pictures than one request may hold.
+#[tokio::test]
+async fn webp_pictures_that_cannot_be_turned_are_refused_in_each_apis_shape() {
+    use crate::attachments::tests::{LOSSY_WEBP, plain_webp};
+    let unreadable =
+        "A WebP picture in this request could not be read. Send a PNG or JPEG instead.";
+    let too_many =
+        "This request has more than 32 WebP pictures. Send PNG or JPEG pictures instead.";
+    let h = Harness::new().await;
+    let crafted = b64(&plain_webp(10_000, 8));
+    let webp_part = |data: &str| json!({"type": "image_url", "image_url": {"url": format!("data:image/webp;base64,{data}")}});
+    let many: Vec<Value> = (0..33).map(|_| webp_part(&b64(LOSSY_WEBP))).collect();
+    let cases = [
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": [webp_part(&crafted)]}]}),
+            unreadable,
+        ),
+        (
+            "/v1/messages",
+            json!({"messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": b64(&LOSSY_WEBP[..40])}}]}]}),
+            unreadable,
+        ),
+        (
+            "/v1/responses",
+            json!({"input": [{"role": "user", "content": [{"type": "input_image", "image_url": crafted}]}]}),
+            unreadable,
+        ),
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": many}]}),
+            too_many,
+        ),
+    ];
+    for (path, body, message) in &cases {
+        let response = h
+            .post(path, body)
+            .header("user-agent", "curl/8.5")
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let answer: Value = response.json().await.unwrap();
+        assert_eq!(status, 400, "{path}: {answer}");
+        assert_eq!(answer["error"]["message"], *message, "{path}: {answer}");
+        assert_eq!(answer["error"]["type"], "invalid_request_error", "{answer}");
+        if *path == "/v1/messages" {
+            assert_eq!(answer["type"], "error", "{answer}");
+        } else {
+            assert!(answer["error"]["code"].is_null(), "{answer}");
+        }
+    }
+    assert!(h.llama.seen().is_empty());
+    let rows = h.audit_done(4).await;
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    for row in &rows {
+        assert_eq!(
+            row.decision,
+            store::AuditDecision::RefusedByPolicy,
+            "{row:?}"
+        );
+        assert_eq!(row.result_status.as_deref(), Some("not_run"), "{row:?}");
+        let summary = row.result_summary.as_deref().unwrap_or_default();
+        assert!(
+            summary.starts_with("Refused: ") && summary.contains("WebP"),
+            "{row:?}"
+        );
+        let text = serde_json::to_string(row).unwrap();
+        assert!(!text.contains("UklGR") && !text.contains("data:"), "{text}");
     }
 }
 

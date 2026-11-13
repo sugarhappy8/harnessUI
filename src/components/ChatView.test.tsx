@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ChatDetail, ErrorInfo, MessageDto } from "../lib/types";
+import type { ChatDetail, ErrorInfo, MessageDto, RuntimeStatus } from "../lib/types";
 
 // The header's own components talk to the backend; the chat's layout is what is tested here.
 vi.mock("../lib/ipc", () => ({ isTauri: () => false }));
@@ -192,5 +192,57 @@ describe("the meter", () => {
     expect(contextMeterTitle(2_000, null)).toBe("How much it can remember: 2,000 tokens used (about 1,000 words)");
     render(<ContextMeter used={3_000} nCtx={4_096} />);
     expect(document.querySelector("[title^='How much it can remember: 3,000 of 4,096 tokens used']")).toBeTruthy();
+  });
+});
+
+describe("the header (header-layout)", () => {
+  afterEach(() => {
+    cleanup();
+    useApp.setState({ runtime: null });
+  });
+
+  it("keeps the model and its lines in one group and the chat's buttons in another that wraps under it", () => {
+    useApp.setState({ runtime: { state: "ready", nCtx: 4_096, thinking: true, supportsTools: true } as RuntimeStatus });
+    const answered: MessageDto = { ...message(2, "assistant", "ok"), promptTokens: 50, completionTokens: 10 };
+    show(detail("local:/models/a.gguf", null, [message(1, "user", "hi"), answered]));
+    const header = document.querySelector("main header") as HTMLElement;
+    // jsdom has no layout: the classes are checked here, the real widths (720 to 1,440 pixels)
+    // in the e2e scenario header-layout.
+    expect(header.className.split(" ")).toContain("flex-wrap");
+    const model = header.querySelector("[data-header-model]") as HTMLElement;
+    const controls = header.querySelector("[data-header-controls]") as HTMLElement;
+    expect([...header.children]).toEqual([model, controls]);
+    // The model's group asks for its parts at their shortest and takes the rest of the row; the
+    // buttons keep their width, right-aligned, and wrap among themselves only when a row of
+    // their own is too narrow.
+    for (const c of ["w-min", "grow", "min-w-0"]) expect(model.className.split(" ")).toContain(c);
+    for (const c of ["ml-auto", "flex-wrap", "max-w-full", "justify-end"]) {
+      expect(controls.className.split(" ")).toContain(c);
+    }
+    // The meter and Thinking go with the model; the folder chip, System prompt and Panel with
+    // the buttons.
+    expect(model.contains(document.querySelector("[title^='How much it can remember']"))).toBe(true);
+    expect(model.contains(screen.getByRole("button", { name: "Thinking on" }))).toBe(true);
+    expect(controls.querySelector("[data-folder-chip]")).toBeTruthy();
+    expect(controls.contains(screen.getByRole("button", { name: "System prompt" }))).toBe(true);
+    expect(controls.contains(screen.getByRole("button", { name: "Panel" }))).toBe(true);
+    // Below @7xl Thinking and System prompt show their icon; their names and tooltips keep the words.
+    for (const name of ["Thinking on", "System prompt"]) {
+      const words = screen.getByRole("button", { name }).querySelector("span") as HTMLElement;
+      expect(words.className).toBe("hidden @7xl:inline");
+    }
+  });
+
+  it("shows the meter's numbers by the header's width, every one of them in its tooltip", () => {
+    render(<ContextMeter used={3_000} nCtx={4_096} />);
+    const meter = document.querySelector("[title^='How much it can remember']") as HTMLElement;
+    expect(meter.title).toBe("How much it can remember: 3,000 of 4,096 tokens used (about 2,000 of 3,000 words)");
+    const full = meter.querySelector("[data-meter='full']") as HTMLElement;
+    const short = meter.querySelector("[data-meter='short']") as HTMLElement;
+    expect(full.textContent).toBe("3.0k / 4.1k tokens (73%)");
+    expect(short.textContent).toBe("73%");
+    // All numbers in a wide header, the share in a middle one, the bar alone in the narrowest.
+    expect(full.className).toBe("hidden @6xl:inline");
+    expect(short.className).toBe("hidden @md:inline @6xl:hidden");
   });
 });

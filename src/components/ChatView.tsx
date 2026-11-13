@@ -69,7 +69,15 @@ export function ContextMeter(props: { used: number; nCtx: number | null }) {
       <span className="h-1.5 w-12 overflow-hidden rounded-full bg-bg-muted" aria-hidden>
         <span className={"block h-full rounded-full transition-[width] duration-500 " + tone} style={{ width: `${pct}%` }} />
       </span>
-      {formatCount(props.used)} / {formatCount(props.nCtx)} tokens ({pct}%)
+      {/* [0.0.6 header-layout] By the header's width: every number from @6xl (a window from
+          about 1,430 pixels), the share in a middle header, the bar alone in the narrowest. The
+          tooltip always has them all, in tokens and words. */}
+      <span className="hidden @6xl:inline" data-meter="full">
+        {formatCount(props.used)} / {formatCount(props.nCtx)} tokens ({pct}%)
+      </span>
+      <span className="hidden @md:inline @6xl:hidden" data-meter="short">
+        {pct}%
+      </span>
     </span>
   );
 }
@@ -248,72 +256,82 @@ export function ChatView() {
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
-      <header className="glass @container z-10 flex items-center gap-1.5 border-b border-border px-3 py-2">
-        {/* [0.0.6 item 6] This computer's usage under the model name (WP10e); in a narrow
-            header it keeps room for its icons and their numbers. */}
-        <div className="flex min-w-0 shrink flex-col @max-xl:has-[[data-icons='2']]:min-w-[6.25rem] @max-xl:has-[[data-icons='3']]:min-w-[9rem]">
-          <ModelPicker />
+      {/* [0.0.6 header-layout] Two groups that share one row while they fit and wrap onto two
+          when they do not: the model with what is known about it (its state or ready line, the
+          meter, the reply's speed, Thinking, and this computer's usage under its name, item 6),
+          then the chat's buttons. The model's group asks only for its parts at their shortest
+          (`w-min`: the name at about 12 characters, the ready line's number, the usage line's
+          form for this width) and takes the rest of the row, so the buttons move under it,
+          right-aligned, before anything there is cut. Below @7xl (a window under about 1,560
+          pixels with the sidebar open) Thinking and System prompt show their icon only; the
+          tooltip and the accessible name keep the words. */}
+      <header className="glass @container z-10 flex flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-border px-3 py-2">
+        <div data-header-model className="flex w-min min-w-0 grow flex-col">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <ModelPicker />
+            <RuntimeIndicator />
+            {(used !== null || live?.tokensPerSecond != null || (detail && modelRef?.startsWith("local:") && runtime?.thinking)) && (
+              <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                {used !== null && <ContextMeter used={used} nCtx={nCtx} />}
+                {live?.tokensPerSecond != null && (
+                  <span className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums">
+                    {live.tokensPerSecond.toFixed(1)} tokens/s
+                  </span>
+                )}
+                {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
+                  <button
+                    type="button"
+                    aria-pressed={detail.chat.thinking}
+                    aria-label={`Thinking ${detail.chat.thinking ? "on" : "off"}`}
+                    title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
+                    onClick={() =>
+                      void ipc
+                        .setChatThinking(detail.chat.id, !detail.chat.thinking)
+                        .then(() => openChat(detail.chat.id))
+                        .catch((e) => showError(toErrorInfo(e)))
+                    }
+                    className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted ${detail.chat.thinking ? "text-accent" : "text-fg-muted"}`}
+                  >
+                    <Brain size={15} aria-hidden />
+                    <span className="hidden @7xl:inline">Thinking {detail.chat.thinking ? "on" : "off"}</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           <UsageLine />
         </div>
-        <RuntimeIndicator />
-        <div className="flex-1" />
-        {used !== null && <ContextMeter used={used} nCtx={nCtx} />}
-        {live?.tokensPerSecond != null && (
-          <span className="shrink-0 text-xs whitespace-nowrap text-fg-muted tabular-nums">
-            {live.tokensPerSecond.toFixed(1)} tokens/s
-          </span>
-        )}
-        {detail && modelRef?.startsWith("local:") && runtime?.thinking && (
-          <button
-            type="button"
-            aria-pressed={detail.chat.thinking}
-            aria-label={`Thinking ${detail.chat.thinking ? "on" : "off"}`}
-            title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
-            onClick={() =>
-              void ipc
-                .setChatThinking(detail.chat.id, !detail.chat.thinking)
-                .then(() => openChat(detail.chat.id))
-                .catch((e) => showError(toErrorInfo(e)))
-            }
-            className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted ${detail.chat.thinking ? "text-accent" : "text-fg-muted"}`}
-          >
-            <Brain size={15} aria-hidden />
-            <span className="hidden @3xl:inline">Thinking {detail.chat.thinking ? "on" : "off"}</span>
-          </button>
-        )}
         {detail && (
-          <ToolsPanel
-            chatId={detail.chat.id}
-            nCtx={nCtx}
-            workingFolder={detail.chat.workingFolder ?? null}
-            unsupported={!!modelRef?.startsWith("local:") && runtime?.state === "ready" && !runtime.supportsTools}
-          />
-        )}
-        {detail && <FolderChip chatId={detail.chat.id} workingFolder={detail.chat.workingFolder ?? null} />}
-        {detail && <ApprovalModeMenu chatId={detail.chat.id} />}
-        {detail && (
-          <button
-            type="button"
-            onClick={() => setPromptOpen(true)}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap text-fg-muted hover:bg-bg-muted hover:text-fg"
-            title="System prompt"
-            aria-label="System prompt"
-          >
-            <FileText size={15} aria-hidden />
-            <span className="hidden @3xl:inline">System prompt</span>
-          </button>
-        )}
-        {detail && (
-          <button
-            type="button"
-            onClick={() => (workbench.open ? closeWorkbench() : openWorkbench())}
-            aria-pressed={workbench.open}
-            aria-label="Panel"
-            title="Artifacts, task, sources and context beside the chat"
-            className={`flex shrink-0 items-center rounded-lg p-1.5 hover:bg-bg-muted ${workbench.open ? "text-accent" : "text-fg-muted hover:text-fg"}`}
-          >
-            <PanelRight size={16} aria-hidden />
-          </button>
+          <div data-header-controls className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1 @md:gap-1.5">
+            <ToolsPanel
+              chatId={detail.chat.id}
+              nCtx={nCtx}
+              workingFolder={detail.chat.workingFolder ?? null}
+              unsupported={!!modelRef?.startsWith("local:") && runtime?.state === "ready" && !runtime.supportsTools}
+            />
+            <FolderChip chatId={detail.chat.id} workingFolder={detail.chat.workingFolder ?? null} />
+            <ApprovalModeMenu chatId={detail.chat.id} />
+            <button
+              type="button"
+              onClick={() => setPromptOpen(true)}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap text-fg-muted hover:bg-bg-muted hover:text-fg"
+              title="System prompt"
+              aria-label="System prompt"
+            >
+              <FileText size={15} aria-hidden />
+              <span className="hidden @7xl:inline">System prompt</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => (workbench.open ? closeWorkbench() : openWorkbench())}
+              aria-pressed={workbench.open}
+              aria-label="Panel"
+              title="Artifacts, task, sources and context beside the chat"
+              className={`flex shrink-0 items-center rounded-lg p-1.5 hover:bg-bg-muted ${workbench.open ? "text-accent" : "text-fg-muted hover:text-fg"}`}
+            >
+              <PanelRight size={16} aria-hidden />
+            </button>
+          </div>
         )}
       </header>
 

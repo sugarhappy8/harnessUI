@@ -425,6 +425,15 @@ export function OtherApps() {
    */
   function setupCopied(withKey: boolean) {
     if (!shownCard) return;
+    const { app: done, version } = shownCard;
+    // `shownCard` is the card the step was copied from (this is the click's own call). A
+    // copy that was still running when Make a new key finished came from a card made for an
+    // older key: that app counts as set up with the old key, as it would have had the copy
+    // ended a moment sooner, so it is listed to set up again.
+    setOldKey((k) => {
+      if (k === null || version >= k.version || k.apps.includes(done)) return k;
+      return { ...k, apps: [...k.apps, done] };
+    });
     const claudeApp = shownCard.app === "claudeApp";
     const next: CopiedSetups = {
       ...copied,
@@ -438,7 +447,6 @@ export function OtherApps() {
     setCopied(next);
     copiedNow.current = next;
     if (!withKey) return;
-    const { app: done, version } = shownCard;
     setOldKey((k) => {
       if (k === null || k.version !== version) return k;
       const apps = k.apps.filter((a) => a !== done);

@@ -624,35 +624,36 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
 }
 
 /// Model-written text that goes into a prompt outside every tool-output block (the summary
-/// block, and the task and context of the app's helper hand-over): hidden characters become
-/// visible escapes (`visible_summary`), chat-template control tokens are broken
-/// ([`Sanitizer::clean`]) and every "[App note]" marker gets round brackets
-/// (`quote_app_notes`), so the text cannot pass for a note from the app.
+/// block, and the task and context of the app's helper hand-over), cleaned so that it cannot
+/// carry the app's "[App note]" marker or one of its block tags. Chat-template control tokens
+/// are broken and block tags escaped ([`Sanitizer::clean`]); every "[App note]" marker gets
+/// round brackets and a block tag split by hidden characters is escaped too, with the hidden
+/// characters in them and right next to them shown as visible escapes; control and tag
+/// characters are shown as escapes wherever they are (`defang_markers`). Everything else is
+/// passed on as written, hidden characters included, so words in any script (joiners in
+/// Persian or Indic words, emoji sequences, right-to-left marks, soft hyphens) reach the
+/// model word for word.
+///
+/// Only the marker itself is recognised: in any letter case and spacing, with hidden
+/// characters inside or full-width brackets. Text that merely resembles it, such as
+/// "[App notes]" or a marker spelled with look-alike letters, is passed on unchanged.
 pub fn defang_app_notes(text: &str, sanitizer: &Sanitizer) -> String {
-    quote_app_notes(&sanitizer.clean(&visible_summary(text)))
+    defang_markers(&sanitizer.clean(&text.replace("\r\n", "\n")))
 }
 
-/// A model-written summary with its hidden characters shown as visible escapes, as approval
-/// cards show them ([`policy::sanitize::visible`]: zero-width, joining, bidirectional and tag
-/// characters, which can carry text a person cannot see), and the rest of the format
-/// characters and default-ignorable code points as well ([`hidden_in_summary`]). Windows
-/// line ends become plain ones first.
-fn visible_summary(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in policy::sanitize::visible(&text.replace("\r\n", "\n")).chars() {
-        if hidden_in_summary(c) {
-            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
-        } else {
-            out.push(c);
-        }
-    }
-    out
+/// A character a person cannot see: one that approval cards show as an escape
+/// ([`policy::sanitize::visible`]: control, zero-width, joining, bidirectional, variation
+/// selector and tag characters) or one of [`hidden_in_summary`].
+fn is_hidden(c: char) -> bool {
+    let mut buf = [0; 4];
+    let one = c.encode_utf8(&mut buf);
+    hidden_in_summary(c) || policy::sanitize::visible(one) != *one
 }
 
-/// Characters a summary shows as escapes beyond [`policy::sanitize::visible`]'s list: every
-/// other format character (general category Cf, Unicode 15.1) and default-ignorable code
-/// point, and the blank Braille pattern, which shows as a space but is not one. Any of them
-/// inside "[App note]" would otherwise reach the system message unseen.
+/// Characters taken as hidden beyond [`policy::sanitize::visible`]'s list: every other
+/// format character (general category Cf, Unicode 15.1) and default-ignorable code point,
+/// and the blank Braille pattern, which shows as a space but is not one. Any of them inside
+/// "[App note]" could otherwise hide the marker.
 fn hidden_in_summary(c: char) -> bool {
     matches!(c as u32,
         0x00AD               // soft hyphen
@@ -671,66 +672,176 @@ fn hidden_in_summary(c: char) -> bool {
         | 0xE01F0..=0xE0FFF) // reserved, default ignorable (after the variation selectors)
 }
 
-/// A model-written summary as the summary block shows it: every "[App note]" marker (any
-/// letter case, any spacing inside the brackets; the app's helper hand-over uses the same,
-/// through [`defang_app_notes`]) gets round brackets, "(App note)". The agent instructions
-/// say lines starting with "[App note]" come from the app; a summary is model output that
-/// can echo a web page or a file, and in the system message it sits outside every
-/// tool-output block, so it must not be able to pass for a note from the app (0.0.6).
-/// Hidden characters inside the brackets (by now visible escapes, [`visible_summary`]) do
-/// not hide a marker, and full-width brackets count as brackets. The text is otherwise
-/// unchanged; the stored summary is never changed.
-fn quote_app_notes(text: &str) -> String {
+/// A character that is no part of ordinary writing, shown as a visible escape wherever it
+/// is: a control character other than a line break or a tab, a tag character (invisible
+/// ASCII, which can spell out text a person cannot see) and a default-ignorable code point
+/// that is assigned to nothing.
+fn never_in_writing(c: char) -> bool {
+    (c.is_control() && c != '\n' && c != '\t')
+        || matches!(c as u32,
+            0xFFF0..=0xFFF8      // reserved
+            | 0xE0000..=0xE00FF  // tag characters, then reserved
+            | 0xE01F0..=0xE0FFF) // reserved (after the variation selectors)
+}
+
+/// The black flag that starts a subdivision flag.
+const BLACK_FLAG: char = '\u{1F3F4}';
+/// The tag characters after [`BLACK_FLAG`] in the subdivision flags that are emoji
+/// (England, Scotland, Wales), ending with the cancel tag. They are left as written.
+const FLAG_TAGS: [&str; 3] = [
+    "\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+    "\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+    "\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}",
+];
+
+/// Model-written text, after [`Sanitizer::clean`], as it goes into the prompt (0.0.6). The
+/// agent instructions say lines starting with "[App note]" come from the app; a summary or
+/// a hand-over is model output that can echo a web page or a file, and it sits outside
+/// every tool-output block. So every "[App note]" marker ([`app_note_close`]) gets round
+/// brackets, "(App note)", and the start of a block tag split by hidden characters
+/// ([`split_tag_len`]) gets `&lt;`, as [`Sanitizer::clean`] gives a plain one; the hidden
+/// characters ([`is_hidden`]) inside either and right next to it are shown as visible
+/// escapes. Control and tag characters ([`never_in_writing`]) are shown as escapes anywhere,
+/// except the tags of a subdivision flag. The rest is unchanged; the stored summary is
+/// never changed.
+fn defang_markers(text: &str) -> String {
     const OPEN: [char; 2] = ['[', '\u{FF3B}'];
-    const CLOSE: [char; 2] = [']', '\u{FF3D}'];
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(open) = rest.find(OPEN) {
-        out.push_str(&rest[..open]);
-        let bracket = rest[open..].chars().next().map_or(1, char::len_utf8);
-        let after = &rest[open + bracket..];
-        let marker = after
-            .find(CLOSE)
-            .filter(|&close| is_app_note_marker(&after[..close]));
-        match marker {
-            Some(close) => {
-                let bracket = after[close..].chars().next().map_or(1, char::len_utf8);
-                out.push('(');
-                out.push_str(&after[..close]);
-                out.push(')');
-                rest = &after[close + bracket..];
+    let mut i = 0;
+    while let Some(c) = text[i..].chars().next() {
+        let rest = &text[i..];
+        let after = &rest[c.len_utf8()..];
+        if OPEN.contains(&c)
+            && let Some((close, bracket)) = app_note_close(after)
+        {
+            escape_hidden_tail(&mut out);
+            out.push('(');
+            push_hidden_escaped(&mut out, &after[..close]);
+            out.push(')');
+            i += c.len_utf8() + close + bracket;
+            i += push_hidden_run(&mut out, &text[i..]);
+        } else if c == '<'
+            && let Some(len) = split_tag_len(rest)
+        {
+            escape_hidden_tail(&mut out);
+            out.push_str("&lt;");
+            push_hidden_escaped(&mut out, &rest[1..len]);
+            i += len;
+            i += push_hidden_run(&mut out, &text[i..]);
+        } else if c == BLACK_FLAG
+            && let Some(tags) = FLAG_TAGS.iter().find(|tags| after.starts_with(**tags))
+        {
+            out.push(c);
+            out.push_str(tags);
+            i += c.len_utf8() + tags.len();
+        } else {
+            if never_in_writing(c) {
+                push_escape(&mut out, c);
+            } else {
+                out.push(c);
             }
-            None => {
-                out.push_str(&rest[open..open + bracket]);
-                rest = after;
-            }
+            i += c.len_utf8();
         }
     }
-    out.push_str(rest);
     out
 }
 
-/// True when the text between two brackets reads "App note" once spacing, the zero-width
-/// space [`Sanitizer::clean`] inserts and the `\u{…}` escapes of hidden characters are left
-/// out (any letter case).
-fn is_app_note_marker(inner: &str) -> bool {
+/// Writes `c` as a visible `\u{…}` escape.
+fn push_escape(out: &mut String, c: char) {
+    out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+}
+
+/// Writes `text` with its hidden characters as visible escapes.
+fn push_hidden_escaped(out: &mut String, text: &str) {
+    for c in text.chars() {
+        if is_hidden(c) {
+            push_escape(out, c);
+        } else {
+            out.push(c);
+        }
+    }
+}
+
+/// Writes the hidden characters at the start of `text` as visible escapes and returns
+/// their length in bytes.
+fn push_hidden_run(out: &mut String, text: &str) -> usize {
+    let len = text
+        .char_indices()
+        .find(|(_, c)| !is_hidden(*c))
+        .map_or(text.len(), |(at, _)| at);
+    push_hidden_escaped(out, &text[..len]);
+    len
+}
+
+/// Shows the hidden characters at the end of what is written so far as visible escapes.
+fn escape_hidden_tail(out: &mut String) {
+    let start = out
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_hidden(*c))
+        .last()
+        .map_or(out.len(), |(at, _)| at);
+    let tail = out.split_off(start);
+    push_hidden_escaped(out, &tail);
+}
+
+/// The byte offset and length of the closing bracket (`]` or full-width `］`) in `after`,
+/// the text after an opening bracket, when the text between them reads "App note" once
+/// spacing, hidden characters ([`is_hidden`]: the zero-width space [`Sanitizer::clean`]
+/// inserts among them) and `\u{…}` escapes are left out (any letter case).
+fn app_note_close(after: &str) -> Option<(usize, usize)> {
+    const CLOSE: [char; 2] = [']', '\u{FF3D}'];
+    const WORD: &str = "appnote";
     let mut letters = String::new();
-    let mut rest = inner;
-    while let Some(c) = rest.chars().next() {
-        if let Some(len) = escape_len(rest) {
-            rest = &rest[len..];
+    let mut i = 0;
+    while let Some(c) = after[i..].chars().next() {
+        if CLOSE.contains(&c) {
+            return (letters == WORD).then_some((i, c.len_utf8()));
+        }
+        if let Some(len) = escape_len(&after[i..]) {
+            i += len;
             continue;
         }
-        rest = &rest[c.len_utf8()..];
-        if c.is_whitespace() || c == BREAK {
+        i += c.len_utf8();
+        if c.is_whitespace() || is_hidden(c) {
             continue;
         }
         letters.extend(c.to_lowercase());
-        if letters.len() > "appnote".len() {
-            return false;
+        if !WORD.starts_with(letters.as_str()) {
+            return None;
         }
     }
-    letters == "appnote"
+    None
+}
+
+/// The byte length of the start of one of the app's block tags (`<tag` or `</tag`, any
+/// ASCII letter case, followed by a character that ends a tag name) at the start of `rest`
+/// once hidden characters are left out, up to the end of the tag name. [`Sanitizer::clean`]
+/// has escaped the ones written plainly, so what is found here is split by hidden
+/// characters.
+fn split_tag_len(rest: &str) -> Option<usize> {
+    let after = rest.strip_prefix('<')?;
+    let longest = RESERVED_TAGS.iter().map(|tag| tag.len()).max().unwrap_or(0);
+    // The visible characters after `<`, each with the offset just past it: a slash, the
+    // longest name and the character after it at most.
+    let seen: Vec<(char, usize)> = after
+        .char_indices()
+        .filter(|(_, c)| !is_hidden(*c))
+        .map(|(at, c)| (c, at + c.len_utf8()))
+        .take(longest + 2)
+        .collect();
+    let skip = usize::from(seen.first().is_some_and(|(c, _)| *c == '/'));
+    RESERVED_TAGS.iter().find_map(|tag| {
+        let name = seen.get(skip..skip + tag.len())?;
+        let same = name
+            .iter()
+            .zip(tag.chars())
+            .all(|((c, _), t)| c.eq_ignore_ascii_case(&t));
+        let ends = seen
+            .get(skip + tag.len())
+            .is_none_or(|(c, _)| !(c.is_ascii_alphanumeric() || *c == '_'));
+        (same && ends).then(|| 1 + name.last().map_or(0, |(_, end)| *end))
+    })
 }
 
 /// The length in bytes of a `\u{…}` escape (one to six hex digits) at the start of `text`.

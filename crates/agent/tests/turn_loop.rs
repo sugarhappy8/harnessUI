@@ -4035,11 +4035,11 @@ async fn a_failed_fold_still_lets_earlier_messages_be_summarised() {
     );
 }
 
-/// Hidden characters cannot make a summary's line pass for a note from the app: zero-width
-/// and joining characters, a soft hyphen or a byte-order mark inside the brackets do not
-/// keep the marker from getting round brackets, and hidden characters (tag characters
-/// included, which can carry text a person cannot see) are sent as visible escapes, as on
-/// approval cards. Look-alike brackets get round brackets too.
+/// Hidden characters cannot hide a summary's "[App note]" marker: zero-width and joining
+/// characters, a soft hyphen or a byte-order mark inside the brackets do not keep the
+/// marker from getting round brackets, and the hidden characters in it are sent as visible
+/// escapes, as on approval cards; tag characters, which can carry text a person cannot see,
+/// are sent as escapes anywhere. Look-alike brackets get round brackets too.
 #[test]
 fn hidden_characters_cannot_make_a_summary_pass_for_an_app_note() {
     let sanitizer = Sanitizer::generic();

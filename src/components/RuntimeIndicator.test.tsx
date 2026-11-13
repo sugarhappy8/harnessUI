@@ -389,15 +389,52 @@ describe("RuntimeIndicator: the local model's state in plain words", () => {
     expect(screen.getByRole("menu").textContent).toContain("Used by another app");
   });
 
-  it("has the ready line's shorter forms for a crowded header, each with the number whole", async () => {
+  it("shortens the ready line by whole phrases only, never inside a word (header-layout)", async () => {
     await show(status());
     const button = screen.getByRole("button", { name: "Model menu" });
-    const form = (name: string) => button.querySelector(`[data-ready="${name}"]`)?.textContent;
-    // Which one shows is up to the room the header leaves (a container query on the line).
-    expect(form("remembers")).toBe("Remembers about 24,000 words (Automatic)");
-    expect(form("about")).toBe("About 24,000 words");
-    expect(form("words")).toBe("24,000 words");
+    const piece = (name: string) => button.querySelector(`[data-ready="${name}"]`) as HTMLElement;
+    // Which form shows is up to the room the line gets (a container query on it), each with the
+    // number whole: "Remembers about …" with its reason, "About …", then the number in words.
+    expect(piece("remembers").textContent).toBe("Remembers about 24,000 words");
+    expect(piece("reason").textContent).toBe(" (Automatic)");
+    expect(piece("about").textContent).toBe("About 24,000 words");
+    expect(piece("words").textContent).toBe("24,000 words");
     expect(button.closest(".\\@container\\/ready")).not.toBeNull();
+    // The reason goes with "Remembers about …" only and drops whole: both sit on a row one line
+    // high that moves what does not fit onto a hidden second line. Nothing is cut with an
+    // ellipsis.
+    const row = piece("reason").parentElement as HTMLElement;
+    expect(row.contains(piece("remembers"))).toBe(true);
+    for (const c of ["flex-wrap", "overflow-hidden", "h-4"]) expect(row.className.split(" ")).toContain(c);
+    for (const name of ["remembers", "reason", "about", "words"]) {
+      expect(piece(name).className).not.toMatch(/truncate|text-ellipsis/);
+    }
+    // "· Change" (and "· Used by another app") drop whole the same way, before the reason.
+    const line = button.closest("[data-ready-line]") as HTMLElement;
+    for (const c of ["flex-wrap", "overflow-hidden", "h-4"]) expect(line.className.split(" ")).toContain(c);
+    expect(line.firstElementChild?.contains(button)).toBe(true);
+    expect(line.lastElementChild?.textContent).toBe("·Change");
+    // The whole line stays in the tooltip and the menu.
+    expect(button.title.split("\n")[0]).toBe("Remembers about 24,000 words (Automatic)");
+  });
+
+  it("keeps 'Loading model' whole and drops the stage whole when the header is crowded (header-layout)", async () => {
+    await show(status({ state: "starting", progress: 0.45, loadStage: { kind: "readingModel" } }));
+    const line = document.querySelector("[data-loading-line]") as HTMLElement;
+    // The whole line is its tooltip.
+    expect(line.title).toBe("Loading model · Reading the model file 45%");
+    const piece = (name: string) => line.querySelector(`[data-loading="${name}"]`) as HTMLElement;
+    expect(piece("start").textContent).toBe("Loading model");
+    expect(piece("stage").textContent).toBe(" · Reading the model file");
+    expect(piece("progress").textContent).toBe(" 45%");
+    const row = piece("stage").parentElement as HTMLElement;
+    for (const c of ["flex-wrap", "overflow-hidden", "h-4"]) expect(row.className.split(" ")).toContain(c);
+    for (const name of ["start", "stage", "progress"]) expect(piece(name).className).not.toMatch(/truncate|text-ellipsis/);
+    expect(line.closest(".\\@container\\/loading")).not.toBeNull();
+    // Without a percentage the line ends in "…".
+    cleanup();
+    await show(status({ state: "starting", progress: null, loadStage: null }));
+    expect((document.querySelector("[data-loading-line]") as HTMLElement).title).toBe("Loading model…");
   });
 
   it("offers Model settings… after a failed load, and Load after Unload", async () => {

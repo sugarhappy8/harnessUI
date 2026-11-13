@@ -16,7 +16,9 @@
 //!   runs the file checks the app offers on the Windows program, the .NET library and the
 //!   ELF, and reads `binary_session`, which names no path outside the pack and the fixtures;
 //! - stops rea and starts it again (both start times are printed), and measures the peak
-//!   memory of Ghidra's Java on Linux while it opens the file;
+//!   memory of Ghidra's Java on Linux while it opens the file; with Ghidra, stops a call in
+//!   the middle of the analysis (it ends as cancelled); after the last stop nothing from the
+//!   pack still runs (Linux; the workflow checks Windows and macOS with their own tools);
 //! - checks that everything rea wrote is under the pack's `home`, `tmp`, `cache` and `work`
 //!   (the part folders and the fixtures' folder are as they were), and that rea added
 //!   nothing to the runner's `~/.cache/rea`, `~/Library/Caches/rea`, `~/.codex`, `~/.cursor`,
@@ -24,6 +26,10 @@
 //!   compared in full only when `CI` is set (on a developer's computer Claude Code itself
 //!   writes there while the test runs); otherwise their settings files must not newly name
 //!   rea.
+//!
+//! The pack goes into a temporary folder, or into `REAL_REA_DIR/<kuna|ghidra>` when that is
+//! set (the Windows job blocks the pack's programs in the firewall by path before the run).
+//! `REAL_REA_VERBOSE` prints rea's results in full.
 //!
 //! The test starts no process itself (`scripts/check-spawn.sh`): rea starts through
 //! `crates/runtime`, and the workflow (`.github/workflows/reverse.yml`) adds the process and
@@ -50,6 +56,20 @@ use tokio_util::sync::CancellationToken;
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const FIXTURE_FILES: [&str; 3] = ["hello-linux-x64", "hello-win-x64.exe", "hello-dotnet.dll"];
+
+/// The program each test opens, and the function it reads: the ELF and its `main`, except
+/// on Windows, where rea's Ghidra support opens Windows programs only (the PE's entry point,
+/// which Ghidra names `entry`). `REAL_REA_OPEN` names another fixture to open.
+fn open_target() -> (&'static str, &'static str) {
+    let pe = ("hello-win-x64.exe", "entry");
+    let elf = ("hello-linux-x64", "main");
+    match std::env::var("REAL_REA_OPEN").as_deref() {
+        Ok("hello-win-x64.exe") => pe,
+        Ok("hello-linux-x64") => elf,
+        _ if cfg!(windows) => pe,
+        _ => elf,
+    }
+}
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -123,9 +143,12 @@ fn snapshot(dirs: &[PathBuf]) -> BTreeMap<PathBuf, BTreeMap<String, u64>> {
     dirs.iter().map(|d| (d.clone(), listing(d))).collect()
 }
 
+/// Every file of a folder with its size and modification time.
+type FolderState = Vec<(String, u64, Option<SystemTime>)>;
+
 /// What the runner's own folders look like: every file with its size and modification time,
 /// at most 50,000 per folder.
-fn home_state(path: &Path) -> Option<Vec<(String, u64, Option<SystemTime>)>> {
+fn home_state(path: &Path) -> Option<FolderState> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_dir() {
         return Some(vec![(String::new(), meta.len(), meta.modified().ok())]);
@@ -160,7 +183,7 @@ fn rea_mentions(path: &Path) -> usize {
 }
 
 struct Home {
-    strict: Vec<(PathBuf, Option<Vec<(String, u64, Option<SystemTime>)>>)>,
+    strict: Vec<(PathBuf, Option<FolderState>)>,
     mentions: Vec<(PathBuf, usize)>,
 }
 
@@ -332,7 +355,10 @@ fn short(text: &str) -> String {
     } else {
         500
     };
-    text.chars().take(limit).collect::<String>().replace('\n', " | ")
+    text.chars()
+        .take(limit)
+        .collect::<String>()
+        .replace('\n', " | ")
 }
 
 /// Calls `tool` the way the `reverse` server forwards it: the arguments given plus the
@@ -376,7 +402,10 @@ fn running_from(root: &Path) -> Vec<(String, PathBuf)> {
         };
         let zombie = std::fs::read_to_string(p.path().join("stat"))
             .ok()
-            .and_then(|s| s.rsplit_once(')').map(|(_, rest)| rest.trim_start().starts_with('Z')))
+            .and_then(|s| {
+                s.rsplit_once(')')
+                    .map(|(_, rest)| rest.trim_start().starts_with('Z'))
+            })
             .unwrap_or(true);
         if exe.starts_with(root) && !zombie {
             out.push((p.file_name().to_string_lossy().into_owned(), exe));
@@ -444,8 +473,8 @@ async fn end_to_end(decompiler: Decompiler) {
     let lock = reverse::lock::embedded();
 
     // Install through the real unpacker.
-    let installer = Installer::new(layout.clone(), platform)
-        .with_fetch(Arc::new(DirFetch::new(&cache)));
+    let installer =
+        Installer::new(layout.clone(), platform).with_fetch(Arc::new(DirFetch::new(&cache)));
     let started = Instant::now();
     let installed = installer
         .download(decompiler.component(), &CancellationToken::new(), &|_| {})
@@ -470,8 +499,8 @@ async fn end_to_end(decompiler: Decompiler) {
             assert_eq!(part.disk_bytes, pinned.unpacked_bytes, "{}", part.name);
             for p in &pinned.programs {
                 let path = part.dir.join(&p.path);
-                let meta = std::fs::metadata(&path)
-                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                let meta =
+                    std::fs::metadata(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
                 assert_eq!(meta.len(), p.size, "{}", p.path);
                 #[cfg(unix)]
                 if p.exec {
@@ -546,8 +575,10 @@ async fn end_to_end(decompiler: Decompiler) {
         enabled_not_offered
     );
 
-    // Open the ELF, find main, read its code.
-    let hello = files.join("hello-linux-x64");
+    // Open the test program, find its function, read its code.
+    let (target, function) = open_target();
+    println!("real_rea: opening {target}, looking for {function}");
+    let hello = files.join(target);
     let stop_sampling = Arc::new(AtomicBool::new(false));
     let peak = Arc::new(AtomicU64::new(0));
     let sampler = (cfg!(target_os = "linux") && decompiler == Decompiler::Ghidra).then(|| {
@@ -585,19 +616,19 @@ async fn end_to_end(decompiler: Decompiler) {
     .await;
     assert!(!page.is_error, "{}", page.joined_text());
     assert!(
-        text_of(&page).contains("\"main\""),
-        "main is not among the functions: {}",
+        text_of(&page).contains(&format!("\"{function}\"")),
+        "{function} is not among the functions: {}",
         short(&text_of(&page))
     );
     let pseudo = call(
         &mut guard,
         "procedure_pseudo_code",
-        json!({"procedure": "main"}),
+        json!({"procedure": function}),
     )
     .await;
     assert!(!pseudo.is_error, "{}", pseudo.joined_text());
     assert!(
-        pseudo.joined_text().contains("main") && pseudo.joined_text().trim().len() > 20,
+        pseudo.joined_text().contains(function) && pseudo.joined_text().trim().len() > 20,
         "{}",
         pseudo.joined_text()
     );
@@ -628,9 +659,8 @@ async fn end_to_end(decompiler: Decompiler) {
         .and_then(|r| r.part("rea"))
         .map(|p| p.dir.clone())
         .expect("rea's folder");
-    let (constants, unexplained): (Vec<String>, Vec<String>) = outside
-        .into_iter()
-        .partition(|p| in_package(&rea_dir, p));
+    let (constants, unexplained): (Vec<String>, Vec<String>) =
+        outside.into_iter().partition(|p| in_package(&rea_dir, p));
     println!("real_rea: binary_session names rea's own constant paths {constants:?}");
     assert!(
         unexplained.is_empty(),

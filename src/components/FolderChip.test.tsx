@@ -366,20 +366,23 @@ describe("FolderChip", () => {
     expect((menu.querySelector("[data-full-access-limit]") as HTMLElement).textContent).toBe(FULL_ACCESS_LIMIT);
   });
 
-  it("shows the spec's words from one width on (@2xl: a window about 950 pixels wide) and short forms below it", async () => {
-    // What a narrow header shows: the parts hidden below the breakpoint left out. jsdom does not
-    // apply container queries, so the real widths are checked in the e2e scenario folder-chip.
+  it("says Whole computer and No folder · Choose in words at every width; only ' more' waits for @2xl", async () => {
+    // What a narrow header shows: the parts hidden below the breakpoint (a header of 42rem, a
+    // window about 950 pixels wide) left out. jsdom does not apply container queries, so the
+    // real widths are checked in the e2e scenarios folder-chip and header-layout. In Full access
+    // the words, not only the red icon, say that the whole computer is reachable (the owner's
+    // README items 6 and 7).
     const narrow = () => {
       const copy = chip().cloneNode(true) as HTMLElement;
       for (const el of copy.querySelectorAll(".hidden")) el.remove();
       return copy.textContent;
     };
     const cases: [ApprovalModeName, ApprovedFolder[], string, string][] = [
-      ["ask", [], "No folder · Choose", "No folder"],
+      ["ask", [], "No folder · Choose", "No folder · Choose"],
       ["ask", [global(1, HARNESS)], "harnessUI", "harnessUI"],
       ["ask", [global(1, HARNESS), own(2, "/a"), own(3, "/b")], "harnessUI + 2 more", "harnessUI + 2"],
       ["allowAll", [global(1, HARNESS), own(2, "/a")], "harnessUI + 1 more", "harnessUI + 1"],
-      ["fullAccess", [global(1, HARNESS)], "Whole computer", ""],
+      ["fullAccess", [global(1, HARNESS)], "Whole computer", "Whole computer"],
     ];
     for (const [mode, list, wide, short] of cases) {
       cleanup();
@@ -388,9 +391,12 @@ describe("FolderChip", () => {
       await show();
       expect(chip().textContent).toBe(wide);
       expect(narrow()).toBe(short);
-      // One breakpoint for every hidden part, so "more", "Choose" and "Whole computer" come
-      // back together.
-      for (const el of chip().querySelectorAll(".hidden")) expect(el.className).toBe("hidden @2xl:inline");
+      // " more" is the one part a narrow header leaves out (the accessible name and the
+      // tooltip keep it).
+      for (const el of chip().querySelectorAll(".hidden")) {
+        expect(el.className).toBe("hidden @2xl:inline");
+        expect(el.textContent).toBe(" more");
+      }
     }
   });
 

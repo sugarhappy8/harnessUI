@@ -53,6 +53,41 @@ describe("ModelPicker: a gear on each local model", () => {
     window.removeEventListener("app:open-model-settings", opened);
   });
 
+  it("keeps room for about 12 characters of the model's name, with the whole name as its tooltip (header-layout)", async () => {
+    const name = "Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL.gguf";
+    useApp.setState({
+      detail: {
+        chat: {
+          id: 1,
+          title: "t",
+          modelRef: `local:/models/${name}`,
+          systemPrompt: null,
+          leafMessageId: null,
+          createdAt: 0,
+          updatedAt: 0,
+          thinking: false,
+          workingFolder: null,
+        },
+        messages: [],
+        summary: null,
+      },
+    });
+    await act(async () => {
+      render(<ModelPicker />);
+    });
+    const button = screen.getByRole("button", { name: "Model for this chat" });
+    // The button's text is the name alone (the menu has it whole too); its tooltip says it whole.
+    expect(button.textContent).toBe(name);
+    expect(button.title).toBe(name);
+    // A crowded header never squeezes it below about 12 characters (jsdom has no layout: the
+    // e2e scenario header-layout measures it). A longer name ends in an ellipsis on one line,
+    // and the header wraps its buttons onto a second row before it shrinks the name further.
+    expect(button.className.split(" ")).toContain("min-w-[8.75rem]");
+    const shown = button.querySelector("[data-model-name]") as HTMLElement;
+    expect(shown.textContent).toBe(name);
+    for (const c of ["line-clamp-1", "break-all"]) expect(shown.className.split(" ")).toContain(c);
+  });
+
   it("still picks a model by its name", async () => {
     await openMenu();
     await act(async () => {

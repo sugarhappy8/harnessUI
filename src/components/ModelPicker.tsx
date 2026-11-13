@@ -54,6 +54,7 @@ export function ModelPicker() {
 
   const local = modelOptions.filter((o) => o.source === "local");
   const remote = modelOptions.filter((o) => o.source === "provider");
+  const shownName = visiblePath(labelFor(current, modelOptions));
 
   return (
     <DropdownMenu.Root onOpenChange={(o) => o && void refreshModelOptions()}>
@@ -61,13 +62,19 @@ export function ModelPicker() {
         <button
           type="button"
           className={
-            // Gives way in step with the ready line beside it (WP2), down to its arrow.
-            "flex max-w-xs min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm font-medium hover:bg-bg-muted " +
+            // [0.0.6 header-layout] Gives way to the ready line beside it only down to about 12
+            // characters of the name (8.75rem with its arrow); the header moves its buttons to
+            // a second row before that. The name ends in an ellipsis on its one line; it breaks
+            // anywhere, so the header can count the name at that width and no more.
+            "flex max-w-xs min-w-[8.75rem] items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm font-medium hover:bg-bg-muted " +
             (current ? "border-transparent" : "border-border bg-surface shadow-soft")
           }
           aria-label="Model for this chat"
+          title={shownName}
         >
-          <span className="truncate">{visiblePath(labelFor(current, modelOptions))}</span>
+          <span data-model-name className="line-clamp-1 break-all">
+            {shownName}
+          </span>
           <ChevronDown size={14} className="shrink-0 text-fg-muted" aria-hidden />
         </button>
       </DropdownMenu.Trigger>
