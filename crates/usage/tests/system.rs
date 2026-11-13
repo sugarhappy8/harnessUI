@@ -26,10 +26,22 @@ fn reports_plausible_values_here() {
     assert!(first.threads > 0);
     assert_eq!(first.threads, usage::logical_processors());
 
-    std::thread::sleep(Duration::from_millis(500));
-    let started = Instant::now();
-    let second = sampler.sample(&focus);
-    let second_in = started.elapsed();
+    // The processor figure is a rate between two samples. On a CI Mac the counters once did
+    // not move within 500 ms, so the reader rightly still said Measuring; the app samples
+    // every second and shows "Measuring…" until then. Wait up to 4 s for the first figure,
+    // and require every sample to stay quick.
+    let mut second = first.clone();
+    let mut second_in = Duration::ZERO;
+    for _ in 0..8 {
+        std::thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        second = sampler.sample(&focus);
+        second_in = started.elapsed();
+        assert!(second_in < STUCK_AFTER, "a later sample took {second_in:?}");
+        if matches!(second.processor_percent, Reading::Value { .. }) {
+            break;
+        }
+    }
     // Shown in the CI log of each system (with --nocapture, or when the test fails).
     eprintln!(
         "made in {made_in:?}, first sample in {first_in:?}, second in {second_in:?}: {}",
@@ -45,7 +57,7 @@ fn reports_plausible_values_here() {
             (0.0..=100.0).contains(value),
             "processor {value} % is not a percentage"
         ),
-        other => panic!("the second sample has no processor figure: {other:?}"),
+        other => panic!("no processor figure within 4 s: {other:?}"),
     }
     assert!(second.threads > 0);
 
