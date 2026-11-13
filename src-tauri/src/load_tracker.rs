@@ -285,6 +285,7 @@ mod tests {
             backend: None,
             device: None,
             mmproj: None,
+            fine: Default::default(),
         }
     }
 

@@ -166,6 +166,10 @@ pub struct RuntimeStatusDto {
     /// Load". Cleared by the next load and by any other unload (removing the model or its
     /// backend). `None` until WP1b sets it.
     pub unloaded_path: Option<String>,
+    /// 0.0.6 item 6 (WP10d): where the loaded model went, from the ready line's memory
+    /// report (`offload::placement_from_report`). `None` until the report arrives (about
+    /// when the model is ready); cleared by each load and each retry.
+    pub placement: Option<Placement>,
 }
 
 impl Default for RuntimeStatusDto {
@@ -194,6 +198,7 @@ impl Default for RuntimeStatusDto {
             settings_changed: false,
             reload_waiting: false,
             unloaded_path: None,
+            placement: None,
         }
     }
 }
@@ -606,6 +611,39 @@ pub struct CatalogListEntry {
     pub results: Vec<YourResult>,
 }
 
+/// 0.0.6 item 6 (WP10d): what the loaded model takes on its graphics device. JSON
+/// `{"name": "AMD Radeon RX 9070 XT", "use": {"model": …, "context": …, "compute": …,
+/// "imageReader": …}}`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphicsUse {
+    /// The probe's description of the device ("Graphics card" / "Apple graphics" when not
+    /// known).
+    pub name: String,
+    #[serde(rename = "use")]
+    pub parts: models::placement::Parts,
+}
+
+/// 0.0.6 item 6 (WP10d): where the loaded model went ("Where the model went" in the usage
+/// menu; WP2's "part on the processor" note).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Placement {
+    /// `None` when nothing is on a graphics device.
+    pub graphics: Option<GraphicsUse>,
+    pub computer: models::placement::Parts,
+    /// llama.cpp's units ("of 41 layers"), when the model's sizes are known.
+    pub units: Option<u32>,
+    /// `None`: only amounts are known.
+    pub layers_on_graphics: Option<u32>,
+    /// Blocks on the card whose expert parts are on the processor (mixture of experts).
+    pub expert_layers_on_processor: Option<u32>,
+    /// As much as fits: the count is worked out from the bytes ("About").
+    pub layers_about: bool,
+    /// Fine control chose the layers or expert parts.
+    pub custom: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -788,5 +826,6 @@ mod tests {
         assert_eq!(v["reloadWaiting"], json!(false));
         assert_eq!(v["unloadedPath"], json!(null));
         assert_eq!(v["stage"], json!(null));
+        assert_eq!(v["placement"], json!(null));
     }
 }

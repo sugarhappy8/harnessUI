@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use runtime::llama::server::{Candidate, Supervisor, SupervisorExit};
 use runtime::{
-    Backend, BackendKind, Device, GpuUse, LaunchConfig, LoadFailure, LoadStage, ProbeResult,
-    RuntimeLayout, ServerEvent, ServerState, StartSpec,
+    Backend, BackendKind, Device, GpuUse, LaunchConfig, LoadFailure, LoadStage, MemoryReport,
+    ProbeResult, RuntimeLayout, ServerEvent, ServerState, StartSpec,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, oneshot};
@@ -84,6 +84,10 @@ pub struct RuntimeManager {
     /// The change that waits for the model to be free, and the users "Stop and restart"
     /// stops (D3).
     gate: Arc<ChangeGate>,
+    /// 0.0.6 item 6: the ready line's memory report of the server running now (cleared by
+    /// each load, retry and unload), for "Where the model went" and for what a load that
+    /// replaces it frees.
+    report: StdMutex<Option<MemoryReport>>,
 }
 
 impl RuntimeManager {
@@ -101,6 +105,7 @@ impl RuntimeManager {
             current: StdMutex::new(None),
             probed_with: StdMutex::new(None),
             gate: Arc::new(ChangeGate::default()),
+            report: StdMutex::new(None),
         }
     }
 
@@ -226,7 +231,15 @@ impl RuntimeManager {
         }
         let backend = status.backend.filter(|b| b != "cpu")?;
         let device = status.device?;
-        let needed = self.current.lock().ok()?.as_ref()?.footprint.needed;
+        // Item 6: once the ready report is known, what llama.cpp allocated on the device,
+        // not the estimate (plus the projector, which the report leaves out).
+        let current = self.current.lock().ok()?;
+        let loaded = current.as_ref()?;
+        let needed = match self.report.lock().ok().and_then(|r| r.clone()) {
+            Some(report) => crate::offload::report_device_bytes(&report)
+                .saturating_add(loaded.footprint.projector_bytes),
+            None => loaded.footprint.needed,
+        };
         Some((backend, device, needed))
     }
 
@@ -240,15 +253,27 @@ impl RuntimeManager {
                 RuntimeStateDto::Ready | RuntimeStateDto::Starting
             );
         let ram_bytes = if on_cpu {
-            self.current
-                .lock()
-                .ok()
-                .and_then(|c| c.as_ref().map(|l| l.footprint.anon))
-                .unwrap_or(0)
+            // Item 6: from the ready report once it is known (the conversation memory, the
+            // working space and the repacked weights, which are not mapped from the file).
+            match self.report.lock().ok().and_then(|r| r.clone()) {
+                Some(report) => crate::offload::report_freed_ram(&report),
+                None => self
+                    .current
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.as_ref().map(|l| l.footprint.anon))
+                    .unwrap_or(0),
+            }
         } else {
             0
         };
         Freed { gpu, ram_bytes }
+    }
+
+    /// The backends as last probed, without probing (`None` before the first probe, or
+    /// while one runs): for the usage line, which never starts a process.
+    pub fn cached_backends(&self) -> Option<Vec<(Backend, ProbeResult)>> {
+        self.probes.try_lock().ok().and_then(|cache| cache.clone())
     }
 
     /// What the loaded copy of `path` was started with, when `path` is the loaded model.
@@ -486,6 +511,7 @@ impl RuntimeManager {
                 footprint,
             });
         }
+        self.forget_report();
         let model_name = model
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -535,6 +561,10 @@ impl RuntimeManager {
         let me = Arc::clone(&self);
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
+                // An older load's server is being stopped: where it went is not news.
+                if matches!(event, ServerEvent::Memory(_)) && !me.loads.is_current(seq) {
+                    continue;
+                }
                 me.on_event(event);
             }
         });
@@ -689,11 +719,13 @@ impl RuntimeManager {
                     max,
                     "llama-server stopped unexpectedly; restarting"
                 );
+                self.forget_report();
                 self.update(|s| {
                     s.state = RuntimeStateDto::Starting;
                     s.stage = Some(format!("Restarting after a crash ({attempt} of {max})"));
                     s.load_stage = Some(LoadStage::Restarting { attempt, max });
                     s.progress = None;
+                    s.placement = None;
                 });
             }
             ServerEvent::SteppedDown { from, to, reason } => {
@@ -703,8 +735,10 @@ impl RuntimeManager {
                     to,
                     reason: reason.clone(),
                 };
+                self.forget_report();
                 self.update(|s| {
                     s.state = RuntimeStateDto::Starting;
+                    s.placement = None;
                     s.backend = Some(kind_name(to).to_string());
                     s.stage = Some(format!(
                         "{} failed ({}); trying {}",
@@ -718,18 +752,90 @@ impl RuntimeManager {
             }
             // A typed transition with no event of its own (WP1a's retries): shown as the
             // current stage, and kept as an adjustment of this load.
-            ServerEvent::Stage(stage) => self.update(|s| {
+            ServerEvent::Stage(stage) => {
+                // A retry starts another server: the last one's report no longer applies.
                 if stage.is_adjustment() {
-                    s.adjustments.push(stage.clone());
+                    self.forget_report();
                 }
-                s.load_stage = Some(stage);
-            }),
+                self.update(|s| {
+                    if stage.is_adjustment() {
+                        s.adjustments.push(stage.clone());
+                        s.placement = None;
+                    }
+                    s.load_stage = Some(stage);
+                });
+            }
             ServerEvent::State(ServerState::Failed(failure)) => {
                 let err = load_error(&failure, self.tail_text());
                 self.update(|s| mark_failed(s, err));
             }
             ServerEvent::State(_) | ServerEvent::Exited { .. } => {}
-            ServerEvent::Memory(_) => {}
+            ServerEvent::Memory(report) => self.on_memory(report),
+        }
+    }
+
+    /// The ready line's memory report (item 6, I6-7): kept for what a load that replaces
+    /// this model frees, and turned into "Where the model went" (`placement`, with the
+    /// offloaded layer counts) for the launch this attempt made. That launch is the
+    /// resolved one, except after a retry with As much as fits (custom placement cleared)
+    /// and on the processor after a step-down, which the status's adjustments and backend
+    /// say; both are updated from the same event stream, before this report.
+    fn on_memory(&self, report: MemoryReport) {
+        if let Ok(mut r) = self.report.lock() {
+            *r = Some(report.clone());
+        }
+        let Some(loaded) = self.current.lock().ok().and_then(|c| c.clone()) else {
+            return;
+        };
+        let status = self.status();
+        let kind = status.backend.as_deref().and_then(backend_kind);
+        let less_gpu = status
+            .adjustments
+            .iter()
+            .any(|a| matches!(a, LoadStage::RetryingWithLessGpu { .. }));
+        let gpu = match kind {
+            Some(BackendKind::Cpu) | None => GpuUse::Off,
+            Some(_) if less_gpu => GpuUse::Fit,
+            Some(_) => loaded.resolved.gpu,
+        };
+        let mut fine = loaded.resolved.fine.clone();
+        if less_gpu {
+            fine.gpu_layers = None;
+            fine.experts_on_cpu = runtime::ExpertsOnCpu::None;
+        }
+        let device_description = kind.zip(status.device.as_deref()).and_then(|(kind, name)| {
+            self.cached_backends()?.iter().find_map(|(b, p)| {
+                (b.kind == kind)
+                    .then(|| p.devices.iter().find(|d| d.name == name))
+                    .flatten()
+                    .map(|d| usage::escape_text(&d.description, 80))
+            })
+        });
+        let placement = crate::offload::placement_from_report(
+            &report,
+            &crate::offload::LaunchFacts {
+                sizes: loaded.footprint.layers.as_deref(),
+                graphics: gpu != GpuUse::Off && status.device.is_some(),
+                gpu,
+                fine: &fine,
+                device_description,
+                apple: kind == Some(BackendKind::Metal),
+                projector_bytes: loaded.footprint.projector_bytes,
+            },
+        );
+        self.update(|s| {
+            if let (Some(on), Some(units)) = (placement.layers_on_graphics, placement.units) {
+                s.offloaded_layers = Some(on);
+                s.total_layers = Some(units);
+            }
+            s.placement = Some(placement);
+        });
+    }
+
+    /// Forgets the running server's memory report (a load, a retry or an unload starts).
+    fn forget_report(&self) {
+        if let Ok(mut r) = self.report.lock() {
+            *r = None;
         }
     }
 
@@ -758,6 +864,7 @@ impl RuntimeManager {
         if let Ok(mut c) = self.current.lock() {
             *c = None;
         }
+        self.forget_report();
         self.update(|s| *s = RuntimeStatusDto::default());
     }
 
@@ -822,8 +929,33 @@ fn launch_config(
         save_memory: settings.save_memory,
         keep_in_memory: settings.keep_in_memory,
         hip_visible_devices: first.hip_visible_devices.clone(),
+        // Item 6: only what reaches the command line; without a device the placement
+        // words are left out by `build_args` (threads and fast attention stay).
+        fine: settings.fine.clone(),
         ..LaunchConfig::new(model, settings.ctx, port, api_key)
     }
+}
+
+/// The candidate a load with `settings` would start on (the settings panel's measurement
+/// uses its backend, device and ROCm mask), or `None` when it could not start.
+pub(crate) fn planned_candidate(
+    found: &[(Backend, ProbeResult)],
+    settings: &ResolvedLoad,
+) -> Option<Candidate> {
+    first_candidate(found, settings).ok().map(|(first, _)| first)
+}
+
+/// The backend named `name` in the status (`kind_name`).
+fn backend_kind(name: &str) -> Option<BackendKind> {
+    [
+        BackendKind::Cpu,
+        BackendKind::Vulkan,
+        BackendKind::Cuda,
+        BackendKind::Rocm,
+        BackendKind::Metal,
+    ]
+    .into_iter()
+    .find(|k| kind_name(*k) == name)
 }
 
 /// The candidate a load starts on and the list it may step down through: the backend the
@@ -1399,6 +1531,7 @@ mod tests {
             backend: None,
             device: None,
             mmproj: None,
+            fine: Default::default(),
         }
     }
 

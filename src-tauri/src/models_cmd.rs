@@ -176,17 +176,45 @@ pub async fn model_load_info(
     overrides: Option<ModelLoadSettings>,
 ) -> AppResult<ModelLoadInfo> {
     crate::commands::only_main_window(window.label())?;
-    existing_model(&path)?;
+    let model = existing_model(&path)?;
     match overrides {
-        None => info_for(&state, &path).await,
+        None => {
+            // The panel opened (item 6, I6-14): a measurement that failed or took too
+            // long for this file may be tried once more.
+            state.offload.forget_failures(&model);
+            info_for(&state, &path).await
+        }
         Some(draft) => {
             let plan = load::plan_draft(&state, &path, draft).await;
             let facts = plan_facts(&plan, &path)?;
-            load::validate(&plan.overrides, facts.trained_ctx(), &plan.machine)
+            load::validate_for(&plan.overrides, facts, &plan.machine)
                 .map_err(AppError::bad_request)?;
             Ok(info_from(&state, &path, &plan, facts))
         }
     }
+}
+
+/// "Where the model goes" with llama.cpp's own figures for the unsaved choices `overrides`
+/// (0.0.6 item 6, 4.2 step 6; asked while Fine control is open): the model file must be
+/// there, the choices are checked as `set_model_load_settings` checks them, nothing is
+/// saved and nothing loads. One measurement runs at a time (a newer request cancels the
+/// older one; the same choices join the run going), results are cached, and a failure
+/// gives the instant estimate with the reason. The answer's `key` is the draft's, as in
+/// `model_load_info`'s picture.
+#[tauri::command]
+pub async fn offload_measure(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    path: String,
+    overrides: ModelLoadSettings,
+) -> AppResult<crate::offload::OffloadPreview> {
+    crate::commands::only_main_window(window.label())?;
+    existing_model(&path)?;
+    let plan = load::plan_draft(&state, &path, overrides).await;
+    let facts = plan_facts(&plan, &path)?;
+    load::validate_for(&plan.overrides, facts, &plan.machine).map_err(AppError::bad_request)?;
+    let found = state.runtime.backends(false).await;
+    Ok(crate::offload::measured(&state.offload, &path, &plan, facts, &found).await)
 }
 
 /// The model file's facts in `plan`, or "could not be found".
@@ -239,8 +267,7 @@ pub async fn set_model_load_settings(
         return Err(AppError::not_found("model file"));
     };
     // The device list is the backend's, which these overrides do not change.
-    load::validate(&overrides, facts.trained_ctx(), &plan.machine)
-        .map_err(AppError::bad_request)?;
+    load::validate_for(&overrides, facts, &plan.machine).map_err(AppError::bad_request)?;
     load::save_overrides(&state.store, &facts.file_name, facts.size_bytes, &overrides).await?;
     refresh_settings_changed(&state).await;
     info_for(&state, &path).await
@@ -404,7 +431,9 @@ pub async fn get_setting(
 /// The app's environment for a diagnostic probe: every variable except the ones that
 /// steer llama.cpp or look like secrets, which never reach a child (4.1).
 fn full_environment(names: impl Iterator<Item = String>) -> runtime::EnvSpec {
-    let mut env = runtime::EnvSpec::minimal();
+    // A crash never starts a debugger (item 6, I6-8); the app's own GGML_* are left out.
+    let mut env =
+        runtime::EnvSpec::minimal().set(runtime::llama::launch::NO_BACKTRACE_ENV, "1");
     for name in names {
         let upper = name.to_ascii_uppercase();
         let steers = ["LLAMA_", "GGML_", "HF_", "HUGGING"]
@@ -687,6 +716,7 @@ fn diagnostic_load(backend: &str, device: Option<String>) -> load::ResolvedLoad 
         backend: Some(backend.to_string()),
         device,
         mmproj: None,
+        fine: runtime::FineLaunch::default(),
     }
 }
 
