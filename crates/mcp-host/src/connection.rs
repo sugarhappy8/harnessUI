@@ -309,12 +309,26 @@ impl Connection {
     /// end the programs it started itself; item5-spec.md WP9b). Returns how the process
     /// ended, when there is one: on its own within the grace, or killed after it.
     pub(crate) async fn close_with_grace(&self, grace: Duration) -> Option<Closed> {
+        self.close_with_grace_then(grace, |_| {}).await
+    }
+
+    /// [`Self::close_with_grace`]; when the grace runs out, `before_kill` gets the process
+    /// id while the process still runs, right before its tree is killed (rea's managed
+    /// server ends the groups its children lead there).
+    pub(crate) async fn close_with_grace_then(
+        &self,
+        grace: Duration,
+        before_kill: impl FnOnce(u32),
+    ) -> Option<Closed> {
         self.stopping.store(true, Ordering::SeqCst);
         self.abort_tasks();
         self.service.cancellation_token().cancel();
         let process = self.process.as_ref()?;
         if let Some(exit) = process.wait_exit(grace).await {
             return Some(Closed::Exited(exit));
+        }
+        if let Some(pid) = process.pid() {
+            before_kill(pid);
         }
         process.kill();
         let _ = process.wait_exit(Duration::from_secs(2)).await;

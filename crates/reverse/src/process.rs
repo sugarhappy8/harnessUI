@@ -18,13 +18,21 @@
 //!   input is closed at once, rea gets the grace to end Kuna or Java itself, then its tree is
 //!   killed, and the call ends as [`ReverseError::Stopped`]. A start that finishes after a
 //!   stop is undone. After [`RestartReason::Quit`] nothing starts again.
+//! - **A caller that stops waiting** (the agent loop drops a cancelled tool's future 250 ms
+//!   after Stop): the call runs in a task of its own, so the managed server's cancel, its
+//!   5 s grace and the stop after it still run to their end, and that call still counts as
+//!   holding rea: [`ReaProcess::lock`] and the idle stop wait for it after taking the lock,
+//!   and the state stays `Busy` until rea has answered or been stopped. A caller that goes
+//!   away without cancelling cancels the call.
 //! - **State** for the tab: `Failed` carries the stderr tail with the reverse folder masked
 //!   ([`crate::results::mask`]) and invisible characters made visible.
 //!
 //! Known limit: on macOS and Linux rea starts Kuna and Java in process groups of their own.
 //! If the app itself crashes, those can outlive it until they notice the closed pipe. Stop,
-//! the timeout, the idle stop and quitting all give rea time to end them first. On Windows
-//! the app's Job Object ends them in every case.
+//! the timeout, the idle stop and quitting all give rea time to end them first. When rea is
+//! still running after that time its tree is killed, and on Linux so are the groups its own
+//! children lead ([`mcp_host::ManagedServer`]); on macOS Kuna or Java can then outlive rea
+//! the same way. On Windows the app's Job Object ends them in every case.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,7 +45,7 @@ use mcp_host::{
     ToolOutput,
 };
 use serde_json::{Map, Value};
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -138,6 +146,11 @@ pub(crate) trait Rea: Send + Sync {
     fn ended_unexpectedly(&self) -> bool;
     fn stderr_tail(&self) -> Vec<String>;
     fn lifecycle(&self) -> Option<Lifecycle>;
+    /// The process id while it runs (tests only look at it).
+    #[cfg(test)]
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[async_trait]
@@ -172,6 +185,10 @@ impl Rea for ManagedServer {
     fn lifecycle(&self) -> Option<Lifecycle> {
         ManagedServer::lifecycle(self)
     }
+    #[cfg(test)]
+    fn pid(&self) -> Option<u32> {
+        ManagedServer::pid(self)
+    }
 }
 
 /// Makes the server for one start.
@@ -196,8 +213,10 @@ struct Status {
     running: Option<Running>,
     /// The server being started, so a stop can cut the start short.
     starting: Option<Arc<dyn Rea>>,
-    /// The chat whose call runs (0 when the caller did not say).
-    busy: Option<i64>,
+    /// The call that runs (its number) and its chat (0 when the caller did not say).
+    busy: Option<(u64, i64)>,
+    /// Calls made so far, to number them.
+    calls_made: u64,
     /// Why the last start failed or rea crashed ("Show details").
     failed: Option<String>,
     last_used: Option<Instant>,
@@ -213,6 +232,8 @@ struct Shared {
     platform: Platform,
     calls: Arc<Mutex<()>>,
     status: StdMutex<Status>,
+    /// Calls whose work has not ended, even if their caller went away (at most one).
+    in_flight: watch::Sender<u32>,
     generation: AtomicU64,
     installer: StdMutex<Arc<Installer>>,
     log_file: StdMutex<Option<PathBuf>>,
@@ -251,6 +272,42 @@ impl Shared {
         let start = tail.len().saturating_sub(TAIL_LINES);
         self.clean(&tail[start..].join("\n"))
     }
+
+    /// Waits until no call is in flight (one whose caller went away may still be ending:
+    /// rea's grace to answer the cancel, then its stop).
+    async fn settled(&self) {
+        let mut in_flight = self.in_flight.subscribe();
+        let _ = in_flight.wait_for(|n| *n == 0).await;
+    }
+}
+
+/// One call whose work has not ended; held by the call's own task. When it goes, the call
+/// no longer makes rea busy and counts as rea's last use.
+struct InFlight {
+    shared: Arc<Shared>,
+    number: u64,
+}
+
+impl InFlight {
+    fn begin(shared: Arc<Shared>, number: u64) -> Self {
+        shared.in_flight.send_modify(|n| *n += 1);
+        Self { shared, number }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        {
+            let mut s = self.shared.status();
+            if s.busy.is_some_and(|(number, _)| number == self.number) {
+                s.busy = None;
+            }
+            s.last_used = Some(Instant::now());
+        }
+        self.shared
+            .in_flight
+            .send_modify(|n| *n = n.saturating_sub(1));
+    }
 }
 
 /// The one rea process.
@@ -285,6 +342,7 @@ impl ReaProcess {
                 platform,
                 calls: Arc::new(Mutex::new(())),
                 status: StdMutex::new(Status::default()),
+                in_flight: watch::Sender::new(0),
                 generation: AtomicU64::new(0),
                 log_file: StdMutex::new(None),
                 launch,
@@ -323,9 +381,11 @@ impl ReaProcess {
         self.shared.platform
     }
 
-    /// Waits for rea to be free and holds it.
+    /// Waits for rea to be free and holds it. Free means no guard holds it and no call is
+    /// still ending (one whose caller stopped waiting: rea's grace, then its stop).
     pub async fn lock(&self) -> ReaGuard {
         let calls = self.shared.calls.clone().lock_owned().await;
+        self.shared.settled().await;
         ReaGuard {
             generation: self.generation(),
             chat: None,
@@ -334,14 +394,24 @@ impl ReaProcess {
         }
     }
 
+    /// rea's process id while it runs.
+    #[cfg(test)]
+    fn pid(&self) -> Option<u32> {
+        let s = self.shared.status();
+        s.running.as_ref().and_then(|r| r.server.pid())
+    }
+
     /// Grows at each start of rea.
     pub fn generation(&self) -> u64 {
         self.shared.generation.load(Ordering::SeqCst)
     }
 
-    /// Whether rea is starting or a call holds it (WP9d answers `busy` then, unless forced).
+    /// Whether rea is starting, a call holds it, or a stopped call is still ending (WP9d
+    /// answers `busy` then, unless forced).
     pub fn is_busy(&self) -> bool {
-        self.shared.status().starting.is_some() || self.shared.calls.try_lock().is_err()
+        self.shared.status().starting.is_some()
+            || self.shared.calls.try_lock().is_err()
+            || *self.shared.in_flight.borrow() > 0
     }
 
     /// For the tab's status line.
@@ -353,7 +423,7 @@ impl ReaProcess {
         if let Some(running) = &s.running {
             if running.server.is_running() {
                 return match s.busy {
-                    Some(chat_id) => RunState::Busy { chat_id },
+                    Some((_, chat_id)) => RunState::Busy { chat_id },
                     None => RunState::Ready,
                 };
             }
@@ -544,6 +614,11 @@ impl ReaGuard {
     /// result comes back as it is (WP9g cleans it); a call stopped by `cancel` is
     /// [`ReverseError::Cancelled`], one past its limit [`ReverseError::Timeout`], and a rea
     /// that is not running or stops during the call [`ReverseError::Stopped`].
+    ///
+    /// The call runs in a task of its own: when this future is dropped, the call goes on
+    /// until rea answers or the managed server has stopped it, and until then it holds rea
+    /// for the next [`ReaProcess::lock`]. Dropping this future before the call ends cancels
+    /// the call (without cancelling `cancel` itself).
     pub async fn call(
         &mut self,
         allow: &ToolAllowList,
@@ -561,23 +636,32 @@ impl ReaGuard {
         if cancel.is_cancelled() {
             return Err(ReverseError::Cancelled);
         }
-        let server = {
+        let (server, number) = {
             let mut s = self.shared.status();
             let server = match &s.running {
                 Some(running) if running.server.is_running() => running.server.clone(),
                 _ => return Err(ReverseError::Stopped),
             };
-            s.busy = Some(self.chat.unwrap_or(0));
-            server
+            s.calls_made += 1;
+            let number = s.calls_made;
+            s.busy = Some((number, self.chat.unwrap_or(0)));
+            (server, number)
         };
-        let outcome = server
-            .call(allow, name, args, timeout, cancel, progress)
-            .await;
-        {
-            let mut s = self.shared.status();
-            s.busy = None;
-            s.last_used = Some(Instant::now());
-        }
+        let token = cancel.child_token();
+        let _caller_gone = token.clone().drop_guard();
+        let flight = InFlight::begin(self.shared.clone(), number);
+        let allow = allow.clone();
+        let tool = name.to_owned();
+        let task = tokio::spawn(async move {
+            let _flight = flight;
+            server
+                .call(&allow, &tool, args, timeout, &token, progress)
+                .await
+        });
+        let outcome = match task.await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(HostError::NotReady("the call ended unexpectedly".into())),
+        };
         match outcome {
             Ok(CallOutcome::Done(output)) => Ok(output),
             Ok(CallOutcome::Cancelled { .. }) => Err(ReverseError::Cancelled),
@@ -677,6 +761,7 @@ fn spawn_idle_stop(weak: Weak<Shared>, generation: u64) -> JoinHandle<()> {
                 return;
             };
             let _calls = shared.calls.clone().lock_owned().await;
+            shared.settled().await;
             let running = {
                 let mut s = shared.status();
                 let current = s
@@ -758,6 +843,11 @@ mod tests {
         stops: StdMutex<Vec<Duration>>,
         /// Calls wait until cancelled or stopped.
         hang: bool,
+        /// With `hang`: after a cancel, rea goes on this long, then stops itself (rea 6.9.0
+        /// never answers a cancelled call, so the managed server stops it after its grace).
+        cancel_takes: Option<Duration>,
+        /// A call's token was cancelled.
+        cancelled: AtomicBool,
         stopped: tokio::sync::Notify,
     }
 
@@ -792,9 +882,16 @@ mod tests {
             self.calls.lock().unwrap().push(name.to_owned());
             if self.hang {
                 tokio::select! {
-                    _ = cancel.cancelled() => return Ok(CallOutcome::Cancelled { stopped: false }),
+                    _ = cancel.cancelled() => {}
                     _ = self.stopped.notified() => return Err(HostError::NotReady("stopped".into())),
                 }
+                self.cancelled.store(true, Ordering::SeqCst);
+                let Some(takes) = self.cancel_takes else {
+                    return Ok(CallOutcome::Cancelled { stopped: false });
+                };
+                tokio::time::sleep(takes).await;
+                self.running.store(false, Ordering::SeqCst);
+                return Ok(CallOutcome::Cancelled { stopped: true });
             }
             Ok(CallOutcome::Done(ToolOutput::text(format!("ran {name}"))))
         }
@@ -1412,6 +1509,117 @@ mod tests {
         assert_eq!(b.count(), 1);
     }
 
+    /// How the agent loop waits for a tool (`crates/agent/src/turn/runner.rs`): until it
+    /// ends, or, once the turn is cancelled, 250 ms more; then the tool's future is dropped.
+    async fn like_the_agent_loop<F: std::future::Future>(
+        call: F,
+        cancel: &CancellationToken,
+    ) -> Option<F::Output> {
+        let mut call = std::pin::pin!(call);
+        tokio::select! {
+            biased;
+            out = &mut call => Some(out),
+            () = cancel.cancelled() => {
+                tokio::time::timeout(Duration::from_millis(250), &mut call).await.ok()
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_dropped_after_stop_holds_rea_until_rea_is_done_with_it() {
+        let b = bench_with(Platform::LinuxX64, false, PathBuf::from("/"), || FakeRea {
+            hang: true,
+            cancel_takes: Some(Duration::from_secs(8)),
+            ..FakeRea::default()
+        });
+        let names = allow();
+        {
+            let mut g = b.process.lock().await;
+            g.set_chat(7);
+            g.ensure_started(b.config(None)).await.unwrap();
+            let cancel = CancellationToken::new();
+            let trigger = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                trigger.cancel();
+            });
+            let call = g.call(
+                &names,
+                "open_binary",
+                Map::new(),
+                Duration::from_secs(60),
+                &cancel,
+                None,
+            );
+            let out = like_the_agent_loop(call, &cancel).await;
+            assert!(out.is_none(), "{out:?}");
+        }
+        let rea = b.last();
+        assert!(rea.cancelled.load(Ordering::SeqCst));
+        // rea still works on the stopped call: the tab says so, and nobody gets rea.
+        assert_eq!(b.process.state(), RunState::Busy { chat_id: 7 });
+        assert!(b.process.is_busy());
+        let early = tokio::time::timeout(Duration::from_secs(5), b.process.lock()).await;
+        assert!(
+            early.is_err(),
+            "another caller got rea while it still worked on the stopped call"
+        );
+        let g = tokio::time::timeout(Duration::from_secs(10), b.process.lock())
+            .await
+            .expect("rea is free once the stopped call has ended");
+        assert!(!rea.is_running());
+        assert_eq!(b.process.state(), RunState::Stopped);
+        drop(g);
+        assert!(!b.process.is_busy());
+        // The next call starts a new rea.
+        let mut g = b.process.lock().await;
+        let s = g.ensure_started(b.config(None)).await.unwrap();
+        assert!(s.fresh && s.generation == 2);
+    }
+
+    #[tokio::test]
+    async fn a_call_whose_caller_goes_away_is_cancelled_and_no_longer_busy() {
+        let b = bench_with(Platform::LinuxX64, false, PathBuf::from("/"), || FakeRea {
+            hang: true,
+            ..FakeRea::default()
+        });
+        let names = allow();
+        let cancel = CancellationToken::new();
+        let mut g = b.process.lock().await;
+        g.set_chat(9);
+        g.ensure_started(b.config(None)).await.unwrap();
+        // The caller stops waiting without cancelling its token.
+        let gave_up = tokio::time::timeout(
+            Duration::from_millis(100),
+            g.call(
+                &names,
+                "open_binary",
+                Map::new(),
+                Duration::from_secs(60),
+                &cancel,
+                None,
+            ),
+        )
+        .await;
+        assert!(gave_up.is_err(), "{gave_up:?}");
+        drop(g);
+        let rea = b.last();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline
+            && (b.process.state() != RunState::Ready || !rea.cancelled.load(Ordering::SeqCst))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(rea.cancelled.load(Ordering::SeqCst), "rea was never told");
+        assert!(
+            !cancel.is_cancelled(),
+            "the caller's own token is left alone"
+        );
+        assert_eq!(b.process.state(), RunState::Ready);
+        assert!(!b.process.is_busy());
+        assert!(rea.is_running());
+    }
+
     #[test]
     fn the_futures_are_send() {
         // `BuiltinServer::call` runs them on a multi-threaded runtime.
@@ -1620,6 +1828,85 @@ mod tests {
             assert!(layout.kuna_cache().is_dir());
         }
         drop(g);
+        // Stop the way the agent loop does it, on a file Kuna takes long over
+        // (`REVERSE_SLOW_BINARY`, e.g. a 120 MB library): 250 ms after Stop the call's future
+        // is dropped. rea never answers a cancelled call, so it must still be stopped after
+        // its grace, Kuna with it, and nobody may use rea before that.
+        if let (true, Some(slow)) = (with_kuna, std::env::var_os("REVERSE_SLOW_BINARY")) {
+            let slow = PathBuf::from(slow);
+            let allow = ToolAllowList::new(["open_binary", "list_procedures"]);
+            let mut g = process.lock().await;
+            g.set_chat(7);
+            g.ensure_started(config.clone()).await.expect("rea runs");
+            let opened = g
+                .call(
+                    &allow,
+                    "open_binary",
+                    serde_json::json!({"path": slow})
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                    Duration::from_secs(600),
+                    &CancellationToken::new(),
+                    None,
+                )
+                .await
+                .expect("open_binary answers");
+            assert!(!opened.is_error, "{opened:?}");
+            let rea_pid = process.pid().expect("rea runs");
+            let cancel = CancellationToken::new();
+            let trigger = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                trigger.cancel();
+            });
+            let begun = std::time::Instant::now();
+            let call = g.call(
+                &allow,
+                "list_procedures",
+                serde_json::json!({"detail": "summary"})
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+                Duration::from_secs(900),
+                &cancel,
+                None,
+            );
+            let out = like_the_agent_loop(call, &cancel).await;
+            drop(g);
+            let busy = pack_processes(layout.root());
+            eprintln!(
+                "real rea: list_procedures dropped after {:.1} s: {:?}; state {:?}; pack processes {busy:?}",
+                begun.elapsed().as_secs_f64(),
+                out.as_ref().map(|o| o.as_ref().map(|t| t.is_error)),
+                process.state()
+            );
+            if out.is_none() {
+                assert_eq!(process.state(), RunState::Busy { chat_id: 7 });
+                assert!(process.is_busy());
+                let g = process.lock().await;
+                let freed = begun.elapsed();
+                let left = pack_processes(layout.root());
+                eprintln!(
+                    "real rea: the next caller got rea {:.1} s after the call began; rea {rea_pid} alive {}; pack processes {left:?}; state {:?}",
+                    freed.as_secs_f64(),
+                    pid_alive(rea_pid),
+                    process.state()
+                );
+                assert!(freed >= Duration::from_secs(4) + mcp_host::CANCEL_GRACE);
+                assert!(!pid_alive(rea_pid), "rea {rea_pid} survived the stop");
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !pack_processes(layout.root()).is_empty()
+                    && std::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let left = pack_processes(layout.root());
+                assert!(left.is_empty(), "still running from the pack: {left:?}");
+                assert!(!matches!(process.state(), RunState::Busy { .. }));
+                drop(g);
+            }
+        }
         let begun = std::time::Instant::now();
         process.stop(STOP_GRACE).await;
         eprintln!("real rea: stop took {:.1} s", begun.elapsed().as_secs_f64());
@@ -1631,6 +1918,29 @@ mod tests {
         assert_eq!(process.state(), RunState::Stopped);
         // Everything rea wrote stays in the reverse folder: its home was used.
         assert!(layout.home().is_dir() && layout.work().is_dir());
+    }
+
+    /// Processes whose program is inside `root` (rea's `node`, Kuna). Linux only.
+    fn pack_processes(root: &Path) -> Vec<(u32, PathBuf)> {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|e| {
+                let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+                let exe = std::fs::read_link(e.path().join("exe")).ok()?;
+                (exe.starts_with(root) && pid_alive(pid)).then_some((pid, exe))
+            })
+            .collect()
+    }
+
+    /// Whether a process runs (a zombie counts as gone). Linux only.
+    fn pid_alive(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+        })
     }
 
     #[tokio::test]

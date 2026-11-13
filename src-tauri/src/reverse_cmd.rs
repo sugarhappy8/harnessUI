@@ -195,11 +195,29 @@ fn on_disk(state: &ComponentState) -> bool {
     )
 }
 
-/// The decompilers on this computer (usable or not), Kuna first.
+/// Whether this build offers a row on this computer, else the row's reason (Kuna on
+/// Windows, Ghidra on a Mac, a part a release build withholds for lack of its publisher's
+/// checks).
+fn offered(server: &ReverseServer, component: Component) -> Result<(), String> {
+    let row = server.installer().status(component);
+    if row.available {
+        Ok(())
+    } else {
+        Err(row.reason.unwrap_or_default())
+    }
+}
+
+/// The decompilers that may be the choice: on this computer (usable or not) and offered by
+/// this build, Kuna first. Files of a decompiler this build does not offer (left by a debug
+/// build, or withdrawn by a later lock) never make it the choice, so rea never starts with
+/// it; its row can still be removed.
 fn decompilers_on_disk(server: &ReverseServer) -> Vec<Decompiler> {
     [Decompiler::Kuna, Decompiler::Ghidra]
         .into_iter()
-        .filter(|d| on_disk(&server.installer().verify_installed(d.component())))
+        .filter(|d| {
+            on_disk(&server.installer().verify_installed(d.component()))
+                && offered(server, d.component()).is_ok()
+        })
         .collect()
 }
 
@@ -410,7 +428,8 @@ pub(crate) fn map_error(e: &ReverseError) -> AppError {
                 "Part of {} is missing, perhaps removed by antivirus software.",
                 row_label_of_part(part)
             ),
-            "Choose Repair to download it again.".into(),
+            // The banner's Repair button is the next step, as on the row's own line.
+            String::new(),
         ),
         ReverseError::Blocked { part } => (
             "blocked",
@@ -672,6 +691,9 @@ pub(crate) async fn switch_decompiler(
     decompiler: Decompiler,
     force: bool,
 ) -> AppResult<()> {
+    if let Err(reason) = offered(server, decompiler.component()) {
+        return Err(map_error(&ReverseError::NotAvailable { reason }));
+    }
     if !on_disk(&server.installer().verify_installed(decompiler.component())) {
         return Err(AppError::new(
             "not_installed",
@@ -761,11 +783,8 @@ pub async fn reverse_download(
     crate::commands::only_main_window(window.label())?;
     consent(accept_license)?;
     let server = server(&app)?;
-    let row = server.installer().status(component);
-    if !row.available {
-        return Err(map_error(&ReverseError::NotAvailable {
-            reason: row.reason.unwrap_or_default(),
-        }));
+    if let Err(reason) = offered(&server, component) {
+        return Err(map_error(&ReverseError::NotAvailable { reason }));
     }
     let rows = rows_of_download(&server, component);
     let token = CancellationToken::new();
@@ -1115,6 +1134,81 @@ mod tests {
         assert_eq!(e.message, "Ghidra is not installed.");
         assert_eq!(saved(&store).await, Some(serde_json::json!("kuna")));
         assert_eq!(server.chosen_decompiler(), Some(Decompiler::Kuna));
+    }
+
+    /// A server for Linux with the release rules on, over a lock in which every part has
+    /// its publisher checks except Ghidra's, pinned on first download only: a release build
+    /// withholds Ghidra ("Not available in this version of harnessUI.").
+    fn release_server_without_ghidra(root: &std::path::Path) -> Arc<ReverseServer> {
+        let mut lock = reverse::lock::embedded().clone();
+        for p in &mut lock.parts {
+            for b in &mut p.builds {
+                b.verified_by = reverse::lock::release_checks(&p.name)
+                    .unwrap()
+                    .iter()
+                    .map(|k| format!("{k}{}", if k.ends_with(':') { "x@y" } else { "" }))
+                    .collect();
+                if b.verified_by.is_empty() || p.name == "ghidra" {
+                    b.verified_by = vec!["first-download-only".into()];
+                }
+            }
+        }
+        ReverseServer::with_installer(
+            Installer::new(ReverseLayout::new(root), Platform::LinuxX64)
+                .with_lock(Arc::new(lock))
+                .with_release_rules(true)
+                .with_free_space(Arc::new(|_| Some(u64::MAX))),
+        )
+    }
+
+    /// A decompiler this build does not offer is never the choice, even with its files on
+    /// disk (left by a debug build, or withdrawn by a later lock), and switching to it is
+    /// refused with the row's reason: rea never starts with it.
+    #[tokio::test]
+    async fn a_decompiler_this_build_does_not_offer_is_never_the_choice() {
+        let dir = scratch("withheld");
+        put_rea(&dir.0);
+        put_kuna(&dir.0);
+        put_ghidra(&dir.0);
+        let server = release_server_without_ghidra(&dir.0);
+        let ghidra = server.installer().status(Component::Ghidra);
+        assert!(!ghidra.available);
+        assert_eq!(
+            ghidra.reason.as_deref(),
+            Some("Not available in this version of harnessUI.")
+        );
+        assert!(server.installer().status(Component::Kuna).available);
+        let store = store::Store::open_in_memory().unwrap();
+        // A saved choice of the withheld one moves to the offered one at start.
+        store.set_setting(DECOMPILER_KEY, "ghidra").await.unwrap();
+        assert_eq!(
+            reconcile(&server, &store).await.unwrap(),
+            Some(Decompiler::Kuna)
+        );
+        assert_eq!(saved(&store).await, Some(serde_json::json!("kuna")));
+        assert_eq!(server.decompiler(), Some(Decompiler::Kuna));
+        // Switching to it is refused with the row's own reason; nothing changes.
+        let e = switch_decompiler(&server, &store, Decompiler::Ghidra, true)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "not_available");
+        assert_eq!(e.message, "Not available in this version of harnessUI.");
+        assert_eq!(saved(&store).await, Some(serde_json::json!("kuna")));
+        assert_eq!(server.decompiler(), Some(Decompiler::Kuna));
+        // Without the offered one, there is no choice at all.
+        remove_row(&server, &store, Component::Kuna, false)
+            .await
+            .unwrap();
+        assert_eq!(server.chosen_decompiler(), None);
+        assert_eq!(server.decompiler(), None);
+        assert_eq!(saved(&store).await, None);
+        // The withheld row's files can still be removed, to free the space.
+        remove_row(&server, &store, Component::Ghidra, false)
+            .await
+            .unwrap();
+        assert!(!dir.0.join("ghidra-12.1.4").exists());
+        assert!(!dir.0.join("java-21.0.13+9").exists());
+        assert!(dir.0.join("rea-6.9.0").exists());
     }
 
     #[tokio::test]
@@ -1600,7 +1694,8 @@ mod tests {
                 },
                 "missing",
                 "Part of rea is missing, perhaps removed by antivirus software.",
-                "Choose Repair to download it again.",
+                // The banner's Repair button is the next step (item5-spec.md WP9d Errors).
+                "",
             ),
             (
                 ReverseError::Blocked {

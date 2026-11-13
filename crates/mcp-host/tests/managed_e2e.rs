@@ -20,7 +20,12 @@
 //!    grace, and the next start is a new process; a timeout is handled the same way;
 //! 6. `stop` lets a server that exits when its standard input closes end by itself, and
 //!    kills one that ignores it after the grace;
-//! 7. the start limit is kept; a crash after start is noticed.
+//! 7. the start limit is kept; a crash after start is noticed;
+//! 8. a caller that stops waiting does not cut the cancel short: the agent loop drops a
+//!    cancelled tool's future 250 ms after Stop, and the server still gets its grace and is
+//!    then stopped; a call whose caller goes away without Stop is cancelled the same way;
+//! 9. (Linux) when a server is killed after its grace, the process groups its own children
+//!    lead end too (rea starts Kuna and Java in groups of their own).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -37,7 +42,8 @@ use tokio_util::sync::CancellationToken;
 
 /// Hidden flag that turns this binary into the fake server; the next argument is the mode:
 /// `normal`, `answers-cancel`, `ignores-cancel`, `lingers` (ignores its standard input
-/// closing), `stubborn` (both), `no-handshake`.
+/// closing), `stubborn` (both), `no-handshake`; or `sleeper`, which only sleeps (started by
+/// the fake's `spawn_group` tool in a process group of its own, as rea starts Kuna).
 const FAKE_FLAG: &str = "--mcp-host-test-fake-managed";
 
 /// Set in this process only; must never reach the server.
@@ -51,7 +57,7 @@ const FIXED_PATH: &str = if cfg!(windows) {
 };
 
 /// Every name the fake lists, over two pages.
-const FAKE_TOOLS: [&str; 9] = [
+const FAKE_TOOLS: [&str; 10] = [
     "echo",
     "env",
     "cwd",
@@ -61,6 +67,7 @@ const FAKE_TOOLS: [&str; 9] = [
     "progress",
     "crash",
     "start_gdb_session",
+    "spawn_group",
 ];
 
 fn main() {
@@ -96,8 +103,24 @@ fn main() {
         run("an_ignored_cancel_stops_the_server", ignored_cancel()).await;
         run("a_server_that_ignores_everything_is_killed", stubborn()).await;
         run("timeouts_are_handled_like_cancels", timeouts()).await;
+        run(
+            "a_call_dropped_after_stop_still_stops_the_server",
+            dropped_after_cancel(),
+        )
+        .await;
+        run(
+            "a_call_dropped_without_stop_is_cancelled",
+            dropped_without_cancel(),
+        )
+        .await;
         run("stop_lets_a_server_end_on_stdin_close", stop_by_itself()).await;
         run("stop_kills_a_server_that_ignores_stdin_close", stop_kills()).await;
+        #[cfg(target_os = "linux")]
+        run(
+            "a_kill_also_ends_the_groups_its_children_lead",
+            kill_ends_child_groups(),
+        )
+        .await;
         run("the_start_limit_is_kept", start_limit()).await;
         run("a_crash_after_start_is_noticed", crash()).await;
     });
@@ -647,6 +670,146 @@ async fn timeouts() {
     assert!(!server.is_running());
 }
 
+/// How the agent loop waits for a tool (`crates/agent/src/turn/runner.rs`): until it ends,
+/// or, once the turn is cancelled, 250 ms more; then the tool's future is dropped.
+async fn like_the_agent_loop<F: std::future::Future>(
+    call: F,
+    cancel: &CancellationToken,
+) -> Option<F::Output> {
+    let mut call = std::pin::pin!(call);
+    tokio::select! {
+        biased;
+        out = &mut call => Some(out),
+        () = cancel.cancelled() => {
+            tokio::time::timeout(Duration::from_millis(250), &mut call).await.ok()
+        }
+    }
+}
+
+async fn dropped_after_cancel() {
+    let scratch = Scratch::new();
+    let server = started(scratch.spec("ignores-cancel")).await;
+    let pid: u32 = text(&server, "pid", json!({})).await.parse().unwrap();
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        trigger.cancel();
+    });
+    let out = like_the_agent_loop(
+        server.call_outcome(
+            &allow_all(),
+            "slow",
+            args(json!({"seconds": 60})),
+            Duration::from_secs(120),
+            &cancel,
+            None,
+        ),
+        &cancel,
+    )
+    .await;
+    let cancelled_at = Instant::now() - Duration::from_millis(250);
+    assert!(out.is_none(), "the fake never answers: {out:?}");
+    // The cancel went out, and the server still has its grace to answer.
+    assert!(
+        eventually(Duration::from_secs(2), || scratch
+            .received()
+            .iter()
+            .any(|m| m["method"] == "notifications/cancelled"))
+        .await,
+        "{:?}",
+        scratch.received()
+    );
+    #[cfg(unix)]
+    assert!(alive(pid), "stopped before its grace ran out");
+    // Then it is stopped, although nobody waits for the call any more.
+    assert!(
+        eventually(
+            CANCEL_GRACE + STOP_AFTER_CANCEL + Duration::from_secs(2),
+            || { !server.is_running() }
+        )
+        .await,
+        "the server still runs {:.1} s after Stop: {:?}",
+        cancelled_at.elapsed().as_secs_f64(),
+        server.stderr_tail()
+    );
+    let stopped_after = cancelled_at.elapsed();
+    assert!(stopped_after >= CANCEL_GRACE, "{stopped_after:?}");
+    #[cfg(unix)]
+    assert!(
+        eventually(Duration::from_secs(5), || !alive(pid)).await,
+        "the process {pid} survived"
+    );
+    #[cfg(not(unix))]
+    let _ = pid;
+    assert!(!server.ended_unexpectedly());
+    assert!(
+        eventually(Duration::from_secs(5), || server
+            .stderr_tail()
+            .iter()
+            .any(|l| l.contains("did not end the stopped call")))
+        .await,
+        "{:?}",
+        server.stderr_tail()
+    );
+    // The next start is a new process.
+    server.start().await.expect("restarts");
+    let again: u32 = text(&server, "pid", json!({})).await.parse().unwrap();
+    assert_ne!(again, pid);
+    server.stop(STOP_AFTER_CANCEL).await;
+}
+
+async fn dropped_without_cancel() {
+    let scratch = Scratch::new();
+    let server = started(scratch.spec("answers-cancel")).await;
+    let pid = text(&server, "pid", json!({})).await;
+    // The caller gives up after 300 ms without cancelling its token.
+    let gave_up = tokio::time::timeout(
+        Duration::from_millis(300),
+        server.call_outcome(
+            &allow_all(),
+            "slow",
+            args(json!({"seconds": 60})),
+            Duration::from_secs(120),
+            &CancellationToken::new(),
+            None,
+        ),
+    )
+    .await;
+    assert!(gave_up.is_err(), "{gave_up:?}");
+    // The server is told the call is cancelled, answers it, and keeps running.
+    let received = || scratch.received();
+    assert!(
+        eventually(Duration::from_secs(3), || {
+            let all = received();
+            let id = all
+                .iter()
+                .find(|m| m["method"] == "tools/call" && m["params"]["name"] == "slow")
+                .map(|m| m["id"].clone());
+            id.is_some_and(|id| {
+                all.iter().any(|m| {
+                    m["method"] == "notifications/cancelled" && m["params"]["requestId"] == id
+                })
+            })
+        })
+        .await,
+        "{:?}",
+        received()
+    );
+    assert!(
+        eventually(Duration::from_secs(3), || server
+            .stderr_tail()
+            .iter()
+            .any(|l| l.contains("the server ended the stopped call")))
+        .await,
+        "{:?}",
+        server.stderr_tail()
+    );
+    assert!(server.is_running());
+    assert_eq!(text(&server, "pid", json!({})).await, pid);
+    server.stop(STOP_AFTER_CANCEL).await;
+}
+
 async fn stop_by_itself() {
     let scratch = Scratch::new();
     let server = started(scratch.spec("normal")).await;
@@ -691,6 +854,42 @@ async fn stop_kills() {
     #[cfg(not(unix))]
     let _ = pid;
     assert!(!scratch.eof_marker().exists());
+}
+
+/// The parent and process group of `pid`, from `/proc`.
+#[cfg(target_os = "linux")]
+fn parent_and_group(pid: u32) -> Option<(u32, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace().skip(1);
+    Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+}
+
+#[cfg(target_os = "linux")]
+async fn kill_ends_child_groups() {
+    let scratch = Scratch::new();
+    let server = started(scratch.spec("lingers")).await;
+    let server_pid = server.pid().expect("pid");
+    let child: u32 = text(&server, "spawn_group", json!({}))
+        .await
+        .parse()
+        .unwrap();
+    assert!(alive(child));
+    // Like Kuna: a child of the server that leads a process group of its own.
+    assert_eq!(parent_and_group(child), Some((server_pid, child)));
+    assert_eq!(
+        parent_and_group(server_pid).map(|(_, g)| g),
+        Some(server_pid)
+    );
+    let outcome = server.stop_with(Duration::from_secs(1)).await;
+    assert_eq!(outcome, StopOutcome::Killed);
+    let gone = eventually(Duration::from_secs(3), || !alive(child)).await;
+    if !gone {
+        // SAFETY: only a signal to the test's own sleeper.
+        unsafe { libc::kill(child as i32, libc::SIGKILL) };
+    }
+    assert!(gone, "the child's group {child} outlived the kill");
+    assert!(eventually(Duration::from_secs(3), || !alive(server_pid)).await);
 }
 
 async fn start_limit() {
@@ -799,6 +998,10 @@ mod fake {
     }
 
     pub fn run(mode: &str) {
+        if mode == "sleeper" {
+            std::thread::sleep(Duration::from_secs(30));
+            return;
+        }
         if let Ok(path) = std::env::var("FAKE_REA_PID") {
             let _ = std::fs::write(path, std::process::id().to_string());
         }
@@ -893,6 +1096,29 @@ mod fake {
                 text(out, &id, &serde_json::to_string(&argv).unwrap(), false);
             }
             "pid" => text(out, &id, &std::process::id().to_string(), false),
+            // A child in a process group of its own (through the app's spawn helper, which
+            // makes every child a group leader on Unix), left running like rea's Kuna.
+            "spawn_group" => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let spec = runtime::spawn::SpawnSpec::new(
+                    std::env::current_exe().unwrap(),
+                    std::env::temp_dir(),
+                )
+                .args([super::FAKE_FLAG, "sleeper"])
+                .env(runtime::EnvSpec::empty())
+                .stdout(runtime::spawn::StdioMode::Null)
+                .stderr(runtime::spawn::StdioMode::Null);
+                let child = runtime
+                    .block_on(async { runtime::spawn::spawn(spec) })
+                    .unwrap();
+                let pid = child.id().unwrap_or_default();
+                // Not killed when the handle goes: it outlives this call, as Kuna does.
+                std::mem::forget(child);
+                text(out, &id, &pid.to_string(), false);
+            }
             "crash" => {
                 eprintln!("fake rea: crashing");
                 std::process::exit(7);

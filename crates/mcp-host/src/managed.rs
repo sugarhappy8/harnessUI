@@ -18,6 +18,12 @@
 //!   `notifications/cancelled` and given [`CANCEL_GRACE`] to answer the call. If it does, it
 //!   keeps running. If not, it is stopped with [`STOP_AFTER_CANCEL`]: standard input
 //!   closed, a wait, then its whole process tree killed. The next start begins afresh.
+//!   Each call runs in a task of its own, so this runs to its end even when the caller
+//!   stops waiting (the agent loop drops a cancelled tool's future 250 ms after Stop); a
+//!   caller that goes away without cancelling cancels the call the same way.
+//! - **Stop:** standard input closed, the grace, then the whole tree killed; on Linux the
+//!   process groups that the server's own children lead are ended with it (rea starts Kuna
+//!   and Java in groups of their own, which the tree kill does not reach).
 //!
 //! The cancellation is sent as a plain notification on the wire rather than through rmcp's
 //! request handle, because rmcp would drop the pending call (and any late answer) the moment
@@ -155,7 +161,8 @@ pub struct ManagedServer {
     spec: ManagedSpec,
     client: Implementation,
     log: Arc<StderrLog>,
-    current: Mutex<Option<Arc<Connection>>>,
+    /// Shared with the calls' own tasks, which stop the server after an unanswered cancel.
+    current: Arc<Mutex<Option<Arc<Connection>>>>,
     lifecycle: Mutex<Option<Lifecycle>>,
     /// Grows at every stop, so a start that finishes after a stop does not survive it.
     stops: AtomicU64,
@@ -182,7 +189,7 @@ impl ManagedServer {
         Self {
             client: Implementation::new(CLIENT_NAME, env!("CARGO_PKG_VERSION")),
             log,
-            current: Mutex::new(None),
+            current: Arc::new(Mutex::new(None)),
             lifecycle: Mutex::new(None),
             stops: AtomicU64::new(0),
             starting: Mutex::new(CancellationToken::new()),
@@ -393,123 +400,25 @@ impl ManagedServer {
         let connection = self
             .live()
             .ok_or_else(|| HostError::NotReady("it is stopped".into()))?;
-        let alive = Arc::new(Notify::new());
-        let signal = alive.clone();
-        // The host's handler formats the server's progress into a line; it is dropped here.
-        let tick: ProgressFn = Arc::new(move |_server_text: String| signal.notify_one());
-        let _call = connection.shared.begin_call(Some(tick));
-        let request = ClientRequest::CallToolRequest(CallToolRequest::new(
-            CallToolRequestParams::new(name.to_owned()).with_arguments(args),
-        ));
-        let peer = connection.service.peer().clone();
-        let handle = peer
-            .send_cancellable_request(request, PeerRequestOptions::no_options())
-            .await
-            .map_err(|_| HostError::NotReady("the connection to the server was lost".into()))?;
-        let id = handle.id.clone();
-        let mut rx = handle.rx;
-        let total = timeout.saturating_mul(MAX_CALL_FACTOR);
-        let idle = tokio::time::sleep(timeout);
-        let hard = tokio::time::sleep(total);
-        tokio::pin!(idle, hard);
-        let mut last_tick: Option<Instant> = None;
-        let end = loop {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => break End::Cancelled,
-                answer = &mut rx => break End::Answer(Box::new(answer)),
-                _ = alive.notified() => {
-                    idle.as_mut().reset(Instant::now() + timeout);
-                    if let Some(progress) = &progress
-                        && last_tick.is_none_or(|t| t.elapsed() >= TICK_EVERY)
-                    {
-                        progress(String::new());
-                        last_tick = Some(Instant::now());
-                    }
-                }
-                _ = &mut idle => break End::TimedOut,
-                _ = &mut hard => break End::TimedOut,
-            }
+        // The call runs in a task of its own, which is not cancelled when this future is
+        // dropped: the cancel, the grace for an answer and the stop after it always run to
+        // their end. A caller that goes away before the call ends cancels it (the guard).
+        let token = cancel.child_token();
+        let _caller_gone = token.clone().drop_guard();
+        let call = Call {
+            connection,
+            current: self.current.clone(),
+            log: self.log.clone(),
+            server: self.spec.name.clone(),
+            name: name.to_owned(),
+            timeout,
+            cancel: token,
+            progress,
         };
-        match end {
-            End::Answer(answer) => match *answer {
-                Ok(Ok(result)) => Ok(CallOutcome::Done(self.map_result(name, result))),
-                Ok(Err(error)) if !connection::is_connection_lost(&error) => {
-                    Ok(CallOutcome::Done(ToolOutput::error(format!(
-                        "{} could not run {}: {}",
-                        self.spec.name,
-                        policy::sanitize::one_line(name, 80),
-                        connection::describe_service_error(&error)
-                    ))))
-                }
-                _ => Err(HostError::NotReady(
-                    "the server stopped during the call".into(),
-                )),
-            },
-            End::Cancelled => {
-                let stopped = self
-                    .give_up(&connection, &peer, &id, &mut rx, "stopped by the user")
-                    .await;
-                Ok(CallOutcome::Cancelled { stopped })
-            }
-            End::TimedOut => {
-                let stopped = self
-                    .give_up(&connection, &peer, &id, &mut rx, "the call took too long")
-                    .await;
-                Ok(CallOutcome::TimedOut { stopped })
-            }
+        match tokio::spawn(call.run(args)).await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(HostError::NotReady("the call ended unexpectedly".into())),
         }
-    }
-
-    fn map_result(&self, name: &str, result: ServerResult) -> ToolOutput {
-        match result {
-            ServerResult::CallToolResult(result) => map_call_result(result),
-            ServerResult::InputRequiredResult(_) => ToolOutput::error(format!(
-                "{} asked for more input during {}, which this app does not support",
-                self.spec.name,
-                policy::sanitize::one_line(name, 80)
-            )),
-            _ => ToolOutput::error(format!(
-                "{} answered {} with something this app does not understand",
-                self.spec.name,
-                policy::sanitize::one_line(name, 80)
-            )),
-        }
-    }
-
-    /// Tells the server the call `id` is cancelled and waits [`CANCEL_GRACE`] for its
-    /// answer. Returns whether the server had to be stopped.
-    async fn give_up(
-        &self,
-        connection: &Arc<Connection>,
-        peer: &Peer<RoleClient>,
-        id: &RequestId,
-        rx: &mut oneshot::Receiver<Result<ServerResult, ServiceError>>,
-        reason: &str,
-    ) -> bool {
-        let deadline = Instant::now() + CANCEL_GRACE;
-        // Sent as a plain notification: see the module documentation.
-        let notification = ClientNotification::CustomNotification(CustomNotification::new(
-            "notifications/cancelled",
-            Some(json!({ "requestId": id, "reason": reason })),
-        ));
-        let _ = tokio::time::timeout_at(deadline, peer.send_notification(notification)).await;
-        let answered = matches!(
-            tokio::time::timeout_at(deadline, rx).await,
-            Ok(Ok(Ok(_) | Err(ServiceError::McpError(_))))
-        );
-        if answered {
-            self.log.note("the server ended the stopped call").await;
-            return false;
-        }
-        self.log
-            .note(&format!(
-                "the server did not end the stopped call within {} seconds; stopping it",
-                CANCEL_GRACE.as_secs()
-            ))
-            .await;
-        self.stop_connection(connection, STOP_AFTER_CANCEL).await;
-        true
     }
 
     /// Closes standard input, waits up to `grace`, then ends the whole process tree.
@@ -528,37 +437,8 @@ impl ManagedServer {
         }
     }
 
-    /// Stops `connection` if it is still the current one (a newer start is left alone).
-    async fn stop_connection(&self, connection: &Arc<Connection>, grace: Duration) {
-        let current = {
-            let mut current = lock(&self.current);
-            if current.as_ref().is_some_and(|c| Arc::ptr_eq(c, connection)) {
-                current.take()
-            } else {
-                None
-            }
-        };
-        if let Some(connection) = current {
-            self.close(&connection, grace).await;
-        }
-    }
-
     async fn close(&self, connection: &Arc<Connection>, grace: Duration) -> StopOutcome {
-        let outcome = match connection.close_with_grace(grace).await {
-            Some(Closed::Exited(exit)) => StopOutcome::Exited(exit.description),
-            Some(Closed::Killed) => StopOutcome::Killed,
-            None => StopOutcome::NotRunning,
-        };
-        let line = match &outcome {
-            StopOutcome::Exited(how) => format!("stopped: the server {how}"),
-            StopOutcome::Killed => format!(
-                "stopped: the server was still running after {} seconds, so it was ended",
-                grace.as_secs_f32()
-            ),
-            StopOutcome::NotRunning => "stopped".to_owned(),
-        };
-        self.log.note(&line).await;
-        outcome
+        close_logged(&self.log, connection, grace).await
     }
 
     /// The last lines the server wrote to stderr, with the app's own notes (`--- … ---`).
@@ -613,6 +493,261 @@ impl ManagedServer {
             lines[start..].join("\n")
         )
     }
+}
+
+/// One call, run in its own task by [`ManagedServer::call_outcome`] with everything it
+/// needs, so that it does not depend on its caller still waiting.
+struct Call {
+    connection: Arc<Connection>,
+    current: Arc<Mutex<Option<Arc<Connection>>>>,
+    log: Arc<StderrLog>,
+    /// The managed server's name, for messages.
+    server: String,
+    name: String,
+    timeout: Duration,
+    /// The caller's token, also cancelled when the caller goes away.
+    cancel: CancellationToken,
+    progress: Option<ProgressFn>,
+}
+
+impl Call {
+    async fn run(self, args: Map<String, Value>) -> Result<CallOutcome, HostError> {
+        let connection = self.connection.clone();
+        let alive = Arc::new(Notify::new());
+        let signal = alive.clone();
+        // The host's handler formats the server's progress into a line; it is dropped here.
+        let tick: ProgressFn = Arc::new(move |_server_text: String| signal.notify_one());
+        let _call = connection.shared.begin_call(Some(tick));
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(
+            CallToolRequestParams::new(self.name.clone()).with_arguments(args),
+        ));
+        let peer = connection.service.peer().clone();
+        let handle = peer
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
+            .await
+            .map_err(|_| HostError::NotReady("the connection to the server was lost".into()))?;
+        let id = handle.id.clone();
+        let mut rx = handle.rx;
+        let timeout = self.timeout;
+        let total = timeout.saturating_mul(MAX_CALL_FACTOR);
+        let idle = tokio::time::sleep(timeout);
+        let hard = tokio::time::sleep(total);
+        tokio::pin!(idle, hard);
+        let mut last_tick: Option<Instant> = None;
+        let end = loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => break End::Cancelled,
+                answer = &mut rx => break End::Answer(Box::new(answer)),
+                _ = alive.notified() => {
+                    idle.as_mut().reset(Instant::now() + timeout);
+                    if let Some(progress) = &self.progress
+                        && last_tick.is_none_or(|t| t.elapsed() >= TICK_EVERY)
+                    {
+                        progress(String::new());
+                        last_tick = Some(Instant::now());
+                    }
+                }
+                _ = &mut idle => break End::TimedOut,
+                _ = &mut hard => break End::TimedOut,
+            }
+        };
+        let name = policy::sanitize::one_line(&self.name, 80);
+        match end {
+            End::Answer(answer) => match *answer {
+                Ok(Ok(result)) => Ok(CallOutcome::Done(map_result(&self.server, &name, result))),
+                Ok(Err(error)) if !connection::is_connection_lost(&error) => {
+                    Ok(CallOutcome::Done(ToolOutput::error(format!(
+                        "{} could not run {name}: {}",
+                        self.server,
+                        connection::describe_service_error(&error)
+                    ))))
+                }
+                _ => Err(HostError::NotReady(
+                    "the server stopped during the call".into(),
+                )),
+            },
+            End::Cancelled => {
+                let stopped = self
+                    .give_up(&peer, &id, &mut rx, "stopped by the user")
+                    .await;
+                Ok(CallOutcome::Cancelled { stopped })
+            }
+            End::TimedOut => {
+                let stopped = self
+                    .give_up(&peer, &id, &mut rx, "the call took too long")
+                    .await;
+                Ok(CallOutcome::TimedOut { stopped })
+            }
+        }
+    }
+
+    /// Tells the server the call `id` is cancelled and waits [`CANCEL_GRACE`] for its
+    /// answer. Returns whether the server had to be stopped (or was stopped meanwhile).
+    async fn give_up(
+        &self,
+        peer: &Peer<RoleClient>,
+        id: &RequestId,
+        rx: &mut oneshot::Receiver<Result<ServerResult, ServiceError>>,
+        reason: &str,
+    ) -> bool {
+        let deadline = Instant::now() + CANCEL_GRACE;
+        // Sent as a plain notification: see the module documentation.
+        let notification = ClientNotification::CustomNotification(CustomNotification::new(
+            "notifications/cancelled",
+            Some(json!({ "requestId": id, "reason": reason })),
+        ));
+        let _ = tokio::time::timeout_at(deadline, peer.send_notification(notification)).await;
+        let answered = matches!(
+            tokio::time::timeout_at(deadline, rx).await,
+            Ok(Ok(Ok(_) | Err(ServiceError::McpError(_))))
+        );
+        if answered {
+            self.log.note("the server ended the stopped call").await;
+            return false;
+        }
+        if self.connection.stopping.load(Ordering::SeqCst) {
+            // Stopped meanwhile by someone else (a stop, a restart, a new start).
+            return true;
+        }
+        self.log
+            .note(&format!(
+                "the server did not end the stopped call within {} seconds; stopping it",
+                CANCEL_GRACE.as_secs()
+            ))
+            .await;
+        stop_if_current(
+            &self.current,
+            &self.log,
+            &self.connection,
+            STOP_AFTER_CANCEL,
+        )
+        .await;
+        true
+    }
+}
+
+fn map_result(server: &str, name: &str, result: ServerResult) -> ToolOutput {
+    match result {
+        ServerResult::CallToolResult(result) => map_call_result(result),
+        ServerResult::InputRequiredResult(_) => ToolOutput::error(format!(
+            "{server} asked for more input during {name}, which this app does not support"
+        )),
+        _ => ToolOutput::error(format!(
+            "{server} answered {name} with something this app does not understand"
+        )),
+    }
+}
+
+/// Stops `connection` if it is still the current one (a newer start is left alone).
+async fn stop_if_current(
+    current: &Mutex<Option<Arc<Connection>>>,
+    log: &StderrLog,
+    connection: &Arc<Connection>,
+    grace: Duration,
+) {
+    let current = {
+        let mut current = lock(current);
+        if current.as_ref().is_some_and(|c| Arc::ptr_eq(c, connection)) {
+            current.take()
+        } else {
+            None
+        }
+    };
+    if let Some(connection) = current {
+        close_logged(log, &connection, grace).await;
+    }
+}
+
+/// Closes standard input, waits up to `grace`, then ends the whole tree and the groups its
+/// children lead ([`end_child_groups`]); notes how it ended.
+async fn close_logged(
+    log: &StderrLog,
+    connection: &Arc<Connection>,
+    grace: Duration,
+) -> StopOutcome {
+    let outcome = match connection
+        .close_with_grace_then(grace, end_child_groups)
+        .await
+    {
+        Some(Closed::Exited(exit)) => StopOutcome::Exited(exit.description),
+        Some(Closed::Killed) => StopOutcome::Killed,
+        None => StopOutcome::NotRunning,
+    };
+    let line = match &outcome {
+        StopOutcome::Exited(how) => format!("stopped: the server {how}"),
+        StopOutcome::Killed => format!(
+            "stopped: the server was still running after {} seconds, so it was ended",
+            grace.as_secs_f32()
+        ),
+        StopOutcome::NotRunning => "stopped".to_owned(),
+    };
+    log.note(&line).await;
+    outcome
+}
+
+/// Ends the process groups that `pid`'s own children lead, when `pid` is still running
+/// after its grace and its tree is about to be killed: rea starts Kuna and Java in process
+/// groups of their own, which ending rea's tree does not reach, so they would go on reading
+/// the file. Only a group whose leader is a child of `pid` is ended, never the app's own
+/// group or `pid`'s (the tree kill ends that). Linux only (it reads `/proc`); on macOS this
+/// is a known limit, and on Windows the Job Object ends the whole tree.
+fn end_child_groups(pid: u32) {
+    #[cfg(target_os = "linux")]
+    for group in child_groups(pid) {
+        // SAFETY: killpg only sends a signal; `group` is led by a child of `pid`, which
+        // still runs, so the group cannot have been reused.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
+}
+
+/// The process groups led by children of `parent` other than the app's and `parent`'s own.
+#[cfg(target_os = "linux")]
+fn child_groups(parent: u32) -> Vec<libc::pid_t> {
+    let Ok(parent) = libc::pid_t::try_from(parent) else {
+        return Vec::new();
+    };
+    // SAFETY: getpgrp has no preconditions and cannot fail.
+    let own = unsafe { libc::getpgrp() };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut groups = Vec::new();
+    for entry in entries.flatten() {
+        let Some(child) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if let Some((ppid, group)) = parent_and_group(&stat)
+            && ppid == parent
+            && group == child
+            && group > 1
+            && group != own
+            && group != parent
+        {
+            groups.push(group);
+        }
+    }
+    groups
+}
+
+/// The parent process and the process group from a `/proc/<pid>/stat` line (the name in
+/// parentheses may hold spaces and parentheses, so fields are read after the last `)`).
+#[cfg(any(target_os = "linux", test))]
+fn parent_and_group(stat: &str) -> Option<(i32, i32)> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace().skip(1);
+    let parent = fields.next()?.parse().ok()?;
+    let group = fields.next()?.parse().ok()?;
+    Some((parent, group))
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -691,6 +826,19 @@ mod tests {
             ManagedServer::new(s).start().await,
             Err(HostError::InvalidConfig(m)) if m.contains("batch")
         ));
+    }
+
+    #[test]
+    fn proc_stat_lines_give_the_parent_and_the_group() {
+        assert_eq!(
+            parent_and_group("4321 (kuna) S 1234 4321 1234 0 -1 4194560 2 0"),
+            Some((1234, 4321))
+        );
+        // A name with spaces and parentheses.
+        assert_eq!(parent_and_group("77 (a (b) c) R 5 77 5 0"), Some((5, 77)));
+        assert_eq!(parent_and_group("77 (x"), None);
+        assert_eq!(parent_and_group("77 (x) S"), None);
+        assert_eq!(parent_and_group("77 (x) S a b"), None);
     }
 
     #[tokio::test]

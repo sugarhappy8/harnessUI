@@ -39,3 +39,22 @@ Collected while the packages run. Each needs doing (or a decision) before the re
     with `hidden_in_summary`); reuse that check there.
   - WP3a: the real-model `llama_memory` test takes very long under load (36 min at load 20;
     about 2-4 min alone); keep it out of the default CI run if it is slow there.
+- **WP1a, WP1b, WP2, WP8 done.** Left (minor), to fix or decide at integration:
+  - **WebP pictures** (lead decision): closing the S2 hole (`--video-ffmpeg-dir` to a fixed
+    empty folder, so llama-server never starts ffmpeg/ffprobe) means llama-server can no
+    longer read WebP; the composer still accepts `image/webp` (`Composer.tsx`,
+    `attachments.rs`). Convert WebP to PNG in `attachments.rs`, or stop accepting WebP with a
+    plain message. Verified end to end by WP1a (PNG 200, WebP 400).
+  - WP1a: a model that refuses Save memory on a graphics card in use still gets the
+    graphics-card wording (rare head-size-80 models); needs a contract change (who refused).
+  - WP1a: the contract test `the_alias_is_the_model_id_in_every_api` failed once at
+    `/v1/messages` (intermittent, cause unknown; it passed on every other run). Watch it in CI.
+  - WP2: at 1100-1200 px with messages the model name in the header can shrink to one
+    letter and the memory number is cut; in an empty chat the ready line's reason and
+    "· Change" are cut up to 1366-1440 px. Header layout pass (also with WP7's chip and
+    item 6's usage line).
+  - WP2: cancelling a wait that the backend started on its own (pickModel with no question)
+    leaves the chat on the new model while the old one stays loaded (`app.ts` pickModel's
+    restore checks `answer.whenIdle`, undefined on that path).
+  - WP8: a model opened through a link or mapped drive is listed under its real path when not
+    loaded; picking it there switches the chat that opened it to that spelling.
