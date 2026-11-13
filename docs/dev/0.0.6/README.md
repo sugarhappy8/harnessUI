@@ -12,11 +12,14 @@ as they wrote them.
    model may hand a task to Claude Code or Codex.)
 4. Add model comparisons for models so users can compare different models and what their good at from the download huggingface thing we have
 5. "i wanna install https://github.com/morluto/rea as a main feature in it but with a free decompiler. maybe lets keep that for version 0.0.6."
-   Not designed yet. First read that repository (what it does, its license, what it needs to
-   run), then pick a free decompiler whose license allows shipping it with the app, and write
-   the spec like the others. Ask the owner before choosing.
+   Designed in `item5-spec.md` (research in `item5-rea-research.md`), with the owner's
+   answers at its top: rea with Kuna and Ghidra, installed from its own Settings tab; Ghidra
+   on Windows, Kuna only on a Mac; an Install button for Apple's command line tools; off in
+   new chats until turned on, then new chats follow the last choice. Built (WP9a to WP9e,
+   WP9g, WP9h; WP9f dropped by the owner's answer).
 6. "on 0.0.6 i want more control options as well for the models seeing how much of my gpu and cpu is currently being used and how offloading would look like and options for select offloading btw. similar to how LM studios does it."
-   Not designed yet. What it adds to item 2:
+   Designed in `item6-spec.md` (earlier sketch `item6-usage-offloading.md`), with the owner's
+   answers 1A, 2A, 3A at its top, and built (WP10a to WP10e). What it adds to item 2:
    - **Live usage:** how busy the graphics card and the processor are, and how much of their
      memory is in use, while a model loads and runs.
    - **What offloading would look like, before loading:** how much of the model would sit on
@@ -26,19 +29,16 @@ as they wrote them.
      go to the graphics card, keeping the experts of a mixture-of-experts model on the
      processor, whether the conversation memory (KV cache) stays on the graphics card, and
      processor threads.
-   This goes against the current spec on purpose: item 2's decision D4 keeps the settings
-   few and plain and lists "threads, batch sizes, slots, rope, tensor split" as never shown.
-   The spec must be revised: keep the plain choices as the default, and add a place with the
-   finer controls and the usage view. Ask the owner where to draw that line. Usage figures
-   must come from this computer only (no telemetry), on Windows (the owner's AMD Radeon
-   RX 9070 XT), macOS and Linux, and degrade to "not available" where a system gives none.
+   This went against item 2's decision D4 on purpose; `spec.md` Part 3b amends D4: the plain
+   choices stay the default, and the finer controls sit in a closed **Fine control** section
+   of each model's settings, with live usage always visible under the model name. Usage
+   figures come from this computer only (no telemetry) and say "Not available" where a
+   system gives none.
 
 7. "i also want to make it clear what folder is being used if u dont have full access on and stuff. it currently kinda hidden."
-   Today the chat's folders are only in the Tools panel ("Folders for this chat") and in
-   Settings → Permissions; the model is told them, the owner hardly sees them. Show the
-   folder the chat works in, and the approved folders, where the owner looks anyway (for
-   example the chat header or beside the message box), with a quick way to change or add
-   one. In Full access say plainly instead that the whole computer is reachable.
+   Before 0.0.6 the chat's folders were only in the Tools panel ("Folders for this chat") and
+   in Settings → Permissions. Built (WP7, `spec.md` Part 3b): a folder chip in the chat
+   header with a menu to change or add folders, "Whole computer" in Full access.
 8. "also when i download a new model it doesnt auto show up here fix that in 0.0.6" (the owner's
    screenshot: the chat header's model menu, "On this computer").
    Cause found while writing this down: that list shows only the model files used recently
@@ -47,26 +47,31 @@ as they wrote them.
    to it, so a new model appears only after it was loaded once from the model manager. The
    menu re-reads its list each time it opens (`ModelPicker.tsx`), so listing the installed
    models (and refreshing when a download finishes, `download-progress`) fixes it. The same
-   screenshot lists `Ornith-1.5-9B-uncensored.Q8_0.gguf` twice: the list shows only the file
-   name, so two copies in different folders look the same. Find out which it is; show enough
-   of the folder to tell them apart, or one entry per file.
+   screenshot lists one Q8_0 model file twice: the list showed only the file name, so two
+   copies in different folders looked the same. Built (WP8): every installed model is
+   listed, one entry per file, and two files with the same name each show the end of their
+   folder.
 
-## What already exists
-- **Design:** `spec.md` (revision 2, with "Amendments after WP0"), the map of the code it is
-  based on (`map.md`, `map-details.md`) and the three independent critiques that shaped it
-  (`critique.md`). Line numbers refer to the code as of 0.0.4. The spec still says "0.0.5"
-  in places, from before the pause.
-- **Groundwork (WP0):** shared types, command stubs and component splits, built and
-  independently checked; reports in `report-WP0-*`. The contract every package builds on is
-  the section "CONTRACT (updated)" of `report-WP0-fix.md`.
-- **Half-built packages:** about 32,000 lines across 119 files for the eleven work packages
-  (WP1a to WP6), partly written, none reviewed yet. They are on this branch,
-  **`claude/0.0.6`**, on top of 0.0.5 (Full access): see `STATUS.md` for what compiles and
-  passes. `package-briefs.json` holds the instructions each package's developer got.
+## What exists
+- **Design:** `spec.md` (revision 3: items 1 to 4 in Part 3, items 5 to 8 in Part 3b, the
+  owner checklist in Part 4), `item5-spec.md` and `item6-spec.md` (each with the owner's
+  answers at the top), the map of the code they started from (`map.md`, `map-details.md`,
+  line numbers as of 0.0.4) and the critiques that shaped them (`critique.md`, and each item
+  spec's critique log).
+- **Groundwork (WP0):** shared types, command stubs and component splits; reports in
+  `report-WP0-*`. The contract every package built on is the section "CONTRACT (updated)"
+  of `report-WP0-fix.md`.
+- **Every work package is built, reviewed and fixed:** WP1a to WP8 (items 1 to 4, 7 and 8),
+  WP9a to WP9e, WP9g and WP9h (item 5), WP10a to WP10e (item 6), each with an independent
+  security review and a correctness review, fixes and a check; then a whole-release review
+  and a final fix round. `STATUS.md` has the timeline, `integration-todo.md` every leftover
+  with its outcome. `package-briefs.json` holds the instructions the first eleven
+  packages' developers got.
+- **What only the owner's computers can show:** `owner-checklist.md` (Windows PC with the
+  Radeon RX 9070 XT, the 16 GB Mac, either).
 - **History of the paused run:** `history/STATUS-at-pause.md` (which package was where when
   the owner stopped it), `history/packages-workflow.js.txt` (the build → security and correctness
-  reviews → fix pipeline that ran them) and `history/resume-args.json` (its arguments, with
-  `resume: true` for every package that had not finished).
+  reviews → fix pipeline that ran them) and `history/resume-args.json` (its arguments).
 
 ## Git history: read this before merging anything
 The paused work was first committed on the 0.0.5 branch (7827001, also the branch
@@ -79,22 +84,28 @@ This branch got the work back by reverting a0177eb on top of 0.0.5 (commit 71310
 use `claude/0.0.5-paused` for anything any more; it is kept only as a record.
 
 ## How to pick it up
-1. Keep this branch up to date by merging `main`. 0.0.5 (pull request 4) was merged into
-   `main` as 4189a3a and released as v0.0.5; its branch `claude/zealous-brown-d3vmfb` is
-   gone. `main` was merged into this branch on 2026-11-12 (no file changes).
-2. Update `spec.md` for 0.0.6:
-   - approval modes are three (Ask first, Allow all, Full access); see ARCHITECTURE.md 13.3
-     "Full access (0.0.5)" and `docs/dev/0.0.5/full-access-review.md`;
-   - D11 (a task for a coding app always asks) now reads: always asks in Ask first and Allow
-     all; in Full access nothing asks (the owner's Full access rule; the terminal could start
-     those apps anyway). This is how the engine was merged (`crates/policy/src/engine.rs`);
-     confirm it with the owner;
-   - item 6 changes item 2's D4 (see above);
-   - items 5 to 8 get their own parts (5 once it is researched; 7 and 8 are small).
-3. Resume the packages: each package's developer continues from the code already written
-   (`history/STATUS-at-pause.md` says where each stood), then two independent reviews
-   (security, correctness) and fixes, as `history/packages-workflow.js.txt` did. Then design and
-   build items 5 to 8, then integration: every check, every e2e suite, a whole-release
-   review, docs, version 0.0.6, CI on all three systems, a draft pull request.
-4. The owner checklist (spec Part 4) still applies: graphics card settings on the owner's
-   Radeon RX 9070 XT, the 16 GB Mac, and Claude Code / Codex using the shared model.
+**0.0.6 is complete, pending the owner's review and CI on all three systems.** All eight
+items are built, the version is 0.0.6 everywhere, and the docs (CHANGELOG, ARCHITECTURE,
+SECURITY, README) describe it. The last step on Linux was a final pass: every check and
+every end-to-end suite with the real model, with each failure fixed (its outcome is in
+`STATUS.md`). Draft pull request #5 (`claude/0.0.6` into `main`) carries it. Nothing is
+left to build unless the final pass, the owner's review or CI finds something.
+
+1. **Read `STATUS.md` (last entries) and the latest CI run on pull request #5.** Windows and
+   macOS have never run 0.0.6's tests: the first CI run (43380365172) stopped at a Linux
+   clippy finding, since fixed. A failure on Windows or macOS is a real bug to fix
+   test-first; do not skip or weaken a test to get green.
+2. **The owner's review.** Give the owner `owner-checklist.md` and these with it: the
+   "rea test files" folder (artifact `rea-test-files` of the macOS job of the *Reverse
+   engineering* workflow, `reverse.yml`), and the table of publisher quotes behind the
+   catalog's *What is it good at?* answers (WP4c's report; the owner approves or swaps each
+   quote before release, D6). The workflow runs only from the default branch (manual or
+   nightly), so it can first run after the merge, or by hand on `main`.
+3. **What stays open on purpose** is listed in CHANGELOG "Known limits" and SECURITY.md;
+   `integration-todo.md` ends with the outcome of every leftover, so a "Known limit" there is
+   a decision, not forgotten work.
+4. **Before tagging v0.0.6:** the owner's go, CI green on all three systems, then merge and
+   tag (the release workflow re-checks Ghidra's checksum before it builds anything).
+5. Toolchain: CI uses stable Rust; the final pass built, linted and tested with
+   `cargo +1.100` (spec Part 1 still says 1.99, from when the packages were built).
+   Keep this branch up to date by merging `main` (0.0.5 was merged as 4189a3a).

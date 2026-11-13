@@ -210,3 +210,60 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   tools-panel-file-note. Queued after batch c's rea-linux-tmp: rea-start-guard (doc comment
   says what the managed server really does when a start is dropped; the guard's stop path
   also removes the run temp folder; scratchpad reports/fix-rea-start-stuck.md OPEN).
+  Done (rea-start-guard, final fix round): checked.
+
+## Final pass (2026-11-13): the outcome of every item above
+Checked against the code and tests. "Done" = fixed and tested; "Known limit" = kept on purpose
+for 0.0.6; "Owner" = on `owner-checklist.md`; "To fix" = found at the final pass, small, not a
+release blocker unless the owner says so.
+- WP7 path escaping in the Tools panel and Settings → Permissions: **Done** (`visiblePath`
+  inside `<bdi dir="ltr">` in `ToolsPanel.tsx` and `PermissionsSettings.tsx`; the
+  `folder-chip` scenario asserts the escaped path in the Tools panel).
+- WP7 narrow windows: **Done** (header-layout): "Whole computer" and "No folder · Choose" stay
+  in words at every width; below about 950 px a chip with more folders reads "harnessUI + 2".
+  `folder-chip` and `header-layout` check 720 px. Re-running `folder-chip`: part of the final
+  pass's full scripted run.
+- WP6 limits and the carriage-return fix in ARCHITECTURE 13.3 and SECURITY.md: **Done**.
+- `compare-models` race: the probe waits for each column after every add; the final pass
+  reruns it. WP4c's quotes: **Owner** (approve or swap each before release, D6).
+- WP5b "Make a new key" and the old-key note: **Done** (leftover runs A and C).
+- WP3a `defang_app_notes` in `subagent.rs`: **Done** (it calls `agent::prompt::defang_app_notes`;
+  runs A, C and helper-escape-minors).
+- WP3a `llama_memory` run time: kept in the default `cargo test --workspace` (CI sets
+  `TEST_GGUF` on all three systems); WP3a's round 2 made it deterministic. Windows and macOS
+  have not run it yet: if CI shows it too slow, put it behind a variable that CI sets in a
+  job of its own, never skip it quietly.
+- WebP: **Done** (converted to JPEG or PNG everywhere; CHANGELOG "Changed").
+- WP1a, a model that refuses Save memory on a graphics card in use gets the graphics-card
+  wording: **Known limit** (rare; wording only; needs a contract field naming who refused).
+- WP1a alias test flake: watch in CI (seen again only under heavy parallel load, WP10a).
+- WP2 header crowding: **Done** (header layout, two rounds). WP2 cancelling a wait the backend
+  started: **Done** (runs A, C, pick-cancel-minors; `src/store/modelChange.test.ts`).
+- WP8 links and mapped drives: **Done** (run A; `model_options.rs` tests
+  `the_asking_chat_sees_its_own_file_the_way_it_names_it`,
+  `remembering_a_link_to_a_file_without_a_gguf_name_keeps_the_link`).
+- WP9g loosened id rule: **kept as built** (ARCHITECTURE 9.3; item5-spec WP9g updated). Stop
+  during a slow rea start: **Done** (rea start stuck, rea-start-guard). `reverse-tools`
+  `groupOn`: **Done**. Ghidra pin: **Done** (ghidra-pin-gate). item5-spec's mode mask:
+  **Done** (`0o755`). `UpdateInfo.part` and `ServerError` wording: **Done** (wp9d-part-update).
+- Throwaway-file exclude rules: **Done** (`.git/info/exclude` holds none; the tree had no
+  untracked leftovers at the final pass).
+- Every final-fix-round item: **Done** (each report's check says addressed; the two stale
+  doc comments a check named are fixed in the code).
+- The CHANGELOG's `TODO(lead)` comment about the Allow all list: removed; the line stays a
+  **Known limit** (`STILL_ASKS` in `AllowAllButton.tsx` does not name coding assistants or the
+  settings of Claude Code and Codex, although both still ask).
+- Windows Error Reporting for the programs the app starts (`SEM_NOGPFAULTERRORBOX` not set):
+  **Known limit**, written in ARCHITECTURE 13.6; whether a crash dialog appears: **Owner**.
+- **To fix** (wording, found at the final pass): the advice under errors still uses old words.
+  `src-tauri/src/pinned.rs` `next_step(true)` says "…, or load the model with a larger
+  context." (suggested: "Remove or shorten pinned instructions in the Context tab, or choose
+  Model settings to let this model remember more."; update `src-tauri/src/pinned/tests.rs`),
+  and `src-tauri/src/error.rs` (`From<ProviderError>`, `ContextOverflow`) says "raise the
+  context size in Settings → Local models and reload the model" (suggested: "Start a new
+  chat, or choose Model settings to let this model remember more."). Turn errors already use
+  the new words (`turns.rs` `failure_next_step`).
+- **To fix** (test data only, D8): tests added in 0.0.6 use real model file names (the
+  owner's screenshot file in `src-tauri/src/model_options.rs` and
+  `src/components/ModelPicker.list.test.tsx`; others in `ModelPicker.test.tsx` and the
+  hub-cache link tests). Neutral names keep the same cases.

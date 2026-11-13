@@ -180,6 +180,17 @@ one starts from this file and `README.md`.
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,
   `python3 scripts/fetch_test_model.py .cache/models`, dev server on port 1420.
 
+- Final pass, completeness check: every work package and owner decision checked against the
+  code and tests; version 0.0.6 in every manifest and in `Cargo.lock`; no `TODO(lead)` or
+  `TODO(0.0.6)` marker left (the last one, in CHANGELOG, removed); two model names removed
+  from the docs; CHANGELOG gained the user-visible changes it lacked (escaped names, the
+  header, renamed MCP servers, Settings fixes); `integration-todo.md` ends with the outcome
+  of every item; `owner-checklist.md` written; ARCHITECTURE 13.6 notes Windows Error
+  Reporting; `e2e/README.md` lists m10, m11 and the 0.0.6 scenarios. Left in the code
+  (integration-todo "To fix"): two old-wording error hints, and real model file names in
+  some 0.0.6 test data.
+- Container set-up: also `rustup toolchain install 1.100` (the final pass's toolchain).
+
 ## Next
-README "How to pick it up". The new session's first job: check this state, update the spec,
-research items 5 and 6, then report to the owner and wait for their go.
+0.0.6 is complete pending the final pass's results, CI on all three systems (pull request
+#5) and the owner's review: README "How to pick it up", then `owner-checklist.md`.

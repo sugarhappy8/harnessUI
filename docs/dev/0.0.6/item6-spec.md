@@ -37,7 +37,7 @@ network).
 ## 0. What was checked on the pinned build (2026-11-12, this machine, processor only)
 
 Run by hand with `.cache/llama-linux` (b12110, `version: 0.9.0-dev (build 12110, commit
-cd959bae9)`) and `.cache/models/Qwen3-0.6B-Q8_0.gguf` (610 MiB), environment emptied
+cd959bae9)`) and the pinned small test model in `.cache/models/` (Q8_0, 610 MiB), environment emptied
 (`env -i`), nothing spawned from code. The captures are copied into the fixtures named in
 WP10a.
 

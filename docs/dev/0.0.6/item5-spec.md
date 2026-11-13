@@ -845,10 +845,14 @@ like `stdio_e2e.rs`); in `src-tauri/src/toolset.rs` (shared) the lines that buil
   open_seq}; `open_seq` grows at every `open_binary`, `close_binary` and reset the app sends;
   the closed reason per chat (another chat, a Settings change); the **result-id ledger**: each
   `ev_[a-f0-9]{64}` found anywhere in a successful result (text, structured content, `ui`) is
-  recorded for the chat whose result showed it first, with the current `store_epoch` and the
+  recorded for the chat whose result showed it, with the current `store_epoch` and the
   canonical path it came from (the binding's for session tools, the checked path for file
-  checks, the parent's for `inspect_analysis_view`); an id already recorded is never given to
-  another chat; ids in error results are not recorded; at most 10,000 ids (oldest dropped).
+  checks, the parent's for `inspect_analysis_view`); ids in error results are not recorded.
+  As built (kept at integration; ARCHITECTURE.md 9.3): an id belongs to every chat whose own
+  successful result about the **same canonical file** showed it (two chats looking at the
+  same file share rea's ids); an id seen in a result about another file is contested and
+  readable by no chat. At most 10,000 records, never dropped: when the ledger is full, new
+  ids are left out and the next open clears rea.
   `store_epoch` grows at every rea start and every reset. `snapshot()` gives WP9c's
   `SessionView`.
 - `describe`: WP9c's `describe::describe` with `RealFs`, the snapshot and the availability.
