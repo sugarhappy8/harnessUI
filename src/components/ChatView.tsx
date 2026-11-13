@@ -194,8 +194,17 @@ export function ChatView() {
   const shown = messages.slice(hidden);
   const live = generation && detail && generation.chatId === detail.chat.id ? generation : null;
   const chatApprovals = approvals.filter((a) => detail && a.chatId === detail.chat.id);
-  const scrollKey =
-    messages.length + (live ? live.text.length + live.tools.length * 1000 + live.reasoning.length : 0) + chatApprovals.length;
+  // What makes the chat follow its end while it is there. [0.0.6 final pass] The reply's notes
+  // count too: one can arrive after an approval card is drawn and push its buttons under the
+  // message box. Joined, not added, so one part growing as another shrinks still counts.
+  const scrollKey = [
+    messages.length,
+    live ? live.text.length : 0,
+    live ? live.tools.length : 0,
+    live ? live.reasoning.length : 0,
+    live ? live.notes.length : 0,
+    chatApprovals.length,
+  ].join(":");
 
   const onScroll = useCallback(() => {
     const el = scrollerRef.current;

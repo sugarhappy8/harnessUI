@@ -14,6 +14,10 @@
 //!   devices and pipes, a second entry for the same path (compared without case, as on
 //!   Windows and macOS), and more entries or bytes than the lock's numbers plus 10 %.
 //!
+//! What an entry is comes from the archive's bytes alone, never from the system unpacking
+//! it: a tar entry's type, and a zip entry's Unix mode as the system its archive names as
+//! the maker records it (an entry made on MS-DOS has none and is a plain file or folder).
+//!
 //! Nothing here runs anything. Links are refused on Windows (creating them needs a
 //! privilege most accounts lack); none of the Windows archives holds one.
 
@@ -631,8 +635,11 @@ mod tests {
                         .unwrap();
                 }
                 E::Hard(..) | E::Fifo(..) => {
-                    // A pipe's file type in the Unix mode of the external attributes.
+                    // A pipe's file type in the Unix mode of the external attributes, in an
+                    // entry that says Unix made it: left alone, the writer names the system
+                    // the test runs on (MS-DOS on Windows), whose entries carry no Unix type.
                     let o = zip::write::SimpleFileOptions::default()
+                        .system(zip::System::Unix)
                         .external_attributes(0o010_644 << 16);
                     let name = match *e {
                         E::Hard(n, _) | E::Fifo(n) => n,
@@ -885,6 +892,103 @@ mod tests {
             matches!(&r, Err(ArchiveError::Refused(m)) if m.contains("not a file, folder or link")),
             "{r:?}"
         );
+    }
+
+    /// A zip of one empty stored entry `name`, written byte by byte: its central directory
+    /// says which system made it (`made_by`: 0 MS-DOS, 3 Unix, 10 Windows NTFS) and carries
+    /// `unix_mode` in the high half of the external attributes, as Info-ZIP writes it.
+    fn hand_made_zip(path: &Path, name: &str, made_by: u8, unix_mode: u32) {
+        let len = u16::try_from(name.len()).unwrap();
+        // Version needed (2.0), flags, stored, time, date (1980-01-01), then the CRC-32 and
+        // both sizes of no bytes.
+        let common = |out: &mut Vec<u8>| {
+            for v in [20u16, 0, 0, 0, 0x21] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.extend_from_slice(&[0; 12]);
+        };
+        let mut local = 0x0403_4b50u32.to_le_bytes().to_vec();
+        common(&mut local);
+        for v in [len, 0] {
+            local.extend_from_slice(&v.to_le_bytes());
+        }
+        local.extend_from_slice(name.as_bytes());
+
+        let mut central = 0x0201_4b50u32.to_le_bytes().to_vec();
+        // Version made by: 2.0, and the system that made the entry.
+        central.extend_from_slice(&[20, made_by]);
+        common(&mut central);
+        // Name, extra and comment lengths, first disk, internal attributes.
+        for v in [len, 0, 0, 0, 0] {
+            central.extend_from_slice(&v.to_le_bytes());
+        }
+        central.extend_from_slice(&(unix_mode << 16).to_le_bytes());
+        // The local header is at the start.
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+
+        let mut end = 0x0605_4b50u32.to_le_bytes().to_vec();
+        for v in [0u16, 0, 1, 1] {
+            end.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [central.len(), local.len()] {
+            end.extend_from_slice(&u32::try_from(v).unwrap().to_le_bytes());
+        }
+        end.extend_from_slice(&0u16.to_le_bytes());
+        std::fs::write(path, [local, central, end].concat()).unwrap();
+    }
+
+    /// A zip entry's type comes from the system its archive says made it, never from the
+    /// system unpacking it: the same bytes give the same answer on Linux, macOS and Windows.
+    #[test]
+    fn a_zip_entry_is_judged_by_the_system_that_made_it_on_every_system() {
+        const DOS: u8 = 0;
+        const UNIX: u8 = 3;
+        const NTFS: u8 = 10;
+        let unpack_one = |made_by: u8, mode: u32| {
+            let dir = tempfile::tempdir().unwrap();
+            let archive = dir.path().join("a.zip");
+            hand_made_zip(&archive, "p/entry", made_by, mode);
+            let out = dir.path().join("out");
+            let r = unpack(
+                &archive,
+                &out,
+                &rules("p/", &ALL),
+                &CancellationToken::new(),
+                &|_| {},
+            );
+            (r, out.join("entry").is_file())
+        };
+        // Made on Unix: a pipe, a character device, a block device or a socket is refused
+        // here as on any other system; so is a pipe from a maker that keeps Unix modes too.
+        for (made_by, mode) in [
+            (UNIX, 0o010_644),
+            (UNIX, 0o020_644),
+            (UNIX, 0o060_644),
+            (UNIX, 0o140_755),
+            (NTFS, 0o010_644),
+        ] {
+            let (r, written) = unpack_one(made_by, mode);
+            assert!(
+                matches!(&r, Err(ArchiveError::Refused(m)) if m.contains("not a file, folder or link")),
+                "made by {made_by}, mode {mode:o}: {r:?}"
+            );
+            assert!(!written, "made by {made_by}, mode {mode:o}");
+        }
+        // A plain file made on Unix unpacks (the hand-made archive is sound).
+        let one_empty_file = Unpacked {
+            files: 1,
+            links: 0,
+            bytes: 0,
+        };
+        let (r, written) = unpack_one(UNIX, 0o100_644);
+        assert_eq!(r.unwrap(), one_empty_file);
+        assert!(written);
+        // MS-DOS has no Unix types: whatever its high bits say, the entry is a plain file, and
+        // nothing but a plain file is written.
+        let (r, written) = unpack_one(DOS, 0o010_644);
+        assert_eq!(r.unwrap(), one_empty_file);
+        assert!(written);
     }
 
     #[test]

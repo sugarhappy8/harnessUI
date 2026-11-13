@@ -203,7 +203,9 @@ fails to load, send the last lines of the log too: *Settings → Diagnostics →
    prompt; Apple graphics roughly follows Activity Monitor's GPU History during a reply;
    memory roughly matches "Memory Used"; harnessUI under 2% of the processor with a chat open.
 7. *Settings for this model* → one memory bar with "Apple graphics can use up to … GB"; *Fine
-   control* figures within 5 seconds.
+   control* figures within 5 seconds. The first time after installing they can take longer
+   (the measuring tool prepares Apple graphics once): note how long; they must never end in
+   "Working them out took too long."
 8. *Layers on Apple graphics* = half → it loads, the menu says so, replies are slower.
 
 **Other apps and coding apps**

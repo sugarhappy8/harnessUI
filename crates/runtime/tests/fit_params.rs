@@ -126,7 +126,10 @@ async fn run_words(
 /// The measurement reads the header and tensor table only: rows parse into bytes, the
 /// processor's figures include the repacked weights that the plain output line leaves
 /// out, and (on Linux) the largest child's peak memory stays below half the model's size,
-/// so the weights were never read. It answers well within its timeout.
+/// so the weights were never read. It answers well within the app's limit: the first run,
+/// which on macOS compiles the Metal library (see `FIT_PARAMS_TIMEOUT`), within half of
+/// it, and the run after it, as every later run in the app, within 20 s on every system.
+/// Both give the same rows.
 #[tokio::test(flavor = "multi_thread")]
 async fn fit_params_measures_without_reading_the_weights() {
     let Some((bin, gguf)) = env_paths("fit_params_measures_without_reading_the_weights") else {
@@ -135,9 +138,20 @@ async fn fit_params_measures_without_reading_the_weights() {
     let backend = backend(&bin);
     let started = Instant::now();
     let rows = measured(&backend, &config(gguf.clone(), 4096)).await;
+    let first = started.elapsed();
+    assert!(
+        first < FIT_PARAMS_TIMEOUT / 2,
+        "the first run took {first:?}"
+    );
+    let started = Instant::now();
+    let again = measured(&backend, &config(gguf.clone(), 4096)).await;
     let took = started.elapsed();
-    assert!(took < Duration::from_secs(20), "took {took:?}");
-    eprintln!("note: one measurement took {took:?}: {rows:#?}");
+    assert!(
+        took < Duration::from_secs(20),
+        "the run after the first took {took:?}"
+    );
+    assert_eq!(again, rows, "the same settings measure the same");
+    eprintln!("note: the first measurement took {first:?}, the next {took:?}: {rows:#?}");
     let host = rows
         .iter()
         .find(|r| r.kind == MemoryRowKind::Host)

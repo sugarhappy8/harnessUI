@@ -5,7 +5,8 @@ The sentences about rea's tests and CI (9.3, 13.6, 16 and 17) are checked agains
 `.github/workflows/reverse.yml` and `ci.yml`, `e2e/scripted_agent.py` and the files they
 name, and no `TODO(lead)` marker may be left in ARCHITECTURE.md. SECURITY.md, CHANGELOG.md
 and docs/dev/0.0.6/item5-spec.md may claim no more of those checks than ARCHITECTURE.md
-does. A failure names the sentence to correct.
+does. ARCHITECTURE.md and docs/dev/0.0.6/item6-spec.md state the `llama-fit-params` time
+limit the code sets. A failure names the sentence to correct.
 
     python3 -I scripts/docs_test.py
 
@@ -261,6 +262,40 @@ class OfflineCoverAsItIs(unittest.TestCase):
         if "m8_offline" not in self.ci:
             self.assertIn("by hand", notes)
             self.assertIn("planned", notes)
+
+
+def fit_params_timeout_secs() -> int:
+    """The limit `crates/runtime/src/llama/fit_params.rs` sets for one measurement, in seconds."""
+    found = re.findall(
+        r"pub const FIT_PARAMS_TIMEOUT: Duration = Duration::from_secs\((\d+)\);",
+        read("crates/runtime/src/llama/fit_params.rs"),
+    )
+    if len(found) != 1:
+        raise AssertionError(f"fit_params.rs: expected one FIT_PARAMS_TIMEOUT, found {len(found)}")
+    return int(found[0])
+
+
+class FitParamsLimitAsTheCodeSetsIt(unittest.TestCase):
+    """Every place ARCHITECTURE.md and item6-spec.md state `FIT_PARAMS_TIMEOUT` gives the
+    number of seconds the code sets."""
+
+    def setUp(self):
+        self.secs = fit_params_timeout_secs()
+
+    def test_item6_spec_states_the_limit_the_code_sets(self):
+        spec = "docs/dev/0.0.6/item6-spec.md"
+        sketch = re.findall(r"FIT_PARAMS_TIMEOUT: Duration = Duration::from_secs\((\d+)\)", read(spec))
+        self.assertEqual(sketch, [str(self.secs)], f"{spec}: the fit_params.rs interface sketch")
+        self.assertIn(f"(`FIT_PARAMS_TIMEOUT`, {self.secs} s", spec_bullet(spec, "- **I6-14 "), f"{spec}: I6-14")
+
+    def test_architecture_states_the_limit_the_code_sets(self):
+        rows = [r for r in architecture() if r.startswith("| `llama-fit-params` (0.0.6) |")]
+        self.assertEqual(len(rows), 2, "the process table row (4) and the threat table row (13)")
+        process_row, threat_row = rows
+        self.assertIn(f"or {self.secs} s (`FIT_PARAMS_TIMEOUT`)", process_row, "4: the process table row")
+        self.assertIn(f"scrubbed environment, {self.secs} s,", threat_row, "13: the threat table row")
+        measurement = paragraph(architecture(), "2. *The measurement,*")
+        self.assertIn(f"killed after {self.secs} s", measurement, "7.7: the measurement")
 
 
 if __name__ == "__main__":

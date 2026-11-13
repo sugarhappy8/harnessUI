@@ -46,9 +46,20 @@ use super::protocol::{
 };
 use crate::spawn::{self, EnvSpec, SpawnSpec, StdioMode};
 
-/// How long one measurement may take before it is killed: enough for macOS's malware scan
-/// of a program's first start (item 6, I6-14).
-pub const FIT_PARAMS_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one measurement may take before it is killed: two minutes (item 6, I6-14).
+///
+/// A run takes under a second on Linux and Windows. On macOS every llama.cpp program
+/// compiles its Metal library from source when it starts (`ggml_backend_metal_reg` at
+/// b12110, `--device none` included), and macOS keeps the compiled result for later runs,
+/// so the first run after an install or update is slow. On a CI Mac (a virtual machine
+/// with 3 processors and no real graphics chip), with the tests of one file running side
+/// by side, one first run was still going at 30 s, the old limit, and was stopped, while
+/// the runs after the first took about 2 s; a second run on a broken file, which crashes,
+/// still took more than 20 s. Those runs shared the machine, so the log gives no time for
+/// one compile on its own. Two minutes is four times the 30 s at which that first run was
+/// stopped. A longer limit costs nothing in normal use: the estimate stays shown while a
+/// run goes on, and a newer request still cancels it at once.
+pub const FIT_PARAMS_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Most stdout lines kept from one run, the last ones (each cut at 16 KiB by the line
 /// reader); earlier lines are drained and dropped.
@@ -1449,6 +1460,18 @@ mod tests {
         let seen = std::fs::read_to_string(dir.path().join("args.txt")).expect("args");
         let seen: Vec<&str> = seen.lines().collect();
         assert_eq!(seen, build_measure_args(&cfg));
+    }
+
+    /// The limit covers a first start on macOS (I6-14), where the program also compiles
+    /// its Metal library before it measures: on a CI Mac one first run was still going
+    /// when the old limit of 30 s stopped it. The limit is at least four times that.
+    #[test]
+    fn the_limit_covers_a_first_start_on_macos() {
+        let stopped_at = Duration::from_secs(30);
+        assert!(
+            FIT_PARAMS_TIMEOUT >= stopped_at * 4,
+            "{FIT_PARAMS_TIMEOUT:?} is too short for a first start on macOS"
+        );
     }
 
     /// The plain line fit-params prints after it queued its record, as the pinned build

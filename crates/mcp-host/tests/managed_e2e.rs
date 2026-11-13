@@ -30,7 +30,9 @@
 //!     a running process and returns once it has ended.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -84,56 +86,119 @@ fn main() {
     }
     // SAFETY: no other thread exists yet; the runtime is built after this.
     unsafe { std::env::set_var(CANARY, "leaked-from-parent") };
+    on_test_thread(run_all);
+}
+
+/// One check: its name and the function that makes its future. The future is boxed so that
+/// the harness's own stack frame stays small however many checks there are.
+type Check = (&'static str, fn() -> Pin<Box<dyn Future<Output = ()>>>);
+
+fn run_all() {
+    let checks: &[Check] = &[
+        ("environment_arguments_and_folder_are_exact", || {
+            Box::pin(exact_environment())
+        }),
+        ("lists_pages_calls_and_logs_stderr", || {
+            Box::pin(lists_and_calls())
+        }),
+        ("names_outside_the_allow_list_never_reach_it", || {
+            Box::pin(allow_list())
+        }),
+        ("progress_keeps_a_call_alive_and_its_text_stays_out", || {
+            Box::pin(progress())
+        }),
+        ("an_answered_cancel_keeps_the_server", || {
+            Box::pin(answered_cancel())
+        }),
+        ("an_ignored_cancel_stops_the_server", || {
+            Box::pin(ignored_cancel())
+        }),
+        ("a_server_that_ignores_everything_is_killed", || {
+            Box::pin(stubborn())
+        }),
+        ("timeouts_are_handled_like_cancels", || Box::pin(timeouts())),
+        ("a_call_dropped_after_stop_still_stops_the_server", || {
+            Box::pin(dropped_after_cancel())
+        }),
+        ("a_call_dropped_without_stop_is_cancelled", || {
+            Box::pin(dropped_without_cancel())
+        }),
+        ("stop_lets_a_server_end_on_stdin_close", || {
+            Box::pin(stop_by_itself())
+        }),
+        ("stop_kills_a_server_that_ignores_stdin_close", || {
+            Box::pin(stop_kills())
+        }),
+        #[cfg(target_os = "linux")]
+        ("a_kill_also_ends_the_groups_its_children_lead", || {
+            Box::pin(kill_ends_child_groups())
+        }),
+        ("the_start_limit_is_kept", || Box::pin(start_limit())),
+        (
+            "a_dropped_start_can_be_waited_for_until_it_has_ended",
+            || Box::pin(dropped_start()),
+        ),
+        ("a_crash_after_start_is_noticed", || Box::pin(crash())),
+    ];
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
     runtime.block_on(async {
-        run(
-            "environment_arguments_and_folder_are_exact",
-            exact_environment(),
-        )
-        .await;
-        run("lists_pages_calls_and_logs_stderr", lists_and_calls()).await;
-        run("names_outside_the_allow_list_never_reach_it", allow_list()).await;
-        run(
-            "progress_keeps_a_call_alive_and_its_text_stays_out",
-            progress(),
-        )
-        .await;
-        run("an_answered_cancel_keeps_the_server", answered_cancel()).await;
-        run("an_ignored_cancel_stops_the_server", ignored_cancel()).await;
-        run("a_server_that_ignores_everything_is_killed", stubborn()).await;
-        run("timeouts_are_handled_like_cancels", timeouts()).await;
-        run(
-            "a_call_dropped_after_stop_still_stops_the_server",
-            dropped_after_cancel(),
-        )
-        .await;
-        run(
-            "a_call_dropped_without_stop_is_cancelled",
-            dropped_without_cancel(),
-        )
-        .await;
-        run("stop_lets_a_server_end_on_stdin_close", stop_by_itself()).await;
-        run("stop_kills_a_server_that_ignores_stdin_close", stop_kills()).await;
-        #[cfg(target_os = "linux")]
-        run(
-            "a_kill_also_ends_the_groups_its_children_lead",
-            kill_ends_child_groups(),
-        )
-        .await;
-        run("the_start_limit_is_kept", start_limit()).await;
-        run(
-            "a_dropped_start_can_be_waited_for_until_it_has_ended",
-            dropped_start(),
-        )
-        .await;
-        run("a_crash_after_start_is_noticed", crash()).await;
+        for (name, check) in checks {
+            run(name, check()).await;
+        }
     });
 }
 
-async fn run(name: &str, check: impl std::future::Future<Output = ()>) {
+/// The stack Windows gives a program's main thread (Linux and macOS give 8 MiB). Only
+/// Linux can hold its main thread to it.
+#[cfg(target_os = "linux")]
+const WINDOWS_MAIN_STACK: usize = 1 << 20;
+
+/// The stack the checks run with: what Linux gives a main thread.
+const TEST_STACK: usize = 8 << 20;
+
+/// Runs `tests` on a thread of their own with [`TEST_STACK`], and fails the run if they
+/// panic. On Windows the main thread has only 1 MiB of stack, less than these
+/// checks need in a debug build: run there, they died with STATUS_STACK_OVERFLOW before
+/// their first line. On Linux the main thread is first held to that same size, so anything
+/// left on it that would overflow on Windows fails here too.
+fn on_test_thread(tests: fn()) {
+    #[cfg(target_os = "linux")]
+    hold_main_stack_to(WINDOWS_MAIN_STACK);
+    let tests = std::thread::Builder::new()
+        .name("tests".into())
+        .stack_size(TEST_STACK)
+        .spawn(tests)
+        .expect("test thread");
+    if tests.join().is_err() {
+        // The panic is already printed; fail the way the default harness does.
+        std::process::exit(101);
+    }
+}
+
+/// Lowers this process's main-thread stack limit to `bytes` (Linux only), so a stack that
+/// would overflow on Windows overflows here too. Children started from here inherit it, as
+/// the fake servers' main threads have the same 1 MiB on Windows.
+#[cfg(target_os = "linux")]
+fn hold_main_stack_to(bytes: usize) {
+    let bytes = libc::rlim_t::try_from(bytes).expect("stack size");
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: both calls only read or write the struct passed to them.
+    unsafe {
+        assert_eq!(libc::getrlimit(libc::RLIMIT_STACK, &mut limit), 0);
+        if limit.rlim_cur > bytes {
+            limit.rlim_cur = bytes;
+            assert_eq!(libc::setrlimit(libc::RLIMIT_STACK, &limit), 0);
+        }
+    }
+}
+
+async fn run(name: &str, check: impl Future<Output = ()>) {
     let started = Instant::now();
     check.await;
     println!(
@@ -265,7 +330,7 @@ async fn eventually(timeout: Duration, mut condition: impl FnMut() -> bool) -> b
 /// Whether a process is still running (a zombie counts as gone). Unix only.
 #[cfg(unix)]
 fn alive(pid: u32) -> bool {
-    if Path::new("/proc/self/stat").exists() {
+    if std::path::Path::new("/proc/self/stat").exists() {
         return match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat
                 .rsplit_once(')')

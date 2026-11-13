@@ -238,6 +238,7 @@ mod calls {
     use std::collections::BTreeSet;
     use std::future::Future;
     use std::path::{Path, PathBuf};
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -264,70 +265,132 @@ mod calls {
 
     pub fn main(args: &[String]) {
         let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
+        on_test_thread(move || run_all(&filter));
+    }
+
+    /// One check: its name and the function that makes its future. The future is boxed so
+    /// that the harness's own stack frame stays small however many checks there are.
+    type Check = (&'static str, fn() -> Pin<Box<dyn Future<Output = ()>>>);
+
+    fn run_all(filter: &Option<String>) {
+        let checks: &[Check] = &[
+            ("forwards_canonical_paths_and_fixed_details", || {
+                Box::pin(forwards())
+            }),
+            ("nothing_outside_the_allow_list_reaches_rea", || {
+                Box::pin(allow_list())
+            }),
+            ("a_queued_session_call_from_another_chat_is_refused", || {
+                Box::pin(queued())
+            }),
+            ("result_ids_stay_with_the_chat_that_saw_them", || {
+                Box::pin(ids())
+            }),
+            ("another_chats_open_clears_rea_first", || {
+                Box::pin(other_open())
+            }),
+            ("a_folder_that_lost_approval_clears_rea", || {
+                Box::pin(lost_folder())
+            }),
+            (
+                "a_folder_swapped_for_a_link_to_a_network_place_clears_rea",
+                || Box::pin(swapped_folder()),
+            ),
+            ("after_an_idle_stop_the_file_opens_again", || {
+                Box::pin(reopen())
+            }),
+            ("a_swapped_file_is_refused", || Box::pin(swapped())),
+            (
+                "a_decompiler_switch_ends_the_binding",
+                || Box::pin(switch()),
+            ),
+            ("results_are_masked_hinted_and_mapped", || {
+                Box::pin(results_route())
+            }),
+            ("a_changed_tool_is_switched_off", || Box::pin(changed())),
+            ("stop_during_a_slow_step", || Box::pin(stop())),
+            ("the_three_approval_modes", || Box::pin(modes())),
+            ("close_after_an_idle_stop_needs_no_rea", || {
+                Box::pin(close_after_stop())
+            }),
+            ("a_fresh_rea_is_not_cleared_before_an_open", || {
+                Box::pin(fresh_open())
+            }),
+            ("hostile_file_names_in_progress_lines", || {
+                Box::pin(hostile_names())
+            }),
+            (
+                "a_file_swapped_while_rea_is_cleared_or_started_is_refused",
+                || Box::pin(swapped_late()),
+            ),
+            ("a_hostile_result_cannot_take_another_chats_id", || {
+                Box::pin(hostile_ids())
+            }),
+            ("the_same_file_in_two_chats_shares_its_ids", || {
+                Box::pin(shared_ids())
+            }),
+            ("a_view_after_rea_stopped_does_not_start_it", || {
+                Box::pin(view_after_stop())
+            }),
+            ("the_real_rea_through_the_server", || Box::pin(real_rea())),
+        ];
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
         runtime.block_on(async {
-            let f = &filter;
-            run(f, "forwards_canonical_paths_and_fixed_details", forwards()).await;
-            run(
-                f,
-                "nothing_outside_the_allow_list_reaches_rea",
-                allow_list(),
-            )
-            .await;
-            run(
-                f,
-                "a_queued_session_call_from_another_chat_is_refused",
-                queued(),
-            )
-            .await;
-            run(f, "result_ids_stay_with_the_chat_that_saw_them", ids()).await;
-            run(f, "another_chats_open_clears_rea_first", other_open()).await;
-            run(f, "a_folder_that_lost_approval_clears_rea", lost_folder()).await;
-            run(
-                f,
-                "a_folder_swapped_for_a_link_to_a_network_place_clears_rea",
-                swapped_folder(),
-            )
-            .await;
-            run(f, "after_an_idle_stop_the_file_opens_again", reopen()).await;
-            run(f, "a_swapped_file_is_refused", swapped()).await;
-            run(f, "a_decompiler_switch_ends_the_binding", switch()).await;
-            run(f, "results_are_masked_hinted_and_mapped", results_route()).await;
-            run(f, "a_changed_tool_is_switched_off", changed()).await;
-            run(f, "stop_during_a_slow_step", stop()).await;
-            run(f, "the_three_approval_modes", modes()).await;
-            run(
-                f,
-                "close_after_an_idle_stop_needs_no_rea",
-                close_after_stop(),
-            )
-            .await;
-            run(f, "a_fresh_rea_is_not_cleared_before_an_open", fresh_open()).await;
-            run(f, "hostile_file_names_in_progress_lines", hostile_names()).await;
-            run(
-                f,
-                "a_file_swapped_while_rea_is_cleared_or_started_is_refused",
-                swapped_late(),
-            )
-            .await;
-            run(
-                f,
-                "a_hostile_result_cannot_take_another_chats_id",
-                hostile_ids(),
-            )
-            .await;
-            run(f, "the_same_file_in_two_chats_shares_its_ids", shared_ids()).await;
-            run(
-                f,
-                "a_view_after_rea_stopped_does_not_start_it",
-                view_after_stop(),
-            )
-            .await;
-            run(f, "the_real_rea_through_the_server", real_rea()).await;
+            for (name, check) in checks {
+                run(filter, name, check()).await;
+            }
         });
+    }
+
+    /// The stack Windows gives a program's main thread (Linux and macOS give 8 MiB). Only
+    /// Linux can hold its main thread to it.
+    #[cfg(target_os = "linux")]
+    const WINDOWS_MAIN_STACK: usize = 1 << 20;
+
+    /// The stack the checks run with: what Linux gives a main thread.
+    const TEST_STACK: usize = 8 << 20;
+
+    /// Runs `tests` on a thread of their own with [`TEST_STACK`], and fails the run if they
+    /// panic: debug builds of async checks like these can need more stack than the 1 MiB
+    /// main thread Windows gives (`mcp-host`'s `managed_e2e` died there with
+    /// STATUS_STACK_OVERFLOW before its first line). On Linux the main thread is first held
+    /// to that same 1 MiB, so anything left on it that would overflow on Windows fails here
+    /// too.
+    fn on_test_thread(tests: impl FnOnce() + Send + 'static) {
+        #[cfg(target_os = "linux")]
+        hold_main_stack_to(WINDOWS_MAIN_STACK);
+        let tests = std::thread::Builder::new()
+            .name("tests".into())
+            .stack_size(TEST_STACK)
+            .spawn(tests)
+            .expect("test thread");
+        if tests.join().is_err() {
+            // The panic is already printed; fail the way the default harness does.
+            std::process::exit(101);
+        }
+    }
+
+    /// Lowers this process's main-thread stack limit to `bytes` (Linux only), so a stack
+    /// that would overflow on Windows overflows here too. Children started from here (the
+    /// fake rea among them) inherit it.
+    #[cfg(target_os = "linux")]
+    fn hold_main_stack_to(bytes: usize) {
+        let bytes = libc::rlim_t::try_from(bytes).expect("stack size");
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: both calls only read or write the struct passed to them.
+        unsafe {
+            assert_eq!(libc::getrlimit(libc::RLIMIT_STACK, &mut limit), 0);
+            if limit.rlim_cur > bytes {
+                limit.rlim_cur = bytes;
+                assert_eq!(libc::setrlimit(libc::RLIMIT_STACK, &limit), 0);
+            }
+        }
     }
 
     async fn run(filter: &Option<String>, name: &str, check: impl Future<Output = ()>) {

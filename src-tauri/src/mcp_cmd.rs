@@ -2780,6 +2780,19 @@ mod tests {
         );
     }
 
+    /// The text of the function that starts with `start` in `source`, up to the first line
+    /// that is a lone `}`. Lines are read the same whether they end in "\n" or, as in a
+    /// checkout on Windows, in "\r\n"; a function with no such line fails the test instead
+    /// of reaching the end of the file.
+    fn fn_body(source: &str, start: &str) -> String {
+        let source = source.replace("\r\n", "\n");
+        let rest = source.split_once(start).expect(start).1;
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("the end of {start}"));
+        rest[..end].to_string()
+    }
+
     /// [0.0.6] Whether a tool is built in comes from its server's slot in the host, so the
     /// built-in `reverse` group counts even if a saved server once had that name; the
     /// Tools list and the group check never decide it from saved names.
@@ -2801,25 +2814,18 @@ mod tests {
         // As checked out on Linux and macOS, and as on Windows, where lines may end in "\r\n".
         let lf = include_str!("mcp_cmd.rs").replace("\r\n", "\n");
         let crlf = lf.replace('\n', "\r\n");
-        for (source, start) in [lf.as_str(), crlf.as_str()]
-            .into_iter()
-            .flat_map(|s| [(s, "async fn tool_list("), (s, "async fn reverse_switched_on(")])
-        {
-            let body = source
-                .split(start)
-                .nth(1)
-                .expect(start)
-                .split("\n}\n")
-                .next()
-                .unwrap();
-            assert!(
-                body.contains("builtin_servers") || body.contains("tools_with_kind("),
-                "{start}"
-            );
-            assert!(
-                !body.contains("list_mcp_servers"),
-                "{start} decides from saved names"
-            );
+        for source in [&lf, &crlf] {
+            for start in ["async fn tool_list(", "async fn reverse_switched_on("] {
+                let body = fn_body(source, start);
+                assert!(
+                    body.contains("builtin_servers") || body.contains("tools_with_kind("),
+                    "{start}"
+                );
+                assert!(
+                    !body.contains("list_mcp_servers"),
+                    "{start} decides from saved names"
+                );
+            }
         }
     }
 

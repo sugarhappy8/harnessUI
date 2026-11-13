@@ -334,3 +334,44 @@ describe("the header (header-layout)", () => {
     expect(short.className).toBe("hidden @md:inline @6xl:hidden");
   });
 });
+
+describe("the chat's end while a reply runs", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  // [0.0.6 final pass] A note under the reply (the server's prompt size, a summary) can arrive
+  // after the approval card is drawn. At the chat's end the chat follows it, so the card's
+  // buttons stay in view instead of half under the message box, where the first click on
+  // Deny or Allow scrolled the card and missed (found by the end-to-end run).
+  it("follows a note that arrives while it is at the end", () => {
+    const scrolled = vi.spyOn(Element.prototype, "scrollTo");
+    const generation = {
+      chatId: 1,
+      text: "",
+      reasoning: "",
+      tools: [],
+      notes: [] as string[],
+      step: 1,
+      tokensPerSecond: null,
+      promptTokens: null,
+      completionTokens: null,
+      contextUsed: null,
+      nCtx: null,
+    };
+    useApp.setState({
+      activeChatId: 1,
+      detail: detail("remote:1:m", null, [message(1, "user", "delete")]),
+      generation,
+      turnNotes: null,
+      error: null,
+      approvals: [],
+    });
+    render(<ChatView />);
+    scrolled.mockClear();
+    act(() => useApp.setState({ generation: { ...generation, notes: ["The server reported a prompt of 50 tokens."] } }));
+    expect(screen.getByText("The server reported a prompt of 50 tokens.")).toBeTruthy();
+    expect(scrolled).toHaveBeenCalled();
+  });
+});

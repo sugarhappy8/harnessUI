@@ -305,6 +305,11 @@ mod tests {
         }
     }
 
+    /// Unix only, like the runtime folder itself: `/run/user/1000` is not an absolute path on
+    /// Windows (it has no drive), and there the app forbids no such folder at all
+    /// ([`run_tmp_forbidden`] is Linux only; checked in
+    /// `only_the_app_layout_on_linux_has_a_folder_outside_the_root`).
+    #[cfg(unix)]
     #[test]
     fn the_forbidden_candidate_needs_only_an_absolute_runtime_folder() {
         let local = Path::new("/home/u/.local/share/io.example.app");
@@ -325,13 +330,31 @@ mod tests {
         std::fs::canonicalize(path).unwrap()
     }
 
+    /// A fresh folder for the runtime folder tests, made under `/tmp` with a short name and
+    /// returned canonical (`/private/tmp/rt-…` on a Mac), so the good cases fit
+    /// [`RUN_TMP_MAX_BYTES`] whatever the system's temporary folder is: a Mac's,
+    /// `/private/var/folders/<2>/<30>/T`, or a long `TMPDIR`, would not.
+    #[cfg(unix)]
+    fn short_base() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("rt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        assert!(
+            base.as_os_str().len() + "/run/io.example.app-reverse".len() <= RUN_TMP_MAX_BYTES,
+            "{} is too long for the runtime folder tests",
+            base.display()
+        );
+        (dir, base)
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_runtime_folder_is_used_only_when_it_is_private_and_fits_rea() {
         use std::os::unix::fs::PermissionsExt;
         let plenty = |_: &Path| Some(RUN_TMP_MIN_FREE);
-        let base = tempfile::Builder::new().prefix("rt-").tempdir().unwrap();
-        let base = std::fs::canonicalize(base.path()).unwrap();
+        let (_dir, base) = short_base();
         if dotted(&base) {
             // A temporary folder under a dot folder cannot hold the good case.
             return;
@@ -398,8 +421,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_runtime_folder_of_a_computer_with_4_gb_of_memory_or_more_is_used() {
-        let base = tempfile::Builder::new().prefix("rt-").tempdir().unwrap();
-        let base = std::fs::canonicalize(base.path()).unwrap();
+        let (_dir, base) = short_base();
         if dotted(&base) {
             return;
         }

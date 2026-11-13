@@ -212,7 +212,10 @@ WP10a.
   ready line's memory report. Process ids in PDH instance names are dropped inside
   `crates/usage`, never returned and never logged.
 - **I6-14 One measurement at a time.** A newer request cancels the older run; one timeout
-  (`FIT_PARAMS_TIMEOUT`, 30 s, enough for macOS's first-start malware scan); results
+  (`FIT_PARAMS_TIMEOUT`, 120 s; it was 30 s until the final fix round: on macOS the first
+  run after an install or update also compiles the Metal library, and on a CI Mac, with
+  the tests of one file running side by side, one first run was still going at 30 s and
+  was stopped, while the runs after the first took about 2 s); results
   cached (32 entries); failures and time-outs cached per file version and backend build
   until the panel is opened again, so a file that crashes fit-params is run at most once
   per opening; output capped; a failure falls back to the estimate and says why.
@@ -314,7 +317,7 @@ pub struct MemoryReport { pub n_ctx: Option<u32>, pub rows: Vec<MemoryRow> }   /
 //              (ServerEvent keeps its derives: Clone, Debug, PartialEq, Serialize).
 
 // fit_params.rs
-pub const FIT_PARAMS_TIMEOUT: Duration = Duration::from_secs(30);
+pub const FIT_PARAMS_TIMEOUT: Duration = Duration::from_secs(120);   // I6-14
 pub enum MeasureLayers { All, Count(u32) }            // the device is MeasureConfig::device
 pub struct MeasureConfig {
     pub model: PathBuf, pub ctx: u32, pub device: Option<String>, pub layers: MeasureLayers,
@@ -1056,7 +1059,8 @@ Vulkan shape; a byte value above 2^50 drops the row). Contract tests against the
 binary on the processor (`LLAMA_SERVER_BIN`, `TEST_GGUF`; fit-params is its sibling), in
 `tests/fit_params.rs`, a binary of its own so `getrusage(RUSAGE_CHILDREN)` sees only
 fit-params children: `fit_params_measures_without_reading_the_weights` (rows parse; on
-Linux the children's peak memory is below half the model's size),
+Linux the children's peak memory is below half the model's size; the first run ends within
+half of `FIT_PARAMS_TIMEOUT` and the next, with the same rows, within 20 s),
 `fit_params_q8_0_halves_the_context`, `fit_params_accepts_the_fine_control_flags` (the exact
 words `--device none -ngl all --cpu-moe -nkvo` and `-ngl 10 --n-cpu-moe 5 -t 2 -fa off`
 through the crate's spawn: exit 0 and one record),
@@ -1459,7 +1463,7 @@ reason and evidence; there are two, plus one partly changed.
     `check-spawn.sh` extended with the low-level pattern list (WP10c; no file matches
     today).
 12. *ARCHITECTURE.md 4 and 13.1 missing; two timeouts* → both added to integration step 4;
-    one `FIT_PARAMS_TIMEOUT` of 30 s.
+    one `FIT_PARAMS_TIMEOUT` of 30 s (120 s since the final fix round, I6-14).
 
 **Owner intent and plain words**
 1. *Two answers to "will it fit?"* → `placement::judge` is the only verdict; `build_info`'s

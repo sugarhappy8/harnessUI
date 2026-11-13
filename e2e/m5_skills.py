@@ -119,6 +119,10 @@ def main() -> int:
         chat_id = s.invoke("list_chats", {"query": None})[0]["id"]
         tools = {t["exposed"]: t for t in s.invoke("list_chat_tools", {"chatId": chat_id})}
         assert tools["load_skill"]["enabledInChat"], tools["load_skill"]
+        # The model thinks despite "/no_think" in the message, often for a few thousand
+        # tokens; on a busy computer the turn then outlasts the wait below. Thinking off for
+        # this chat (the header's switch), so the reply ends quickly.
+        s.invoke("set_chat_thinking", {"chatId": chat_id, "on": False})
 
         def idle():
             return s.execute("return document.querySelector('button[aria-label=\"Stop\"]') === null;")
