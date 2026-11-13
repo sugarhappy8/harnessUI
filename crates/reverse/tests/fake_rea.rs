@@ -7,8 +7,8 @@
 //! every call as a JSON line in `<reverse root>/fake-calls.jsonl` and answers with canned
 //! results holding a prompt-injection line, the reverse folder's path (also inside
 //! structured content) and an `ev_` id. `<reverse root>/fake.json` steers it per call: a
-//! delay or an error per tool, ids to repeat, tools whose schema changed or that are
-//! missing.
+//! delay, an error or extra text per tool, ids to repeat, tools whose schema changed or
+//! that are missing, and a slow start.
 //!
 //! Started any other way (by `cargo test`) it installs a fake pack through
 //! `reverse::install` from local archives (rea, Node.js whose `node` is a shell script that
@@ -93,6 +93,10 @@ mod fake {
                     "node_options": std::env::var("NODE_OPTIONS").ok(),
                 }),
             );
+            // A slow start (antivirus scanning a new install, a first start of Ghidra).
+            if let Some(ms) = config(&root)["start_delay_ms"].as_u64() {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+            }
             let server = Fake {
                 root: Arc::new(root),
                 counter: Arc::new(AtomicU64::new(0)),
@@ -214,6 +218,10 @@ mod fake {
                     text.push_str(&format!("\nalso {extra}"));
                 }
             }
+            if let Some(extra) = cfg["append"][&name].as_str() {
+                text.push('\n');
+                text.push_str(extra);
+            }
             let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
             result.structured_content = Some(json!({
                 "evidence_id": id,
@@ -293,6 +301,30 @@ mod calls {
             .await;
             run(f, "a_fresh_rea_is_not_cleared_before_an_open", fresh_open()).await;
             run(f, "hostile_file_names_in_progress_lines", hostile_names()).await;
+            run(
+                f,
+                "a_file_swapped_while_rea_is_cleared_or_started_is_refused",
+                swapped_late(),
+            )
+            .await;
+            run(
+                f,
+                "a_hostile_result_cannot_take_another_chats_id",
+                hostile_ids(),
+            )
+            .await;
+            run(
+                f,
+                "the_same_file_in_two_chats_shares_its_ids",
+                shared_ids(),
+            )
+            .await;
+            run(
+                f,
+                "a_view_after_rea_stopped_does_not_start_it",
+                view_after_stop(),
+            )
+            .await;
             run(f, "the_real_rea_through_the_server", real_rea()).await;
         });
     }
@@ -940,12 +972,15 @@ mod calls {
     }
 
     /// An id first seen in chat A's result is refused in chat B, also after it appears in a
-    /// later result of chat B; chat A can still read it.
+    /// later result of chat B. That later result is about another file, so rea's record of
+    /// the id may be about either file: chat A no longer reads it either (contested, WP9g
+    /// r1); chat A's other ids are still its own.
     async fn ids() {
         let p = Pack::new(false).await;
         let a = p.chat(1, &[&p.files]);
         let b = p.chat(2, &[&p.other]);
-        p.ok("open_binary", open_args("hello-linux-x64"), &a).await;
+        let opened = p.ok("open_binary", open_args("hello-linux-x64"), &a).await;
+        let other_id = own_id(&opened);
         let listed = p.ok("list_procedures", json!({}), &a).await;
         let id = own_id(&listed);
         assert_eq!(
@@ -960,21 +995,27 @@ mod calls {
                 &b,
             )
             .await;
+        p.configure(json!({}));
         assert!(results::evidence_ids(&shown).contains(&id));
         assert_eq!(
             p.invalid("inspect_analysis_view", view(&id), &b).await,
             m::UNKNOWN_ID
         );
+        assert_eq!(
+            p.invalid("inspect_analysis_view", view(&id), &a).await,
+            m::UNKNOWN_ID,
+            "contested"
+        );
         p.clear_record();
-        let action = p.action("inspect_analysis_view", view(&id), &a).await;
+        let action = p.action("inspect_analysis_view", view(&other_id), &a).await;
         assert_eq!(action.scope, Scope::FileAnalysisSession);
         let out = p
-            .call_with("inspect_analysis_view", view(&id), &action, ctx(&a))
+            .call_with("inspect_analysis_view", view(&other_id), &action, ctx(&a))
             .await;
         assert!(!out.is_error, "{}", out.joined_text());
         assert_eq!(
             p.calls(),
-            vec![("inspect_analysis_view".to_string(), view(&id))]
+            vec![("inspect_analysis_view".to_string(), view(&other_id))]
         );
         // Chat B's own id is B's.
         let b_id = own_id(&shown);
@@ -1273,6 +1314,15 @@ mod calls {
             ["open_binary"],
             "the injection ran nothing"
         );
+        // A successful result naming rea's settings (the real rea's binary_session does)
+        // gets the hint too, first (correctness review, WP9g r1).
+        p.configure(json!({"append": {"binary_session":
+            "Set REA_IDA_MCP_CONFIG to an upstream IDA MCP server to enable IDA."}}));
+        let out = p.ok("binary_session", json!({}), &a).await;
+        assert_eq!(out.joined_text().lines().next(), Some(SETTINGS_HINT));
+        p.configure(json!({}));
+        let out = p.ok("binary_session", json!({}), &a).await;
+        assert!(!out.joined_text().contains(SETTINGS_HINT));
     }
 
     /// The live check: a tool whose schema changed in the installed rea is switched off and
@@ -1690,6 +1740,246 @@ mod calls {
         }
     }
 
+    /// Replaces `target` with a link to `to` after `ms` milliseconds.
+    fn swap_later(target: &Path, to: &Path, ms: u64) -> tokio::task::JoinHandle<()> {
+        let (target, to) = (target.to_path_buf(), to.to_path_buf());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            std::fs::remove_file(&target).unwrap();
+            std::os::unix::fs::symlink(&to, &target).unwrap();
+        })
+    }
+
+    /// Replaces `target` with another regular file after `ms` milliseconds.
+    fn replace_later(target: &Path, ms: u64) -> tokio::task::JoinHandle<()> {
+        let target = target.to_path_buf();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            let tmp = target.with_extension("new");
+            std::fs::write(&tmp, b"\x7fELF another program").unwrap();
+            std::fs::rename(&tmp, &target).unwrap();
+        })
+    }
+
+    /// A file swapped while the app clears rea or starts it (each can take minutes) is
+    /// refused right before rea would read it, for an open, a file check and the reopen
+    /// after an idle stop (security review, WP9g r1). The links point into the reverse
+    /// folder, which is forbidden in every mode.
+    async fn swapped_late() {
+        let p = Pack::new(false).await;
+        let a = p.chat(1, &[&p.files]);
+        let b = p.chat(2, &[&p.other]);
+        let fake_json = p.root.join("fake.json");
+        // An open, while the app clears chat A's file first.
+        p.ok("open_binary", open_args("hello-linux-x64"), &a).await;
+        let action = p
+            .action("open_binary", open_args("hello-linux-x64"), &b)
+            .await;
+        p.configure(json!({"delay_ms": {"close_binary": 2500}}));
+        p.clear_record();
+        let swap = swap_later(&p.other.join("hello-linux-x64"), &fake_json, 800);
+        let out = p
+            .call_with("open_binary", open_args("hello-linux-x64"), &action, ctx(&b))
+            .await;
+        swap.await.unwrap();
+        assert!(out.is_error);
+        let text = out.joined_text();
+        assert_eq!(text.lines().next(), Some(notes::CLEARED), "{text}");
+        assert!(text.ends_with(refusals::FILE_CHANGED), "{text}");
+        assert_eq!(p.tools_called(), ["close_binary", "reset_investigation"]);
+        assert_eq!(
+            p.invalid("list_procedures", json!({}), &b).await,
+            m::NO_FILE_OPEN
+        );
+        // A file check, while rea starts slowly.
+        p.server.process().stop(Duration::from_secs(3)).await;
+        p.configure(json!({"start_delay_ms": 2500}));
+        let args = json!({"path": "hello-win-x64.exe"});
+        let action = p.action("inspect_pe_imports", args.clone(), &a).await;
+        p.clear_record();
+        let swap = swap_later(&p.files.join("hello-win-x64.exe"), &fake_json, 800);
+        let out = p
+            .call_with("inspect_pe_imports", args, &action, ctx(&a))
+            .await;
+        swap.await.unwrap();
+        assert_eq!(out.joined_text(), refusals::FILE_CHANGED);
+        assert_eq!(p.starts().len(), 1, "rea started");
+        assert!(p.calls().is_empty(), "and read nothing");
+
+        // The reopen after an idle stop, while the app clears chat B's results.
+        let p = Pack::new(false).await;
+        let a = p.chat(1, &[&p.files]);
+        let b = p.chat(2, &[&p.other]);
+        let fake_json = p.root.join("fake.json");
+        let mine = p.files.join("mine.bin");
+        std::fs::copy(fixture("hello-linux-x64"), &mine).unwrap();
+        p.ok("open_binary", open_args("mine.bin"), &a).await;
+        p.server.process().stop(Duration::from_secs(3)).await;
+        p.ok(
+            "inspect_pe_imports",
+            json!({"path": "hello-win-x64.exe"}),
+            &b,
+        )
+        .await;
+        let pseudo = json!({"procedure": "main"});
+        let action = p.action("procedure_pseudo_code", pseudo.clone(), &a).await;
+        p.configure(json!({"delay_ms": {"close_binary": 2500}}));
+        p.clear_record();
+        let swap = swap_later(&mine, &fake_json, 800);
+        let out = p
+            .call_with("procedure_pseudo_code", pseudo.clone(), &action, ctx(&a))
+            .await;
+        swap.await.unwrap();
+        assert!(out.is_error);
+        let text = out.joined_text();
+        assert_eq!(text.lines().next(), Some(notes::CLEARED), "{text}");
+        assert!(text.ends_with(m::NO_LONGER_REACHABLE), "{text}");
+        assert_eq!(p.tools_called(), ["close_binary", "reset_investigation"]);
+        assert_eq!(
+            p.invalid("procedure_pseudo_code", pseudo.clone(), &a).await,
+            m::NO_FILE_OPEN
+        );
+        // The reopen after an idle stop, while rea starts slowly; another file now.
+        let again = p.files.join("again.bin");
+        std::fs::copy(fixture("hello-linux-x64"), &again).unwrap();
+        p.configure(json!({}));
+        p.ok("open_binary", open_args("again.bin"), &a).await;
+        p.server.process().stop(Duration::from_secs(3)).await;
+        p.configure(json!({"start_delay_ms": 2500}));
+        let action = p.action("procedure_pseudo_code", pseudo.clone(), &a).await;
+        p.clear_record();
+        let swap = replace_later(&again, 800);
+        let out = p
+            .call_with("procedure_pseudo_code", pseudo.clone(), &action, ctx(&a))
+            .await;
+        swap.await.unwrap();
+        assert_eq!(out.joined_text(), refusals::OPEN_FILE_CHANGED);
+        assert_eq!(p.starts().len(), 1, "rea started");
+        assert!(p.calls().is_empty(), "and opened nothing");
+        assert_eq!(
+            p.invalid("procedure_pseudo_code", pseudo, &a).await,
+            m::NO_FILE_OPEN
+        );
+    }
+
+    /// A hostile file's result shows 10,000 ids, then chat A's id (security review, WP9g
+    /// r1): the full ledger frees none of chat A's ids, chat B never gets chat A's id, and
+    /// as it was shown about another file, nobody reads it; chat A's other ids still work.
+    async fn hostile_ids() {
+        let p = Pack::new(false).await;
+        let a = p.chat(1, &[&p.files]);
+        let b = p.chat(2, &[&p.other]);
+        let open_id = own_id(&p.ok("open_binary", open_args("hello-linux-x64"), &a).await);
+        let id_a = own_id(&p.ok("list_procedures", json!({}), &a).await);
+        let mut echo: Vec<String> = (0..10_000u64)
+            .map(|n| format!("ev_{:064x}", 0xdead_0000 + n))
+            .collect();
+        echo.push(id_a.clone());
+        p.configure(json!({ "echo_ids": echo }));
+        let shown = p
+            .ok(
+                "inspect_pe_imports",
+                json!({"path": "hello-win-x64.exe"}),
+                &b,
+            )
+            .await;
+        p.configure(json!({}));
+        let shown_ids = results::evidence_ids(&shown);
+        assert!(shown_ids.len() > 10_000 && shown_ids.contains(&id_a));
+        for chat in [&b, &a] {
+            assert_eq!(
+                p.invalid("inspect_analysis_view", view(&id_a), chat).await,
+                m::UNKNOWN_ID
+            );
+        }
+        // Chat B's own id and its first junk ids are B's; the ids after the room ran out
+        // are nobody's.
+        p.action("inspect_analysis_view", view(&own_id(&shown)), &b)
+            .await;
+        p.action("inspect_analysis_view", view(&echo[0]), &b).await;
+        assert_eq!(
+            p.invalid("inspect_analysis_view", view(&echo[9_999]), &b)
+                .await,
+            m::UNKNOWN_ID
+        );
+        p.clear_record();
+        let out = p.call("inspect_analysis_view", view(&open_id), &a).await;
+        assert!(!out.is_error, "{}", out.joined_text());
+        assert_eq!(p.tools_called(), ["inspect_analysis_view"]);
+        // The next open clears rea, and ids are recorded again.
+        p.clear_record();
+        p.ok("open_binary", open_args("hello-linux-x64"), &a).await;
+        assert_eq!(
+            p.tools_called(),
+            ["close_binary", "reset_investigation", "open_binary"]
+        );
+        let fresh = own_id(&p.ok("list_procedures", json!({}), &a).await);
+        p.action("inspect_analysis_view", view(&fresh), &a).await;
+    }
+
+    /// rea's ids are digests of the content, so a second chat that checks the same file
+    /// gets the same ids: it may read them, as rea's record is about a file it can read
+    /// (correctness review, WP9g r1, seen with the real rea). The same id in a result
+    /// about another file is read by nobody.
+    async fn shared_ids() {
+        let p = Pack::new(false).await;
+        let a = p.chat(1, &[&p.files]);
+        let b = p.chat(2, &[&p.files]);
+        let c = p.chat(3, &[&p.files]);
+        let args = json!({"path": "hello-linux-x64"});
+        let id = own_id(&p.ok("inspect_native_exports", args.clone(), &a).await);
+        // The fake gives each result a new id; the real rea gives the same check of the
+        // same file the same ids.
+        p.configure(json!({"echo_ids": [id]}));
+        p.ok("inspect_native_exports", args.clone(), &b).await;
+        p.configure(json!({}));
+        p.clear_record();
+        let out = p.call("inspect_analysis_view", view(&id), &b).await;
+        assert!(!out.is_error, "{}", out.joined_text());
+        assert_eq!(p.tools_called(), ["inspect_analysis_view"]);
+        p.action("inspect_analysis_view", view(&id), &a).await;
+        // Another file's result shows it: rea's record may be about either file.
+        p.configure(json!({"echo_ids": [id]}));
+        p.ok(
+            "inspect_pe_imports",
+            json!({"path": "hello-win-x64.exe"}),
+            &c,
+        )
+        .await;
+        p.configure(json!({}));
+        for chat in [&a, &b, &c] {
+            assert_eq!(
+                p.invalid("inspect_analysis_view", view(&id), chat).await,
+                m::UNKNOWN_ID
+            );
+        }
+    }
+
+    /// `inspect_analysis_view` after an idle stop is refused at once: the stopped rea lost
+    /// its results, so rea is not started only to refuse (correctness review, WP9g r1).
+    /// The chat's file still opens again by itself at its next step (R21).
+    async fn view_after_stop() {
+        let p = Pack::new(false).await;
+        let a = p.chat(1, &[&p.files]);
+        p.ok("open_binary", open_args("hello-linux-x64"), &a).await;
+        let id = own_id(&p.ok("list_procedures", json!({}), &a).await);
+        let action = p.action("inspect_analysis_view", view(&id), &a).await;
+        p.server.process().stop(Duration::from_secs(3)).await;
+        p.clear_record();
+        let out = p
+            .call_with("inspect_analysis_view", view(&id), &action, ctx(&a))
+            .await;
+        assert_eq!(out.joined_text(), m::UNKNOWN_ID);
+        assert!(p.record().is_empty(), "rea was not started");
+        assert_eq!(p.server.process().state(), RunState::Stopped);
+        assert_eq!(
+            p.invalid("inspect_analysis_view", view(&id), &a).await,
+            m::UNKNOWN_ID
+        );
+        p.ok("list_procedures", json!({}), &a).await;
+        assert_eq!(p.tools_called(), ["open_binary", "list_procedures"]);
+    }
+
     /// The same call path with the real rea, Node.js and Kuna, installed through
     /// `reverse::install` from a cache filled by `scripts/pin_reverse.py --download-to`
     /// (`REVERSE_PACK_CACHE`; skipped without it, and where Kuna is not offered). It checks
@@ -1833,6 +2123,31 @@ mod calls {
         let session = call("binary_session", json!({}), a.clone()).await;
         assert!(!session.is_error);
         no_root(&session);
+        // rea names its own settings in this successful result: the hint comes first.
+        assert_eq!(
+            session.joined_text().lines().next(),
+            Some(SETTINGS_HINT),
+            "{}",
+            session.joined_text()
+        );
+        // The same check of the same file in another chat gives the same ids (digests of
+        // the content); that chat may read them.
+        let c = chat(3, &files);
+        let exports = json!({"path": "hello-linux-x64"});
+        let first = call("inspect_native_exports", exports.clone(), a.clone()).await;
+        let second = call("inspect_native_exports", exports, c.clone()).await;
+        assert!(!first.is_error && !second.is_error);
+        let shared = results::evidence_ids(&second);
+        assert!(!shared.is_empty());
+        assert_eq!(results::evidence_ids(&first), shared, "the same ids");
+        let view_c = json!({"source": {"kind": "retained-evidence", "evidence_id": shared[0]}, "view": {"kind": "summary"}});
+        let out = call("inspect_analysis_view", view_c, c.clone()).await;
+        assert!(
+            !out.joined_text().contains(m::UNKNOWN_ID),
+            "{}",
+            out.joined_text()
+        );
+        no_root(&out);
         // File checks need no decompiler; another chat may run them while chat A holds
         // its file.
         let check = call(

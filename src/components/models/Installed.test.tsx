@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { InstalledModel, ModelBusy, ModelLoadInfo, RuntimeStatus } from "../../lib/types";
+import { FINE_LAUNCH_NONE, fineFacts, processorPicture } from "../fine.fixtures";
 
 const ipcMock = vi.hoisted(() => ({
   isTauri: () => false,
@@ -61,6 +62,7 @@ function info(path: string, patch: Partial<ModelLoadInfo> = {}): ModelLoadInfo {
       backend: null,
       device: null,
       mmproj: null,
+      fine: FINE_LAUNCH_NONE,
     },
     fit: "green",
     tooLarge: false,
@@ -70,6 +72,8 @@ function info(path: string, patch: Partial<ModelLoadInfo> = {}): ModelLoadInfo {
     loaded: false,
     olderSettingsLoaded: false,
     autoCtx: null,
+    fineFacts: fineFacts(),
+    picture: processorPicture(),
     ...patch,
   };
 }
@@ -99,6 +103,7 @@ function readyOn(path: string): RuntimeStatus {
     settingsChanged: false,
     reloadWaiting: false,
     unloadedPath: null,
+    placement: null,
   };
 }
 
@@ -195,6 +200,7 @@ describe("Models → Installed", () => {
       settingsChanged: false,
       reloadWaiting: false,
       unloadedPath: null,
+      placement: null,
     };
     useApp.setState({ runtime: loaded });
     ipcMock.modelBusy.mockResolvedValue({ chatTurns: 0, modelChecks: 1, otherApps: 0 });

@@ -28,7 +28,42 @@ import {
   upgradeNoteWords,
   waitingWords,
   wordsPerSecond,
+  amountGb,
+  amountNumber,
+  appleLimitWords,
+  barLegend,
+  barTitle,
+  capacityGb,
+  customPlacementWords,
+  CUSTOM_PLACEMENT_HELP,
+  expertLayersWords,
+  expertsAfterLayersNote,
+  fineChoiceWords,
+  fineHelp,
+  fineLabels,
+  fineNotes,
+  fineSummary,
+  freeAfterLoading,
+  layersOfWords,
+  leaveFreeWords,
+  legendWords,
+  modelUsesWords,
+  needsWords,
+  partsTotal,
+  percentWords,
+  pictureCaption,
+  pictureLayerWords,
+  pictureSourceWords,
+  pictureWarning,
+  placementWords,
+  threadsOfWords,
+  USAGE_MENU,
+  usageGapWords,
+  usageIcons,
+  usageLine,
+  wontFitQuestion,
 } from "./words";
+import { computerBar, gb, graphicsBar, picture, placement, usage } from "../components/fine.fixtures";
 
 const BACKENDS: BackendKind[] = ["cpu", "vulkan", "cuda", "rocm", "metal"];
 
@@ -52,10 +87,16 @@ const STAGES: Record<LoadStage["kind"], LoadStage[]> = {
   loading: [{ kind: "loading" }],
   restarting: [{ kind: "restarting", attempt: 1, max: 3 }],
   retryingWithoutSaveMemory: BACKENDS.map((backend) => ({ kind: "retryingWithoutSaveMemory", backend })),
-  retryingWithLessGpu: BACKENDS.map((backend) => ({ kind: "retryingWithLessGpu", backend })),
+  retryingWithLessGpu: BACKENDS.flatMap((backend) => [
+    { kind: "retryingWithLessGpu" as const, backend },
+    // 0.0.6 item 6: after a placement chosen in Fine control, with and without a layer count.
+    { kind: "retryingWithLessGpu" as const, backend, custom: true, chosenLayers: 40 },
+    { kind: "retryingWithLessGpu" as const, backend, custom: true },
+  ]),
   steppingDown: BACKENDS.flatMap((from) =>
     BACKENDS.flatMap((to) => Object.values(FAILURES).map((reason) => ({ kind: "steppingDown" as const, from, to, reason }))),
   ),
+  retryingWithoutFastAttention: BACKENDS.map((backend) => ({ kind: "retryingWithoutFastAttention", backend })),
 };
 
 const SOURCES: Record<ContextSource, true> = {
@@ -112,7 +153,13 @@ describe("plain words", () => {
   });
 
   it("explains every change a load had to make, in the specification's words", () => {
-    for (const kind of ["retryingWithoutSaveMemory", "retryingWithLessGpu", "steppingDown", "restarting"] as const) {
+    for (const kind of [
+      "retryingWithoutSaveMemory",
+      "retryingWithLessGpu",
+      "steppingDown",
+      "restarting",
+      "retryingWithoutFastAttention",
+    ] as const) {
       for (const s of STAGES[kind]) {
         const words = adjustmentWords(s);
         expect(words, JSON.stringify(s)).not.toBeNull();
@@ -256,5 +303,369 @@ describe("plain words", () => {
     expect(waitingWords("reload", busy({ otherApps: 1 }))).toBe("Restarts when the other app's request ends");
     expect(waitingWords("unload", busy({ modelChecks: 1 }))).toBe("Unloads when the model check ends");
     expect(waitingWords("switch", busy({ chatTurns: 1 }))).toBe("Changes the model when the reply ends");
+  });
+});
+
+describe("0.0.6 item 6: plain words for Fine control, the picture and the usage line", () => {
+  it("counts memory the way Task Manager does: capacities whole from 10 GB, amounts with one decimal", () => {
+    expect(capacityGb(gb(15.9))).toBe("16 GB");
+    expect(capacityGb(gb(32))).toBe("32 GB");
+    expect(capacityGb(gb(7.46))).toBe("7.5 GB");
+    expect(capacityGb(gb(2))).toBe("2 GB");
+    expect(amountGb(gb(11.7))).toBe("11.7 GB");
+    expect(amountGb(gb(12.0))).toBe("12 GB");
+    expect(amountGb(gb(0.04))).toBe("0 GB");
+    expect(amountNumber(gb(12.63))).toBe("12.6");
+    // A number that is not a finite amount of zero or more is shown as nothing used.
+    expect(amountGb(Number.NaN)).toBe("0 GB");
+    expect(amountGb(-5)).toBe("0 GB");
+    // The device label rounds the same way: a 15.9 GB card reads 16 GB here and in the usage line.
+    expect(deviceLabel({ name: "Vulkan0", description: "AMD Radeon RX 9070 XT", totalMib: 16_304, freeMib: 0, recommended: false })).toBe(
+      "AMD Radeon RX 9070 XT · 16 GB",
+    );
+    expect(deviceLabel({ name: "Vulkan1", description: "Small", totalMib: 7640, freeMib: 0, recommended: false })).toBe("Small · 7.5 GB");
+  });
+
+  it("words the two new retries, with Mac and processor versions", () => {
+    expect(loadStageWords({ kind: "retryingWithoutFastAttention", backend: "vulkan" })).toBe("Trying again without Fast attention");
+    expect(adjustmentWords({ kind: "retryingWithoutFastAttention", backend: "vulkan" })).toBe(
+      "Fast attention doesn't work with this graphics card, so it was turned off for this load.",
+    );
+    expect(adjustmentWords({ kind: "retryingWithoutFastAttention", backend: "metal" })).toBe(
+      "Fast attention doesn't work with Apple graphics, so it was turned off for this load.",
+    );
+    expect(adjustmentWords({ kind: "retryingWithoutFastAttention", backend: "cpu" })).toBe(
+      "Fast attention doesn't work with this model, so it was turned off for this load.",
+    );
+    const custom: LoadStage = { kind: "retryingWithLessGpu", backend: "vulkan", custom: true, chosenLayers: 40 };
+    expect(loadStageWords(custom)).toBe("Trying again with As much as fits");
+    expect(adjustmentWords(custom)).toBe(
+      "The 40 layers you chose didn't fit on the graphics card, so As much as fits was used for this load. Choose fewer layers in Fine control.",
+    );
+    expect(adjustmentWords({ kind: "retryingWithLessGpu", backend: "vulkan", custom: true })).toBe(
+      "Your Fine control choices didn't fit on the graphics card, so As much as fits was used for this load.",
+    );
+    expect(adjustmentWords({ kind: "retryingWithLessGpu", backend: "metal", custom: true, chosenLayers: 1 })).toBe(
+      "The 1 layer you chose didn't fit on Apple graphics, so As much as fits was used for this load. Choose fewer layers in Fine control.",
+    );
+    // Without `custom` (old JSON, or All of it) WP2's words stay.
+    expect(loadStageWords({ kind: "retryingWithLessGpu", backend: "vulkan" })).toBe(
+      "Trying again with part of the model on the processor",
+    );
+  });
+
+  it("has the exact labels, help lines and notes of Fine control, and Mac versions that never say graphics card", () => {
+    expect(fineLabels(false)).toEqual({
+      layers: "Layers on the graphics card",
+      experts: "Expert parts on the processor",
+      kv: "Conversation memory on the graphics card",
+      threads: "Processor threads",
+      fastAttention: "Fast attention",
+      leaveFree: "Leave free on the graphics card",
+    });
+    expect(fineLabels(true)).toEqual({
+      layers: "Layers on Apple graphics",
+      experts: "Expert parts on the processor",
+      kv: "Conversation memory with Apple graphics",
+      threads: "Processor threads",
+      fastAttention: "Fast attention",
+      leaveFree: "Memory to leave free",
+    });
+    const help = fineHelp(false, null);
+    expect(help.layers).toBe(
+      "The model is built from layers. Layers on the graphics card run much faster than on the processor, as long as they fit in its memory. The rest run on the processor.",
+    );
+    expect(help.experts).toBe(
+      "This model is a mixture of experts: it has many expert parts but uses only a few of them for each word. Keeping expert parts on the processor frees a lot of graphics memory and is often only a little slower. Automatic keeps them on the graphics card with All of it, and moves them first when As much as fits needs room.",
+    );
+    expect(help.kv).toBe(
+      "Where the model keeps the chat it is working on. On the graphics card is faster. Keeping it in computer memory leaves more room for layers on the graphics card, but replies slow down as the chat grows.",
+    );
+    expect(help.threads).toBe(
+      "How many of the processor's threads the model may use for the parts that run on the processor. Automatic is usually fastest. Fewer keeps the computer more responsive for other work.",
+    );
+    expect(help.fastAttention).toBe(
+      "A faster way for the model to look back over the chat that also uses less memory. Automatic turns it on where the graphics card supports it.",
+    );
+    expect(help.leaveFree).toBe(
+      "With As much as fits, this much graphics memory is left free for the screen and other programs, such as games or video. More free memory means fewer layers on the graphics card.",
+    );
+    const mac = fineHelp(true, gb(10.7));
+    expect(mac.layers).toBe(
+      "The model is built from layers. Layers on Apple graphics run much faster than on the processor, as long as they fit in Apple graphics' share of memory (up to 10.7 GB here). The rest run on the processor.",
+    );
+    expect(mac.kv).toBe(
+      "On a Mac the processor and Apple graphics share one memory. Keeping the conversation with the processor leaves Apple graphics more of its share (up to 10.7 GB here) for layers, but replies slow down as the chat grows.",
+    );
+    expect(mac.fastAttention).toBe(
+      "A faster way for the model to look back over the chat that also uses less memory. Automatic turns it on where Apple graphics supports it.",
+    );
+    expect(mac.leaveFree).toBe(
+      "With As much as fits, this much of Apple graphics' share of memory is left free for other programs. More free memory means fewer layers on Apple graphics.",
+    );
+    expect(fineHelp(true, null).layers).toContain("share of memory. The rest");
+    for (const text of [...Object.values(mac), ...Object.values(fineLabels(true)), ...Object.values(fineNotes(true))]) {
+      // "the graphics card" is only in the expert help, which describes the model, not the Mac.
+      if (text !== mac.experts) expect(text, text).not.toMatch(/graphics card/);
+    }
+    expect(fineNotes(false)).toEqual({
+      gpuOff: "Not used while Use the graphics card is Don't use it.",
+      leaveFreeAll: "Only used with As much as fits.",
+      leaveFreeCustom: "Not used while you choose the layers or expert parts yourself.",
+      expertsNoLayers: "Not used while no layers are on the graphics card.",
+    });
+    expect(fineNotes(true).gpuOff).toBe("Not used while Use Apple graphics is Don't use it.");
+    expect(expertsAfterLayersNote(32, 41)).toBe(
+      "The first 9 layers already run on the processor. Only expert parts of later layers free graphics memory.",
+    );
+    expect(expertsAfterLayersNote(40, 41)).toBe(
+      "The first layer already runs on the processor. Only expert parts of later layers free graphics memory.",
+    );
+    const choices = fineChoiceWords(false);
+    expect(choices.layersAuto).toBe("Automatic (follows Use the graphics card)");
+    expect(fineChoiceWords(true).layersAuto).toBe("Automatic (follows Use Apple graphics)");
+    expect(choices.kvAuto).toBe("Yes, faster (Automatic)");
+    expect(choices.kvComputer).toBe("No, keep it in computer memory");
+    expect(fineChoiceWords(true).kvComputer).toBe("No, keep it with the processor");
+    expect(choices.onForSaveMemory).toBe("On (Save memory needs it)");
+    expect(choices.leaveFreeAuto).toBe("Automatic (1 GB)");
+    expect([512, 2048, 4096].map(leaveFreeWords)).toEqual(["0.5 GB", "2 GB", "4 GB"]);
+    expect(layersOfWords(30, 41)).toBe("30 of 41 layers");
+    expect(expertLayersWords(20, 48)).toBe("the first 20 of 48 layers");
+    expect(threadsOfWords(8, 16)).toBe("8 of 16 threads");
+    expect(customPlacementWords(30, 41)).toBe("Custom: 30 of 41 layers (set in Fine control)");
+    expect(customPlacementWords(null, 41)).toBe("Custom: expert parts on the processor (set in Fine control)");
+    expect(CUSTOM_PLACEMENT_HELP).toBe("Fine control sets where the model goes. Choose another option here to go back to it.");
+  });
+
+  it("sums the closed section: layers on the card, and changed", () => {
+    expect(fineSummary(picture(), false, false)).toBe("Fine control · 30 of 41 layers on the graphics card");
+    expect(fineSummary(picture(), false, true)).toBe("Fine control · 30 of 41 layers on the graphics card · changed");
+    expect(fineSummary(picture({ layersAbout: true }), true, false)).toBe("Fine control · About 30 of 41 layers on Apple graphics");
+    expect(fineSummary(picture({ graphics: null, layersOnGraphics: 0 }), false, true)).toBe(
+      "Fine control · On the processor only · changed",
+    );
+    expect(fineSummary(null, false, true)).toBe("Fine control · changed");
+  });
+
+  it("says where the layers go in the picture, for every placement", () => {
+    expect(pictureLayerWords(picture({ layersOnGraphics: 41 }), false)).toBe("All 41 layers on the graphics card.");
+    expect(pictureLayerWords(picture(), false)).toBe("30 of 41 layers on the graphics card, 11 on the processor.");
+    expect(pictureLayerWords(picture({ layersAbout: true, custom: false }), false)).toBe(
+      "About 30 of 41 layers on the graphics card. The rest run on the processor. The exact number is decided when the model loads.",
+    );
+    expect(pictureLayerWords(picture({ graphics: null, layersOnGraphics: 0 }), false)).toBe("On the processor only.");
+    expect(pictureLayerWords(picture({ layersOnGraphics: 41, expertLayersOnProcessor: 20 }), false)).toBe(
+      "All 41 layers on the graphics card. Expert parts of 20 layers stay on the processor.",
+    );
+    expect(
+      pictureLayerWords(picture({ units: 49, layersOnGraphics: 49, layersAbout: true, expertLayersOnProcessor: 19 }), false),
+    ).toBe(
+      "All 49 layers on the graphics card. Expert parts of about 19 layers stay on the processor. The exact split is decided when the model loads.",
+    );
+    // A Mac: one bar, no graphics bar, but layers on Apple graphics.
+    expect(pictureLayerWords(picture({ unified: true, graphics: null }), true)).toBe(
+      "30 of 41 layers on Apple graphics, 11 on the processor.",
+    );
+    expect(pictureLayerWords(picture({ units: null }), false)).toBeNull();
+  });
+
+  it("has a source line for every answer", () => {
+    const off = { measuring: false, fineOpen: false };
+    expect(pictureSourceWords({ kind: "measured" }, off)).toBe("Worked out for these settings.");
+    expect(pictureSourceWords({ kind: "estimate", why: "quick" }, off)).toBe(
+      "Rough estimate from the model file. Open Fine control to work out exact figures.",
+    );
+    expect(pictureSourceWords({ kind: "estimate", why: "quick" }, { measuring: true, fineOpen: true })).toBe(
+      "Working out exact figures…",
+    );
+    expect(pictureSourceWords({ kind: "estimate", why: "failed" }, off)).toBe(
+      "Rough estimate from the model file. Exact figures couldn't be worked out for this file.",
+    );
+    expect(pictureSourceWords({ kind: "estimate", why: "timedOut" }, off)).toBe(
+      "Rough estimate from the model file. Working them out took too long.",
+    );
+    expect(pictureSourceWords({ kind: "estimate", why: "noTool", backend: "rocm" }, off)).toBe(
+      "Rough estimate from the model file. The AMD graphics card (ROCm) download can't work out exact figures.",
+    );
+    expect(pictureSourceWords({ kind: "estimate", why: "noTool", backend: "vulkan" }, off)).toBe(
+      "Rough estimate from the model file. Exact figures can't be worked out with this download.",
+    );
+    expect(pictureSourceWords({ kind: "estimate", why: "notReadable" }, off)).toBe(
+      "Rough estimate. The model file's details couldn't be read.",
+    );
+    expect(pictureCaption(false)).toBe("Memory is counted the way Task Manager counts it, so it can differ from the download size.");
+    expect(pictureCaption(true)).toContain("Activity Monitor");
+  });
+
+  it("gives each bar a title, a legend that adds up to the whole, and what it needs", () => {
+    const g = graphicsBar();
+    expect(barTitle(g, "graphics")).toBe("Graphics card · AMD Radeon RX 9070 XT · 16 GB");
+    expect(barTitle(graphicsBar({ name: " " }), "graphics")).toBe("Graphics card · 16 GB");
+    expect(barTitle(computerBar(), "computer")).toBe("Computer memory · 32 GB");
+    expect(barTitle(computerBar({ totalBytes: gb(16) }), "shared")).toBe("Memory · shared by the processor and Apple graphics · 16 GB");
+    expect(barLegend(g).map(legendWords)).toEqual([
+      "Model 9.9 GB",
+      "Conversation memory 1.2 GB",
+      "Working space 0.6 GB",
+      "Other programs 0.9 GB",
+      "Free after loading 3.3 GB",
+    ]);
+    // The parts add up to the card's memory (the worked example: 15.9 GB).
+    const sum = barLegend(g).reduce((a, i) => a + i.bytes, 0);
+    expect(Math.abs(sum - g.totalBytes)).toBeLessThan(gb(0.01));
+    expect(barLegend(computerBar()).map(legendWords)).toEqual([
+      "Model 4.1 GB",
+      "Conversation memory 0.4 GB",
+      "Working space 0.3 GB",
+      "Other programs 12 GB",
+      "Free after loading 15.1 GB",
+    ]);
+    expect(needsWords(g)).toBe("Needs about 11.7 GB of the 15 GB free now.");
+    expect(needsWords(graphicsBar({ freeAfterUnload: true }))).toBe(
+      "Needs about 11.7 GB of the 15 GB free once the loaded model is unloaded.",
+    );
+    const reader = graphicsBar({ need: { model: gb(9.9), context: gb(1.2), compute: gb(0.6), imageReader: gb(0.9) } });
+    expect(barLegend(reader).map(legendWords)).toContain("Image reader 0.9 GB");
+    // More than is free: nothing is left, and the legend says no free part.
+    const over = graphicsBar({ need: { model: gb(14), context: gb(1.2), compute: gb(0.6), imageReader: 0 } });
+    expect(freeAfterLoading(over)).toBe(0);
+    expect(barLegend(over).some((i) => i.part === "free")).toBe(false);
+    expect(partsTotal({ model: gb(1), context: Number.NaN, compute: -1, imageReader: gb(1) })).toBe(gb(2));
+    expect(appleLimitWords(gb(10.7))).toBe("Apple graphics can use up to 10.7 GB");
+  });
+
+  it("warns once, with the figures, and with Mac words", () => {
+    const opts = { apple: false, saveMemory: false };
+    expect(pictureWarning(picture({ fits: "fits" }), opts)).toBeNull();
+    expect(pictureWarning(picture({ fits: "partial" }), opts)).toBeNull();
+    const big = picture({
+      fits: "wontFitGraphics",
+      custom: false,
+      graphics: graphicsBar({ need: { model: gb(13.8), context: gb(1.2), compute: gb(0.6), imageReader: 0 } }),
+    });
+    expect(pictureWarning(big, opts)).toBe(
+      "This probably won't fit in the graphics card's memory: it needs about 15.6 GB and 15 GB is free. Choose As much as fits, or turn on Save memory.",
+    );
+    expect(pictureWarning({ ...big, custom: true }, opts)).toBe(
+      "This probably won't fit in the graphics card's memory: it needs about 15.6 GB and 15 GB is free. Choose fewer layers or keep expert parts on the processor in Fine control, or turn on Save memory.",
+    );
+    // Save memory already on: the warning does not ask for it again.
+    expect(pictureWarning(big, { apple: false, saveMemory: true })).toBe(
+      "This probably won't fit in the graphics card's memory: it needs about 15.6 GB and 15 GB is free. Choose As much as fits.",
+    );
+    const all = picture({
+      fits: "wontFitAtAll",
+      graphics: graphicsBar({ freeBytes: gb(15.0), need: { model: gb(16), context: gb(1), compute: gb(1), imageReader: 0 } }),
+      computer: computerBar({ freeBytes: gb(15.2), need: { model: gb(18), context: gb(1), compute: gb(1), imageReader: 0 } }),
+    });
+    expect(pictureWarning(all, opts)).toBe(
+      "This probably needs more memory than this computer has free: about 38 GB, with 30.2 GB free. Choose less to remember, or a smaller download.",
+    );
+    expect(pictureWarning(picture({ fits: "tight" }), opts)).toBe(
+      "It only just fits. Programs that use the graphics card, such as games or video, may stop it from loading.",
+    );
+    const mac = picture({ fits: "wontFitGraphics", custom: false, unified: true, graphics: null, graphicsLimitBytes: gb(10.7) });
+    expect(pictureWarning(mac, { apple: true, saveMemory: false })).toBe(
+      "This probably won't fit in Apple graphics' share of memory: it needs about 4.8 GB and 10.7 GB is free. Choose As much as fits, or turn on Save memory.",
+    );
+    expect(pictureWarning(picture({ fits: "tight" }), { apple: true, saveMemory: false })).toBe(
+      "It only just fits. Programs that use Apple graphics, such as games or video, may stop it from loading.",
+    );
+    expect(wontFitQuestion(false)).toBe(
+      "This probably won't fit in the graphics card's memory. If it doesn't, the model won't load, or part of it moves to the processor, which is slower.",
+    );
+    expect(wontFitQuestion(true)).toBe(
+      "This probably won't fit in Apple graphics' share of memory. If it doesn't, the model won't load, or part of it moves to the processor, which is slower.",
+    );
+  });
+
+  it("says where the loaded model went, in every variant", () => {
+    expect(placementWords(placement(), false)).toBe("30 of 41 layers on the graphics card, 11 on the processor.");
+    expect(placementWords(placement({ layersOnGraphics: 41 }), false)).toBe("All 41 layers on the graphics card.");
+    expect(placementWords(placement({ layersAbout: true, custom: false }), false)).toBe(
+      "About 30 of 41 layers on the graphics card, the rest on the processor.",
+    );
+    expect(placementWords(placement({ graphics: null, layersOnGraphics: 0 }), false)).toBe("On the processor only.");
+    expect(placementWords(placement({ units: 49, layersOnGraphics: 49, layersAbout: true, expertLayersOnProcessor: 19 }), false)).toBe(
+      "All 49 layers on the graphics card. Expert parts of about 19 layers are on the processor.",
+    );
+    expect(placementWords(placement({ units: 49, layersOnGraphics: 49, expertLayersOnProcessor: 20 }), false)).toBe(
+      "All 49 layers on the graphics card. Expert parts of 20 layers are on the processor.",
+    );
+    expect(
+      placementWords(
+        placement({ layersOnGraphics: null, graphics: { name: "x", use: { model: gb(12.1), context: 0, compute: 0, imageReader: 0 } } }),
+        false,
+      ),
+    ).toBe("About 12.1 GB of the model is on the graphics card, the rest on the processor.");
+    expect(placementWords(placement(), true)).toBe("30 of 41 layers on Apple graphics, 11 on the processor.");
+    expect(modelUsesWords(placement().graphics!.use)).toBe(
+      "The model uses 11.7 GB: 9.9 GB for itself, 1.2 GB conversation memory, 0.6 GB working space",
+    );
+    expect(modelUsesWords({ model: gb(1), context: gb(1), compute: gb(1), imageReader: gb(0.9) })).toBe(
+      "The model uses 3.9 GB: 1 GB for itself, 1 GB conversation memory, 1 GB working space, 0.9 GB image reader",
+    );
+  });
+
+  it("writes the usage line in each width, with Mac wording and missing figures", () => {
+    const now = usage();
+    expect(usageLine(now, "wide")).toBe("Graphics card 63% · 12.6 of 16 GB · Processor 12% · Memory 16.8 of 32 GB");
+    expect(usageLine(now, "medium")).toBe("Graphics card 63% · 12.6/16 GB · Processor 12% · Memory 16.8/32 GB");
+    expect(usageLine(now, "small")).toBe("Graphics card 63% · Processor 12% · Memory 53%");
+    expect(usageIcons(now)).toEqual([
+      { kind: "graphics", value: "63%", label: "Graphics card 63% busy" },
+      { kind: "processor", value: "12%", label: "Processor 12% busy" },
+      { kind: "memory", value: "53%", label: "Memory 53% in use" },
+    ]);
+    const mac = usage({
+      unified: true,
+      graphics: {
+        kind: "value",
+        value: { name: "Apple M2", busyPercent: { kind: "value", value: 40 }, memoryUsedBytes: { kind: "value", value: gb(6.1) }, memoryTotalBytes: gb(10.7) },
+      },
+      memory: { kind: "value", value: { usedBytes: gb(11.2), totalBytes: gb(16) } },
+    });
+    expect(usageLine(mac, "wide")).toBe("Apple graphics 40% · Processor 12% · Memory 11.2 of 16 GB");
+    expect(usageLine(mac, "small")).toBe("Apple graphics 40% · Processor 12% · Memory 70%");
+    // The first sample, and half a reading.
+    const first = usage({ processorPercent: { kind: "measuring" } });
+    expect(usageLine(first, "wide")).toBe("Graphics card 63% · 12.6 of 16 GB · Processor … · Memory 16.8 of 32 GB");
+    const noBusy = usage();
+    if (noBusy.graphics.kind === "value") noBusy.graphics.value.busyPercent = { kind: "notAvailable", why: "systemGivesNone" };
+    expect(usageLine(noBusy, "wide")).toBe("Graphics card – · 12.6 of 16 GB · Processor 12% · Memory 16.8 of 32 GB");
+    const noMemory = usage();
+    if (noMemory.graphics.kind === "value") noMemory.graphics.value.memoryUsedBytes = { kind: "notAvailable", why: "readFailed" };
+    expect(usageLine(noMemory, "wide")).toBe("Graphics card 63% · – of 16 GB · Processor 12% · Memory 16.8 of 32 GB");
+    expect(usageIcons(noBusy)[0]).toEqual({ kind: "graphics", value: "–", label: "Graphics card: not available" });
+    // No graphics card: the graphics part is left out.
+    const none = usage({ graphics: { kind: "notAvailable", why: "noGraphicsCard" } });
+    expect(usageLine(none, "wide")).toBe("Processor 12% · Memory 16.8 of 32 GB");
+    expect(usageIcons(none).map((i) => i.kind)).toEqual(["processor", "memory"]);
+    expect(usageLine(usage({ graphics: { kind: "notAvailable", why: "notReadHere" } }), "small")).toBe(
+      "Graphics card – · Processor 12% · Memory 53%",
+    );
+    expect(percentWords({ kind: "value", value: 140 })).toBe("100%");
+    expect(percentWords({ kind: "value", value: Number.NaN })).toBe("–");
+  });
+
+  it("says why a figure is missing, on its own row", () => {
+    expect(usageGapWords("systemGivesNone", "graphicsBusy", false)).toBe("This computer doesn't tell apps how busy its graphics card is.");
+    expect(usageGapWords("systemGivesNone", "graphicsMemory", false)).toBe(
+      "This computer doesn't tell apps how much of its graphics memory is in use.",
+    );
+    expect(usageGapWords("systemGivesNone", "graphicsBusy", true)).toBe("This Mac doesn't tell apps how busy Apple graphics is.");
+    expect(usageGapWords("notReadHere", "graphicsBusy", false)).toBe("harnessUI can't read this graphics card on this system yet.");
+    expect(usageGapWords("readFailed", "processor", false)).toBe("Couldn't read this just now.");
+    expect(USAGE_MENU).toEqual({
+      title: "This computer right now",
+      privacy: "Read on this computer only while you can see it. Nothing is sent anywhere.",
+    });
+    for (const gap of ["noGraphicsCard", "systemGivesNone", "notReadHere", "readFailed"] as const) {
+      for (const what of ["graphicsBusy", "graphicsMemory", "processor", "memory"] as const) {
+        plain(usageGapWords(gap, what, false));
+        expect(usageGapWords(gap, what, true)).not.toMatch(/graphics card's|its graphics card/);
+      }
+    }
   });
 });

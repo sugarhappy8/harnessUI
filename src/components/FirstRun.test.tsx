@@ -148,6 +148,7 @@ describe("FirstRun: I have a GGUF file", () => {
     settingsChanged: false,
     reloadWaiting: false,
     unloadedPath: null,
+    placement: null,
   };
 
   async function importIt() {

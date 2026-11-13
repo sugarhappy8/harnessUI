@@ -201,6 +201,8 @@ export interface RuntimeStatus {
   reloadWaiting: boolean;
   /** 0.0.5: the model the user unloaded ("Unloaded to free memory · Load"); null after any load. */
   unloadedPath: string | null;
+  /** 0.0.6 item 6: where the loaded model went (the ready line's memory report); null until ready. */
+  placement: Placement | null;
 }
 
 export interface DeviceInfo {
@@ -745,8 +747,9 @@ export type LoadStage =
   | { kind: "loading" }
   | { kind: "restarting"; attempt: number; max: number }
   | { kind: "retryingWithoutSaveMemory"; backend: BackendKind }
-  | { kind: "retryingWithLessGpu"; backend: BackendKind }
-  | { kind: "steppingDown"; from: BackendKind; to: BackendKind; reason: LoadFailure };
+  | { kind: "retryingWithLessGpu"; backend: BackendKind; custom?: boolean; chosenLayers?: number }
+  | { kind: "steppingDown"; from: BackendKind; to: BackendKind; reason: LoadFailure }
+  | { kind: "retryingWithoutFastAttention"; backend: BackendKind };
 
 /** "Use the graphics card": All of it, As much as fits, Don't use it. */
 export type GpuUse = "all" | "fit" | "off";
@@ -772,6 +775,8 @@ export interface ModelLoadSettings {
   keepInMemory: Toggle;
   device: DeviceChoice;
   thinkingLimit: ThinkingChoice;
+  /** 0.0.6 item 6: Fine control; absent means every field "auto". */
+  fine?: FineControl;
 }
 
 /** Why the loaded context is the size it is (the ready line's reason). */
@@ -790,6 +795,8 @@ export interface ResolvedLoad {
   backend: string | null;
   device: string | null;
   mmproj: string | null;
+  /** 0.0.6 item 6: the Fine control values that reach the command line. */
+  fine: FineLaunch;
 }
 
 export interface ContextOption {
@@ -836,6 +843,10 @@ export interface ModelLoadInfo {
   olderSettingsLoaded: boolean;
   /** Automatic's number for the current load, when loaded with Automatic. */
   autoCtx: number | null;
+  /** 0.0.6 item 6: what Fine control may offer for this file on this computer. */
+  fineFacts: FineFacts;
+  /** 0.0.6 item 6: the instant estimate of where the model goes with these choices. */
+  picture: OffloadPreview;
 }
 
 /** What is using the local model now (D3). */
@@ -1090,13 +1101,150 @@ export interface ReverseProgress {
 
 /** 0.0.6 item 5 (WP9h): what the message box does with one file dropped on the window (`reverse_dropped`). */
 export type DroppedProgram =
-  | { kind: "insert"; path: string }
+  | { kind: "insert"; path: string; fileName: string }
   | { kind: "addFolder"; fileName: string }
   | { kind: "notReachable"; fileName: string }
+  | { kind: "rename"; fileName: string }
   | { kind: "ignore" };
 
 /** The answer to one drop: whether rea is installed, and one entry per path, in order. */
 export interface DropAnswer {
   installed: boolean;
+  /** Whether the Reverse engineering group is on in this chat (only answered with paths). */
+  groupOn: boolean;
   items: DroppedProgram[];
+}
+
+// ---- 0.0.6 item 6 (WP10e; Rust: src-tauri/src/load_settings.rs, offload.rs, usage_cmd.rs,
+// dto.rs, crates/runtime launch.rs). Usage view and Fine control. -------------------------
+
+/** "Layers on the graphics card": Automatic or a number of llama.cpp's units. */
+export type LayersChoice = "auto" | { count: number };
+/** "Expert parts on the processor". */
+export type ExpertsChoice = "auto" | "all" | { firstLayers: number };
+/** "Conversation memory on the graphics card": Automatic (yes) or computer memory. */
+export type KvPlace = "auto" | "computerMemory";
+export type ThreadsChoice = "auto" | { count: number };
+export type FastAttention = "auto" | "on" | "off";
+/** "Leave free on the graphics card"; Automatic is 1 GB. */
+export type LeaveFree = "auto" | { mib: 512 | 2048 | 4096 };
+
+/** One model's Fine control (every field "auto" means "what the app does without it"). */
+export interface FineControl {
+  layers: LayersChoice;
+  experts: ExpertsChoice;
+  kv: KvPlace;
+  threads: ThreadsChoice;
+  fastAttention: FastAttention;
+  leaveFree: LeaveFree;
+}
+
+/** Fine control as launch arguments (only what reaches the command line). */
+export interface FineLaunch {
+  gpuLayers: number | null;
+  expertsOnCpu: "none" | "all" | { firstLayers: number };
+  kvInComputerMemory: boolean;
+  threads: number | null;
+  flashAttn: "auto" | "on" | "off";
+  fitMarginMib: number | null;
+}
+
+/** What Fine control may offer for one model file on this computer. */
+export interface FineFacts {
+  /** Block count + 1 ("of 41 layers"); null without a readable header. */
+  units: number | null;
+  /** Block count when the model is a mixture of experts, else null. */
+  expertLayers: number | null;
+  /** Logical processors of this computer. */
+  threads: number;
+  /** A graphics device is known for this load. */
+  graphics: boolean;
+  /** Apple graphics (one memory shared with the processor). */
+  apple: boolean;
+  /** Apple: the most Apple graphics may use. */
+  graphicsLimitBytes: number | null;
+}
+
+/** Memory a model needs, in bytes, by part. */
+export interface Parts {
+  model: number;
+  context: number;
+  compute: number;
+  imageReader: number;
+}
+
+/** One memory bar of the picture (bytes). */
+export interface MemoryBar {
+  name: string;
+  totalBytes: number;
+  freeBytes: number;
+  /** The free figure counts the loaded model as unloaded. */
+  freeAfterUnload: boolean;
+  otherBytes: number;
+  need: Parts;
+}
+
+export type PictureSource =
+  | { kind: "measured" }
+  | {
+      kind: "estimate";
+      why: "quick" | "noTool" | "failed" | "timedOut" | "notReadable";
+      /** Set with "noTool". */
+      backend?: BackendKind;
+    };
+
+/** The picture's detail of "will it fit?" (placement::judge). */
+export type Fits = "fits" | "tight" | "partial" | "wontFitGraphics" | "wontFitAtAll";
+
+/** "Where the model goes" before loading, for one set of choices. */
+export interface OffloadPreview {
+  /** The choices it answers (the webview drops stale answers). */
+  key: string;
+  source: PictureSource;
+  unified: boolean;
+  units: number | null;
+  layersOnGraphics: number;
+  layersAbout: boolean;
+  /** Expert layers whose expert parts run on the processor (the effective count). */
+  expertLayersOnProcessor: number | null;
+  /** Null on the processor only, and on a Mac. */
+  graphics: MemoryBar | null;
+  computer: MemoryBar;
+  /** Apple: the marker on the single bar. */
+  graphicsLimitBytes: number | null;
+  mark: Verdict;
+  fits: Fits;
+  custom: boolean;
+}
+
+/** Where the loaded model went (the ready line's memory report). */
+export interface Placement {
+  graphics: { name: string; use: Parts } | null;
+  computer: Parts;
+  units: number | null;
+  /** Null: only amounts are known. */
+  layersOnGraphics: number | null;
+  expertLayersOnProcessor: number | null;
+  layersAbout: boolean;
+  custom: boolean;
+}
+
+/** Why a usage figure is not shown. */
+export type UsageGap = "noGraphicsCard" | "systemGivesNone" | "notReadHere" | "readFailed";
+export type Reading<T> = { kind: "value"; value: T } | { kind: "measuring" } | { kind: "notAvailable"; why: UsageGap };
+
+/** This computer's usage now (`usage_now`), read on this computer only. */
+export interface UsageNow {
+  graphics: Reading<{
+    name: string;
+    busyPercent: Reading<number>;
+    memoryUsedBytes: Reading<number>;
+    memoryTotalBytes: number | null;
+  }>;
+  processorPercent: Reading<number>;
+  /** Logical processors. */
+  threads: number;
+  memory: Reading<{ usedBytes: number; totalBytes: number }>;
+  /** Apple silicon: graphics memory is computer memory. */
+  unified: boolean;
 }

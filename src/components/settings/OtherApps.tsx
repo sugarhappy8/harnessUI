@@ -15,11 +15,11 @@ import { ModelSettings } from "../ModelSettings";
 //
 // - The switch changes only on the user's click (`set_share_enabled`).
 // - The key is read only when asked for (Show key, Copy) and is never kept outside React
-//   state. Every key request is numbered: one that answers after the key was hidden, or
-//   after sharing went off, is dropped. The setup cards contain the key too: a card is
-//   fetched only when its app is chosen, shows the key as dots until Show key (Copy copies
-//   the backend's text exactly), is forgotten when it is closed or sharing goes off, and is
-//   shown only while it matches the current key, port and size.
+//   state. Every key request is numbered: one that answers after the key was hidden, after
+//   sharing went off or after a new key was made, is dropped. The setup cards contain the
+//   key too: a card is fetched only when its app is chosen, shows the key as dots until Show
+//   key (Copy copies the backend's text exactly), is forgotten when it is closed or sharing
+//   goes off, and is shown only while it matches the current key, port and size.
 // - The page asks `share_status` again every POLL_MS while it is open and visible (there is
 //   no push event); a late answer never overwrites a newer one.
 // - What each app's copied setup assumed (the model's context, the port and the model file,
@@ -183,13 +183,19 @@ export function OtherApps() {
   // The key: shown only on request.
   const [key, setKey] = useState<string | null>(null);
   const [confirmNewKey, setConfirmNewKey] = useState(false);
-  const [keyReplaced, setKeyReplaced] = useState(false);
   const [keyVersion, setKeyVersion] = useState(0);
+  // After a new key (made for `version`): the apps whose setup was copied with the old key
+  // and not yet with the new one. Each is crossed off when a step with the key in it is
+  // copied for it; with none known, the note stays until the new key is copied at all.
+  // Copy the key ends it for every app. Null: no note.
+  const [oldKey, setOldKey] = useState<{ version: number; apps: ShareApp[] } | null>(null);
   // Setup cards.
   const [app, setApp] = useState<ShareApp | null>(null);
   const [card, setCard] = useState<(Made & { setup: ShareSetup }) | null>(null);
   const [cardError, setCardError] = useState<(Made & { error: ErrorInfo }) | null>(null);
   const [copied, setCopied] = useState<CopiedSetups>(readCopied);
+  // The copied setups as they are now, for a new key that is made while one is copied.
+  const copiedNow = useRef(copied);
   // Windows or Mac, for every card: kept when a card is made again (new key, port or size).
   const [tab, setTab] = useState<Tab>(() => (isAppleComputer() ? "mac" : "windows"));
   // The loaded model's settings, for the context warning's fit mark.
@@ -380,12 +386,18 @@ export function OtherApps() {
     setConfirmNewKey(false);
     setWorking("Making a new key…");
     setError(null);
-    // Shown now: the new key is shown once made, unless the user hides it meanwhile.
+    // A Show key read still on its way would answer with the old key: it is dropped. A key
+    // shown now stays (Copy waits) until the new one is made, which is then shown in its
+    // place, unless the user hides it meanwhile.
+    keyAsk.current += 1;
     const shownAt = key !== null ? keyAsk.current : null;
     try {
       await track(ipc.newShareKey);
-      setKeyReplaced(true);
-      setKeyVersion((v) => v + 1);
+      // The old key is refused from now on: it leaves the page even if the new one cannot be read.
+      setKey(null);
+      const version = keyVersion + 1;
+      setOldKey({ version, apps: APPS.filter((a) => copiedNow.current[a.app] !== undefined).map((a) => a.app) });
+      setKeyVersion(version);
     } catch (e) {
       fail("key", e);
       return;
@@ -407,8 +419,11 @@ export function OtherApps() {
       ? cardError.error
       : null;
 
-  /** A step of the shown card was copied: remember what that app's setup assumed. */
-  function setupCopied() {
+  /**
+   * A step of the shown card was copied: remember what that app's setup assumed, and, when
+   * the step has the key in it, that the app now has the key the card was made for.
+   */
+  function setupCopied(withKey: boolean) {
     if (!shownCard) return;
     const claudeApp = shownCard.app === "claudeApp";
     const next: CopiedSetups = {
@@ -421,7 +436,15 @@ export function OtherApps() {
     };
     writeCopied(next);
     setCopied(next);
-    if (shownCard.version === keyVersion) setKeyReplaced(false);
+    copiedNow.current = next;
+    if (!withKey) return;
+    const { app: done, version } = shownCard;
+    setOldKey((k) => {
+      if (k === null || k.version !== version) return k;
+      const apps = k.apps.filter((a) => a !== done);
+      if (k.apps.length > 0 && apps.length === k.apps.length) return k;
+      return apps.length === 0 ? null : { ...k, apps };
+    });
   }
 
   /**
@@ -479,9 +502,10 @@ export function OtherApps() {
     const c = copied[a.app];
     return c !== undefined && portStale(c);
   });
+  // Apps to set up again: those whose copied setup no longer matches, or has the old key.
   const setUpAgain = APPS.filter((a) => {
     const c = copied[a.app];
-    return c !== undefined && (sizeStale(c) || portStale(c));
+    return (c !== undefined && (sizeStale(c) || portStale(c))) || (oldKey?.apps.includes(a.app) ?? false);
   }).map((a) => a.label);
 
   return (
@@ -662,7 +686,8 @@ export function OtherApps() {
                 label="Copy the key"
                 disabled={working !== null}
                 text={() => key ?? ipc.revealShareKey()}
-                onCopied={() => setKeyReplaced(false)}
+                // A copy that began before a newer key was made copied the old one.
+                onCopied={() => setOldKey((k) => (k?.version === keyVersion ? null : k))}
                 onError={(e) => fail("key", e)}
               />
               {!confirmNewKey && (
@@ -697,7 +722,7 @@ export function OtherApps() {
                 </div>
               </div>
             )}
-            {keyReplaced && !confirmNewKey && <p className="text-warning">{OLD_KEY}</p>}
+            {oldKey !== null && !confirmNewKey && <p className="text-warning">{OLD_KEY}</p>}
             {errorAt("key")}
           </section>
 
@@ -794,7 +819,8 @@ function SetupCard(props: {
   tab: Tab;
   onTab: (tab: Tab) => void;
   keyShown: boolean;
-  onCopied: () => void;
+  /** A step was copied; `withKey`: the step has the key in it. */
+  onCopied: (withKey: boolean) => void;
 }) {
   const { setup } = props;
   const tabs = (["windows", "mac"] as const).filter((t) => setup.ways.some((w) => w.system === t));
@@ -887,7 +913,7 @@ function SetupCard(props: {
   );
 }
 
-function Step(props: { step: SetupStep; name: string; keyShown: boolean; onCopied: () => void }) {
+function Step(props: { step: SetupStep; name: string; keyShown: boolean; onCopied: (withKey: boolean) => void }) {
   const { step } = props;
   const shown = (text: string) => (props.keyShown ? text : text.replace(KEY_IN_TEXT, HIDDEN_KEY));
   return (
@@ -904,7 +930,12 @@ function Step(props: { step: SetupStep; name: string; keyShown: boolean; onCopie
           <pre className="min-w-0 flex-1 overflow-x-auto rounded-md bg-bg-muted p-2 font-mono text-xs whitespace-pre">
             {shown(step.code)}
           </pre>
-          <CopyButton label={`Copy ${props.name}`} text={() => step.code ?? ""} onCopied={props.onCopied} />
+          <CopyButton
+            label={`Copy ${props.name}`}
+            text={() => step.code ?? ""}
+            // `search` ignores the pattern's /g state (`test` would not).
+            onCopied={() => props.onCopied((step.code ?? "").search(KEY_IN_TEXT) !== -1)}
+          />
         </div>
       )}
     </li>

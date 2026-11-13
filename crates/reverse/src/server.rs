@@ -19,15 +19,23 @@
 //!    id. A session call also checks its file's identity (or walks its `.app` folder);
 //!    The model's `close_binary` for a file rea no longer holds (an idle stop, a crash)
 //!    ends the binding here, without starting rea or opening the file again;
+//!    `inspect_analysis_view` is refused here when rea is not running: a stopped rea lost
+//!    its results, and starting one only to refuse would make the model wait;
 //! 4. rea is started if needed (a new start grows the store epoch and runs the live check
 //!    of rea's tool list against the installed version's fixture);
 //! 5. a session call whose file rea lost (an idle stop, a crash) opens it again first,
 //!    without a card (R21); `inspect_analysis_view` needs its id in the current epoch;
 //! 6. `open_binary` first clears rea when another chat used it (R12 step 6), unless rea
 //!    was started for this very call (a new process holds nothing);
-//! 7. the call is forwarded with the canonical arguments and the fixed `detail` only, the
+//! 7. immediately before anything that makes rea read a file (an open, a file check, the
+//!    reopen of step 5), after any start or clearing of rea (each can take minutes), the
+//!    file is checked once more: the same canonical path inside the chat's folders, the
+//!    same identity and not a link (a folder walked again). What is left is the moment
+//!    between this check and rea's own open (a known limit);
+//! 8. the call is forwarded with the canonical arguments and the fixed `detail` only, the
 //!    tool's time limit, the turn's Stop and the app's own progress line; the result's ids
-//!    are recorded for this chat, the binding is updated, and the result is cleaned
+//!    are recorded for this chat (ids in an error result only contest, see
+//!    [`crate::session`]), the binding is updated, and the result is cleaned
 //!    ([`crate::results`]).
 //!
 //! Housekeeping the app did for a call (`close_binary`, `reset_investigation`, a restart of
@@ -45,7 +53,7 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::allow::{self, AllowedTool, ToolClass};
-use crate::describe::{self, Availability, DescribeEnv, Payload, messages as m};
+use crate::describe::{self, Availability, DescribeEnv, Payload, TargetSeen, messages as m};
 use crate::env::{self, Flavor};
 use crate::install::Installer;
 use crate::layout::ReverseLayout;
@@ -397,17 +405,51 @@ impl ReverseServer {
     /// Whether the open file is still the one that was opened: the same identity (and not
     /// a link now), or for a `.app` folder, a walk that passes again.
     fn intact(&self, b: &Binding, chat: &ChatContext) -> bool {
-        let canonical = b.view.canonical.as_str();
-        if b.folder {
-            let sandbox = self.sandbox(chat, canonical);
-            return RealWalkFs.kind(canonical) == Some(walk::EntryKind::Dir)
-                && walk::walk_folder(&RealWalkFs, canonical, &sandbox, chat.full_access).is_ok();
+        let identity = (!b.folder).then_some(&b.view.identity);
+        self.still_there(&b.view.canonical, identity, chat)
+    }
+
+    /// Whether an open's or a file check's target is still what was checked.
+    fn target_intact(&self, target: &TargetSeen, chat: &ChatContext) -> bool {
+        if !target.folder && target.identity.is_none() {
+            return false;
         }
-        RealWalkFs.kind(canonical) == Some(walk::EntryKind::File)
-            && FileIdentity::of(std::path::Path::new(canonical))
-                .ok()
-                .as_ref()
-                == Some(&b.view.identity)
+        self.still_there(&target.canonical, target.identity.as_ref(), chat)
+    }
+
+    /// Whether `canonical` still passes this chat's sandbox as that same canonical path
+    /// and is the same thing: a file with `identity` (not a link now; a link swapped in
+    /// for the file, or for a folder above it, fails), or with `None`, a folder whose walk
+    /// passes again.
+    fn still_there(
+        &self,
+        canonical: &str,
+        identity: Option<&FileIdentity>,
+        chat: &ChatContext,
+    ) -> bool {
+        if walk::is_network_or_device(canonical, self.path_flavor()) {
+            return false;
+        }
+        let sandbox = self.sandbox(chat, canonical);
+        let same_place = sandbox
+            .check(canonical, None, &RealWalkFs)
+            .is_ok_and(|c| c.exists && c.canonical == canonical);
+        if !same_place {
+            return false;
+        }
+        match identity {
+            None => {
+                RealWalkFs.kind(canonical) == Some(walk::EntryKind::Dir)
+                    && walk::walk_folder(&RealWalkFs, canonical, &sandbox, chat.full_access).is_ok()
+            }
+            Some(identity) => {
+                RealWalkFs.kind(canonical) == Some(walk::EntryKind::File)
+                    && FileIdentity::of(std::path::Path::new(canonical))
+                        .ok()
+                        .as_ref()
+                        == Some(identity)
+            }
+        }
     }
 
     fn run_config(&self, decompiler: Option<Decompiler>) -> RunConfig {
@@ -668,6 +710,12 @@ impl ReverseServer {
                 if fresh.evidence != payload.evidence || fresh.args != payload.args {
                     return Err(m::UNKNOWN_ID.into());
                 }
+                // A rea that is not running (an idle stop, a crash) lost its results; a
+                // start would only empty the ledger and refuse after a long wait.
+                if !self.running() {
+                    self.session().rea_stopped();
+                    return Err(m::UNKNOWN_ID.into());
+                }
             }
         }
 
@@ -707,6 +755,10 @@ impl ReverseServer {
                     )
                     .await?;
                 }
+                // 7. The file once more, after the start and the clearing.
+                if !self.target_intact(&target, &ctx.chat) {
+                    return Err(refusals::FILE_CHANGED.into());
+                }
                 let name = shown_name(&target.canonical, self.path_flavor());
                 let line = format!("rea is reading {name} with {}…", decompiler.label());
                 let result = self
@@ -726,7 +778,11 @@ impl ReverseServer {
                         );
                         session.record(chat, &target.canonical, &results::evidence_ids(out));
                     }
-                    _ => session.open_failed(chat, generation),
+                    Ok(out) => {
+                        session.saw_in_error(&target.canonical, &results::evidence_ids(out));
+                        session.open_failed(chat, generation);
+                    }
+                    Err(_) => session.open_failed(chat, generation),
                 }
                 result
             }
@@ -735,6 +791,10 @@ impl ReverseServer {
                     .target
                     .clone()
                     .ok_or_else(|| refusals::NOT_DESCRIBED.to_string())?;
+                // 7. The file once more, after the start.
+                if !self.target_intact(&target, &ctx.chat) {
+                    return Err(refusals::FILE_CHANGED.into());
+                }
                 let name = shown_name(&target.canonical, self.path_flavor());
                 let result = self
                     .forward(
@@ -745,12 +805,7 @@ impl ReverseServer {
                         format!("rea is checking {name}…"),
                     )
                     .await;
-                if let Ok(out) = &result
-                    && !out.is_error
-                {
-                    self.session()
-                        .record(chat, &target.canonical, &results::evidence_ids(out));
-                }
+                self.note_ids(chat, &target.canonical, &result);
                 result
             }
             ToolClass::Session => {
@@ -775,13 +830,10 @@ impl ReverseServer {
                 let result = self
                     .forward(&mut guard, t, payload.args.clone(), ctx, line)
                     .await;
-                let mut session = self.session();
                 if t.name == "close_binary" {
-                    session.closed_by_model();
-                } else if let Ok(out) = &result
-                    && !out.is_error
-                {
-                    session.record(chat, &b.view.canonical, &results::evidence_ids(out));
+                    self.session().closed_by_model();
+                } else {
+                    self.note_ids(chat, &b.view.canonical, &result);
                 }
                 result
             }
@@ -793,8 +845,8 @@ impl ReverseServer {
                 // A start of rea since the description took the result with it.
                 let current = self
                     .session()
-                    .evidence(&evidence.id)
-                    .is_some_and(|e| e.chat_id == chat && e.canonical == evidence.canonical);
+                    .evidence_for(chat, &evidence.id)
+                    .is_some_and(|e| e.canonical == evidence.canonical);
                 if !current {
                     return Err(m::UNKNOWN_ID.into());
                 }
@@ -806,25 +858,39 @@ impl ReverseServer {
                 let result = self
                     .forward(&mut guard, t, payload.args.clone(), ctx, line)
                     .await;
-                if let Ok(out) = &result
-                    && !out.is_error
-                {
-                    self.session()
-                        .record(chat, &evidence.canonical, &results::evidence_ids(out));
-                }
+                self.note_ids(chat, &evidence.canonical, &result);
                 result
             }
         }
     }
 
+    /// Records the ids of a successful result of `chat` about `canonical`; the ids of an
+    /// error result only contest (they are never recorded).
+    fn note_ids(&self, chat: i64, canonical: &str, result: &Result<ToolOutput, Refusal>) {
+        let Ok(out) = result else {
+            return;
+        };
+        let ids = results::evidence_ids(out);
+        let mut session = self.session();
+        if out.is_error {
+            session.saw_in_error(canonical, &ids);
+        } else {
+            session.record(chat, canonical, &ids);
+        }
+    }
+
+    /// Whether rea runs now (under the lock no call is in flight, so it is `Ready`).
+    fn running(&self) -> bool {
+        matches!(
+            self.process.state(),
+            RunState::Ready | RunState::Busy { .. }
+        )
+    }
+
     /// Whether the running rea still holds the binding's file: the same process (no start
     /// since the open) and running now.
     fn holds(&self, b: &Binding) -> bool {
-        self.process.generation() == b.view.generation
-            && matches!(
-                self.process.state(),
-                RunState::Ready | RunState::Busy { .. }
-            )
+        self.process.generation() == b.view.generation && self.running()
     }
 
     /// Ends this chat's binding whose file left the chat's folders or changed: when rea
@@ -884,6 +950,16 @@ impl ReverseServer {
             )
             .await?;
         }
+        // The file once more, after the start and the clearing (the caller checked it
+        // before either).
+        if !self.reachable(&b.view.canonical, &ctx.chat) {
+            self.session().dropped();
+            return Err(m::NO_LONGER_REACHABLE.into());
+        }
+        if !self.intact(&b, &ctx.chat) {
+            self.session().dropped();
+            return Err(refusals::OPEN_FILE_CHANGED.into());
+        }
         let open = allow::get("open_binary").ok_or_else(|| refusals::NOT_DESCRIBED.to_string())?;
         let line = format!("rea is reading {name} with {}…", b.view.decompiler.label());
         let _ticker = Ticker::start(ctx.progress.clone(), line);
@@ -918,6 +994,7 @@ impl ReverseServer {
                     .ok_or_else(|| m::NO_FILE_OPEN.to_string())
             }
             Ok(out) => {
+                session.saw_in_error(&b.view.canonical, &results::evidence_ids(&out));
                 session.open_failed(chat, generation);
                 notes.push(format!(
                     "rea could not open {} again, so this step did not run. Open it again with open_binary.",

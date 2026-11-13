@@ -692,8 +692,11 @@ async fn dropped_after_cancel() {
     let pid: u32 = text(&server, "pid", json!({})).await.parse().unwrap();
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();
+    let stamp = Arc::new(Mutex::new(None::<Instant>));
+    let stamped = stamp.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
+        *stamped.lock().unwrap() = Some(Instant::now());
         trigger.cancel();
     });
     let out = like_the_agent_loop(
@@ -708,7 +711,7 @@ async fn dropped_after_cancel() {
         &cancel,
     )
     .await;
-    let cancelled_at = Instant::now() - Duration::from_millis(250);
+    let cancelled_at = stamp.lock().unwrap().expect("cancelled");
     assert!(out.is_none(), "the fake never answers: {out:?}");
     // The cancel went out, and the server still has its grace to answer.
     assert!(

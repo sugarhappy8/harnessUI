@@ -7,6 +7,7 @@ import { MessageItem } from "./MessageItem";
 import { Composer } from "./Composer";
 import { ModelPicker } from "./ModelPicker";
 import { RuntimeIndicator } from "./RuntimeIndicator";
+import { UsageLine } from "./UsageLine";
 import { openModelSettings } from "./ModelSettings";
 import { SystemPromptDialog } from "./SystemPromptDialog";
 import { ErrorBanner } from "./ErrorBanner";
@@ -248,7 +249,11 @@ export function ChatView() {
   return (
     <main className="flex min-w-0 flex-1 flex-col">
       <header className="glass @container z-10 flex items-center gap-1.5 border-b border-border px-3 py-2">
-        <ModelPicker />
+        {/* [0.0.6 item 6] This computer's usage under the model name (WP10e). */}
+        <div className="flex min-w-0 shrink flex-col">
+          <ModelPicker />
+          <UsageLine />
+        </div>
         <RuntimeIndicator />
         <div className="flex-1" />
         {used !== null && <ContextMeter used={used} nCtx={nCtx} />}

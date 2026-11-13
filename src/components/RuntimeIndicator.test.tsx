@@ -65,6 +65,7 @@ function status(patch: Partial<RuntimeStatus> = {}): RuntimeStatus {
     settingsChanged: false,
     reloadWaiting: false,
     unloadedPath: null,
+    placement: null,
     ...patch,
   };
 }

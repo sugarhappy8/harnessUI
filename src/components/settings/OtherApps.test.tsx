@@ -9,6 +9,7 @@ import type {
   ShareSetup,
   ShareStatus,
 } from "../../lib/types";
+import { FINE_LAUNCH_NONE, fineFacts, processorPicture } from "../fine.fixtures";
 
 const KEY = "harnessui-share-0123456789abcdef0123456789abcdef";
 const NEW_KEY = "harnessui-share-fedcba9876543210fedcba9876543210";
@@ -109,6 +110,7 @@ function runtime(patch: Partial<RuntimeStatus> = {}): RuntimeStatus {
     settingsChanged: false,
     reloadWaiting: false,
     unloadedPath: null,
+    placement: null,
     ...patch,
   };
 }
@@ -152,6 +154,7 @@ function info(patch: Partial<ModelLoadInfo> = {}): ModelLoadInfo {
       backend: null,
       device: null,
       mmproj: null,
+      fine: FINE_LAUNCH_NONE,
     },
     fit: "green",
     tooLarge: false,
@@ -167,6 +170,8 @@ function info(patch: Partial<ModelLoadInfo> = {}): ModelLoadInfo {
     loaded: true,
     olderSettingsLoaded: false,
     autoCtx: null,
+    fineFacts: fineFacts(),
+    picture: processorPicture(),
     ...patch,
   };
 }
@@ -636,6 +641,65 @@ describe("OtherApps: the key", () => {
     expect(screen.getByRole("button", { name: "Show key" })).toBeTruthy();
   });
 
+  it("drops a Show key read still on its way when a new key is made, so the old key is never shown or copied", async () => {
+    statusNow = ON();
+    await show();
+    // Show key goes out (the keychain is slow); the user makes a new key before it answers.
+    const reveal = deferred<string>();
+    ipcMock.revealShareKey.mockImplementationOnce(() => reveal.promise);
+    await click(screen.getByRole("button", { name: "Show key" }));
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    expect(ipcMock.newShareKey).toHaveBeenCalledTimes(1);
+    // The read answers late, with the old key: it is not shown.
+    await act(async () => reveal.resolve(KEY));
+    expect(screen.queryByText(KEY)).toBeNull();
+    expect(screen.getByRole("button", { name: "Show key" })).toBeTruthy();
+    // Copy copies the new key, never the old one.
+    await click(screen.getByRole("button", { name: "Copy the key" }));
+    expect(browserClipboard).toHaveBeenCalledWith(NEW_KEY);
+    expect(browserClipboard).not.toHaveBeenCalledWith(KEY);
+  });
+
+  it("takes the old key off the page once a new one is made, even when the new one cannot be read", async () => {
+    statusNow = ON();
+    await show();
+    await click(screen.getByRole("button", { name: "Show key" }));
+    expect(screen.getByText(KEY)).toBeTruthy();
+    ipcMock.newShareKey.mockImplementationOnce(async () => {
+      ipcMock.revealShareKey.mockResolvedValue(NEW_KEY);
+      ipcMock.revealShareKey.mockRejectedValueOnce(KEYCHAIN);
+      return statusNow;
+    });
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    expect(screen.getByRole("alert").textContent).toContain(KEYCHAIN.message);
+    expect(screen.queryByText(KEY)).toBeNull();
+    expect(screen.getByRole("button", { name: "Show key" })).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Copy the key" }));
+    expect(browserClipboard).toHaveBeenCalledWith(NEW_KEY);
+    expect(browserClipboard).not.toHaveBeenCalledWith(KEY);
+  });
+
+  it("keeps saying the old key stopped working when a copy of the key started before the new key was made", async () => {
+    statusNow = ON();
+    await show();
+    // Copy the key goes out and reads the key slowly; a new key is made meanwhile.
+    const read = deferred<string>();
+    ipcMock.revealShareKey.mockImplementationOnce(() => read.promise);
+    await click(screen.getByRole("button", { name: "Copy the key" }));
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    expect(screen.getByText(OLD_KEY)).toBeTruthy();
+    // That copy ends with the old key: the page still says to copy the new one.
+    await act(async () => read.resolve(KEY));
+    expect(browserClipboard).toHaveBeenLastCalledWith(KEY);
+    expect(screen.getByText(OLD_KEY)).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Copy the key" }));
+    expect(browserClipboard).toHaveBeenLastCalledWith(NEW_KEY);
+    expect(screen.queryByText(OLD_KEY)).toBeNull();
+  });
+
   it("shows why the key could not be read, copied or replaced", async () => {
     statusNow = ON();
     await show();
@@ -955,6 +1019,50 @@ describe("OtherApps: setup cards", () => {
     expect(ipcMock.shareSetup).toHaveBeenCalledTimes(2);
     expect(screen.getByText(OLD_KEY)).toBeTruthy();
     await click(firstCopy());
+    expect(screen.queryByText(OLD_KEY)).toBeNull();
+  });
+
+  it("keeps the old-key note for each app set up before, until a step with the key is copied for that app", async () => {
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    // Claude Code and Codex were set up with the old key.
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    await click(firstCopy());
+    await click(screen.getByRole("button", { name: "Codex" }));
+    await click(firstCopy());
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    expect(screen.getByText(OLD_KEY)).toBeTruthy();
+    expect(screen.getByText("Apps to set up again: Claude Code and Codex.")).toBeTruthy();
+    // A Codex step without the key in it does not set Codex up with the new key.
+    const codex = screen.getByRole("region", { name: "Set up Codex" });
+    await click(within(codex).getByRole("button", { name: "Copy step 1 of For every window" }));
+    expect(browserClipboard).toHaveBeenLastCalledWith('{\n  "env": {}\n}');
+    expect(screen.getByText(OLD_KEY)).toBeTruthy();
+    expect(screen.getByText("Apps to set up again: Claude Code and Codex.")).toBeTruthy();
+    // Codex's step with the key: Codex is done, Claude Code still has the old key.
+    await click(firstCopy(codex));
+    expect(screen.getByText(OLD_KEY)).toBeTruthy();
+    expect(screen.getByText("Apps to set up again: Claude Code.")).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Claude Code" }));
+    await click(firstCopy());
+    expect(screen.queryByText(OLD_KEY)).toBeNull();
+    expect(screen.queryByText(/Apps to set up again/)).toBeNull();
+  });
+
+  it("keeps the old-key note when a step without the key is copied, with no app set up before", async () => {
+    statusNow = ON({ modelCtx: 32_768 });
+    await show();
+    await click(screen.getByRole("button", { name: "Make a new key" }));
+    await click(within(screen.getByRole("group", { name: "Make a new key?" })).getByRole("button", { name: "Make a new key" }));
+    expect(screen.getByText(OLD_KEY)).toBeTruthy();
+    // The Claude app's address has no key in it.
+    await click(screen.getByRole("button", { name: "Claude app" }));
+    await click(screen.getByRole("button", { name: "Copy step 2 of In the Claude app" }));
+    expect(browserClipboard).toHaveBeenLastCalledWith("http://127.0.0.1:51234");
+    expect(screen.getByText(OLD_KEY)).toBeTruthy();
+    // The new key itself ends it.
+    await click(screen.getByRole("button", { name: "Copy the key" }));
     expect(screen.queryByText(OLD_KEY)).toBeNull();
   });
 

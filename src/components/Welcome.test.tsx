@@ -33,6 +33,7 @@ const ready: RuntimeStatus = {
   settingsChanged: false,
   reloadWaiting: false,
   unloadedPath: null,
+  placement: null,
 };
 
 describe("the welcome screen", () => {

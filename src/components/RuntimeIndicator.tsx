@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { DropdownMenu } from "radix-ui";
 import { ChevronDown, RotateCcw, Settings2, PowerOff } from "lucide-react";
 import * as ipc from "../lib/ipc";
@@ -13,6 +13,7 @@ import {
   stepDownAction,
   waitingWords,
 } from "../lib/words";
+import { usePageVisible, usePoll } from "../lib/usePoll";
 import { toErrorInfo, useApp } from "../store/app";
 import { reloadModel, switchModel, unloadModel, useRestartNote, useWaiting } from "../store/modelChange";
 import { ModelSettingsHost, openModelSettings, QuestionHost } from "./ModelSettings";
@@ -49,12 +50,29 @@ export function runtimeNotes(rt: RuntimeStatus, opts: { restarted: boolean; hasM
     );
   }
   const gpu = rt.backend !== null && rt.backend !== "cpu";
-  const partial =
-    gpu && rt.offloadedLayers !== null && rt.totalLayers !== null && rt.offloadedLayers < rt.totalLayers;
+  const partial = gpu && partOnProcessor(rt);
   if (partial && !adjustments.some((a) => a.kind === "retryingWithLessGpu")) add(SLOW_WORDS.partial, "settings");
   if (rt.slow && rt.speedTps !== null) add(slowSpeedWords(rt.speedTps), "settings");
   if (opts.restarted && opts.hasMessages) add(SLOW_WORDS.afterRestart, null);
   return notes;
+}
+
+/**
+ * Whether part of the loaded model runs on the processor and the rest on the graphics card
+ * (the "part on the processor" slow state). From where the model went (0.0.6 item 6, the
+ * ready line's memory report) when it is known: fewer than all layers, or any expert parts,
+ * on the processor, but never for a placement the user chose in Fine control (they chose
+ * it) and never with nothing on the graphics card. Else from the layer counts.
+ */
+export function partOnProcessor(rt: RuntimeStatus): boolean {
+  // A backend without item 6 sends no `placement` at all.
+  const p = rt.placement ?? null;
+  if (p) {
+    if (p.custom || p.graphics === null) return false;
+    const fewer = p.layersOnGraphics !== null && p.units !== null && p.layersOnGraphics < p.units;
+    return fewer || (p.expertLayersOnProcessor ?? 0) > 0;
+  }
+  return rt.offloadedLayers !== null && rt.totalLayers !== null && rt.offloadedLayers < rt.totalLayers;
 }
 
 /**
@@ -76,46 +94,6 @@ function currentAdjustments(adjustments: LoadStage[]): LoadStage[] {
     (a, i) => i !== last && a.kind !== "steppingDown" && !(a.kind === "retryingWithLessGpu" && left.has(a.backend)),
   );
   return [adjustments[last] as LoadStage, ...rest];
-}
-
-/** Whether the page is shown (polling stops while the window is hidden). */
-function usePageVisible(): boolean {
-  const [visible, setVisible] = useState(() => typeof document === "undefined" || document.visibilityState === "visible");
-  useEffect(() => {
-    const on = () => setVisible(document.visibilityState === "visible");
-    document.addEventListener("visibilitychange", on);
-    return () => document.removeEventListener("visibilitychange", on);
-  }, []);
-  return visible;
-}
-
-/**
- * Calls `read` now and again after `delay(last result)` milliseconds while `active`; null
- * while inactive. `read` and `delay` must be stable (module-level) functions.
- */
-function usePoll<T>(active: boolean, read: () => Promise<T>, delay: (last: T | null) => number): T | null {
-  const [value, setValue] = useState<T | null>(null);
-  useEffect(() => {
-    if (!active) return;
-    let alive = true;
-    let timer = 0;
-    const tick = async () => {
-      let last: T | null = null;
-      try {
-        last = await read();
-        if (alive) setValue(last);
-      } catch {
-        // Not available now; asked again on the next tick.
-      }
-      if (alive) timer = window.setTimeout(() => void tick(), delay(last));
-    };
-    void tick();
-    return () => {
-      alive = false;
-      window.clearTimeout(timer);
-    };
-  }, [active, read, delay]);
-  return active ? value : null;
 }
 
 /** The busy counts behind the waiting line: every 1.5 seconds. */

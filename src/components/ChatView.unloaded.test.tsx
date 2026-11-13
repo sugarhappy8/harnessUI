@@ -64,6 +64,7 @@ function stopped(unloadedPath: string | null): RuntimeStatus {
     settingsChanged: false,
     reloadWaiting: false,
     unloadedPath,
+    placement: null,
   };
 }
 

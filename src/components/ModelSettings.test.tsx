@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ModelBusy, ModelLoadInfo, ModelLoadSettings, RuntimeStatus } from "../lib/types";
+import { FINE_LAUNCH_NONE, fineFacts, processorPicture } from "./fine.fixtures";
 
 const IDLE: ModelBusy = { chatTurns: 0, modelChecks: 0, otherApps: 0 };
 
@@ -62,6 +63,7 @@ function sample(path = "/models/model.gguf"): ModelLoadInfo {
       backend: null,
       device: null,
       mmproj: null,
+      fine: FINE_LAUNCH_NONE,
     },
     fit: "green",
     tooLarge: false,
@@ -82,6 +84,8 @@ function sample(path = "/models/model.gguf"): ModelLoadInfo {
     loaded: false,
     olderSettingsLoaded: false,
     autoCtx: null,
+    fineFacts: fineFacts(),
+    picture: processorPicture(),
   };
 }
 
@@ -110,6 +114,7 @@ function ready(path: string): RuntimeStatus {
     settingsChanged: false,
     reloadWaiting: false,
     unloadedPath: null,
+    placement: null,
   };
 }
 

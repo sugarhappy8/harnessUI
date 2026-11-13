@@ -4,17 +4,24 @@ import { X } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import type {
   ContextChoice,
+  ContextSize,
   DeviceChoice,
   ErrorInfo,
+  FineControl as FineSettings,
   GpuChoice,
+  GpuUse,
   ModelLoadInfo,
   ModelLoadSettings,
+  OffloadPreview,
   ThinkingChoice,
   Toggle,
+  Verdict,
 } from "../lib/types";
 import {
   automaticResult,
   busyQuestion,
+  customPlacementWords,
+  CUSTOM_PLACEMENT_HELP,
   deviceLabel,
   FIT_WORDS,
   gpuHelp,
@@ -22,20 +29,26 @@ import {
   GPU_USE_WORDS,
   HELP,
   isAppleComputer,
+  pictureWarning,
   THINKING_WORDS,
   TOO_LARGE_LINE,
   tokensWithWords,
   upgradeNoteWords,
+  wontFitQuestion,
 } from "../lib/words";
 import { toErrorInfo, useApp } from "../store/app";
 import {
   answerQuestion,
+  ask,
+  askTooLarge,
   reloadModel,
   registerQuestionHost,
   updateQuestionText,
   useQuestion,
 } from "../store/modelChange";
 import { ErrorBanner } from "./ErrorBanner";
+import { FINE_AUTO, FineControl, fineIsAuto, hasCustomPlacement } from "./FineControl";
+import { OffloadPicture } from "./OffloadPicture";
 
 // ---- Shared controls (also used by Settings → Local models) ------------------------------
 
@@ -106,8 +119,41 @@ function onOff(on: boolean): string {
   return on ? "On" : "Off";
 }
 
+/** The choices without a Fine control that is all Automatic (absent means Automatic, item 6). */
+function tidy(s: ModelLoadSettings): ModelLoadSettings {
+  if (s.fine === undefined || !fineIsAuto(s.fine)) return s;
+  const next = { ...s };
+  delete next.fine;
+  return next;
+}
+
+/** JSON with the keys of every object in order, so two equal choices always compare equal. */
+function canonical(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")}}`;
+}
+
+/** Whether two sets of choices are the same; Fine control absent and all Automatic are the same. */
 function same(a: ModelLoadSettings, b: ModelLoadSettings): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return canonical(tidy(a)) === canonical(tidy(b));
+}
+
+function sameSize(a: ContextSize, b: ContextSize): boolean {
+  return typeof a === "string" || typeof b === "string" ? a === b : a.fixed === b.fixed;
+}
+
+/** What an on/off choice of one model comes to with the defaults for all models. */
+function toggleOn(t: Toggle, fallback: boolean): boolean {
+  return t === "default" ? fallback : t === "on";
+}
+
+/** What "Use the graphics card" comes to with the defaults for all models. */
+function gpuOf(g: GpuChoice, fallback: GpuUse): GpuUse {
+  return g === "default" ? fallback : g;
 }
 
 /** Whether a setting the model is launched with differs (How long it may think is not one). */
@@ -146,6 +192,10 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
   const [saved, setSaved] = useState(false);
   // The facts for the unsaved choices (`draftKey`), so the fit marks follow them.
   const [preview, setPreview] = useState<{ key: string; info: ModelLoadInfo } | null>(null);
+  // Item 6: Fine control is open (exact figures are worked out only then), and llama.cpp's
+  // measurement for the choices `key` (`picture` null when it could not be asked).
+  const [fineOpen, setFineOpen] = useState(false);
+  const [measured, setMeasured] = useState<{ key: string; picture: OffloadPreview | null } | null>(null);
   const runtime = useApp((s) => s.runtime);
   const apple = isAppleComputer();
 
@@ -195,6 +245,35 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
   // What the controls show: the facts for the choices on screen when known, else the saved ones.
   const previewNow = info && dirty && preview && preview.key === draftKey ? preview.info : null;
   const facts = previewNow ?? info;
+
+  // Item 6: while Fine control is open, llama.cpp works out the exact figures for the choices
+  // on screen, a moment after the last change. An answer is used only while the choices it
+  // was asked for are still on screen; a newer request replaces an older one.
+  const canMeasure = !!info?.picture && !!info.fineFacts;
+  useEffect(() => {
+    if (!fineOpen || !canMeasure || draftKey === null) return;
+    const choices = JSON.parse(draftKey) as ModelLoadSettings;
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      ipc.offloadMeasure(path, choices).then(
+        (picture) => alive && setMeasured({ key: draftKey, picture }),
+        () => alive && setMeasured({ key: draftKey, picture: null }),
+      );
+    }, 600);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [path, fineOpen, canMeasure, draftKey]);
+  const measuredNow = measured && measured.key === draftKey ? measured : null;
+  const measuring = fineOpen && canMeasure && !measuredNow;
+  // The latest answer for the choices on screen: the measurement, else the instant estimate
+  // (which says why exact figures could not be worked out when the request failed).
+  const estimate: OffloadPreview | null = facts?.picture ?? null;
+  const picture: OffloadPreview | null =
+    measuredNow?.picture ??
+    (measuredNow && estimate ? { ...estimate, source: { kind: "estimate", why: "failed" } } : estimate);
+  const measuredMark: Verdict | null = measuredNow?.picture?.source.kind === "measured" ? measuredNow.picture.mark : null;
   // Whether loading with the choices on screen would launch the model differently from the
   // copy that is loaded (the backend's own rule, `olderSettingsLoaded`): only then does
   // Apply and restart have something to restart. How long it may think is a per-request
@@ -209,7 +288,26 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
 
   function change(patch: Partial<ModelLoadSettings>) {
     setSaved(false);
-    setDraft((d) => (d ? { ...d, ...patch } : d));
+    setDraft((d) => (d ? tidy({ ...d, ...patch }) : d));
+  }
+
+  /**
+   * Before a load with these choices: the latest answer may say it probably won't fit
+   * (item 6, 6.2). Too large or not at all: WP2's question; not on the graphics card: the
+   * same dialog with its own question (Cancel has the focus). Resolves true to go on.
+   */
+  async function loadAnyway(): Promise<boolean> {
+    if (facts?.tooLarge || picture?.fits === "wontFitAtAll") return askTooLarge();
+    if (picture?.fits === "wontFitGraphics") {
+      const choice = await ask({
+        text: wontFitQuestion(facts?.fineFacts?.apple ?? apple),
+        cancel: "Cancel",
+        choices: [{ label: "Load anyway", value: "load", tone: "primary" }],
+        busy: false,
+      });
+      return choice === "load";
+    }
+    return true;
   }
 
   function took(next: ModelLoadInfo) {
@@ -255,8 +353,9 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
       setSaved(false);
     });
 
-  const onApply = () =>
-    run(dirty ? "Saving…" : "Restarting the model…", async () => {
+  const onApply = async () => {
+    if (needsRestart && !(await loadAnyway())) return;
+    await run(dirty ? "Saving…" : "Restarting the model…", async () => {
       const next = await save();
       if (!next) return;
       // The backend says whether the loaded copy now differs from these settings; when it
@@ -270,14 +369,17 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
       // it is answered, and stays open after Cancel.
       void reloadModel(state.runtime, false, onClose).catch((err) => state.showError(toErrorInfo(err)));
     });
+  };
 
-  const onLoad = () =>
-    run(dirty ? "Saving…" : "Loading the model…", async () => {
+  const onLoad = async () => {
+    if (!(await loadAnyway())) return;
+    await run(dirty ? "Saving…" : "Loading the model…", async () => {
       if (!(await save())) return;
       // pickModel asks first when the loaded model is busy, and closes the panel once the
       // chat has the model.
       await useApp.getState().pickModel(`local:${path}`, { onChatSet: onClose });
     });
+  };
 
   return (
     <Dialog.Root open onOpenChange={(o) => !o && onClose()}>
@@ -306,6 +408,11 @@ export function ModelSettings(props: { path: string; onClose: () => void; onSave
                 apple={apple}
                 disabled={working !== null}
                 onChange={change}
+                picture={picture}
+                measuring={measuring}
+                measuredMark={measuredMark}
+                fineOpen={fineOpen}
+                onFineToggle={setFineOpen}
               />
             )}
           </div>
@@ -397,22 +504,40 @@ function Controls(props: {
   /** While a command runs, nothing can be changed. */
   disabled: boolean;
   onChange: (patch: Partial<ModelLoadSettings>) => void;
+  /** Item 6: the latest picture for the choices on screen (the measurement when there is one). */
+  picture: OffloadPreview | null;
+  /** Exact figures are being worked out for the choices on screen. */
+  measuring: boolean;
+  /** The measurement's mark for the selected choices, which replaces their estimated marks. */
+  measuredMark: Verdict | null;
+  fineOpen: boolean;
+  onFineToggle: (open: boolean) => void;
 }) {
-  const { info, draft, dirty, apple, disabled, onChange } = props;
+  const { info, draft, dirty, apple, disabled, onChange, picture, measuring, measuredMark, fineOpen, onFineToggle } = props;
   const d = info.defaults;
+  // A backend without item 6 sends no `fineFacts`; Fine control then stays hidden.
+  const fineFacts = info.fineFacts ?? null;
+  const appleGraphics = fineFacts?.apple ?? apple;
+  const fine: FineSettings = draft.fine ?? FINE_AUTO;
+  const gpuNow = gpuOf(draft.gpu, d.gpu);
+  const gpuOff = gpuNow === "off";
+  const saveMemoryOn = toggleOn(draft.saveMemory, d.saveMemory);
+  // The measurement's mark replaces the estimated marks of the selected choices (4.1).
+  const markOf = (fit: Verdict, selected: boolean): Verdict => (selected && measuredMark !== null ? measuredMark : fit);
 
   // How much it can remember.
   const autoDefault = defaultIsAuto(info);
   const contextOptions: Option[] = [
     { value: "default", label: sameAs(autoDefault ? "Automatic" : tokensWithWords(d.ctx)) },
-    ...info.contextOptions.map((o) =>
-      o.choice === "auto"
+    ...info.contextOptions.map((o) => {
+      const fit = markOf(o.fit, sameSize(o.choice, info.resolved.ctxChoice));
+      return o.choice === "auto"
         ? {
             value: "auto",
-            label: o.tokens > 0 ? `Automatic: ${tokensWithWords(o.tokens)} · ${FIT_WORDS[o.fit]}` : "Automatic: too large for this computer",
+            label: o.tokens > 0 ? `Automatic: ${tokensWithWords(o.tokens)} · ${FIT_WORDS[fit]}` : "Automatic: too large for this computer",
           }
-        : { value: `fixed:${o.choice.fixed}`, label: `${tokensWithWords(o.choice.fixed)} · ${FIT_WORDS[o.fit]}` },
-    ),
+        : { value: `fixed:${o.choice.fixed}`, label: `${tokensWithWords(o.choice.fixed)} · ${FIT_WORDS[fit]}` };
+    }),
   ];
   const contextNow = contextValue(draft.context);
   if (!contextOptions.some((o) => o.value === contextNow) && typeof draft.context === "object") {
@@ -426,12 +551,37 @@ function Controls(props: {
   const autoTokens =
     !dirty && info.loaded && !info.olderSettingsLoaded && info.autoCtx ? info.autoCtx : (autoOption?.tokens ?? 0);
 
-  // Use the graphics card: only when there is one.
+  // Use the graphics card: only when there is one. A placement chosen in Fine control is
+  // one more, selected option ("Custom: …"), unless the graphics card is not used at all
+  // (item 6, 6.3); choosing any other option goes back to the plain placement.
   const showGpu = info.devices.length > 0;
+  const custom = hasCustomPlacement(draft.fine) && !gpuOff;
   const gpuOptions: Option[] = [
     { value: "default", label: sameAs(GPU_USE_WORDS[d.gpu]) },
-    ...info.gpuOptions.map((o) => ({ value: o.gpu, label: `${GPU_USE_WORDS[o.gpu]} · ${FIT_WORDS[o.fit]}` })),
+    ...info.gpuOptions.map((o) => ({
+      value: o.gpu,
+      label: `${GPU_USE_WORDS[o.gpu]} · ${FIT_WORDS[markOf(o.fit, !custom && o.gpu === info.resolved.gpu)]}`,
+    })),
   ];
+  if (custom) {
+    gpuOptions.push({
+      value: "custom",
+      label: customPlacementWords(typeof fine.layers === "object" ? fine.layers.count : null, fineFacts?.units ?? null),
+      disabled: true,
+    });
+  }
+  const pickGpu = (v: string) =>
+    onChange(
+      hasCustomPlacement(draft.fine)
+        ? { gpu: v as GpuChoice, fine: { ...fine, layers: "auto", experts: "auto" } }
+        : { gpu: v as GpuChoice },
+    );
+  // The one warning line (4.1): too large first, then the picture's own warning.
+  const warning = info.tooLarge
+    ? TOO_LARGE_LINE
+    : picture
+      ? pictureWarning(picture, { apple: appleGraphics, saveMemory: saveMemoryOn })
+      : null;
 
   const toggle = (on: boolean): Option[] => [
     { value: "default", label: sameAs(onOff(on)) },
@@ -465,9 +615,17 @@ function Controls(props: {
 
   return (
     <div className="space-y-4">
-      {info.tooLarge && (
-        <p className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-sm text-danger" role="alert">
-          {TOO_LARGE_LINE}
+      {warning && (
+        <p
+          className={
+            "rounded-md border px-3 py-2 text-sm " +
+            (info.tooLarge || picture?.fits === "wontFitAtAll"
+              ? "border-danger/40 bg-danger/5 text-danger"
+              : "border-warning/40 bg-warning/5 text-warning")
+          }
+          role="alert"
+        >
+          {warning}
         </p>
       )}
       <Field
@@ -490,11 +648,11 @@ function Controls(props: {
         <Field
           id="model-gpu"
           label={gpuLabel(apple)}
-          value={draft.gpu}
+          value={custom ? "custom" : draft.gpu}
           options={gpuOptions}
           disabled={disabled}
-          onChange={(v) => onChange({ gpu: v as GpuChoice })}
-          help={<p>{gpuHelp(apple)}</p>}
+          onChange={pickGpu}
+          help={<p>{custom ? CUSTOM_PLACEMENT_HELP : gpuHelp(apple)}</p>}
         />
       )}
       <Field
@@ -515,6 +673,15 @@ function Controls(props: {
         onChange={(v) => onChange({ keepInMemory: v as Toggle })}
         help={<p>{HELP.keepInMemory}</p>}
       />
+      {picture && (
+        <OffloadPicture
+          picture={picture}
+          measuring={measuring}
+          fineOpen={fineOpen}
+          apple={appleGraphics}
+          mac={apple || appleGraphics}
+        />
+      )}
       {more && (
         <details className="rounded-md border border-border px-3 py-2">
           <summary className="cursor-pointer text-sm font-medium">More options</summary>
@@ -542,6 +709,20 @@ function Controls(props: {
             )}
           </div>
         </details>
+      )}
+      {fineFacts && (
+        <FineControl
+          facts={fineFacts}
+          fine={fine}
+          gpuOff={gpuOff}
+          gpu={gpuNow}
+          saveMemory={saveMemoryOn}
+          picture={picture}
+          open={fineOpen}
+          onToggle={onFineToggle}
+          disabled={disabled}
+          onChange={(next) => onChange({ fine: next })}
+        />
       )}
     </div>
   );

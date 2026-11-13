@@ -49,6 +49,7 @@ function runtime(state: RuntimeStatus["state"], modelPath: string | null = "/m/a
     settingsChanged: false,
     reloadWaiting: false,
     unloadedPath: null,
+    placement: null,
   };
 }
 

@@ -416,6 +416,11 @@ export function Composer(props: {
                     Add a folder…
                   </button>
                 )}
+                {n.kind === "turnOn" && (
+                  <button type="button" onClick={dropped.openTools} className="text-accent underline">
+                    Open Tools panel
+                  </button>
+                )}
               </li>
             ))}
           </ul>

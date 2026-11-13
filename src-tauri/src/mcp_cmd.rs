@@ -1092,6 +1092,45 @@ fn mark_reverse<'a>(
     }
 }
 
+/// [0.0.6 item 5, WP9h] Whether the Reverse engineering group is switched on in this chat:
+/// any tool of the built-in `reverse` server, by the chat's own choice or the last choice.
+/// Never by default (the owner's answer Q4 = B), so no context is looked up. While it is
+/// off, a program dropped on the message box comes with a note saying to turn it on
+/// (`reverse_drop.rs`).
+pub(crate) async fn reverse_switched_on(state: &AppState, chat: &store::Chat) -> bool {
+    let prefs: crate::turns::ChatTools =
+        serde_json::from_value(chat.tool_prefs.clone()).unwrap_or_default();
+    let last_choice: Option<Vec<String>> =
+        state.store.get_setting(DEFAULT_TOOLS).await.ok().flatten();
+    let selection = Selection::for_chat(
+        prefs.enabled.as_deref(),
+        last_choice.as_deref(),
+        false,
+        None,
+    );
+    let stored = state.store.list_mcp_servers().await.unwrap_or_default();
+    let tools: Vec<(String, String, bool)> = state
+        .host
+        .tools()
+        .into_iter()
+        .map(|t| {
+            let builtin = !stored.iter().any(|r| r.name == t.server);
+            (t.exposed, t.server, builtin)
+        })
+        .collect();
+    reverse_group_on(&selection, &tools)
+}
+
+/// Whether one of the built-in `reverse` server's tools (exposed name, server, built in) is
+/// on in `selection`.
+fn reverse_group_on(selection: &Selection<'_>, tools: &[(String, String, bool)]) -> bool {
+    tools.iter().any(|(exposed, server, builtin)| {
+        *builtin
+            && server == reverse::server::SERVER_NAME
+            && selection.on(exposed, server, *builtin)
+    })
+}
+
 async fn tool_list(
     state: &AppState,
     selection: &Selection<'_>,
@@ -2108,5 +2147,38 @@ mod tests {
         let companions = body.find("companions_follow(").expect("companions");
         assert!(marks < companions);
         assert!(body.contains("reverse::handle()"));
+    }
+
+    /// The group counts as on in a chat when one of the built-in `reverse` tools is on there,
+    /// by the chat's own choice or the last choice; never by default (Q4 = B), and an
+    /// outside server of the same name does not count.
+    #[test]
+    fn whether_the_reverse_group_is_on_in_a_chat() {
+        let reverse = reverse::server::SERVER_NAME.to_string();
+        let tools = vec![
+            ("open_binary".to_string(), reverse.clone(), true),
+            ("procedure_pseudo_code".to_string(), reverse.clone(), true),
+            ("read_file".to_string(), "files".to_string(), true),
+        ];
+        let own_on = names(&["read_file", "open_binary"]);
+        let own_off = names(&["read_file"]);
+        assert!(reverse_group_on(&Selection::Chat(&own_on), &tools));
+        assert!(!reverse_group_on(&Selection::Chat(&own_off), &tools));
+        assert!(reverse_group_on(&Selection::LastChoice(&own_on), &tools));
+        assert!(!reverse_group_on(&Selection::LastChoice(&own_off), &tools));
+        for context in [None, Some(4_096), Some(8_192), Some(131_072)] {
+            for browser_available in [false, true] {
+                let defaults = Selection::Defaults {
+                    browser_available,
+                    context,
+                };
+                assert!(!reverse_group_on(&defaults, &tools), "{context:?}");
+            }
+        }
+        assert!(!reverse_group_on(&Selection::NoChat, &tools));
+        // An outside server that happens to be called "reverse" is not the group.
+        let outside = vec![("open_binary".to_string(), reverse, false)];
+        assert!(!reverse_group_on(&Selection::Chat(&own_on), &outside));
+        assert!(!reverse_group_on(&Selection::Chat(&own_on), &[]));
     }
 }

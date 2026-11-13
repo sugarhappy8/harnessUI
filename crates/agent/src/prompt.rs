@@ -617,10 +617,19 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
     if let Some(summary) = parts.summary.map(str::trim).filter(|s| !s.is_empty()) {
         blocks.push(format!(
             "<conversation_summary>\nEarlier messages of this conversation were summarised:\n{}\n</conversation_summary>",
-            quote_app_notes(&sanitizer.clean(&visible_summary(summary)))
+            defang_app_notes(summary, sanitizer)
         ));
     }
     blocks.join("\n\n")
+}
+
+/// Model-written text that goes into a prompt outside every tool-output block (the summary
+/// block, and the task and context of the app's helper hand-over): hidden characters become
+/// visible escapes (`visible_summary`), chat-template control tokens are broken
+/// ([`Sanitizer::clean`]) and every "[App note]" marker gets round brackets
+/// (`quote_app_notes`), so the text cannot pass for a note from the app.
+pub fn defang_app_notes(text: &str, sanitizer: &Sanitizer) -> String {
+    quote_app_notes(&sanitizer.clean(&visible_summary(text)))
 }
 
 /// A model-written summary with its hidden characters shown as visible escapes, as approval
@@ -663,14 +672,14 @@ fn hidden_in_summary(c: char) -> bool {
 }
 
 /// A model-written summary as the summary block shows it: every "[App note]" marker (any
-/// letter case, any spacing inside the brackets, as `defang_app_notes` in the app's helper
-/// hand-over) gets round brackets, "(App note)". The agent instructions say lines starting
-/// with "[App note]" come from the app; a summary is model output that can echo a web page
-/// or a file, and in the system message it sits outside every tool-output block, so it must
-/// not be able to pass for a note from the app (0.0.6). Hidden characters inside the
-/// brackets (by now visible escapes, [`visible_summary`]) do not hide a marker, and
-/// full-width brackets count as brackets. The text is otherwise unchanged; the stored
-/// summary is never changed.
+/// letter case, any spacing inside the brackets; the app's helper hand-over uses the same,
+/// through [`defang_app_notes`]) gets round brackets, "(App note)". The agent instructions
+/// say lines starting with "[App note]" come from the app; a summary is model output that
+/// can echo a web page or a file, and in the system message it sits outside every
+/// tool-output block, so it must not be able to pass for a note from the app (0.0.6).
+/// Hidden characters inside the brackets (by now visible escapes, [`visible_summary`]) do
+/// not hide a marker, and full-width brackets count as brackets. The text is otherwise
+/// unchanged; the stored summary is never changed.
 fn quote_app_notes(text: &str) -> String {
     const OPEN: [char; 2] = ['[', '\u{FF3B}'];
     const CLOSE: [char; 2] = [']', '\u{FF3D}'];

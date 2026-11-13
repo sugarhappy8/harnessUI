@@ -2,7 +2,7 @@ import { type Dispatch, type RefObject, type SetStateAction, useCallback, useEff
 import * as ipc from "../lib/ipc";
 import type { DroppedProgram } from "../lib/types";
 import { toErrorInfo, useApp } from "../store/app";
-import { useChatFolders } from "./FolderChip";
+import { useChatFolders, visiblePath } from "./FolderChip";
 
 /**
  * Dropping a program file on the window points the message box at it (0.0.6 item 5,
@@ -16,6 +16,11 @@ import { useChatFolders } from "./FolderChip";
  * alone, as before. Nothing is sent: the owner reads the box and sends it, and the model's
  * reverse tools then ask as every tool does.
  *
+ * A path with hidden or direction-changing characters never goes into the box (it would carry
+ * text the owner cannot see into their own message): a note asks to rename the file instead.
+ * The backend refuses such a path first; the box checks again. When the chat's Reverse
+ * engineering group is off (it is off in new chats), a note says to turn it on.
+ *
  * Outside the app (a plain browser, component tests) there is no drop event and no command:
  * the message box works as it did before.
  */
@@ -23,20 +28,32 @@ import { useChatFolders } from "./FolderChip";
 /** Files looked at per drop, at most (the command refuses more). */
 export const MAX_DROPPED = 8;
 
-/** A note under the message box about one dropped file. */
+/** A note under the message box about one dropped file (or, for `turnOn`, the files just put in the box). */
 export interface DropNote {
-  kind: "addFolder" | "notReachable";
-  /** The file's name, made safe to show by the backend. */
+  kind: "addFolder" | "notReachable" | "rename" | "turnOn";
+  /** The file's name, made safe to show ("these files" for a `turnOn` note about several). */
   fileName: string;
-  /** The path as dropped, looked at again once a folder is added. */
+  /** The path as dropped, looked at again once a folder is added ("" for `turnOn`). */
   path: string;
 }
 
 /** What a note says. */
 export function dropNoteText(note: DropNote): string {
-  return note.kind === "addFolder"
-    ? `To let the model look inside ${note.fileName}, add its folder to this chat.`
-    : `rea can't reach ${note.fileName} from this chat.`;
+  switch (note.kind) {
+    case "addFolder":
+      return `To let the model look inside ${note.fileName}, add its folder to this chat.`;
+    case "notReachable":
+      return `rea can't reach ${note.fileName} from this chat.`;
+    case "rename":
+      return `The path of ${note.fileName} has hidden or unusual characters, so it was not put in the message. Rename the file or its folder, then drop it again.`;
+    case "turnOn":
+      return `To let the model look inside ${note.fileName}, turn on Reverse engineering in this chat's Tools panel.`;
+  }
+}
+
+/** Opens the chat's Tools panel, as a click on its button in the chat header would. */
+function openToolsPanel() {
+  document.querySelector<HTMLButtonElement>('button[title="Tools for this chat"]')?.click();
 }
 
 /** A path as it goes into the message box: in double quotes, or single ones if it holds a double quote. */
@@ -68,13 +85,19 @@ export function insertAtCaret(
   });
 }
 
+/** Whether a file name is a compiled Python file's (`.pyc`, `.pyo`). */
+function isCompiledPythonName(name: string): boolean {
+  return /\.py[co]$/i.test(name);
+}
+
 /**
- * Whether the first bytes of a file are a program's or a library's: Windows (`MZ`), Linux
- * (ELF), Mac (Mach-O, and universal files built for several processors, which share their
- * first four bytes with Java class files) or compiled Python. The same rule as the backend's
- * (`reverse_drop::is_program_magic`).
+ * Whether the first bytes of a file named `name` are a program's or a library's: Windows
+ * (`MZ`), Linux (ELF), Mac (Mach-O, and universal files built for several processors, which
+ * share their first four bytes with Java class files) or, for a `.pyc` or `.pyo` file only,
+ * compiled Python (whose two-byte number and CR LF also start many Windows text files). The
+ * same rule as the backend's (`reverse_drop::is_program_head`).
  */
-export function isProgramHead(b: Uint8Array): boolean {
+export function isProgramHead(b: Uint8Array, name: string): boolean {
   if (b.length >= 2 && b[0] === 0x4d && b[1] === 0x5a) return true;
   if (b.length < 4) return false;
   const [b0, b1, b2, b3] = [b[0]!, b[1]!, b[2]!, b[3]!];
@@ -86,7 +109,7 @@ export function isProgramHead(b: Uint8Array): boolean {
     const count = ((b[4]! << 24) | (b[5]! << 16) | (b[6]! << 8) | b[7]!) >>> 0;
     return count >= 1 && count < 45;
   }
-  if (b2 === 0x0d && b3 === 0x0a) {
+  if (b2 === 0x0d && b3 === 0x0a && isCompiledPythonName(name)) {
     const magic = b0 | (b1 << 8);
     return (magic >= 3000 && magic <= 4999) || (magic >= 20121 && magic <= 62211);
   }
@@ -107,7 +130,7 @@ function headOf(file: File, n: number): Promise<Uint8Array> {
 export async function isProgramFile(file: File): Promise<boolean> {
   if (file.type.startsWith("image/")) return false;
   if (file.name.toLowerCase().endsWith(".asar")) return true;
-  return isProgramHead(await headOf(file, 8));
+  return isProgramHead(await headOf(file, 8), file.name);
 }
 
 /** A call to the app that may not exist here (a browser, tests): nothing then. */
@@ -154,16 +177,31 @@ export function useDroppedPrograms(
     };
   }, [chatId]);
 
-  /** Inserts the paths to insert; returns the notes for the rest. */
+  /**
+   * Inserts the paths to insert; returns the notes for the rest, and one asking to turn the
+   * Reverse engineering group on when it is off in this chat (`groupOn`).
+   */
   const apply = useCallback(
-    (paths: string[], items: DroppedProgram[]): DropNote[] => {
+    (paths: string[], items: DroppedProgram[], groupOn: boolean): DropNote[] => {
       const inserts: string[] = [];
+      const names: string[] = [];
       const out: DropNote[] = [];
       items.forEach((item, i) => {
-        if (item.kind === "insert") inserts.push(quotePath(item.path));
-        else if (item.kind !== "ignore") out.push({ kind: item.kind, fileName: item.fileName, path: paths[i] ?? "" });
+        const path = paths[i] ?? "";
+        if (item.kind === "insert") {
+          // A second check: text the owner can't see never goes into their own message.
+          if (visiblePath(item.path) !== item.path) {
+            out.push({ kind: "rename", fileName: visiblePath(item.fileName), path });
+            return;
+          }
+          inserts.push(quotePath(item.path));
+          names.push(item.fileName);
+        } else if (item.kind !== "ignore") out.push({ kind: item.kind, fileName: item.fileName, path });
       });
-      if (inserts.length > 0) insertAtCaret(box.current, setText, inserts.join(" "));
+      if (inserts.length > 0) {
+        insertAtCaret(box.current, setText, inserts.join(" "));
+        if (!groupOn) out.push({ kind: "turnOn", fileName: names.length === 1 ? names[0]! : "these files", path: "" });
+      }
       return out;
     },
     [box, setText],
@@ -183,7 +221,7 @@ export function useDroppedPrograms(
           setKnown({ chat: chatId, installed: answer.installed });
           // Nothing to do with these files (not programs, or no rea): nothing changes.
           if (!answer.installed || answer.items.every((i) => i.kind === "ignore")) return;
-          setNoted({ chat: chatId, notes: apply(paths, answer.items) });
+          setNoted({ chat: chatId, notes: apply(paths, answer.items, answer.groupOn) });
         })
         .catch((e) => showError(toErrorInfo(e)));
     };
@@ -207,10 +245,16 @@ export function useDroppedPrograms(
       const waiting = notes.filter((n) => n.kind === "addFolder").map((n) => n.path);
       if (waiting.length === 0) return;
       const answer = await ipc.reverseDropped(chatId, waiting);
-      const still = apply(waiting, answer.items);
+      const still = apply(waiting, answer.items, answer.groupOn);
+      const turnOn = still.some((n) => n.kind === "turnOn");
       setNoted((old) => ({
         chat: chatId,
-        notes: [...(old?.chat === chatId ? old.notes : []).filter((n) => n.kind !== "addFolder"), ...still],
+        notes: [
+          ...(old?.chat === chatId ? old.notes : []).filter(
+            (n) => n.kind !== "addFolder" && !(turnOn && n.kind === "turnOn"),
+          ),
+          ...still,
+        ],
       }));
     } catch (e) {
       showError(toErrorInfo(e));
@@ -218,6 +262,12 @@ export function useDroppedPrograms(
   }, [chatId, notes, apply, showError]);
 
   const dismiss = useCallback(() => setNoted(null), []);
+
+  /** **Open Tools panel** on the note asking to turn the group on: opens it; the note has said its piece. */
+  const openTools = useCallback(() => {
+    setNoted((old) => (old ? { ...old, notes: old.notes.filter((n) => n.kind !== "turnOn") } : old));
+    openToolsPanel();
+  }, []);
 
   /** For the box's own drop handler: while rea is installed, program files are left to the window's drop event. */
   const withoutPrograms = useCallback(
@@ -229,5 +279,5 @@ export function useDroppedPrograms(
     [installed],
   );
 
-  return { installed, notes, addFolder, dismiss, withoutPrograms };
+  return { installed, notes, addFolder, dismiss, openTools, withoutPrograms };
 }

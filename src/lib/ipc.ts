@@ -493,3 +493,12 @@ export async function onDroppedPaths(handler: (paths: string[]) => void): Promis
     if (e.payload.type === "drop") handler(e.payload.paths);
   });
 }
+
+// 0.0.6 item 6 (WP10e; commands are WP10d's): llama.cpp's own measurement of where the
+// model would go with the unsaved choices `overrides` (nothing is saved, nothing loads;
+// values outside the lists are refused), and this computer's usage now (read on this
+// computer only, while the window is visible).
+type Offload = import("./types").OffloadPreview;
+export const offloadMeasure = (path: string, overrides: ModelLoadSettings) =>
+  invoke<Offload>("offload_measure", { path, overrides });
+export const usageNow = () => invoke<import("./types").UsageNow>("usage_now");
