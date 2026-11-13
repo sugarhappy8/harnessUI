@@ -427,10 +427,11 @@ pub struct FineFacts {
 ///
 /// - With Don't use it, or with no graphics device: no layers, expert parts, `-nkvo` or
 ///   margin (the placement has nothing to act on).
-/// - Layers at or above the model's units launch every unit (`-ngl` of the unit count,
-///   which llama.cpp reads as all of them); expert parts are dropped for a model without
-///   them (or whose header cannot be read), and the first `k` at or above its expert
-///   layers become all of them.
+/// - Layers at or above the model's units launch every unit: no count with All of it or
+///   with expert parts on the processor (`-ngl all`, the same launch as without the
+///   count), else `-ngl` of the unit count, which llama.cpp reads as all of them. Expert
+///   parts are dropped for a model without them (or whose header cannot be read), and
+///   the first `k` at or above its expert layers become all of them.
 /// - The margin only with As much as fits and no custom placement.
 /// - Threads above this computer's become its threads (settings copied from another
 ///   computer); with an unknown count (0) they are kept.
@@ -445,16 +446,27 @@ pub fn resolve_fine(
     let layers = facts.and_then(|f| f.layers.as_ref());
     let mut out = FineLaunch::default();
     if machine.graphics(gpu) {
-        out.gpu_layers = match fine.layers {
-            LayersChoice::Auto => None,
-            LayersChoice::Count(n) => Some(layers.map_or(n, |l| n.min(l.units()))),
-        };
         out.experts_on_cpu = match (fine.experts, layers.and_then(LayerFacts::expert_layers)) {
             (ExpertsChoice::Auto, _) | (_, None) => ExpertsOnCpu::None,
             (ExpertsChoice::All, Some(_)) => ExpertsOnCpu::All,
             (ExpertsChoice::FirstLayers(k), Some(e)) if k >= e => ExpertsOnCpu::All,
             (ExpertsChoice::FirstLayers(0), Some(_)) => ExpertsOnCpu::None,
             (ExpertsChoice::FirstLayers(k), Some(_)) => ExpertsOnCpu::FirstLayers(k),
+        };
+        out.gpu_layers = match (fine.layers, layers.map(LayerFacts::units)) {
+            (LayersChoice::Auto, _) => None,
+            // Every unit is `-ngl all` without a count wherever that launches the same:
+            // with All of it (its own `-ngl all --fit off`), and with expert parts on the
+            // processor (a custom placement of `-ngl all` either way). Only As much as fits
+            // without expert parts needs the count, or it would be `--fit on`.
+            (LayersChoice::Count(n), Some(units))
+                if n >= units
+                    && (gpu == GpuUse::All || out.experts_on_cpu != ExpertsOnCpu::None) =>
+            {
+                None
+            }
+            (LayersChoice::Count(n), Some(units)) => Some(n.min(units)),
+            (LayersChoice::Count(n), None) => Some(n),
         };
         out.kv_in_computer_memory = fine.kv == KvPlace::ComputerMemory;
         if gpu == GpuUse::Fit
