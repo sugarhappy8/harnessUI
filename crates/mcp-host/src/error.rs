@@ -68,6 +68,9 @@ pub enum HostError {
     /// No server with this name.
     #[error("no server named \"{0}\"")]
     NotFound(String),
+    /// The server is built into the app, so it cannot be removed.
+    #[error("\"{0}\" is built into the app and cannot be removed")]
+    BuiltIn(String),
     /// The name is empty, too long or has control characters.
     #[error("\"{0}\" is not a valid server name")]
     InvalidName(String),

@@ -838,6 +838,8 @@ mod tests {
         running: AtomicBool,
         crashed: AtomicBool,
         fail_start: bool,
+        /// `start` never ends (it waits until its caller stops waiting for it).
+        start_hangs: bool,
         starts: AtomicU64,
         calls: StdMutex<Vec<String>>,
         stops: StdMutex<Vec<Duration>>,
@@ -855,6 +857,9 @@ mod tests {
     impl Rea for FakeRea {
         async fn start(&self) -> Result<Vec<(String, Value)>, HostError> {
             self.starts.fetch_add(1, Ordering::SeqCst);
+            if self.start_hangs {
+                std::future::pending::<()>().await;
+            }
             if self.fail_start {
                 return Err(HostError::Connect(
                     "the server exited with code 1 before completing the handshake".into(),
@@ -1618,6 +1623,70 @@ mod tests {
         assert_eq!(b.process.state(), RunState::Ready);
         assert!(!b.process.is_busy());
         assert!(rea.is_running());
+    }
+
+    /// Waits until the tab would say "rea is starting…".
+    async fn until_starting(process: &ReaProcess) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process.state() != RunState::Starting {
+            assert!(Instant::now() < deadline, "rea never got to Starting");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_dropped_like_the_agent_loop_leaves_rea_stopped_and_free() {
+        let b = bench_with(Platform::LinuxX64, false, PathBuf::from("/"), || FakeRea {
+            start_hangs: true,
+            ..FakeRea::default()
+        });
+        {
+            let mut g = b.process.lock().await;
+            g.set_chat(7);
+            let cancel = CancellationToken::new();
+            // Stop (or deleting the chat) while rea starts.
+            let stop = async {
+                until_starting(&b.process).await;
+                cancel.cancel();
+            };
+            let start = like_the_agent_loop(g.ensure_started(b.config(None)), &cancel);
+            let (out, ()) = tokio::join!(start, stop);
+            assert!(out.is_none(), "{out:?}");
+        }
+        let rea = b.last();
+        assert_eq!(b.process.state(), RunState::Stopped);
+        // The half-started rea is stopped, and then rea is free for the next caller.
+        let g = tokio::time::timeout(Duration::from_secs(5), b.process.lock())
+            .await
+            .expect("rea is free once the dropped start is undone");
+        assert_eq!(*rea.stops.lock().unwrap(), vec![STOP_GRACE]);
+        drop(g);
+        assert!(!b.process.is_busy());
+        assert_eq!(b.process.state(), RunState::Stopped);
+        assert_eq!(b.process.generation(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_restart_ends_a_start_that_runs() {
+        let b = bench_with(Platform::LinuxX64, false, PathBuf::from("/"), || FakeRea {
+            start_hangs: true,
+            ..FakeRea::default()
+        });
+        let mut g = b.process.lock().await;
+        let config = b.config(None);
+        let start = tokio::spawn(async move { g.ensure_started(config).await });
+        until_starting(&b.process).await;
+        // The restart from Settings (Remove, a decompiler switch, an update).
+        b.process.restart(RestartReason::Updated).await;
+        let rea = b.last();
+        assert_eq!(*rea.stops.lock().unwrap(), vec![STOP_GRACE]);
+        assert_eq!(b.process.state(), RunState::Stopped);
+        // Its caller goes away later: the rea the restart stopped is left alone.
+        start.abort();
+        assert!(start.await.unwrap_err().is_cancelled());
+        assert_eq!(b.process.state(), RunState::Stopped);
+        assert!(!b.process.is_busy());
+        assert_eq!(*rea.stops.lock().unwrap(), vec![STOP_GRACE]);
     }
 
     #[test]

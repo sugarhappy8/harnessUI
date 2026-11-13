@@ -335,6 +335,95 @@ def p_settings(c, notes):
         assert "Something went wrong" not in text, tab
     s.screenshot(str(OUT / "settings-diagnostics.png"))
     assert not any("alerts" in n for n in notes), notes
+    settings_section_list(s, notes)
+
+
+def settings_section_list(s, notes):
+    """The Settings section list at the default window size (1200 x 800) shows every
+    section inside the dialog, one line each (Reverse engineering may wrap); in shorter
+    windows (680 px, and the 480 px minimum) the list scrolls inside the dialog and every
+    section can be scrolled to and clicked with a real pointer click."""
+
+    def geometry(label=None):
+        return s.execute(
+            """
+            const [label] = arguments;
+            const dialog = document.querySelector('[role=dialog]');
+            const list = dialog.querySelector('[role=tablist][aria-label="Settings sections"]');
+            const tabs = [...list.querySelectorAll('[role=tab]')];
+            if (label) tabs.find(t => t.innerText.trim() === label).scrollIntoView({block: 'nearest'});
+            const d = dialog.getBoundingClientRect(), l = list.getBoundingClientRect();
+            return {inner: window.innerHeight, dialogTop: d.top, dialogBottom: d.bottom, listTop: l.top,
+                    listBottom: l.bottom, overflowY: getComputedStyle(list).overflowY,
+                    scrollHeight: list.scrollHeight, clientHeight: list.clientHeight, scrollTop: list.scrollTop,
+                    tabs: tabs.map(t => {
+                      const r = t.getBoundingClientRect();
+                      return {label: t.innerText.trim(), top: r.top, bottom: r.bottom, height: r.height,
+                              selected: t.getAttribute('aria-selected') === 'true'};
+                    })};
+            """,
+            label,
+        )
+
+    def inside(geo, tab):
+        return (geo["listTop"] - 0.5 <= tab["top"] and tab["bottom"] <= geo["listBottom"] + 0.5
+                and geo["dialogTop"] - 0.5 <= tab["top"] and tab["bottom"] <= geo["dialogBottom"] + 0.5)
+
+    def tab_element(label):
+        el = s.execute(
+            """
+            return [...document.querySelectorAll('[role=dialog] [role=tablist] [role=tab]')]
+              .find(t => t.innerText.trim() === arguments[0]) || null;
+            """,
+            label,
+        )
+        assert el, f"no {label!r} tab"
+        return next(iter(el.values()))
+
+    rect = s._req("GET", s._s("/window/rect"))
+    try:
+        s._req("POST", s._s("/window/rect"), {"width": 1200, "height": 800})
+        time.sleep(1.0)
+        geo = geometry()
+        labels = [t["label"] for t in geo["tabs"]]
+        one_line = geo["tabs"][0]["height"]
+        wrapped = [t["label"] for t in geo["tabs"] if t["height"] > one_line * 1.4]
+        outside = [t["label"] for t in geo["tabs"] if not inside(geo, t)]
+        notes.append(f"section list at 1200x800 (inner height {geo['inner']}): dialog {geo['dialogTop']:.0f}-"
+                     f"{geo['dialogBottom']:.0f}, list {geo['listTop']:.0f}-{geo['listBottom']:.0f}, last tab ends at "
+                     f"{geo['tabs'][-1]['bottom']:.0f}; on two lines: {wrapped}; outside: {outside}")
+        s.screenshot(str(OUT / "settings-sections-1200x800.png"))
+        assert len(labels) == 15 and labels[-1] == "Diagnostics", labels
+        assert geo["dialogTop"] >= 0 and geo["dialogBottom"] <= geo["inner"] + 0.5, geo
+        assert not outside, f"sections drawn outside the dialog at 1200x800: {outside}"
+        assert set(wrapped) <= {"Reverse engineering"}, f"section names on two lines: {wrapped}"
+        for height in (680, 480):
+            s._req("POST", s._s("/window/rect"), {"width": 1200, "height": height})
+            time.sleep(1.0)
+            geo = geometry()
+            notes.append(f"section list at 1200x{height} (inner height {geo['inner']}): dialog "
+                         f"{geo['dialogTop']:.0f}-{geo['dialogBottom']:.0f}, list {geo['clientHeight']} of "
+                         f"{geo['scrollHeight']} px shown, overflow-y {geo['overflowY']}")
+            assert geo["dialogTop"] >= 0 and geo["dialogBottom"] <= geo["inner"] + 0.5, geo
+            if geo["scrollHeight"] > geo["clientHeight"]:
+                assert geo["overflowY"] in ("auto", "scroll"), geo
+            scrolled = 0
+            for label in reversed(labels):
+                g = geometry(label)
+                scrolled = max(scrolled, g["scrollTop"])
+                tab = next(t for t in g["tabs"] if t["label"] == label)
+                assert inside(g, tab), f"{label!r} not reachable at 1200x{height}: {tab} in {g}"
+                s.click(tab_element(label))
+                s.wait_for(lambda: next(t for t in geometry()["tabs"] if t["label"] == label)["selected"], 5,
+                           f"{label!r} chosen at 1200x{height}")
+            notes.append(f"at 1200x{height} the list scrolled up to {scrolled} px; every section clicked")
+            if height == 480:
+                assert geo["scrollHeight"] > geo["clientHeight"] and scrolled > 0, \
+                    f"the list did not scroll at 1200x480: {geo}"
+            s.screenshot(str(OUT / f"settings-sections-1200x{height}.png"))
+    finally:
+        s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
+        time.sleep(1.0)
 
 
 @probe("general-settings")

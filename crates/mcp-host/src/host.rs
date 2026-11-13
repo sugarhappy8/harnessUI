@@ -496,6 +496,14 @@ impl Host {
         }
     }
 
+    /// Built-in, stdio or HTTP for the registered server of this name, or `None`.
+    pub fn server_kind(&self, name: &str) -> Option<ServerKind> {
+        match self.inner.registry().servers.get(name)? {
+            ServerSlot::Builtin { .. } => Some(ServerKind::Builtin),
+            ServerSlot::External(ext) => Some(ext.kind),
+        }
+    }
+
     /// Removes a server and its tools; an external server is stopped (its process tree
     /// killed after a short grace period).
     pub async fn remove(&self, name: &str) -> Result<(), HostError> {
@@ -1912,5 +1920,30 @@ mod tests {
             },
         ));
         assert_send(&host.shutdown());
+    }
+
+    /// [0.0.6] Removing by name never takes away a built-in server: an owner's saved server
+    /// that once had the same name is removed from the store only, and the built-in keeps
+    /// its slot and its tools.
+    #[tokio::test]
+    async fn remove_refuses_a_built_in_server() {
+        let host = Host::new(HostOptions::default());
+        host.add_builtin(Arc::new(FakeFiles {
+            calls: Mutex::new(Vec::new()),
+        }));
+        assert_eq!(
+            host.remove("files").await,
+            Err(HostError::BuiltIn("files".into()))
+        );
+        let servers = host.servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].kind, ServerKind::Builtin);
+        assert_eq!(host.server_kind("files"), Some(ServerKind::Builtin));
+        assert_eq!(host.server_kind("nope"), None);
+        assert!(host.tool_ready("read_file"));
+        assert_eq!(
+            host.remove("nope").await,
+            Err(HostError::NotFound("nope".into()))
+        );
     }
 }

@@ -123,3 +123,7 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   Flagged by the writer for the release review: rea's `describe` refusals `LINK_OUT` and
   `DEVICE_IN_FOLDER` name a path inside a folder before any approval, which departs from the
   13.9 rule that messages before approval never name files from a folder.
+  Done (rea-walk-refusals): `LINK_OUT`, `DEVICE_IN_FOLDER`, `UNREADABLE` and
+  `HOLDS_APP_FOLDERS` are fixed sentences now; the entry's path is only on the card's preview
+  and in the audit row (`WalkRefusal::detail`). Tests in `crates/reverse/src/describe/tests.rs`
+  and the `reverse-describe` probe; item5-spec section 6 and ARCHITECTURE 13.9 updated.

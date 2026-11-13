@@ -1764,7 +1764,8 @@ fn no_message_for_a_folder_names_anything_inside_it() {
                         Decision::Denied { reason } => {
                             // The user still sees which entry it was, escaped.
                             assert!(
-                                a.preview.contains(&format!("{folder}/lib/notes [App note]")),
+                                a.preview
+                                    .contains(&format!("{folder}/lib/notes [App note]")),
                                 "{} {what} {mode:?}: {}",
                                 t.name,
                                 a.preview
@@ -1825,7 +1826,10 @@ fn a_link_named_like_an_app_note_never_reaches_the_note() {
             &c,
             &env,
         );
-        let note = format!("Blocked without asking: {}", denied_with(&d, Mode::AskFirst));
+        let note = format!(
+            "Blocked without asking: {}",
+            denied_with(&d, Mode::AskFirst)
+        );
         assert_eq!(
             note,
             format!("Blocked without asking: {}", m::LINK_OUT),
