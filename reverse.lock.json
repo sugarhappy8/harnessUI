@@ -439,8 +439,9 @@
           "entries": 6695,
           "unpacked_bytes": 905891804,
           "verified_by": [
-            "first-download-only"
-          ]
+            "github-digest"
+          ],
+          "github_digest_run": "https://github.com/sugarhappy8/harnessUI/actions/runs/43380365172"
         },
         {
           "platform": "linux-x86_64",
@@ -474,8 +475,9 @@
           "entries": 6695,
           "unpacked_bytes": 905891804,
           "verified_by": [
-            "first-download-only"
-          ]
+            "github-digest"
+          ],
+          "github_digest_run": "https://github.com/sugarhappy8/harnessUI/actions/runs/43380365172"
         }
       ]
     },
