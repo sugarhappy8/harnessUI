@@ -105,8 +105,21 @@ left to build unless the final pass, the owner's review or CI finds something.
 3. **What stays open on purpose** is listed in CHANGELOG "Known limits" and SECURITY.md;
    `integration-todo.md` ends with the outcome of every leftover, so a "Known limit" there is
    a decision, not forgotten work.
-4. **Before tagging v0.0.6:** the owner's go, CI green on all three systems, then merge and
-   tag (the release workflow re-checks Ghidra's checksum before it builds anything).
+4. **Merge and release, in this order** (`main` has not moved since 0.0.5, so the merge is
+   clean):
+   1. CI green on all three systems on the pull request's last commit. The owner tries the
+      CI installers (artifacts of the *Build installer* jobs) with `owner-checklist.md`,
+      approves or swaps the catalog quotes, and says go.
+   2. Mark pull request #5 ready for review and merge it with a merge commit, as #4 was.
+   3. Release: push the tag on the merge commit (`git tag v0.0.6 <merge commit>` then
+      `git push origin v0.0.6`), or start *Actions → Release → Run workflow* on `main`. The
+      workflow first checks the reverse-engineering pins and re-reads Ghidra's checksum from
+      GitHub, builds the Windows installer and the universal Mac disk image into a draft
+      release, signs and uploads the catalog when the updater key is set, checks every
+      asset, and only then publishes.
+   4. After the release: run *Reverse engineering* (`reverse.yml`) by hand once on `main` (it
+      runs only from the default branch) for its first results on all three systems and the
+      `rea-test-files` artifact; delete the branch `claude/0.0.6`.
 5. Toolchain: CI uses stable Rust; the final pass built, linted and tested with
    `cargo +1.100` (spec Part 1 still says 1.99, from when the packages were built).
    Keep this branch up to date by merging `main` (0.0.5 was merged as 4189a3a).
