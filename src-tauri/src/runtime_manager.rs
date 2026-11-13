@@ -610,6 +610,8 @@ impl RuntimeManager {
                         s.error = None;
                         s.load_stage = None;
                     });
+                    // Item 6: the report may have come before the device was final.
+                    me2.refresh_placement();
                     if let Ok(mut slot) = ready_tx.lock()
                         && let Some(tx) = slot.take()
                     {
@@ -782,8 +784,18 @@ impl RuntimeManager {
     /// say; both are updated from the same event stream, before this report.
     fn on_memory(&self, report: MemoryReport) {
         if let Ok(mut r) = self.report.lock() {
-            *r = Some(report.clone());
+            *r = Some(report);
         }
+        self.refresh_placement();
+    }
+
+    /// "Where the model went" from the kept memory report, if there is one. Called when the
+    /// report arrives and again when the server is ready (the two may come in either order,
+    /// and the ready line's device name is final only then).
+    fn refresh_placement(&self) {
+        let Some(report) = self.report.lock().ok().and_then(|r| r.clone()) else {
+            return;
+        };
         let Some(loaded) = self.current.lock().ok().and_then(|c| c.clone()) else {
             return;
         };

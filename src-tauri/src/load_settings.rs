@@ -7,6 +7,13 @@
 //! the panel's facts ([`build_info`]) and their validation ([`validate`]); the per-request
 //! thinking limit ([`thinking_for`]).
 //!
+//! 0.0.6 item 6 (WP10d): Fine control ([`FineControl`], this model only, inside its
+//! overrides) is checked ([`validate_fine`]; stored values outside the lists read as
+//! Automatic, [`sane_fine`]) and resolved to what reaches the command line
+//! ([`resolve_fine`], `ResolvedLoad::fine`); the model's layers and what they weigh come
+//! from its tensor tables ([`LayerFacts`]); every mark of the panel and the picture come
+//! from one verdict (`crate::offload::Placer`, `placement::judge_in`).
+//!
 //! How exact Automatic is: weights are the file sizes; the conversation memory is counted
 //! for every attention layer at full length (sliding-window layers need less, so the
 //! estimate is on the safe side) at 2 bytes a value, or 34 bytes per 32 values with Save

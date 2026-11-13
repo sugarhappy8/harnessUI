@@ -1209,3 +1209,89 @@ fn the_report_says_what_unloading_frees() {
     )]);
     assert_eq!(report_device_bytes(&huge), u64::MAX);
 }
+
+/// The JSON the webview reads (src/lib/types.ts: OffloadPreview, MemoryBar, Parts,
+/// PictureSource, Placement).
+#[test]
+fn the_json_the_webview_reads() {
+    let d = ModelFacts {
+        projector_bytes: 5,
+        ..dense()
+    };
+    let p = picture(&d, &card(15 * GB), &resolved(8192, GpuUse::All, layers(30)));
+    let v = serde_json::to_value(&p).unwrap();
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "computer",
+            "custom",
+            "expertLayersOnProcessor",
+            "fits",
+            "graphics",
+            "graphicsLimitBytes",
+            "key",
+            "layersAbout",
+            "layersOnGraphics",
+            "mark",
+            "source",
+            "unified",
+            "units"
+        ]
+    );
+    assert_eq!(
+        v["source"],
+        serde_json::json!({"kind": "estimate", "why": "quick"})
+    );
+    assert_eq!(v["fits"], serde_json::json!("fits"));
+    assert_eq!(v["mark"], serde_json::json!("green"));
+    let bar = &v["graphics"];
+    for key in [
+        "name",
+        "totalBytes",
+        "freeBytes",
+        "freeAfterUnload",
+        "otherBytes",
+        "need",
+    ] {
+        assert!(bar.get(key).is_some(), "{key}");
+    }
+    assert_eq!(bar["need"]["imageReader"], serde_json::json!(5));
+    assert_eq!(
+        serde_json::to_value(PictureSource::Estimate {
+            why: EstimateWhy::NoTool,
+            backend: Some(BackendKind::Rocm)
+        })
+        .unwrap(),
+        serde_json::json!({"kind": "estimate", "why": "noTool", "backend": "rocm"})
+    );
+    assert_eq!(
+        serde_json::to_value(PictureSource::Measured).unwrap(),
+        serde_json::json!({"kind": "measured"})
+    );
+    for (fits, word) in [
+        (Fits::Tight, "tight"),
+        (Fits::Partial, "partial"),
+        (Fits::WontFitGraphics, "wontFitGraphics"),
+        (Fits::WontFitAtAll, "wontFitAtAll"),
+    ] {
+        assert_eq!(serde_json::to_value(fits).unwrap(), serde_json::json!(word));
+    }
+    let placed = placement_from_report(
+        &report(vec![row(MemoryRowKind::Device, "Vulkan0", 1, 2, 3)]),
+        &launch(None, GpuUse::All, &FineLaunch::default(), Some("Card")),
+    );
+    assert_eq!(
+        serde_json::to_value(&placed).unwrap(),
+        serde_json::json!({
+            "graphics": {"name": "Card", "use": {"model": 1, "context": 2, "compute": 3, "imageReader": 0}},
+            "computer": {"model": 0, "context": 0, "compute": 0, "imageReader": 0},
+            "units": null,
+            "layersOnGraphics": null,
+            "expertLayersOnProcessor": null,
+            "layersAbout": false,
+            "custom": false
+        })
+    );
+}
