@@ -210,6 +210,12 @@ pub struct AutoCtx {
 /// there is the partial room used. `None` when not even the floor fits at all.
 /// `input.ctx` is not used; `input.max_ctx` is the trained length.
 pub fn auto_ctx(input: &FitInput, room: Room) -> Option<AutoCtx> {
+    auto_ctx_with_margin(input, room, SPARE_BYTES)
+}
+
+/// [`auto_ctx`] leaving `spare_bytes` free instead of [`SPARE_BYTES`] (0.0.6 item 6: As
+/// much as fits with "Leave free on the graphics card" set).
+pub fn auto_ctx_with_margin(input: &FitInput, room: Room, spare_bytes: u64) -> Option<AutoCtx> {
     let floor = input
         .max_ctx
         .map_or(AUTO_FLOOR_CTX, |m| m.min(AUTO_FLOOR_CTX));
@@ -217,7 +223,7 @@ pub fn auto_ctx(input: &FitInput, room: Room) -> Option<AutoCtx> {
     // The largest context that leaves the spare free in `available`, if it reaches the
     // floor.
     let largest = |available: u64| {
-        let fixed = input.needed_at(0).saturating_add(SPARE_BYTES);
+        let fixed = input.needed_at(0).saturating_add(spare_bytes);
         let left = available.checked_sub(fixed)?;
         let tokens = left
             .checked_div(input.kv_bytes_per_token)
@@ -618,6 +624,73 @@ mod tests {
         assert_eq!(auto_ctx(&eight_b(F16), too_tight), None);
         assert_eq!(verdict_at(&eight_b(F16), 4096, too_tight), Verdict::Red);
         assert_eq!(verdict_at(&eight_b(F16), 4095, too_tight), Verdict::Green);
+    }
+
+    /// 0.0.6 item 6: the margin can be chosen; at SPARE_BYTES it is `auto_ctx` itself.
+    #[test]
+    fn auto_ctx_with_margin_equals_auto_ctx_at_the_spare() {
+        let rooms = [
+            Room::processor(12 * GB),
+            Room::graphics_card(15 * GB, 24 * GB),
+            Room::graphics_card(7_500_000_000, 24 * GB),
+            Room::graphics_card(4 * GB, 24 * GB),
+            Room::apple(11 * GB, 9 * GB),
+            Room::default(),
+            Room {
+                whole: u64::MAX,
+                partial: u64::MAX,
+            },
+        ];
+        let inputs = [
+            eight_b(F16),
+            eight_b(Q8),
+            FitInput {
+                max_ctx: Some(2048),
+                ..eight_b(F16)
+            },
+            FitInput {
+                kv_bytes_per_token: 0,
+                ..eight_b(F16)
+            },
+            FitInput {
+                weights_bytes: u64::MAX,
+                kv_bytes_per_token: u64::MAX,
+                vocab_size: u64::MAX,
+                ..eight_b(F16)
+            },
+        ];
+        for room in rooms {
+            for input in &inputs {
+                assert_eq!(
+                    auto_ctx_with_margin(input, room, SPARE_BYTES),
+                    auto_ctx(input, room)
+                );
+                // Never a panic, whatever the margin.
+                let _ = auto_ctx_with_margin(input, room, u64::MAX);
+            }
+        }
+        // 4 GB left free instead of 1 GB: 7,168 tokens on the 7.5 GB card drop below the
+        // floor, so only the partial room is left; half a GB free gives more.
+        let small = Room::graphics_card(7_500_000_000, 24 * GB);
+        assert_eq!(
+            auto_ctx_with_margin(&eight_b(F16), small, 4 * GB),
+            Some(AutoCtx {
+                ctx: 32_768,
+                verdict: Verdict::Yellow
+            })
+        );
+        // 7.5 − 6.43 + 0.5 GB = 1.57 GB of cache: 11,970 tokens → 11,264.
+        assert_eq!(
+            auto_ctx_with_margin(&eight_b(F16), small, 500_000_000),
+            Some(AutoCtx {
+                ctx: 11_264,
+                verdict: Verdict::Green
+            })
+        );
+        assert_eq!(
+            auto_ctx_with_margin(&eight_b(F16), Room::processor(12 * GB), u64::MAX),
+            None
+        );
     }
 
     #[test]

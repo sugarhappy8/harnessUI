@@ -863,8 +863,9 @@ impl<'a> Turn<'a> {
 
     /// Streams a summary request without showing it and returns the summary; `None` when
     /// the server failed or the model wrote nothing. A summary longer than the cap (`cap`
-    /// tokens, four characters each) keeps its head and its tail ([`cut_summary`]), where the
-    /// headings that start and end it are. A rewrite of the old summary that the output
+    /// tokens, four characters each, whatever output limit the request carries) keeps its
+    /// head and its tail ([`cut_summary`]), where the headings that start and end it are.
+    /// A rewrite of the old summary that the output
     /// limit cut off, or whose stream ended early, is `None` too: it lost its last sections
     /// ("What is left", the exact paths), and stored in place of the old summary they would
     /// be gone for good. A summary of earlier messages cut off the same way is kept: the
@@ -929,8 +930,10 @@ impl<'a> Turn<'a> {
 
     /// Stage 2 for a summary that no longer fits a smaller context: the model rewrites it
     /// under this context's cap, covering the same messages ([`TurnEvent::Compacted`] carries
-    /// the new text, so the app stores it in place of the old one). When that request cannot
-    /// fit, the model writes nothing or its rewrite is cut off, the failure is reported and
+    /// the new text, so the app stores it in place of the old one). The request may write
+    /// twice the cap ([`ContextBudget::fold_max_tokens`]); a rewrite that ends past the cap
+    /// is cut to it, keeping its head and its tail. When that request cannot fit, the model
+    /// writes nothing or its rewrite is cut off, the failure is reported and
     /// the summary is cut to the cap for this turn (not stored), so the turn still goes on,
     /// and summaries of earlier messages can still be made from it. Returns whether the
     /// summary changed.
@@ -941,7 +944,13 @@ impl<'a> Turn<'a> {
         let cap = self.budget.summary_max_tokens();
         let mut text = None;
         if !self.fold_failed && !self.summary_failed {
-            let mut request = self.summary_request(&[], &fold_instruction(cap * 2 / 3), cap);
+            // Room to run past the cap, so a long rewrite still ends and is cut to the cap
+            // (head and tail) instead of being cut off by the output limit.
+            let mut request = self.summary_request(
+                &[],
+                &fold_instruction(cap * 2 / 3),
+                self.budget.fold_max_tokens(),
+            );
             let mut fits = self.count(&request).await?.0 <= self.budget.budget;
             if !fits && !request.tools.is_empty() {
                 // The tool list is there only so the server can reuse its cached prompt.

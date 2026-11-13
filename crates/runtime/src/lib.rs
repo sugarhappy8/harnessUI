@@ -32,12 +32,20 @@ pub use llama::devices::{
     probe_with_env,
 };
 pub use llama::failure::{LoadFailure, classify};
+pub use llama::fit_params::{
+    FIT_PARAMS_TIMEOUT, FitParamsError, MeasureConfig, MeasureLayers, build_measure_args,
+    measurable, measure, parse_measure_output,
+};
 pub use llama::launch::{
-    GpuUse, LaunchConfig, MODEL_ALIAS, build_args, build_env, free_loopback_port, random_api_key,
+    ExpertsOnCpu, FineLaunch, FlashAttn, GpuUse, LaunchConfig, MODEL_ALIAS, build_args, build_env,
+    free_loopback_port, random_api_key,
 };
 pub use llama::lock::{LlamaLock, PackFile, PackSpec};
 pub use llama::props::{Modalities, Props, TemplateCaps};
-pub use llama::protocol::{ChildState, LogEvent, LogInfo, parse_child_line, scan_log_line};
+pub use llama::protocol::{
+    ChildState, LogEvent, LogInfo, MemoryReport, MemoryRow, MemoryRowKind, parse_child_line,
+    scan_log_line,
+};
 pub use llama::server::{
     Candidate, RunningServer, ServerEvent, ServerState, StartError, StartSpec, Supervisor,
     SupervisorExit, start, step_down,

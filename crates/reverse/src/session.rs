@@ -412,7 +412,10 @@ mod tests {
         s.cleared(ClosedReason::OtherChat, 2);
         assert_eq!(s.closed_reason(1), Some(ClosedReason::OtherChat));
         open(&mut s, 2, "/b/y", 1);
-        assert_eq!(s.snapshot_for(1).closed_reason(1), Some(ClosedReason::OtherChat));
+        assert_eq!(
+            s.snapshot_for(1).closed_reason(1),
+            Some(ClosedReason::OtherChat)
+        );
         // Chat 2's snapshot does not carry chat 1's reason.
         assert_eq!(s.snapshot_for(2).closed_reason(1), None);
         // Opening again clears chat 1's reason.

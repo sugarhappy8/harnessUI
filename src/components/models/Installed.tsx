@@ -62,6 +62,8 @@ export function Installed(props: { onClose: () => void }) {
   }, []);
 
   const load = useCallback(() => {
+    // [0.0.6 item 8, WP8] An import or a delete changes "On this computer" in the chat's model list.
+    useApp.getState().refreshModelOptions().catch(() => undefined);
     return Promise.all([ipc.listInstalledModels(), ipc.diskUsage()])
       .then(([m, u]) => {
         setModels(m);

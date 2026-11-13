@@ -1,0 +1,3 @@
+{"type":"log","time":23199,"level":"info","msg":"llama_fit_params: printing estimated memory in MiB to stdout (device, model, context, compute) ...\n"}
+{"type":"log","time":61335,"level":"error","msg":"llama_model_load: error loading model: tensor 'token_embd.weight' data is not within the file bounds, model is corrupted or incomplete\n"}
+{"type":"log","time":61364,"level":"error","msg":"llama_model_load_from_file_impl: failed to load model\n"}

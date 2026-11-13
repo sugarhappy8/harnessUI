@@ -26,6 +26,7 @@ mod load_tracker;
 mod logging;
 mod mcp_cmd;
 mod mentions;
+mod model_options;
 mod models_cmd;
 mod navigation;
 mod outputs;
@@ -437,6 +438,10 @@ pub fn run() {
                     server.shutdown();
                 }
                 tauri::async_runtime::block_on(async move {
+                    // 0.0.6 item 5: rea gets its grace to end Kuna or Java itself (WP9g).
+                    if let Some(rea) = reverse::handle() {
+                        rea.restart(reverse::RestartReason::Quit).await;
+                    }
                     if let Some(b) = browser {
                         b.shutdown().await;
                     }

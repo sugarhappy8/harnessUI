@@ -151,7 +151,11 @@ impl Masker {
         let mut first = [false; 256];
         for n in &needles {
             let b = n[0];
-            first[usize::from(if insensitive { b.to_ascii_lowercase() } else { b })] = true;
+            first[usize::from(if insensitive {
+                b.to_ascii_lowercase()
+            } else {
+                b
+            })] = true;
         }
         Self {
             needles,
@@ -278,12 +282,9 @@ fn clean_text(text: &str, masker: &Masker) -> String {
 fn clean_value(value: Value, masker: &Masker) -> Value {
     match value {
         Value::String(s) => Value::String(clean_text(&s, masker)),
-        Value::Array(items) => Value::Array(
-            items
-                .into_iter()
-                .map(|v| clean_value(v, masker))
-                .collect(),
-        ),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(|v| clean_value(v, masker)).collect())
+        }
         Value::Object(map) => Value::Object(
             map.into_iter()
                 .map(|(k, v)| (clean_text(&k, masker), clean_value(v, masker)))
@@ -674,7 +675,8 @@ mod tests {
         assert!(app_lines(&output("PREA_X and REA_ alone", true), p).is_empty());
         assert!(app_lines(&output("no settings here", true), p).is_empty());
         let mut structured = output("failed", true);
-        structured.ui = Some(json!({"structuredContent": {"hint": "REA_GHIDRA_STARTUP_TIMEOUT_MS"}}));
+        structured.ui =
+            Some(json!({"structuredContent": {"hint": "REA_GHIDRA_STARTUP_TIMEOUT_MS"}}));
         assert_eq!(app_lines(&structured, p), vec![SETTINGS_HINT.to_string()]);
     }
 
@@ -682,7 +684,8 @@ mod tests {
     #[test]
     fn every_mapped_failure_on_each_platform() {
         use failures as f;
-        let kuna_pe = "REA verified the Kuna provider on ELF and thin Mach-O images; pe is not admitted yet.";
+        let kuna_pe =
+            "REA verified the Kuna provider on ELF and thin Mach-O images; pe is not admitted yet.";
         let kuna_universal = "REA's Kuna provider has no verified universal Mach-O slice selection yet; open a thin slice or use another provider.";
         for text in [kuna_pe, kuna_universal] {
             let linux = app_lines(&output(text, true), Platform::LinuxX64);

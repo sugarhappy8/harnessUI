@@ -24,8 +24,9 @@
 //! A summary is cut to [`ContextBudget::summary_max_chars`], keeping its head and its tail
 //! ([`cut_summary`]). One written when the model had a larger context can be longer than a
 //! smaller context allows; before the turn measures anything it is folded again under the
-//! smaller cap ([`fold_instruction`]), or, when the model cannot do that, cut to it for the
-//! turn.
+//! smaller cap ([`fold_instruction`]), with room to run past the cap
+//! ([`ContextBudget::fold_max_tokens`]) and then cut to it, or, when the model cannot do
+//! that, cut to it for the turn.
 //!
 //! A stubbed call keeps its name and arguments (long string values shortened) and its result
 //! becomes a note with the status, the size and "call again to re-read"; a call and its
@@ -137,6 +138,16 @@ impl ContextBudget {
     /// The output limit for a compaction summary: a capped length well inside the reserve.
     pub fn summary_max_tokens(&self) -> u32 {
         (self.reply_reserve / 2).clamp(128, 1_024)
+    }
+
+    /// The output limit for rewriting an old summary under this context's cap: twice
+    /// [`ContextBudget::summary_max_tokens`], within the reply reserve (never less than the
+    /// cap). A small model asked to shorten a long summary often writes more than asked; with
+    /// this room it can still finish, and its rewrite is then cut to the cap keeping its head
+    /// and its tail, instead of being cut off by the output limit and failing.
+    pub fn fold_max_tokens(&self) -> u32 {
+        let cap = self.summary_max_tokens();
+        cap.saturating_mul(2).min(self.reply_reserve).max(cap)
     }
 
     /// The most characters a summary may keep in this context: [`SUMMARY_CHARS_PER_TOKEN`]
@@ -982,6 +993,28 @@ mod tests {
         assert_eq!(ContextBudget::new(8_192, 0).summary_max_chars(), 4_096);
         assert_eq!(ContextBudget::new(4_096, 0).summary_max_chars(), 2_048);
         assert_eq!(ContextBudget::new(2_048, 0).summary_max_chars(), 1_024);
+    }
+
+    #[test]
+    fn a_fold_may_write_twice_the_cap_within_the_reply_reserve() {
+        for (n_ctx, fold) in [
+            (65_536, 2_048),
+            (32_768, 2_048),
+            (8_192, 2_048),
+            (4_096, 1_024),
+            (2_048, 512),
+            (1_024, 256),
+            // The cap's floor of 128 tokens is above the reserve here; the cap stays.
+            (512, 128),
+        ] {
+            let budget = ContextBudget::new(n_ctx, 0);
+            assert_eq!(budget.fold_max_tokens(), fold, "{n_ctx}");
+            assert!(budget.fold_max_tokens() >= budget.summary_max_tokens());
+            // A fold request whose prompt fits the budget still fits the context with it.
+            if fold <= budget.reply_reserve {
+                assert!(budget.budget + budget.fold_max_tokens() < n_ctx, "{n_ctx}");
+            }
+        }
     }
 
     #[test]

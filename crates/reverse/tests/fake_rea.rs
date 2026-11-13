@@ -197,7 +197,10 @@ mod fake {
             }
             let root = self.root.display().to_string();
             let root_json = root.replace('/', "\\/");
-            let fill = |s: &str| s.replace("{root_json}", &root_json).replace("{root}", &root);
+            let fill = |s: &str| {
+                s.replace("{root_json}", &root_json)
+                    .replace("{root}", &root)
+            };
             if let Some(text) = cfg["error"][&name].as_str() {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(fill(text))]).into());
             }
@@ -241,7 +244,7 @@ mod calls {
     use reverse::results::{self, MASK, SETTINGS_HINT, failures};
     use reverse::server::{notes, refusals};
     use reverse::{
-        Component, Decompiler, DirFetch, Platform, ReverseLayout, ReverseServer, RestartReason,
+        Component, Decompiler, DirFetch, Platform, RestartReason, ReverseLayout, ReverseServer,
         RunState, allow,
     };
     use runtime::PackFile;
@@ -260,8 +263,18 @@ mod calls {
         runtime.block_on(async {
             let f = &filter;
             run(f, "forwards_canonical_paths_and_fixed_details", forwards()).await;
-            run(f, "nothing_outside_the_allow_list_reaches_rea", allow_list()).await;
-            run(f, "a_queued_session_call_from_another_chat_is_refused", queued()).await;
+            run(
+                f,
+                "nothing_outside_the_allow_list_reaches_rea",
+                allow_list(),
+            )
+            .await;
+            run(
+                f,
+                "a_queued_session_call_from_another_chat_is_refused",
+                queued(),
+            )
+            .await;
             run(f, "result_ids_stay_with_the_chat_that_saw_them", ids()).await;
             run(f, "another_chats_open_clears_rea_first", other_open()).await;
             run(f, "a_folder_that_lost_approval_clears_rea", lost_folder()).await;
@@ -475,8 +488,7 @@ mod calls {
         ];
         ReverseLock {
             schema: 2,
-            families: "direct,enhanced,native,artifact,managed,session,electron,application"
-                .into(),
+            families: "direct,enhanced,native,artifact,managed,session,electron,application".into(),
             disabled_ghidra_analyzers: Default::default(),
             parts,
         }
@@ -688,7 +700,9 @@ mod calls {
     async fn forwards() {
         let p = Pack::new(false).await;
         let a = p.chat(1, &[&p.files, &p.other]);
-        let open = p.action("open_binary", open_args("hello-linux-x64"), &a).await;
+        let open = p
+            .action("open_binary", open_args("hello-linux-x64"), &a)
+            .await;
         assert_eq!(open.summary, "Open hello-linux-x64 in rea (Kuna)");
         assert_eq!(
             open.scope,
@@ -785,8 +799,12 @@ mod calls {
         let p = Pack::new(false).await;
         let a = p.chat(1, &[&p.files]);
         // rea runs, so a call that got through would be recorded.
-        p.ok("inspect_pe_imports", json!({"path": "hello-win-x64.exe"}), &a)
-            .await;
+        p.ok(
+            "inspect_pe_imports",
+            json!({"path": "hello-win-x64.exe"}),
+            &a,
+        )
+        .await;
         p.clear_record();
         let catalog: Value = serde_json::from_str(CATALOG).unwrap();
         let listed: Vec<String> = p.server.tools().into_iter().map(|t| t.name).collect();
@@ -881,7 +899,9 @@ mod calls {
         let a_action = p.action("procedure_pseudo_code", pseudo.clone(), &a).await;
         p.configure(json!({"delay_ms": {"open_binary": 2000}}));
         p.clear_record();
-        let b_open = p.action("open_binary", open_args("hello-linux-x64"), &b).await;
+        let b_open = p
+            .action("open_binary", open_args("hello-linux-x64"), &b)
+            .await;
         let server = p.server.clone();
         let b_ctx = ctx(&b);
         let b_task = tokio::spawn(async move {
@@ -925,7 +945,11 @@ mod calls {
         );
         p.configure(json!({"echo_ids": [id]}));
         let shown = p
-            .ok("inspect_pe_imports", json!({"path": "hello-win-x64.exe"}), &b)
+            .ok(
+                "inspect_pe_imports",
+                json!({"path": "hello-win-x64.exe"}),
+                &b,
+            )
             .await;
         assert!(results::evidence_ids(&shown).contains(&id));
         assert_eq!(
@@ -1003,7 +1027,8 @@ mod calls {
         let p = Pack::new(false).await;
         let both = p.chat(1, &[&p.files, &p.other]);
         let narrowed = p.chat(1, &[&p.other]);
-        p.ok("open_binary", open_args("hello-linux-x64"), &both).await;
+        p.ok("open_binary", open_args("hello-linux-x64"), &both)
+            .await;
         p.clear_record();
         let out = p
             .ok(
@@ -1022,7 +1047,8 @@ mod calls {
             m::NO_FILE_OPEN
         );
         // A session call described before the change and run after it.
-        p.ok("open_binary", open_args("hello-linux-x64"), &both).await;
+        p.ok("open_binary", open_args("hello-linux-x64"), &both)
+            .await;
         let action = p
             .action("procedure_pseudo_code", json!({"procedure": "main"}), &both)
             .await;
@@ -1074,7 +1100,9 @@ mod calls {
         let progress: ProgressFn = Arc::new(move |l: String| sink.lock().unwrap().push(l));
         let mut c = ctx(&a);
         c.progress = Some(progress);
-        let out = p.call_with("procedure_pseudo_code", pseudo, &action, c).await;
+        let out = p
+            .call_with("procedure_pseudo_code", pseudo, &action, c)
+            .await;
         assert!(!out.is_error, "{}", out.joined_text());
         assert_eq!(
             p.calls(),
@@ -1158,7 +1186,9 @@ mod calls {
             m::CLOSED_SETTINGS
         );
         p.clear_record();
-        let open = p.action("open_binary", open_args("hello-linux-x64"), &a).await;
+        let open = p
+            .action("open_binary", open_args("hello-linux-x64"), &a)
+            .await;
         assert_eq!(open.summary, "Open hello-linux-x64 in rea (Ghidra)");
         let out = p
             .call_with("open_binary", open_args("hello-linux-x64"), &open, ctx(&a))
@@ -1166,7 +1196,9 @@ mod calls {
         assert!(!out.is_error, "{}", out.joined_text());
         assert_eq!(p.starts()[0]["provider"], "ghidra");
         // Approved with Ghidra, switched to Kuna before it ran.
-        let open = p.action("open_binary", open_args("hello-linux-x64"), &a).await;
+        let open = p
+            .action("open_binary", open_args("hello-linux-x64"), &a)
+            .await;
         p.server.set_decompiler(Some(Decompiler::Kuna));
         p.clear_record();
         let out = p
@@ -1227,7 +1259,11 @@ mod calls {
         let ui = out.ui.expect("structured content").to_string();
         assert!(ui.contains(MASK) && !ui.contains(&root), "{ui}");
         assert!(ui.contains("maintenance mode"), "{ui}");
-        assert_eq!(p.tools_called(), ["open_binary"], "the injection ran nothing");
+        assert_eq!(
+            p.tools_called(),
+            ["open_binary"],
+            "the injection ran nothing"
+        );
     }
 
     /// The live check: a tool whose schema changed in the installed rea is switched off and
@@ -1251,12 +1287,18 @@ mod calls {
         p.configure(json!({"missing": ["reset_investigation"]}));
         p.server.process().stop(Duration::from_secs(3)).await;
         p.clear_record();
-        let out = p.call("open_binary", open_args("hello-linux-x64"), &a).await;
+        let out = p
+            .call("open_binary", open_args("hello-linux-x64"), &a)
+            .await;
         assert_eq!(out.joined_text(), m::CHANGED_TOOL);
         assert!(p.calls().is_empty());
         // File checks still work.
-        p.ok("inspect_pe_imports", json!({"path": "hello-win-x64.exe"}), &a)
-            .await;
+        p.ok(
+            "inspect_pe_imports",
+            json!({"path": "hello-win-x64.exe"}),
+            &a,
+        )
+        .await;
     }
 
     /// Stop during a slow step ends it with the cancelled text; rea, which did not answer
@@ -1311,7 +1353,9 @@ mod calls {
                 full_access: mode == "full",
             };
             let grants = BTreeSet::new();
-            let open = p.action("open_binary", open_args("hello-linux-x64"), &chat).await;
+            let open = p
+                .action("open_binary", open_args("hello-linux-x64"), &chat)
+                .await;
             let decision = policy::evaluate(&open, &turn, &grants);
             match mode {
                 "ask" => assert!(
@@ -1337,7 +1381,12 @@ mod calls {
                 open.preview
             );
             let out = p
-                .call_with("open_binary", open_args("hello-linux-x64"), &open, ctx(&chat))
+                .call_with(
+                    "open_binary",
+                    open_args("hello-linux-x64"),
+                    &open,
+                    ctx(&chat),
+                )
                 .await;
             assert!(!out.is_error, "{mode}: {}", out.joined_text());
             let session = p.action("list_procedures", json!({}), &chat).await;

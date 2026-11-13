@@ -5203,6 +5203,201 @@ def p_folder_chip(c, notes):
             con.close()
 
 
+@probe("reverse-settings")
+def p_reverse_settings(c, notes):
+    """0.0.6 item 5 (WP9d): Settings → Reverse engineering in the real app. Nothing is
+    downloaded: the download dialogs are cancelled, a download without consent is refused,
+    and installed, paused, broken and outdated rows are made by writing the installer's own
+    folders and markers (no programs) into the app's reverse folder. The decompiler choice is
+    switched and saved, removing the chosen decompiler switches to the other one, and the
+    choice is never writable through the generic setting command."""
+    s = c.s
+    if os.environ.get("HARNESS_REVERSE_ROOT"):
+        notes.append("HARNESS_REVERSE_ROOT is set: the reverse-engineering scenario owns that folder; skipped")
+        return
+    root = c.db.parent / "reverse"
+    lock = json.loads((ROOT / "reverse.lock.json").read_text())
+    builds = {p["name"]: next(b for b in p["builds"] if b["platform"] == "linux-x86_64")
+              for p in lock["parts"] if any(b["platform"] == "linux-x86_64" for b in p["builds"])}
+    versions = {p["name"]: p["version"] for p in lock["parts"]}
+
+    def mb(n):
+        return f"{int(n / 1e6 + 0.5):,}"
+
+    def put(component, part, version=None, programs=()):
+        d = root / f"{part}-{version or versions[part]}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ".complete").write_text(json.dumps({
+            "component": component, "part": part, "version": version or versions[part],
+            "archiveSha256": [], "programs": list(programs), "diskBytes": 1_000_000}))
+
+    def panel():
+        return s.execute("const p = [...document.querySelectorAll('[role=tabpanel]')]"
+                         ".find(e => e.getAttribute('data-state') === 'active'); return p ? p.innerText : '';")
+
+    def row(name):
+        return s.execute("const l = [...document.querySelectorAll('li[aria-label]')]"
+                         ".find(e => e.getAttribute('aria-label') === arguments[0]); return l ? l.innerText : null;", name)
+
+    def press(where, label):
+        """Clicks the button labelled `label` inside the row `where`, or inside the open
+        dialog when `where` is None."""
+        el = s.wait_for(lambda: s.execute(
+            """
+            const [where, label] = arguments;
+            const scope = where === null
+              ? [...document.querySelectorAll('[role=alertdialog]')].pop()
+              : [...document.querySelectorAll('li[aria-label]')].find(e => e.getAttribute('aria-label') === where);
+            if (!scope) return null;
+            return [...scope.querySelectorAll('button,[role=radio]')].find(b => b.innerText.trim() === label) || null;
+            """, where, label) or False, 15, f"button {label!r} in {where or 'the dialog'}")
+        try:
+            s.click(next(iter(el.values())))
+        except WebDriverError:
+            s.execute("arguments[0].click();", el)
+        time.sleep(0.4)
+
+    def choose(label):
+        el = s.wait_for(lambda: s.execute(
+            "return [...document.querySelectorAll('[role=radio]')].find(b => b.innerText.trim() === arguments[0]) || null;",
+            label) or False, 10, f"the {label} choice")
+        s.click(next(iter(el.values())))
+        time.sleep(0.4)
+
+    def dialog():
+        return s.wait_for(lambda: s.execute(
+            "const d = [...document.querySelectorAll('[role=alertdialog]')].pop(); return d ? d.innerText : null;"),
+            10, "a dialog")
+
+    def no_dialog():
+        s.wait_for(lambda: s.execute("return !document.querySelector('[role=alertdialog]');"), 10, "the dialog to close")
+
+    def refused(command, args):
+        try:
+            s.invoke(command, args)
+        except WebDriverError as e:
+            return str(e)
+        raise AssertionError(f"{command} {args} was not refused")
+
+    def open_tab():
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        time.sleep(0.3)
+        s.click_button("Settings")
+        s.click_button("Reverse engineering")
+        s.wait_for(lambda: "Lets the model look inside programs" in panel(), 10, "the Reverse engineering page")
+
+    shutil.rmtree(root, ignore_errors=True)
+    try:
+        open_tab()
+        text = panel()
+        for line in (
+            "Nothing is downloaded until you choose it here. After that it works without the internet.",
+            "Use it only on files you own or are allowed to examine.",
+            "A file made to attack decompilers could still harm this computer.",
+            "In Ask first and Allow all, rea reaches only the chat's approved folders.",
+            "A decompiler turns a program's machine code back into code people can read. Install one, or both and switch between them.",
+            "Install a decompiler to open programs.",
+        ):
+            assert line in text, (line, text[:1500])
+        assert "Apple's command line tools" not in text
+        assert f"rea {versions['rea']}, with Node.js {versions['node']} to run it" in row("rea")
+        rea_bytes = builds["rea"]["file"]["size"] + builds["node"]["file"]["size"]
+        assert f"{mb(rea_bytes)} MB download" in row("rea"), row("rea")
+
+        # The dialogs name the hosts and the total; Cancel downloads nothing.
+        press("rea", "Download")
+        d = dialog()
+        notes.append("rea dialog: " + d.replace("\n", " | ")[:400])
+        assert "Download rea?" in d and f"About {mb(rea_bytes)} MB from npmjs.com (rea) and nodejs.org (Node.js)." in d, d
+        assert "rea license" in d and "Node.js license" in d, d
+        press(None, "Cancel")
+        no_dialog()
+        press("Kuna", "Download")
+        d = dialog()
+        both = rea_bytes + builds["kuna"]["file"]["size"]
+        assert "Download rea and Kuna?" in d, d
+        assert f"About {mb(both)} MB: rea from npmjs.com and Node.js from nodejs.org, then Kuna from Kuna's releases on GitHub." in d, d
+        press(None, "Cancel")
+        no_dialog()
+        time.sleep(1)
+        assert not (root / ".downloads").exists(), "a cancelled dialog downloaded something"
+
+        # Commands refuse what the page never sends, whatever a page script tries.
+        e = refused("reverse_download", {"component": "rea", "acceptLicense": False})
+        assert "licences must be accepted" in e, e
+        e = refused("set_setting", {"key": "reverseDecompiler", "value": "kuna"})
+        assert "cannot be changed this way" in e, e
+        e = refused("reverse_set_decompiler", {"decompiler": "kuna", "force": False})
+        assert "not_installed" in e, e
+        assert s.invoke("get_setting", {"key": "reverseDecompiler"}) is None
+
+        # Installed rows (as the installer leaves them), seen on the page's next check.
+        put("rea", "rea")
+        put("rea", "node")
+        put("kuna", "kuna")
+        put("ghidra", "ghidra")
+        put("ghidra", "java")
+        s.wait_for(lambda: "Installed" in (row("rea") or "") and "Use for decompiling:" in panel(), 15, "installed rows")
+        assert "rea is not running." in panel()
+        assert "To use it, ask about a program file in one of the chat's folders" in panel()
+        assert "Saved analysis: 0 MB." in panel()
+        choose("Kuna")
+        s.wait_for(lambda: s.invoke("get_setting", {"key": "reverseDecompiler"}) == "kuna", 10, "the choice saved")
+        choose("Ghidra")
+        s.wait_for(lambda: s.invoke("get_setting", {"key": "reverseDecompiler"}) == "ghidra", 10, "the choice switched")
+        checked = s.execute("return [...document.querySelectorAll('[role=radio][aria-checked=true]')].map(b => b.innerText.trim());")
+        assert checked == ["Ghidra"], checked
+        st = s.invoke("reverse_status")
+        assert st["decompiler"] == "ghidra" and st["chosen"] == "ghidra", st["decompiler"]
+
+        # Removing: the question names what it frees; the chosen one switches to the other.
+        press("Kuna", "Remove")
+        d = dialog()
+        assert "Remove Kuna?" in d and "This frees 1 MB." in d, d
+        press(None, "Remove")
+        s.wait_for(lambda: not (root / f"kuna-{versions['kuna']}").exists(), 10, "Kuna removed")
+        s.wait_for(lambda: "Decompiling uses Ghidra." in panel(), 10, "Ghidra still used")
+        press("Ghidra", "Remove")
+        d = dialog()
+        assert "Remove Ghidra?" in d and "This frees" in d, d
+        press(None, "Remove")
+        s.wait_for(lambda: "Install a decompiler to open programs." in panel(), 10, "no decompiler left")
+        assert s.invoke("get_setting", {"key": "reverseDecompiler"}) is None
+        assert (root / f"rea-{versions['rea']}").exists()
+
+        # An outdated part, then a missing file: each with its one action (not clicked).
+        shutil.rmtree(root / f"node-{versions['node']}")
+        put("rea", "node", "24.0.0")
+        s.wait_for(lambda: "This version of Node.js has a known problem. Update it to keep using it." in (row("rea") or ""),
+                   15, "the needs-update line")
+        assert "Update" in row("rea")
+        shutil.rmtree(root / "node-24.0.0")
+        put("rea", "node", programs=[{"path": "bin/node", "size": 5}])
+        s.wait_for(lambda: "Part of rea is missing, perhaps removed by antivirus software." in (row("rea") or ""),
+                   15, "the missing line")
+        assert "Repair" in row("rea")
+
+        # A paused download: Remove frees it.
+        shutil.rmtree(root)
+        f = builds["rea"]["file"]
+        part = root / ".downloads" / f"{f['name']}.{f['sha256'][:16]}.part"
+        part.parent.mkdir(parents=True)
+        part.write_bytes(b"\0" * 3_000_000)
+        s.wait_for(lambda: f"Paused at 3 MB of {mb(rea_bytes)} MB. Remove frees that space." in (row("rea") or ""),
+                   15, "the paused line")
+        press("rea", "Remove")
+        s.wait_for(lambda: not part.exists(), 10, "the paused download removed")
+        s.wait_for(lambda: "Download" in (row("rea") or ""), 10, "rea downloadable again")
+        s.screenshot(str(OUT / "reverse-settings.png"))
+    finally:
+        s.execute("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+        shutil.rmtree(root, ignore_errors=True)
+        try:
+            s.invoke("reverse_status")
+        except WebDriverError:
+            pass
+
+
 PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, p_skill_guard, p_terminal_git, p_errors, p_stop, p_mcp,
           p_regen_error, p_switch, p_delete, p_reasoning, p_text_call, p_subagent, p_step_limit, p_allow_all, p_full_access,
           p_tool_selection, p_artifacts, p_search, p_pinned,
@@ -5210,6 +5405,7 @@ PROBES = [p_markdown, p_settings, p_general, p_remote_ctx, p_folders, p_skills, 
           p_chat_memory, p_model_settings, p_coding_apps, p_share_proxy, p_other_apps]
 
 PROBES.append(p_folder_chip)  # [0.0.6 item 7]
+PROBES.append(p_reverse_settings)  # [0.0.6 item 5, WP9d]
 
 
 def main() -> int:

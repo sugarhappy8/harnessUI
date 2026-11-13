@@ -68,16 +68,15 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 /// [`crate::describe::messages`]).
 pub mod refusals {
     /// The action was not made by this server's `describe` for this tool.
-    pub const NOT_DESCRIBED: &str = "This rea step was not checked by harnessUI, so it did not run.";
+    pub const NOT_DESCRIBED: &str =
+        "This rea step was not checked by harnessUI, so it did not run.";
     /// A file or folder changed between the approval and the call.
-    pub const FILE_CHANGED: &str =
-        "The file changed after this step was approved, so rea did not read it. Run the step again.";
+    pub const FILE_CHANGED: &str = "The file changed after this step was approved, so rea did not read it. Run the step again.";
     /// The decompiler changed between the approval of an open and the call.
     pub const DECOMPILER_CHANGED: &str = "The decompiler was changed in Settings after this step was approved, so rea did not open the file. Run open_binary again.";
     /// The chat's open file changed (another open of the same chat) since the step was
     /// planned.
-    pub const BINDING_CHANGED: &str =
-        "The file open in rea for this chat changed after this step was planned. Run the step again.";
+    pub const BINDING_CHANGED: &str = "The file open in rea for this chat changed after this step was planned. Run the step again.";
     /// The open file was replaced or changed on disk.
     pub const OPEN_FILE_CHANGED: &str = "The file open in rea for this chat was changed or replaced on disk, so rea closed it. Open it again with open_binary.";
     /// rea stopped during the call.
@@ -118,7 +117,6 @@ pub struct ReverseServer {
     /// The next start is the first since the app started or an install changed (a longer
     /// start limit, R9/C16).
     first_start: AtomicBool,
-    masker: Masker,
 }
 
 /// What the live check of the running rea found.
@@ -178,7 +176,6 @@ impl ReverseServer {
         let process = Arc::new(ReaProcess::new(layout.clone(), platform));
         process.set_installer(installer.clone());
         Arc::new(Self {
-            masker: Masker::new(layout.root(), platform),
             installer,
             process,
             layout,
@@ -354,13 +351,9 @@ impl ReverseServer {
             approved.push(top);
         }
         let fs = RealWalkFs;
-        PathSandbox::new(
-            flavor,
-            &approved,
-            &chat.forbidden_folders,
-            &fs,
-            &|p| fs.case_of(p),
-        )
+        PathSandbox::new(flavor, &approved, &chat.forbidden_folders, &fs, &|p| {
+            fs.case_of(p)
+        })
         .0
     }
 
@@ -384,7 +377,9 @@ impl ReverseServer {
                 && walk::walk_folder(&RealWalkFs, canonical, &sandbox, chat.full_access).is_ok();
         }
         RealWalkFs.kind(canonical) == Some(walk::EntryKind::File)
-            && FileIdentity::of(std::path::Path::new(canonical)).ok().as_ref()
+            && FileIdentity::of(std::path::Path::new(canonical))
+                .ok()
+                .as_ref()
                 == Some(&b.view.identity)
     }
 
@@ -399,11 +394,7 @@ impl ReverseServer {
     }
 
     /// Starts rea if needed; after a new start, a new store epoch and the live check.
-    async fn start(
-        &self,
-        guard: &mut ReaGuard,
-        config: &RunConfig,
-    ) -> Result<Started, Refusal> {
+    async fn start(&self, guard: &mut ReaGuard, config: &RunConfig) -> Result<Started, Refusal> {
         let started = guard
             .ensure_started(config.clone())
             .await
@@ -653,7 +644,10 @@ impl ReverseServer {
                 if !live.housekeeping_ok {
                     return Err(m::CHANGED_TOOL.into());
                 }
-                let target = payload.target.clone().ok_or_else(|| refusals::NOT_DESCRIBED.to_string())?;
+                let target = payload
+                    .target
+                    .clone()
+                    .ok_or_else(|| refusals::NOT_DESCRIBED.to_string())?;
                 let decompiler = payload
                     .decompiler
                     .ok_or_else(|| describe::no_decompiler_message(self.platform).to_string())?;
@@ -696,7 +690,10 @@ impl ReverseServer {
                 result
             }
             ToolClass::FileCheck => {
-                let target = payload.target.clone().ok_or_else(|| refusals::NOT_DESCRIBED.to_string())?;
+                let target = payload
+                    .target
+                    .clone()
+                    .ok_or_else(|| refusals::NOT_DESCRIBED.to_string())?;
                 let name = walk::file_name(&target.canonical, self.path_flavor()).to_string();
                 let result = self
                     .forward(
@@ -827,8 +824,15 @@ impl ReverseServer {
             session.last_open().is_some_and(|(c, _)| c != chat) || session.others_hold_ids(chat)
         };
         if others {
-            self.clear(guard, config, chat, ClosedReason::OtherChat, &ctx.cancel, notes)
-                .await?;
+            self.clear(
+                guard,
+                config,
+                chat,
+                ClosedReason::OtherChat,
+                &ctx.cancel,
+                notes,
+            )
+            .await?;
         }
         let open = allow::get("open_binary").ok_or_else(|| refusals::NOT_DESCRIBED.to_string())?;
         let line = format!("rea is reading {name} with {}…", b.view.decompiler.label());
@@ -970,7 +974,10 @@ impl BuiltinServer for ReverseServer {
             Ok(output) => output,
             Err(refusal) => ToolOutput::error(refusal),
         };
-        results::clean_with(output, &self.masker, self.platform, &notes)
+        // Built for each call: the folder's resolved and 8.3 spellings exist only once
+        // something is installed in it.
+        let masker = Masker::new(self.layout.root(), self.platform);
+        results::clean_with(output, &masker, self.platform, &notes)
     }
 }
 

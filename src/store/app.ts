@@ -499,3 +499,14 @@ export const useApp = create<AppState>((set, get) => {
     },
   };
 });
+
+/** [0.0.6 item 8] The `download-progress` listener: a finished download (every file of it
+ *  done) is a new model "On this computer", so the chat's model list is read again then, not
+ *  only when its menu opens. Returns the function that stops listening; outside the app it
+ *  listens to nothing. */
+export function refreshModelsAfterDownloads(): Promise<() => void> {
+  if (!ipc.isTauri()) return Promise.resolve(() => undefined);
+  return ipc.onDownloadProgress((g) => {
+    if (g.status === "done") useApp.getState().refreshModelOptions().catch(() => undefined);
+  });
+}

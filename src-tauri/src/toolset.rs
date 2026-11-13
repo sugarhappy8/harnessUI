@@ -76,6 +76,20 @@ pub async fn build_host(
     host.add_builtin(Arc::new(crate::outputs::OutputsServer::new(app.clone())));
     // `update_task` (0.0.4): the chat's task state, offered with any other tool.
     host.add_builtin(Arc::new(crate::task::TaskServer::new(app.clone())));
+    // The "Reverse engineering" group (0.0.6, item 5): rea behind the app's allow-list. One
+    // server for the app, shared with Settings → Reverse engineering and the Tools panel.
+    if let Ok(local_data) = app.path().app_local_data_dir() {
+        let reverse = reverse::ReverseServer::new(
+            reverse::ReverseLayout::for_app(&local_data),
+            reverse::Platform::current(),
+        );
+        reverse
+            .process()
+            .set_log_dir(app.path().app_log_dir().ok().as_deref());
+        reverse::server::set_handle(reverse.clone());
+        app.manage(reverse::ReverseHandle(reverse.clone()));
+        host.add_builtin(reverse);
+    }
     host
 }
 

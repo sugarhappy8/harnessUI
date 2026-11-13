@@ -2997,13 +2997,14 @@ async fn a_chat_summarised_at_32k_continues_at_4k() {
         outcome.status
     );
     // The fold comes first: the old summary in the system message, the instruction to
-    // rewrite it within the 4k cap (512 tokens; at most 341 words), no tool calls.
+    // rewrite it within the 4k cap (512 tokens; at most 341 words), no tool calls. Its output
+    // limit is twice the cap (1,024 tokens), so a rewrite that runs long can still end.
     let kinds = kinds(&seen);
     assert_eq!(kinds.first(), Some(&"fold"), "{kinds:?}");
     assert_eq!(kinds.last(), Some(&"chat"), "{kinds:?}");
     let fold = &requests_of(&seen, "fold")[0];
     assert_eq!(fold["tool_choice"], json!("none"));
-    assert_eq!(fold["max_tokens"], json!(512));
+    assert_eq!(fold["max_tokens"], json!(1_024));
     assert!(system_of(fold).contains("/p/kept-at-the-end.txt"));
     assert!(last_message_text(fold).contains("at most 341 words"));
     let budget = outcome.budget.unwrap();

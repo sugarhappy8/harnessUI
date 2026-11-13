@@ -1,0 +1,5 @@
+# Shape only until the owner's capture: written by hand from fit.cpp's row shape (b12110, common/fit.cpp lines 1125-1158: device rows carry kind, name, description, total, free, self, model, context, compute, unaccounted; host and buffer-type rows kind, name, self, model, context, compute; all in MiB). Not a capture; the numbers are made up for a 16 GB card with 30 of 41 layers on it.
+{"type":"log","time":10411,"level":"info","msg":"llama_fit_params: printing estimated memory in MiB to stdout (device, model, context, compute) ...\n"}
+{"type":"fit_memory_breakdown","data":{"unit":"MiB","rows":[{"kind":"device","name":"Vulkan0","description":"AMD Radeon RX 9070 XT","total":16304,"free":15400,"self":11980,"model":10137,"context":1229,"compute":614,"unaccounted":-11076},{"kind":"host","name":"Host","self":4505,"model":4199,"context":0,"compute":306},{"kind":"buffer_type","name":"Vulkan_Host","self":0,"model":0,"context":0,"compute":0}]}}
+Vulkan0 10137 1229 614 
+Host 4199 0 306 

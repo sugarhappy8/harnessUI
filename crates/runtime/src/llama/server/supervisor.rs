@@ -13,8 +13,17 @@
 //!      is one it can cause ([`LoadFailure::save_memory_may_be_the_cause`], 0.0.6 D2c). It
 //!      stays off for the rest of the load. Without a card in use, a plain failure is
 //!      never retried without it: that would need twice the memory and blame the card.
-//!   2. **As much as fits** ([`LoadStage::RetryingWithLessGpu`]) when a graphics card ran
-//!      out of memory ([`LoadFailure::is_out_of_memory`]) with All of it ([`GpuUse::All`]).
+//!   2. **Fast attention off** ([`LoadStage::RetryingWithoutFastAttention`], item 6) when
+//!      fast attention was chosen On in Fine control with Save memory off, a graphics card
+//!      is in use and the failure is one Save memory can also cause
+//!      ([`LoadFailure::save_memory_may_be_the_cause`]): a card or driver that cannot do it.
+//!      It stays off for the rest of the load.
+//!   3. **As much as fits** ([`LoadStage::RetryingWithLessGpu`]) when a graphics card ran
+//!      out of memory ([`LoadFailure::is_out_of_memory`]) with All of it ([`GpuUse::All`])
+//!      or with layers or expert parts chosen in Fine control (a custom placement, item 6).
+//!      The chosen placement is set aside for the rest of the load (the stage says so, with
+//!      the chosen number of layers); the margin As much as fits leaves free and where the
+//!      conversation memory lives are kept.
 //! - **Stepping down:** when a GPU backend still fails, and a lower backend passed its
 //!   probe, try the next one down (ROCm or CUDA → Vulkan → CPU) and report
 //!   [`ServerEvent::SteppedDown`]. The processor runs with [`GpuUse::Off`]; another
@@ -35,9 +44,11 @@
 //! Don't use it on Vulkan runs on the processor (`--device none`) and is treated so.
 //!
 //! So a graphics card that runs out of memory goes: Save memory off (if it was on and the
-//! context failed), then As much as fits, then the processor. A failure to allocate the
-//! weights skips the first step, since Save memory only changes the conversation memory,
-//! which is made after the weights.
+//! context failed), fast attention off (if it was chosen On and the context failed), then
+//! As much as fits, then the processor. A failure to allocate the weights skips the first
+//! two steps, since Save memory and fast attention only change the conversation memory and
+//! the working space, which are made after the weights. The saved settings never change:
+//! every step is for this load only.
 //!
 //! The policy talks to servers only through the [`Starter`] and [`Supervised`] traits, so
 //! tests drive it with scripted fakes and no real process.
@@ -53,7 +64,7 @@ use tokio_util::sync::CancellationToken;
 use super::{RunningServer, ServerEvent, ServerState, StartError, StartSpec, start};
 use crate::llama::backend::{Backend, BackendKind};
 use crate::llama::failure::{LoadFailure, classify, save_memory_refused};
-use crate::llama::launch::{GpuUse, free_loopback_port};
+use crate::llama::launch::{ExpertsOnCpu, FlashAttn, GpuUse, free_loopback_port};
 use crate::llama::stage::LoadStage;
 
 /// Starts a server. Implemented by [`LocalStarter`] for real llama-server processes and by
@@ -480,7 +491,8 @@ impl<S: Starter> Supervisor<S> {
     /// applies (see the module documentation).
     ///
     /// Each retry turns a setting down for the rest of the load, so it can happen only once:
-    /// Save memory is then off, and the card is then at As much as fits.
+    /// Save memory is then off, fast attention is then Off, and the card is then at As much
+    /// as fits with no custom placement.
     fn retry_spec(
         &self,
         spec: &StartSpec,
@@ -493,6 +505,8 @@ impl<S: Starter> Supervisor<S> {
         // The model refusing Save memory is retried on any backend. Otherwise only a card
         // in use is: a device or driver may lack what a q8_0 memory needs, while on the
         // processor a plain failure is a lack of memory, which turning it off makes worse.
+        let fine = &spec.launch.fine;
+        let custom = fine.custom_placement();
         let stage = if spec.launch.save_memory
             && (save_memory_refused(stderr_tail) || (card && reason.save_memory_may_be_the_cause()))
         {
@@ -501,9 +515,29 @@ impl<S: Starter> Supervisor<S> {
             // the processor is what the user is told about, not a card the load never used.
             let backend = if card { backend } else { BackendKind::Cpu };
             LoadStage::RetryingWithoutSaveMemory { backend }
-        } else if card && spec.launch.gpu == GpuUse::All && reason.is_out_of_memory() {
+        } else if !spec.launch.save_memory
+            && fine.flash_attn == FlashAttn::On
+            && card
+            && reason.save_memory_may_be_the_cause()
+        {
+            // Item 6, section 3.3 step 2: fast attention chosen On fails the way Save memory
+            // can fail on a graphics card that cannot do it. Off for the rest of the load.
+            next.launch.fine.flash_attn = FlashAttn::Off;
+            LoadStage::RetryingWithoutFastAttention { backend }
+        } else if card && (spec.launch.gpu == GpuUse::All || custom) && reason.is_out_of_memory()
+        {
+            // All of it, or a placement chosen in Fine control (item 6, section 3.3 step 3),
+            // ran out of graphics memory: As much as fits for the rest of the load. The
+            // chosen layers and expert parts are set aside; the margin As much as fits
+            // leaves free and the conversation memory's place are kept.
             next.launch.gpu = GpuUse::Fit;
-            LoadStage::RetryingWithLessGpu { backend }
+            next.launch.fine.gpu_layers = None;
+            next.launch.fine.experts_on_cpu = ExpertsOnCpu::None;
+            LoadStage::RetryingWithLessGpu {
+                backend,
+                custom,
+                chosen_layers: if custom { fine.gpu_layers } else { None },
+            }
         } else {
             return None;
         };
@@ -566,7 +600,7 @@ mod tests {
 
     use super::*;
     use crate::llama::backend::BackendSource;
-    use crate::llama::launch::{GpuUse, LaunchConfig};
+    use crate::llama::launch::{ExpertsOnCpu, FineLaunch, FlashAttn, GpuUse, LaunchConfig};
     use crate::llama::stage::LoadStage;
 
     /// What a scripted start does.
@@ -758,7 +792,7 @@ mod tests {
     }
 
     fn with_less_gpu(backend: BackendKind) -> ServerEvent {
-        ServerEvent::Stage(LoadStage::RetryingWithLessGpu { backend })
+        ServerEvent::Stage(LoadStage::with_less_gpu(backend))
     }
 
     fn supervisor(
@@ -1995,5 +2029,397 @@ mod tests {
         let policy = RestartPolicy::default();
         assert_eq!(policy.max_restarts, 3);
         assert_eq!(policy.window, Duration::from_secs(300));
+    }
+
+    /// [`spec_with`] with these Fine control values (item 6).
+    fn spec_fine(gpu: GpuUse, save_memory: bool, fine: FineLaunch) -> StartSpec {
+        let mut spec = spec_with(BackendKind::Vulkan, Some("Vulkan0"), gpu, save_memory);
+        spec.launch.fine = fine;
+        spec
+    }
+
+    /// Fast attention, layers and expert parts of every start, in order.
+    fn fine_attempts(log: &Arc<Mutex<Log>>) -> Vec<(BackendKind, GpuUse, FineLaunch)> {
+        log.lock()
+            .expect("log")
+            .started
+            .iter()
+            .map(|s| (s.backend.kind, s.launch.gpu, s.launch.fine.clone()))
+            .collect()
+    }
+
+    fn without_fast_attention(backend: BackendKind) -> ServerEvent {
+        ServerEvent::Stage(LoadStage::RetryingWithoutFastAttention { backend })
+    }
+
+    /// Item 6, section 3.3 step 2: fast attention chosen On fails the way Save memory can
+    /// fail on a graphics card (a failed context, or an unknown crash): one retry on the same
+    /// backend with it Off, the rest of Fine control kept. Without a card in use, with Save
+    /// memory on (its own `-fa on` is what the card refused, step 1), with Automatic or Off,
+    /// and for weights that did not fit, there is no such retry.
+    #[tokio::test(start_paused = true)]
+    async fn fast_attention_failure_retries_once_with_off() {
+        let on = FineLaunch {
+            flash_attn: FlashAttn::On,
+            threads: Some(4),
+            kv_in_computer_memory: true,
+            ..FineLaunch::default()
+        };
+        for reason in [LoadFailure::ContextTooLarge, LoadFailure::Unknown] {
+            let script = vec![Script::Fail(reason.clone()), Script::Run(None)];
+            let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+            let (_server, running) = sup
+                .start(spec_fine(GpuUse::All, false, on.clone()))
+                .await
+                .expect("starts");
+            let off = FineLaunch {
+                flash_attn: FlashAttn::Off,
+                ..on.clone()
+            };
+            assert_eq!(running.backend.kind, BackendKind::Vulkan, "{reason:?}");
+            assert_eq!(running.launch.fine, off, "{reason:?}");
+            assert_eq!(
+                fine_attempts(&log),
+                vec![
+                    (BackendKind::Vulkan, GpuUse::All, on.clone()),
+                    (BackendKind::Vulkan, GpuUse::All, off),
+                ],
+                "{reason:?}"
+            );
+            assert_eq!(
+                drain(&mut rx),
+                vec![without_fast_attention(BackendKind::Vulkan)],
+                "{reason:?}"
+            );
+            let args = crate::llama::launch::build_args(&running.launch);
+            assert!(args.windows(2).any(|w| w == ["-fa", "off"]), "{args:?}");
+        }
+
+        // Once only: a second such failure goes on down the chain (As much as fits for a
+        // context that did not fit, then the processor).
+        let script = vec![Script::Fail(LoadFailure::ContextTooLarge); 3]
+            .into_iter()
+            .chain([Script::Run(None)])
+            .collect();
+        let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+        sup.start(spec_fine(GpuUse::All, false, on.clone()))
+            .await
+            .expect("starts on the processor");
+        let flash: Vec<FlashAttn> = fine_attempts(&log)
+            .iter()
+            .map(|(_, _, f)| f.flash_attn)
+            .collect();
+        assert_eq!(
+            flash,
+            [FlashAttn::On, FlashAttn::Off, FlashAttn::Off, FlashAttn::Off]
+        );
+        assert_eq!(
+            drain(&mut rx),
+            vec![
+                without_fast_attention(BackendKind::Vulkan),
+                with_less_gpu(BackendKind::Vulkan),
+                ServerEvent::SteppedDown {
+                    from: BackendKind::Vulkan,
+                    to: BackendKind::Cpu,
+                    reason: LoadFailure::ContextTooLarge,
+                },
+            ]
+        );
+
+        // No fast-attention retry for these.
+        let cases: Vec<(&str, StartSpec, LoadFailure)> = vec![
+            (
+                "weights that did not fit",
+                spec_fine(GpuUse::Fit, false, on.clone()),
+                LoadFailure::OutOfMemory,
+            ),
+            (
+                "Automatic",
+                spec_fine(GpuUse::Fit, false, FineLaunch::default()),
+                LoadFailure::ContextTooLarge,
+            ),
+            (
+                "Off",
+                spec_fine(
+                    GpuUse::Fit,
+                    false,
+                    FineLaunch {
+                        flash_attn: FlashAttn::Off,
+                        ..FineLaunch::default()
+                    },
+                ),
+                LoadFailure::ContextTooLarge,
+            ),
+            (
+                "Don't use it on a graphics backend",
+                spec_fine(GpuUse::Off, false, on.clone()),
+                LoadFailure::ContextTooLarge,
+            ),
+        ];
+        for (name, start, reason) in cases {
+            let script = vec![Script::Fail(reason.clone()), Script::Run(None)];
+            let (mut sup, _log, mut rx) = supervisor(script, gpu_cpu());
+            let _ = sup.start(start).await;
+            assert!(
+                !drain(&mut rx).contains(&without_fast_attention(BackendKind::Vulkan)),
+                "{name}"
+            );
+        }
+        // The processor: fast attention always works there; a plain failure is no reason.
+        let (mut sup, log, mut rx) = supervisor(
+            vec![Script::Fail(LoadFailure::ContextTooLarge)],
+            vec![candidate(BackendKind::Cpu, None)],
+        );
+        let mut cpu = spec(BackendKind::Cpu, None);
+        cpu.launch.fine = on.clone();
+        sup.start(cpu).await.expect_err("does not fit");
+        assert_eq!(fine_attempts(&log).len(), 1);
+        assert!(drain(&mut rx).is_empty());
+
+        // Save memory on: step 1 turns Save memory off; its `-fa on` was the one in use.
+        // A second failure then retries with the chosen fast attention Off.
+        let script = vec![
+            Script::Fail(LoadFailure::ContextTooLarge),
+            Script::Fail(LoadFailure::ContextTooLarge),
+            Script::Run(None),
+        ];
+        let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let (_server, running) = sup
+            .start(spec_fine(GpuUse::Fit, true, on.clone()))
+            .await
+            .expect("starts");
+        assert!(!running.launch.save_memory);
+        assert_eq!(running.launch.fine.flash_attn, FlashAttn::Off);
+        assert_eq!(fine_attempts(&log).len(), 3);
+        assert_eq!(
+            drain(&mut rx),
+            vec![
+                without_save_memory(BackendKind::Vulkan),
+                without_fast_attention(BackendKind::Vulkan),
+            ]
+        );
+    }
+
+    /// Item 6, section 3.3 step 3: a placement chosen in Fine control that runs out of
+    /// graphics memory is retried once with As much as fits, whatever the plain choice
+    /// said; the chosen layers and expert parts are set aside for this load, the stage says
+    /// so with the chosen number of layers, and the conversation memory's place and the
+    /// margin As much as fits leaves free are kept. Then the existing order.
+    #[tokio::test(start_paused = true)]
+    async fn custom_placement_out_of_memory_retries_with_as_much_as_fits() {
+        let chosen = FineLaunch {
+            gpu_layers: Some(40),
+            experts_on_cpu: ExpertsOnCpu::FirstLayers(5),
+            kv_in_computer_memory: true,
+            fit_margin_mib: Some(2048),
+            threads: Some(6),
+            flash_attn: FlashAttn::Off,
+        };
+        let kept = FineLaunch {
+            gpu_layers: None,
+            experts_on_cpu: ExpertsOnCpu::None,
+            ..chosen.clone()
+        };
+        for (gpu, reason) in [
+            (GpuUse::All, LoadFailure::OutOfMemory),
+            (GpuUse::Fit, LoadFailure::OutOfMemory),
+            (GpuUse::Fit, LoadFailure::ContextTooLarge),
+        ] {
+            let script = vec![Script::Fail(reason.clone()), Script::Run(None)];
+            let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+            let (_server, running) = sup
+                .start(spec_fine(gpu, false, chosen.clone()))
+                .await
+                .expect("starts");
+            assert_eq!(
+                fine_attempts(&log),
+                vec![
+                    (BackendKind::Vulkan, gpu, chosen.clone()),
+                    (BackendKind::Vulkan, GpuUse::Fit, kept.clone()),
+                ],
+                "{gpu:?} {reason:?}"
+            );
+            assert_eq!(
+                drain(&mut rx),
+                vec![ServerEvent::Stage(LoadStage::RetryingWithLessGpu {
+                    backend: BackendKind::Vulkan,
+                    custom: true,
+                    chosen_layers: Some(40),
+                })],
+                "{gpu:?} {reason:?}"
+            );
+            let args = crate::llama::launch::build_args(&running.launch).join(" ");
+            assert!(
+                args.contains("--device Vulkan0 --fit on -fitt 2048 -nkvo -t 6 -fa off"),
+                "{args}"
+            );
+        }
+
+        // Expert parts only: the stage names no layer count.
+        let experts = FineLaunch {
+            experts_on_cpu: ExpertsOnCpu::All,
+            ..FineLaunch::default()
+        };
+        let script = vec![Script::Fail(LoadFailure::OutOfMemory), Script::Run(None)];
+        let (mut sup, _log, mut rx) = supervisor(script, gpu_cpu());
+        let (_server, running) = sup
+            .start(spec_fine(GpuUse::All, false, experts))
+            .await
+            .expect("starts");
+        assert!(!running.launch.fine.custom_placement());
+        assert_eq!(running.launch.gpu, GpuUse::Fit);
+        assert_eq!(
+            drain(&mut rx),
+            vec![ServerEvent::Stage(LoadStage::RetryingWithLessGpu {
+                backend: BackendKind::Vulkan,
+                custom: true,
+                chosen_layers: None,
+            })]
+        );
+
+        // Once: As much as fits that still runs out of memory steps down to the processor,
+        // where the placement adds nothing.
+        let script = vec![
+            Script::Fail(LoadFailure::OutOfMemory),
+            Script::Fail(LoadFailure::OutOfMemory),
+            Script::Run(None),
+        ];
+        let (mut sup, log, mut rx) = supervisor(script, gpu_cpu());
+        let (_server, running) = sup
+            .start(spec_fine(GpuUse::All, false, chosen.clone()))
+            .await
+            .expect("starts on the processor");
+        assert_eq!(fine_attempts(&log).len(), 3);
+        assert_eq!(running.backend.kind, BackendKind::Cpu);
+        assert_eq!(drain(&mut rx).len(), 2, "the retry, then the step-down");
+
+        // A failure that is not about memory keeps the chosen placement.
+        let script = vec![Script::Fail(LoadFailure::Unknown), Script::Run(None)];
+        let (mut sup, log, _rx) = supervisor(script, gpu_cpu());
+        sup.start(spec_fine(GpuUse::All, false, chosen.clone()))
+            .await
+            .expect("starts");
+        let attempts = fine_attempts(&log);
+        assert_eq!(attempts.len(), 2);
+        assert!(
+            attempts.iter().all(|(_, _, f)| *f == chosen),
+            "an unknown failure steps down; it does not drop the placement: {attempts:?}"
+        );
+
+        // Without a custom placement, All of it keeps the old stage (no `custom`).
+        let script = vec![Script::Fail(LoadFailure::OutOfMemory), Script::Run(None)];
+        let (mut sup, _log, mut rx) = supervisor(script, gpu_cpu());
+        sup.start(spec_fine(GpuUse::All, false, FineLaunch::default()))
+            .await
+            .expect("starts");
+        assert_eq!(drain(&mut rx), vec![with_less_gpu(BackendKind::Vulkan)]);
+    }
+
+    /// Every retry happens once, with every setting on (Save memory, fast attention On, a
+    /// custom placement, the conversation memory in computer memory): Save memory off, fast
+    /// attention off, As much as fits, the processor, then the failure. The chain ends.
+    #[tokio::test(start_paused = true)]
+    async fn the_chain_still_ends() {
+        let everything = FineLaunch {
+            gpu_layers: Some(30),
+            experts_on_cpu: ExpertsOnCpu::All,
+            kv_in_computer_memory: true,
+            threads: Some(2),
+            flash_attn: FlashAttn::On,
+            fit_margin_mib: Some(512),
+        };
+        for failure in [
+            LoadFailure::ContextTooLarge,
+            LoadFailure::Unknown,
+            LoadFailure::OutOfMemory,
+        ] {
+            let script = vec![Script::Fail(failure.clone()); 12];
+            let candidates = vec![
+                candidate(BackendKind::Rocm, Some("ROCm0")),
+                candidate(BackendKind::Vulkan, Some("Vulkan0")),
+                candidate(BackendKind::Cpu, None),
+            ];
+            let (mut sup, log, mut rx) = supervisor(script, candidates);
+            let mut start = spec_with(BackendKind::Rocm, Some("ROCm0"), GpuUse::All, true);
+            start.launch.fine = everything.clone();
+            let error = sup.start(start).await.expect_err("nothing loads");
+            assert_eq!(error.failure(), failure);
+            let started = log.lock().expect("log").started.len();
+            assert!(started <= 6, "{failure:?}: {started} starts");
+            let events = drain(&mut rx);
+            for stage in [
+                without_save_memory(BackendKind::Rocm),
+                without_fast_attention(BackendKind::Rocm),
+            ] {
+                assert!(
+                    events.iter().filter(|e| **e == stage).count() <= 1,
+                    "{failure:?}: {events:?}"
+                );
+            }
+            assert!(
+                events
+                    .iter()
+                    .filter(|e| matches!(
+                        e,
+                        ServerEvent::Stage(LoadStage::RetryingWithLessGpu { .. })
+                    ))
+                    .count()
+                    <= 2,
+                "at most once per graphics backend: {events:?}"
+            );
+            let kinds: Vec<BackendKind> = log
+                .lock()
+                .expect("log")
+                .started
+                .iter()
+                .map(|s| s.backend.kind)
+                .collect();
+            assert_eq!(kinds.last(), Some(&BackendKind::Cpu), "{failure:?}: {kinds:?}");
+            match failure {
+                LoadFailure::ContextTooLarge => assert_eq!(
+                    events,
+                    vec![
+                        without_save_memory(BackendKind::Rocm),
+                        without_fast_attention(BackendKind::Rocm),
+                        ServerEvent::Stage(LoadStage::RetryingWithLessGpu {
+                            backend: BackendKind::Rocm,
+                            custom: true,
+                            chosen_layers: Some(30),
+                        }),
+                        ServerEvent::SteppedDown {
+                            from: BackendKind::Rocm,
+                            to: BackendKind::Vulkan,
+                            reason: LoadFailure::ContextTooLarge,
+                        },
+                        ServerEvent::SteppedDown {
+                            from: BackendKind::Vulkan,
+                            to: BackendKind::Cpu,
+                            reason: LoadFailure::ContextTooLarge,
+                        },
+                    ]
+                ),
+                LoadFailure::OutOfMemory => assert_eq!(
+                    events,
+                    vec![
+                        ServerEvent::Stage(LoadStage::RetryingWithLessGpu {
+                            backend: BackendKind::Rocm,
+                            custom: true,
+                            chosen_layers: Some(30),
+                        }),
+                        ServerEvent::SteppedDown {
+                            from: BackendKind::Rocm,
+                            to: BackendKind::Vulkan,
+                            reason: LoadFailure::OutOfMemory,
+                        },
+                        ServerEvent::SteppedDown {
+                            from: BackendKind::Vulkan,
+                            to: BackendKind::Cpu,
+                            reason: LoadFailure::OutOfMemory,
+                        },
+                    ]
+                ),
+                _ => {}
+            }
+        }
     }
 }

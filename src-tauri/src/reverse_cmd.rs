@@ -189,7 +189,9 @@ fn tools_changed(app: &AppHandle) {
 fn on_disk(state: &ComponentState) -> bool {
     matches!(
         state,
-        ComponentState::Installed | ComponentState::Broken { .. } | ComponentState::NeedsUpdate { .. }
+        ComponentState::Installed
+            | ComponentState::Broken { .. }
+            | ComponentState::NeedsUpdate { .. }
     )
 }
 
@@ -689,7 +691,24 @@ pub(crate) fn apple_tools_spec() -> runtime::spawn::SpawnSpec {
 pub async fn reverse_status(window: tauri::WebviewWindow, app: AppHandle) -> AppResult<ReverseTab> {
     crate::commands::only_main_window(window.label())?;
     let server = server(&app)?;
-    Ok(tab(&server))
+    let tab = tab(&server);
+    if apple_tools_changed(tab.status.apple_tools) {
+        // Installed (or removed) while the tab was open: the Tools panel's marks follow.
+        server.refresh();
+        tools_changed(&app);
+    }
+    Ok(tab)
+}
+
+/// What the last status said about Apple's command line tools.
+static LAST_APPLE_TOOLS: Mutex<Option<AppleTools>> = Mutex::new(None);
+
+/// Whether Apple's tools changed since the last status (not on the first one).
+fn apple_tools_changed(now: AppleTools) -> bool {
+    let mut last = LAST_APPLE_TOOLS.lock().unwrap_or_else(|e| e.into_inner());
+    let changed = last.is_some_and(|before| before != now);
+    *last = Some(now);
+    changed
 }
 
 /// Starts a download (rea first when a decompiler is chosen and rea is missing). Returns at
@@ -998,7 +1017,10 @@ mod tests {
         assert!(consent(true).is_ok());
         // The command checks it before it looks at anything else.
         let source = include_str!("reverse_cmd.rs");
-        let download = source.split("pub async fn reverse_download(").nth(1).unwrap();
+        let download = source
+            .split("pub async fn reverse_download(")
+            .nth(1)
+            .unwrap();
         let body = download.split_once(") -> AppResult<()> {").unwrap().1;
         let lines: Vec<&str> = body
             .lines()
@@ -1103,7 +1125,9 @@ mod tests {
         let server = linux_server(&dir.0);
         let store = store::Store::open_in_memory().unwrap();
         assert_eq!(
-            after_install(&server, &store, Component::Rea).await.unwrap(),
+            after_install(&server, &store, Component::Rea)
+                .await
+                .unwrap(),
             Some(RestartReason::Updated)
         );
         assert_eq!(server.chosen_decompiler(), None);
@@ -1122,7 +1146,9 @@ mod tests {
         // A second decompiler does not take over, and rea need not restart for it.
         put_kuna(&dir.0);
         assert_eq!(
-            after_install(&server, &store, Component::Kuna).await.unwrap(),
+            after_install(&server, &store, Component::Kuna)
+                .await
+                .unwrap(),
             None
         );
         assert_eq!(server.chosen_decompiler(), Some(Decompiler::Ghidra));
@@ -1309,10 +1335,7 @@ mod tests {
             events.lock().unwrap().push(p)
         })
         .await;
-        assert_eq!(
-            result,
-            Err(ReverseError::Mismatch { part: "rea".into() })
-        );
+        assert_eq!(result, Err(ReverseError::Mismatch { part: "rea".into() }));
         let events = events.into_inner().unwrap();
         for name in ["rea", "node"] {
             let first = events
@@ -1333,7 +1356,10 @@ mod tests {
             error.message,
             "The download doesn't match the copy harnessUI expects, so it wasn't installed."
         );
-        assert_eq!(error.next_step, "Try again. If it keeps failing, report it.");
+        assert_eq!(
+            error.next_step,
+            "Try again. If it keeps failing, report it."
+        );
         assert!(!root.join("rea-6.9.0").exists());
 
         // The last event carries the error and nothing else.
@@ -1432,19 +1458,25 @@ mod tests {
                 "Try again. If it keeps failing, report it.",
             ),
             (
-                ReverseError::Interrupted { part: "node".into() },
+                ReverseError::Interrupted {
+                    part: "node".into(),
+                },
                 "interrupted",
                 "The download was interrupted.",
                 "Check your connection and try again; it continues where it stopped.",
             ),
             (
-                ReverseError::CantReach { host: "nodejs.org".into() },
+                ReverseError::CantReach {
+                    host: "nodejs.org".into(),
+                },
                 "cant_reach",
                 "Can't reach nodejs.org.",
                 "Check your internet connection and try again.",
             ),
             (
-                ReverseError::DiskFull { need_bytes: 1_150_000_000 },
+                ReverseError::DiskFull {
+                    need_bytes: 1_150_000_000,
+                },
                 "disk_full",
                 "The disk is full.",
                 "You need 1.2 GB free.",
@@ -1456,25 +1488,34 @@ mod tests {
                 "Free some space and try again; it continues where it stopped.",
             ),
             (
-                ReverseError::PathTooLong { chars: 260, max: 250 },
+                ReverseError::PathTooLong {
+                    chars: 260,
+                    max: 250,
+                },
                 "path_too_long",
                 "The folder harnessUI keeps its files in has too long a path for Ghidra.",
                 "This is rare; please report it.",
             ),
             (
-                ReverseError::BlockedHost { host: "example.com".into() },
+                ReverseError::BlockedHost {
+                    host: "example.com".into(),
+                },
                 "blocked_host",
                 "The download was redirected to a server harnessUI does not trust.",
                 "Report this.",
             ),
             (
-                ReverseError::Missing { part: "node".into() },
+                ReverseError::Missing {
+                    part: "node".into(),
+                },
                 "missing",
                 "Part of rea is missing, perhaps removed by antivirus software.",
                 "Choose Repair to download it again.",
             ),
             (
-                ReverseError::Blocked { part: "java".into() },
+                ReverseError::Blocked {
+                    part: "java".into(),
+                },
                 "blocked",
                 "Your antivirus blocked part of Ghidra.",
                 "Allow harnessUI in it, then choose Repair.",
@@ -1486,19 +1527,26 @@ mod tests {
                 "Allow harnessUI in it, then choose Repair.",
             ),
             (
-                ReverseError::ServerError { host: "github.com".into(), status: 404 },
+                ReverseError::ServerError {
+                    host: "github.com".into(),
+                    status: 404,
+                },
                 "server_error",
                 "github.com didn't send the file (error 404).",
                 "Try again later. If it keeps failing, report it.",
             ),
             (
-                ReverseError::NeedsUpdate { part: "java".into() },
+                ReverseError::NeedsUpdate {
+                    part: "java".into(),
+                },
                 "needs_update",
                 "This version of Java has a known problem.",
                 "Update it to keep using it.",
             ),
             (
-                ReverseError::NotAvailable { reason: "rea can't use Kuna on Windows yet.".into() },
+                ReverseError::NotAvailable {
+                    reason: "rea can't use Kuna on Windows yet.".into(),
+                },
                 "not_available",
                 "rea can't use Kuna on Windows yet.",
                 "",
@@ -1510,7 +1558,10 @@ mod tests {
                 "Wait for it to finish, or cancel it first.",
             ),
             (
-                ReverseError::Archive { part: "ghidra".into(), message: "x".into() },
+                ReverseError::Archive {
+                    part: "ghidra".into(),
+                    message: "x".into(),
+                },
                 "archive",
                 "The download of Ghidra was damaged, so it wasn't installed.",
                 "Try again. If it keeps failing, report it.",
@@ -1573,9 +1624,22 @@ mod tests {
     }
 
     #[test]
+    fn a_change_of_apples_tools_is_noticed_once() {
+        // The first status only records what it saw.
+        *LAST_APPLE_TOOLS.lock().unwrap() = None;
+        assert!(!apple_tools_changed(AppleTools::Missing));
+        assert!(!apple_tools_changed(AppleTools::Missing));
+        assert!(apple_tools_changed(AppleTools::Present));
+        assert!(!apple_tools_changed(AppleTools::Present));
+    }
+
+    #[test]
     fn apples_installer_is_opened_with_fixed_words() {
         let spec = apple_tools_spec();
-        assert_eq!(spec.program, std::path::PathBuf::from("/usr/bin/xcode-select"));
+        assert_eq!(
+            spec.program,
+            std::path::PathBuf::from("/usr/bin/xcode-select")
+        );
         assert_eq!(spec.args, vec![std::ffi::OsString::from("--install")]);
         assert_eq!(spec.stdin, runtime::spawn::StdioMode::Null);
     }

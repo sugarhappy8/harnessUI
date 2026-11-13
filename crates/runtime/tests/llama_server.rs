@@ -1089,3 +1089,128 @@ async fn a_plain_memory_failure_without_a_graphics_card_is_not_retried() {
         );
     }
 }
+
+/// Fine control words a processor can show (item 6): a server with `-t 2 -fa off`, and one
+/// with `-fa on`, reaches Ready through the app's start path and answers. The expert flags
+/// and `-nkvo` add nothing without a device (the launch leaves them out), so their server
+/// start is on the owner checklist; fit-params accepts them (`tests/fit_params.rs`).
+#[tokio::test(flavor = "multi_thread")]
+async fn fine_control_flags_start() {
+    use runtime::{ExpertsOnCpu, FineLaunch, FlashAttn};
+
+    let Some((bin, gguf)) = env_paths("fine_control_flags_start") else {
+        return;
+    };
+    let with = |fine: FineLaunch| LaunchConfig {
+        fine,
+        ..launch(gguf.clone())
+    };
+    let threads_off = with(FineLaunch {
+        threads: Some(2),
+        flash_attn: FlashAttn::Off,
+        // Without a device these change nothing on the command line.
+        experts_on_cpu: ExpertsOnCpu::All,
+        kv_in_computer_memory: true,
+        ..FineLaunch::default()
+    });
+    let args = build_args(&threads_off).join(" ");
+    assert!(
+        args.contains("--device none -ngl 0 --fit off -t 2 -fa off --cache-ram"),
+        "{args}"
+    );
+    assert!(!args.contains("--cpu-moe") && !args.contains("-nkvo"), "{args}");
+    let fa_on = with(FineLaunch {
+        flash_attn: FlashAttn::On,
+        ..FineLaunch::default()
+    });
+    assert!(
+        build_args(&fa_on).join(" ").contains("--fit off -fa on --cache-ram"),
+        "{:?}",
+        build_args(&fa_on)
+    );
+    for config in [threads_off, fa_on] {
+        let server = start_cpu(&bin, config).await;
+        assert_eq!(server.props().n_ctx, 2048);
+        let reply = post(&server, "/v1/chat/completions", chat_request("x")).await;
+        assert!(reply["choices"][0]["message"].is_object(), "{reply}");
+        server.stop().await;
+    }
+}
+
+/// Where the model went (item 6, I6-7): the start path sends one memory report from the
+/// managed-child ready line, in bytes, with the processor's rows (Host and the repacked
+/// weights' buffer type), the allocated context and the conversation memory a 2,048-token
+/// f16 memory takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_reports_where_the_model_went() {
+    use runtime::MemoryRowKind;
+
+    let Some((bin, gguf)) = env_paths("ready_reports_where_the_model_went") else {
+        return;
+    };
+    let (tx, mut rx) = unbounded_channel();
+    let spec = StartSpec {
+        backend: backend(&bin, BackendKind::Cpu),
+        launch: launch(gguf.clone()),
+        load_timeout: LOAD_TIMEOUT,
+    };
+    let server = match start(spec, tx).await {
+        Ok(server) => server,
+        Err(error) => panic!("start failed: {error}\n{}", error.stderr_tail().join("\n")),
+    };
+    // The stdout reader may still be passing the line on.
+    let mut events = drain(&mut rx);
+    for _ in 0..50 {
+        if events.iter().any(|e| matches!(e, ServerEvent::Memory(_))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        events.extend(drain(&mut rx));
+    }
+    server.stop().await;
+    events.extend(drain(&mut rx));
+    let reports: Vec<&runtime::MemoryReport> = events
+        .iter()
+        .filter_map(|e| match e {
+            ServerEvent::Memory(report) => Some(report),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reports.len(), 1, "one report per ready line: {reports:?}");
+    let report = reports[0];
+    eprintln!("note: the ready line's report: {report:#?}");
+    let ready_at = events
+        .iter()
+        .position(|e| *e == ServerEvent::State(ServerState::Ready));
+    let memory_at = events
+        .iter()
+        .position(|e| matches!(e, ServerEvent::Memory(_)));
+    eprintln!("note: Ready at {ready_at:?}, the memory report at {memory_at:?}");
+    assert_eq!(report.n_ctx, Some(2048));
+    assert!(report.rows.len() <= 16);
+    let host = report
+        .rows
+        .iter()
+        .find(|r| r.kind == MemoryRowKind::Host)
+        .expect("a Host row");
+    assert_eq!(host.name, "Host");
+    assert_eq!(host.description, "", "the ready line carries no description");
+    assert!(
+        report
+            .rows
+            .iter()
+            .all(|r| r.kind != MemoryRowKind::Device && r.total_bytes.is_none()),
+        "the processor has no device row: {report:?}"
+    );
+    let model_size = std::fs::metadata(&gguf).expect("model").len();
+    let weights: u64 = report.rows.iter().map(|r| r.model_bytes).sum();
+    assert!(
+        weights >= model_size / 2 && weights <= model_size.saturating_mul(2),
+        "{weights} bytes of weights for a {model_size}-byte file"
+    );
+    // 2,048 tokens of f16 conversation memory (234,881,024 bytes for this model on b12110,
+    // see save_memory_starts_and_allocates_a_q8_0_memory).
+    let context: u64 = report.rows.iter().map(|r| r.context_bytes).sum();
+    assert!(context > 0, "{report:?}");
+    assert!(report.rows.iter().all(|r| r.compute_bytes < (1 << 40)));
+}

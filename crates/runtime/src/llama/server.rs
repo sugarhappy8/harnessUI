@@ -33,7 +33,7 @@ use super::failure::{LoadFailure, classify};
 use super::launch::{LaunchConfig, REDACTED, build_args, build_env_on};
 use super::lines::{LineReader, Tail};
 use super::props::Props;
-use super::protocol::{ChildState, LogEvent, LogInfo, parse_child_line};
+use super::protocol::{ChildState, LogEvent, LogInfo, MemoryReport, parse_child_line};
 use super::stage::LoadStage;
 use crate::spawn::{self, ManagedChild, SpawnSpec, StdioMode};
 
@@ -132,6 +132,11 @@ pub enum ServerEvent {
     /// A typed stage or transition that has no event of its own (0.0.5: the retries the
     /// supervisor adds, WP1a). The app shows it as the current [`LoadStage`].
     Stage(LoadStage),
+    /// Where the model went: the memory llama.cpp allocated per device, from the
+    /// managed-child `ready` line (item 6, I6-7). Sent once per ready line that carries a
+    /// readable report, from the stdout reader, so it may come just before or just after
+    /// [`ServerState::Ready`].
+    Memory(MemoryReport),
 }
 
 /// Why [`start`] failed. Every variant can report a classified [`LoadFailure`] and the
@@ -480,8 +485,13 @@ async fn read_stdout(stdout: tokio::process::ChildStdout, events: UnboundedSende
                 stage: current,
                 value: progress,
             },
-            // Readiness is decided by /health and /props; the state line is not an event.
-            Some(ChildState::Ready { .. }) => continue,
+            // Readiness is decided by /health and /props; the state line only reports where
+            // the model went.
+            Some(ChildState::Ready {
+                memory: Some(report),
+                ..
+            }) => ServerEvent::Memory(report),
+            Some(ChildState::Ready { memory: None, .. }) => continue,
             Some(ChildState::Sleeping | ChildState::Unknown(_)) | None => ServerEvent::Log(line),
         };
         let _ = events.send(event);
@@ -828,9 +838,9 @@ mod tests {
         assert_eq!(json["data"]["from"], "rocm");
         let state = serde_json::to_value(ServerEvent::State(ServerState::Ready)).expect("json");
         assert_eq!(state["data"]["state"], "ready");
-        let stage = serde_json::to_value(ServerEvent::Stage(LoadStage::RetryingWithLessGpu {
-            backend: BackendKind::Vulkan,
-        }))
+        let stage = serde_json::to_value(ServerEvent::Stage(LoadStage::with_less_gpu(
+            BackendKind::Vulkan,
+        )))
         .expect("json");
         assert_eq!(
             stage,

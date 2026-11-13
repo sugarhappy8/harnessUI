@@ -9,13 +9,13 @@
 //!
 //! The 0.0.6 load settings are typed fields with a fixed set of words each (0.0.6 D4):
 //! [`LaunchConfig::gpu`], [`LaunchConfig::save_memory`] and
-//! [`LaunchConfig::keep_in_memory`]. Nothing a user or a model types reaches the command
-//! line.
+//! [`LaunchConfig::keep_in_memory`], and Fine control ([`LaunchConfig::fine`], item 6:
+//! layers, expert parts, where the conversation memory lives, threads, fast attention and
+//! the memory As much as fits leaves free). Nothing a user or a model types reaches the
+//! command line: every value is a fixed word or a number from a typed choice.
 //!
-//! TODO(0.0.6): the optional fit estimate from the pinned build's `llama-fit-params` (spec
-//! WP1a) is not built; item 6 (finer offloading controls) will run it. Until then As much
-//! as fits leaves the split to llama-server's own `--fit on` at load time, and the fit
-//! marks before a load come from `models::fit`.
+//! The fit estimate before a load is [`super::fit_params`] (item 6); As much as fits still
+//! leaves the split to llama-server's own `--fit on` at load time.
 
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
@@ -75,6 +75,90 @@ pub enum GpuUse {
     Off,
 }
 
+/// Expert parts kept on the processor, for a mixture-of-experts model (Fine control,
+/// item 6). JSON `"none"`, `"all"` or `{"firstLayers":n}`.
+///
+/// - `None`: no flag; where the expert parts go follows the rest of the placement.
+/// - `All`: `--cpu-moe`, every layer's expert parts on the processor.
+/// - `FirstLayers(k)`: `--n-cpu-moe k`, the expert parts of the **first** `k` layers
+///   (llama.cpp: "keep the MoE weights of the first N layers in the CPU").
+///   `FirstLayers(0)` adds no flag and is no custom placement (a defence: the app's
+///   resolver never produces it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExpertsOnCpu {
+    /// No flag.
+    #[default]
+    None,
+    /// Every expert part on the processor (`--cpu-moe`).
+    All,
+    /// The expert parts of the first `n` layers on the processor (`--n-cpu-moe n`).
+    FirstLayers(u32),
+}
+
+/// Fast attention (`-fa`), Fine control item 6. JSON `"auto"`, `"on"` or `"off"`. With
+/// Save memory on, Save memory's own `-fa on` wins, whatever this says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FlashAttn {
+    /// No flag: llama.cpp's default (`auto`, on where the device supports it).
+    #[default]
+    Auto,
+    /// `-fa on`.
+    On,
+    /// `-fa off`.
+    Off,
+}
+
+/// Fine control as launch arguments (item 6, section 3.1). The default adds no argument
+/// at all, so a launch without Fine control is exactly the launch of 0.0.6 without item 6.
+/// The app's resolver fills only what reaches the command line for the chosen graphics
+/// card use; [`build_args`] still ignores every field that cannot apply (no device, Don't
+/// use it, Save memory), so a stray value never changes the arguments.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FineLaunch {
+    /// Layers on the graphics card, counted from the back by llama.cpp (`-ngl N`). A
+    /// custom placement: replaces All of it and As much as fits, and launches with
+    /// `--fit off`.
+    #[serde(default)]
+    pub gpu_layers: Option<u32>,
+    /// Expert parts on the processor (`--cpu-moe` or `--n-cpu-moe N`). Anything but
+    /// [`ExpertsOnCpu::None`] (and `FirstLayers(0)`) is a custom placement.
+    #[serde(default)]
+    pub experts_on_cpu: ExpertsOnCpu,
+    /// Keep the conversation memory in computer memory (`-nkvo`), with a graphics device.
+    #[serde(default)]
+    pub kv_in_computer_memory: bool,
+    /// Processor threads (`-t N`). `None` and `Some(0)` add nothing (llama.cpp's default).
+    #[serde(default)]
+    pub threads: Option<u16>,
+    /// Fast attention (`-fa on` / `-fa off`), when Save memory is off.
+    #[serde(default)]
+    pub flash_attn: FlashAttn,
+    /// Graphics memory As much as fits leaves free, in MiB (`-fitt N`). Only with As much
+    /// as fits, a device and no custom placement.
+    #[serde(default)]
+    pub fit_margin_mib: Option<u32>,
+}
+
+impl FineLaunch {
+    /// Whether layers or expert parts were chosen by hand: a custom placement, which
+    /// replaces All of it and As much as fits (`--fit off`, item 6 I6-2 and I6-3).
+    pub fn custom_placement(&self) -> bool {
+        self.gpu_layers.is_some() || self.experts_flag().is_some()
+    }
+
+    /// The expert flag and its number, when one applies.
+    fn experts_flag(&self) -> Option<Vec<String>> {
+        match self.experts_on_cpu {
+            ExpertsOnCpu::None | ExpertsOnCpu::FirstLayers(0) => None,
+            ExpertsOnCpu::All => Some(vec!["--cpu-moe".to_owned()]),
+            ExpertsOnCpu::FirstLayers(n) => Some(vec!["--n-cpu-moe".to_owned(), n.to_string()]),
+        }
+    }
+}
+
 /// Everything that varies between launches.
 ///
 /// `Debug` shows the API key as `<redacted>`, so a logged config never leaks it.
@@ -114,6 +198,11 @@ pub struct LaunchConfig {
     /// the command line; anything else is replaced by [`MODEL_ALIAS`] (see [`build_args`]).
     #[serde(default = "default_alias")]
     pub alias: String,
+    /// Fine control (item 6): placement, conversation memory place, threads, fast
+    /// attention and the margin As much as fits leaves free (see [`FineLaunch`]). The
+    /// default adds nothing.
+    #[serde(default)]
+    pub fine: FineLaunch,
 }
 
 fn default_alias() -> String {
@@ -140,6 +229,7 @@ impl Default for LaunchConfig {
             save_memory: false,
             keep_in_memory: false,
             alias: default_alias(),
+            fine: FineLaunch::default(),
         }
     }
 }
@@ -197,6 +287,7 @@ impl std::fmt::Debug for LaunchConfig {
             .field("save_memory", &self.save_memory)
             .field("keep_in_memory", &self.keep_in_memory)
             .field("alias", &self.alias)
+            .field("fine", &self.fine)
             .finish()
     }
 }
@@ -234,16 +325,33 @@ const MAX_ALIAS_LEN: usize = 64;
 /// ```text
 /// --host 127.0.0.1 --port P --no-webui --no-slots --offline --jinja --cors-origins none
 /// --no-context-shift --video-ffmpeg-dir no-ffmpeg -a harnessui-local -m M [--mmproj X]
-/// -c C -np 1
-/// --device D (-ngl all --fit off | --fit on | -ngl 0 --fit off)
-/// [-fa on -ctk q8_0 -ctv q8_0] [-lm mmap+mlock] --cache-ram R [--reasoning-budget B]
+/// -c C -np 1 --device D <placement> [--cpu-moe | --n-cpu-moe K] [-nkvo] [-t T]
+/// [-fa on | -fa off | -fa on -ctk q8_0 -ctv q8_0] [-lm mmap+mlock] --cache-ram R
+/// [--reasoning-budget B]
 /// ```
 ///
-/// `D` is the device, or `none` for the processor and for [`GpuUse::Off`]. Every word is
-/// fixed except the paths, the numbers, the device name from the probe and the alias, which
-/// is used only when it is one plain word (otherwise [`MODEL_ALIAS`]). Paths are converted
-/// lossily; [`super::server::start`] refuses paths that are not valid Unicode before it
-/// gets here.
+/// `D` is the device, or `none` for the processor and for [`GpuUse::Off`]. The placement
+/// and its extras (item 6, section 3.1; [`placement_args`]):
+///
+/// | Card use | device | Fine control           | placement and extras                 |
+/// |----------|--------|------------------------|--------------------------------------|
+/// | Off      | `none` | anything               | `-ngl 0 --fit off`                   |
+/// | All      | `none` | anything               | `-ngl all --fit off`                 |
+/// | Fit      | `none` | anything               | `--fit on`                           |
+/// | All      | yes    | no custom placement    | `-ngl all --fit off`                 |
+/// | Fit      | yes    | no custom placement    | `--fit on` [`-fitt M`]               |
+/// | All, Fit | yes    | layers N               | `-ngl N --fit off`                   |
+/// | All, Fit | yes    | expert parts only      | `-ngl all --fit off` + expert flag   |
+/// | All, Fit | yes    | layers N, expert parts | `-ngl N --fit off` + expert flag     |
+///
+/// `-nkvo` only with a device. Independent of the placement: `-t T` when threads are
+/// chosen; `-fa on` / `-fa off` when fast attention is chosen and Save memory is off; Save
+/// memory gives `-fa on -ctk q8_0 -ctv q8_0` whatever fast attention says.
+///
+/// Every word is fixed except the paths, the numbers, the device name from the probe and
+/// the alias, which is used only when it is one plain word (otherwise [`MODEL_ALIAS`]).
+/// Paths are converted lossily; [`super::server::start`] refuses paths that are not valid
+/// Unicode before it gets here.
 pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
     let port = cfg.port.to_string();
     let model = cfg.model.to_string_lossy();
@@ -282,12 +390,18 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
         "--device".to_owned(),
         device.to_owned(),
     ]);
-    let gpu: &[&str] = match cfg.gpu {
-        GpuUse::All => &["-ngl", "all", "--fit", "off"],
-        GpuUse::Fit => &["--fit", "on"],
-        GpuUse::Off => &["-ngl", "0", "--fit", "off"],
-    };
-    args.extend(gpu.iter().map(|s| (*s).to_owned()));
+    args.extend(placement_args(cfg));
+    if let Some(threads) = cfg.fine.threads.filter(|&t| t > 0) {
+        args.push("-t".to_owned());
+        args.push(threads.to_string());
+    }
+    if !cfg.save_memory {
+        match cfg.fine.flash_attn {
+            FlashAttn::Auto => {}
+            FlashAttn::On => args.extend(["-fa", "on"].map(str::to_owned)),
+            FlashAttn::Off => args.extend(["-fa", "off"].map(str::to_owned)),
+        }
+    }
     if cfg.save_memory {
         args.extend(
             [
@@ -312,6 +426,49 @@ pub fn build_args(cfg: &LaunchConfig) -> Vec<String> {
     args
 }
 
+/// The placement words after `--device D` (see the table of [`build_args`]): where the
+/// layers and expert parts go, `--fit`, the margin As much as fits leaves free and where
+/// the conversation memory lives. Without a device (the processor, Don't use it, or no
+/// probed device) only the card choice's own words of 0.0.6 without item 6 appear: Fine
+/// control's placement, expert flags, `-nkvo` and `-fitt` have nothing to act on.
+fn placement_args(cfg: &LaunchConfig) -> Vec<String> {
+    let words = |list: &[&str]| -> Vec<String> { list.iter().map(|s| (*s).to_owned()).collect() };
+    if !cfg.uses_device() {
+        return match cfg.gpu {
+            GpuUse::All => words(&["-ngl", "all", "--fit", "off"]),
+            GpuUse::Fit => words(&["--fit", "on"]),
+            GpuUse::Off => words(&["-ngl", "0", "--fit", "off"]),
+        };
+    }
+    let fine = &cfg.fine;
+    let mut args = if fine.custom_placement() {
+        let layers = fine
+            .gpu_layers
+            .map_or_else(|| "all".to_owned(), |n| n.to_string());
+        let mut args = vec!["-ngl".to_owned(), layers, "--fit".to_owned(), "off".to_owned()];
+        args.extend(fine.experts_flag().unwrap_or_default());
+        args
+    } else {
+        match cfg.gpu {
+            GpuUse::All => words(&["-ngl", "all", "--fit", "off"]),
+            GpuUse::Fit => {
+                let mut args = words(&["--fit", "on"]);
+                if let Some(margin) = fine.fit_margin_mib {
+                    args.push("-fitt".to_owned());
+                    args.push(margin.to_string());
+                }
+                args
+            }
+            // `uses_device` is false for Off; kept for completeness.
+            GpuUse::Off => words(&["-ngl", "0", "--fit", "off"]),
+        }
+    };
+    if fine.kv_in_computer_memory {
+        args.push("-nkvo".to_owned());
+    }
+    args
+}
+
 /// The `-a` value: `alias` when it is one plain word (lower-case ASCII letters, digits,
 /// `-`, `_` and `.`, starting with a letter or digit, at most [`MAX_ALIAS_LEN`]
 /// characters), otherwise [`MODEL_ALIAS`]. llama-server splits the value at commas into
@@ -329,17 +486,29 @@ fn alias_arg(alias: &str) -> &str {
     if plain { alias } else { MODEL_ALIAS }
 }
 
-/// The environment for `cfg`: the platform allowlist, the API key, managed-child mode and,
-/// for ROCm, `HIP_VISIBLE_DEVICES`. Nothing else from the app's environment is passed, so
-/// `LLAMA_ARG_*`, `GGML_*`, `HF_TOKEN` and `HF_ENDPOINT` never reach the server.
+/// Environment variable that stops ggml from starting a debugger when a llama.cpp program
+/// crashes (item 6, I6-8). Without it, ggml's `ggml_print_backtrace` on Linux starts `gdb`
+/// (then `lldb`) found on `PATH`, which attaches to the crashing process and prints its
+/// argument values: a process the app did not start through `crate::spawn`, reading the
+/// memory of a server that holds chat text and its API key. Any value turns it off; macOS
+/// uses a debugger only with `GGML_BACKTRACE_LLDB`, which the scrubbed environment never
+/// passes.
+pub const NO_BACKTRACE_ENV: &str = "GGML_NO_BACKTRACE";
+
+/// The environment for `cfg`: the platform allowlist, the API key, managed-child mode,
+/// [`NO_BACKTRACE_ENV`] and, for ROCm, `HIP_VISIBLE_DEVICES`. Nothing else from the app's
+/// environment is passed, so `LLAMA_ARG_*`, other `GGML_*`, `HF_TOKEN` and `HF_ENDPOINT`
+/// never reach the server.
 pub fn build_env(cfg: &LaunchConfig) -> EnvSpec {
     build_env_on(EnvSpec::minimal(), cfg)
 }
 
 /// [`build_env`] on top of a backend's own base environment
-/// ([`Backend::base_env`](crate::Backend::base_env)).
+/// ([`Backend::base_env`](crate::Backend::base_env), which carries [`NO_BACKTRACE_ENV`]
+/// too; it is set here again so a caller's other base cannot lose it).
 pub fn build_env_on(base: EnvSpec, cfg: &LaunchConfig) -> EnvSpec {
     let mut env = base
+        .set(NO_BACKTRACE_ENV, "1")
         .set(API_KEY_ENV, cfg.api_key.clone())
         .set(ROUTER_PORT_ENV, "1");
     if let Some(devices) = &cfg.hip_visible_devices {
@@ -717,6 +886,562 @@ mod tests {
             }
         }
         assert_eq!(seen, 3 * 2 * 2 * 3 * 2 * 2);
+    }
+
+    /// Fine control (item 6, section 3.1): every row of the table, as the exact words
+    /// between `--device` and `--cache-ram`. Each flag appears once at most, and the
+    /// fixed protections stay.
+    #[test]
+    fn args_are_exact_for_every_fine_control() {
+        let with = |gpu: GpuUse, fine: FineLaunch| LaunchConfig {
+            gpu,
+            fine,
+            ..config()
+        };
+        let layers = |n: u32| FineLaunch {
+            gpu_layers: Some(n),
+            ..FineLaunch::default()
+        };
+        let experts = |e: ExpertsOnCpu| FineLaunch {
+            experts_on_cpu: e,
+            ..FineLaunch::default()
+        };
+        let margin = |mib: u32| FineLaunch {
+            fit_margin_mib: Some(mib),
+            ..FineLaunch::default()
+        };
+        // Every Fine control value set at once.
+        let everything = FineLaunch {
+            gpu_layers: Some(30),
+            experts_on_cpu: ExpertsOnCpu::FirstLayers(5),
+            kv_in_computer_memory: true,
+            threads: Some(4),
+            flash_attn: FlashAttn::Off,
+            fit_margin_mib: Some(2048),
+        };
+        let cases: Vec<(&str, LaunchConfig, Vec<&str>)> = vec![
+            (
+                "All, no custom placement",
+                with(GpuUse::All, FineLaunch::default()),
+                vec!["--device", "Vulkan0", "-ngl", "all", "--fit", "off"],
+            ),
+            (
+                "As much as fits, no custom placement",
+                with(GpuUse::Fit, FineLaunch::default()),
+                vec!["--device", "Vulkan0", "--fit", "on"],
+            ),
+            (
+                "As much as fits with Leave free",
+                with(GpuUse::Fit, margin(2048)),
+                vec!["--device", "Vulkan0", "--fit", "on", "-fitt", "2048"],
+            ),
+            (
+                "Leave free with All of it adds nothing",
+                with(GpuUse::All, margin(4096)),
+                vec!["--device", "Vulkan0", "-ngl", "all", "--fit", "off"],
+            ),
+            (
+                "layers with All",
+                with(GpuUse::All, layers(30)),
+                vec!["--device", "Vulkan0", "-ngl", "30", "--fit", "off"],
+            ),
+            (
+                "layers with As much as fits: no -fitt with a custom placement",
+                with(
+                    GpuUse::Fit,
+                    FineLaunch {
+                        fit_margin_mib: Some(512),
+                        ..layers(30)
+                    },
+                ),
+                vec!["--device", "Vulkan0", "-ngl", "30", "--fit", "off"],
+            ),
+            (
+                "no layers on the card, with a device",
+                with(GpuUse::All, layers(0)),
+                vec!["--device", "Vulkan0", "-ngl", "0", "--fit", "off"],
+            ),
+            (
+                "every expert part with All",
+                with(GpuUse::All, experts(ExpertsOnCpu::All)),
+                vec![
+                    "--device",
+                    "Vulkan0",
+                    "-ngl",
+                    "all",
+                    "--fit",
+                    "off",
+                    "--cpu-moe",
+                ],
+            ),
+            (
+                "the first expert parts with As much as fits",
+                with(GpuUse::Fit, experts(ExpertsOnCpu::FirstLayers(20))),
+                vec![
+                    "--device",
+                    "Vulkan0",
+                    "-ngl",
+                    "all",
+                    "--fit",
+                    "off",
+                    "--n-cpu-moe",
+                    "20",
+                ],
+            ),
+            (
+                "layers and expert parts",
+                with(
+                    GpuUse::Fit,
+                    FineLaunch {
+                        experts_on_cpu: ExpertsOnCpu::FirstLayers(5),
+                        ..layers(40)
+                    },
+                ),
+                vec![
+                    "--device",
+                    "Vulkan0",
+                    "-ngl",
+                    "40",
+                    "--fit",
+                    "off",
+                    "--n-cpu-moe",
+                    "5",
+                ],
+            ),
+            (
+                "layers and every expert part",
+                with(
+                    GpuUse::All,
+                    FineLaunch {
+                        experts_on_cpu: ExpertsOnCpu::All,
+                        ..layers(40)
+                    },
+                ),
+                vec![
+                    "--device",
+                    "Vulkan0",
+                    "-ngl",
+                    "40",
+                    "--fit",
+                    "off",
+                    "--cpu-moe",
+                ],
+            ),
+            (
+                "FirstLayers(0) adds nothing with As much as fits",
+                with(GpuUse::Fit, experts(ExpertsOnCpu::FirstLayers(0))),
+                vec!["--device", "Vulkan0", "--fit", "on"],
+            ),
+            (
+                "FirstLayers(0) adds nothing with All",
+                with(GpuUse::All, experts(ExpertsOnCpu::FirstLayers(0))),
+                vec!["--device", "Vulkan0", "-ngl", "all", "--fit", "off"],
+            ),
+            (
+                "conversation memory in computer memory with All",
+                with(
+                    GpuUse::All,
+                    FineLaunch {
+                        kv_in_computer_memory: true,
+                        ..FineLaunch::default()
+                    },
+                ),
+                vec!["--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-nkvo"],
+            ),
+            (
+                "conversation memory in computer memory with As much as fits",
+                with(
+                    GpuUse::Fit,
+                    FineLaunch {
+                        kv_in_computer_memory: true,
+                        ..margin(512)
+                    },
+                ),
+                vec!["--device", "Vulkan0", "--fit", "on", "-fitt", "512", "-nkvo"],
+            ),
+            (
+                "threads",
+                with(
+                    GpuUse::All,
+                    FineLaunch {
+                        threads: Some(8),
+                        ..FineLaunch::default()
+                    },
+                ),
+                vec![
+                    "--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-t", "8",
+                ],
+            ),
+            (
+                "zero threads adds nothing",
+                with(
+                    GpuUse::All,
+                    FineLaunch {
+                        threads: Some(0),
+                        ..FineLaunch::default()
+                    },
+                ),
+                vec!["--device", "Vulkan0", "-ngl", "all", "--fit", "off"],
+            ),
+            (
+                "fast attention on",
+                with(
+                    GpuUse::All,
+                    FineLaunch {
+                        flash_attn: FlashAttn::On,
+                        ..FineLaunch::default()
+                    },
+                ),
+                vec![
+                    "--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-fa", "on",
+                ],
+            ),
+            (
+                "fast attention off",
+                with(
+                    GpuUse::All,
+                    FineLaunch {
+                        flash_attn: FlashAttn::Off,
+                        ..FineLaunch::default()
+                    },
+                ),
+                vec![
+                    "--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-fa", "off",
+                ],
+            ),
+            (
+                "Save memory wins over fast attention off",
+                LaunchConfig {
+                    save_memory: true,
+                    ..with(
+                        GpuUse::All,
+                        FineLaunch {
+                            flash_attn: FlashAttn::Off,
+                            ..FineLaunch::default()
+                        },
+                    )
+                },
+                vec![
+                    "--device", "Vulkan0", "-ngl", "all", "--fit", "off", "-fa", "on", "-ctk",
+                    "q8_0", "-ctv", "q8_0",
+                ],
+            ),
+            (
+                "everything with a device",
+                with(GpuUse::Fit, everything.clone()),
+                vec![
+                    "--device",
+                    "Vulkan0",
+                    "-ngl",
+                    "30",
+                    "--fit",
+                    "off",
+                    "--n-cpu-moe",
+                    "5",
+                    "-nkvo",
+                    "-t",
+                    "4",
+                    "-fa",
+                    "off",
+                ],
+            ),
+            (
+                "Don't use it with everything set adds only -t and -fa",
+                with(GpuUse::Off, everything.clone()),
+                vec![
+                    "--device", "none", "-ngl", "0", "--fit", "off", "-t", "4", "-fa", "off",
+                ],
+            ),
+            (
+                "no device with All keeps the words of 0.0.6 without item 6",
+                LaunchConfig {
+                    device: None,
+                    ..with(GpuUse::All, everything.clone())
+                },
+                vec![
+                    "--device", "none", "-ngl", "all", "--fit", "off", "-t", "4", "-fa", "off",
+                ],
+            ),
+            (
+                "no device with As much as fits keeps the words of 0.0.6 without item 6",
+                LaunchConfig {
+                    device: None,
+                    ..with(GpuUse::Fit, everything.clone())
+                },
+                vec!["--device", "none", "--fit", "on", "-t", "4", "-fa", "off"],
+            ),
+            (
+                "an empty device name is no device",
+                LaunchConfig {
+                    device: Some(String::new()),
+                    ..with(GpuUse::Fit, everything.clone())
+                },
+                vec!["--device", "none", "--fit", "on", "-t", "4", "-fa", "off"],
+            ),
+        ];
+        for (name, cfg, want) in cases {
+            assert_eq!(choice_args(&cfg), want, "{name}");
+            let args = build_args(&cfg);
+            for flag in [
+                "-ngl",
+                "--fit",
+                "--cpu-moe",
+                "--n-cpu-moe",
+                "-nkvo",
+                "-t",
+                "-fa",
+                "-fitt",
+                "--device",
+                "-c",
+            ] {
+                let n = args.iter().filter(|a| *a == flag).count();
+                assert!(n <= 1, "{name}: {flag} {n} times in {args:?}");
+            }
+            let joined = args.join(" ");
+            for fixed in [
+                "--host 127.0.0.1 --port 40123 --no-webui --no-slots --offline --jinja",
+                "--cors-origins none --no-context-shift --video-ffmpeg-dir no-ffmpeg",
+                "-a harnessui-local",
+                "-c 8192 -np 1 --device",
+                "--cache-ram 512",
+            ] {
+                assert!(joined.contains(fixed), "{name}: {fixed} missing from {joined}");
+            }
+        }
+    }
+
+    /// The whole list with every Fine control value and every other option, so the order
+    /// of section 3.1 is pinned end to end.
+    #[test]
+    fn fine_control_args_come_in_the_documented_order() {
+        let cfg = LaunchConfig {
+            mmproj: Some(PathBuf::from("/models/p.gguf")),
+            keep_in_memory: true,
+            reasoning_budget: Some(0),
+            fine: FineLaunch {
+                gpu_layers: Some(12),
+                experts_on_cpu: ExpertsOnCpu::All,
+                kv_in_computer_memory: true,
+                threads: Some(6),
+                flash_attn: FlashAttn::On,
+                fit_margin_mib: None,
+            },
+            ..config()
+        };
+        assert_eq!(
+            build_args(&cfg).join(" "),
+            "--host 127.0.0.1 --port 40123 --no-webui --no-slots --offline --jinja \
+             --cors-origins none --no-context-shift --video-ffmpeg-dir no-ffmpeg \
+             -a harnessui-local -m /models/m.gguf --mmproj /models/p.gguf -c 8192 -np 1 \
+             --device Vulkan0 -ngl 12 --fit off --cpu-moe -nkvo -t 6 -fa on -lm mmap+mlock \
+             --cache-ram 512 --reasoning-budget 0"
+        );
+    }
+
+    /// A custom placement is chosen layers or expert parts that move at least one layer.
+    #[test]
+    fn what_counts_as_a_custom_placement() {
+        assert!(!FineLaunch::default().custom_placement());
+        for custom in [
+            FineLaunch {
+                gpu_layers: Some(0),
+                ..FineLaunch::default()
+            },
+            FineLaunch {
+                experts_on_cpu: ExpertsOnCpu::All,
+                ..FineLaunch::default()
+            },
+            FineLaunch {
+                experts_on_cpu: ExpertsOnCpu::FirstLayers(1),
+                ..FineLaunch::default()
+            },
+        ] {
+            assert!(custom.custom_placement(), "{custom:?}");
+        }
+        for plain in [
+            FineLaunch {
+                experts_on_cpu: ExpertsOnCpu::FirstLayers(0),
+                ..FineLaunch::default()
+            },
+            FineLaunch {
+                kv_in_computer_memory: true,
+                threads: Some(4),
+                flash_attn: FlashAttn::Off,
+                fit_margin_mib: Some(1024),
+                ..FineLaunch::default()
+            },
+        ] {
+            assert!(!plain.custom_placement(), "{plain:?}");
+        }
+    }
+
+    /// A launch config written by 0.0.6 without item 6 still reads (Fine control at its
+    /// defaults, so the same arguments), and one written with Fine control reads into a
+    /// struct that has no `fine` (the other fields kept). The JSON shapes are the
+    /// contract's (item 6, section 2.1).
+    #[test]
+    fn fine_launch_old_json_reads() {
+        let mut v = serde_json::to_value(config()).expect("json");
+        assert!(
+            v.as_object_mut()
+                .expect("object")
+                .remove("fine")
+                .is_some()
+        );
+        let back: LaunchConfig = serde_json::from_value(v).expect("reads");
+        assert_eq!(back, config());
+        assert_eq!(back.fine, FineLaunch::default());
+        assert_eq!(build_args(&back), build_args(&config()));
+
+        /// `LaunchConfig` as 0.0.6 had it before item 6.
+        #[derive(Deserialize)]
+        #[allow(dead_code)] // only some fields are compared
+        struct Before {
+            model: PathBuf,
+            mmproj: Option<PathBuf>,
+            ctx: u32,
+            device: Option<String>,
+            cache_ram_mib: u32,
+            reasoning_budget: Option<i32>,
+            port: u16,
+            api_key: String,
+            hip_visible_devices: Option<String>,
+            #[serde(default)]
+            gpu: GpuUse,
+            #[serde(default)]
+            save_memory: bool,
+            #[serde(default)]
+            keep_in_memory: bool,
+            #[serde(default = "default_alias")]
+            alias: String,
+        }
+        let with_fine = LaunchConfig {
+            gpu: GpuUse::Fit,
+            save_memory: true,
+            fine: FineLaunch {
+                gpu_layers: Some(30),
+                experts_on_cpu: ExpertsOnCpu::FirstLayers(20),
+                kv_in_computer_memory: true,
+                threads: Some(8),
+                flash_attn: FlashAttn::Off,
+                fit_margin_mib: Some(2048),
+            },
+            ..config()
+        };
+        let json = serde_json::to_value(&with_fine).expect("json");
+        assert_eq!(
+            json["fine"],
+            serde_json::json!({
+                "gpuLayers": 30,
+                "expertsOnCpu": {"firstLayers": 20},
+                "kvInComputerMemory": true,
+                "threads": 8,
+                "flashAttn": "off",
+                "fitMarginMib": 2048,
+            })
+        );
+        let before: Before = serde_json::from_value(json.clone()).expect("reads");
+        assert_eq!(before.model, with_fine.model);
+        assert_eq!(before.ctx, 8192);
+        assert_eq!(before.gpu, GpuUse::Fit);
+        assert!(before.save_memory);
+        assert_eq!(before.alias, MODEL_ALIAS);
+        let again: LaunchConfig = serde_json::from_value(json).expect("reads");
+        assert_eq!(again, with_fine);
+
+        // Each field may be absent; the shapes of the two enums.
+        let empty: FineLaunch = serde_json::from_str("{}").expect("reads");
+        assert_eq!(empty, FineLaunch::default());
+        for (value, json) in [
+            (ExpertsOnCpu::None, r#""none""#),
+            (ExpertsOnCpu::All, r#""all""#),
+            (ExpertsOnCpu::FirstLayers(3), r#"{"firstLayers":3}"#),
+        ] {
+            assert_eq!(serde_json::to_string(&value).expect("json"), json);
+            assert_eq!(serde_json::from_str::<ExpertsOnCpu>(json).expect("reads"), value);
+        }
+        for (value, json) in [
+            (FlashAttn::Auto, r#""auto""#),
+            (FlashAttn::On, r#""on""#),
+            (FlashAttn::Off, r#""off""#),
+        ] {
+            assert_eq!(serde_json::to_string(&value).expect("json"), json);
+            assert_eq!(serde_json::from_str::<FlashAttn>(json).expect("reads"), value);
+        }
+    }
+
+    /// `Debug` shows Fine control (and still hides the key).
+    #[test]
+    fn debug_output_shows_fine_control() {
+        let cfg = LaunchConfig {
+            fine: FineLaunch {
+                threads: Some(3),
+                ..FineLaunch::default()
+            },
+            ..config()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(shown.contains("fine: FineLaunch {"), "{shown}");
+        assert!(shown.contains("threads: Some(3)"), "{shown}");
+        assert!(!shown.contains("api_key: \"k\""), "{shown}");
+    }
+
+    /// Every llama.cpp program the app starts gets `GGML_NO_BACKTRACE=1`, so a crash never
+    /// starts a debugger that reads its memory (item 6, I6-8): the device probe and
+    /// fit-params (both from [`Backend::base_env`](crate::Backend::base_env)), llama-server
+    /// on top of it, and llama-server through [`build_env`] alone. Even when the app's own
+    /// environment asks for a debugger.
+    #[test]
+    fn env_turns_off_debugger_backtraces() {
+        use crate::llama::backend::{Backend, BackendKind, BackendSource};
+        let parent: Vec<(OsString, OsString)> = [
+            ("PATH", "/usr/bin"),
+            ("GGML_BACKTRACE_LLDB", "1"),
+            ("GGML_NO_BACKTRACE", ""),
+        ]
+        .into_iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+        .collect();
+        let backend = Backend {
+            kind: BackendKind::Rocm,
+            dir: PathBuf::from("/rt"),
+            server: PathBuf::from("/rt/llama-server"),
+            fit_params: Some(PathBuf::from("/rt/llama-fit-params")),
+            build: "b1".into(),
+            source: BackendSource::Installed,
+        };
+        let measure = crate::llama::fit_params::MeasureConfig {
+            model: PathBuf::from("/m.gguf"),
+            ctx: 4096,
+            device: Some("ROCm0".into()),
+            layers: crate::llama::fit_params::MeasureLayers::All,
+            experts_on_cpu: ExpertsOnCpu::None,
+            kv_in_computer_memory: false,
+            save_memory: false,
+            flash_attn: FlashAttn::Auto,
+            hip_visible_devices: Some("1".into()),
+        };
+        let environments = [
+            ("probe", backend.base_env()),
+            ("llama-server", build_env_on(backend.base_env(), &config())),
+            ("llama-server alone", build_env(&config())),
+            (
+                "fit-params",
+                crate::llama::fit_params::measure_env(&backend, &measure),
+            ),
+        ];
+        for (name, env) in environments {
+            let resolved = env.resolve_from(parent.clone());
+            let get = |key: &str| {
+                resolved
+                    .iter()
+                    .filter(|(k, _)| k == key)
+                    .map(|(_, v)| v.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(get("GGML_NO_BACKTRACE"), vec!["1"], "{name}");
+            assert!(get("GGML_BACKTRACE_LLDB").is_empty(), "{name}");
+        }
     }
 
     #[test]

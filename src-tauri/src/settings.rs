@@ -69,21 +69,10 @@ pub async fn local_model_settings(app: &AppHandle) -> LocalModelSettings {
         .unwrap_or_default()
 }
 
-/// Remembers a model file so it appears in the model picker.
+/// Remembers a model file so it appears first in the model picker: its canonical path,
+/// with any older spelling of the same file dropped (0.0.6 item 8, `model_options`).
 pub async fn remember_local_model(state: &AppState, path: &str) {
-    let mut recent: Vec<String> = state
-        .store
-        .get_setting(RECENT_LOCAL_MODELS)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    recent.retain(|p| p != path);
-    recent.insert(0, path.to_string());
-    recent.truncate(20);
-    if let Err(e) = state.store.set_setting(RECENT_LOCAL_MODELS, &recent).await {
-        tracing::warn!("could not save recent models: {e}");
-    }
+    crate::model_options::remember(&state.store, path).await;
 }
 
 #[cfg(test)]

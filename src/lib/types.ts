@@ -235,6 +235,9 @@ export interface ModelOption {
   label: string;
   source: "local" | "provider";
   contextLength: number | null;
+  /** [0.0.6 item 8] The end of a local file's folder ("Downloads\models"), only when another
+   *  file in the list has the same name. */
+  hint?: string;
 }
 
 /**

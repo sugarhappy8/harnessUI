@@ -49,12 +49,35 @@ pub enum LoadStage {
         /// runs everything on the processor).
         backend: BackendKind,
     },
+    /// Trying again on the same backend with fast attention off, after a failure with it
+    /// on that it can cause on a graphics card (item 6, section 3.3; the failures Save
+    /// memory can cause, [`LoadFailure::save_memory_may_be_the_cause`]). Sent by the
+    /// supervisor as [`ServerEvent::Stage`]. JSON
+    /// `{"kind":"retryingWithoutFastAttention","backend":"vulkan"}`.
+    RetryingWithoutFastAttention {
+        /// The backend being retried.
+        backend: BackendKind,
+    },
     /// Trying again on the same backend with only as much of the model on the graphics
-    /// card as fits, after it ran out of memory with all of it there. Sent by the
-    /// supervisor as [`ServerEvent::Stage`].
+    /// card as fits, after it ran out of memory with all of it there, or with the layers or
+    /// expert parts chosen in Fine control (item 6). Sent by the supervisor as
+    /// [`ServerEvent::Stage`]. JSON `{"kind":"retryingWithLessGpu","backend":"vulkan"}`, and
+    /// after a custom placement `{"kind":"retryingWithLessGpu","backend":"vulkan",
+    /// "custom":true,"chosenLayers":40}`; JSON without the two fields still reads.
     RetryingWithLessGpu {
         /// The backend being retried.
         backend: BackendKind,
+        /// The placement that ran out of memory was chosen in Fine control.
+        #[serde(default, skip_serializing_if = "is_false")]
+        custom: bool,
+        /// The number of layers chosen in Fine control, when one was (`None` with expert
+        /// parts only, and without `custom`).
+        #[serde(
+            default,
+            rename = "chosenLayers",
+            skip_serializing_if = "Option::is_none"
+        )]
+        chosen_layers: Option<u32>,
     },
     /// Moving to the next backend down after `from` failed. Sent by the supervisor as
     /// [`ServerEvent::SteppedDown`], never as [`ServerEvent::Stage`].
@@ -100,6 +123,7 @@ impl LoadStage {
             ServerEvent::State(_)
             | ServerEvent::Log(_)
             | ServerEvent::Offloaded { .. }
+            | ServerEvent::Memory(_)
             | ServerEvent::Exited { .. } => None,
         }
     }
@@ -111,10 +135,27 @@ impl LoadStage {
         matches!(
             self,
             Self::RetryingWithoutSaveMemory { .. }
+                | Self::RetryingWithoutFastAttention { .. }
                 | Self::RetryingWithLessGpu { .. }
                 | Self::SteppingDown { .. }
         )
     }
+
+    /// [`LoadStage::RetryingWithLessGpu`] after All of it ran out of memory (no custom
+    /// placement): the stage of 0.0.6 without item 6.
+    pub fn with_less_gpu(backend: BackendKind) -> Self {
+        Self::RetryingWithLessGpu {
+            backend,
+            custom: false,
+            chosen_layers: None,
+        }
+    }
+}
+
+/// For `skip_serializing_if`: leave a `false` flag out of the JSON.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes a reference
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]
@@ -176,8 +217,14 @@ mod tests {
             LoadStage::RetryingWithoutSaveMemory {
                 backend: BackendKind::Metal,
             },
+            LoadStage::with_less_gpu(BackendKind::Vulkan),
+            LoadStage::RetryingWithoutFastAttention {
+                backend: BackendKind::Vulkan,
+            },
             LoadStage::RetryingWithLessGpu {
                 backend: BackendKind::Vulkan,
+                custom: true,
+                chosen_layers: Some(40),
             },
         ] {
             assert_eq!(
@@ -193,6 +240,7 @@ mod tests {
                 layers: 1,
                 total: 2,
             },
+            ServerEvent::Memory(crate::llama::protocol::MemoryReport::default()),
             ServerEvent::Exited { code: Some(0) },
         ] {
             assert_eq!(LoadStage::of_event(&quiet), None, "{quiet:?}");
@@ -205,8 +253,14 @@ mod tests {
             LoadStage::RetryingWithoutSaveMemory {
                 backend: BackendKind::Vulkan,
             },
+            LoadStage::with_less_gpu(BackendKind::Vulkan),
             LoadStage::RetryingWithLessGpu {
                 backend: BackendKind::Vulkan,
+                custom: true,
+                chosen_layers: None,
+            },
+            LoadStage::RetryingWithoutFastAttention {
+                backend: BackendKind::Metal,
             },
             LoadStage::SteppingDown {
                 from: BackendKind::Vulkan,
@@ -250,10 +304,30 @@ mod tests {
                 r#"{"kind":"retryingWithoutSaveMemory","backend":"vulkan"}"#,
             ),
             (
-                LoadStage::RetryingWithLessGpu {
-                    backend: BackendKind::Metal,
-                },
+                LoadStage::with_less_gpu(BackendKind::Metal),
                 r#"{"kind":"retryingWithLessGpu","backend":"metal"}"#,
+            ),
+            (
+                LoadStage::RetryingWithLessGpu {
+                    backend: BackendKind::Vulkan,
+                    custom: true,
+                    chosen_layers: Some(40),
+                },
+                r#"{"kind":"retryingWithLessGpu","backend":"vulkan","custom":true,"chosenLayers":40}"#,
+            ),
+            (
+                LoadStage::RetryingWithLessGpu {
+                    backend: BackendKind::Vulkan,
+                    custom: true,
+                    chosen_layers: None,
+                },
+                r#"{"kind":"retryingWithLessGpu","backend":"vulkan","custom":true}"#,
+            ),
+            (
+                LoadStage::RetryingWithoutFastAttention {
+                    backend: BackendKind::Vulkan,
+                },
+                r#"{"kind":"retryingWithoutFastAttention","backend":"vulkan"}"#,
             ),
             (
                 LoadStage::SteppingDown {
@@ -269,5 +343,41 @@ mod tests {
             let back: LoadStage = serde_json::from_str(json).expect("reads");
             assert_eq!(back, stage);
         }
+    }
+
+    /// The status saved or sent by 0.0.6 without item 6 still reads: `retryingWithLessGpu`
+    /// without `custom` and `chosenLayers` is the plain step to As much as fits.
+    #[test]
+    fn retrying_with_less_gpu_old_json_reads() {
+        let old: LoadStage =
+            serde_json::from_str(r#"{"kind":"retryingWithLessGpu","backend":"vulkan"}"#)
+                .expect("reads");
+        assert_eq!(old, LoadStage::with_less_gpu(BackendKind::Vulkan));
+        assert_eq!(
+            old,
+            LoadStage::RetryingWithLessGpu {
+                backend: BackendKind::Vulkan,
+                custom: false,
+                chosen_layers: None,
+            }
+        );
+        // A list of adjustments as the app kept it before item 6.
+        let list: Vec<LoadStage> = serde_json::from_str(
+            r#"[{"kind":"retryingWithoutSaveMemory","backend":"cpu"},
+                {"kind":"retryingWithLessGpu","backend":"metal"}]"#,
+        )
+        .expect("reads");
+        assert_eq!(list[1], LoadStage::with_less_gpu(BackendKind::Metal));
+        // `custom` false never appears in the JSON, so a 0.0.6 reader without item 6 sees
+        // exactly what it used to.
+        assert_eq!(
+            serde_json::to_string(&LoadStage::RetryingWithLessGpu {
+                backend: BackendKind::Cuda,
+                custom: false,
+                chosen_layers: None,
+            })
+            .expect("json"),
+            r#"{"kind":"retryingWithLessGpu","backend":"cuda"}"#
+        );
     }
 }

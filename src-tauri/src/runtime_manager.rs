@@ -719,12 +719,7 @@ impl RuntimeManager {
             // A typed transition with no event of its own (WP1a's retries): shown as the
             // current stage, and kept as an adjustment of this load.
             ServerEvent::Stage(stage) => self.update(|s| {
-                if matches!(
-                    stage,
-                    LoadStage::RetryingWithoutSaveMemory { .. }
-                        | LoadStage::RetryingWithLessGpu { .. }
-                        | LoadStage::SteppingDown { .. }
-                ) {
+                if stage.is_adjustment() {
                     s.adjustments.push(stage.clone());
                 }
                 s.load_stage = Some(stage);
@@ -734,6 +729,7 @@ impl RuntimeManager {
                 self.update(|s| mark_failed(s, err));
             }
             ServerEvent::State(_) | ServerEvent::Exited { .. } => {}
+            ServerEvent::Memory(_) => {}
         }
     }
 

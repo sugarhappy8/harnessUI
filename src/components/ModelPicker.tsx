@@ -1,7 +1,9 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { DropdownMenu } from "radix-ui";
 import { Boxes, ChevronDown, FolderOpen, HardDrive, Globe, Settings2 } from "lucide-react";
-import { useApp } from "../store/app";
+import { refreshModelsAfterDownloads, useApp } from "../store/app";
+import type { ModelOption } from "../lib/types";
+import { visiblePath } from "./FolderChip";
 import { openModelSettings } from "./ModelSettings";
 
 function labelFor(ref: string | null, options: { ref: string; label: string }[]): string {
@@ -12,6 +14,12 @@ function labelFor(ref: string | null, options: { ref: string; label: string }[])
   return ref;
 }
 
+/** [0.0.6 item 8] How a local entry reads: its file name, and the end of its folder when
+ *  another file in the list has the same name, each with invisible characters as codes. */
+function entryWords(o: ModelOption): string {
+  return o.hint ? `${visiblePath(o.label)} · ${visiblePath(o.hint)}` : visiblePath(o.label);
+}
+
 export function ModelPicker() {
   const { detail, modelOptions, refreshModelOptions, pickModel, openModelFile } = useApp();
   const current = detail?.chat.modelRef ?? null;
@@ -20,6 +28,20 @@ export function ModelPicker() {
 
   // The settings panel opens as the menu closes; the menu must not take the focus back.
   const openingSettings = useRef(false);
+
+  // [0.0.6 item 8] A finished download shows up in the list without the menu being reopened.
+  useEffect(() => {
+    let alive = true;
+    let stop: (() => void) | undefined;
+    void refreshModelsAfterDownloads().then((u) => {
+      if (alive) stop = u;
+      else u();
+    });
+    return () => {
+      alive = false;
+      stop?.();
+    };
+  }, []);
 
   const local = modelOptions.filter((o) => o.source === "local");
   const remote = modelOptions.filter((o) => o.source === "provider");
@@ -36,7 +58,7 @@ export function ModelPicker() {
           }
           aria-label="Model for this chat"
         >
-          <span className="truncate">{labelFor(current, modelOptions)}</span>
+          <span className="truncate">{visiblePath(labelFor(current, modelOptions))}</span>
           <ChevronDown size={14} className="shrink-0 text-fg-muted" aria-hidden />
         </button>
       </DropdownMenu.Trigger>
@@ -59,16 +81,23 @@ export function ModelPicker() {
             <div key={o.ref} className="flex items-center gap-0.5">
               <DropdownMenu.Item
                 onSelect={() => void choose(o.ref)}
+                title={visiblePath(o.ref.slice("local:".length))}
                 className="flex min-w-0 flex-1 cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none data-[highlighted]:bg-bg-muted"
               >
-                <HardDrive size={14} aria-hidden /> <span className="truncate">{o.label}</span>
+                <HardDrive size={14} aria-hidden /> <span className="truncate">{visiblePath(o.label)}</span>
+                {o.hint && (
+                  <>
+                    {" "}
+                    <span className="max-w-[50%] shrink-0 truncate text-xs text-fg-muted">· {visiblePath(o.hint)}</span>
+                  </>
+                )}
               </DropdownMenu.Item>
               <DropdownMenu.Item
                 onSelect={() => {
                   openingSettings.current = true;
                   openModelSettings(o.ref.slice("local:".length));
                 }}
-                aria-label={`Settings for this model: ${o.label}`}
+                aria-label={`Settings for this model: ${entryWords(o)}`}
                 title="Settings for this model"
                 className="shrink-0 cursor-default rounded-lg p-1.5 text-fg-muted outline-none data-[highlighted]:bg-bg-muted data-[highlighted]:text-fg"
               >

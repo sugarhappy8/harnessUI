@@ -625,18 +625,41 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
 
 /// A model-written summary with its hidden characters shown as visible escapes, as approval
 /// cards show them ([`policy::sanitize::visible`]: zero-width, joining, bidirectional and tag
-/// characters, which can carry text a person cannot see), and the soft hyphen and the
-/// combining grapheme joiner as well. Windows line ends become plain ones first.
+/// characters, which can carry text a person cannot see), and the rest of the format
+/// characters and default-ignorable code points as well ([`hidden_in_summary`]). Windows
+/// line ends become plain ones first.
 fn visible_summary(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in policy::sanitize::visible(&text.replace("\r\n", "\n")).chars() {
-        if matches!(c, '\u{00AD}' | '\u{034F}') {
+        if hidden_in_summary(c) {
             out.push_str(&format!("\\u{{{:04X}}}", c as u32));
         } else {
             out.push(c);
         }
     }
     out
+}
+
+/// Characters a summary shows as escapes beyond [`policy::sanitize::visible`]'s list: every
+/// other format character (general category Cf, Unicode 15.1) and default-ignorable code
+/// point, and the blank Braille pattern, which shows as a space but is not one. Any of them
+/// inside "[App note]" would otherwise reach the system message unseen.
+fn hidden_in_summary(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD               // soft hyphen
+        | 0x034F             // combining grapheme joiner
+        | 0x0600..=0x0605    // Arabic number signs (prepended marks)
+        | 0x06DD             // Arabic end of ayah
+        | 0x070F             // Syriac abbreviation mark
+        | 0x0890..=0x0891    // Arabic pound and piastre marks above
+        | 0x08E2             // Arabic disputed end of ayah
+        | 0x2800             // Braille pattern blank
+        | 0xFFF0..=0xFFF8    // reserved, default ignorable
+        | 0x110BD | 0x110CD  // Kaithi number signs
+        | 0x13430..=0x1343F  // Egyptian hieroglyph format controls
+        | 0x1BCA0..=0x1BCA3  // shorthand format controls
+        | 0xE0080..=0xE00FF  // reserved, default ignorable (after the tag characters)
+        | 0xE01F0..=0xE0FFF) // reserved, default ignorable (after the variation selectors)
 }
 
 /// A model-written summary as the summary block shows it: every "[App note]" marker (any
