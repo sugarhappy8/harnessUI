@@ -561,7 +561,8 @@ fn find_score(listed: &Listed<'_>, wording: &super::Wording) -> u32 {
     // Its group: the words that mean the group, and the group's name.
     let group = tool_catalog::group(&tool.server).filter(|_| listed.builtin);
     if let Some(group) = group {
-        score += (3 * wording.count(group.strong)).min(6) + wording.count(group.weak).min(2);
+        let (strong, weak) = super::listed_words(group, wording);
+        score += (3 * strong).min(6) + weak.min(2);
     }
     let label = group.map(|g| super::words_of(g.label)).unwrap_or_default();
     if own

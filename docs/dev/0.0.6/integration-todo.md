@@ -177,8 +177,9 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   (`permissions.rs`), masked in rea's output. Else today's `/tmp/rea-ghidra-…` fallback, a
   documented limit. `-XX:-UsePerfData` cannot be passed (rea empties the Java option variables
   outside Windows): documented. Tests in `layout.rs`, `env.rs`, `process.rs`, `results.rs`;
-  `real_rea.rs rea_with_ghidra_under_a_dot_folder` is strict now. The StartGuard stop path
-  (rea-start-guard, below) does not remove the folder yet. Final round: the floor was 1 GiB,
+  `real_rea.rs rea_with_ghidra_under_a_dot_folder` is strict now. Done in rea-start-guard
+  (below): a start cut short removes the folder once its half-started rea has ended; until
+  then `Status.ending_starts` keeps a stop from removing it. Final round: the floor was 1 GiB,
   which left out computers with less than about 11 GB of memory (systemd gives the runtime
   folder a tenth of it); 256 MiB now. A stop that lands while a start prepares the folder
   undoes that start before rea is launched (it used to remove the folder under a rea that

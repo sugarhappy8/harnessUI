@@ -1026,6 +1026,17 @@ fn a_search_is_about_reverse_engineering_only_through_its_strong_words() {
     );
     let text = render("decompile the program", &[], &all, &off, &[], &validate);
     assert!(text.contains(line), "{text}");
+    // A search finds a rea tool through its own words, not through a weak group word.
+    let on = listed(&tools, &["read_file"], &[]);
+    let from_reverse = |query: &str| -> Vec<String> {
+        search(query, &on)
+            .into_iter()
+            .filter(|l| l.tool.server == "reverse")
+            .map(|l| l.tool.exposed.clone())
+            .collect()
+    };
+    assert!(from_reverse("my program").is_empty());
+    assert!(!from_reverse("decompile my program").is_empty());
 }
 
 #[test]

@@ -517,12 +517,17 @@ def check_a_reply_begun_while_the_check_probes_is_waited_for(s, home):
         if not begin("__diag6"):
             return False
         assert pending(s, "__diag6") and reply_streams(s), ("waiting, but not for this reply", busy(s))
+        # Waiting, the check has not touched the server: the reply is not cut off (before the
+        # fix, the first test load stopped it here and it ended with an error).
         assert the_server(home)[0] == pid, "the check replaced the model while it waited"
-        r = fired(s, "__sent", 600)
-        assert r.get("ok"), ("the reply failed", r)
+        # The small model writes about 1,500 words at a few tokens a second, too long to let
+        # it run out; Stop ends the reply, which keeps what it wrote (never an error), the
+        # wait then sees the model free, and the check runs its test loads and timing.
+        s.invoke("stop_generation")
+        fired(s, "__sent", 300)
         last = messages(s, REPLY["chat"])[-1]
-        assert last["role"] == "assistant" and last["status"] == "complete" and last.get("content"), (
-            "the reply the check waited for did not end well", last["status"])
+        assert last["role"] == "assistant" and last["status"] != "error" and last.get("content"), (
+            "the reply the check waited for was cut off", last["status"])
         r = fired(s, "__diag6", 1200)
         assert r.get("ok"), r
         text = r["value"]["text"]

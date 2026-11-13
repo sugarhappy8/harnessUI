@@ -1261,9 +1261,9 @@ impl CodingAppsServer {
                 Err((
                     format!(
                         "The chat's working folder {} is not a folder that exists. The user can choose another one in the Tools panel.",
-                        policy::sanitize::visible(&c.canonical)
+                        tools::errors::said_path(&written, &c, &sandbox, flavor)
                     ),
-                    None::<String>.filter(|_| written.is_empty()),
+                    tools::errors::leads_to(&written, &c, &sandbox, flavor),
                 ))
             }
             Err(e) => Err((
