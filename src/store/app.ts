@@ -168,6 +168,21 @@ export type WorkbenchTab = "artifacts" | "task" | "sources" | "context";
 /** [0.0.6 item 8] Counts reads of the chat's model list, so an older answer never replaces a newer one. */
 let modelOptionsRead = 0;
 
+/** A chat's pick that switches it to a model that must load (pickModel). */
+interface SwitchOf {
+  chatId: number;
+  pick: number;
+}
+
+/** A pick that loads a model (see `newestLoad` in the store). */
+interface LoadPick {
+  pick: number;
+  path: string;
+  chatId: number | null;
+  riders: SwitchOf[];
+  keep?: boolean;
+}
+
 export const useApp = create<AppState>((set, get) => {
   /** Re-reads a chat after a stream event. Never rejects: the chat may have been deleted
    * while its reply was being written, and the turn still has to end in the UI. */
@@ -317,8 +332,14 @@ export const useApp = create<AppState>((set, get) => {
   /** The newest pick of each chat (by chat id): only a newer pick in its own chat replaces a
    *  switch's change of that chat; picks in other chats do not. */
   const newestPick = new Map<number, number>();
-  /** The newest pick that loads a model, of any chat. */
-  let newestLoad: { pick: number; path: string } | null = null;
+  /** The newest pick that loads a model, of any chat. `chatId` is the chat that picked it;
+   *  `riders` are the chats whose own load of the same model it replaced, which now wait on
+   *  this one; `keep` is set when it ends: true when it loaded (or failed with the error
+   *  shown), false when it was cancelled or replaced. */
+  let newestLoad: LoadPick | null = null;
+  /** For each chat with a switch that has not ended (loaded, or put back): the model it had
+   *  before the first of them, which a Cancel puts back even after newer picks. */
+  const beforeSwitch = new Map<number, string | null>();
   const notePick = (chatId: number | null): number => {
     picks += 1;
     if (chatId !== null) newestPick.set(chatId, picks);
@@ -331,6 +352,17 @@ export const useApp = create<AppState>((set, get) => {
     if (saved.chat.modelRef !== modelRef) return;
     await ipc.setChatModel(chatId, before);
     if (get().activeChatId === chatId) await get().openChat(chatId);
+  };
+  /** Ends the switches of `chats` to `modelRef`: each keeps it, or (`keep` false) goes back to
+   *  the model it had before its first switch. A chat whose newer pick replaced its switch is
+   *  left to that pick. */
+  const endSwitches = async (chats: SwitchOf[], modelRef: string, keep: boolean) => {
+    for (const { chatId, pick } of chats) {
+      if (newestPick.get(chatId) !== pick) continue;
+      const before = beforeSwitch.get(chatId) ?? null;
+      beforeSwitch.delete(chatId);
+      if (!keep && before !== null) await restoreModel(chatId, modelRef, before);
+    }
   };
 
   return {
@@ -389,6 +421,7 @@ export const useApp = create<AppState>((set, get) => {
     deleteChat: async (chatId) => {
       await ipc.deleteChat(chatId);
       newestPick.delete(chatId);
+      beforeSwitch.delete(chatId);
       if (get().activeChatId === chatId) set({ activeChatId: null, detail: null });
       await get().refreshChats();
     },
@@ -465,10 +498,22 @@ export const useApp = create<AppState>((set, get) => {
         // An endpoint, or the local model already loaded (or loading): nothing to load. Its
         // changed settings wait for Apply and restart (D3).
         if (path === null || isLoadedNow(runtime, path)) {
-          notePick(get().activeChatId);
-          // The loaded model picked again while a switch to another one waits: the wait is
-          // cancelled, so the loaded model stays (and the waiting chat goes back to it).
-          if (path !== null && useWaiting.getState().kind === "switch") await ipc.cancelPendingReload();
+          const chatId = get().activeChatId;
+          // Whether the switch that waits is this chat's own newest pick (not one that another
+          // chat's load of the same model took over).
+          const own =
+            chatId !== null &&
+            newestLoad !== null &&
+            newestLoad.keep === undefined &&
+            newestLoad.chatId === chatId &&
+            newestPick.get(chatId) === newestLoad.pick;
+          notePick(chatId);
+          if (chatId !== null) beforeSwitch.delete(chatId);
+          // While a switch to another model waits, picking the loaded model again (in any
+          // chat) or an endpoint in the chat whose switch it is cancels the wait: the loaded
+          // model stays, and each other chat that waited for that switch goes back to the
+          // model it had before (which can be an endpoint).
+          if (useWaiting.getState().kind === "switch" && (path !== null || own)) await ipc.cancelPendingReload();
           await get().setChatModel(modelRef);
           opts?.onChatSet?.();
           return;
@@ -477,23 +522,42 @@ export const useApp = create<AppState>((set, get) => {
         if (answer === null) return;
         const chatId = get().activeChatId;
         const open = get().detail;
-        const before = chatId !== null && open?.chat.id === chatId ? open.chat.modelRef : null;
         const pick = notePick(chatId);
         await get().setChatModel(modelRef);
         opts?.onChatSet?.();
-        newestLoad = { pick, path };
-        const done = await runChange("switch", answer.whenIdle, () =>
-          ipc.loadLocalModel(path, null, backendWhenIdle(answer)),
-        );
+        // The model a Cancel puts back: the one the chat had before its first switch that has
+        // not ended, so after b and then c (or b twice) it goes back past both.
+        if (chatId !== null && !beforeSwitch.has(chatId)) {
+          beforeSwitch.set(chatId, open?.chat.id === chatId ? open.chat.modelRef : null);
+        }
+        const load: LoadPick = { pick, path, chatId, riders: [] };
+        newestLoad = load;
+        const switches = (): SwitchOf[] => [...(chatId !== null ? [{ chatId, pick }] : []), ...load.riders];
+        let done: boolean;
+        try {
+          done = await runChange("switch", answer.whenIdle, () =>
+            ipc.loadLocalModel(path, null, backendWhenIdle(answer)),
+          );
+        } catch (err) {
+          // A load that failed (its error is shown) leaves its chats on the model they picked.
+          load.keep = true;
+          await endSwitches(switches(), modelRef, true);
+          throw err;
+        }
+        load.keep = done;
         // A switch that was cancelled changes nothing, whether the user asked it to wait or
         // the backend waited on its own (no question was asked), and whether its chat is open
-        // or not: the chat goes back to the model it had, unless a newer pick in that chat
-        // has changed it since (even to the same model, whose newer load is the one that
-        // replaced this one), or a newer load of the same model, from another chat, replaced
-        // this one and brings the model this chat picked.
-        const sameLoad = newestLoad !== null && newestLoad.pick !== pick && newestLoad.path === path;
-        if (!done && chatId !== null && before !== null && newestPick.get(chatId) === pick && !sameLoad) {
-          await restoreModel(chatId, modelRef, before);
+        // or not: the chat goes back to the model it had before its first switch, unless a
+        // newer pick in that chat replaced this one (that pick decides) or it was given
+        // another model since. When a newer load of the same model replaced this one (a pick
+        // in another chat, or a pick of that model again), this chat and those that waited on
+        // this load wait on the newer one and end with it: they keep the model if it loads.
+        const newer: LoadPick | null = newestLoad;
+        if (!done && newer !== null && newer !== load && newer.path === path && newer.keep === undefined) {
+          newer.riders.push(...switches());
+        } else {
+          const keep = done || (newer !== null && newer !== load && newer.path === path && newer.keep === true);
+          await endSwitches(switches(), modelRef, keep);
         }
         await get().refreshModelOptions();
       } catch (err) {

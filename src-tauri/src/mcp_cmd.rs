@@ -541,7 +541,11 @@ pub(crate) async fn rename_clashing_servers(
         if !all_copied {
             undo(&copied);
         }
-        let config = if all_copied { moved } else { row.config.clone() };
+        let config = if all_copied {
+            moved
+        } else {
+            row.config.clone()
+        };
         match store.rename_mcp_server(row.id, to.clone(), config).await {
             Ok(()) => {
                 if all_copied {
@@ -2498,7 +2502,10 @@ mod tests {
     #[test]
     fn a_free_name_is_not_taken_and_shares_no_secrets() {
         let taken = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
-        assert_eq!(free_name("reverse", &taken(&["reverse"])), "reverse (yours)");
+        assert_eq!(
+            free_name("reverse", &taken(&["reverse"])),
+            "reverse (yours)"
+        );
         assert_eq!(
             free_name("reverse", &taken(&["reverse", "reverse (yours)"])),
             "reverse (yours 2)"
@@ -2537,8 +2544,14 @@ mod tests {
                 .split("\n}\n")
                 .next()
                 .unwrap();
-            assert!(body.contains("builtin_servers") || body.contains("tools_with_kind("), "{start}");
-            assert!(!body.contains("list_mcp_servers"), "{start} decides from saved names");
+            assert!(
+                body.contains("builtin_servers") || body.contains("tools_with_kind("),
+                "{start}"
+            );
+            assert!(
+                !body.contains("list_mcp_servers"),
+                "{start} decides from saved names"
+            );
         }
     }
 }

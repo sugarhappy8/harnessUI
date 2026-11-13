@@ -1692,6 +1692,53 @@ async fn a_new_key_replaces_the_old_one_at_once() {
     sharing.shutdown().await;
 }
 
+/// What the Coding apps see (WP6): the kept port and the switch always, the listening port
+/// and the sharing key the proxy checks only while sharing is on and listening.
+#[tokio::test]
+async fn the_coding_apps_get_the_key_only_while_sharing_listens() {
+    let env = env_with(Upstream::NotLoaded);
+    let sharing = Sharing::default();
+    assert_eq!(sharing.now(&env).await, ShareNow::default());
+    let port = sharing.set_enabled(&env, true).await.unwrap().port.unwrap();
+    let key = sharing.reveal_key(&env).await.unwrap();
+    let on = sharing.now(&env).await;
+    assert_eq!(
+        on,
+        ShareNow {
+            port: Some(port),
+            enabled: true,
+            listening: Some(port),
+            key: Some(key.clone()),
+        }
+    );
+    assert!(!format!("{on:?}").contains(&key), "{on:?}");
+    // A new key: the new one, at once.
+    sharing.replace_key(&env).await.unwrap();
+    let new = sharing.reveal_key(&env).await.unwrap();
+    assert_eq!(sharing.now(&env).await.key, Some(new));
+    // Off: the kept port, nothing listening, no key.
+    sharing.set_enabled(&env, false).await.unwrap();
+    let off = ShareNow {
+        port: Some(port),
+        enabled: false,
+        listening: None,
+        key: None,
+    };
+    assert_eq!(sharing.now(&env).await, off);
+    // On, but the kept port was taken meanwhile: not listening, no key.
+    let taken = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    assert!(!sharing.set_enabled(&env, true).await.unwrap().listening);
+    assert_eq!(
+        sharing.now(&env).await,
+        ShareNow {
+            enabled: true,
+            ..off
+        }
+    );
+    drop(taken);
+    sharing.shutdown().await;
+}
+
 #[tokio::test]
 async fn the_status_shows_the_loaded_models_context_and_use() {
     let llama = FakeLlama::default();

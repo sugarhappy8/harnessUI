@@ -64,8 +64,43 @@ fn args(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap()
 }
 
-fn no_share() -> SharePort {
-    Arc::new(|| Box::pin(async { None }))
+fn no_share() -> ReadShare {
+    share_is(ShareNow::default())
+}
+
+/// The sharing key Sharing holds in these tests.
+const SHARING_KEY: &str = "harnessui-share-0123456789abcdef0123456789abcdef";
+
+/// Sharing as `Sharing::now` says it.
+fn share_is(now: ShareNow) -> ReadShare {
+    Arc::new(move || {
+        let now = now.clone();
+        Box::pin(async move { now })
+    })
+}
+
+/// Sharing switched on and listening on `port`.
+fn live(port: u16) -> ShareNow {
+    ShareNow {
+        port: Some(port),
+        enabled: true,
+        listening: Some(port),
+        key: Some(SHARING_KEY.into()),
+    }
+}
+
+/// A Codex settings folder whose `config.toml` chooses a provider at `base_url` that reads
+/// its key from `env_key`, as the Other apps setup card writes it.
+fn codex_home(name: &str, base_url: &str, env_key: &str) -> PathBuf {
+    let dir = temp(name);
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "model_provider = \"harnessui\"\nmodel = \"harnessui-local\"\nmodel_providers.harnessui = {{ name = \"harnessUI\", base_url = \"{base_url}\", env_key = \"{env_key}\", wire_api = \"responses\" }}\n"
+        ),
+    )
+    .unwrap();
+    dir
 }
 
 fn base_env() -> BTreeMap<String, String> {
@@ -1382,7 +1417,7 @@ async fn the_card_says_when_the_app_uses_the_shared_model() {
     let mut shared = base_env();
     shared.insert("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:51234".into());
     let mut s = server_for(&bin, shared);
-    s.share_port = Arc::new(|| Box::pin(async { Some(51234) }));
+    s.share = share_is(live(51234));
     let a = describe(&s, CLAUDE_TOOL, json!({"task": "x"}), &chat(&work)).await;
     assert!(
         a.preview
@@ -1391,6 +1426,192 @@ async fn the_card_says_when_the_app_uses_the_shared_model() {
         a.preview
     );
     assert!(!a.preview.contains("runs online"), "{}", a.preview);
+}
+
+/// An app set up for the model this app shares is not asked while sharing is off, or on but
+/// not listening (the port taken): the card would promise the local model while the app
+/// connects to a port nothing serves, or another program took. An app not set up for it is
+/// asked as usual, and the card says it runs online.
+#[cfg(unix)]
+#[tokio::test]
+async fn with_sharing_off_an_app_set_up_for_it_is_not_asked() {
+    let bin = temp("off-bin");
+    let work = temp("off-work");
+    fake(&bin, "claude", CLAUDE_OK);
+    fake(&bin, "codex", CODEX_OK);
+    let codex = codex_home(
+        "off-codex",
+        "http://127.0.0.1:51234/v1",
+        "HARNESSUI_SHARE_KEY",
+    );
+    let mut env = base_env();
+    env.insert("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:51234".into());
+    env.insert("CODEX_HOME".into(), codex.display().to_string());
+    let off = ShareNow {
+        port: Some(51234),
+        enabled: false,
+        listening: None,
+        key: None,
+    };
+    let not_listening = ShareNow {
+        enabled: true,
+        ..off.clone()
+    };
+    // On, but listening on another port than the one the apps are set up for.
+    let elsewhere = ShareNow {
+        port: Some(51234),
+        ..live(51999)
+    };
+    for (share, words) in [
+        (off, "and sharing is off, so"),
+        (not_listening.clone(), "but sharing is not working now, so"),
+        (elsewhere, "but sharing is not working now, so"),
+    ] {
+        let mut s = server_for(&bin, env.clone());
+        s.share = share_is(share.clone());
+        for (tool, app) in [
+            (CLAUDE_TOOL, CodingApp::ClaudeCode),
+            (CODEX_TOOL, CodingApp::Codex),
+        ] {
+            let a = describe(&s, tool, json!({"task": "x"}), &chat(&work)).await;
+            let why = a.hard_limit.clone().unwrap_or_default();
+            assert_eq!(why, sharing_off(app, share.enabled), "{share:?}");
+            assert!(why.contains(words), "{why}");
+            assert!(
+                why.starts_with(&format!(
+                    "{} is set up to use the model in harnessUI",
+                    app.label()
+                )),
+                "{why}"
+            );
+            for full_access in [false, true] {
+                assert!(
+                    matches!(
+                        policy::evaluate(
+                            &a,
+                            &turn_in(false, full_access, false, false),
+                            &BTreeSet::new()
+                        ),
+                        policy::Decision::Denied { .. }
+                    ),
+                    "{tool} {full_access}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        sharing_off(CodingApp::Codex, false),
+        "Codex is set up to use the model in harnessUI, and sharing is off, so Codex was not asked. The user can turn on sharing in Settings → Other apps, then ask again."
+    );
+
+    // Not set up for the shared model: asked as usual, online, whatever sharing says.
+    let mut s = server_for(&bin, base_env());
+    s.share = share_is(not_listening);
+    let a = describe(&s, CLAUDE_TOOL, json!({"task": "x"}), &chat(&work)).await;
+    assert_eq!(a.hard_limit, None);
+    assert!(
+        a.preview
+            .contains(&online_line(CodingApp::ClaudeCode, false)),
+        "{}",
+        a.preview
+    );
+
+    // Sharing switched off between the card and the run: nothing runs.
+    let switch = Arc::new(Mutex::new(live(51234)));
+    let reader = switch.clone();
+    let mut s = server_for(&bin, env.clone());
+    s.share = Arc::new(move || {
+        let now = reader.lock().unwrap().clone();
+        Box::pin(async move { now })
+    });
+    for tool in [CLAUDE_TOOL, CODEX_TOOL] {
+        *switch.lock().unwrap() = live(51234);
+        let _ = std::fs::remove_file(bin.join("args.txt"));
+        let a = describe(&s, tool, json!({"task": "x"}), &chat(&work)).await;
+        assert_eq!(a.hard_limit, None, "{tool}");
+        assert_eq!(a.payload["localModel"], true, "{tool}");
+        switch.lock().unwrap().enabled = false;
+        switch.lock().unwrap().listening = None;
+        switch.lock().unwrap().key = None;
+        let (out, _) = call(&s, &a, &chat(&work)).await;
+        assert!(out.is_error, "{tool}: {out:?}");
+        assert!(out.joined_text().contains("sharing is off"), "{out:?}");
+        assert!(out.joined_text().ends_with("Nothing was run."), "{out:?}");
+        assert!(!bin.join("args.txt").exists(), "{tool} ran");
+    }
+
+    // The card said online and the app was set up for the shared model before the run (or
+    // the other way round): the card no longer says where the task goes, so nothing runs.
+    let mut online = server_for(&bin, base_env());
+    online.share = share_is(live(51234));
+    let mut local = server_for(&bin, env.clone());
+    local.share = share_is(live(51234));
+    for (described_by, run_by) in [(&online, &local), (&local, &online)] {
+        let _ = std::fs::remove_file(bin.join("args.txt"));
+        let a = describe(described_by, CLAUDE_TOOL, json!({"task": "x"}), &chat(&work)).await;
+        let (out, _) = call(run_by, &a, &chat(&work)).await;
+        assert!(out.is_error, "{out:?}");
+        assert!(
+            out.joined_text().contains("changed after the request was approved"),
+            "{out:?}"
+        );
+        assert!(!bin.join("args.txt").exists());
+    }
+}
+
+/// Codex's built-in provider is the one `OPENAI_BASE_URL` moves; a `config.toml` that
+/// chooses another provider sends the task there, whatever that variable says.
+#[test]
+fn codex_uses_openai_base_url_only_for_its_built_in_provider() {
+    let mut env = base_env();
+    env.insert("OPENAI_BASE_URL".into(), "http://127.0.0.1:51234/v1".into());
+    let online = codex_home("codex-online", "https://api.example.com/v1", "EXAMPLE_KEY");
+    env.insert("CODEX_HOME".into(), online.display().to_string());
+    assert!(!uses_shared_model(
+        CodingApp::Codex,
+        &env,
+        None,
+        Some(51234)
+    ));
+    // Its own provider at the port: the key goes in the provider's env_key.
+    let local = codex_home("codex-local", "http://localhost:51234/v1", "MY_SHARE_KEY");
+    env.insert("CODEX_HOME".into(), local.display().to_string());
+    assert_eq!(
+        shared_setup(CodingApp::Codex, &env, None, Some(51234)),
+        Some(SharedSetup {
+            key_variable: Some("MY_SHARE_KEY".into())
+        })
+    );
+    // An env_key that does not look like a secret's name could stand for a variable the
+    // app keeps (PATH, LD_PRELOAD): the key is not put there.
+    for name in ["PATH", "LD_PRELOAD", "HOME", "BAD NAME_KEY", "-X_KEY", ""] {
+        let odd = codex_home("codex-odd", "http://127.0.0.1:51234/v1", name);
+        env.insert("CODEX_HOME".into(), odd.display().to_string());
+        assert_eq!(
+            shared_setup(CodingApp::Codex, &env, None, Some(51234)),
+            Some(SharedSetup { key_variable: None }),
+            "{name}"
+        );
+    }
+    // No config.toml: the built-in provider, moved by OPENAI_BASE_URL; it reads no key
+    // this app could fill.
+    env.insert("CODEX_HOME".into(), temp("codex-empty").display().to_string());
+    assert_eq!(
+        shared_setup(CodingApp::Codex, &env, None, Some(51234)),
+        Some(SharedSetup { key_variable: None })
+    );
+    // Claude Code: ANTHROPIC_AUTH_TOKEN, only when ANTHROPIC_BASE_URL is at the port.
+    env.insert("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:51234".into());
+    assert_eq!(
+        shared_setup(CodingApp::ClaudeCode, &env, None, Some(51234)),
+        Some(SharedSetup {
+            key_variable: Some("ANTHROPIC_AUTH_TOKEN".into())
+        })
+    );
+    assert_eq!(
+        shared_setup(CodingApp::ClaudeCode, &env, None, Some(51235)),
+        None
+    );
 }
 
 // ---- Runs of fake programs --------------------------------------------------------------
@@ -1486,6 +1707,105 @@ async fn secret_variables_stay_stripped() {
     for secret in ["sk-secret", "ghp-secret", "hunter2"] {
         assert!(!seen.contains(secret), "{secret} reached the app");
     }
+}
+
+/// The secret-looking lines of the environment a fake app recorded.
+fn secrets_seen(bin: &Path) -> Vec<String> {
+    std::fs::read_to_string(bin.join("env.txt"))
+        .unwrap()
+        .lines()
+        .filter(|l| {
+            l.split_once('=')
+                .is_some_and(|(k, _)| tools::terminal::looks_secret(k))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// While sharing listens, an app set up for it gets the sharing key Sharing holds, in the
+/// one variable its own setup reads it from (Claude Code: ANTHROPIC_AUTH_TOKEN; Codex: the
+/// chosen provider's env_key), and no other secret-looking variable: the owner's own values
+/// of those names stay stripped like every other. An app set up for another port, or not
+/// at all, gets no key.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_sharing_key_reaches_only_an_app_set_up_for_the_live_port() {
+    let bin = temp("key-bin");
+    let work = temp("key-work");
+    fake(&bin, "claude", CLAUDE_OK);
+    fake(&bin, "codex", CODEX_OK);
+    let mut owner = base_env();
+    for (k, v) in [
+        ("ANTHROPIC_AUTH_TOKEN", "owner-auth-token"),
+        ("HARNESSUI_SHARE_KEY", "owner-share-key"),
+        ("ANTHROPIC_API_KEY", "owner-anthropic-key"),
+        ("OPENAI_API_KEY", "owner-openai-key"),
+        ("GITHUB_TOKEN", "owner-github-token"),
+        ("PLAIN_SETTING", "kept-value"),
+    ] {
+        owner.insert(k.into(), v.into());
+    }
+    let run = async |env: &BTreeMap<String, String>, tool: &str, share: ShareNow| {
+        let mut s = server_for(&bin, env.clone());
+        s.share = share_is(share);
+        let a = describe(&s, tool, json!({"task": "x"}), &chat(&work)).await;
+        assert_eq!(a.hard_limit, None, "{tool}");
+        let (out, _) = call(&s, &a, &chat(&work)).await;
+        assert!(!out.is_error, "{tool}: {out:?}");
+        let seen = std::fs::read_to_string(bin.join("env.txt")).unwrap();
+        assert!(seen.contains("PLAIN_SETTING=kept-value"), "{seen}");
+        assert!(seen.contains("PATH=/usr/bin:/bin"), "{seen}");
+        assert!(!seen.contains("owner-"), "an owner's secret reached {tool}: {seen}");
+        (a, secrets_seen(&bin))
+    };
+
+    // Claude Code set up for the live port.
+    let mut claude = owner.clone();
+    claude.insert("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:51234".into());
+    let (a, seen) = run(&claude, CLAUDE_TOOL, live(51234)).await;
+    assert!(a.preview.contains(&online_line(CodingApp::ClaudeCode, true)));
+    assert_eq!(seen, vec![format!("ANTHROPIC_AUTH_TOKEN={SHARING_KEY}")]);
+
+    // Codex set up for the live port through its config.toml, as the setup card writes it.
+    let mut codex = owner.clone();
+    let home = codex_home(
+        "key-codex",
+        "http://127.0.0.1:51234/v1",
+        "HARNESSUI_SHARE_KEY",
+    );
+    codex.insert("CODEX_HOME".into(), home.display().to_string());
+    let (a, seen) = run(&codex, CODEX_TOOL, live(51234)).await;
+    assert!(a.preview.contains(&online_line(CodingApp::Codex, true)));
+    assert_eq!(seen, vec![format!("HARNESSUI_SHARE_KEY={SHARING_KEY}")]);
+
+    // Set up for another port than the live one: no key, and the card says online.
+    let mut other = owner.clone();
+    other.insert("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:4000".into());
+    let other_home = codex_home(
+        "key-codex-other",
+        "http://127.0.0.1:4000/v1",
+        "HARNESSUI_SHARE_KEY",
+    );
+    other.insert("CODEX_HOME".into(), other_home.display().to_string());
+    for (tool, app) in [
+        (CLAUDE_TOOL, CodingApp::ClaudeCode),
+        (CODEX_TOOL, CodingApp::Codex),
+    ] {
+        let (a, seen) = run(&other, tool, live(51234)).await;
+        assert!(a.preview.contains(&online_line(app, false)), "{}", a.preview);
+        assert!(seen.is_empty(), "{tool}: {seen:?}");
+    }
+
+    // A provider whose env_key names a variable the app keeps: the card says local (it is),
+    // but the key is not put there and the variable keeps its value.
+    let mut odd = owner.clone();
+    let odd_home = codex_home("key-codex-odd", "http://127.0.0.1:51234/v1", "PATH");
+    odd.insert("CODEX_HOME".into(), odd_home.display().to_string());
+    let (a, seen) = run(&odd, CODEX_TOOL, live(51234)).await;
+    assert!(a.preview.contains(&online_line(CodingApp::Codex, true)));
+    assert!(seen.is_empty(), "{seen:?}");
+    let recorded = std::fs::read_to_string(bin.join("env.txt")).unwrap();
+    assert!(!recorded.contains(SHARING_KEY), "{recorded}");
 }
 
 /// Stop ends the program at once; what it had written so far comes back.

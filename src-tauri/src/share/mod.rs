@@ -77,6 +77,31 @@ pub struct ShareStatus {
     pub model_ctx: Option<u32>,
 }
 
+/// Sharing as the Coding apps see it (WP6, [`Sharing::now`]). Never sent to the window,
+/// and its `Debug` hides the key.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ShareNow {
+    /// The kept port; `None` until sharing is first switched on.
+    pub port: Option<u16>,
+    /// The switch is on.
+    pub enabled: bool,
+    /// The port the proxy listens on now; `None` while the switch is off or nothing listens.
+    pub listening: Option<u16>,
+    /// The sharing key, only while the proxy listens.
+    pub key: Option<String>,
+}
+
+impl std::fmt::Debug for ShareNow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShareNow")
+            .field("port", &self.port)
+            .field("enabled", &self.enabled)
+            .field("listening", &self.listening)
+            .field("key", &self.key.as_ref().map(|_| "hidden"))
+            .finish()
+    }
+}
+
 /// An app the setup text is for. JSON: `"claudeCode"`, `"codex"`, `"claudeApp"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -301,6 +326,29 @@ impl Sharing {
     pub async fn status(&self, env: &Env) -> ShareStatus {
         let inner = self.inner.lock().await;
         self.status_of(env, &inner).await
+    }
+
+    /// Sharing as the Coding apps see it (WP6): the kept port, the switch, the port the
+    /// proxy listens on now and, only while it listens, the sharing key the proxy checks
+    /// (read from the keychain when sharing was switched on; never from an environment).
+    pub async fn now(&self, env: &Env) -> ShareNow {
+        let inner = self.inner.lock().await;
+        let saved = self.saved(env).await;
+        let enabled = saved.is_some_and(|s| s.enabled);
+        let listening = inner
+            .running
+            .as_ref()
+            .filter(|r| enabled && !r.is_finished())
+            .map(|r| r.port());
+        let key = listening
+            .and_then(|_| self.key.read().ok().map(|k| k.clone()))
+            .filter(|k| is_key(k));
+        ShareNow {
+            port: saved.map(|s| s.port),
+            enabled,
+            listening,
+            key,
+        }
     }
 
     async fn status_of(&self, env: &Env, inner: &Inner) -> ShareStatus {

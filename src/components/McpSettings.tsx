@@ -317,6 +317,45 @@ function AddServers(props: { onDone: () => void; onError: (e: ErrorInfo) => void
   );
 }
 
+/** [0.0.6] Setting: the owner's saved servers renamed at start because a built-in server now has their name. */
+const RENAMED_SERVERS = "mcpRenamedServers";
+
+interface RenamedServer {
+  from: string;
+  to: string;
+}
+
+/** Says once which saved servers have a new name, until the owner closes the note. */
+function RenamedNote() {
+  const [renamed, setRenamed] = useState<RenamedServer[]>([]);
+  useEffect(() => {
+    void ipc
+      .getSetting<RenamedServer[]>(RENAMED_SERVERS)
+      .then((v) => setRenamed(Array.isArray(v) ? v : []))
+      .catch(() => setRenamed([]));
+  }, []);
+  if (renamed.length === 0) return null;
+  const close = () => {
+    setRenamed([]);
+    void ipc.setSetting(RENAMED_SERVERS, []).catch(() => undefined);
+  };
+  return (
+    <div role="status" className="flex items-start gap-2 rounded-md border border-border p-2 text-sm">
+      <div className="min-w-0 flex-1 space-y-1">
+        {renamed.map((r) => (
+          <p key={`${r.from}\n${r.to}`}>
+            Your server "{r.from}" is now called "{r.to}", because the app now has a built-in server with that name.
+            It works as before, with the same settings.
+          </p>
+        ))}
+      </div>
+      <button type="button" onClick={close} className="rounded-md border border-border px-2 py-0.5 text-xs">
+        OK
+      </button>
+    </div>
+  );
+}
+
 export function McpSettings() {
   const [servers, setServers] = useState<McpServerDto[]>([]);
   const [adding, setAdding] = useState(false);
@@ -351,6 +390,7 @@ export function McpSettings() {
         )}
       </div>
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+      <RenamedNote />
       {adding && (
         <AddServers
           onDone={() => {

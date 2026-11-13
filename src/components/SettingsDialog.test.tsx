@@ -52,9 +52,10 @@ describe("Settings: the section list stays inside the dialog and scrolls", () =>
 
   it("bounds the dialog to the window's height", async () => {
     const dialog = await open();
-    // Tall enough for every section at the default window size (1200 x 800), never
-    // taller than nine tenths of the window, so nothing is drawn past its bottom edge.
-    expect(classes(dialog)).toContain("max-h-[90vh]");
+    // Tall enough for every section at the default window size (1200 x 800). In a shorter
+    // window it shrinks, leaving 4.5rem above and below: nothing is drawn past its bottom
+    // edge and the chat's header bar never covers its title and Close button.
+    expect(classes(dialog)).toContain("max-h-[calc(100vh-9rem)]");
     expect(classes(dialog)).toContain("h-[40rem]");
     expect(classes(dialog)).not.toContain("h-[34rem]");
   });

@@ -141,3 +141,10 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   child exactly one extra variable, harnessUI's own sharing key, under the name its own setup
   uses; every other secret variable stays stripped. The key only goes to a program whose
   configuration points at the live local sharing address.
+- **WP9e done (wf_59ddd95e-968; report in scratchpad reports/WP9e.md).** CI run 43380365172's
+  `ghidra-digest` job confirmed GitHub's digest for Ghidra 12.1.4 (artifact
+  `ghidra-release-record`, id 14015748800, artifact digest checked by the lead). Batch c
+  wf_dad2159c-dae: ghidra-pin-gate (record must name its CI run, `github_digest_run` in the
+  lock, release.yml gate, lock flipped from that record), rea-linux-tmp (Ghidra's session in
+  /tmp on Linux because the app folder is under a dot folder; private runtime folder or a
+  documented limit; Java perf file), arch-todo-lead (the ARCHITECTURE.md TODO(lead) markers).

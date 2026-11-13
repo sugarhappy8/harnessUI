@@ -423,8 +423,7 @@ pub async fn start_saved_servers(app: &AppHandle) {
     // [0.0.6] A saved server whose name a built-in server now has is renamed first, so it
     // starts under its new name instead of being skipped.
     let builtin = crate::tool_catalog::builtin_servers(&state.host);
-    crate::mcp_cmd::rename_clashing_servers(&state.store, state.secrets.as_ref(), &builtin)
-        .await;
+    crate::mcp_cmd::rename_clashing_servers(&state.store, state.secrets.as_ref(), &builtin).await;
     let servers = match state.store.list_mcp_servers().await {
         Ok(s) => s,
         Err(e) => {

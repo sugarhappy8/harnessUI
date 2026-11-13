@@ -342,7 +342,8 @@ def settings_section_list(s, notes):
     """The Settings section list at the default window size (1200 x 800) shows every
     section inside the dialog, one line each (Reverse engineering may wrap); in shorter
     windows (680 px, and the 480 px minimum) the list scrolls inside the dialog and every
-    section can be scrolled to and clicked with a real pointer click."""
+    section can be scrolled to and clicked with a real pointer click. At every size the
+    dialog's title and Close button are on top, not under the chat's header bar."""
 
     def geometry(label=None):
         return s.execute(
@@ -353,7 +354,13 @@ def settings_section_list(s, notes):
             const tabs = [...list.querySelectorAll('[role=tab]')];
             if (label) tabs.find(t => t.innerText.trim() === label).scrollIntoView({block: 'nearest'});
             const d = dialog.getBoundingClientRect(), l = list.getBoundingClientRect();
-            return {inner: window.innerHeight, dialogTop: d.top, dialogBottom: d.bottom, listTop: l.top,
+            const onTop = el => {
+              const r = el.getBoundingClientRect();
+              return el.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
+            };
+            const uncovered = ['h2', 'button[aria-label="Close settings"]']
+              .map(q => dialog.querySelector(q)).every(onTop);
+            return {inner: window.innerHeight, dialogTop: d.top, dialogBottom: d.bottom, listTop: l.top, uncovered,
                     listBottom: l.bottom, overflowY: getComputedStyle(list).overflowY,
                     scrollHeight: list.scrollHeight, clientHeight: list.clientHeight, scrollTop: list.scrollTop,
                     tabs: tabs.map(t => {
@@ -395,6 +402,7 @@ def settings_section_list(s, notes):
         s.screenshot(str(OUT / "settings-sections-1200x800.png"))
         assert len(labels) == 15 and labels[-1] == "Diagnostics", labels
         assert geo["dialogTop"] >= 0 and geo["dialogBottom"] <= geo["inner"] + 0.5, geo
+        assert geo["uncovered"], f"the dialog's title or Close button is covered at 1200x800: {geo}"
         assert not outside, f"sections drawn outside the dialog at 1200x800: {outside}"
         assert set(wrapped) <= {"Reverse engineering"}, f"section names on two lines: {wrapped}"
         for height in (680, 480):
@@ -405,6 +413,7 @@ def settings_section_list(s, notes):
                          f"{geo['dialogTop']:.0f}-{geo['dialogBottom']:.0f}, list {geo['clientHeight']} of "
                          f"{geo['scrollHeight']} px shown, overflow-y {geo['overflowY']}")
             assert geo["dialogTop"] >= 0 and geo["dialogBottom"] <= geo["inner"] + 0.5, geo
+            assert geo["uncovered"], f"the dialog's title or Close button is covered at 1200x{height}: {geo}"
             if geo["scrollHeight"] > geo["clientHeight"]:
                 assert geo["overflowY"] in ("auto", "scroll"), geo
             scrolled = 0
@@ -6600,7 +6609,10 @@ def p_header_layout(c, notes):
     model = os.environ.get("TEST_GGUF", "/home/user/llama-dev/Qwen3-0.6B-Q8_0.gguf")
     folder = c.work.name
 
+    opened = [None]
+
     def open_chat(title):
+        opened[0] = title
         s.execute("window.location.reload();")
         time.sleep(1.5)
         s.wait_for(lambda: title in s.page_text(), 20, f"the chat {title!r} in the sidebar")
@@ -6609,6 +6621,16 @@ def p_header_layout(c, notes):
             "const a = [...document.querySelectorAll('nav[aria-label=\"Chat history\"] button')]"
             ".find(b => b.innerText.includes(arguments[0])); a && a.click();", title)
         time.sleep(1.0)
+
+    def still_open():
+        """[r2] The chat is still open. Other developers edit the app's files while this runs, and
+        the dev server then reloads the page, which closes the chat: it is opened again (noted)."""
+        if s.execute("return !!document.querySelector('main header [data-header-controls]');"):
+            return True
+        notes.append(f"the page was reloaded (a change to the app's files); {opened[0]!r} opened again")
+        open_chat(opened[0])
+        s.wait_for(lambda: s.execute("return !!document.querySelector('main header [data-header-controls]');"), 20, "the chat open again")
+        return False
 
     def panel(on):
         """Opens or closes the Panel beside the chat with its header button."""
@@ -6635,6 +6657,7 @@ def p_header_layout(c, notes):
         def need(ok, what):
             if not ok:
                 problems.append(f"{where}: {what}")
+                notes.append(f"miss now: {where}: {what}")
 
         need(not r["over"], f"runs past the header: {r['outside']}")
         need(not r["overlaps"], f"parts cover each other: {r['overlaps']}")
@@ -6705,6 +6728,7 @@ def p_header_layout(c, notes):
         rect = s._req("GET", s._s("/window/rect"))
         try:
             for width, with_panel in widths or sizes():
+                still_open()
                 panel(with_panel)
                 s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
                 time.sleep(1.0)
@@ -6774,10 +6798,20 @@ def p_header_layout(c, notes):
             panel(False)
             s._req("POST", s._s("/window/rect"), {"width": rect["width"], "height": rect["height"]})
             time.sleep(0.8)
-            send(s, "Count from 1 to 2000, separated by spaces. /no_think")
-            s.wait_for(lambda: s.execute("const e = document.querySelector('main header [data-speed]'); return !!e && e.innerText.includes('tokens/s');"),
-                       180, "the reply's speed in the header")
+            speed_shown = "const e = document.querySelector('main header [data-speed]'); return !!e && e.innerText.includes('tokens/s');"
+            for attempt in (1, 2):
+                send(s, "Count from 1 to 2000, separated by spaces. /no_think")
+                try:
+                    s.wait_for(lambda: s.execute(speed_shown), 180, "the reply's speed in the header")
+                    break
+                except WebDriverError:
+                    # A reload by the dev server (see still_open) loses the reply on the page.
+                    if attempt == 2 or still_open():
+                        raise
+                    wait_idle(s, 300)
             for width, with_panel in widths:
+                if not still_open():
+                    break
                 panel(with_panel)
                 s._req("POST", s._s("/window/rect"), {"width": width, "height": rect["height"]})
                 time.sleep(1.0)
@@ -7087,7 +7121,8 @@ def p_reverse_describe(c, notes):
             # Nothing the model read names an entry of a folder it gave (13.9): not the
             # app note, not any other message.
             sent = json.dumps(Fake.requests[-1]["messages"])
-            assert "App note] The user" not in sent, sent[-1200:]
+            at = sent.find("just approved every action")
+            assert at < 0, sent[max(0, at - 700):at + 200]
             for below in (f"{app}/lib", f"{app.resolve()}/lib", f"{noted}/", f"{noted.resolve()}/"):
                 assert below not in sent, (below, sent[-1200:])
             noted_rows = [a for a in s.invoke("list_audit", {"filter": {"chatId": chat}})

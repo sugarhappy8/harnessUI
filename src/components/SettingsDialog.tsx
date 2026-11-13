@@ -783,7 +783,7 @@ export function SettingsDialog(props: {
     <Dialog.Root open={props.open} onOpenChange={props.onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay fixed inset-0" />
-        <Dialog.Content className="fixed top-1/2 left-1/2 flex h-[34rem] w-[48rem] max-w-[94vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-border bg-surface shadow-pop">
+        <Dialog.Content className="fixed top-1/2 left-1/2 flex h-[40rem] max-h-[calc(100vh-9rem)] w-[48rem] max-w-[94vw] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-border bg-surface shadow-pop">
           <div className="flex items-center justify-between border-b border-border px-5 py-3">
             <Dialog.Title className="text-base font-semibold">Settings</Dialog.Title>
             <Dialog.Close className="rounded-md p-1 text-fg-muted hover:bg-bg-muted hover:text-fg" aria-label="Close settings">
@@ -792,7 +792,7 @@ export function SettingsDialog(props: {
           </div>
           <Dialog.Description className="sr-only">App settings</Dialog.Description>
           <Tabs.Root key={props.initialTab ?? "general"} defaultValue={props.initialTab ?? "general"} orientation="vertical" className="flex min-h-0 flex-1">
-            <Tabs.List className="flex w-44 flex-col gap-1 border-r border-border p-3" aria-label="Settings sections">
+            <Tabs.List className="flex min-h-0 w-48 flex-col gap-1 overflow-y-auto border-r border-border p-3" aria-label="Settings sections">
               <Tabs.Trigger value="general" className={tabClass}>General</Tabs.Trigger>
               <Tabs.Trigger value="runtime" className={tabClass}>Local models</Tabs.Trigger>
               <Tabs.Trigger value="reverse" className={tabClass}>Reverse engineering</Tabs.Trigger>

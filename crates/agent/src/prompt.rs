@@ -816,19 +816,21 @@ fn app_note_close(after: &str) -> Option<(usize, usize)> {
 
 /// The byte length of the start of one of the app's block tags (`<tag` or `</tag`, any
 /// ASCII letter case, followed by a character that ends a tag name) at the start of `rest`
-/// once hidden characters are left out, up to the end of the tag name. [`Sanitizer::clean`]
-/// has escaped the ones written plainly, so what is found here is split by hidden
-/// characters.
+/// once hidden characters inside it are left out, up to the end of the tag name. The
+/// character right after the name is taken as written, so a hidden one there (a control,
+/// tag or other default-ignorable character) ends the name even when a letter follows, as
+/// it does for [`Sanitizer::clean`]. [`Sanitizer::clean`] has escaped the ones written
+/// plainly, so what is found here is split by hidden characters.
 fn split_tag_len(rest: &str) -> Option<usize> {
     let after = rest.strip_prefix('<')?;
     let longest = RESERVED_TAGS.iter().map(|tag| tag.len()).max().unwrap_or(0);
-    // The visible characters after `<`, each with the offset just past it: a slash, the
-    // longest name and the character after it at most.
+    // The visible characters after `<`, each with the offset just past it: a slash and the
+    // longest name at most.
     let seen: Vec<(char, usize)> = after
         .char_indices()
         .filter(|(_, c)| !is_hidden(*c))
         .map(|(at, c)| (c, at + c.len_utf8()))
-        .take(longest + 2)
+        .take(longest + 1)
         .collect();
     let skip = usize::from(seen.first().is_some_and(|(c, _)| *c == '/'));
     RESERVED_TAGS.iter().find_map(|tag| {
@@ -837,10 +839,12 @@ fn split_tag_len(rest: &str) -> Option<usize> {
             .iter()
             .zip(tag.chars())
             .all(|((c, _), t)| c.eq_ignore_ascii_case(&t));
-        let ends = seen
-            .get(skip + tag.len())
-            .is_none_or(|(c, _)| !(c.is_ascii_alphanumeric() || *c == '_'));
-        (same && ends).then(|| 1 + name.last().map_or(0, |(_, end)| *end))
+        let end = name.last().map_or(0, |(_, end)| *end);
+        let ends = after[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+        (same && ends).then_some(1 + end)
     })
 }
 

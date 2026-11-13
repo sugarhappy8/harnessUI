@@ -34,7 +34,13 @@
 //!   be one the user approved.
 //! - **Helpers never get these tools** (`subagent.rs`), in any mode.
 //! - **Secret environment variables stay stripped** (the apps use their own stored login),
-//!   as in the terminal (`tools::terminal::looks_secret`).
+//!   as in the terminal (`tools::terminal::looks_secret`). One exception: an app set up to
+//!   use the model shared on the port Sharing listens on now (WP5) gets the sharing key
+//!   this app keeps (from its keychain, never from an environment), in the one variable its
+//!   own setup reads it from (Claude Code's `ANTHROPIC_AUTH_TOKEN`, or the `env_key` of the
+//!   Codex provider at that port when it looks like a secret's name), and nothing else. An
+//!   app set up for the kept port while sharing is off or not listening is not asked
+//!   ([`sharing_off`]).
 //! - **Stop** ends the process group (Unix) or job (Windows). Processes the app started in
 //!   a new session can outlive it (known limit, ARCHITECTURE 13.14).
 //! - **The answer is untrusted tool output**, shortened like any other long result.
@@ -102,6 +108,7 @@ use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::{AppError, AppResult};
+use crate::share::ShareNow;
 use crate::state::AppState;
 
 /// The built-in server (the "Coding apps (experimental)" group of the Tools panel).
@@ -756,71 +763,136 @@ fn points_at(url: &str, port: u16) -> bool {
 }
 
 /// Whether the app would send this task to the model the app shares on `port` (WP5)
-/// rather than online: Claude Code through `ANTHROPIC_BASE_URL` in its environment (with
-/// `--restricted` it reads no settings file), Codex through `OPENAI_BASE_URL` or the
-/// provider chosen in its `config.toml`.
+/// rather than online ([`shared_setup`]).
 pub fn uses_shared_model(
     app: CodingApp,
     env: &BTreeMap<String, String>,
     home: Option<&Path>,
     port: Option<u16>,
 ) -> bool {
-    let Some(port) = port else {
-        return false;
-    };
+    shared_setup(app, env, home, port).is_some()
+}
+
+/// How an app set up for the model shared on a port reads the sharing key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedSetup {
+    /// The variable its own setup reads the key from, when that is one a hand-off may fill:
+    /// Claude Code's `ANTHROPIC_AUTH_TOKEN`, or the `env_key` of the Codex provider at the
+    /// port when it looks like a secret's name (so it cannot stand for a variable the run
+    /// keeps, such as `PATH`). `None` for Codex's built-in provider moved by
+    /// `OPENAI_BASE_URL`, which reads the user's own login.
+    pub key_variable: Option<String>,
+}
+
+/// Whether the app would send this task to the model the app shares on `port` (WP5)
+/// rather than online, and where it reads the sharing key: Claude Code through
+/// `ANTHROPIC_BASE_URL` in its environment (with `--restricted` it reads no settings file),
+/// Codex through the provider its `config.toml` chooses, or through `OPENAI_BASE_URL` when
+/// that is its built-in provider.
+pub fn shared_setup(
+    app: CodingApp,
+    env: &BTreeMap<String, String>,
+    home: Option<&Path>,
+    port: Option<u16>,
+) -> Option<SharedSetup> {
+    let port = port?;
     let var = |name: &str| {
         env.iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
     };
     match app {
-        CodingApp::ClaudeCode => var("ANTHROPIC_BASE_URL").is_some_and(|u| points_at(u, port)),
+        CodingApp::ClaudeCode => var("ANTHROPIC_BASE_URL")
+            .is_some_and(|u| points_at(u, port))
+            .then(|| SharedSetup {
+                key_variable: Some("ANTHROPIC_AUTH_TOKEN".into()),
+            }),
         CodingApp::Codex => {
-            if var("OPENAI_BASE_URL").is_some_and(|u| points_at(u, port)) {
-                return true;
-            }
             let dir = match var("CODEX_HOME") {
-                Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-                _ => match home {
-                    Some(home) => home.join(".codex"),
-                    None => return false,
-                },
+                Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+                _ => home.map(|home| home.join(".codex")),
             };
-            codex_config_uses(&dir.join("config.toml"), port)
+            let config = dir.and_then(|d| codex_config(&d.join("config.toml")));
+            let chosen = config
+                .as_ref()
+                .and_then(|c| c.get("model_provider"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("openai");
+            if chosen == "openai" {
+                // The built-in provider (its id cannot be redefined in `model_providers`).
+                return var("OPENAI_BASE_URL")
+                    .is_some_and(|u| points_at(u, port))
+                    .then_some(SharedSetup { key_variable: None });
+            }
+            let provider = config.as_ref()?.get("model_providers")?.get(chosen)?;
+            if !provider
+                .get("base_url")
+                .and_then(|u| u.as_str())
+                .is_some_and(|u| points_at(u, port))
+            {
+                return None;
+            }
+            let key_variable = provider
+                .get("env_key")
+                .and_then(|v| v.as_str())
+                .filter(|name| key_variable_ok(name))
+                .map(str::to_owned);
+            Some(SharedSetup { key_variable })
         }
     }
 }
 
-/// Whether Codex's `config.toml` chooses a provider whose `base_url` points at `port`.
-fn codex_config_uses(file: &Path, port: u16) -> bool {
-    let Ok(meta) = std::fs::metadata(file) else {
-        return false;
-    };
-    if meta.len() > 1024 * 1024 {
-        return false;
+/// A variable name the sharing key may go in: a plain name that the run strips anyway
+/// because it looks like a secret's, so it replaces nothing the run keeps.
+fn key_variable_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && name.len() <= 128
+        && tools::terminal::looks_secret(name)
+}
+
+/// Codex's `config.toml`, when it can be read (at most 1 MiB).
+fn codex_config(file: &Path) -> Option<toml::Table> {
+    if std::fs::metadata(file).ok()?.len() > 1024 * 1024 {
+        return None;
     }
-    let Ok(text) = std::fs::read_to_string(file) else {
-        return false;
-    };
-    let Ok(config) = text.parse::<toml::Table>() else {
-        return false;
-    };
-    let Some(provider) = config.get("model_provider").and_then(|v| v.as_str()) else {
-        return false;
-    };
-    config
-        .get("model_providers")
-        .and_then(|p| p.get(provider))
-        .and_then(|p| p.get("base_url"))
-        .and_then(|u| u.as_str())
-        .is_some_and(|u| points_at(u, port))
+    std::fs::read_to_string(file).ok()?.parse().ok()
+}
+
+/// Why an app set up for the model shared on the kept port is not asked: sharing is off,
+/// or on and not listening there.
+pub fn sharing_off(app: CodingApp, enabled: bool) -> String {
+    let label = app.label();
+    if enabled {
+        format!(
+            "{label} is set up to use the model in harnessUI, but sharing is not working now, so {label} was not asked. The user can see why in Settings → Other apps, then ask again."
+        )
+    } else {
+        format!(
+            "{label} is set up to use the model in harnessUI, and sharing is off, so {label} was not asked. The user can turn on sharing in Settings → Other apps, then ask again."
+        )
+    }
+}
+
+/// Where a task goes, by what the app is set up for and what Sharing says now.
+#[derive(Clone, PartialEq, Eq)]
+enum Destination {
+    /// Online, with the user's account.
+    Online,
+    /// The model shared now; the sharing key in the variable the app's setup reads it from
+    /// (name, key), when there is one.
+    Local { key: Option<(String, String)> },
 }
 
 // ---- The server --------------------------------------------------------------------------
 
-/// Reads the port the app shares its model on, if sharing was ever set up.
-pub type SharePort =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<u16>> + Send>> + Send + Sync>;
+/// Reads what Sharing (WP5) says now: the kept port, the switch, the port it listens on
+/// and, while it listens, the sharing key ([`ShareNow`]).
+pub type ReadShare =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ShareNow> + Send>> + Send + Sync>;
 
 /// The folders the user approved, read from the store when a call is checked.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -846,7 +918,7 @@ pub struct CodingAppsServer {
     /// secret-looking variables are dropped.
     base_env: BTreeMap<String, String>,
     home: Option<PathBuf>,
-    share_port: SharePort,
+    share: ReadShare,
     approved: Approved,
     windows: bool,
     max_run: Duration,
@@ -858,13 +930,13 @@ impl CodingAppsServer {
         saved: SavedSetup,
         base_env: BTreeMap<String, String>,
         home: Option<PathBuf>,
-        share_port: SharePort,
+        share: ReadShare,
     ) -> Self {
         Self {
             saved,
             base_env,
             home,
-            share_port,
+            share,
             approved: Arc::new(|_| Box::pin(async { ApprovedNow::default() })),
             windows: cfg!(windows),
             max_run: MAX_RUN,
@@ -885,19 +957,44 @@ impl CodingAppsServer {
             SavedSetup::default(),
             BTreeMap::new(),
             None,
-            Arc::new(|| Box::pin(async { None })),
+            Arc::new(|| Box::pin(async { ShareNow::default() })),
         )
     }
 
-    /// The environment of a run: the base environment without secret-looking variables.
-    fn child_env(&self) -> runtime::EnvSpec {
+    /// The environment of a run: the base environment without secret-looking variables,
+    /// plus, for an app set up for the model shared now, the sharing key in the one
+    /// variable its setup reads it from ([`Destination::Local`]).
+    fn child_env(&self, share_key: Option<&(String, String)>) -> runtime::EnvSpec {
         let mut env = runtime::EnvSpec::empty();
         for (k, v) in &self.base_env {
             if !tools::terminal::looks_secret(k) {
                 env = env.set(k.clone(), v.clone());
             }
         }
+        if let Some((name, key)) = share_key {
+            env = env.set(name.clone(), key.clone());
+        }
         env
+    }
+
+    /// Where the task goes, by what the app is set up for and what Sharing says now. An app
+    /// set up for the port the proxy listens on gets the sharing key; one set up for the
+    /// kept port while sharing is off or not listening there is refused ([`sharing_off`]),
+    /// since it would connect to a port nothing serves, or another program took.
+    async fn destination(&self, app: CodingApp) -> Result<Destination, String> {
+        let share = (self.share)().await;
+        let home = self.home.as_deref();
+        if let (Some(port), Some(key)) = (share.listening, share.key.as_ref())
+            && let Some(setup) = shared_setup(app, &self.base_env, home, Some(port))
+        {
+            return Ok(Destination::Local {
+                key: setup.key_variable.map(|name| (name, key.clone())),
+            });
+        }
+        if shared_setup(app, &self.base_env, home, share.port).is_some() {
+            return Err(sharing_off(app, share.enabled));
+        }
+        Ok(Destination::Online)
     }
 
     /// The working folder's sandbox: the folders the user approved for the chat (never the
@@ -963,7 +1060,7 @@ pub(crate) fn listing_both() -> CodingAppsServer {
         },
         BTreeMap::new(),
         None,
-        Arc::new(|| Box::pin(async { None })),
+        Arc::new(|| Box::pin(async { ShareNow::default() })),
     )
 }
 
@@ -1175,15 +1272,13 @@ impl BuiltinServer for CodingAppsServer {
             Ok(c) => c,
             Err(why) => return Self::refused(app, &task, why),
         };
-        let shared = uses_shared_model(
-            app,
-            &self.base_env,
-            self.home.as_deref(),
-            (self.share_port)().await,
-        );
+        let local = match self.destination(app).await {
+            Ok(d) => d != Destination::Online,
+            Err(why) => return Self::refused(app, &task, why),
+        };
         let folder = policy::sanitize::visible(&cwd.canonical);
         let mut preview = card_lines(app, may_edit, &folder, self.windows);
-        preview.push(online_line(app, shared));
+        preview.push(online_line(app, local));
         preview.push("Experimental.".into());
         preview.push(format!(
             "Program: {}",
@@ -1222,6 +1317,7 @@ impl BuiltinServer for CodingAppsServer {
                 "root": cwd.root,
                 "wasSymlink": cwd.was_symlink,
                 "program": program.display().to_string(),
+                "localModel": local,
             }),
         })
     }
@@ -1261,9 +1357,26 @@ impl BuiltinServer for CodingAppsServer {
                 "The working folder changed after the request was approved ({e}), so nothing was run."
             ));
         }
+        // The card said where the task goes; that must still hold.
+        let destination = match self.destination(app).await {
+            Ok(d) => d,
+            Err(why) => return ToolOutput::error(format!("{why} Nothing was run.")),
+        };
+        let share_key = match &destination {
+            Destination::Local { key } => key.as_ref(),
+            Destination::Online => None,
+        };
+        if action.payload.get("localModel").and_then(Value::as_bool)
+            != Some(destination != Destination::Online)
+        {
+            return ToolOutput::error(format!(
+                "Where {} sends the task changed after the request was approved, so nothing was run. Ask again.",
+                app.label()
+            ));
+        }
         let spec = runtime::SpawnSpec::new(&program, &planned.cwd.canonical)
             .args(arguments(app, planned.may_edit))
-            .env(self.child_env())
+            .env(self.child_env(share_key))
             .stdin(runtime::StdioMode::Piped)
             .stdout(runtime::StdioMode::Piped)
             .stderr(runtime::StdioMode::Piped);
@@ -1502,22 +1615,21 @@ fn home_of(env: &BTreeMap<String, String>) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// The server for a saved setup, reading the sharing port from the app's settings.
+/// The server for a saved setup, reading what Sharing says at each call.
 fn server(app: &AppHandle, saved: SavedSetup) -> CodingAppsServer {
     let env = base_env();
     let home = home_of(&env);
     let handle = app.clone();
-    let share_port: SharePort = Arc::new(move || {
+    let share: ReadShare = Arc::new(move || {
         let handle = handle.clone();
         Box::pin(async move {
-            let state = handle.try_state::<AppState>()?;
-            state
-                .store
-                .get_setting::<crate::share::ShareSettings>(crate::share::SETTINGS_KEY)
-                .await
-                .ok()
-                .flatten()
-                .map(|s| s.port)
+            let (Some(state), Some(sharing)) = (
+                handle.try_state::<AppState>(),
+                handle.try_state::<crate::share::Sharing>(),
+            ) else {
+                return ShareNow::default();
+            };
+            sharing.now(&crate::share::Env::from_state(&state)).await
         })
     });
     let handle = app.clone();
@@ -1546,7 +1658,7 @@ fn server(app: &AppHandle, saved: SavedSetup) -> CodingAppsServer {
             }
         })
     });
-    CodingAppsServer::new(saved, env, home, share_port).with_approved(approved)
+    CodingAppsServer::new(saved, env, home, share).with_approved(approved)
 }
 
 fn now_ms() -> i64 {

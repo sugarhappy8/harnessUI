@@ -1074,7 +1074,8 @@ mod tests {
             })
             .await
             .expect("pref");
-        let moved = json!({ "url": "https://x.test", "headers": { "A": "${secret:reverse__yours_.A}" } });
+        let moved =
+            json!({ "url": "https://x.test", "headers": { "A": "${secret:reverse__yours_.A}" } });
         store
             .rename_mcp_server(id, "reverse (yours)".into(), moved.clone())
             .await
