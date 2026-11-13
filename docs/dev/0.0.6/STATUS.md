@@ -139,6 +139,13 @@ one starts from this file and `README.md`.
   portability, wf_16028e05-829 lifecycle + owner/plain words): finders by dimension, dedup,
   a skeptic per finding. Still finishing: WP9e (fix round), header layout (second fix round).
   Docs done (ARCHITECTURE, SECURITY, CHANGELOG, README; TODO(lead) markers for WP9e).
+- 06:50 UTC (owner asked to go faster): version set to 0.0.6 and pushed without [skip ci]
+  (9e8de10) so CI on all three systems runs early; draft pull request #5 opened and watched.
+  Release review findings are fixed as each review run ends: gate/untrusted-input findings in
+  wf_97f1aa9f-152 (rea walk refusals naming inner paths, escaped names); integration/
+  portability findings in wf_bf302e55-0de (Windows path test, backend check D3, MCP name clash).
+  Review runs still going: processes/network + tests (wf_0772ffdb-bab), lifecycle + owner
+  (wf_16028e05-829). Disk guard now also removes superseded rlib/rmeta files (8.6 GB freed).
 - Container set-up done here (needed again in a fresh container): Tauri system libraries
   (ci.yml), webkit2gtk-driver and xdotool, `cargo install tauri-driver --locked`,
   `rustup toolchain install 1.99`, `python3 scripts/fetch_llama.py linux`,

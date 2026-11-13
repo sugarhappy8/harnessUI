@@ -322,7 +322,7 @@ export function ChatView() {
                         .catch((e) => showError(toErrorInfo(e)))
                     }
                     // Lower on the usage line's row (under @2xl) than on the name's row.
-                    className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted @max-2xl:py-0.5 ${detail.chat.thinking ? "text-accent" : "text-fg-muted"}`}
+                    className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm whitespace-nowrap hover:bg-bg-muted @max-2xl:py-0 ${detail.chat.thinking ? "text-accent" : "text-fg-muted"}`}
                   >
                     <Brain size={15} aria-hidden />
                     {/* "On" or "Off" at every width; "Thinking on" from @5xl while the chat has no

@@ -541,6 +541,33 @@ describe("ModelSettings: one model's load settings in plain words", () => {
       device: { named: "Vulkan1" },
     });
   });
+
+  it("shows the file name and graphics card names with hidden and right-to-left characters as codes", async () => {
+    const info = sample("/models/X-‮fuug.Q4_K_M.gguf");
+    info.devices = [
+      { name: "Vulkan0", description: "Card‮evil", totalMib: 2048, freeMib: 1000, recommended: false },
+      { name: "Vulkan1", description: "Other​", totalMib: 16_384, freeMib: 15_000, recommended: true },
+    ];
+    await openPanel(info);
+    const shown = screen.getByText("X-\\u{202E}fuug.Q4_K_M.gguf");
+    expect(shown.tagName).toBe("BDI");
+    expect(shown.getAttribute("dir")).toBe("ltr");
+    expect(shown.parentElement?.getAttribute("title")).toBe("/models/X-\\u{202E}fuug.Q4_K_M.gguf");
+    expect(optionTexts("Which graphics card")).toEqual([
+      "Same as default (Automatic)",
+      "Automatic",
+      "Card\\u{202E}evil · 2 GB",
+      "Other\\u{200B} · 16 GB (recommended)",
+    ]);
+    expect(document.body.innerHTML).not.toMatch(/[‮​]/);
+    // The stored path is untouched: Save sends the file's own path.
+    await choose("Which graphics card", "named:Vulkan0");
+    await click("Save");
+    expect(ipcMock.setModelLoadSettings).toHaveBeenCalledWith("/models/X-‮fuug.Q4_K_M.gguf", {
+      ...DEFAULTS,
+      device: { named: "Vulkan0" },
+    });
+  });
 });
 
 describe("ModelSettings: Fine control and where the model goes (0.0.6 item 6)", () => {

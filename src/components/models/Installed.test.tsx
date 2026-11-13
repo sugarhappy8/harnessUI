@@ -314,4 +314,22 @@ describe("Models → Installed", () => {
     // Also as visible text, once for the list, not only as a tooltip.
     expect(screen.getAllByText("You can compare up to 4 models. Remove one first.")).toHaveLength(1);
   });
+
+  it("shows file names, folders and repos with hidden and right-to-left characters as codes", async () => {
+    const odd = { ...model(3, "X-‮fuug.Q4_K_M.gguf"), repo: "someone/‮evil-GGUF" };
+    ipcMock.listInstalledModels.mockResolvedValue([odd]);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await show();
+    const name = screen.getByText("X-\\u{202E}fuug.Q4_K_M.gguf");
+    expect(name.tagName).toBe("BDI");
+    expect(name.getAttribute("dir")).toBe("ltr");
+    expect(name.parentElement?.getAttribute("title")).toBe("/models/X-\\u{202E}fuug.Q4_K_M.gguf");
+    expect(screen.getByText("someone/\\u{202E}evil-GGUF")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Settings for this model: X-\\u{202E}fuug.Q4_K_M.gguf" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add to comparison: X-\\u{202E}fuug.Q4_K_M.gguf" })).toBeTruthy();
+    await click(screen.getByRole("button", { name: "Delete X-\\u{202E}fuug.Q4_K_M.gguf" }));
+    expect(confirm).toHaveBeenCalledWith("Delete X-\\u{202E}fuug.Q4_K_M.gguf? This removes 1 GB from disk.");
+    expect(document.body.innerHTML).not.toContain("‮");
+    confirm.mockRestore();
+  });
 });
