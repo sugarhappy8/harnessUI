@@ -458,8 +458,9 @@ fn base64_picture_type(data: &str) -> Option<&'static str> {
 
 /// [0.0.6] A picture from a tool or stored inline in a chat, as the model gets it.
 enum InlinePicture {
-    /// Not a WebP file by its first bytes, whatever its type says (or not base64, which the
-    /// agent replaces with its own note): sent as it is.
+    /// Not labelled WebP and not a WebP file by its first bytes: sent as it is (data that is
+    /// not base64 is replaced by the agent with its own note). Data labelled WebP that is not
+    /// a WebP file is [`Self::Relabel`] or [`Self::LeftOut`], never this.
     Keep,
     /// A PNG, JPEG or GIF picture labelled WebP: sent as it is, under the type it really is.
     /// Other data labelled WebP is [`Self::LeftOut`] instead.
