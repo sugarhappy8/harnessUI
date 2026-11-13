@@ -4,7 +4,7 @@ import * as ipc from "../lib/ipc";
 import type { ErrorInfo, SkillList } from "../lib/types";
 import { toErrorInfo } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
-import { visiblePath } from "./FolderChip";
+import { visibleLines, visiblePath } from "./FolderChip";
 
 const TEMPLATE = (name: string) => `---
 name: ${name}
@@ -248,7 +248,8 @@ export function SkillsSettings() {
                 <bdi dir="ltr" className="font-mono text-xs">
                   {visiblePath(p.path)}
                 </bdi>
-                : {visiblePath(p.error)}
+                {/* A YAML error has several lines with a snippet of the file: they stay lines. */}
+                : <span className="whitespace-pre-line">{visibleLines(p.error)}</span>
               </li>
             ))}
           </ul>

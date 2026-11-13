@@ -31,7 +31,10 @@ Drives the backend commands the model settings panel uses, in the real app:
   "Unloaded to free memory" is as it was after the check; the backend check itself, asked
   to wait ("Restart when it ends") while the model is busy, waits and stops nothing, and the
   waiting line's Cancel ends it with nothing checked, also when pressed at once (the check
-  starts its wait before it probes the backends) while a real reply streams.
+  starts its wait before it probes the backends) while a real reply streams; a reply that
+  begins while the check probes the backends (made slow for that step) is waited for before
+  the check's first test load, never cut off, and Cancel on that wait leaves the model as it
+  is and still gives the report of the devices.
 
 The small model sometimes ends the long reply after a few words; a step that needs the
 reply to still stream then tries again with a new reply in a new chat, and a change that
@@ -46,6 +49,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -63,6 +67,12 @@ MODEL = os.environ.get("TEST_GGUF") or str(next(iter(sorted((ROOT / ".cache" / "
 LLAMA_DIR = os.environ.get("APP_DEV_LLAMA_DIR", str(ROOT / ".cache" / "llama-linux"))
 OUT = pathlib.Path(os.environ.get("E2E_OUT", tempfile.mkdtemp(prefix="e2e-m10-")))
 IDENTIFIER = "io.github.sugarhappy8.harnessui"
+# The app runs the pinned llama-server through a small wrapper in this run's folder: while
+# SLOW_PROBES exists, its device listing (the backend probe) takes 6 s, as on a computer
+# whose graphics drivers start slowly. Only the step that needs a reply to begin while the
+# backend check probes creates that file.
+WRAPPED_LLAMA = OUT / "llama"
+SLOW_PROBES = OUT / "slow-probes"
 
 # Starts a command without waiting for it: the result lands in `window[slot]`.
 FIRE = """
@@ -95,6 +105,27 @@ LONG_REPLY = "Write a story of about 1,500 words about a lighthouse keeper and a
 
 # The chat of the reply started last.
 REPLY = {"chat": None}
+
+
+def wrap_llama_dir() -> pathlib.Path:
+    """The folder the app takes llama-server from: wrappers that run the pinned programs."""
+    real = pathlib.Path(LLAMA_DIR).resolve()
+    WRAPPED_LLAMA.mkdir(parents=True, exist_ok=True)
+    SLOW_PROBES.unlink(missing_ok=True)
+    for name in ("llama-server", "llama-fit-params"):
+        if not (real / name).exists():
+            continue
+        slow = ""
+        if name == "llama-server":
+            slow = (
+                'for a in "$@"; do\n'
+                f'  if [ "$a" = "--list-devices" ] && [ -e {shlex.quote(str(SLOW_PROBES))} ]; then /bin/sleep 6; break; fi\n'
+                "done\n"
+            )
+        script = WRAPPED_LLAMA / name
+        script.write_text(f'#!/bin/sh\n{slow}exec {shlex.quote(str(real / name))} "$@"\n')
+        script.chmod(0o755)
+    return WRAPPED_LLAMA
 
 
 def free_port() -> int:
@@ -433,6 +464,107 @@ def check_cancel_at_once_ends_the_waiting_backend_check(s, home):
     ready(s)
 
 
+def check_a_reply_begun_while_the_check_probes_is_waited_for(s, home):
+    """The backend check begins with nothing using the model, so it does not wait at first.
+    A reply that begins while it probes the backends (made slow here: 6 s) is waited for
+    before the check's first test load, with the waiting line on: it is never cut off, and
+    the check runs once it has ended. Then the same again, with Cancel on that wait: the
+    check gives its report of the devices, with the timed generation not run, and the model
+    and its server are as they were. (Before, the first test load stopped the server, the
+    reply ended with an error, and nothing waited.)"""
+    idle = {"chatTurns": 0, "modelChecks": 0, "otherApps": 0}
+
+    def begin(slot):
+        """Starts the check, then a reply while it probes. True once the check waits for
+        the reply (the waiting line is on); False when the reply ended by itself first."""
+        st = ready(s)
+        assert st["modelPath"] == MODEL and busy(s) == idle, (st, busy(s))
+        chat = s.invoke("create_chat", {"modelRef": f"local:{MODEL}"})
+        s.invoke("set_chat_tools", {"chatId": chat["id"], "enabled": []})
+        REPLY["chat"] = chat["id"]
+        SLOW_PROBES.touch()
+        try:
+            s.execute(FIRE, slot, "run_diagnostics", {"modelPath": MODEL, "whenIdle": True})
+            s.wait_for(lambda: busy(s)["modelChecks"] == 1 or not pending(s, slot), 30, "the check to start")
+            assert pending(s, slot), ("the check ended at once", s.execute(f"return window.{slot}"))
+            s.execute(SEND, chat["id"], LONG_REPLY, None)
+            s.wait_for(lambda: busy(s)["chatTurns"] == 1 or not pending(s, "__sent"), 30, "the reply to start")
+        finally:
+            # The probe that runs now has already read it.
+            SLOW_PROBES.unlink(missing_ok=True)
+        seen = {}
+
+        def settled():
+            seen["status"] = s.invoke("runtime_status")
+            return seen["status"]["reloadWaiting"] or not pending(s, "__sent") or not pending(s, slot)
+
+        s.wait_for(settled, 120, "the check to wait for the reply")
+        if seen["status"]["reloadWaiting"]:
+            return True
+        # Nothing waited: fine only when the reply had ended by itself, never when the check
+        # cut it off.
+        fired(s, "__sent", 300)
+        last = messages(s, chat["id"])[-1]
+        assert last["role"] == "assistant" and last["status"] == "complete", (
+            "the backend check cut off a reply that began while it probed", last["status"],
+            len(last.get("content") or ""), seen["status"], busy(s))
+        fired(s, slot, 1200)
+        ready(s)
+        return False
+
+    def waits_then_runs():
+        pid = the_server(home)[0]
+        if not begin("__diag6"):
+            return False
+        assert pending(s, "__diag6") and reply_streams(s), ("waiting, but not for this reply", busy(s))
+        assert the_server(home)[0] == pid, "the check replaced the model while it waited"
+        r = fired(s, "__sent", 600)
+        assert r.get("ok"), ("the reply failed", r)
+        last = messages(s, REPLY["chat"])[-1]
+        assert last["role"] == "assistant" and last["status"] == "complete" and last.get("content"), (
+            "the reply the check waited for did not end well", last["status"])
+        r = fired(s, "__diag6", 1200)
+        assert r.get("ok"), r
+        text = r["value"]["text"]
+        assert "  cpu: prompt" in text and "not run" not in text, ("the check did not run after the wait", text[-600:])
+        st = ready(s)
+        assert st["modelPath"] == MODEL and st["reloadWaiting"] is False, st
+        assert busy(s)["modelChecks"] == 0, busy(s)
+        return True
+
+    def cancel_ends_the_wait():
+        pid = the_server(home)[0]
+        if not begin("__diag7"):
+            return False
+        call(s, "cancel_pending_reload")
+        r = fired(s, "__diag7", 60)
+        assert r.get("ok"), ("Cancel on the check's second wait gave no report", r)
+        text = r["value"]["text"]
+        assert "backend cpu" in text and "not run" in text and "  cpu: prompt" not in text, text[-600:]
+        st = s.invoke("runtime_status")
+        assert st["reloadWaiting"] is False, ("still shown as waiting after Cancel", st)
+        assert st["modelPath"] == MODEL and the_server(home)[0] == pid, ("the cancelled check replaced the model", st)
+        assert busy(s)["modelChecks"] == 0, busy(s)
+        if reply_streams(s):
+            s.invoke("stop_generation")
+        fired(s, "__sent", 120)
+        last = messages(s, REPLY["chat"])[-1]
+        assert last["status"] != "error", ("the reply was cut off", last["status"])
+        ready(s)
+        return True
+
+    for name, attempt in (
+        ("a reply begun while the check probes is waited for", waits_then_runs),
+        ("Cancel on that wait leaves the model as it is", cancel_ends_the_wait),
+    ):
+        for n in range(1, 5):
+            if attempt():
+                break
+            print(f"    {name}: the reply ended by itself too soon ({n} of 4)", flush=True)
+        else:
+            raise AssertionError(f"{name}: the reply ended by itself too soon 4 times")
+
+
 def main() -> int:
     home = OUT / "home"
     shutil.rmtree(home, ignore_errors=True)
@@ -443,7 +575,7 @@ def main() -> int:
         XDG_DATA_HOME=str(home / "data"),
         XDG_CONFIG_HOME=str(home / "config"),
         XDG_CACHE_HOME=str(home / "cache"),
-        APP_DEV_LLAMA_DIR=LLAMA_DIR,
+        APP_DEV_LLAMA_DIR=str(wrap_llama_dir()),
         RUST_LOG="info",
     )
     port = free_port()
@@ -742,6 +874,9 @@ def main() -> int:
 
         step("Cancel right after Restart when it ends: the backend check ends, the model stays")
         check_cancel_at_once_ends_the_waiting_backend_check(s, home)
+
+        step("a reply begun while the backend check probes is waited for; Cancel on that wait")
+        check_a_reply_begun_while_the_check_probes_is_waited_for(s, home)
 
         step("the 0.0.4 command shape still loads exactly as given")
         old = {"ctx": 4096, "backend": None, "device": None}

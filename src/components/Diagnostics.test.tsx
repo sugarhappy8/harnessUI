@@ -24,6 +24,7 @@ vi.mock("../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn(async () => undefined) }));
 
 const { Diagnostics } = await import("./SettingsDialog");
+const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
 const { RuntimeIndicator } = await import("./RuntimeIndicator");
 const change = await import("../store/modelChange");
 const { useApp } = await import("../store/app");
@@ -166,6 +167,32 @@ describe("Settings, Diagnostics: the backend check asks first when the model is 
     expect(ipcMock.modelBusy).not.toHaveBeenCalled();
     expect(ipcMock.runDiagnostics).toHaveBeenCalledWith(null, true);
   });
+
+  // The report names the loaded model's path ("timed generation with …") and the logs
+  // folder; a file named with a right-to-left override must not read reversed there. The
+  // report keeps its lines; Copy report copies it as it was written.
+  it("shows hidden and right-to-left characters in the report as codes and keeps its lines", async () => {
+    const path = "/m/X-\u202Efuug.Q4_K_M.gguf";
+    useApp.setState({ runtime: runtime("ready", path) });
+    ipcMock.modelBusy.mockResolvedValue(IDLE);
+    const text = `harnessUI 0.0.6 diagnostics\r\nbackend cpu [b1] /data/\u200Bbin\n\ntimed generation with ${path}\n  cpu:\t12 tokens/s\n`;
+    ipcMock.runDiagnostics.mockResolvedValueOnce({ text, savedTo: "/home/\u202Eu/logs/diagnostics.txt" });
+    render(<Diagnostics />);
+    fireEvent.click(screen.getByRole("button", { name: "Run backend check" }));
+    await flush();
+    expect(ipcMock.runDiagnostics).toHaveBeenCalledWith(path, true);
+    const pre = document.querySelector("pre") as HTMLElement;
+    expect(pre.textContent).toBe(
+      "harnessUI 0.0.6 diagnostics\nbackend cpu [b1] /data/\\u{200B}bin\n\ntimed generation with /m/X-\\u{202E}fuug.Q4_K_M.gguf\n  cpu:\t12 tokens/s\n",
+    );
+    expect(pre.className).toContain("whitespace-pre-wrap");
+    const saved = screen.getByText("/home/\\u{202E}u/logs/diagnostics.txt");
+    expect(saved.tagName).toBe("BDI");
+    expect(saved.getAttribute("dir")).toBe("ltr");
+    expect(new XMLSerializer().serializeToString(document.body)).not.toMatch(/[\u202E\u200B]/);
+    fireEvent.click(screen.getByRole("button", { name: "Copy report" }));
+    expect(writeText).toHaveBeenCalledWith(text);
+  });
 });
 
 function localChat(): ChatDetail {
@@ -287,5 +314,36 @@ describe("Settings, Diagnostics: the header's waiting line is up only while the 
     expect(waitingLine()).toBeNull();
     await act(async () => finish({ text: "the report", savedTo: null }));
     expect(screen.getByText("the report")).toBeTruthy();
+  });
+
+  it("comes up for a reply that began while the check probed; that Cancel still gives the report", async () => {
+    // Nothing used the model: nothing is asked and the check runs at once.
+    ipcMock.modelBusy.mockResolvedValue(IDLE);
+    let end: (r: DiagnosticsReport | null) => void = () => undefined;
+    ipcMock.runDiagnostics.mockImplementationOnce(() => new Promise((resolve) => (end = resolve)));
+    // The backend ends that wait with the report of the devices, having replaced nothing.
+    const text =
+      "backend cpu [dev]\n\ntimed generation with /m/a.gguf\n  not run: cancelled while it waited for the model to be free (nothing was changed)\n";
+    ipcMock.cancelPendingReload.mockImplementationOnce(async () => end({ text, savedTo: null }));
+    await showWithHeader();
+    fireEvent.click(screen.getByRole("button", { name: "Run backend check" }));
+    await flush();
+    expect(ipcMock.runDiagnostics).toHaveBeenCalledWith("/m/a.gguf", true);
+    // The check probes the backends, holding the model; a reply begins meanwhile.
+    ipcMock.modelBusy.mockResolvedValue({ chatTurns: 1, modelChecks: 1, otherApps: 0 });
+    expect(waitingLine(), "nothing waits yet").toBeNull();
+    // Right before its first test load the backend waits for that reply.
+    await backend({ reloadWaiting: true });
+    const line = waitingLine();
+    expect(line?.textContent).toContain("Restarts when the reply ends");
+    await act(async () => {
+      fireEvent.click(within(line as HTMLElement).getByRole("button", { name: "Cancel" }));
+    });
+    await backend({ reloadWaiting: false });
+    expect(ipcMock.cancelPendingReload).toHaveBeenCalledTimes(1);
+    expect(waitingLine()).toBeNull();
+    expect(screen.getByText(/not run: cancelled while it waited/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByRole("button", { name: "Run backend check" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

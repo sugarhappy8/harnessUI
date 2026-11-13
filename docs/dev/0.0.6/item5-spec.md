@@ -185,7 +185,8 @@ minutes without use; the chat's open file is opened again by itself when the cha
   into the owner's own home folder or other apps' settings. The one exception is Linux with
   Ghidra: rea's temporary folder is `<XDG_RUNTIME_DIR>/<app id>-reverse` (above), private
   (mode 0700), added to `forbidden_folders` (`reverse::layout::run_tmp_forbidden`) and masked
-  in rea's output like `reverse/`. Without a usable `XDG_RUNTIME_DIR` it is `reverse/tmp`, and
+  in rea's output like `reverse/`. Without a usable `XDG_RUNTIME_DIR` (none, not private, or
+  under 256 MiB free, as on computers with less than about 2.5 GB of memory) it is `reverse/tmp`, and
   rea puts Ghidra's session in a private `/tmp/rea-ghidra-…` folder it removes at the stop (a
   documented Linux limit).
 - **R9 rea runs only as `node <rea>/scripts/rea.mjs mcp`, spawned through `crates/runtime`.**
@@ -694,7 +695,9 @@ No other package edits mcp-host.
     Ghidra when the layout has a runtime folder (`ReverseLayout::run_tmp`): then `TMPDIR` is
     `<XDG_RUNTIME_DIR>/<app id>-reverse`. That folder is chosen when the app starts, only when
     `XDG_RUNTIME_DIR` is an absolute path to a real folder (not a link) of the user's with mode
-    0700 and at least 1 GiB free, and the folder, as written and as resolved, has no folder
+    0700 and at least 256 MiB free (the system keeps it in memory, by default a tenth of it, so
+    computers with less than about 2.5 GB of memory fall back to `reverse/tmp`), and the
+    folder, as written and as resolved, has no folder
     starting with a dot and is at most 76 bytes (the bridge socket's 106-byte limit);
   - `REA_MCP_TOOL_FAMILIES` (section 5), `REA_MCP_TOOL_CATALOG_PROFILE=full`,
     `REA_MCP_INPUT_SCHEMA_PROFILE=compact`, `REA_MCP_OUTPUT_SCHEMA_PROFILE=off`,
@@ -713,7 +716,8 @@ No other package edits mcp-host.
   `ensure_started` refuses on a Mac without Apple's tools (fresh check), when the marker is
   missing, `Broken` or `NeedsUpdate`; empties `reverse/tmp` (and on Linux with Ghidra makes the
   runtime folder afresh, mode 0700, checked to be a real folder of the user's; it is removed
-  after every stop and idle stop unless rea started again, and when the app starts); starts;
+  after every stop and idle stop unless rea started again, and when the app starts; a stop
+  that comes while a start prepares it undoes that start before rea is launched); starts;
   grows `generation`; returns
   rea's tool list for the live check. Stopped after 15 minutes without a call, on `restart()`
   and at app quit; `state()` for the tab (`Failed` carries the masked, sanitised stderr tail
@@ -790,8 +794,10 @@ against the narrowed schemas.
   never grantable, allowed without a card at risk Normal like `AppData`, after the Full access
   check (so Full access records "Full access").
 - `tool_catalog.rs`: group `reverse`, label "Reverse engineering", strong words "decompile",
-  "disassemble", "reverse engineer", "binary", "pseudocode", ".exe", ".dll", ".dylib"; weak
-  "program", "function", "library"; ranks 1 for `open_binary`, `procedure_pseudo_code`,
+  "disassemble", "reverse engineer", "binary", "pseudocode", "pseudo code", "xref", "pyc",
+  ".exe", ".dll", ".dylib"; weak "program", "function", "library", which count only beside a
+  strong word; the words of the tools' names do not count (`OWN_WORDS_ONLY`, R18: everyday
+  coding requests do not bring the group in); ranks 1 for `open_binary`, `procedure_pseudo_code`,
   `list_procedures`, `search_procedures`, `search_strings`, `close_binary`; 3 for the file
   checks; 2 for the rest; examples valid for the narrowed schemas.
 
@@ -1283,8 +1289,10 @@ at all. They are free and come from Apple (a large download).
   owner decides to install a decompiler (security critique asked for the tab line, which is
   added).
 - **N6. The CI network check covers the test's processes, not system DNS.** A firewall or `pf`
-  log cannot attribute lookups made by the system resolver on Windows and macOS; Linux's
-  `strace` covers them there, and the release-gate test (13.6) records DNS on both systems.
+  log cannot attribute lookups made by the system resolver on Windows and macOS. On Linux,
+  `strace` catches them in CI. On Windows and macOS no automatic test records them; only the
+  owner's checklist runs with the lead do, recording the built app's connections and name
+  lookups (section 9, Windows step 12 and Mac step 3; ARCHITECTURE.md 13.6 and 19).
 
 ---------------------------------------------------------------------------------------
 

@@ -59,6 +59,8 @@ function fit(verdict: Verdict, over: Partial<FitResult> = {}): FitResult {
     partialOffload: false,
     device: "graphicsCard",
     computerBytes: 0,
+    computerFreeBytes: 0,
+    computerShort: false,
     sentence: "Needs about 4.4 GB; your GPU has 15.2 GB free. Fits.",
     ...over,
   };
@@ -849,6 +851,29 @@ describe("Compare: columns as the backend fills them", () => {
     expect(cell("Will it fit on this computer?", 1).textContent).toBe(
       "Too large. Needs about 12.5 GB; this computer has 11.2 GB free. " +
         `There is not enough memory free to run it on the processor.${fitSource(16384)}`,
+    );
+  });
+
+  // compare-fit-minors r2: on a graphics card, Too large names the computer's memory and how
+  // much it has free when the part kept there is what does not fit.
+  it("says the computer's memory is short when an installed column's part there does not fit", async () => {
+    factsFor = (item, ctx) =>
+      facts(item, ctx, {
+        ctx: 16384,
+        fit: fit("red", {
+          neededBytes: 2.7 * GIB,
+          availableBytes: 3.7 * GIB,
+          computerBytes: 1.9 * GIB,
+          computerFreeBytes: 1.5 * GIB,
+          computerShort: true,
+          partialOffload: true,
+        }),
+      });
+    useCompare.setState({ entries: [{ installedPath: "/models/a.gguf" }] });
+    await show();
+    expect(cell("Will it fit on this computer?").textContent).toBe(
+      "Too large. Needs about 4.6 GB in all: 2.7 GB on the graphics card, which has 3.7 GB free, " +
+        `and 1.9 GB in the computer's memory. The computer's memory has 1.5 GB free, not enough for its part.${fitSource(16384)}`,
     );
   });
 

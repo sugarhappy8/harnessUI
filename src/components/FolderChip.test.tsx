@@ -60,6 +60,7 @@ const {
   messagePlaceholder,
   useChatFolders,
   useWorkingFolderName,
+  visibleLines,
   visiblePath,
   workingFolderOf,
 } = await import("./FolderChip");
@@ -165,6 +166,20 @@ describe("folder names and visible paths", () => {
     expect(visiblePath("/x/\u{E0080}\u{E01F0}\u{E0FFF}")).toBe("/x/\\u{E0080}\\u{E01F0}\\u{E0FFF}");
     // Ordinary marks that do show stay as they are.
     expect(visiblePath("/x/caf\u00E9 e\u0301")).toBe("/x/caf\u00E9 e\u0301");
+  });
+
+  // A report or an error message of several lines (the backend check's report, a skill's
+  // YAML error) keeps its line breaks and tabs; everything else is shown as visiblePath does.
+  it("keeps line breaks and tabs in text of several lines and shows the rest as codes", () => {
+    expect(visibleLines("line one\n  line two\tafter a tab")).toBe("line one\n  line two\tafter a tab");
+    // A Windows line end is one line break, not a break and a code.
+    expect(visibleLines("a\r\nb")).toBe("a\nb");
+    expect(visibleLines("a\rb")).toBe("a\\u{000D}b");
+    expect(visibleLines("with /m/X-\u202Efuug.gguf\nnext \u200B\u2066x\u2069")).toBe(
+      "with /m/X-\\u{202E}fuug.gguf\nnext \\u{200B}\\u{2066}x\\u{2069}",
+    );
+    expect(visibleLines("\u2028\u2029\u000B\u000C\u0085")).toBe("\\u{2028}\\u{2029}\\u{000B}\\u{000C}\\u{0085}");
+    expect(visibleLines("\u05E9\u05DC\u05D5\u05DD caf\u00E9")).toBe("\u05E9\u05DC\u05D5\u05DD caf\u00E9");
   });
 
   it("finds the working folder the way the backend does", () => {

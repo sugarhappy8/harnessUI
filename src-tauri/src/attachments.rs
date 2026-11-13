@@ -750,8 +750,35 @@ pub fn cut_document(text: &str, cap: usize, pdf: bool) -> (String, Option<Docume
     (out, Some(DocumentCut { kept, total }))
 }
 
-/// [0.0.6] How many times [`cut_to_share`] measures a cut with the model server's tokens.
-const MAX_COUNTS: usize = 4;
+/// [0.0.6] How many times [`cut_to_share`] measures a cut with the model server's tokens
+/// (and `mentions::read_all` a mention).
+pub(crate) const MAX_COUNTS: usize = 4;
+
+/// [0.0.6] How many tokens `text` takes as the local model server counts them
+/// (llama-server's `/tokenize`); `None` when it cannot say.
+pub(crate) async fn server_tokens(client: &agent::OpenAiClient, text: String) -> Option<usize> {
+    client
+        .tokenize(&text, false)
+        .await
+        .ok()
+        .flatten()
+        .map(|tokens| tokens.len())
+}
+
+/// [0.0.6] The characters to cut to next when a cut of `chars` characters, `sent` of them
+/// sent, took `tokens` of the model server's tokens where `allowed` fit: fewer in
+/// proportion, with a tenth to spare, at least one fewer than before, never below `floor`.
+/// The one rule for documents ([`cut_to_share`]) and mentions (`mentions::read_all`).
+pub(crate) fn fewer_chars(
+    sent: usize,
+    chars: usize,
+    allowed: usize,
+    tokens: usize,
+    floor: usize,
+) -> usize {
+    let fewer = sent.saturating_mul(allowed).saturating_mul(9) / tokens.saturating_mul(10).max(1);
+    fewer.clamp(floor, chars.saturating_sub(1).max(floor))
+}
 
 /// [0.0.6] `text` cut to its share of the context ([`cut_document`] at `cap` characters),
 /// then held to `cap / 3` tokens as the model server counts them, when it can count
@@ -787,11 +814,7 @@ where
             return out;
         }
         let sent = out.0.chars().count().min(chars);
-        let fewer = sent.saturating_mul(allowed).saturating_mul(9) / tokens.saturating_mul(10);
-        chars = fewer.clamp(
-            MIN_DOCUMENT_CHARS,
-            chars.saturating_sub(1).max(MIN_DOCUMENT_CHARS),
-        );
+        chars = fewer_chars(sent, chars, allowed, tokens, MIN_DOCUMENT_CHARS);
         out = cut_document(text, chars, pdf);
     }
     out
@@ -971,16 +994,7 @@ pub async fn save_documents(
         };
         // [0.0.5 memory] Its share of the context, with a note on what was left out;
         // [0.0.6] in the local model's own tokens.
-        let count = counter.map(|client| {
-            move |t: String| async move {
-                client
-                    .tokenize(&t, false)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|tokens| tokens.len())
-            }
-        });
+        let count = counter.map(|client| move |t: String| server_tokens(client, t));
         let (text, cut) = document_for_model(&text, n_ctx, shared_by, is_pdf, count).await;
         let name: String = doc
             .file_name

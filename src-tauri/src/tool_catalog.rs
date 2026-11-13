@@ -48,16 +48,24 @@ pub struct Group {
     pub weak: &'static [&'static str],
 }
 
-/// [0.0.6 item 5] Groups that match a request by their listed words (`strong`, `weak`)
-/// only, not also by the words of their tools' names. rea's tool names hold everyday
-/// words ("function", "strings", "python", "rust", "view") that say nothing about reverse
-/// engineering (item5-spec.md R18).
+/// [0.0.6 item 5] Groups that match a request by their listed words only, and only when
+/// one of their `strong` words is there: the words of their tools' names do not count,
+/// and their `weak` words add to a match but never make one. rea's tool names hold
+/// everyday words ("function", "strings", "python", "rust", "view") and its weak words
+/// ("program", "function", "library") are everyday coding words; none of them says a
+/// request is about reverse engineering (item5-spec.md R18).
 pub const OWN_WORDS_ONLY: &[&str] = &[reverse::server::SERVER_NAME];
 
 impl Group {
     /// Whether the words of its tools' names also point at this group (`tool_select`).
     pub fn counts_tool_names(&self) -> bool {
         !OWN_WORDS_ONLY.contains(&self.server)
+    }
+
+    /// Whether only one of its `strong` words makes a request match this group, its `weak`
+    /// words then adding to the match (`tool_select`, `find_tools`).
+    pub fn needs_strong_word(&self) -> bool {
+        OWN_WORDS_ONLY.contains(&self.server)
     }
 }
 
@@ -259,8 +267,10 @@ pub const GROUPS: &[Group] = &[
         weak: &[],
     },
     // [0.0.6 item 5] rea. Words match whole words, so a file name such as "notepad.exe"
-    // counts through "exe". Only these words count, not the words of the tools' names
-    // (`OWN_WORDS_ONLY`).
+    // counts through "exe". Only these words count, not the words of the tools' names, and
+    // a weak word only beside a strong one (`OWN_WORDS_ONLY`). "pseudo code" also matches
+    // "pseudo-code", "xref" also "xrefs". Words that also mean ordinary coding
+    // ("assembly", "callers", "callees", "strings", "imports") are left out.
     Group {
         server: "reverse",
         label: "Reverse engineering",
@@ -273,6 +283,9 @@ pub const GROUPS: &[Group] = &[
             "reverse engineering",
             "binary",
             "pseudocode",
+            "pseudo code",
+            "xref",
+            "pyc",
             "exe",
             "dll",
             "dylib",

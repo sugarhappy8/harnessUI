@@ -100,8 +100,14 @@ Collected while the packages run. Each needs doing (or a decision) before the re
     "Apps to set up again".
   - `tool_catalog.rs:250` TODO(0.0.6) (tool selection counting words of tool names; rea's
     names; done in rea-name-words: the Reverse engineering group matches by its listed
-    words only, `tool_catalog::OWN_WORDS_ONLY`) and `attachments.rs:643` TODO(0.0.6) (documents in the mentions' share): decide
-    before release, or keep with a reason.
+    words only, a weak word only beside a strong one, with "pseudo code", "xref" and "pyc"
+    added to its strong words, `tool_catalog::OWN_WORDS_ONLY`) and `attachments.rs:643` TODO(0.0.6) (documents in the mentions' share;
+    done in mentions-share-docs: `resolve::cap_chars` is shared by the message's mentions and
+    documents, `mentions::attach` gets `documents.len()`, and on a local model each mention
+    is held in llama-server's own tokens as a document is, never below 600 characters; tests
+    `documents_and_mentions_share_forty_percent_of_the_context`,
+    `a_mentions_share_is_held_in_the_models_own_tokens`,
+    `mentions_are_held_in_llama_servers_own_tokens`): both done, the TODO is removed.
 - **Leftover fixes run C (wf_6a9d631b-ae5) done** (per-chat model switch cancel, WebP on the
   proxy and tool paths, helper escaping scope, Other apps copy race). Minors found by its
   reviews, for the final fix round (with the release review's findings):
@@ -139,6 +145,10 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   13.6, 16 and 17 corrected where they differed; the offline test sentence now names
   `e2e/m8_offline.py` and puts the built app's network check on the owner checklist (19,
   item5-spec section 9). `scripts/docs_test.py` (in ci.yml) keeps those sentences in step.
+  Review round: SECURITY, CHANGELOG and 13.6 now say what `reverse.yml` blocks on each
+  system (four named programs on Windows, TCP and UDP on macOS) and that it has not run on
+  GitHub; item5-spec N6 and the 17 Offline row no longer lean on a release-gate test that
+  records name lookups. `docs_test.py` checks these too.
 
 - **Final fix round (07:15 UTC).** Release review processes/network + tests (wf_0772ffdb-bab)
   confirmed 4 minors (scratchpad rr-2.json). The throwaway `crates/reverse/tests/zz_review_wp9c_sec.rs`
@@ -162,13 +172,17 @@ Collected while the packages run. Each needs doing (or a decision) before the re
   documented limit; Java perf file), arch-todo-lead (the ARCHITECTURE.md TODO(lead) markers).
   Done (rea-linux-tmp): on Linux with Ghidra, `TMPDIR` is `<XDG_RUNTIME_DIR>/<app id>-reverse`
   when that folder can be used (`reverse::layout::run_tmp_in`: absolute, real folder of the
-  user's, mode 0700, 1 GiB free, no dot folder, at most 76 bytes); made afresh (0700) at each
+  user's, mode 0700, 256 MiB free, no dot folder, at most 76 bytes); made afresh (0700) at each
   start, removed after each stop and idle stop and at app start, forbidden to the tools
   (`permissions.rs`), masked in rea's output. Else today's `/tmp/rea-ghidra-…` fallback, a
   documented limit. `-XX:-UsePerfData` cannot be passed (rea empties the Java option variables
   outside Windows): documented. Tests in `layout.rs`, `env.rs`, `process.rs`, `results.rs`;
   `real_rea.rs rea_with_ghidra_under_a_dot_folder` is strict now. The StartGuard stop path
-  (rea-start-guard, below) does not remove the folder yet.
+  (rea-start-guard, below) does not remove the folder yet. Final round: the floor was 1 GiB,
+  which left out computers with less than about 11 GB of memory (systemd gives the runtime
+  folder a tenth of it); 256 MiB now. A stop that lands while a start prepares the folder
+  undoes that start before rea is launched (it used to remove the folder under a rea that
+  then ran).
 - **Batch d (wf_728c1760-d70, 07:40 UTC):** mcp-rename-settings (renamed server keeps its
   chats' tool choices, last choice and grants, or the note says what to switch on; keychain
   failure during the rename), canonical-in-notes (pre-approval messages name the path the model

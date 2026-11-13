@@ -21,7 +21,8 @@
 //!   Windows; size and modified time on both) are saved under [`SETTINGS_KEY`]. Before each
 //!   run the path must still lead to the same file with the same identity, or nothing runs.
 //!   A program inside an approved folder is refused. On Windows the real `.exe` is used
-//!   when there is one; an npm `.cmd` shim gets only the fixed words of the template.
+//!   when there is one, also one in `~\.local\bin` before an npm `.cmd` shim on `PATH`
+//!   ([`locate`]); a shim gets only the fixed words of the template.
 //! - **The task goes on standard input**, never on the command line. The command line is
 //!   the fixed template of [`arguments`]: the model chooses only `may_edit`, which picks
 //!   between two fixed templates. No token that turns off a permission check
@@ -35,12 +36,14 @@
 //! - **Helpers never get these tools** (`subagent.rs`), in any mode.
 //! - **Secret environment variables stay stripped** (the apps use their own stored login),
 //!   as in the terminal (`tools::terminal::looks_secret`). One exception: an app set up to
-//!   use the model shared on the port Sharing listens on now (WP5) gets the sharing key
-//!   this app keeps (from its keychain, never from an environment), in the one variable its
-//!   own setup reads it from (Claude Code's `ANTHROPIC_AUTH_TOKEN`, or the `env_key` of the
-//!   Codex provider at that port when it looks like a secret's name), and nothing else. An
-//!   app set up for the kept port while sharing is off or not listening is not asked
-//!   ([`sharing_off`]).
+//!   use the model shared at `127.0.0.1` on the port Sharing listens on now (WP5) gets the
+//!   sharing key this app keeps (from its keychain, never from an environment), in the one
+//!   variable its own setup reads it from (Claude Code's `ANTHROPIC_AUTH_TOKEN`, or the
+//!   `env_key` of the Codex provider at that port when it looks like a secret's name), and
+//!   nothing else. An app set up for any other address of this computer is not asked
+//!   ([`local_setup`]): the kept port while sharing is off or not listening
+//!   ([`sharing_off`]), the sharing port under another name such as `localhost` or `[::1]`
+//!   ([`not_sharing_address`]), or another port ([`not_sharing_port`]).
 //! - **Stop** ends the process group (Unix) or job (Windows). Processes the app started in
 //!   a new session can outlive it (known limit, ARCHITECTURE 13.14).
 //! - **The answer is untrusted tool output**, shortened like any other long result.
@@ -481,10 +484,13 @@ impl SavedSetup {
     }
 }
 
-/// Where an app is: on `path` (the `PATH` value to search; on Windows the real `.exe`
-/// first, else the npm `.cmd` shim), else in `<home>/.local/bin`, where Claude Code's own
-/// installer puts it (often missing from the `PATH` an app started from the Dock gets).
-/// Only file names are looked at; nothing is run.
+/// Where an app is, in `path` (the `PATH` value to search) and `<home>/.local/bin`, where
+/// Claude Code's own installer puts it (often missing from the `PATH` an app started from
+/// the Dock gets). On Windows the real `.exe` comes first (spec: "run the real `.exe` if
+/// there is one"): `<name>.exe` on `path`, else `<home>\.local\bin\<name>.exe`, and only
+/// then npm's `.cmd` shim on `path`, so an npm install left on `PATH` does not hide the
+/// installed `.exe`. Elsewhere the first `<name>` on `path`, else the user's bin. Only file
+/// names are looked at; nothing is run.
 pub fn locate(
     app: CodingApp,
     path: Option<&OsStr>,
@@ -494,23 +500,18 @@ pub fn locate(
     let name = app.program();
     let search = path.filter(|p| !p.is_empty());
     let on_path = |n: &str| search.and_then(|p| runtime::resolve_program(n, Some(p)));
-    let found = if windows {
-        on_path(&format!("{name}.exe")).or_else(|| on_path(name))
-    } else {
-        on_path(name)
+    let in_bin = |n: &str| {
+        let file = home?.join(".local").join("bin").join(n);
+        runtime::resolve_program(file.to_str()?, None)
     };
-    found.or_else(|| {
-        let bin = home?.join(".local").join("bin");
-        let candidates: Vec<PathBuf> = if windows {
-            vec![bin.join(format!("{name}.exe"))]
-        } else {
-            vec![bin.join(name)]
-        };
-        candidates.into_iter().find_map(|c| {
-            let text = c.to_str()?.to_owned();
-            runtime::resolve_program(&text, None)
-        })
-    })
+    if windows {
+        let exe = format!("{name}.exe");
+        on_path(&exe)
+            .or_else(|| in_bin(&exe))
+            .or_else(|| on_path(name))
+    } else {
+        on_path(name).or_else(|| in_bin(name))
+    }
 }
 
 /// The version of the program at `program` (links followed), when the files say:
@@ -750,52 +751,94 @@ pub fn unchanged(saved: &SavedApp) -> Result<PathBuf, Problem> {
 
 // ---- Whether an app uses the shared model ---------------------------------------------
 
-/// Whether a URL points at this computer on `port` (where the app shares its model).
-fn points_at(url: &str, port: u16) -> bool {
-    let Ok(parsed) = url::Url::parse(url.trim()) else {
-        return false;
-    };
-    let local = matches!(
-        parsed.host_str(),
-        Some("127.0.0.1" | "localhost" | "[::1]" | "::1")
-    );
-    local && parsed.port_or_known_default() == Some(port)
+/// A base URL on this computer, by its host and port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAddress {
+    /// `None` for `127.0.0.1`, the one address harnessUI shares its model on (the proxy
+    /// binds no other, `share::proxy::bind`); otherwise the other name or address of this
+    /// computer, as a refusal shows it (`localhost`, `[::1]`, `127.0.0.2`, `0.0.0.0`), where
+    /// another program could listen on the same port.
+    pub other_host: Option<String>,
+    /// Its port, or its scheme's when it names none.
+    pub port: u16,
 }
 
-/// How an app set up for the model shared on a port reads the sharing key.
+/// Where a base URL leads when that is this computer ([`LocalAddress`]); `None` for an
+/// address elsewhere, or one that does not parse.
+fn on_this_computer(url: &str) -> Option<LocalAddress> {
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    let port = parsed.port_or_known_default()?;
+    let other_host = match parsed.host()? {
+        url::Host::Ipv4(ip) if ip == std::net::Ipv4Addr::LOCALHOST => None,
+        url::Host::Ipv4(ip) if ip.is_loopback() || ip.is_unspecified() => Some(ip.to_string()),
+        url::Host::Ipv6(ip)
+            if ip.is_loopback()
+                || ip.is_unspecified()
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| v4.is_loopback() || v4.is_unspecified()) =>
+        {
+            Some(format!("[{ip}]"))
+        }
+        url::Host::Domain(name) => {
+            let name = name.to_ascii_lowercase();
+            let name = name.strip_suffix('.').unwrap_or(&name);
+            if name != "localhost" && !name.ends_with(".localhost") {
+                return None;
+            }
+            // Shown as written only when it is plain letters, digits, dots and hyphens.
+            let plain = name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+            Some(if plain { name } else { "localhost" }.to_owned())
+        }
+        _ => return None,
+    };
+    Some(LocalAddress { other_host, port })
+}
+
+/// Where an app's own setup sends its tasks when that is this computer rather than online,
+/// and where it reads the sharing key from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SharedSetup {
+pub struct LocalSetup {
+    pub address: LocalAddress,
     /// The variable its own setup reads the key from, when that is one a hand-off may fill:
-    /// Claude Code's `ANTHROPIC_AUTH_TOKEN`, or the `env_key` of the Codex provider at the
-    /// port when it looks like a secret's name (so it cannot stand for a variable the run
-    /// keeps, such as `PATH`). `None` for Codex's built-in provider moved by
-    /// `OPENAI_BASE_URL`, which reads the user's own login.
+    /// Claude Code's `ANTHROPIC_AUTH_TOKEN`, or the `env_key` of the chosen Codex provider
+    /// when it looks like a secret's name (so it cannot stand for a variable the run keeps,
+    /// such as `PATH`). `None` for Codex's built-in provider moved by `OPENAI_BASE_URL`,
+    /// which reads the user's own login.
     pub key_variable: Option<String>,
 }
 
-/// Whether the app would send this task to the model the app shares on `port` (WP5)
-/// rather than online, and where it reads the sharing key: Claude Code through
-/// `ANTHROPIC_BASE_URL` in its environment (with `--restricted` it reads no settings file),
-/// Codex through the provider its `config.toml` chooses, or through `OPENAI_BASE_URL` when
-/// that is its built-in provider.
-pub fn shared_setup(
+/// Whether the app would send this task to this computer (WP5) rather than online, where,
+/// and where it reads the sharing key: Claude Code through `ANTHROPIC_BASE_URL` in its
+/// environment (with `--restricted` it reads no settings file), Codex through the provider
+/// its `config.toml` chooses, or through `OPENAI_BASE_URL` when that is its built-in
+/// provider. Variable names are compared without case only on Windows, as the system
+/// compares them there; elsewhere `anthropic_base_url` is not the variable the app reads.
+pub fn local_setup(
     app: CodingApp,
     env: &BTreeMap<String, String>,
     home: Option<&Path>,
-    port: Option<u16>,
-) -> Option<SharedSetup> {
-    let port = port?;
+    windows: bool,
+) -> Option<LocalSetup> {
     let var = |name: &str| {
         env.iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .find(|(k, _)| {
+                if windows {
+                    k.eq_ignore_ascii_case(name)
+                } else {
+                    k.as_str() == name
+                }
+            })
             .map(|(_, v)| v.as_str())
     };
     match app {
-        CodingApp::ClaudeCode => var("ANTHROPIC_BASE_URL")
-            .is_some_and(|u| points_at(u, port))
-            .then(|| SharedSetup {
-                key_variable: Some("ANTHROPIC_AUTH_TOKEN".into()),
-            }),
+        CodingApp::ClaudeCode => Some(LocalSetup {
+            address: on_this_computer(var("ANTHROPIC_BASE_URL")?)?,
+            key_variable: Some("ANTHROPIC_AUTH_TOKEN".into()),
+        }),
         CodingApp::Codex => {
             let dir = match var("CODEX_HOME") {
                 Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
@@ -809,24 +852,22 @@ pub fn shared_setup(
                 .unwrap_or("openai");
             if chosen == "openai" {
                 // The built-in provider (its id cannot be redefined in `model_providers`).
-                return var("OPENAI_BASE_URL")
-                    .is_some_and(|u| points_at(u, port))
-                    .then_some(SharedSetup { key_variable: None });
+                return Some(LocalSetup {
+                    address: on_this_computer(var("OPENAI_BASE_URL")?)?,
+                    key_variable: None,
+                });
             }
             let provider = config.as_ref()?.get("model_providers")?.get(chosen)?;
-            if !provider
-                .get("base_url")
-                .and_then(|u| u.as_str())
-                .is_some_and(|u| points_at(u, port))
-            {
-                return None;
-            }
+            let address = on_this_computer(provider.get("base_url")?.as_str()?)?;
             let key_variable = provider
                 .get("env_key")
                 .and_then(|v| v.as_str())
                 .filter(|name| key_variable_ok(name))
                 .map(str::to_owned);
-            Some(SharedSetup { key_variable })
+            Some(LocalSetup {
+                address,
+                key_variable,
+            })
         }
     }
 }
@@ -864,6 +905,26 @@ pub fn sharing_off(app: CodingApp, enabled: bool) -> String {
             "{label} is set up to use the model in harnessUI, and sharing is off, so {label} was not asked. The user can turn on sharing in Settings → Other apps, then ask again."
         )
     }
+}
+
+/// Why an app set up for the sharing port under another name or address of this computer
+/// than `127.0.0.1` (`localhost`, `[::1]`) is not asked: harnessUI does not listen there,
+/// and another program could, on the same port.
+pub fn not_sharing_address(app: CodingApp, host: &str) -> String {
+    let label = app.label();
+    format!(
+        "{label} is set up to use the model in harnessUI at {host}, but harnessUI listens only at 127.0.0.1, so {label} was not asked. The user can copy {label}'s setup again from Settings → Other apps, then ask again."
+    )
+}
+
+/// Why an app set up for another port of this computer (an older sharing port, or a program
+/// of the user's own) is not asked: the task would go neither online, as the online line
+/// says, nor to the model in harnessUI, but to whatever program holds that port.
+pub fn not_sharing_port(app: CodingApp, port: u16) -> String {
+    let label = app.label();
+    format!(
+        "{label} is set up to send tasks to port {port} on this computer, and harnessUI does not share its model there, so {label} was not asked. The user can copy {label}'s setup again from Settings → Other apps, then ask again."
+    )
 }
 
 /// Where a task goes, by what the app is set up for and what Sharing says now.
@@ -965,24 +1026,32 @@ impl CodingAppsServer {
         env
     }
 
-    /// Where the task goes, by what the app is set up for and what Sharing says now. An app
-    /// set up for the port the proxy listens on gets the sharing key; one set up for the
-    /// kept port while sharing is off or not listening there is refused ([`sharing_off`]),
-    /// since it would connect to a port nothing serves, or another program took.
+    /// Where the task goes, by what the app is set up for and what Sharing says now. Only an
+    /// app set up for `127.0.0.1` at the port the proxy listens on goes to the local model,
+    /// with the sharing key. Any other address of this computer is refused before any card:
+    /// the kept port while sharing is off or not listening ([`sharing_off`]), the sharing
+    /// port under another name such as `localhost` ([`not_sharing_address`]), or another
+    /// port ([`not_sharing_port`]), since the app would reach a port nothing serves, or
+    /// whatever program holds it.
     async fn destination(&self, app: CodingApp) -> Result<Destination, String> {
         let share = (self.share)().await;
-        let home = self.home.as_deref();
-        if let (Some(port), Some(key)) = (share.listening, share.key.as_ref())
-            && let Some(setup) = shared_setup(app, &self.base_env, home, Some(port))
-        {
-            return Ok(Destination::Local {
-                key: setup.key_variable.map(|name| (name, key.clone())),
-            });
+        let Some(setup) = local_setup(app, &self.base_env, self.home.as_deref(), self.windows)
+        else {
+            return Ok(Destination::Online);
+        };
+        let port = setup.address.port;
+        if Some(port) != share.listening && Some(port) != share.port {
+            return Err(not_sharing_port(app, port));
         }
-        if shared_setup(app, &self.base_env, home, share.port).is_some() {
-            return Err(sharing_off(app, share.enabled));
+        if let Some(host) = &setup.address.other_host {
+            return Err(not_sharing_address(app, host));
         }
-        Ok(Destination::Online)
+        match (share.listening, share.key) {
+            (Some(listening), Some(key)) if listening == port => Ok(Destination::Local {
+                key: setup.key_variable.map(|name| (name, key)),
+            }),
+            _ => Err(sharing_off(app, share.enabled)),
+        }
     }
 
     /// The working folder's sandbox: the folders the user approved for the chat (never the
@@ -1091,6 +1160,16 @@ struct Planned {
 impl CodingAppsServer {
     /// A refusal for the policy engine (step 2: no card).
     fn refused(app: CodingApp, task: &str, why: String) -> Described {
+        Self::refused_with(app, task, why, None)
+    }
+
+    /// [`Self::refused`] with `more` on the preview after `why`, and so in the audit row:
+    /// what the model's note never says, such as where a link leads (13.9).
+    fn refused_with(app: CodingApp, task: &str, why: String, more: Option<String>) -> Described {
+        let preview = match more {
+            Some(more) => format!("{why}\n{more}"),
+            None => why.clone(),
+        };
         Described::Action(policy::Action {
             server: SERVER_NAME.into(),
             tool: app.tool().into(),
@@ -1099,7 +1178,7 @@ impl CodingAppsServer {
                 app.label(),
                 policy::sanitize::one_line(task, 120)
             ),
-            preview: why.clone(),
+            preview,
             scope: policy::Scope::CodingApp {
                 app: app.key().into(),
                 folder: String::new(),
@@ -1149,12 +1228,14 @@ impl CodingAppsServer {
         Ok(program)
     }
 
-    /// The chat's working folder, checked: approved by the user (`own`) and a folder.
+    /// The chat's working folder, checked: approved by the user (`own`) and a folder. A
+    /// refusal names the folder as it is stored, never where a link leads (13.9); that is
+    /// the second part, for the card's preview only.
     fn working_folder(
         app: CodingApp,
         chat: &ChatContext,
         own: &[String],
-    ) -> Result<policy::CheckedPath, String> {
+    ) -> Result<policy::CheckedPath, (String, Option<String>)> {
         let sandbox = Self::sandbox(own, chat);
         let base = if own.is_empty() {
             None
@@ -1164,19 +1245,32 @@ impl CodingAppsServer {
                 .or_else(|| sandbox.roots().first().map(|r| r.canonical.to_string()))
         };
         let Some(base) = base else {
-            return Err(format!(
-                "No folder is approved for this chat, so {} has nowhere to work. The user can approve a folder in the Tools panel.",
-                app.label()
+            return Err((
+                format!(
+                    "No folder is approved for this chat, so {} has nowhere to work. The user can approve a folder in the Tools panel.",
+                    app.label()
+                ),
+                None,
             ));
         };
         match sandbox.check(&base, None, &RealFs) {
             Ok(c) if Path::new(&c.canonical).is_dir() => Ok(c),
-            Ok(c) => Err(format!(
-                "The chat's working folder {} is not a folder that exists. The user can choose another one in the Tools panel.",
-                policy::sanitize::visible(&c.canonical)
-            )),
-            Err(e) => Err(format!(
-                "The chat's working folder is not approved ({e}). The user can approve it in the Tools panel."
+            Ok(c) => {
+                let flavor = Flavor::native();
+                let written = tools::errors::written_path(&base, None, flavor);
+                Err((
+                    format!(
+                        "The chat's working folder {} is not a folder that exists. The user can choose another one in the Tools panel.",
+                        policy::sanitize::visible(&c.canonical)
+                    ),
+                    None::<String>.filter(|_| written.is_empty()),
+                ))
+            }
+            Err(e) => Err((
+                format!(
+                    "The chat's working folder is not approved ({e}). The user can approve it in the Tools panel."
+                ),
+                None,
             )),
         }
     }
@@ -1258,7 +1352,7 @@ impl BuiltinServer for CodingAppsServer {
         };
         let cwd = match Self::working_folder(app, chat, &own) {
             Ok(c) => c,
-            Err(why) => return Self::refused(app, &task, why),
+            Err((why, more)) => return Self::refused_with(app, &task, why, more),
         };
         let local = match self.destination(app).await {
             Ok(d) => d != Destination::Online,

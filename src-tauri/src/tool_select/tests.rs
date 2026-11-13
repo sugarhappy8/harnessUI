@@ -319,9 +319,32 @@ fn reverse_engineering_matches_by_its_own_words_only() {
     assert_eq!(groups(&all, "Write a Python function"), set(&["terminal"]));
     assert_eq!(groups(&all, "view the strings in this rust file"), set(&[]));
     assert_eq!(groups(&all, "what does this function do?"), set(&[]));
+    // Its weak words ("program", "function", "library") are everyday coding words: without
+    // one of its strong words they bring nothing in.
+    assert_eq!(groups(&all, "Write a function for my program"), set(&[]));
+    assert!(!groups(&all, "add a function to this library").contains("reverse"));
+    assert!(!groups(&all, "link this library into my program").contains("reverse"));
     // Its own words still bring it in.
     assert_eq!(groups(&all, "decompile this program"), set(&["reverse"]));
     assert!(groups(&all, "disassemble notepad.exe").contains("reverse"));
+    // Plain ways to ask for what only rea does, which used to count through its tools'
+    // names (procedure_pseudo_code, xrefs, inspect_python_pyc).
+    for text in [
+        "show me the pseudo code of main",
+        "show me the pseudo-code of main",
+        "find the xrefs to main",
+        "what is in this .pyc file",
+    ] {
+        assert!(groups(&all, text).contains("reverse"), "{text}");
+    }
+    // A weak word still adds to a match that a strong word made.
+    let score = |text: &str| -> u32 {
+        matching_groups(&all, &Wording::of(text), &[])
+            .into_iter()
+            .find(|(g, _)| g == "reverse")
+            .map_or(0, |(_, s)| s)
+    };
+    assert!(score("decompile this program") > score("decompile this"));
     // "screenshot" and "drag" are only in the names of browser and computer tools.
     assert_eq!(
         groups(&all, "take a screenshot"),

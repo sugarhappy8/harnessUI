@@ -411,6 +411,23 @@ impl FilesServer {
         }
     }
 
+    /// [`Self::hard_limit`] of a path the sandbox let through but a rule refuses. The
+    /// preview, and so the audit row, also says where the path leads when a link on the way
+    /// leads somewhere else (`leads`, [`errors::leads_to`]); `why` never does (13.9).
+    fn hard_limit_at(
+        tool: &str,
+        path: &str,
+        why: String,
+        leads: Option<String>,
+    ) -> Described {
+        let mut refused = Self::hard_limit(tool, path, why);
+        if let (Described::Action(action), Some(leads)) = (&mut refused, leads) {
+            action.preview.push('\n');
+            action.preview.push_str(&leads);
+        }
+        refused
+    }
+
     fn hard_limit(tool: &str, path: &str, why: String) -> Described {
         Described::Action(Action {
             server: "files".into(),
@@ -761,7 +778,8 @@ impl BuiltinServer for FilesServer {
                 Reach::Inside,
             )
         {
-            return Self::hard_limit(tool, &path, why);
+            let leads = errors::leads_to(&written, &c, &sb, self.flavor);
+            return Self::hard_limit_at(tool, &path, why, leads);
         }
         let shown = policy::sanitize::visible(&c.canonical);
         match tool {
@@ -3547,6 +3565,22 @@ mod tests {
             assert_eq!(why, expected, "{tool} {a}");
             assert!(!why.contains("App note"), "{tool} {a}: {why}");
         }
+        // The card of a refused call, and so its audit row, shows where the path leads.
+        let refused = described(
+            &fs,
+            &c,
+            "write_file",
+            json!({"path": "to-skill/SKILL.md", "content": "x"}),
+        )
+        .await;
+        assert!(refused.hard_limit.is_some());
+        assert_eq!(
+            refused.preview,
+            format!(
+                "to-skill/SKILL.md\nThat path leads to {}.",
+                shown(&skills.join(NOTE_NAME).join("SKILL.md"))
+            )
+        );
         // The card of an allowed call shows where the path leads.
         let edit = described(
             &fs,

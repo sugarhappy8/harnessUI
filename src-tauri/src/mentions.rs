@@ -241,18 +241,72 @@ pub async fn search_mentions(
     .map_err(|e| AppError::internal(e.to_string()))
 }
 
-/// Reads the mentions for `ctx` in a blocking task, each cut to its share of `n_ctx`.
+/// [0.0.6] A token count for [`read_all`] when there is none (an endpoint, or only checking).
+type NoCount = fn(String) -> std::future::Ready<Option<usize>>;
+
+/// Reads the mentions for `ctx`, each cut to its share of `n_ctx`.
 /// [0.0.6] The share counts the message's `documents` too (`resolve::cap_chars`), as a
 /// document's share counts the mentions (`attachments::document_cap_chars`): together
-/// they carry at most 40% of the context.
-async fn read_all(
+/// they carry at most 40% of the context. Then each excerpt is held to `cap / 3` tokens as
+/// the model server counts them, when it can count (`count`: llama-server's own tokenizer
+/// for a local model; `None` for an endpoint, whose requests the loop measures with the
+/// same 3-characters-a-token estimate), as documents are (`attachments::cut_to_share`):
+/// numbers and some code take more tokens per character than the estimate, and the
+/// current message is never summarised, so it could stop the chat with "too long". An
+/// excerpt that is over is read again with fewer characters, in proportion with a tenth
+/// to spare (`attachments::fewer_chars`), at most 4 counts, never below the 600-character
+/// floor; a count that fails keeps the excerpt as it is. A mention that cannot be read
+/// again (changed or removed meanwhile) fails like one that could not be read at all.
+async fn read_all<F, Fut>(
     ctx: ChatContext,
     mentions: Vec<MentionRequest>,
     n_ctx: usize,
     documents: usize,
+    count: Option<F>,
+) -> AppResult<Vec<Result<Resolved, String>>>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<usize>>,
+{
+    let cap = resolve::cap_chars(n_ctx, mentions.len() + documents);
+    let mut read = read_at(ctx.clone(), mentions.clone(), cap).await?;
+    let Some(count) = count else {
+        return Ok(read);
+    };
+    let allowed = (cap / resolve::CHARS_PER_TOKEN).max(1);
+    for (mention, got) in mentions.into_iter().zip(read.iter_mut()) {
+        let mut chars = cap;
+        for _ in 0..crate::attachments::MAX_COUNTS {
+            let Ok(r) = got.as_ref() else {
+                break;
+            };
+            let Some(tokens) = count(r.text.clone()).await else {
+                break;
+            };
+            if tokens <= allowed || chars <= resolve::MIN_CHARS {
+                break;
+            }
+            let sent = r.text.chars().count().min(chars);
+            chars =
+                crate::attachments::fewer_chars(sent, chars, allowed, tokens, resolve::MIN_CHARS);
+            if let Some(again) = read_at(ctx.clone(), vec![mention.clone()], chars)
+                .await?
+                .pop()
+            {
+                *got = again;
+            }
+        }
+    }
+    Ok(read)
+}
+
+/// Reads the mentions for `ctx` in a blocking task, each cut to `cap` characters.
+async fn read_at(
+    ctx: ChatContext,
+    mentions: Vec<MentionRequest>,
+    cap: usize,
 ) -> AppResult<Vec<Result<Resolved, String>>> {
     tokio::task::spawn_blocking(move || {
-        let cap = resolve::cap_chars(n_ctx, mentions.len() + documents);
         mentions
             .iter()
             .map(|m| resolve::resolve(m, &ctx, cap))
@@ -284,7 +338,7 @@ pub async fn resolve_mentions(
     too_many(mentions.len())?;
     let ctx = context_for(&app, &state, Some(chat_id)).await?;
     let n_ctx = crate::settings::DEFAULT_REMOTE_CONTEXT as usize;
-    Ok(read_all(ctx, mentions, n_ctx, 0)
+    Ok(read_all(ctx, mentions, n_ctx, 0, None::<NoCount>)
         .await?
         .into_iter()
         .map(|r| match r {
@@ -313,7 +367,9 @@ pub async fn resolve_mentions(
 /// Reads the chips the user chose for a message and stores each excerpt as a text
 /// document of the chat. Returns the content parts for the message. Any mention that
 /// cannot be read fails the send with the reason, before anything is stored. [0.0.6] Each
-/// excerpt's share of `n_ctx` counts the message's `documents` (attached files) too.
+/// excerpt's share of `n_ctx` counts the message's `documents` (attached files) too, and
+/// `counter` is the local model server, whose own token counts hold each share
+/// ([`read_all`]); `None` for an endpoint.
 pub async fn attach(
     app: &AppHandle,
     state: &AppState,
@@ -321,14 +377,16 @@ pub async fn attach(
     mentions: Vec<MentionRequest>,
     n_ctx: usize,
     documents: usize,
+    counter: Option<&agent::OpenAiClient>,
 ) -> AppResult<Vec<Value>> {
     if mentions.is_empty() {
         return Ok(Vec::new());
     }
     too_many(mentions.len())?;
     let ctx = context_for(app, state, Some(chat_id)).await?;
+    let count = counter.map(|client| move |t: String| crate::attachments::server_tokens(client, t));
     let mut resolved = Vec::new();
-    for r in read_all(ctx, mentions, n_ctx, documents).await? {
+    for r in read_all(ctx, mentions, n_ctx, documents, count).await? {
         resolved.push(r.map_err(|why| {
             AppError::new(
                 "mention_unreadable",
@@ -394,6 +452,7 @@ pub fn mention_refs(content: &Value) -> Vec<MentionRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attachments::MAX_COUNTS;
 
     fn resolved(label: &str, text: &str) -> Resolved {
         Resolved {
@@ -483,7 +542,7 @@ mod tests {
             })
             .collect();
         for n_ctx in [8_192, 16_384, 32_768, 65_536, 131_072, 262_144] {
-            let read = read_all(ctx.clone(), mentions.clone(), n_ctx, 8)
+            let read = read_all(ctx.clone(), mentions.clone(), n_ctx, 8, None::<NoCount>)
                 .await
                 .unwrap();
             let mentioned: usize = read
@@ -502,6 +561,416 @@ mod tests {
                 "{n_ctx}: mentions {mentioned} + documents {documents} > {share}"
             );
         }
+    }
+
+    /// A folder for one test, removed when it ends, also when an assertion fails.
+    struct Folder(std::path::PathBuf);
+    impl Folder {
+        fn new(name: &str) -> Self {
+            let base = std::env::temp_dir().join(format!(
+                "{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&base).unwrap();
+            Self(dunce::canonicalize(&base).unwrap())
+        }
+        fn write(&self, name: &str, text: &str) {
+            std::fs::write(self.0.join(name), text).unwrap();
+        }
+        /// The chat context with this folder approved and as the working folder.
+        fn chat(&self) -> ChatContext {
+            let folder = self.0.display().to_string();
+            ChatContext {
+                chat_id: 1,
+                approved_folders: vec![folder.clone()],
+                working_folder: Some(folder),
+                result_cap_tokens: 2000,
+                ..Default::default()
+            }
+        }
+    }
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn files(paths: &[&str]) -> Vec<MentionRequest> {
+        paths
+            .iter()
+            .map(|p| MentionRequest {
+                path: (*p).into(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// A table of numbers, the kind of text a tokenizer splits finely: `rows` lines.
+    fn table(rows: usize) -> String {
+        (1..=rows)
+            .map(|i| {
+                format!(
+                    "{i},{},{}\n",
+                    (i * 7_919) % 100_003,
+                    (i * 104_729) % 1_000_003
+                )
+            })
+            .collect()
+    }
+
+    /// A made-up model server's count: `per_digit` tokens for each digit, one for every
+    /// three other characters (the estimate), and how many texts it was asked to count.
+    fn counter(
+        per_digit: usize,
+        asked: &std::sync::Mutex<usize>,
+    ) -> impl Fn(String) -> std::future::Ready<Option<usize>> + '_ {
+        move |t: String| {
+            *asked.lock().unwrap() += 1;
+            let digits = t.chars().filter(char::is_ascii_digit).count();
+            let other = t.chars().count() - digits;
+            std::future::ready(Some(digits * per_digit + other.div_ceil(3)))
+        }
+    }
+
+    fn texts(read: Vec<Result<Resolved, String>>) -> Vec<Resolved> {
+        read.into_iter().map(|r| r.unwrap()).collect()
+    }
+
+    /// [0.0.6] With a local model a mention's share is held in the model server's own
+    /// tokens, as a document's is (`attachments::cut_to_share`): numbers mentioned beside 8
+    /// documents, or 8 of them alone, take more tokens than the 3-characters-a-token
+    /// estimate allows, and are read again with fewer lines until each is within its share,
+    /// still with the note on what was left out. So documents and mentions together stay
+    /// within 40% of the context in the model's own tokens. Where the share is close to the
+    /// 600-character floor (8,192 tokens shared by 8 or 10 files, the review's cases, which
+    /// took about 51% and almost all of the context by the estimate alone) the excerpt
+    /// stops at the floor, as a document does. Text the estimate already covers is read
+    /// once and counted once.
+    #[tokio::test]
+    async fn a_mentions_share_is_held_in_the_models_own_tokens() {
+        let folder = Folder::new("mention-tokens");
+        let names: Vec<String> = (0..8).map(|n| format!("data{n}.csv")).collect();
+        for name in &names {
+            folder.write(name, &table(3_000));
+        }
+        let prose = "The river runs past the old mill and on to the sea.\n".repeat(2_000);
+        folder.write("notes.txt", &prose);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        // (context, mentions, documents, whether the share is too close to the floor)
+        for (n_ctx, mentions, documents, at_floor) in [
+            (8_192, &names[..2], 8, true),
+            (16_384, &names[..2], 8, false),
+            (32_768, &names[..2], 8, false),
+            (131_072, &names[..2], 8, false),
+            (8_192, &names[..], 0, true),
+            (32_768, &names[..], 0, false),
+            (65_536, &names[..], 0, false),
+        ] {
+            let what = format!("{n_ctx} tokens, {} mentions", mentions.len());
+            let cap = resolve::cap_chars(n_ctx, mentions.len() + documents);
+            let allowed = cap / resolve::CHARS_PER_TOKEN;
+            let by_estimate = texts(
+                read_all(
+                    folder.chat(),
+                    files(mentions),
+                    n_ctx,
+                    documents,
+                    None::<NoCount>,
+                )
+                .await
+                .unwrap(),
+            );
+            let asked = std::sync::Mutex::new(0);
+            let count = counter(1, &asked);
+            let held = texts(
+                read_all(
+                    folder.chat(),
+                    files(mentions),
+                    n_ctx,
+                    documents,
+                    Some(&count),
+                )
+                .await
+                .unwrap(),
+            );
+            assert!(
+                *asked.lock().unwrap() <= mentions.len() * MAX_COUNTS,
+                "{what}"
+            );
+            let mut mentioned = 0;
+            for (estimate, r) in by_estimate.iter().zip(&held) {
+                // The estimate alone is over: the case this holds.
+                let over = count(estimate.text.clone()).await.unwrap();
+                assert!(over > allowed, "{what}: {over} <= {allowed}");
+                let tokens = count(r.text.clone()).await.unwrap();
+                let chars = r.text.chars().count();
+                if at_floor {
+                    // As few characters as any file keeps, and fewer tokens than before.
+                    assert!(chars <= resolve::MIN_CHARS, "{what}: {chars}");
+                    assert!(chars * 2 > resolve::MIN_CHARS, "{what}: {chars}");
+                    assert!(tokens < over, "{what}: {tokens} >= {over}");
+                } else {
+                    assert!(
+                        tokens <= allowed,
+                        "{what}: {} took {tokens} > {allowed}",
+                        r.label
+                    );
+                    // Not cut to nothing: more than half the share is used.
+                    assert!(tokens * 2 > allowed, "{what}: {tokens} of {allowed}");
+                    assert!(chars > resolve::MIN_CHARS, "{what}: {chars}");
+                }
+                assert!(r.text.len() < estimate.text.len(), "{what}");
+                assert!(r.truncated, "{what}");
+                assert!(r.text.starts_with("File: "), "{what}");
+                assert!(r.text.contains("of the file were left out"), "{what}");
+                assert_eq!(
+                    (r.label.as_str(), r.kind.as_str()),
+                    (estimate.label.as_str(), "file")
+                );
+                mentioned += tokens;
+            }
+            // Each document is held to its share the same way (`cut_to_share`).
+            let documents = documents
+                * (crate::attachments::document_cap_chars(n_ctx, mentions.len() + documents) / 3);
+            assert!(
+                at_floor || mentioned + documents <= n_ctx * 2 / 5,
+                "{what}: mentions {mentioned} + documents {documents} > 40%"
+            );
+        }
+
+        // A server that counts as the estimate does (the line numbers and the path are
+        // digits, which `counter` makes dear): the same excerpt, counted once.
+        let asked = std::sync::Mutex::new(0);
+        let count = |t: String| {
+            *asked.lock().unwrap() += 1;
+            std::future::ready(Some(t.chars().count().div_ceil(3)))
+        };
+        let mentions = files(&["notes.txt"]);
+        assert_eq!(
+            read_all(folder.chat(), mentions.clone(), 8_192, 8, Some(&count))
+                .await
+                .unwrap(),
+            read_all(folder.chat(), mentions, 8_192, 8, None::<NoCount>)
+                .await
+                .unwrap()
+        );
+        assert_eq!(*asked.lock().unwrap(), 1);
+    }
+
+    /// [0.0.6] A definition read again keeps its definition; a server that cannot count
+    /// leaves the estimate's excerpt; nothing goes below the 600-character floor, even for
+    /// a tokenizer far denser than any real one, and the counts are bounded.
+    #[tokio::test]
+    async fn a_held_mention_keeps_its_definition_and_never_goes_below_the_floor() {
+        let folder = Folder::new("mention-floor");
+        let body: String = table(2_000)
+            .lines()
+            .map(|l| format!("        ({l}),\n"))
+            .collect();
+        folder.write(
+            "calc.py",
+            &format!(
+                "def add(a, b):\n    return a + b\n\n\ndef rows():\n    return [\n{body}    ]\n"
+            ),
+        );
+        folder.write("data.csv", &table(3_000));
+        let rows = vec![MentionRequest {
+            path: "calc.py".into(),
+            symbol: Some("rows".into()),
+            kind: Some("function".into()),
+            ..Default::default()
+        }];
+        let (n_ctx, documents) = (8_192, 3);
+        let allowed = resolve::cap_chars(n_ctx, 1 + documents) / resolve::CHARS_PER_TOKEN;
+        let asked = std::sync::Mutex::new(0);
+        let count = counter(1, &asked);
+        let held = texts(
+            read_all(folder.chat(), rows.clone(), n_ctx, documents, Some(&count))
+                .await
+                .unwrap(),
+        );
+        let estimate = texts(
+            read_all(folder.chat(), rows, n_ctx, documents, None::<NoCount>)
+                .await
+                .unwrap(),
+        );
+        assert!(count(estimate[0].text.clone()).await.unwrap() > allowed);
+        let r = &held[0];
+        assert!(count(r.text.clone()).await.unwrap() <= allowed);
+        assert_eq!(
+            (r.label.as_str(), r.kind.as_str(), r.symbol.as_deref()),
+            ("calc.py#rows", "function", Some("rows"))
+        );
+        assert_eq!(
+            (r.start_line, r.end_line),
+            (estimate[0].start_line, estimate[0].end_line)
+        );
+        assert!(r.text.starts_with("File: ") && r.text.contains("(function rows)"));
+        assert!(
+            r.text.contains("of this definition were left out"),
+            "{}",
+            r.text
+        );
+
+        // The server could not count: the estimate's excerpt.
+        let failed = |_: String| std::future::ready(None::<usize>);
+        let data = files(&["data.csv"]);
+        assert_eq!(
+            read_all(folder.chat(), data.clone(), n_ctx, documents, Some(failed))
+                .await
+                .unwrap(),
+            read_all(
+                folder.chat(),
+                data.clone(),
+                n_ctx,
+                documents,
+                None::<NoCount>
+            )
+            .await
+            .unwrap()
+        );
+
+        // Fifty tokens a digit: the floor, and a bounded number of counts.
+        let asked = std::sync::Mutex::new(0);
+        let count = counter(50, &asked);
+        let held = texts(
+            read_all(folder.chat(), data, n_ctx, documents, Some(&count))
+                .await
+                .unwrap(),
+        );
+        let chars = held[0].text.chars().count();
+        assert!(chars <= resolve::MIN_CHARS, "{chars}");
+        assert!(held[0].text.contains("\n     1\t1,"), "{}", held[0].text);
+        assert!(*asked.lock().unwrap() <= MAX_COUNTS);
+    }
+
+    /// [0.0.6] Against the pinned llama-server and the real small model (set
+    /// `LLAMA_SERVER_BIN` and `TEST_GGUF`; skipped without them, and off Linux like the
+    /// other tests that start it here): tables of numbers mentioned on a local model are
+    /// held to their share in the server's own tokens, which the 3-characters-a-token
+    /// estimate alone is not (the review counted 767 tokens against a share of 327), or,
+    /// where the share is close to the 600-character floor, cut to the floor.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mentions_are_held_in_llama_servers_own_tokens() {
+        let bin = std::env::var_os("LLAMA_SERVER_BIN").filter(|v| !v.is_empty());
+        let gguf = std::env::var_os("TEST_GGUF").filter(|v| !v.is_empty());
+        let (Some(bin), Some(gguf)) = (bin, gguf) else {
+            eprintln!("skipping: set LLAMA_SERVER_BIN and TEST_GGUF to run it");
+            return;
+        };
+        let dir = std::path::PathBuf::from(bin)
+            .parent()
+            .expect("a folder")
+            .to_path_buf();
+        let layout = runtime::RuntimeLayout {
+            installed_dir: None,
+            packs_dir: dir.join("no-packs-here"),
+            dev_override: Some(dir),
+        };
+        let backend = runtime::discover(&layout)
+            .into_iter()
+            .find(|b| b.kind == runtime::BackendKind::Cpu)
+            .expect("the processor backend next to LLAMA_SERVER_BIN");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let launch = runtime::LaunchConfig {
+            gpu: runtime::GpuUse::Off,
+            cache_ram_mib: 0,
+            ..runtime::LaunchConfig::new(
+                std::path::PathBuf::from(gguf),
+                2_048,
+                runtime::free_loopback_port().expect("a port"),
+                runtime::random_api_key(),
+            )
+        };
+        let spec = runtime::StartSpec {
+            backend,
+            launch,
+            load_timeout: std::time::Duration::from_secs(180),
+        };
+        let server = match runtime::start(spec, tx).await {
+            Ok(server) => server,
+            Err(e) => panic!("start failed: {e}\n{}", e.stderr_tail().join("\n")),
+        };
+        let client =
+            crate::runtime_manager::local_client(server.base_url(), server.api_key().to_string())
+                .unwrap();
+        let count = |t: String| crate::attachments::server_tokens(&client, t);
+
+        let folder = Folder::new("mention-llama");
+        let names: Vec<String> = (0..8).map(|n| format!("data{n}.csv")).collect();
+        for name in &names {
+            folder.write(name, &table(3_000));
+        }
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        // (context, mentions, documents, whether the share is too close to the floor)
+        for (n_ctx, mentions, documents, at_floor) in [
+            (8_192, &names[..2], 8, true),
+            (8_192, &names[..], 0, true),
+            (32_768, &names[..2], 8, false),
+            (32_768, &names[..], 0, false),
+        ] {
+            let what = format!(
+                "{n_ctx} tokens, {} mentions, {documents} documents",
+                mentions.len()
+            );
+            let allowed = resolve::cap_chars(n_ctx, mentions.len() + documents) / 3;
+            let estimate = texts(
+                read_all(
+                    folder.chat(),
+                    files(mentions),
+                    n_ctx,
+                    documents,
+                    None::<NoCount>,
+                )
+                .await
+                .unwrap(),
+            );
+            let held = texts(
+                read_all(
+                    folder.chat(),
+                    files(mentions),
+                    n_ctx,
+                    documents,
+                    Some(&count),
+                )
+                .await
+                .unwrap(),
+            );
+            let mut mentioned = 0;
+            for (e, r) in estimate.iter().zip(&held) {
+                let before = count(e.text.clone()).await.expect("a count");
+                let after = count(r.text.clone()).await.expect("a count");
+                eprintln!(
+                    "{what}: {} by the estimate {} characters, {before} tokens; held {} characters, {after} tokens (share {allowed})",
+                    r.label,
+                    e.text.chars().count(),
+                    r.text.chars().count()
+                );
+                assert!(before > allowed, "{what}: {before} <= {allowed}");
+                if at_floor {
+                    assert!(r.text.chars().count() <= resolve::MIN_CHARS, "{what}");
+                    assert!(after < before, "{what}: {after} >= {before}");
+                } else {
+                    assert!(after <= allowed, "{what}: {after} > {allowed}");
+                    assert!(after * 2 > allowed, "{what}: {after} of {allowed}");
+                }
+                mentioned += after;
+            }
+            let documents = documents
+                * (crate::attachments::document_cap_chars(n_ctx, mentions.len() + documents) / 3);
+            eprintln!("{what}: mentions {mentioned} + documents {documents} of {n_ctx}");
+            assert!(
+                at_floor || mentioned + documents <= n_ctx * 2 / 5,
+                "{what}: mentions {mentioned} + documents {documents} > 40%"
+            );
+        }
+        server.stop().await;
     }
 
     /// A stored mention comes back as its chip, and is not listed again as a document.

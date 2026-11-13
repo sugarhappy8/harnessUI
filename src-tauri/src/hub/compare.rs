@@ -778,7 +778,8 @@ fn stored_file_facts(st: &StoredSummary, vision: bool) -> Option<FileFacts> {
 /// fit.rs's rule on the same memory. The amounts are the settings panel's picture's: what
 /// the model needs in the memory that holds it (a graphics card's own memory, else all of
 /// it) and what is free there, and on a graphics card the part in the computer's memory
-/// (its second bar). The smaller size that leaves room is Automatic's pick, when
+/// and the free memory of its second bar, with whether that part is what makes it too
+/// large. The smaller size that leaves room is Automatic's pick, when
 /// the same judge marks it green. `None` without the file's header: Settings for this
 /// model shows no mark then either.
 pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
@@ -793,6 +794,8 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
         Some(p) => p.judge(n, gpu, fine).0,
         None => models::fit::verdict_at(&input, n, machine.room(gpu)),
     };
+    let mut computer_free_bytes = 0;
+    let mut computer_short = false;
     let (verdict, partial_offload, needed_bytes, computer_bytes) = match &placer {
         Some(p) => {
             let split = p.work(tokens, gpu, fine).split;
@@ -806,6 +809,14 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
                     (split.gpu.total().saturating_add(split.cpu.total()), 0)
                 }
             };
+            if kind == MemoryKind::Separate {
+                // The second bar's free figure, and whether the computer's part is what does
+                // not fit: `judge_in`'s own check, its free memory less the reserve.
+                let room = machine.room(gpu);
+                computer_free_bytes = machine.ram_free_bytes;
+                computer_short =
+                    verdict == Verdict::Red && computer > room.partial.saturating_sub(room.whole);
+            }
             let partial = matches!(fits, Fits::Partial | Fits::WontFitGraphics);
             (verdict, partial, needed, computer)
         }
@@ -841,6 +852,8 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
         partial_offload,
         device,
         computer_bytes,
+        computer_free_bytes,
+        computer_short,
         sentence: String::new(),
     })
 }

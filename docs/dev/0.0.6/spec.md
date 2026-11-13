@@ -622,7 +622,8 @@ Coding apps switch in `src/components/ToolsPanel.tsx`.
   their absolute resolved path in the panel and on every card; a program whose resolved path
   is inside any approved folder is refused; before each run the file's identity (device and
   inode or file id, size, modified time) must be unchanged. On Windows run the real `.exe`
-  if there is one; a `.cmd` shim only with fixed words (the task never goes on the command
+  if there is one (on `PATH`, else `~\.local\bin\<name>.exe`, before a `.cmd` shim on
+  `PATH`); a `.cmd` shim only with fixed words (the task never goes on the command
   line). When neither is found: "Claude Code and Codex are not installed on this computer."
 - Tools `ask_claude_code {task, may_edit?}` and `ask_codex {task, may_edit?}` (short
   definitions). Action: risk `AlwaysAsk`, `keep_asking` set, `network` and `outbound` true,
@@ -663,8 +664,17 @@ Coding apps switch in `src/components/ToolsPanel.tsx`.
   keeps it (never from the owner's environment), under the name the outside app's own setup
   reads it from (`ANTHROPIC_AUTH_TOKEN` when Claude Code's `ANTHROPIC_BASE_URL` is the live
   address; the chosen Codex provider's `env_key` when its `base_url` is, and only if that
-  name looks like a secret's). Everything else stays stripped. Both checks run again before
-  the run, and a run whose destination no longer matches the card does not start.
+  name looks like a secret's). Everything else stays stripped. The live address is exactly
+  `127.0.0.1` at the port the proxy listens on (it binds no other address). Any other
+  address of this computer is refused before any card too: the sharing port under another
+  name such as `localhost` or `[::1]` ("<App> is set up to use the model in harnessUI at
+  <host>, but harnessUI listens only at 127.0.0.1, so <App> was not asked. The user can copy
+  <App>'s setup again from Settings → Other apps, then ask again."), or another port, such
+  as the one sharing used before the user changed it ("<App> is set up to send tasks to
+  port N on this computer, and harnessUI does not share its model there, so <App> was not
+  asked. The user can copy <App>'s setup again from Settings → Other apps, then ask
+  again."). Variable names are compared without case only on Windows. Both checks run again
+  before the run, and a run whose destination no longer matches the card does not start.
 **Tests:** argument building per template and mode, the forbidden-token and required-flag
 test, task on stdin with quotes, `%` and line breaks, task starting with `-`, program inside
 an approved folder refused, swapped file refused, always asks in Ask first and Allow all, with

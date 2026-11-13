@@ -31,6 +31,8 @@ const fit: FitResult = {
   partialOffload: false,
   device: "graphicsCard",
   computerBytes: 0,
+  computerFreeBytes: 0,
+  computerShort: false,
   sentence: "Fits easily.",
 };
 

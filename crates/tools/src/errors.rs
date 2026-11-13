@@ -648,6 +648,15 @@ pub fn written_path(given: &str, base: Option<&str>, flavor: Flavor) -> String {
 /// that name, and the model reads such a message as the app's own note. When `checked`
 /// leads somewhere else, [`THROUGH_LINK`] says so; where it leads is only on the card.
 pub fn said_path(written: &str, checked: &CheckedPath, sb: &PathSandbox, flavor: Flavor) -> String {
+    let mut out = policy::sanitize::visible(written);
+    if leads_elsewhere(written, checked, sb, flavor) {
+        out.push_str(THROUGH_LINK);
+    }
+    out
+}
+
+/// Whether `checked` names another place than `written` (a link on the way).
+fn leads_elsewhere(written: &str, checked: &CheckedPath, sb: &PathSandbox, flavor: Flavor) -> bool {
     let case = sb
         .roots()
         .get(checked.root)
@@ -659,11 +668,24 @@ pub fn said_path(written: &str, checked: &CheckedPath, sb: &PathSandbox, flavor:
         (Ok(a), Ok(b)) => a.components.len() == b.components.len() && is_within(&a, &b, case),
         _ => written == checked.canonical,
     };
-    let mut out = policy::sanitize::visible(written);
-    if !same {
-        out.push_str(THROUGH_LINK);
-    }
-    out
+    !same
+}
+
+/// "That path leads to …" for the card's preview of a refusal, and so its audit row, when
+/// [`said_path`] would say "(through a link)": where the path leads, escaped, which the user
+/// reads and the model never does (13.9).
+pub fn leads_to(
+    written: &str,
+    checked: &CheckedPath,
+    sb: &PathSandbox,
+    flavor: Flavor,
+) -> Option<String> {
+    leads_elsewhere(written, checked, sb, flavor).then(|| {
+        format!(
+            "That path leads to {}.",
+            policy::sanitize::visible(&checked.canonical)
+        )
+    })
 }
 
 #[cfg(test)]

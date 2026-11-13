@@ -1849,6 +1849,22 @@ async fn the_coding_apps_get_the_key_only_while_sharing_listens() {
             ..off
         }
     );
+    // The user picks another port: that one is kept and listened on, with the key, and the
+    // old one is neither (an app still set up for it is not asked:
+    // outside_agent::tests::an_app_set_up_for_another_port_of_this_computer_is_not_asked).
+    let moved = sharing.set_port(&env, 0).await.unwrap();
+    let new_port = moved.port.unwrap();
+    assert!(moved.listening);
+    assert_ne!(new_port, port);
+    assert_eq!(
+        sharing.now(&env).await,
+        ShareNow {
+            port: Some(new_port),
+            enabled: true,
+            listening: Some(new_port),
+            key: Some(sharing.reveal_key(&env).await.unwrap()),
+        }
+    );
     drop(taken);
     sharing.shutdown().await;
 }

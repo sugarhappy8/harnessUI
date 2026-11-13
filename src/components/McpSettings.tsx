@@ -327,6 +327,8 @@ const RENAMED_SERVERS = "mcpRenamedServers";
 interface RenamedServer {
   from: string;
   to: string;
+  /** Some of its tools that were on are off now: their new names could not be told for sure. */
+  toolsOff?: boolean;
 }
 
 /** Says once which saved servers have a new name, until the owner closes the note. */
@@ -349,7 +351,9 @@ function RenamedNote() {
         {renamed.map((r) => (
           <p key={`${r.from}\n${r.to}`}>
             Your server "{r.from}" is now called "{r.to}", because the app now has a built-in server with that name.
-            It works as before, with the same settings.
+            {r.toolsOff
+              ? " It works as before, with the same settings, but some of its tools were switched off because their names changed too. Switch them on again in a chat's Tools panel."
+              : " It works as before, with the same settings."}
           </p>
         ))}
       </div>

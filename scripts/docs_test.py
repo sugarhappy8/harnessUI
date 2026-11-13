@@ -3,8 +3,9 @@
 
 The sentences about rea's tests and CI (9.3, 13.6, 16 and 17) are checked against
 `.github/workflows/reverse.yml` and `ci.yml`, `e2e/scripted_agent.py` and the files they
-name, and no `TODO(lead)` marker may be left in ARCHITECTURE.md. A failure names the
-sentence to correct.
+name, and no `TODO(lead)` marker may be left in ARCHITECTURE.md. SECURITY.md, CHANGELOG.md
+and docs/dev/0.0.6/item5-spec.md may claim no more of those checks than ARCHITECTURE.md
+does. A failure names the sentence to correct.
 
     python3 -I scripts/docs_test.py
 
@@ -59,6 +60,53 @@ def reverse_sentences() -> dict[str, str]:
     }
 
 
+def doc_paragraph(rel: str, needle: str) -> str:
+    """The one paragraph of a hard-wrapped document (the lines between blank lines, joined
+    with single spaces) that holds `needle`."""
+    paragraphs = [" ".join(p.split()) for p in re.split(r"\n\s*\n", read(rel))]
+    found = [p for p in paragraphs if needle in p]
+    if len(found) != 1:
+        raise AssertionError(f"{rel}: expected one paragraph holding {needle!r}, found {len(found)}")
+    return found[0]
+
+
+def doc_line(rel: str, needle: str) -> str:
+    """The one line of a document that holds `needle`."""
+    found = [line for line in read(rel).splitlines() if needle in line]
+    if len(found) != 1:
+        raise AssertionError(f"{rel}: expected one line holding {needle!r}, found {len(found)}")
+    return found[0]
+
+
+def spec_bullet(rel: str, start: str) -> str:
+    """A bullet that starts with `start`, with its indented continuation lines, joined."""
+    lines = read(rel).splitlines()
+    first = [i for i, line in enumerate(lines) if line.startswith(start)]
+    if len(first) != 1:
+        raise AssertionError(f"{rel}: expected one bullet starting with {start!r}, found {len(first)}")
+    out = [lines[first[0]]]
+    for line in lines[first[0] + 1 :]:
+        if not line.startswith("  ") or not line.strip():
+            break
+        out.append(line)
+    return " ".join(" ".join(out).split())
+
+
+def windows_blocked_programs(workflow: str) -> list[str]:
+    """The programs reverse.yml gives outbound block rules on Windows."""
+    block = workflow.split("$programs = @(", 1)[1].split(")", 1)[0]
+    return re.findall(r"\\([\w.-]+\.exe)'", block)
+
+
+def macos_blocked_protocols(workflow: str) -> list[str]:
+    """The protocols reverse.yml's pf rule blocks for the test user ([] for all)."""
+    rule = re.search(r"block drop out log quick on ! lo0 (.*) user reatest", workflow)
+    if rule is None:
+        raise AssertionError("reverse.yml has no pf rule for the test user")
+    protocols = re.search(r"proto \{ ([^}]+) \}", rule.group(1))
+    return [p.strip() for p in protocols.group(1).split(",")] if protocols else []
+
+
 def probes() -> set[str]:
     return set(re.findall(r'^@probe\("([a-z0-9-]+)"\)', read("e2e/scripted_agent.py"), re.MULTILINE))
 
@@ -106,8 +154,7 @@ class ReverseCiAsTheWorkflowsRunIt(unittest.TestCase):
         self.bullet = self.sentences["16 reverse CI"]
 
     def test_the_programs_blocked_on_windows_are_named(self):
-        block = self.reverse.split("$programs = @(", 1)[1].split(")", 1)[0]
-        programs = re.findall(r"\\([\w.-]+\.exe)'", block)
+        programs = windows_blocked_programs(self.reverse)
         self.assertTrue(programs, "reverse.yml lists no programs to block")
         for program in programs:
             self.assertIn(f"`{program}`", self.bullet)
@@ -141,6 +188,79 @@ class ReverseCiAsTheWorkflowsRunIt(unittest.TestCase):
         if "m8_offline" not in self.ci:
             self.assertIn("not in CI", test)
         self.assertIn("owner", test)
+
+
+# What each recorder of reverse.yml sees, in the words SECURITY.md uses for its programs.
+PLAIN_NAMES = {"node.exe": "Node.js", "java.exe": "Java", "javaw.exe": "Java", "decompile.exe": "decompiler"}
+
+
+class NoClaimBeyondWhatEachJobChecks(unittest.TestCase):
+    """On Windows only the programs with a block rule are blocked and logged, and on macOS pf
+    blocks only the protocols its rule names: no document may say more."""
+
+    def setUp(self):
+        self.reverse = (WORKFLOWS / "reverse.yml").read_text(encoding="utf-8")
+        sentences = reverse_sentences()
+        self.offline = sentences["13.6 stays offline"]
+        self.bullet = sentences["16 reverse CI"]
+        self.security = doc_paragraph("SECURITY.md", "the real decompilers")
+
+    def test_13_6_names_the_programs_blocked_on_windows(self):
+        for program in windows_blocked_programs(self.reverse):
+            self.assertIn(f"`{program}`", self.offline, "13.6 must name what Windows blocks, as 16 does")
+        self.assertNotIn("any attempt to reach another computer", self.offline)
+
+    def test_security_names_the_programs_blocked_on_windows(self):
+        for program in windows_blocked_programs(self.reverse):
+            self.assertIn(program, PLAIN_NAMES, f"say in SECURITY.md that Windows blocks {program}, then add it here")
+            self.assertIn(PLAIN_NAMES[program], self.security)
+        self.assertNotIn("any of their processes", self.security)
+
+    def test_the_protocols_pf_blocks_on_macos_are_named(self):
+        protocols = macos_blocked_protocols(self.reverse)
+        if protocols:
+            words = " and ".join(p.upper() for p in protocols)
+            for where, text in (("13.6", self.offline), ("16", self.bullet), ("SECURITY.md", self.security)):
+                self.assertIn(words, text, f"{where}: pf blocks only {words} on macOS")
+            self.assertNotIn("any packet", self.offline)
+
+
+class ReleaseDocsSayWhetherTheWorkflowRan(unittest.TestCase):
+    """While ARCHITECTURE.md 16 says reverse.yml has not run on GitHub, SECURITY.md and
+    CHANGELOG.md say so too; once 16 says it has run, neither may still say it has not."""
+
+    def test_security_and_changelog_agree_with_16(self):
+        pending = "has not run on GitHub yet" in reverse_sentences()["16 reverse CI"]
+        docs = {
+            "SECURITY.md": doc_paragraph("SECURITY.md", "the real decompilers"),
+            "CHANGELOG.md": doc_line("CHANGELOG.md", "the real rea and its decompilers"),
+        }
+        for where, text in docs.items():
+            self.assertEqual("has not run" in text, pending, f"{where}: say whether reverse.yml has run, as 16 does")
+
+
+class OfflineCoverAsItIs(unittest.TestCase):
+    """The 13.6 Test bullet says what the offline test sees; the testing table and
+    item5-spec's N6 may not lean on a release-gate test that records name lookups."""
+
+    def setUp(self):
+        self.test = reverse_sentences()["13.6 test"]
+        self.ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    def test_n6_names_the_cover_that_exists(self):
+        n6 = spec_bullet("docs/dev/0.0.6/item5-spec.md", "- **N6.")
+        if "not direct connections or name lookups" in self.test:
+            self.assertNotIn("release-gate test", n6, "13.6 says no test records name lookups")
+            self.assertIn("section 9", n6, "name the owner checklist that records them")
+
+    def test_the_offline_row_says_what_runs_today(self):
+        row = paragraph(section("## 17. Testing"), "| Offline |")
+        notes = row.split("|")[3]
+        self.assertIn("`e2e/m8_offline.py`", notes)
+        self.assertIn("13.6", notes)
+        if "m8_offline" not in self.ci:
+            self.assertIn("by hand", notes)
+            self.assertIn("planned", notes)
 
 
 if __name__ == "__main__":

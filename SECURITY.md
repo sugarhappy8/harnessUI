@@ -204,8 +204,9 @@ the port or the key, in any approval mode.
 - harnessUI answers on `127.0.0.1` only, on a port picked at random the first time and then
   kept. llama-server stays behind it on its own random port with its private key.
 - Every request needs the sharing key. It is kept in the system keychain, shown only when
-  you press *Show key*, and *Make a new key* replaces it (the old one stops working at
-  once). The key, the address the request was sent to and the absence of a web page's
+  you press *Show key* (and, while sharing is on, handed only to a Claude Code or Codex run
+  from a chat that is set up for this port; see the next section), and *Make a new key*
+  replaces it (the old one stops working at once). The key, the address the request was sent to and the absence of a web page's
   `Origin` header are checked before anything else is read, so web pages cannot use the
   model.
 - Requests are rebuilt, not passed through: only the fields each API defines, at most
@@ -246,8 +247,13 @@ new chat, and helpers (subagents) never get it.
   online with your account and uses your plan or credit, and that what the program reads is
   sent to Anthropic (Claude Code) or OpenAI (Codex). When the program is set up to use the
   model in harnessUI, the card says the task goes to your local model instead. That needs
-  sharing switched on and working now; if it is not, the program is not asked, so it cannot
-  connect to a port that another program may have taken.
+  sharing switched on and working now, and the program set up for `127.0.0.1` and the port
+  sharing uses, as the setup steps write it. A program set up for harnessUI while sharing is
+  off or not working, for the same port under another name such as `localhost` (which can
+  reach another program listening on `[::1]`), or for any other port on this computer (such
+  as the port sharing used before you changed it) is not asked. So harnessUI never starts a
+  program it has found set up to send its task to a port on this computer that harnessUI
+  does not serve.
 - **Full access:** it runs without a card. The checks above still apply, and the working
   folder must be one you approved.
 - The task is handed to the program privately, never on its command line, where other
@@ -260,9 +266,9 @@ new chat, and helpers (subagents) never get it.
   permission checks can be added. On Windows, Codex's sandbox has not been tried.
 - Their answer is outside content, shortened like any other tool result.
 - Secret-looking environment variables (keys, tokens, passwords) are not passed to them,
-  with one exception: a program set up to use the model in harnessUI on the port sharing
-  uses now gets the sharing key, from where harnessUI keeps it, in the one variable its own
-  setup reads it from, and nothing else.
+  with one exception: a program set up to use the model in harnessUI at `127.0.0.1` on the
+  port sharing uses now gets the sharing key, from where harnessUI keeps it, in the one
+  variable its own setup reads it from, and nothing else.
 - Writing to the settings of Claude Code or Codex asks in Ask first and Allow all, whichever
   tool does it (see *Always ask* above).
 
@@ -335,9 +341,12 @@ the app starts. It never runs its own setup,
 so it writes nothing into the settings of Claude Code, Codex or other apps. Ghidra's
 analyser that looks up debugging-symbol files is turned off. On a Mac it never starts before
 Apple's command line tools are installed, so Apple's install window cannot appear in the
-middle of a chat. CI runs rea with the real decompilers (Ghidra on Windows, Kuna on macOS,
-both on Linux) and fails if any of their processes tries to reach anything but this
-computer.
+middle of a chat. A CI workflow is set up to run rea with the real decompilers (Ghidra on
+Windows, Kuna on macOS, both on Linux) and to fail if they try to reach another computer.
+On Linux it watches every program the tests start, name lookups included; on Windows it
+blocks and watches Node.js, Java and Ghidra's decompiler; on macOS it blocks and watches the
+tests' TCP and UDP traffic. It has not run on GitHub yet: its Linux checks were run on the
+build machine, and its Windows and macOS jobs have not run at all.
 
 **Limits:**
 
@@ -348,7 +357,9 @@ computer.
   it over, and it would then have your rights and network access. Open programs from people
   you don't trust only on a computer you can wipe.
 - If harnessUI crashes, Kuna or Java can keep running for a short while on macOS and Linux.
-- On Linux without a usable `XDG_RUNTIME_DIR`, Ghidra's working files (its project and a
+- On Linux, when `XDG_RUNTIME_DIR` is missing, is not private to you, or has less than
+  256 MB free (it gets a tenth of the computer's memory by default, so this happens on
+  computers with less than about 2.5 GB of memory), Ghidra's working files (its project and a
   copy of the opened program) go to a private folder in `/tmp` that only you can open; rea
   removes it when it stops. Where the runtime folder is used, the system keeps it in memory,
   so a very large program may not fit there. After Java is stopped by force, a 32 KB file of Java's

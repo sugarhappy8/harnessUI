@@ -36,9 +36,11 @@ pub const RUN_TMP_SUFFIX: &str = "-reverse";
 /// `bridge.sock`, and Java takes at most 106 bytes for a socket's path on Linux (rea moves a
 /// longer one to `/tmp`).
 pub const RUN_TMP_MAX_BYTES: usize = 106 - "/rea-ghidra-XXXXXX/bridge.sock".len();
-/// The free space `XDG_RUNTIME_DIR` must have for rea's temporary folder. The system keeps
-/// that folder in memory, usually limited to a tenth of it; a smaller one is left alone.
-pub const RUN_TMP_MIN_FREE: u64 = 1 << 30;
+/// The free space `XDG_RUNTIME_DIR` must have for rea's temporary folder: room for Ghidra's
+/// project of a typical program (tens of MB) and the copy of the opened file. The system
+/// keeps that folder in memory, limited by default to a tenth of it, so computers with about
+/// 2.5 GB of memory or more have room; a smaller one is left alone.
+pub const RUN_TMP_MIN_FREE: u64 = 256 << 20;
 
 /// The reverse-engineering folders.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -391,6 +393,29 @@ mod tests {
         assert_eq!(run_tmp_in(Some(&os(&run)), "app", &little), None);
         assert_eq!(run_tmp_in(Some(&os(&run)), "app", &|_| None), None);
         assert!(private_folder(&run) && !private_folder(&open) && !private_folder(&link));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_runtime_folder_of_a_computer_with_4_gb_of_memory_or_more_is_used() {
+        let base = tempfile::Builder::new().prefix("rt-").tempdir().unwrap();
+        let base = std::fs::canonicalize(base.path()).unwrap();
+        if dotted(&base) {
+            return;
+        }
+        let run = private_dir(&base.join("run"));
+        let run = Some(run.as_os_str());
+        // systemd gives the runtime folder a tenth of the memory by default
+        // (`RuntimeDirectorySize=10%`); the session's own files already use a little of it.
+        let gib = 1u64 << 30;
+        let free_with = |memory: u64| move |_: &Path| Some(memory / 10 - (16 << 20));
+        for memory in [4 * gib, 8 * gib, 16 * gib] {
+            let found = run_tmp_in(run, "app", &free_with(memory));
+            assert!(found.is_some(), "{} GiB of memory", memory / gib);
+        }
+        // A tiny one, as with 2 GB of memory, is left alone.
+        assert_eq!(run_tmp_in(run, "app", &free_with(2 * gib)), None);
+        assert_eq!(RUN_TMP_MIN_FREE, 256 << 20);
     }
 
     #[test]

@@ -569,7 +569,8 @@ fn group_score(
     let catalog = tool_catalog::group(server).filter(|_| builtin);
     let mut score = match catalog {
         Some(group) => {
-            let mut score = STRONG * wording.count(group.strong) + WEAK * wording.count(group.weak);
+            let (strong, weak) = listed_words(group, wording);
+            let mut score = STRONG * strong + WEAK * weak;
             if server == "skills" {
                 score += skills_score(skills, wording);
             }
@@ -613,6 +614,18 @@ fn group_score(
             .unwrap_or(0);
     }
     score
+}
+
+/// How many of a built-in group's strong and weak words a text has. A group that needs a
+/// strong word (rea's, `tool_catalog::OWN_WORDS_ONLY`) gets no weak words without one.
+fn listed_words(group: &tool_catalog::Group, wording: &Wording) -> (u32, u32) {
+    let strong = wording.count(group.strong);
+    let weak = if strong == 0 && group.needs_strong_word() {
+        0
+    } else {
+        wording.count(group.weak)
+    };
+    (strong, weak)
 }
 
 /// How much a request points at one of the enabled skills: its name as written, and the

@@ -316,6 +316,21 @@ impl RuntimeManager {
         }
     }
 
+    /// The backend check, right before its first test load: waits until nothing else uses
+    /// the model, with "Restarts when the reply ends · Cancel" meanwhile (D3). `Err` when
+    /// Cancel or a newer change ended the wait: the check then replaces nothing.
+    pub async fn wait_for_others(
+        &self,
+        busy: &BusyCounter,
+        stop: &CancellationToken,
+    ) -> Result<(), crate::load_tracker::Replaced> {
+        self.gate
+            .wait_for_others(busy, stop, |waiting| {
+                self.update(|s| s.reload_waiting = waiting);
+            })
+            .await
+    }
+
     /// Counts one user of the local model (D3) until the returned guard is dropped;
     /// "Stop and restart" stops it with `stop`.
     pub fn hold(

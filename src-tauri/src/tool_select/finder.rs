@@ -657,7 +657,10 @@ fn group_is_about(server: &str, wording: &super::Wording) -> bool {
         .iter()
         .chain(&label)
         .any(|w| w.chars().count() >= 3 && wording.has_form_of(w));
-    let meant = group.is_some_and(|g| 2 * wording.count(g.strong) + wording.count(g.weak) >= 2);
+    let meant = group.is_some_and(|g| {
+        let (strong, weak) = super::listed_words(g, wording);
+        2 * strong + weak >= 2
+    });
     named || meant
 }
 

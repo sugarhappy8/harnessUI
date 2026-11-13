@@ -137,6 +137,13 @@ pub struct FitResult {
     /// placement is known (an installed file); 0 otherwise: on Apple graphics and the
     /// processor [`Self::needed_bytes`] counts all of it, and this estimate does not split.
     pub computer_bytes: u64,
+    /// With [`Self::computer_bytes`] known, the computer's free memory as the system reports
+    /// it (the settings panel's second bar); 0 otherwise.
+    pub computer_free_bytes: u64,
+    /// Red on a graphics card because the part in the computer's memory is larger than its
+    /// free memory less [`RAM_RESERVE_BYTES`] (`placement::judge_in`), not only because the
+    /// whole does not fit: the screen then names the computer's memory as what is short.
+    pub computer_short: bool,
     /// The 0.0.4 sentence (logs and scripts). The 0.0.6 screens word the figures instead
     /// (`fitLine` in src/lib/words.ts); empty when the placement judge made the result.
     pub sentence: String,
@@ -295,6 +302,8 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
         partial_offload,
         device: target.device(),
         computer_bytes: 0,
+        computer_free_bytes: 0,
+        computer_short: false,
         sentence,
     };
 

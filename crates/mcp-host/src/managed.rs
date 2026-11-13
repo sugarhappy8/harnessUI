@@ -24,6 +24,9 @@
 //! - **Stop:** standard input closed, the grace, then the whole tree killed; on Linux the
 //!   process groups that the server's own children lead are ended with it (rea starts Kuna
 //!   and Java in groups of their own, which the tree kill does not reach).
+//! - **A start whose caller stops waiting:** dropping [`ManagedServer::start`]'s future
+//!   kills the half-started process tree at once, with no grace, and nothing waits for it
+//!   there; [`ManagedServer::wait_until_ended`] waits until it has ended.
 //!
 //! The cancellation is sent as a plain notification on the wire rather than through rmcp's
 //! request handle, because rmcp would drop the pending call (and any late answer) the moment
@@ -53,7 +56,7 @@ use crate::connection::{self, Closed, Connection, Lifecycle, Target};
 use crate::error::HostError;
 use crate::result::map_call_result;
 use crate::stderr::StderrLog;
-use crate::stdio::Prepared;
+use crate::stdio::{Prepared, ProcessCount};
 
 /// After a cancel, how long the server has to answer the call before it is stopped.
 pub const CANCEL_GRACE: Duration = Duration::from_secs(5);
@@ -170,6 +173,8 @@ pub struct ManagedServer {
     starting: Mutex<CancellationToken>,
     /// Serialises starts.
     start_lock: tokio::sync::Mutex<()>,
+    /// The processes this server started whose tree has not been seen to end.
+    processes: ProcessCount,
 }
 
 /// The server's answer to a call, or why there is none.
@@ -194,6 +199,7 @@ impl ManagedServer {
             stops: AtomicU64::new(0),
             starting: Mutex::new(CancellationToken::new()),
             start_lock: tokio::sync::Mutex::new(()),
+            processes: ProcessCount::default(),
             spec,
         }
     }
@@ -317,6 +323,7 @@ impl ManagedServer {
             program: s.program.clone(),
             command: program_text,
             search: OsString::new(),
+            processes: Some(self.processes.clone()),
         })
     }
 
@@ -444,6 +451,14 @@ impl ManagedServer {
     /// The last lines the server wrote to stderr, with the app's own notes (`--- … ---`).
     pub fn stderr_tail(&self) -> Vec<String> {
         self.log.tail()
+    }
+
+    /// Waits until every process this server started has ended (its tree was seen to end),
+    /// also one it no longer holds: when [`Self::start`]'s future is dropped, its
+    /// half-started process is killed at once and nothing else waits for it. Returns at
+    /// once when none runs.
+    pub async fn wait_until_ended(&self) {
+        self.processes.none_left().await;
     }
 
     /// Whether the process runs.

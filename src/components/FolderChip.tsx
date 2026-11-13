@@ -63,10 +63,18 @@ const INVISIBLE =
 /** A path as it is shown: every invisible or direction-changing character as `\u{XXXX}`,
  *  the way approval cards show them. */
 export function visiblePath(text: string): string {
-  return text.replace(
-    INVISIBLE,
-    (ch) => `\\u{${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}}`,
-  );
+  return text.replace(INVISIBLE, codeOf);
+}
+
+/** Text of several lines (the backend check's report, a skill's YAML error) as it is shown:
+ *  the same codes as `visiblePath`, except that line breaks and tabs stay, so the text keeps
+ *  its lines. A Windows line end counts as one line break; a carriage return alone is a code. */
+export function visibleLines(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(INVISIBLE, (ch) => (ch === "\n" || ch === "\t" ? ch : codeOf(ch)));
+}
+
+function codeOf(ch: string): string {
+  return `\\u{${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}}`;
 }
 
 /** The last name of a folder path ("harnessUI" for "C:\\Users\\me\\harnessUI" or

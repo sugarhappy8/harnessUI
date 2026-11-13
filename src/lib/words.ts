@@ -341,9 +341,10 @@ const FIT_SHORT: Record<FitDevice, string> = {
  * the way Task Manager counts memory (I6-10); on a graphics card with part of the model in the
  * computer's memory, the whole need and how it is split (compare-fit-minors). Then what the
  * verdict means: "It would run on the processor" only when it would; for a model too large,
- * what is short; a shorter memory that leaves room (tokens with words), part of it on the
- * processor, or only just. It never repeats the verdict word and never shows the backend's
- * 0.0.4 sentence.
+ * what is short (on a graphics card, the computer's memory with how much is free when its
+ * part does not fit there, else the whole); a shorter memory that leaves room (tokens with
+ * words), part of it on the processor, or only just. It never repeats the verdict word and
+ * never shows the backend's 0.0.4 sentence.
  */
 export function fitLine(fit: FitResult): string {
   const device = FIT_HAS[fit.device] ? fit.device : "processor";
@@ -354,7 +355,14 @@ export function fitLine(fit: FitResult): string {
         `which has ${amountGb(fit.availableBytes)} free, and ${amountGb(fit.computerBytes)} in the computer's memory.`
       : `Needs about ${amountGb(fit.neededBytes)}; ${FIT_HAS[device](amountGb(fit.availableBytes))}`,
   ];
-  if (fit.verdict === "red") {
+  if (fit.verdict === "red" && device === "graphicsCard" && fit.computerShort) {
+    // The part in the computer's memory does not fit there (with As much as fits, the only
+    // way a model is too large on a card), as Settings for this model's second bar shows.
+    parts.push(`The computer's memory has ${amountGb(fit.computerFreeBytes)} free, not enough for its part.`);
+    if (fit.computerBytes <= fit.computerFreeBytes) {
+      parts.push("Part of that memory is kept free for other programs.");
+    }
+  } else if (fit.verdict === "red") {
     parts.push(FIT_SHORT[device]);
     if (device === "processor" && fit.neededBytes <= fit.availableBytes) {
       parts.push("Part of that memory is kept free for other programs.");

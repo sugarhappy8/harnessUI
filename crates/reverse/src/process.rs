@@ -19,8 +19,10 @@
 //!   decompiler) is stopped and started again, never reused.
 //! - **Stopping:** [`ReaProcess::stop`] does not wait for a call that runs: rea's standard
 //!   input is closed at once, rea gets the grace to end Kuna or Java itself, then its tree is
-//!   killed, and the call ends as [`ReverseError::Stopped`]. A start that finishes after a
-//!   stop is undone. After [`RestartReason::Quit`] nothing starts again. After a stop (and
+//!   killed, and the call ends as [`ReverseError::Stopped`]. A start that a stop comes
+//!   during is undone; when the stop comes while the start still prepares rea's folders,
+//!   before it counts as starting, rea is never launched (that stop has removed the
+//!   temporary folder). After [`RestartReason::Quit`] nothing starts again. After a stop (and
 //!   the idle stop), the temporary folder outside the reverse folder is removed unless rea
 //!   was started again meanwhile; it is also removed when the app starts
 //!   ([`ReaProcess::new`]), in case the app ended without a stop.
@@ -30,8 +32,12 @@
 //!   holding rea: [`ReaProcess::lock`] and the idle stop wait for it after taking the lock,
 //!   and the state stays `Busy` until rea has answered or been stopped. A caller that goes
 //!   away without cancelling cancels the call. A start whose caller stops waiting is no
-//!   longer `Starting`: the half-started rea is stopped the same way, and holds rea until
-//!   it has stopped.
+//!   longer `Starting`: dropping it makes the managed server kill the half-started rea at
+//!   once, with no grace (one that had already connected is stopped with its grace), and
+//!   rea counts as busy until that process has ended; then the temporary folder outside the
+//!   reverse folder is removed as after a stop. A stop during a start, and a start that
+//!   fails, wait for the half-started rea to end the same way, and no start empties rea's
+//!   folders while an earlier rea may still be ending.
 //! - **State** for the tab: `Failed` carries the stderr tail with the reverse folder masked
 //!   ([`crate::results::mask`]) and invisible characters made visible.
 //!
@@ -67,6 +73,8 @@ use crate::{AppleTools, Component, ReverseError, RunState};
 pub const IDLE_STOP: Duration = Duration::from_secs(15 * 60);
 /// Grace given to rea to end Kuna or Java itself before its tree is killed.
 pub const STOP_GRACE: Duration = Duration::from_secs(3);
+/// Longest wait for a stopped or killed rea's process to end ([`wait_ended`]).
+const ENDED_WAIT: Duration = Duration::from_secs(10);
 /// rea's stderr log in the app's log folder ([`ReaProcess::set_log_dir`]); no user server's
 /// `mcp-server-<name>.log` can be this file.
 pub const LOG_FILE_NAME: &str = "mcp-reverse.log";
@@ -184,7 +192,9 @@ impl Rea for ManagedServer {
     async fn stop(&self, grace: Duration) {
         ManagedServer::stop(self, grace).await;
     }
-    async fn ended(&self) {}
+    async fn ended(&self) {
+        ManagedServer::wait_until_ended(self).await;
+    }
     fn is_running(&self) -> bool {
         ManagedServer::is_running(self)
     }
@@ -225,6 +235,9 @@ struct Status {
     running: Option<Running>,
     /// The server being started, so a stop can cut the start short.
     starting: Option<Arc<dyn Rea>>,
+    /// Starts whose caller stopped waiting and whose half-started rea has not ended yet
+    /// ([`StartGuard`]); their own task removes rea's temporary folder once it has.
+    ending_starts: u32,
     /// The call that runs (its number) and its chat (0 when the caller did not say).
     busy: Option<(u64, i64)>,
     /// Calls made so far, to number them.
@@ -257,6 +270,10 @@ struct Shared {
     /// ([`ReverseLayout::run_tmp`]); held while it is prepared or removed, so a stop removes
     /// it only when no start has prepared it since the stop began.
     run_tmp_starts: StdMutex<u64>,
+    /// Tests only: holds a start once it has prepared rea's folders and before it counts as
+    /// starting, so a test can stop rea in between.
+    #[cfg(test)]
+    after_prepare: StdMutex<Option<Arc<tests::Pause>>>,
 }
 
 impl Shared {
@@ -334,17 +351,30 @@ impl Drop for InFlight {
     }
 }
 
-/// Clears [`Status::starting`] on every way out of [`ReaGuard::ensure_started`], also when
-/// its caller stops waiting (the agent loop drops a stopped tool's future 250 ms after
-/// Stop). Only while `starting` is still this server: then the half-started server is also
-/// stopped, in a task of its own that holds rea like a call that is still ending.
+/// Undoes a start whose caller stopped waiting before [`ReaGuard::ensure_started`] was done
+/// (the agent loop drops a stopped tool's future 250 ms after Stop). Dropping the start
+/// made the managed server kill the half-started rea at once; this clears
+/// [`Status::starting`] if it is still this server, and in a task of its own that holds rea
+/// like a call that is still ending (so rea counts as busy and nobody gets it): stops the
+/// server if it was still `starting` (one that had already connected is stopped with its
+/// grace; for one that had not, there is nothing left to stop), waits until its process has
+/// ended ([`wait_ended`]), then removes rea's temporary folder outside the reverse folder
+/// unless a start has prepared it since this one.
 struct StartGuard {
     shared: Arc<Shared>,
     server: Arc<dyn Rea>,
+    /// [`Shared::run_tmp_starts`] once this start had prepared the folder.
+    starts: u64,
+    /// `ensure_started` came to its end: nothing to undo.
+    done: bool,
 }
 
 impl Drop for StartGuard {
     fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let runtime = tokio::runtime::Handle::try_current().ok();
         let ours = {
             let mut s = self.shared.status();
             let ours = s
@@ -354,22 +384,48 @@ impl Drop for StartGuard {
             if ours {
                 s.starting = None;
             }
+            if runtime.is_some() {
+                s.ending_starts += 1;
+            }
             ours
         };
-        if !ours {
-            // Started, failed, or taken by a stop that stops it itself.
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let Some(runtime) = runtime else {
             return;
         };
         // Number 0 is no call's, so it never clears another call's busy state.
         let flight = InFlight::begin(self.shared.clone(), 0);
+        let shared = self.shared.clone();
         let server = self.server.clone();
+        let starts = self.starts;
         runtime.spawn(async move {
             let _flight = flight;
-            server.stop(STOP_GRACE).await;
+            // Not ours: a stop took it and stops it itself, or it was being undone already.
+            if ours {
+                server.stop(STOP_GRACE).await;
+            }
+            wait_ended(server.as_ref()).await;
+            {
+                let mut s = shared.status();
+                s.ending_starts = s.ending_starts.saturating_sub(1);
+            }
+            remove_run_tmp_after_stop(&shared, starts).await;
         });
+    }
+}
+
+/// Waits until the processes of a rea that was stopped, or whose start was cut short, have
+/// ended (the managed server kills a half-started rea at once and waits for nothing), at
+/// most [`ENDED_WAIT`]: then rea counts as free anyway, so a process that is never seen to
+/// end cannot leave rea busy for good.
+async fn wait_ended(server: &dyn Rea) {
+    if tokio::time::timeout(ENDED_WAIT, server.ended())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "rea's process was not seen to end within {} seconds of its stop",
+            ENDED_WAIT.as_secs()
+        );
     }
 }
 
@@ -416,6 +472,8 @@ impl ReaProcess {
                 launch,
                 apple_root,
                 run_tmp_starts: StdMutex::new(0),
+                #[cfg(test)]
+                after_prepare: StdMutex::new(None),
             }),
         }
     }
@@ -541,6 +599,8 @@ async fn stop_shared(shared: &Arc<Shared>, grace: Duration) {
     };
     if let Some(server) = starting {
         server.stop(grace).await;
+        // The managed server kills a half-started rea without waiting for it.
+        wait_ended(server.as_ref()).await;
     }
     if let Some(running) = running {
         running.server.stop(grace).await;
@@ -549,8 +609,9 @@ async fn stop_shared(shared: &Arc<Shared>, grace: Duration) {
 }
 
 /// After a stop: removes rea's temporary folder outside the reverse folder
-/// ([`ReverseLayout::run_tmp`]), unless rea runs or is starting, or a start has prepared it
-/// since `starts`. Best effort: the next start empties it, and so does the next app start.
+/// ([`ReverseLayout::run_tmp`]), unless rea runs or is starting, a start cut short is still
+/// ending its rea, or a start has prepared it since `starts`. Best effort: the next start
+/// empties it, and so does the next app start.
 async fn remove_run_tmp_after_stop(shared: &Arc<Shared>, starts: u64) {
     let Some(run_tmp) = shared.layout.run_tmp().map(Path::to_path_buf) else {
         return;
@@ -563,7 +624,7 @@ async fn remove_run_tmp_after_stop(shared: &Arc<Shared>, starts: u64) {
             .unwrap_or_else(|e| e.into_inner());
         let idle = {
             let s = shared.status();
-            s.running.is_none() && s.starting.is_none()
+            s.running.is_none() && s.starting.is_none() && s.ending_starts == 0
         };
         if *now == starts && idle {
             remove_private_dir(&run_tmp);
@@ -605,7 +666,10 @@ impl ReaGuard {
             }
         }
         check_before_start(&shared, &config)?;
-        let old = {
+        // `stops` from here on: a stop at any point of this start undoes it, also one that
+        // comes before it counts as starting, while rea's folders are prepared (that stop
+        // removes the temporary folder outside the reverse folder, and sees nothing to stop).
+        let (old, stops) = {
             let mut s = shared.status();
             if let Some(task) = s.idle_task.take() {
                 task.abort();
@@ -616,7 +680,7 @@ impl ReaGuard {
             {
                 s.failed = Some(shared.details(old.server.as_ref()));
             }
-            old
+            (old, s.stops)
         };
         if let Some(old) = old
             && old.server.is_running()
@@ -624,6 +688,9 @@ impl ReaGuard {
             // Another configuration (a decompiler switch that skipped restart()).
             old.server.stop(STOP_GRACE).await;
         }
+        // A start cut short, or a call whose caller went away, may still be ending its rea:
+        // its folders are never emptied under it.
+        shared.settled().await;
         let folders = crate::env::folders(&config, &shared.layout);
         let tmp = shared.layout.tmp();
         // rea's temporary folder outside the reverse folder, when this configuration uses it.
@@ -640,19 +707,21 @@ impl ReaGuard {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 *starts += 1;
-                prepare_folders(&tmp, run_tmp.as_deref(), &folders)
+                (*starts, prepare_folders(&tmp, run_tmp.as_deref(), &folders))
             }
         })
         .await;
-        match prepared {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(ReverseError::from(e)),
+        let starts = match prepared {
+            Ok((starts, Ok(()))) => starts,
+            Ok((_, Err(e))) => return Err(ReverseError::from(e)),
             Err(e) => {
                 return Err(ReverseError::Io {
                     message: e.to_string(),
                 });
             }
-        }
+        };
+        #[cfg(test)]
+        tests::Pause::at(&shared.after_prepare).await;
         let spec = ManagedSpec {
             name: SERVER_NAME.into(),
             program: config.program.clone(),
@@ -666,15 +735,25 @@ impl ReaGuard {
                 .clone(),
             start_timeout: config.start_timeout,
         };
-        let (server, stops) = {
+        let server = {
             let mut s = shared.status();
-            let server = (shared.launch)(spec, s.lifecycle);
-            s.starting = Some(server.clone());
-            (server, s.stops)
+            (s.stops == stops && !s.quitting).then(|| {
+                let server = (shared.launch)(spec, s.lifecycle);
+                s.starting = Some(server.clone());
+                server
+            })
         };
-        let _starting = StartGuard {
+        let Some(server) = server else {
+            // Stopped (or the app quit) while this start prepared rea's folders: undone before
+            // rea runs, so no rea is left with a temporary folder the stop removed.
+            remove_run_tmp_after_stop(&shared, starts).await;
+            return Err(ReverseError::Stopped);
+        };
+        let mut undo = StartGuard {
             shared: shared.clone(),
             server: server.clone(),
+            starts,
+            done: false,
         };
         let result = server.start().await;
         // Decided under the lock, which is released before anything is awaited.
@@ -714,17 +793,26 @@ impl ReaGuard {
                 }
             }
         };
-        match after {
+        let outcome = match after {
             Ok(started) => {
                 self.generation = started.generation;
                 Ok(started)
             }
-            Err(Some(error)) => Err(error),
+            Err(Some(error)) => {
+                // Failed, or cut short by a stop (then the managed server killed the
+                // half-started rea without waiting for it): this call holds rea until its
+                // process has ended.
+                wait_ended(server.as_ref()).await;
+                Err(error)
+            }
             Err(None) => {
                 server.stop(STOP_GRACE).await;
+                wait_ended(server.as_ref()).await;
                 Err(ReverseError::Stopped)
             }
-        }
+        };
+        undo.done = true;
+        outcome
     }
 
     /// Calls `name`, which must be in `allow` (refused before anything reaches rea). rea's
@@ -1005,7 +1093,8 @@ mod tests {
         fail_start: bool,
         /// `start` never ends (it waits until its caller stops waiting for it).
         start_hangs: bool,
-        /// Its process goes on ending after a start is dropped or a stop, until `end_now`.
+        /// Its process goes on ending after a start is dropped or a stop, until the test sets
+        /// `has_ended` and notifies `end`.
         ends_late: bool,
         has_ended: AtomicBool,
         end: tokio::sync::Notify,
@@ -1076,7 +1165,7 @@ mod tests {
         }
         async fn ended(&self) {
             while self.ends_late && !self.has_ended.load(Ordering::SeqCst) {
-                // Registered when made, so an `end_now` from here on is not missed.
+                // Registered when made, so a notify from here on is not missed.
                 let end = self.end.notified();
                 if self.has_ended.load(Ordering::SeqCst) {
                     break;
@@ -1445,6 +1534,80 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(!run_tmp.exists(), "still there after the idle stop");
+    }
+
+    /// Where [`Shared::after_prepare`] holds a start: it says it got there, then waits until
+    /// the test lets it go on.
+    #[derive(Default)]
+    pub(super) struct Pause {
+        reached: tokio::sync::Notify,
+        go: tokio::sync::Notify,
+    }
+
+    impl Pause {
+        pub(super) async fn at(slot: &StdMutex<Option<Arc<Pause>>>) {
+            let pause = slot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(pause) = pause {
+                pause.reached.notify_one();
+                pause.go.notified().await;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_after_a_start_prepared_the_runtime_folder_undoes_the_start() {
+        let (b, run_tmp) = bench_ghidra_with_run_tmp();
+        let config = b.config(Some(Decompiler::Ghidra));
+        let pause = Arc::new(Pause::default());
+        *b.process.shared.after_prepare.lock().unwrap() = Some(pause.clone());
+        let mut g = b.process.lock().await;
+        let start = tokio::spawn(async move { g.ensure_started(config).await.map(|_| ()) });
+        // The start has made the folder afresh but is not Starting yet: a forced decompiler
+        // switch or a Remove in Settings sees rea as stopped and stops it.
+        pause.reached.notified().await;
+        assert!(run_tmp.is_dir());
+        assert_eq!(b.process.state(), RunState::Stopped);
+        b.process.stop(STOP_GRACE).await;
+        pause.go.notify_one();
+        // Undone before rea runs: never a rea whose temporary folder is gone.
+        assert_eq!(start.await.unwrap(), Err(ReverseError::Stopped));
+        assert_eq!(b.count(), 0, "rea was started after the stop");
+        assert_eq!(b.process.state(), RunState::Stopped);
+        assert!(!b.process.is_busy());
+        assert!(!run_tmp.exists(), "the undone start left its folder");
+        // The next call starts rea with the folder made again.
+        *b.process.shared.after_prepare.lock().unwrap() = None;
+        run_call(
+            &b.process,
+            b.config(Some(Decompiler::Ghidra)),
+            "open_binary",
+        )
+        .await
+        .unwrap();
+        assert_eq!(b.process.state(), RunState::Ready);
+        assert!(run_tmp.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_while_a_start_waits_for_an_ending_call_undoes_the_start() {
+        use std::future::Future;
+        let (b, run_tmp) = bench_ghidra_with_run_tmp();
+        let mut g = b.process.lock().await;
+        // A call whose caller went away is still ending: the start waits for it.
+        let ending = InFlight::begin(b.process.shared.clone(), 0);
+        let mut start = std::pin::pin!(g.ensure_started(b.config(Some(Decompiler::Ghidra))));
+        let waits =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(start.as_mut().poll(cx).is_pending()))
+                .await;
+        assert!(waits);
+        b.process.stop(STOP_GRACE).await;
+        drop(ending);
+        assert_eq!(start.await.map(|_| ()), Err(ReverseError::Stopped));
+        assert_eq!(b.count(), 0, "rea was started after the stop");
+        assert_eq!(b.process.state(), RunState::Stopped);
+        assert!(!run_tmp.exists(), "the undone start left its folder");
     }
 
     #[tokio::test]
@@ -2061,7 +2224,10 @@ mod tests {
         let rea = b.last();
         let deadline = Instant::now() + Duration::from_secs(5);
         while rea.stops.lock().unwrap().is_empty() {
-            assert!(Instant::now() < deadline, "the half-started rea was never stopped");
+            assert!(
+                Instant::now() < deadline,
+                "the half-started rea was never stopped"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // Its process is still ending: rea is busy (not Starting) and its folder stays.
@@ -2086,7 +2252,10 @@ mod tests {
         let g = tokio::time::timeout(Duration::from_secs(5), b.process.lock())
             .await
             .expect("rea is free once the half-started rea has ended");
-        assert!(!run_tmp.exists(), "the dropped start's folder is still there");
+        assert!(
+            !run_tmp.exists(),
+            "the dropped start's folder is still there"
+        );
         assert_eq!(*rea.stops.lock().unwrap(), vec![STOP_GRACE]);
         drop(g);
         assert!(!b.process.is_busy());
@@ -2175,7 +2344,10 @@ mod tests {
             !pid_alive(pid),
             "another caller got rea while the half-started rea {pid} still ran"
         );
-        assert!(!run_tmp.exists(), "the dropped start's folder is still there");
+        assert!(
+            !run_tmp.exists(),
+            "the dropped start's folder is still there"
+        );
         drop(g);
         assert!(!process.is_busy());
         assert_eq!(process.state(), RunState::Stopped);

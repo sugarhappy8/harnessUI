@@ -25,7 +25,9 @@
 //!    cancelled tool's future 250 ms after Stop, and the server still gets its grace and is
 //!    then stopped; a call whose caller goes away without Stop is cancelled the same way;
 //! 9. (Linux) when a server is killed after its grace, the process groups its own children
-//!    lead end too (rea starts Kuna and Java in groups of their own).
+//!    lead end too (rea starts Kuna and Java in groups of their own);
+//! 10. a start whose future is dropped kills its process, and `wait_until_ended` waits for
+//!     a running process and returns once it has ended.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -122,6 +124,11 @@ fn main() {
         )
         .await;
         run("the_start_limit_is_kept", start_limit()).await;
+        run(
+            "a_dropped_start_can_be_waited_for_until_it_has_ended",
+            dropped_start(),
+        )
+        .await;
         run("a_crash_after_start_is_noticed", crash()).await;
     });
 }
@@ -926,6 +933,52 @@ async fn start_limit() {
             .unwrap();
         assert!(eventually(Duration::from_secs(5), || !alive(pid)).await);
     }
+}
+
+async fn dropped_start() {
+    let scratch = Scratch::new();
+    let server = ManagedServer::new(scratch.spec("no-handshake"));
+    tokio::time::timeout(Duration::from_secs(1), server.wait_until_ended())
+        .await
+        .expect("nothing runs yet");
+    let pid_file = scratch.pid_file();
+    let mut start = Box::pin(server.start());
+    let pid: u32 = tokio::select! {
+        out = &mut start => panic!("the start ended: {out:?}"),
+        pid = async {
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|t| t.trim().parse().ok())
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        } => pid,
+    };
+    // While the half-started process runs, waiting does not end.
+    let early = tokio::time::timeout(Duration::from_millis(300), server.wait_until_ended()).await;
+    assert!(early.is_err(), "waiting ended while the process ran");
+    // Its caller stops waiting: the process is killed, and waiting ends once it has ended.
+    drop(start);
+    tokio::time::timeout(Duration::from_secs(5), server.wait_until_ended())
+        .await
+        .expect("the dropped start's process ends");
+    #[cfg(unix)]
+    assert!(!alive(pid), "{pid} still runs");
+    #[cfg(not(unix))]
+    let _ = pid;
+    assert!(!server.is_running());
+    // A started server is waited for too, and nothing is left after its stop.
+    let scratch = Scratch::new();
+    let server = started(scratch.spec("normal")).await;
+    let early = tokio::time::timeout(Duration::from_millis(300), server.wait_until_ended()).await;
+    assert!(early.is_err(), "waiting ended while the server ran");
+    server.stop(STOP_AFTER_CANCEL).await;
+    tokio::time::timeout(Duration::from_secs(2), server.wait_until_ended())
+        .await
+        .expect("nothing runs after the stop");
 }
 
 async fn crash() {

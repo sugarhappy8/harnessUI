@@ -34,6 +34,25 @@ describe("McpSettings: servers renamed at start (0.0.6)", () => {
     expect(ipcMock.setSetting).toHaveBeenCalledWith("mcpRenamedServers", []);
   });
 
+  it("says when some of a renamed server's tools were switched off", async () => {
+    ipcMock.getSetting.mockResolvedValue([
+      { from: "reverse", to: "reverse (yours)", toolsOff: true },
+      { from: "coding_apps", to: "coding_apps (yours)" },
+    ]);
+    render(<McpSettings />);
+    expect(
+      await screen.findByText(
+        'Your server "reverse" is now called "reverse (yours)", because the app now has a built-in server with that name. It works as before, with the same settings, but some of its tools were switched off because their names changed too. Switch them on again in a chat\'s Tools panel.',
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        'Your server "coding_apps" is now called "coding_apps (yours)", because the app now has a built-in server with that name. It works as before, with the same settings.',
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(NOTE)).toBeNull();
+  });
+
   it("shows nothing when no server was renamed", async () => {
     ipcMock.getSetting.mockResolvedValue(null);
     render(<McpSettings />);

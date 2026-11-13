@@ -499,9 +499,12 @@ pub async fn set_setting(
 /// generation on each usable backend. The report is saved to the logs folder.
 /// `when_idle` is the answer to the D3 question, as for a reload: the timed generation
 /// replaces the loaded model, so with it the check waits until nothing uses the model
-/// (a wait that is cancelled ends with `load_replaced` and no report); without it,
+/// (a cancel of this wait ends with `load_replaced` and no report); without it,
 /// what uses the model is stopped. With a model, that wait comes first, before the
-/// backends are probed, and the check counts as a model check from then on.
+/// backends are probed, and the check counts as a model check from then on. With
+/// `when_idle` it waits again right before its first test load, for what began to use the
+/// model while it probed (a reply, another app's request, another model check); a cancel
+/// of that wait still gives the report of the devices, with nothing replaced.
 #[tauri::command]
 pub async fn run_diagnostics(
     app: AppHandle,
@@ -625,8 +628,25 @@ pub async fn run_diagnostics(
     }
     if let Some((path, previous, stop, check)) = timed {
         let _ = writeln!(report, "\ntimed generation with {path}");
+        // Asked to wait, the check waits again right before its first test load, for a
+        // reply, another app's request or another model check that began while the
+        // backends were probed: never stopped unasked, with the waiting line and its Cancel
+        // as for the first wait. Cancel there, or a newer change, ends the check with the
+        // report of the devices and nothing replaced.
+        let cancelled = when_idle
+            && state
+                .runtime
+                .wait_for_others(&state.model_busy, &stop)
+                .await
+                .is_err();
+        if cancelled {
+            let _ = writeln!(
+                report,
+                "  not run: cancelled while it waited for the model to be free (nothing was changed)"
+            );
+        }
         for (b, p) in backends.iter().filter(|(_, p)| p.error.is_none()) {
-            if stop.is_cancelled() {
+            if cancelled || stop.is_cancelled() {
                 break;
             }
             let kind = crate::runtime_manager::kind_name(b.kind).to_string();
@@ -666,7 +686,8 @@ pub async fn run_diagnostics(
                 "  stopped: what is loaded was changed during the check"
             );
         }
-        match after_check(&previous, stopped) {
+        // Cancelled before its first test load, the check replaced nothing: it leaves it.
+        match after_check(&previous, stopped || cancelled) {
             AfterCheck::LeaveIt => {}
             // The model loaded before comes back as a load resolves it: with its projector,
             // its own settings, whether it can think, and the speed check.
@@ -711,7 +732,8 @@ enum AfterCheck {
     /// Nothing was loaded: nothing is, and "Unloaded to free memory · Load" is as it was.
     Unloaded(Option<String>),
     /// A change of what is loaded stopped the check (Stop and restart): it decides what is
-    /// loaded, so the check leaves it alone.
+    /// loaded, so the check leaves it alone. Also when the check's wait before its first
+    /// test load was cancelled: it replaced nothing.
     LeaveIt,
 }
 

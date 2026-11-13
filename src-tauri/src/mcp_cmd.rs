@@ -2931,8 +2931,7 @@ mod tests {
     #[test]
     fn only_the_renamed_servers_tools_and_secrets_follow_it() {
         let owners = names(&["reverse (yours)", "reverse_", "reverse x"]);
-        let map =
-            |name: &str| renamed_tool(name, "reverse", "reverse (yours 2)", &owners, &owners);
+        let map = |name: &str| renamed_tool(name, "reverse", "reverse (yours 2)", &owners, &owners);
         let to = |name: &str| Some(Carried::To(name.to_string()));
         assert_eq!(map("reverse__lookup"), to("reverse__yours_2___lookup"));
         // A name the host made unique stays unique.
@@ -3034,7 +3033,10 @@ mod tests {
         let old = host_names("reverse", &tools);
         let now = host_names("reverse (yours)", &tools);
         assert!(old[0] != old[1] && old[0].len() < 64, "{old:?}");
-        assert!(now[1].ends_with("_2") && now[0][..62] == now[1][..62], "{now:?}");
+        assert!(
+            now[1].ends_with("_2") && now[0][..62] == now[1][..62],
+            "{now:?}"
+        );
         // Only the second tool is on, in a chat and in the last choice.
         let chat = store
             .create_chat(store::NewChat {
@@ -3069,12 +3071,18 @@ mod tests {
         let stored = store.get_chat(chat).await.unwrap().unwrap().tool_prefs;
         let prefs: crate::turns::ChatTools = serde_json::from_value(stored).unwrap();
         let enabled = prefs.enabled.expect("the chat keeps its own choice");
-        assert!(!enabled.contains(&now[0]), "the first tool stays off: {enabled:?}");
+        assert!(
+            !enabled.contains(&now[0]),
+            "the first tool stays off: {enabled:?}"
+        );
         assert_eq!(enabled, vec![now[2].clone(), "read_file".to_string()]);
         assert_eq!(prefs.shown, vec![now[2].clone()]);
         let last: Vec<String> = store.get_setting(DEFAULT_TOOLS).await.unwrap().unwrap();
         assert_eq!(last, vec![now[2].clone()], "new chats start without it too");
-        assert!(renamed[0].tools_off, "the note says some of its tools were switched off");
+        assert!(
+            renamed[0].tools_off,
+            "the note says some of its tools were switched off"
+        );
         let note: Vec<RenamedServer> = store.get_setting(RENAMED_SERVERS).await.unwrap().unwrap();
         assert_eq!(note, renamed);
         // What Settings → MCP reads; a note saved without the mark reads as nothing off.
@@ -3111,11 +3119,32 @@ mod tests {
             vec!["a b".into(), "a?b".into(), "a_b_2".into(), "lookup".into()],
             vec!["a_b_2".into(), "a b".into(), "a?b".into()],
             // A name one short of the limit whose twin gets a number.
-            vec![format!("{}.", "t".repeat(45)), format!("{}?", "t".repeat(45))],
+            vec![
+                format!("{}.", "t".repeat(45)),
+                format!("{}?", "t".repeat(45)),
+            ],
         ];
         // Many more, from pieces that make names start alike for up to 60 characters.
-        let starts = ["", "x", "get_", &prefix[..30], prefix, "get_organization_repository_security_advisory_listing_"];
-        let ends = ["", "l", "list", "listing", "listing_details", "_2", " x", "?", "s", "summary_of_everything_here"];
+        let starts = [
+            "",
+            "x",
+            "get_",
+            &prefix[..30],
+            prefix,
+            "get_organization_repository_security_advisory_listing_",
+        ];
+        let ends = [
+            "",
+            "l",
+            "list",
+            "listing",
+            "listing_details",
+            "_2",
+            " x",
+            "?",
+            "s",
+            "summary_of_everything_here",
+        ];
         let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
         let mut next = |n: usize| {
             seed ^= seed << 13;
@@ -3171,16 +3200,20 @@ mod tests {
         let old = host_names("reverse", &[&sets[0][0], &sets[0][1], "lookup"]);
         let mut prefs = json!({ "shown": [old[1], old[2]], "found": [old[1]], "enabled": [] });
         let mut gone = BTreeSet::new();
-        assert!(rename_tools_in_chat(&mut prefs, &renamed, &owners, &mut gone));
+        assert!(rename_tools_in_chat(
+            &mut prefs, &renamed, &owners, &mut gone
+        ));
         assert_eq!(
             prefs,
             json!({ "shown": ["reverse__yours___lookup"], "found": [], "enabled": [] })
         );
         assert!(gone.is_empty(), "it was not on: {gone:?}");
-        let mut prefs = json!({ "enabled": [old[0], old[1], 7] });
-        assert!(rename_tools_in_chat(&mut prefs, &renamed, &owners, &mut gone));
-        let first = host_names("reverse (yours)", &[&sets[0][0]]);
-        assert_eq!(prefs, json!({ "enabled": [first[0], 7] }));
+        // Both new names are cut to 64 characters, so neither is carried.
+        let mut prefs = json!({ "enabled": [old[0], old[1], old[2], 7] });
+        assert!(rename_tools_in_chat(
+            &mut prefs, &renamed, &owners, &mut gone
+        ));
+        assert_eq!(prefs, json!({ "enabled": ["reverse__yours___lookup", 7] }));
         assert_eq!(gone, BTreeSet::from(["reverse".to_string()]));
     }
 
@@ -3194,10 +3227,24 @@ mod tests {
             to: "reverse (yours)".into(),
             tools_off: false,
         }];
-        // "reverse (yours" names its tool "_x" "reverse__yours___x", as "reverse (yours)"
-        // names its tool "x".
-        let both = names(&["reverse (yours)", "reverse (yours"]);
         let free = |_: &str| false;
+        // "reverse (yours)  x" names its tool "y" as "reverse (yours)" names its tool "x__y".
+        let both = names(&["reverse (yours)", "reverse (yours)  x"]);
+        assert_eq!(
+            mcp_host::names::exposed_name("reverse (yours)  x", "y", &free),
+            mcp_host::names::exposed_name("reverse (yours)", "x__y", &free)
+        );
+        assert_eq!(
+            renamed_name("reverse__x__y", &renamed, &both).map(|(_, c)| c),
+            Some(Carried::Off)
+        );
+        assert_eq!(
+            renamed_name("reverse__lookup", &renamed, &both).map(|(_, c)| c),
+            Some(Carried::To("reverse__yours___lookup".into()))
+        );
+        // "reverse (yours" names its tool "_x" as "reverse (yours)" names its tool "x", so
+        // with it saved no tool of the renamed server is carried.
+        let both = names(&["reverse (yours)", "reverse (yours"]);
         assert_eq!(
             mcp_host::names::exposed_name("reverse (yours", "_x", &free),
             mcp_host::names::exposed_name("reverse (yours)", "x", &free)
@@ -3205,10 +3252,6 @@ mod tests {
         assert_eq!(
             renamed_name("reverse__x", &renamed, &both).map(|(_, c)| c),
             Some(Carried::Off)
-        );
-        assert_eq!(
-            renamed_name("reverse__lookup_tool", &renamed, &both).map(|(_, c)| c),
-            Some(Carried::To("reverse__yours___lookup_tool".into()))
         );
         // Before the rename no server was called "reverse (yours)", so this was the old
         // server's tool "yours___x"; left as it is, it would switch on the tool "x".

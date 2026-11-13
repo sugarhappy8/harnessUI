@@ -10,7 +10,10 @@
 //! - **The sharing key** (`harnessui-share-` and 32 random hex digits) lives in the
 //!   keychain only, under [`KEY_SECRET`]; it is kept in memory for the proxy's checks,
 //!   shown only by `reveal_share_key` and replaced by `new_share_key` (the old one stops
-//!   working at once). It is never written to settings, files or logs.
+//!   working at once). The one other place it goes: while sharing listens,
+//!   [`Sharing::now`] hands it to a Coding apps run of an app set up for `127.0.0.1` at
+//!   that port (`outside_agent::local_setup`), in that run's environment only. It is never
+//!   written to settings, files or logs.
 //! - **The proxy** (`proxy.rs`) listens on `127.0.0.1` only; the setup text
 //!   (`setup_text.rs`) is built with real JSON and TOML serialisers.
 //! - **No approval mode changes any of this** (D12): sharing is not a tool action, and no

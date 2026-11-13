@@ -1008,6 +1008,26 @@ fn the_answer_names_groups_that_are_off_without_listing_their_tools() {
     );
 }
 
+/// [0.0.6 item 5] A search is about Reverse engineering only through one of its strong
+/// words: its weak ones ("program", "function", "library") are everyday coding words.
+#[test]
+fn a_search_is_about_reverse_engineering_only_through_its_strong_words() {
+    let host = builtin_host();
+    let tools = host.tools();
+    let validate = |name: &str, value: &Value| host.validate(name, value);
+    let all = listed(&tools, &["read_file"], &["reverse"]);
+    let off = vec!["reverse".to_string()];
+    let line = "Reverse engineering tools are off in this chat";
+    let text = render("a function for my program", &[], &all, &off, &[], &validate);
+    assert!(!text.contains(line), "{text}");
+    assert!(
+        text.contains("Also off in this chat: Reverse engineering."),
+        "{text}"
+    );
+    let text = render("decompile the program", &[], &all, &off, &[], &validate);
+    assert!(text.contains(line), "{text}");
+}
+
 #[test]
 fn examples_fit_the_tool_as_it_is_registered() {
     let host = builtin_host();

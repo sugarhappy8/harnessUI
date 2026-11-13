@@ -24,6 +24,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::dto::ModelBusy;
 use crate::load_settings::ResolvedLoad;
 use crate::state::BusyCounter;
 
@@ -140,6 +141,15 @@ impl Drop for LoadTicket<'_> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Replaced;
 
+/// How often the backend check, waiting behind a newer change, looks whether it may take
+/// that change's place (the change was cancelled).
+const TAKE_OVER_EVERY: Duration = Duration::from_millis(200);
+
+/// Nothing uses the model but the backend check itself (its one model check).
+fn only_the_check(b: &ModelBusy) -> bool {
+    b.chat_turns == 0 && b.other_apps == 0 && b.model_checks <= 1
+}
+
 /// The change of what is loaded that waits for the model to be free, and the users of the
 /// model that can be stopped (0.0.6 D3).
 #[derive(Default)]
@@ -242,6 +252,80 @@ impl ChangeGate {
     fn waiting_flag_after_replaced(&self, on_wait: &impl Fn(bool)) {
         if self.waiting.lock().is_ok_and(|w| w.is_none()) {
             on_wait(false);
+        }
+    }
+
+    /// The backend check, which holds one model check, right before its first test load
+    /// (0.0.6 D3): waits until nothing else uses the model (no chat turn, no request from
+    /// another app, no other model check), so a user that began while it probed the
+    /// backends is waited for, never stopped. `Ok` at once when nothing else does.
+    /// - While it waits it is the change that waits (`on_wait(true)`, then `on_wait(false)`),
+    ///   and Cancel ([`Self::cancel_waiting`]) or a newer change ends the wait with
+    ///   [`Replaced`]: the check then replaces nothing.
+    /// - It never replaces a change that already waits (one made after the check began, so
+    ///   newer): it waits behind it, and takes its place if that change is cancelled, so the
+    ///   waiting line and its Cancel are always about a change that waits.
+    /// - `stop` ("Stop and restart" of a newer change) ends the wait with `Ok`; the caller
+    ///   sees `stop` itself.
+    pub async fn wait_for_others(
+        &self,
+        busy: &BusyCounter,
+        stop: &CancellationToken,
+        on_wait: impl Fn(bool),
+    ) -> Result<(), Replaced> {
+        let mut counts = busy.subscribe();
+        if only_the_check(&counts.borrow_and_update()) || stop.is_cancelled() {
+            return Ok(());
+        }
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let token = CancellationToken::new();
+        let mut mine = false;
+        // A place freed by Cancel is taken only once it has stayed free for a whole look,
+        // after whoever freed it has turned the waiting flag off.
+        let mut free_before = true;
+        let outcome = loop {
+            if !mine {
+                mine = self.waiting.lock().is_ok_and(|mut w| {
+                    let take = w.is_none() && free_before;
+                    free_before = w.is_none();
+                    if take {
+                        *w = Some((id, token.clone()));
+                    }
+                    take
+                });
+                if mine {
+                    on_wait(true);
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => break Ok(()),
+                _ = token.cancelled() => break Err(Replaced),
+                _ = counts.wait_for(only_the_check) => break Ok(()),
+                _ = tokio::time::sleep(TAKE_OVER_EVERY), if !mine => {}
+            }
+        };
+        if !mine {
+            return outcome;
+        }
+        let still_mine = self.waiting.lock().is_ok_and(|mut w| {
+            let mine = w.as_ref().is_some_and(|(i, _)| *i == id);
+            if mine {
+                *w = None;
+            }
+            mine
+        });
+        if still_mine {
+            on_wait(false);
+            return outcome;
+        }
+        // Cancelled or replaced, perhaps just as the model became free: the check replaces
+        // nothing (unless it was stopped, which the caller sees).
+        self.waiting_flag_after_replaced(&on_wait);
+        if stop.is_cancelled() {
+            Ok(())
+        } else {
+            Err(Replaced)
         }
     }
 
@@ -488,6 +572,164 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         gate.remove_user(id);
         drop(stuck);
+    }
+
+    /// Waits until a spawned task has ended, at most two seconds.
+    async fn ended<T>(task: tokio::task::JoinHandle<T>) -> T {
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("it ended")
+            .expect("no panic")
+    }
+
+    /// The backend check right before its first test load (it holds one model check): at
+    /// once when nothing else uses the model; a reply, another app's request or another
+    /// model check that began while it probed is waited for, with the waiting flag on.
+    #[tokio::test]
+    async fn the_backend_check_waits_for_what_began_while_it_probed() {
+        let gate = Arc::new(ChangeGate::default());
+        let busy = Arc::new(BusyCounter::default());
+        let stop = CancellationToken::new();
+        let _check = busy.hold(BusyKind::ModelCheck);
+        let flags = Arc::new(Mutex::new(Vec::new()));
+        assert_eq!(
+            gate.wait_for_others(&busy, &stop, |w| flags.lock().unwrap().push(w))
+                .await,
+            Ok(())
+        );
+        assert!(flags.lock().unwrap().is_empty(), "nothing waited");
+        for kind in [BusyKind::ChatTurn, BusyKind::OtherApp, BusyKind::ModelCheck] {
+            flags.lock().unwrap().clear();
+            let other = busy.hold(kind);
+            let waiter = {
+                let (gate, busy, stop, flags) =
+                    (gate.clone(), busy.clone(), stop.clone(), flags.clone());
+                tokio::spawn(async move {
+                    gate.wait_for_others(&busy, &stop, |w| flags.lock().unwrap().push(w))
+                        .await
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!waiter.is_finished(), "went ahead while {kind:?} used it");
+            assert_eq!(*flags.lock().unwrap(), [true]);
+            drop(other);
+            assert_eq!(ended(waiter).await, Ok(()));
+            assert_eq!(*flags.lock().unwrap(), [true, false]);
+            assert!(!gate.cancel_waiting(), "nothing waits now");
+        }
+    }
+
+    /// Cancel on the backend check's wait ends it with `Replaced` and the flag off; so does
+    /// a newer change, which waits in its place; "Stop and restart" ends it with `Ok` (the
+    /// check sees its stop token).
+    #[tokio::test]
+    async fn cancel_a_newer_change_or_stop_ends_the_backend_checks_wait() {
+        let gate = Arc::new(ChangeGate::default());
+        let busy = Arc::new(BusyCounter::default());
+        let _check = busy.hold(BusyKind::ModelCheck);
+        let _turn = busy.hold(BusyKind::ChatTurn);
+        let flags = Arc::new(Mutex::new(Vec::new()));
+        let spawn_check = |stop: CancellationToken| {
+            let (gate, busy, flags) = (gate.clone(), busy.clone(), flags.clone());
+            tokio::spawn(async move {
+                gate.wait_for_others(&busy, &stop, |w| flags.lock().unwrap().push(w))
+                    .await
+            })
+        };
+        // Cancel ("Restarts when the reply ends · Cancel").
+        let check = spawn_check(CancellationToken::new());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(gate.cancel_waiting());
+        assert_eq!(ended(check).await, Err(Replaced));
+        assert_eq!(*flags.lock().unwrap(), [true, false]);
+        // A newer change that waits takes its place.
+        flags.lock().unwrap().clear();
+        let check = spawn_check(CancellationToken::new());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let newer = {
+            let (gate, busy, flags) = (gate.clone(), busy.clone(), flags.clone());
+            tokio::spawn(async move {
+                gate.before_change(&busy, true, STOP_WAIT, |w| flags.lock().unwrap().push(w))
+                    .await
+            })
+        };
+        assert_eq!(ended(check).await, Err(Replaced));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!newer.is_finished(), "the newer change waits");
+        assert_eq!(flags.lock().unwrap().last(), Some(&true), "and is shown");
+        assert!(gate.cancel_waiting());
+        assert_eq!(ended(newer).await, Err(Replaced));
+        // Stop and restart.
+        flags.lock().unwrap().clear();
+        let stop = CancellationToken::new();
+        let check = spawn_check(stop.clone());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        stop.cancel();
+        assert_eq!(ended(check).await, Ok(()));
+        assert_eq!(*flags.lock().unwrap(), [true, false]);
+        assert!(!gate.cancel_waiting(), "nothing waits now");
+    }
+
+    /// The backend check never replaces a change that already waits (made after the check
+    /// began, so newer): it waits behind it, and takes its place once that change is
+    /// cancelled, so the waiting line and its Cancel stay about a change that waits.
+    #[tokio::test]
+    async fn the_backend_check_never_replaces_a_change_that_waits() {
+        let gate = Arc::new(ChangeGate::default());
+        let busy = Arc::new(BusyCounter::default());
+        let _check = busy.hold(BusyKind::ModelCheck);
+        let flags = Arc::new(Mutex::new(Vec::new()));
+        let pick = {
+            let (gate, busy, flags) = (gate.clone(), busy.clone(), flags.clone());
+            tokio::spawn(async move {
+                gate.before_change(&busy, true, STOP_WAIT, |w| flags.lock().unwrap().push(w))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let turn = busy.hold(BusyKind::ChatTurn);
+        let check = {
+            let (gate, busy, flags) = (gate.clone(), busy.clone(), flags.clone());
+            tokio::spawn(async move {
+                let stop = CancellationToken::new();
+                gate.wait_for_others(&busy, &stop, |w| flags.lock().unwrap().push(w))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !pick.is_finished(),
+            "the check replaced the change that waits"
+        );
+        assert!(
+            !check.is_finished(),
+            "the check went ahead during the reply"
+        );
+        assert_eq!(
+            *flags.lock().unwrap(),
+            [true],
+            "one change is shown waiting"
+        );
+        // Cancel ends the change that is shown; the check takes its place.
+        assert!(gate.cancel_waiting());
+        assert_eq!(ended(pick).await, Err(Replaced));
+        let started = std::time::Instant::now();
+        while gate.waiting.lock().unwrap().is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "the check did not take its place"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            flags.lock().unwrap().last(),
+            Some(&true),
+            "the check is shown"
+        );
+        assert!(!check.is_finished());
+        drop(turn);
+        assert_eq!(ended(check).await, Ok(()));
+        assert_eq!(flags.lock().unwrap().last(), Some(&false));
     }
 
     #[test]

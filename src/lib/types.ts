@@ -345,6 +345,16 @@ export interface FitResult {
    * 0 otherwise: on Apple graphics and the processor `neededBytes` counts all of it.
    */
   computerBytes: number;
+  /**
+   * With `computerBytes` known, the computer's free memory as the system reports it (Settings
+   * for this model's second bar); 0 otherwise.
+   */
+  computerFreeBytes: number;
+  /**
+   * Too large on a graphics card because the part in the computer's memory does not fit there
+   * (its free memory less what is kept for other programs), not only the whole.
+   */
+  computerShort: boolean;
   /** The backend's 0.0.4 sentence; the screens word the figures with `fitLine` (words.ts). */
   sentence: string;
 }

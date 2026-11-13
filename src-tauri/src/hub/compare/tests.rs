@@ -1811,6 +1811,111 @@ fn an_installed_answer_says_what_goes_in_the_computers_memory() {
     assert_eq!(installed_fit(&plain, CTX).unwrap().computer_bytes, 0);
 }
 
+/// On a graphics card a model is too large either because its part in the computer's
+/// memory does not fit there (`placement::judge_in`: larger than the computer's free memory
+/// less the reserve) or because the whole does not fit even with part of it there. An
+/// installed answer says which (`computer_short`) and carries the computer's free memory as
+/// Settings for this model's second bar shows it, so the screen can name what is short.
+#[test]
+fn a_too_large_answer_on_a_graphics_card_says_whether_the_computers_part_is_short() {
+    let facts = sized_facts();
+    let little_computer = |gpu_free: u64, ram_free: u64| Machine {
+        ram_free_bytes: ram_free,
+        ..card(gpu_free)
+    };
+    let room = |plan: &Plan| plan.machine.room(plan.resolved.gpu);
+
+    // As much as fits with 2.5 GB of computer memory free: the card's share leaves room on
+    // the card, and the computer's part is larger than the 0.5 GB the reserve leaves.
+    let fit_choice = plan_with(
+        Some(facts.clone()),
+        little_computer(4 * GB, 2_500_000_000),
+        fixed(CTX, GpuChoice::Fit),
+    );
+    let fit = installed_fit(&fit_choice, CTX).unwrap();
+    let info = settings_panel(&fit_choice);
+    assert_eq!(fit.verdict, Verdict::Red);
+    assert_eq!(fit.verdict, info.picture.mark);
+    assert!(
+        fit.needed_bytes < fit.available_bytes,
+        "the card has room for its share"
+    );
+    let r = room(&fit_choice);
+    assert!(fit.computer_bytes > r.partial - r.whole);
+    assert!(fit.computer_short, "{fit:?}");
+    assert_eq!(fit.computer_free_bytes, 2_500_000_000);
+    assert_eq!(fit.computer_free_bytes, info.picture.computer.free_bytes);
+
+    // Fine control keeps the conversation memory in the computer's memory: a 16 GB card
+    // could hold all of it, and 2.2 GB of computer memory free leaves 0.2 GB for its part.
+    let mut kv = fixed(CTX, GpuChoice::All);
+    kv.fine.kv = crate::load_settings::KvPlace::ComputerMemory;
+    let kv_plan = plan_with(
+        Some(facts.clone()),
+        little_computer(16 * GB, 2_200_000_000),
+        kv,
+    );
+    let fit = installed_fit(&kv_plan, CTX).unwrap();
+    let info = settings_panel(&kv_plan);
+    assert_eq!(fit.verdict, Verdict::Red);
+    assert_eq!(fit.verdict, info.picture.mark);
+    assert!(fit.needed_bytes + fit.computer_bytes < fit.available_bytes);
+    assert!(fit.computer_short, "{fit:?}");
+    assert_eq!(fit.computer_free_bytes, info.picture.computer.free_bytes);
+
+    // All of it on a 2 GB card with 3 GB of computer memory free: the whole does not fit
+    // even with part of it there, while the computer's part (the input part) fits.
+    let all = plan_with(
+        Some(facts.clone()),
+        little_computer(2 * GB, 3 * GB),
+        fixed(CTX, GpuChoice::All),
+    );
+    let fit = installed_fit(&all, CTX).unwrap();
+    assert_eq!(fit.verdict, Verdict::Red);
+    assert_eq!(fit.verdict, settings_panel(&all).picture.mark);
+    let r = room(&all);
+    assert!(fit.computer_bytes <= r.partial - r.whole);
+    assert!(!fit.computer_short, "{fit:?}");
+    assert_eq!(fit.computer_free_bytes, 3 * GB);
+
+    // A model that fits is never short; the processor, Apple graphics and a file without
+    // its sizes send no computer figures (their amount counts all of it).
+    let roomy = plan_with(
+        Some(facts.clone()),
+        card(16 * GB),
+        fixed(CTX, GpuChoice::All),
+    );
+    let fit = installed_fit(&roomy, CTX).unwrap();
+    assert_eq!(fit.verdict, Verdict::Green);
+    assert!(!fit.computer_short);
+    assert_eq!(fit.computer_free_bytes, 32 * GB);
+    let apple = Machine {
+        backend: Some(runtime::BackendKind::Metal),
+        ..little_computer(4 * GB, 2_500_000_000)
+    };
+    for machine in [processor(3 * GB), apple] {
+        let plan = plan_with(Some(facts.clone()), machine, fixed(CTX, GpuChoice::Default));
+        let fit = installed_fit(&plan, CTX).unwrap();
+        assert_eq!(fit.verdict, Verdict::Red, "{fit:?}");
+        assert!(!fit.computer_short, "{fit:?}");
+        assert_eq!(fit.computer_free_bytes, 0, "{fit:?}");
+    }
+    let plain = plan_with(
+        Some(header_facts(
+            "Sample-7B-Q4_K_M.gguf",
+            &dense_bytes(),
+            4_440_000_000,
+        )),
+        little_computer(4 * GB, 2_500_000_000),
+        fixed(CTX, GpuChoice::Fit),
+    );
+    let fit = installed_fit(&plain, CTX).unwrap();
+    assert!(
+        !fit.computer_short && fit.computer_free_bytes == 0,
+        "{fit:?}"
+    );
+}
+
 /// The repository page, and Compare's Change menu which lists the page's files, judge an
 /// installed file as its column does (the same plan, the same judge), so one column never
 /// gives two verdicts for one file. A file that is not installed keeps the page's estimate.

@@ -16,6 +16,7 @@ import { APP_NAME } from "../lib/app";
 import { toErrorInfo, useApp } from "../store/app";
 import { askBeforeChange, backendWhenIdle, runChange } from "../store/modelChange";
 import { ErrorBanner } from "./ErrorBanner";
+import { visibleLines, visiblePath } from "./FolderChip";
 import { AuditLogView, PermissionsSettings } from "./PermissionsSettings";
 import { McpSettings } from "./McpSettings";
 import { SkillsSettings } from "./SkillsSettings";
@@ -778,12 +779,20 @@ export function Diagnostics() {
       </div>
       {report && (
         <>
-          <pre className="max-h-72 overflow-auto rounded-md bg-bg-muted p-3 text-xs whitespace-pre-wrap">{report}</pre>
+          {/* The report names the loaded model's path: hidden and direction-changing characters
+              show as codes, its lines stay. Copy report copies it as it was written. */}
+          <pre className="max-h-72 overflow-auto rounded-md bg-bg-muted p-3 text-xs whitespace-pre-wrap">
+            {visibleLines(report)}
+          </pre>
           <div className="flex gap-3 text-xs">
             <button type="button" className="underline" onClick={() => void writeText(report)}>
               Copy report
             </button>
-            {savedTo && <span className="text-fg-muted">Saved to {savedTo}</span>}
+            {savedTo && (
+              <span className="text-fg-muted">
+                Saved to <bdi dir="ltr">{visiblePath(savedTo)}</bdi>
+              </span>
+            )}
           </div>
         </>
       )}

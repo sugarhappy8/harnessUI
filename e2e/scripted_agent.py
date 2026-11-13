@@ -3635,12 +3635,17 @@ def p_compare_models(c, notes):
             # too large says what is short; a graphics card's split names the computer's part.
             assert ("It would run on the processor." in said) == (
                 not said.startswith("Too large") and "on the graphics card" not in said and "Apple graphics" not in said), said
-            assert said.startswith("Too large") == ("There is not enough memory free" in said), said
+            assert said.startswith("Too large") == (
+                "There is not enough memory free" in said or "not enough for its part." in said), said
             column = s.invoke("compare_facts", {"items": [{"installedPath": m["path"]}], "ctx": None})[0]
             computer = column["fit"]["computerBytes"]
             assert (" in all: " in said) == (column["fit"]["device"] == "graphicsCard" and computer >= 0.05 * 2**30), (said, column["fit"])
             if column["fit"]["device"] != "graphicsCard":
-                assert computer == 0, column["fit"]
+                assert computer == 0 and column["fit"]["computerFreeBytes"] == 0, column["fit"]
+            # compare-fit-minors r2: on a graphics card, Too large names the computer's memory
+            # (with how much it has free) when the part kept there is what does not fit.
+            assert ("not enough for its part." in said) == column["fit"]["computerShort"], (said, column["fit"])
+            assert not column["fit"]["computerShort"] or column["fit"]["verdict"] == "red", column["fit"]
             info = s.invoke("model_load_info", {"path": m["path"]})
             marks = [o["fit"] for o in info["contextOptions"] if o["choice"] == {"fixed": column["ctx"]}]
             if marks:
@@ -3689,7 +3694,8 @@ def p_compare_models(c, notes):
                        in answer("Will it fit on this computer?", 1), 30, f"the fit at {biggest}")
             settle()
             large = answer("Will it fit on this computer?", 1).splitlines()[0]
-            assert large.startswith("Too large") == ("There is not enough memory free" in large), large
+            assert large.startswith("Too large") == (
+                "There is not enough memory free" in large or "not enough for its part." in large), large
             assert not (large.startswith("Too large") and "would run" in large), large
             notes.append(f"installed fit at {biggest}: {large}")
             set_ctx(str(chosen))

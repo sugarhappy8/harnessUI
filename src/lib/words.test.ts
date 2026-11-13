@@ -703,6 +703,8 @@ describe("compare-fit-words: \"Will it fit on this computer?\" in plain words", 
     partialOffload: false,
     device: "graphicsCard",
     computerBytes: 0,
+    computerFreeBytes: 0,
+    computerShort: false,
     sentence: "Needs about 4.4 GB; your GPU has 15.7 GB free. Fits.",
     ...over,
   });
@@ -806,6 +808,96 @@ describe("compare-fit-words: \"Will it fit on this computer?\" in plain words", 
       const line = fitLine(fit({ verdict: "yellow", neededBytes: needed * GIB, availableBytes: free * GIB, computerBytes: computer * GIB, partialOffload: true }));
       expect(line).toContain(`${computer} GB in the computer's memory`);
       expect(line).toContain(`Needs about ${Math.round((needed + computer) * 10) / 10} GB in all`);
+      plain(line);
+      expect(line).not.toMatch(/Fits|GPU|CPU|context|layer|your /);
+    }
+  });
+
+  // compare-fit-minors r2: on a graphics card a model is too large either because its part
+  // in the computer's memory does not fit there (the backend's `computerShort`: always so
+  // with As much as fits, whose card share leaves room on the card) or because the whole
+  // does not fit even with part of it in the computer's memory. The line says which, and
+  // gives the computer's free memory as Settings for this model's second bar does.
+  it("says the computer's memory is short when its part does not fit there, with how much is free", () => {
+    // As much as fits: the card's share fits its free memory; the computer's part does not.
+    expect(
+      fitLine(
+        fit({
+          verdict: "red",
+          neededBytes: 2.7 * GIB,
+          availableBytes: 3.7 * GIB,
+          computerBytes: 1.9 * GIB,
+          computerFreeBytes: 1.5 * GIB,
+          computerShort: true,
+          partialOffload: true,
+        }),
+      ),
+    ).toBe(
+      "Needs about 4.6 GB in all: 2.7 GB on the graphics card, which has 3.7 GB free, and 1.9 GB in the computer's memory. " +
+        "The computer's memory has 1.5 GB free, not enough for its part.",
+    );
+    // Fine control with part of it kept in the computer's memory: the card could hold all
+    // of it, and the computer's memory has more free than its part needs, less what is kept
+    // for other programs. Said, as on the processor, not left as a puzzle.
+    expect(
+      fitLine(
+        fit({ verdict: "red", neededBytes: 5 * GIB, computerBytes: 5 * GIB, computerFreeBytes: 6 * GIB, computerShort: true }),
+      ),
+    ).toBe(
+      "Needs about 10 GB in all: 5 GB on the graphics card, which has 14.6 GB free, and 5 GB in the computer's memory. " +
+        "The computer's memory has 6 GB free, not enough for its part. Part of that memory is kept free for other programs.",
+    );
+    // A shorter memory that leaves room still follows.
+    expect(
+      fitLine(
+        fit({
+          verdict: "red",
+          neededBytes: 2.7 * GIB,
+          availableBytes: 3.7 * GIB,
+          computerBytes: 1.9 * GIB,
+          computerFreeBytes: 1.5 * GIB,
+          computerShort: true,
+          suggestedCtx: 8192,
+        }),
+      ),
+    ).toBe(
+      "Needs about 4.6 GB in all: 2.7 GB on the graphics card, which has 3.7 GB free, and 1.9 GB in the computer's memory. " +
+        "The computer's memory has 1.5 GB free, not enough for its part. It has room if it remembers up to 8,192 tokens, about 6,000 words.",
+    );
+    // The whole does not fit even with part of it in the computer's memory, whose part
+    // fits: the sentence about the whole stays.
+    expect(
+      fitLine(
+        fit({ verdict: "red", neededBytes: 9 * GIB, availableBytes: 3.7 * GIB, computerBytes: 0.3 * GIB, computerFreeBytes: 3 * GIB }),
+      ),
+    ).toBe(
+      "Needs about 9.3 GB in all: 9 GB on the graphics card, which has 3.7 GB free, and 0.3 GB in the computer's memory. " +
+        "There is not enough memory free for it, even with part of it in the computer's memory.",
+    );
+    // Only a graphics card's Too large names the computer's part; elsewhere the amount
+    // already counts all of it, and a model that fits is never said to be short.
+    for (const device of ["appleGraphics", "processor"] as const) {
+      const line = fitLine(fit({ verdict: "red", device, computerFreeBytes: 1.5 * GIB, computerShort: true }));
+      expect(line).toMatch(/There is not enough memory free/);
+      expect(line).not.toMatch(/for its part/);
+    }
+    for (const verdict of ["green", "yellow"] as const) {
+      expect(fitLine(fit({ verdict, computerBytes: 1.9 * GIB, computerFreeBytes: 1.5 * GIB, computerShort: true }))).not.toMatch(
+        /not enough|for its part/,
+      );
+    }
+    const short: [number, number][] = [
+      [1.9, 1.5],
+      [5, 6],
+      [0.3, 0.2],
+    ];
+    for (const [computer, free] of short) {
+      const line = fitLine(
+        fit({ verdict: "red", neededBytes: 2.7 * GIB, computerBytes: computer * GIB, computerFreeBytes: free * GIB, computerShort: true }),
+      );
+      expect(line).toContain(`The computer's memory has ${free} GB free, not enough for its part.`);
+      expect(line).not.toMatch(/There is not enough memory free|would run|which is slower/);
+      expect(line.includes("Part of that memory is kept free for other programs.")).toBe(computer <= free);
       plain(line);
       expect(line).not.toMatch(/Fits|GPU|CPU|context|layer|your /);
     }

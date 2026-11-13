@@ -233,7 +233,8 @@ impl FilesServer {
         };
         // `shown` for the card; `said`, the path as the model gave it, for messages given
         // before approval (13.9).
-        let said = errors::said_path(&self.written(chat, &sb, &path), &c, &sb, self.flavor);
+        let written = self.written(chat, &sb, &path);
+        let said = errors::said_path(&written, &c, &sb, self.flavor);
         if let Err(why) = skill_guard::check_as(
             &c.canonical,
             &said,
@@ -241,7 +242,8 @@ impl FilesServer {
             self.flavor,
             Reach::Inside,
         ) {
-            return Self::hard_limit(tool, &path, why);
+            let leads = errors::leads_to(&written, &c, &sb, self.flavor);
+            return Self::hard_limit_at(tool, &path, why, leads);
         }
         let shown = policy::sanitize::visible(&c.canonical);
         let p = Path::new(&c.canonical);
@@ -279,7 +281,8 @@ impl FilesServer {
         };
         // `shown_*` for the card; `said_*`, the paths as the model gave them, for messages
         // given before approval (13.9).
-        let said_from = errors::said_path(&self.written(chat, &sb, &from), &src, &sb, self.flavor);
+        let written_from = self.written(chat, &sb, &from);
+        let said_from = errors::said_path(&written_from, &src, &sb, self.flavor);
         let shown_from = policy::sanitize::visible(&src.canonical);
         let src_path = PathBuf::from(&src.canonical);
         // The path is resolved through links, so moving one would move what it points to.
@@ -298,7 +301,8 @@ impl FilesServer {
             return Described::Invalid(root_refusal(&said_from));
         }
         if let Some(why) = self.protected_inside_as(&src.canonical, &said_from, chat) {
-            return Self::hard_limit(tool, &from, why);
+            let leads = errors::leads_to(&written_from, &src, &sb, self.flavor);
+            return Self::hard_limit_at(tool, &from, why, leads);
         }
         let (mut dst, _, _) = match self.check(chat, &to) {
             Ok(v) => v,
@@ -326,7 +330,8 @@ impl FilesServer {
             self.flavor,
             Reach::Inside,
         ) {
-            return Self::hard_limit(tool, &to, why);
+            let leads = errors::leads_to(&written_to, &dst, &sb, self.flavor);
+            return Self::hard_limit_at(tool, &to, why, leads);
         }
         let dst_path = Path::new(&dst.canonical);
         if dst_path == src_path {
@@ -378,7 +383,8 @@ impl FilesServer {
         };
         // `shown` for the card; `said`, the path as the model gave it, for messages given
         // before approval (13.9).
-        let said = errors::said_path(&self.written(chat, &sb, &path), &c, &sb, self.flavor);
+        let written = self.written(chat, &sb, &path);
+        let said = errors::said_path(&written, &c, &sb, self.flavor);
         let shown = policy::sanitize::visible(&c.canonical);
         let p = PathBuf::from(&c.canonical);
         if c.was_symlink {
@@ -401,7 +407,8 @@ impl FilesServer {
             return Described::Invalid(root_refusal(&said));
         }
         if let Some(why) = self.protected_inside_as(&c.canonical, &said, chat) {
-            return Self::hard_limit(tool, &path, why);
+            let leads = errors::leads_to(&written, &c, &sb, self.flavor);
+            return Self::hard_limit_at(tool, &path, why, leads);
         }
         let held = count(&p);
         let what = if held.files + held.folders == 0 {
@@ -1066,6 +1073,62 @@ mod tests {
             let why = run(&fs, &chat, tool, a.clone()).await.unwrap_err();
             assert_eq!(why, expected, "{tool} {a}");
             assert!(!why.contains("App note"), "{tool} {a}: {why}");
+        }
+        // The card of a refused call, and so its audit row, shows the path given and where
+        // it leads: the folder holding the app's own, or the place in the skills folder.
+        let skills = s.root.join("skills");
+        std::fs::create_dir_all(skills.join(NOTE)).unwrap();
+        symlink(skills.join(NOTE), s.root.join("to-skill")).unwrap();
+        let in_skills = format!(
+            "is in the skills folder {}. Skills can only be added or changed in Settings → Skills.",
+            skills.display()
+        );
+        for (tool, a, expected, given, leads) in [
+            (
+                "delete_folder",
+                json!({"path": "to-holder/inner"}),
+                format!(
+                    "{} holds the app's own folders, which are never moved or deleted. Nothing was changed.",
+                    at("to-holder/inner")
+                ),
+                "to-holder/inner",
+                note(" holder/inner"),
+            ),
+            (
+                "move_path",
+                json!({"from": "to-holder/inner", "to": "elsewhere"}),
+                format!(
+                    "{} holds the app's own folders, which are never moved or deleted. Nothing was changed.",
+                    at("to-holder/inner")
+                ),
+                "to-holder/inner",
+                note(" holder/inner"),
+            ),
+            (
+                "make_folder",
+                json!({"path": "to-skill/new"}),
+                format!("{} {in_skills}", at("to-skill/new")),
+                "to-skill/new",
+                skills.join(NOTE).join("new"),
+            ),
+            (
+                "move_path",
+                json!({"from": "a.txt", "to": "to-skill/b.txt"}),
+                format!("{} {in_skills}", at("to-skill/b.txt")),
+                "to-skill/b.txt",
+                skills.join(NOTE).join("b.txt"),
+            ),
+        ] {
+            let Described::Action(refused) = fs.describe(tool, a.as_object().unwrap(), &chat).await
+            else {
+                panic!("{tool} {a}: not described")
+            };
+            assert_eq!(refused.hard_limit.as_deref(), Some(expected.as_str()), "{tool} {a}");
+            assert_eq!(
+                refused.preview,
+                format!("{given}\nThat path leads to {}.", leads.display()),
+                "{tool} {a}"
+            );
         }
         // The card of an allowed call shows where the path leads.
         let a = json!({"path": "to-dir/new"});
