@@ -282,21 +282,24 @@ CoreGraphics, AppKit; the same bindings Tauri uses, no Swift build step).
 
 ## M8 — Polish
 
-**Works:** opt-in updater (only in builds with the updater key; *Check now*, *Install and
-restart*, automatic check off by default); keyboard shortcut sheet (Ctrl+/ or Cmd+/) and
+**Works:** updater (only in builds with the updater key; since 0.0.8 it checks by itself
+shortly after start and every 6 hours unless turned off, downloads and verifies a newer
+version in the background, and shows an "Update ready" box with *Restart and update*,
+*Later* and *What's new*); keyboard shortcut sheet (Ctrl+/ or Cmd+/) and
 chat-list toggle (Ctrl+B or Cmd+B); the 8.1 message for models without tool support;
 third-party notices generated and checked in CI; an offline gate (`e2e/m8_offline.py`:
 no outbound request through any proxy during start, a local chat and all twelve settings
 pages). The release workflow fetches the pinned llama.cpp runtime, signs and attaches the
-catalog when the updater key is set, and fails if the draft release is missing an
-installer, a platform in `latest.json` or the catalog. The Windows installer stops a stray
-`llama-server.exe` running from the install folder before it copies files.
+catalog (since 0.0.8 every release needs the updater key), and fails if the draft release
+is missing an installer, a platform in `latest.json` or the catalog. The Windows installer
+stops a stray `llama-server.exe` running from the install folder before it copies files.
 
 **Manual test — both machines:**
-1. *Settings → General → Updates* says this build cannot update itself (no key yet). After you set up the key (README, "Signing") and tag a release, a release build offers *Check now*.
+1. A CI build: *Settings → General → Updates* says this build cannot update itself. A release build (0.0.8 or later, made after you set up the key; README, "Signing"): *Check for updates automatically (contacts github.com)* is ticked, *Check now* works, and the line under it says it is up to date.
 2. Press Ctrl+/ (Cmd+/): the shortcut list opens, including your stop hotkey. Ctrl+B hides and shows the chat list.
 3. Offline: turn off Wi-Fi / unplug the network, start the app, load a downloaded model and chat; everything works and nothing reports a network error except Hugging Face search.
-4. Windows: quit the app, start `llama-server.exe -m <any .gguf>` from the install folder's `llama\main` (by default `%LOCALAPPDATA%\harnessUI\llama\main`) in a terminal, then run the installer again: it stops that server and installs without an "Error opening file for writing" prompt.
+4. The first real update, once the version after 0.0.8 is released: install 0.0.8 (on a Mac, drag it into Applications and open it from there), then click *Check now* or wait for the automatic check. The "Update ready" box appears; *What's new* shows that version's changes as plain text; *Later* hides the box until the next start. Click *Restart and update*: harnessUI closes, installs the new version and opens again; *Check now* in *Settings → General → Updates* then says you have the latest version, with the new number. On a Mac, also open a copy from the disk image and check that *Restart and update* says to move it to Applications.
+5. Windows: quit the app, start `llama-server.exe -m <any .gguf>` from the install folder's `llama\main` (by default `%LOCALAPPDATA%\harnessUI\llama\main`) in a terminal, then run the installer again: it stops that server and installs without an "Error opening file for writing" prompt.
 
 **Known issues:** the offline gate sees proxied traffic only (not direct DNS lookups); long
 chats show their latest 80 messages with a "Show earlier" button rather than a

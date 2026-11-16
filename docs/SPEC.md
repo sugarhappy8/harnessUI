@@ -4,7 +4,7 @@
 Build a cross-platform desktop app (Windows .exe installer, macOS .dmg) that gives local AI models the agentic capabilities of the Claude, ChatGPT and Kimi desktop apps: chat, tools, skills and MCP. It is for people who run models on their own hardware. Keep the app name in one config constant so it's easy to change.
 
 Non-negotiable:
-- Works fully offline once a model is downloaded. Network use happens only when the user starts it: Hugging Face search and downloads, git clone/pull, the browser tool, remote endpoints and MCP servers the user adds, and an opt-in update check.
+- Works fully offline once a model is downloaded. Network use happens only when the user starts it: Hugging Face search and downloads, git clone/pull, the browser tool, remote endpoints and MCP servers the user adds, and an opt-in update check. *(Changed in 0.0.8 at the owner's request: the update check is automatic unless the user turns it off; see [docs/dev/0.0.8/README.md](dev/0.0.8/README.md).)*
 - No account, no telemetry, no remote crash reporting. Logs stay on disk.
 - All user data (chats, settings, audit log) is stored locally.
 
@@ -114,7 +114,7 @@ Non-negotiable:
 ## Packaging and release
 - GitHub Actions builds the Windows installer and the macOS .dmg on every tag, using tauri-action.
 - Prepare code signing: macOS Developer ID signing plus notarization, and Windows code signing. Leave the secrets as placeholders for me to fill in later, and document how to open unsigned builds in the meantime.
-- Updates: opt-in check only, using Tauri's updater with signature verification.
+- Updates: opt-in check only, using Tauri's updater with signature verification. *(Changed in 0.0.8 at the owner's request: the update check is automatic unless the user turns it off; see [docs/dev/0.0.8/README.md](dev/0.0.8/README.md).)*
 - Include third-party license notices for llama.cpp and every other bundled binary.
 
 ## Out of scope for v1
@@ -150,9 +150,3 @@ A milestone is done when:
 3. Stop after each milestone and wait for the owner to test.
 4. License: MIT.
 5. The MacBook Air M5 has 16 GB RAM.
-
-# Owner's later changes
-
-0.0.8, verbatim: "id like to make harnessUI one universal installer that gets updates through the web. also add the installer as the download link for the website." and "please start building what i told u i want. it shouldnt be a installer from 0.0.7 it should just be one installer in my opinion ngl, its fine if people need to install a brand new app as long as from now on all updates will appear as a little box in the app saying that an update is ready and if the user wants to update the app."
-
-This replaces "an opt-in update check" (Non-negotiable) and "Updates: opt-in check only" (Packaging and release): from 0.0.8 the app checks for updates on its own, shortly after it starts and every 6 hours, unless the user turns that off in Settings → General → Updates. A newer version is downloaded and its signature verified in the background, and installed only when the user clicks *Restart and update* in the box.

@@ -40,14 +40,14 @@ A local-first desktop app that gives AI models running on your own hardware the 
 
 ## Download
 
-Go to **[harnessui.site](https://harnessui.site)** and click **Download**. It gives you the installer for your computer from the latest release. Or pick the link for your computer; both always give the newest version:
+Go to **[harnessui.site](https://harnessui.site)** and click **Download**. It offers the installer for your computer first, from the latest release. Or pick the link for your computer; both always give the newest version:
 
 - **Windows:** [harnessUI-setup.exe](https://github.com/sugarhappy8/harnessUI/releases/latest/download/harnessUI-setup.exe)
 - **Mac (Apple silicon or Intel):** [harnessUI-universal.dmg](https://github.com/sugarhappy8/harnessUI/releases/latest/download/harnessUI-universal.dmg)
 
-The repository's **Releases** page has the same files, also under names with the version in them (`harnessUI_<version>_x64-setup.exe` and `harnessUI_<version>_universal.dmg`). Versions 0.0.x are early test builds.
+The repository's **Releases** page has the same files, also under names with the version in them (`harnessUI_<version>_x64-setup.exe` and `harnessUI_<version>_universal.dmg`). Releases before 0.0.8 have only those, so until 0.0.8 is published the two links above lead to GitHub's "Not Found" page and harnessui.site says *Coming soon*; take the installer from the Releases page instead. Versions 0.0.x are early test builds.
 
-**Updates.** From 0.0.8 on, harnessUI updates itself. Shortly after it starts, and every 6 hours while it runs, it asks github.com whether a newer version is out. If there is one, it downloads it in the background and checks its signature. When it is ready, a small box appears in the window: "Update ready", with *Restart and update*, *Later* and *What's new*. *Restart and update* closes the model and any running tools, installs the new version and opens harnessUI again. *Later* hides the box until the next time you open harnessUI. Nothing is installed until you choose to. To stop the automatic check, untick *Check for updates automatically* in *Settings → General → Updates*; *Check now* there still works.
+**Updates.** From 0.0.8 on, harnessUI updates itself. Shortly after it starts, and every 6 hours while it runs, it asks github.com whether a newer version is out. If there is one, it downloads it in the background and checks its signature. When it is ready, a small box appears in the window: "Update ready", with *Restart and update*, *Later* and *What's new*. *Restart and update* closes the model and any running tools, installs the new version and opens harnessUI again. *Later* hides the box until the next time you open harnessUI. Nothing is installed until you choose to. On a Mac, drag harnessUI into the Applications folder and open it from there: a copy run from the disk image or straight from Downloads cannot update itself, and *Restart and update* says so. To stop the automatic check, untick *Check for updates automatically* in *Settings → General → Updates*; *Check now* there still works.
 
 **Have 0.0.7 or older?** Those versions cannot update themselves. Download 0.0.8 as above and install it once by hand. After that, updates come by themselves.
 
@@ -142,7 +142,7 @@ A Tauri 2 app: a Rust core and a React + TypeScript webview with no privileges. 
 | `crates/reverse` | Reverse engineering: rea, Kuna and Ghidra downloads, the allow-listed `reverse` tools and their path checks |
 | `crates/usage` | How busy the graphics card and processor are, read on this computer |
 
-The app's display name is `productName` in `src-tauri/tauri.conf.json`; everything else reads it from there.
+The app's display name is `productName` in `src-tauri/tauri.conf.json`; everything else reads it from there, except the download names `harnessUI-setup.exe` and `harnessUI-universal.dmg` (`STABLE_WINDOWS` and `STABLE_MAC` in `release.yml`), which harnessui.site and the links under [Download](#download) use. They stay the same on purpose when the app is renamed.
 
 ## Signing
 
@@ -156,13 +156,13 @@ Release builds (`.github/workflows/release.yml`, on `v*` tags) fetch the pinned 
 
 **In-app updates** need the updater key pair, and every release needs it: the release workflow stops before it builds anything when the `TAURI_SIGNING_PRIVATE_KEY` secret is missing or `src-tauri/tauri.updater.conf.json` has no public key. Make the key once, on your own computer:
 
-1. In the repository folder run `npm ci`, then `python3 -I scripts/setup_updater.py` (on Windows: `python scripts\setup_updater.py`). It runs `npx tauri signer generate`, which asks you to choose a password, saves the key as `~/.tauri/harnessui.key` (`--key PATH` puts it somewhere else) and writes the public key into `src-tauri/tauri.updater.conf.json`. If the GitHub CLI (`gh`) is installed and signed in, it offers to save the two secrets for you; otherwise it says where to add them.
+1. In the repository folder run `npm ci`, then `python3 -I scripts/setup_updater.py` (on Windows: `py scripts\setup_updater.py` or `python scripts\setup_updater.py`). It runs the Tauri CLI's `tauri signer generate`, which asks you to choose a password, saves the key as `~/.tauri/harnessui.key` (`--key PATH` puts it somewhere else) and writes the public key into `src-tauri/tauri.updater.conf.json`. If the GitHub CLI (`gh`) is installed and signed in, it offers to save the two secrets for you; otherwise it says where to add them.
 2. Keep the key file and its password in your password manager. If you lose either one, installed copies can never update again.
 3. Commit `src-tauri/tauri.updater.conf.json` and push it. Then release: *Actions → Release → Run workflow* on the commit to release, or push the tag `v<version>`.
 
 The script never overwrites a key file, never prints the private key, and does nothing when a public key is already committed, because a new key would leave every installed copy unable to update. Without the script: run `npx tauri signer generate -w ~/.tauri/harnessui.key` and choose a password; add the key file's contents and the password as the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets (*Settings → Secrets and variables → Actions* on GitHub); and put the `.pub` file's contents, unchanged, into `plugins.updater.pubkey` in `src-tauri/tauri.updater.conf.json`.
 
-Every release then includes signed update files, `latest.json`, and a copy of each installer under the name without the version (`harnessUI-setup.exe`, `harnessUI-universal.dmg`), which harnessui.site and the links under [Download](#download) use. The release page shows the version's entry from `CHANGELOG.md`, and the app's update box shows the same text under *What's new*; a version without an entry is not built. The release workflow also signs `catalog/models.json` and attaches it with `models.json.minisig`, which *Settings → General → Model catalog → Refresh catalog* downloads. A last job keeps the release a draft if an installer or its copy is missing, if a copy is not the same file as its installer, if `latest.json` lacks Windows, Apple silicon or Intel Macs, or if the catalog is missing.
+Every release then includes signed update files, `latest.json`, and a copy of each installer under the name without the version (`harnessUI-setup.exe`, `harnessUI-universal.dmg`), which harnessui.site and the links under [Download](#download) use. The release page shows the version's entry from `CHANGELOG.md`, followed by where to download and how to open the unsigned builds; the app's update box shows the same entry under *What's new*, as plain text and without the download part. A version without an entry is not built. The entry is published as it is, so write it for the people who download harnessUI. The release workflow also signs `catalog/models.json` and attaches it with `models.json.minisig`, which *Settings → General → Model catalog → Refresh catalog* downloads. A last job keeps the release a draft if an installer or its copy is missing, if a copy is not the same file as its installer, if `latest.json` lacks Windows, Apple silicon or Intel Macs, or if the catalog is missing.
 
 In the app, the automatic check is on unless you turn it off: *Settings → General → Updates* has *Check for updates automatically* (it contacts github.com), *Check now*, a line that says what the last check found, and *Restart and update* when an update is ready. A build made without the key, such as a build from source or a CI build, cannot update itself and says so.
 
