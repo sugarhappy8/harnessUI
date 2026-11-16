@@ -649,11 +649,10 @@ const MAX_JPEG_MARKERS: usize = 1_024;
 /// decoded: the first bytes, and for a JPEG the head of each segment on its way to the size,
 /// so large Exif or colour data, or a broken file, costs no more than a few bytes each.
 fn picture_size_of(data: &str) -> Option<(u32, u32)> {
-    let head = base64_bytes(data, 0, 32)?;
-    if head.starts_with(&[0xFF, 0xD8]) {
+    if base64_bytes(data, 0, 2)?.starts_with(&[0xFF, 0xD8]) {
         jpeg_size(data)
     } else {
-        picture_size(&head)
+        picture_size(&base64_bytes(data, 0, 32)?)
     }
 }
 
@@ -675,17 +674,18 @@ fn base64_bytes(data: &str, at: usize, len: usize) -> Option<Vec<u8>> {
 }
 
 /// A JPEG's width and height from its start of frame, found by walking the segments from
-/// marker to marker.
+/// marker to marker: four bytes of each (the marker and the segment's length), nine of the
+/// start of frame.
 fn jpeg_size(data: &str) -> Option<(u32, u32)> {
+    let be16 = |bytes: &[u8], i: usize| {
+        Some(u32::from(u16::from_be_bytes([
+            *bytes.get(i)?,
+            *bytes.get(i + 1)?,
+        ])))
+    };
     let mut at = 2usize;
     for _ in 0..MAX_JPEG_MARKERS {
-        let head = base64_bytes(data, at, 9)?;
-        let be16 = |i: usize| {
-            Some(u32::from(u16::from_be_bytes([
-                *head.get(i)?,
-                *head.get(i + 1)?,
-            ])))
-        };
+        let head = base64_bytes(data, at, 4)?;
         if *head.first()? != 0xFF {
             return None;
         }
@@ -693,16 +693,17 @@ fn jpeg_size(data: &str) -> Option<(u32, u32)> {
             // Fill bytes, and markers without a length.
             0xFF => at += 1,
             0x01 | 0xD0..=0xD8 => at += 2,
-            // A start of frame: precision, then height and width.
+            // A start of frame: its length and precision, then height and width.
             0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
-                return Some((be16(7)?, be16(5)?));
+                let frame = base64_bytes(data, at, 9)?;
+                return Some((be16(&frame, 7)?, be16(&frame, 5)?));
             }
             _ => {
-                let length = usize::try_from(be16(2)?).ok()?;
+                let length = usize::try_from(be16(&head, 2)?).ok()?;
                 if length < 2 {
                     return None;
                 }
-                at += 2 + length;
+                at = at.checked_add(2 + length)?;
             }
         }
     }

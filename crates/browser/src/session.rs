@@ -888,7 +888,8 @@ impl Browser {
                 let this = self.clone();
                 tokio::spawn(async move { this.setup_session(session, TargetKind::Frame).await });
             }
-            "worker" | "shared_worker" | "service_worker" if self.watch_worker(parent_session, kind, &session) => {}
+            "worker" | "shared_worker" | "service_worker"
+                if self.watch_worker(parent_session, kind, &session) => {}
             _ => self.release_other(parent_session, &session),
         }
         self.bump();
@@ -953,7 +954,11 @@ impl Browser {
                 .call("Network.enable", json!({}), Some(&session), CMD)
                 .await;
         }
-        let Ok(targets) = self.cdp.call("Target.getTargets", json!({}), None, CMD).await else {
+        let Ok(targets) = self
+            .cdp
+            .call("Target.getTargets", json!({}), None, CMD)
+            .await
+        else {
             return;
         };
         for t in targets

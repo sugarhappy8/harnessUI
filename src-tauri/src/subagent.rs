@@ -23,7 +23,7 @@
 //!   any other result.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -559,6 +559,15 @@ fn handover_message(task: &str, context: &str, sanitizer: &Sanitizer) -> String 
     text
 }
 
+/// [0.0.7 P5] The chat's client for a conversation of the helper's own, so the thinking
+/// Claude's API returns in it is kept for the helper's steps alone: never sent in the chat
+/// or another helper, and a block the API refuses in it never clears the chat's.
+fn helper_client(client: OpenAiClient, chat_id: i64) -> OpenAiClient {
+    static HELPERS: AtomicU64 = AtomicU64::new(0);
+    let n = HELPERS.fetch_add(1, Ordering::Relaxed) + 1;
+    client.for_conversation(format!("chat {chat_id} helper {n}"))
+}
+
 /// Runs one helper to its end and returns its final answer as the tool result. Failures
 /// (stopped, step cap, repeated or invalid calls, a failed request) come back as error
 /// results that say what happened and carry what the helper had so far.
@@ -596,6 +605,7 @@ pub async fn run(
     ))];
     input.summary = None;
     input.app_notes.clear();
+    let client = helper_client(client, chat_id);
     let step_cap = input.step_cap;
     // A child of the call's token: Stop reaches the helper's stream and its running tool.
     // Cancelled as well if this call is dropped, so a helper never works on unattended.
@@ -624,6 +634,8 @@ pub async fn run(
             sanitizer: &sanitizer,
         };
         let outcome = agent::turn::run_turn(deps, input, token).await;
+        // The helper's conversation ends here: what it kept is not needed again.
+        client.end_conversation();
         sink.finish();
         tracing::info!(
             status = ?outcome.status,

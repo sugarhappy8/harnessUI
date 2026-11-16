@@ -57,6 +57,24 @@ fn meta_key(group: &str) -> String {
     format!("downloadGroup:{group}")
 }
 
+/// 0.0.7 (P6b round 2): the settings key saved while a group is being cancelled, from before
+/// its task is stopped until its files are gone. Meanwhile it shows as "cancelling", nothing
+/// follows it or starts beside it, it cannot be resumed, and if the app stops first the
+/// cancel is finished at the next start.
+fn cancelling_key(group: &str) -> String {
+    format!("downloadCancelling:{group}")
+}
+
+/// Whether `group` is being cancelled ([`cancelling_key`]).
+async fn is_cancelling(store: &store::Store, group: &str) -> bool {
+    store
+        .get_setting::<bool>(&cancelling_key(group))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
 /// What the UI shows for a group.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +179,49 @@ struct Running {
     /// 0.0.7 (P6b review m1): cancelled once the task has ended. Cancel waits for it before it
     /// deletes anything, so no file is written, renamed or added after Cancel looked.
     ended: CancellationToken,
+    /// Which task this is ([`NEXT_TASK`]), so the end of one never takes off a newer task of
+    /// the same group ([`TaskEnd`]).
+    id: u64,
+}
+
+/// The id of the next group task.
+static NEXT_TASK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 0.0.7 (P6b round 2): ends a group's task however it ends, a panic included: its entry
+/// leaves `running` (only its own: a newer task of the group keeps its entry), its live
+/// progress goes, and `ended` fires, so Cancel never waits for a task that is gone.
+struct TaskEnd {
+    manager: Arc<DownloadManager>,
+    group: String,
+    id: u64,
+    ended: CancellationToken,
+    finished: bool,
+}
+
+impl TaskEnd {
+    fn new(manager: Arc<DownloadManager>, group: String, id: u64, ended: CancellationToken) -> Self {
+        Self {
+            manager,
+            group,
+            id,
+            ended,
+            finished: false,
+        }
+    }
+
+    /// Takes the task off `running` and drops its live progress. Returns whether Pause
+    /// stopped it.
+    fn finish(&mut self) -> bool {
+        let _ = (&self.manager, &self.group, self.id);
+        self.finished = true;
+        false
+    }
+}
+
+impl Drop for TaskEnd {
+    fn drop(&mut self) {
+        let _ = &self.ended;
+    }
 }
 
 /// How long Cancel waits for a group's task to end. Every step stops at once on cancel
@@ -360,6 +421,8 @@ enum Start {
     /// shares the image file, or the image file for another model): refused until that one
     /// is done. `running`: that download's task runs (else it is paused or failed).
     Busy { running: bool },
+    /// A download that writes some of its files is being cancelled: refused until it is gone.
+    Cancelling,
 }
 
 /// Decides [`Start`] for a new download of `new` that writes `dests`, from every download
@@ -374,6 +437,7 @@ fn plan_start(
     rows: &[store::Download],
     meta_of: impl Fn(&str) -> Option<GroupMeta>,
     running: impl Fn(&str) -> bool,
+    _cancelling: impl Fn(&str) -> bool,
 ) -> Start {
     let busy: Vec<&store::Download> = rows
         .iter()
@@ -433,6 +497,22 @@ fn busy_error(image_file: bool, running: bool) -> AppError {
         ),
     };
     AppError::new("already_downloading", message, next_step, String::new())
+}
+
+/// A new download refused because a download of some of its files is being cancelled
+/// ([`Start::Cancelling`]).
+fn cancelling_error(image_file: bool) -> AppError {
+    let message = if image_file {
+        "This image file is part of a download that is being cancelled."
+    } else {
+        "One of this model's files is part of a download that is being cancelled."
+    };
+    AppError::new(
+        "download_cancelling",
+        message,
+        "Wait a moment, then try again.",
+        String::new(),
+    )
 }
 
 /// What [`DownloadManager::record`] did with a new download.
@@ -612,10 +692,29 @@ fn files_to_delete_on_cancel(
         .collect()
 }
 
+/// 0.0.7 (P6b round 2): whether the real path `file` is inside the real folder `root`.
+/// `dunce` keeps Windows' verbatim prefix (`\\?\C:\…`, `\\?\UNC\server\…`) for a path
+/// over 260 characters, so one side can have it and the other not: it is left out of both.
+pub(crate) fn inside_folder(file: &Path, root: &Path) -> bool {
+    inside_by(&file.to_string_lossy(), &root.to_string_lossy(), cfg!(windows))
+}
+
+/// [`inside_folder`] on paths as text; `windows`: `\` separates too, and the verbatim
+/// prefix is known.
+fn inside_by(file: &str, root: &str, windows: bool) -> bool {
+    let _ = windows;
+    Path::new(file).starts_with(root)
+}
+
 /// Deletes a cancelled group's files and forgets it: its partial files, and the finished
 /// files [`files_to_delete_on_cancel`] allows (the models folder, or for an image file the
 /// model's own folder, is where they may be).
-async fn clean_up(store: &store::Store, group: &str, models_dir: &Path) -> AppResult<()> {
+async fn clean_up(
+    store: &store::Store,
+    group: &str,
+    models_dir: &Path,
+    _deleting_model: Option<&str>,
+) -> AppResult<()> {
     let rows = store.list_downloads(Some(group.to_string())).await?;
     let meta: Option<GroupMeta> = store.get_setting(&meta_key(group)).await.ok().flatten();
     let written = written_by(store, group).await;
@@ -659,7 +758,7 @@ enum AtStart {
 /// [`AtStart`] for a group with rows in `statuses`. A cancelled row is left only by a cancel
 /// that did not finish (the app was closed while it ran, or a store error): it is finished
 /// (P6b review m2).
-fn at_start(statuses: &[DownloadStatus]) -> AtStart {
+fn at_start(statuses: &[DownloadStatus], _cancelling: bool) -> AtStart {
     if statuses.contains(&DownloadStatus::Cancelled) {
         AtStart::FinishCancel
     } else if resumes_at_start(statuses) {
@@ -802,6 +901,7 @@ impl DownloadManager {
             .collect();
         let rows = store.list_downloads(None).await?;
         let mut metas: HashMap<String, Option<GroupMeta>> = HashMap::new();
+        let mut cancelling: Vec<String> = Vec::new();
         for r in rows.iter().filter(|r| dests.contains(&r.dest_path)) {
             if !metas.contains_key(&r.group_id) {
                 let saved = store
@@ -810,6 +910,9 @@ impl DownloadManager {
                     .ok()
                     .flatten();
                 metas.insert(r.group_id.clone(), saved);
+                if is_cancelling(store, &r.group_id).await {
+                    cancelling.push(r.group_id.clone());
+                }
             }
         }
         let plan = plan_start(
@@ -818,6 +921,7 @@ impl DownloadManager {
             &rows,
             |g| metas.get(g).cloned().flatten(),
             |g| self.is_running(g),
+            |g| cancelling.iter().any(|c| c == g),
         );
         match plan {
             Start::New => Ok(Recorded::New(insert_group(store, meta, files).await?)),
@@ -839,6 +943,7 @@ impl DownloadManager {
                 Ok(Recorded::Replaced { new, old })
             }
             Start::Busy { running } => Err(busy_error(meta.image_file_for.is_some(), running)),
+            Start::Cancelling => Err(cancelling_error(meta.image_file_for.is_some())),
         }
     }
 
@@ -857,7 +962,8 @@ impl DownloadManager {
             }
         }
         for (g, statuses) in groups {
-            match at_start(&statuses) {
+            let cancelling = is_cancelling(&state.store, &g).await;
+            match at_start(&statuses, cancelling) {
                 AtStart::Resume => {
                     tracing::info!(group = %g, "resuming an interrupted download");
                     self.spawn_group(app.clone(), g);
@@ -889,6 +995,7 @@ impl DownloadManager {
                     token: token.clone(),
                     paused: false,
                     ended: ended.clone(),
+                    id: NEXT_TASK.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 },
             );
         }
@@ -1234,6 +1341,25 @@ impl DownloadManager {
     /// it could stop is left as it is.
     pub async fn cancel(&self, app: &AppHandle, group: &str) -> AppResult<()> {
         let state = app.state::<AppState>();
+        let models_dir = crate::hub::models_dir(app).await;
+        self.cancel_core(&state.store, &models_dir, group, None, CANCEL_WAIT, |dto| {
+            self.emit(app, dto)
+        })
+        .await
+    }
+
+    /// [`Self::cancel`], with the store, the models folder, how long to wait for the task and
+    /// where the group's new look goes (`emit`) given. `deleting_model`: the installed model
+    /// whose Delete cancels this download of its image file.
+    async fn cancel_core(
+        &self,
+        store: &store::Store,
+        models_dir: &Path,
+        group: &str,
+        deleting_model: Option<&str>,
+        wait: Duration,
+        emit: impl Fn(DownloadGroupDto),
+    ) -> AppResult<()> {
         let _starting = self.starting.lock().await;
         let task = self
             .running
@@ -1242,30 +1368,22 @@ impl DownloadManager {
             .and_then(|r| r.get(group).map(|r| (r.token.clone(), r.ended.clone())));
         if let Some((token, ended)) = task {
             token.cancel();
-            if tokio::time::timeout(CANCEL_WAIT, ended.cancelled())
-                .await
-                .is_err()
-            {
-                return Err(AppError::new(
-                    "download_stopping",
-                    "The download is still stopping.",
-                    "Wait a moment, then cancel it again.",
-                    String::new(),
-                ));
+            if tokio::time::timeout(wait, ended.cancelled()).await.is_err() {
+                return Err(stopping_error());
             }
         }
-        let rows = state.store.list_downloads(Some(group.to_string())).await?;
+        let rows = store.list_downloads(Some(group.to_string())).await?;
         if !rows.is_empty() && rows.iter().all(|r| r.status == DownloadStatus::Completed) {
-            if let Ok(Some(dto)) = self.group_dto(&state.store, group).await {
-                self.emit(app, dto);
+            if let Ok(Some(dto)) = self.group_dto(store, group).await {
+                emit(dto);
             }
             return Ok(());
         }
-        let mut dto = self.group_dto(&state.store, group).await?;
-        clean_up(&state.store, group, &crate::hub::models_dir(app).await).await?;
+        let mut dto = self.group_dto(store, group).await?;
+        clean_up(store, group, models_dir, deleting_model).await?;
         if let Some(d) = dto.as_mut() {
             d.status = "cancelled".into();
-            self.emit(app, d.clone());
+            emit(d.clone());
         }
         Ok(())
     }
@@ -1275,11 +1393,30 @@ impl DownloadManager {
     /// its file behind.
     pub async fn cancel_image_files_for(&self, app: &AppHandle, model: &str) -> AppResult<()> {
         let state = app.state::<AppState>();
+        let models_dir = crate::hub::models_dir(app).await;
         for g in image_file_downloads_for(&state.store, model).await? {
-            self.cancel(app, &g).await?;
+            self.cancel_core(
+                &state.store,
+                &models_dir,
+                &g,
+                Some(model),
+                CANCEL_WAIT,
+                |dto| self.emit(app, dto),
+            )
+            .await?;
         }
         Ok(())
     }
+}
+
+/// What Cancel says when the group's task did not end in time.
+fn stopping_error() -> AppError {
+    AppError::new(
+        "download_stopping",
+        "The download is still stopping.",
+        "Wait a moment, then cancel it again.",
+        String::new(),
+    )
 }
 
 /// The groups still downloading an image file for the installed model at `model` (P6b
@@ -1701,13 +1838,13 @@ mod tests {
     #[test]
     fn a_cancel_left_half_done_is_finished_and_can_be_cancelled_again() {
         assert_eq!(
-            at_start(&[S::Verifying, S::Cancelled]),
+            at_start(&[S::Verifying, S::Cancelled], false),
             AtStart::FinishCancel
         );
-        assert_eq!(at_start(&[S::Cancelled, S::Queued]), AtStart::FinishCancel);
-        assert_eq!(at_start(&[S::Verifying, S::Downloading]), AtStart::Resume);
-        assert_eq!(at_start(&[S::Verifying, S::Paused]), AtStart::Leave);
-        assert_eq!(at_start(&[S::Completed]), AtStart::Leave);
+        assert_eq!(at_start(&[S::Cancelled, S::Queued], false), AtStart::FinishCancel);
+        assert_eq!(at_start(&[S::Verifying, S::Downloading], false), AtStart::Resume);
+        assert_eq!(at_start(&[S::Verifying, S::Paused], false), AtStart::Leave);
+        assert_eq!(at_start(&[S::Completed], false), AtStart::Leave);
         assert_eq!(
             group_status(&[S::Verifying, S::Cancelled], false),
             S::Paused
@@ -1832,6 +1969,34 @@ mod tests {
                     .map(|(_, m)| m.clone())
             },
             |g| running.contains(&g),
+            |_| false,
+        )
+    }
+
+    /// [`plan`] with the groups being cancelled.
+    fn plan_while_cancelling<P: AsRef<Path>>(
+        new: &GroupMeta,
+        dests: &[P],
+        rows: &[store::Download],
+        metas: &[(&str, GroupMeta)],
+        cancelling: &[&str],
+    ) -> Start {
+        let dests: Vec<String> = dests
+            .iter()
+            .map(|p| p.as_ref().display().to_string())
+            .collect();
+        plan_start(
+            new,
+            &dests,
+            rows,
+            |g| {
+                metas
+                    .iter()
+                    .find(|(id, _)| *id == g)
+                    .map(|(_, m)| m.clone())
+            },
+            |_| false,
+            |g| cancelling.contains(&g),
         )
     }
 
@@ -1951,12 +2116,15 @@ mod tests {
             Start::Busy { running: false }
         );
 
-        // Done and cancelled downloads write nothing.
-        let over = vec![
-            row("a", &q4, 1, S::Completed),
-            row("q8", &q4, 1, S::Cancelled),
-        ];
+        // A done download writes nothing. P6b round 2: one left cancelled (its cancel did not
+        // finish) still writes its files, so the same model goes on with it.
+        let over = vec![row("a", &q4, 1, S::Completed)];
         assert_eq!(plan(&model, &[&q4], &over, &metas, &[]), Start::New);
+        let left = vec![row("q8", &q4, 1, S::Cancelled)];
+        assert_eq!(
+            plan(&model, &[&q4], &left, &metas, &[]),
+            Start::Resume("q8".into())
+        );
         assert_eq!(plan(&model, &[&q4], &[], &metas, &[]), Start::New);
         // A download whose saved metadata cannot be read is left alone.
         let unknown = vec![row("lost", &q4, 1, S::Paused)];
@@ -2277,7 +2445,7 @@ mod tests {
         note_written(&store, "g", &wrote.display().to_string())
             .await
             .unwrap();
-        clean_up(&store, "g", &models).await.unwrap();
+        clean_up(&store, "g", &models, None).await.unwrap();
         assert!(!wrote.exists(), "the file it wrote goes");
         assert!(found.exists(), "the same file found in place stays");
         assert!(
@@ -2313,7 +2481,7 @@ mod tests {
         note_written(&store, "g", &linked.display().to_string())
             .await
             .unwrap();
-        clean_up(&store, "g", &models).await.unwrap();
+        clean_up(&store, "g", &models, None).await.unwrap();
         assert!(linked.exists());
     }
 
@@ -2371,5 +2539,326 @@ mod tests {
             image_step.message,
             "The image file was downloaded, but it could not be added to its model. Something went wrong inside the app."
         );
+    }
+
+    /// P6b round 2 (verification H, H2, H3): a group left with a cancelled row (its cancel
+    /// did not finish) still writes its files. Before, it counted as writing nothing: the same
+    /// model, another model sharing the image file, or "Download the image file" started a
+    /// second download of the same partial file, which the old group's cancel then deleted.
+    /// Now the same model goes on with it and anything else is refused; and while a cancel
+    /// runs (its marker saved), nothing follows that download or starts beside it.
+    #[test]
+    fn a_download_left_cancelled_still_writes_its_files() {
+        let dir = Path::new("/models/example-quants/Sample-7B-GGUF");
+        let q4 = dir.join("Sample-7B-Q4_K_M.gguf");
+        let q8 = dir.join("Sample-7B-Q8_0.gguf");
+        let image = dir.join("mmproj-Sample-F16.gguf");
+        let model = group_meta(None);
+        let metas = [("g1", model.clone())];
+        let solo = vec![row("g1", &q4, 1, S::Cancelled)];
+        assert_eq!(
+            plan(&model, &[&q4], &solo, &metas, &[]),
+            Start::Resume("g1".into())
+        );
+        let left = vec![
+            row("g1", &q4, 1, S::Verifying),
+            row("g1", &image, 1, S::Cancelled),
+        ];
+        assert_eq!(
+            plan(&model, &[&q8, &image], &left, &metas, &[]),
+            Start::Busy { running: false }
+        );
+        assert_eq!(
+            plan(&group_meta(Some(q4.as_path())), &[&image], &left, &metas, &[]),
+            Start::Busy { running: false }
+        );
+        let both: [&Path; 2] = [&q4, &image];
+        for new in [&model, &group_meta(Some(q8.as_path()))] {
+            assert_eq!(
+                plan_while_cancelling(new, &both, &left, &metas, &["g1"]),
+                Start::Cancelling
+            );
+        }
+        let err = cancelling_error(false);
+        assert_eq!(err.code, "download_cancelling");
+        assert_eq!(
+            err.message,
+            "One of this model's files is part of a download that is being cancelled."
+        );
+        assert_eq!(err.next_step, "Wait a moment, then try again.");
+        assert_eq!(
+            cancelling_error(true).message,
+            "This image file is part of a download that is being cancelled."
+        );
+    }
+
+    /// P6b round 2 (verification H): a cancel deletes only its own partial files, never one
+    /// another download not finished yet writes (a download of the same file that started
+    /// while this one's cancel had not finished), and it forgets its marker.
+    #[tokio::test]
+    async fn a_cancel_never_deletes_another_downloads_partial_file() {
+        let dir = Scratch::new();
+        let models = dir.path().join("models");
+        let repo = models.join("example-quants/Sample-7B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let shared = repo.join("Solo-Q4_K_M.gguf");
+        let own = repo.join("Own-Q4_K_M.gguf");
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g1", &shared, 4000, S::Cancelled).await;
+        recorded(&store, "g1", &own, 10, S::Cancelled).await;
+        recorded(&store, "g2", &shared, 4000, S::Downloading).await;
+        store.set_setting(&cancelling_key("g1"), &true).await.unwrap();
+        let part = |p: &Path| PathBuf::from(format!("{}.part", p.display()));
+        std::fs::write(part(&shared), vec![1u8; 3000]).unwrap();
+        std::fs::write(part(&own), vec![1u8; 5]).unwrap();
+        clean_up(&store, "g1", &models, None).await.unwrap();
+        assert!(part(&shared).exists(), "the partial file another download writes stays");
+        assert!(!part(&own).exists(), "its own partial file goes");
+        assert!(store.list_downloads(Some("g1".into())).await.unwrap().is_empty());
+        assert!(!is_cancelling(&store, "g1").await);
+        assert_eq!(statuses(&store, "g2").await, vec![S::Downloading]);
+    }
+
+    /// P6b round 2 (verification H4): Resume of a download while another download writes one
+    /// of its files is refused (both would append to one partial file), and a download being
+    /// cancelled cannot be resumed.
+    #[tokio::test]
+    async fn resume_refuses_while_another_download_writes_its_file() {
+        let dir = Scratch::new();
+        let solo = dir.path().join("Solo-Q4_K_M.gguf");
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g1", &solo, 4000, S::Cancelled).await;
+        recorded(&store, "g2", &solo, 4000, S::Downloading).await;
+        let manager = DownloadManager::default();
+        let err = manager.ready_to_resume(&store, "g1").await.unwrap_err();
+        assert_eq!(err.code, "already_downloading");
+        assert_eq!(statuses(&store, "g1").await, vec![S::Cancelled]);
+
+        let other = dir.path().join("Other-Q4_K_M.gguf");
+        recorded(&store, "g3", &other, 10, S::Paused).await;
+        store.set_setting(&cancelling_key("g3"), &true).await.unwrap();
+        let err = manager.ready_to_resume(&store, "g3").await.unwrap_err();
+        assert_eq!(err.code, "download_cancelling");
+        assert_eq!(statuses(&store, "g3").await, vec![S::Paused]);
+    }
+
+    /// P6b round 2 (verification K): Delete of a model cancels its image file's download, and
+    /// that cancel deletes the image file the download wrote although the model being deleted
+    /// would find it next to itself. A plain Cancel keeps it: the model uses it at its next
+    /// load.
+    #[tokio::test]
+    async fn delete_removes_the_image_file_its_cancelled_download_wrote() {
+        let dir = Scratch::new();
+        let models = dir.path().join("models");
+        let folder = models.join("k/K-GGUF");
+        std::fs::create_dir_all(&folder).unwrap();
+        let model = folder.join("K-Q4.gguf");
+        let image = folder.join("mmproj-K-F16.gguf");
+        std::fs::write(&model, vec![1u8; 100]).unwrap();
+        std::fs::write(&image, vec![2u8; 50]).unwrap();
+        let model_text = model.display().to_string();
+        let store = store::Store::open_in_memory().unwrap();
+        store
+            .upsert_model(store::ModelInput {
+                path: model_text.clone(),
+                repo: Some("k/K-GGUF".into()),
+                file_name: "K-Q4.gguf".into(),
+                size_bytes: 100,
+                sha256: None,
+                gguf_summary: serde_json::json!({}),
+                source: ModelSource::Download,
+            })
+            .await
+            .unwrap();
+        let image_download = |group: &'static str| {
+            let store = &store;
+            let image = &image;
+            let meta = group_meta(Some(model.as_path()));
+            async move {
+                store.set_setting(&meta_key(group), &meta).await.unwrap();
+                recorded(store, group, image, 50, S::Verifying).await;
+                note_written(store, group, &image.display().to_string())
+                    .await
+                    .unwrap();
+            }
+        };
+        image_download("plain").await;
+        clean_up(&store, "plain", &models, None).await.unwrap();
+        assert!(image.exists(), "a plain Cancel keeps it for the model next to it");
+        image_download("delete").await;
+        clean_up(&store, "delete", &models, Some(&model_text))
+            .await
+            .unwrap();
+        assert!(!image.exists(), "Delete's cancel removes the image file it wrote");
+        assert!(model.exists());
+    }
+
+    /// The fake task of a group for the tests of Cancel: its stop token and its `ended`.
+    fn fake_task(manager: &DownloadManager, group: &str) -> (CancellationToken, CancellationToken) {
+        let (token, ended) = (CancellationToken::new(), CancellationToken::new());
+        manager.running.lock().unwrap().insert(
+            group.into(),
+            Running {
+                token: token.clone(),
+                paused: false,
+                ended: ended.clone(),
+                id: 0,
+            },
+        );
+        (token, ended)
+    }
+
+    /// P6b round 2 (verification items 4 and 6): Cancel saves its marker and stops the task,
+    /// says "cancelling" at once, and waits for the task without holding up other downloads
+    /// (before, every Download, Resume, Cancel and Delete waited up to 30 s behind it). Once
+    /// the task has ended the download goes, with its marker.
+    #[tokio::test]
+    async fn cancel_marks_the_download_and_lets_others_go_on_while_it_waits() {
+        let dir = Scratch::new();
+        let models = dir.path().join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        let model = models.join("Sample-7B-Q8_0.gguf");
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g", &model, 100, S::Downloading).await;
+        let manager = DownloadManager::default();
+        let (token, ended) = fake_task(&manager, "g");
+        let shown = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let seen = shown.clone();
+        let cancel = manager.cancel_core(
+            &store,
+            &models,
+            "g",
+            None,
+            Duration::from_secs(10),
+            move |d: DownloadGroupDto| seen.lock().unwrap().push(d.status),
+        );
+        tokio::pin!(cancel);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut cancel)
+                .await
+                .is_err(),
+            "it waits for the task"
+        );
+        assert!(token.is_cancelled());
+        assert!(is_cancelling(&store, "g").await);
+        assert!(
+            manager.starting.try_lock().is_ok(),
+            "a start or resume goes on meanwhile"
+        );
+        assert_eq!(shown.lock().unwrap().clone(), vec!["cancelling".to_string()]);
+        manager.running.lock().unwrap().remove("g");
+        ended.cancel();
+        cancel.await.unwrap();
+        assert!(store.list_downloads(Some("g".into())).await.unwrap().is_empty());
+        assert!(!is_cancelling(&store, "g").await);
+        assert_eq!(
+            shown.lock().unwrap().last().map(String::as_str),
+            Some("cancelled")
+        );
+    }
+
+    /// P6b round 2 (verification items 3 and 4): a cancel whose task did not end in time
+    /// leaves the download "cancelling" (not "downloading" or "paused"), with its rows, and the
+    /// next start finishes it whatever its rows say: the last file had finished (nothing was
+    /// marked cancelled), or the task was stuck (still "downloading"). A download that was
+    /// done before the cancel could stop it is done.
+    #[tokio::test]
+    async fn a_cancel_cut_short_says_cancelling_and_is_finished_at_the_next_start() {
+        let dir = Scratch::new();
+        let models = dir.path().join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        let model = models.join("Sample-7B-Q8_0.gguf");
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g", &model, 100, S::Downloading).await;
+        let manager = DownloadManager::default();
+        let _task = fake_task(&manager, "g");
+        let err = manager
+            .cancel_core(&store, &models, "g", None, Duration::from_millis(50), |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "download_stopping");
+        assert!(is_cancelling(&store, "g").await);
+        manager.running.lock().unwrap().remove("g");
+        let dto = manager.group_dto(&store, "g").await.unwrap().unwrap();
+        assert_eq!(dto.status, "cancelling");
+        assert_eq!(statuses(&store, "g").await, vec![S::Downloading]);
+        assert_eq!(at_start(&[S::Verifying], true), AtStart::FinishCancel);
+        assert_eq!(at_start(&[S::Downloading], true), AtStart::FinishCancel);
+        assert_eq!(at_start(&[S::Verifying, S::Downloading], false), AtStart::Resume);
+        set_all(&store, "g", S::Completed).await;
+        let dto = manager.group_dto(&store, "g").await.unwrap().unwrap();
+        assert_eq!(dto.status, "done");
+    }
+
+    /// P6b round 2 (verification item 7): a group's task that panics still ends: its entry
+    /// goes and `ended` fires, so Cancel does not answer "still stopping" until the app
+    /// restarts. The end of a task never takes off a newer task of the same group.
+    #[test]
+    fn a_task_that_panics_still_ends() {
+        let manager = Arc::new(DownloadManager::default());
+        let ended = CancellationToken::new();
+        manager.running.lock().unwrap().insert(
+            "g".into(),
+            Running {
+                token: CancellationToken::new(),
+                paused: false,
+                ended: ended.clone(),
+                id: 7,
+            },
+        );
+        manager
+            .live
+            .lock()
+            .unwrap()
+            .insert("g".into(), Live::default());
+        let end = TaskEnd::new(manager.clone(), "g".into(), 7, ended.clone());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _end = end;
+            panic!("a bug in a download task");
+        }));
+        assert!(panicked.is_err());
+        assert!(!manager.is_running("g"));
+        assert!(ended.is_cancelled());
+        assert!(!manager.live.lock().unwrap().contains_key("g"));
+
+        let (newer, _) = fake_task(&manager, "g");
+        drop(TaskEnd::new(
+            manager.clone(),
+            "g".into(),
+            7,
+            CancellationToken::new(),
+        ));
+        assert!(manager.is_running("g"), "the newer task keeps its entry");
+        assert!(!newer.is_cancelled());
+    }
+
+    /// P6b round 2 (verification item 9, Windows): `dunce` keeps the verbatim prefix for paths
+    /// over 260 characters, so a long written file and a short models folder (or the other way
+    /// round) still compare; elsewhere only `/` separates, so a backslash in a name is no way
+    /// out of the folder.
+    #[test]
+    fn a_long_windows_path_is_inside_its_folder() {
+        for (file, root) in [
+            (r"\\?\C:\Users\me\models\a\b.gguf", r"C:\Users\me\models"),
+            (r"C:\Users\me\models\a\b.gguf", r"\\?\C:\Users\me\models"),
+            (r"\\?\C:\Users\me\models\b.gguf", r"\\?\C:\Users\me\models\"),
+            (r"\\?\UNC\server\share\models\b.gguf", r"\\server\share\models"),
+            (r"\\server\share\models\b.gguf", r"\\?\UNC\server\share\models"),
+            (r"C:\b.gguf", r"C:\"),
+        ] {
+            assert!(inside_by(file, root, true), "{file} in {root}");
+        }
+        for (file, root) in [
+            (r"\\?\C:\Users\me\models-old\b.gguf", r"C:\Users\me\models"),
+            (r"C:\Users\me\other\b.gguf", r"\\?\C:\Users\me\models"),
+            (r"\\?\UNC\server\share\other\b.gguf", r"\\server\share\models"),
+        ] {
+            assert!(!inside_by(file, root, true), "{file} not in {root}");
+        }
+        assert!(inside_by("/home/me/models/a/b.gguf", "/home/me/models", false));
+        assert!(inside_by("/home/me/models/b.gguf", "/home/me/models/", false));
+        assert!(inside_by("/b.gguf", "/", false));
+        assert!(!inside_by("/home/me/models\\evil/b.gguf", "/home/me/models", false));
+        assert!(!inside_by("/home/me/models-old/b.gguf", "/home/me/models", false));
     }
 }

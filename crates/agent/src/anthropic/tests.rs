@@ -1345,7 +1345,10 @@ fn the_replay_store_is_bounded_and_exact() {
     assert_eq!(replay.len(), 1);
     assert!(replay.find(&key(0, 1)).is_none());
     assert!(replay.find(&key(limit as u64 - 1, 1)).is_none());
-    assert_eq!(replay.find(&key(limit as u64, 1)), Some(&vec![json!("new")]));
+    assert_eq!(
+        replay.find(&key(limit as u64, 1)),
+        Some(&vec![json!("new")])
+    );
     replay.clear();
     assert_eq!(replay.len(), 0);
 }
@@ -1509,13 +1512,19 @@ fn many_pictures_in_one_request_follow_claudes_limits() {
     sides[0] = 9_000;
     sides[1] = 4_000;
     let seen = pictures(&body(&request_of(&sides), &adaptive_facts(), None));
-    assert!(seen[0].contains("8,000 pixels a side that Claude takes."), "{seen:?}");
+    assert!(
+        seen[0].contains("8,000 pixels a side that Claude takes."),
+        "{seen:?}"
+    );
     assert_eq!(seen[1], "image", "{seen:?}");
     // Only as many as needed: of 25 larger pictures, the oldest 5 go.
     sides = vec![4_000; 25];
     sides[24] = 2_000;
     let seen = pictures(&body(&request_of(&sides), &adaptive_facts(), None));
-    assert!(seen[..5].iter().all(|p| p.contains("more than 20")), "{seen:?}");
+    assert!(
+        seen[..5].iter().all(|p| p.contains("more than 20")),
+        "{seen:?}"
+    );
     assert!(seen[5..].iter().all(|p| p == "image"), "{seen:?}");
     // When even that leaves more than 20, every larger one goes and the smaller ones stay.
     sides = vec![1_000; 30];
@@ -1524,7 +1533,9 @@ fn many_pictures_in_one_request_follow_claudes_limits() {
     }
     let seen = pictures(&body(&request_of(&sides), &adaptive_facts(), None));
     assert!(
-        [2, 11, 29].iter().all(|at| seen[*at].contains("more than 20")),
+        [2, 11, 29]
+            .iter()
+            .all(|at| seen[*at].contains("more than 20")),
         "{seen:?}"
     );
     assert_eq!(seen.iter().filter(|p| *p == "image").count(), 27);
@@ -1551,7 +1562,11 @@ fn many_pictures_in_one_request_follow_claudes_limits() {
     let mut sides = vec![1_000; 101];
     sides[50] = 9_000;
     let seen = pictures(&body(&request_of(&sides), &unknown, None));
-    assert_eq!(seen.iter().filter(|p| *p == "image").count(), 100, "{seen:?}");
+    assert_eq!(
+        seen.iter().filter(|p| *p == "image").count(),
+        100,
+        "{seen:?}"
+    );
     assert!(!seen.iter().any(|p| p.contains("at most 100")), "{seen:?}");
     // A larger window takes 600.
     let sent = body(&request_with(103), &adaptive_facts(), None);

@@ -323,17 +323,35 @@ mod tests {
         let mut log = CaptureLog::new("S", "T");
         log.watch.insert("W".into());
         assert!(log.watches("S") && log.watches("W") && !log.watches("X"));
-        log.note_socket("Network.webSocketCreated", &json!({"requestId": "1", "url": "ws://10.0.0.1/a"}));
+        log.note_socket(
+            "Network.webSocketCreated",
+            &json!({"requestId": "1", "url": "ws://10.0.0.1/a"}),
+        );
         assert_eq!(log.tried, ["a WebSocket to ws://10.0.0.1/a"]);
         assert!(log.sockets.is_empty(), "blocked before it started");
-        log.note_socket("Network.webSocketCreated", &json!({"requestId": "2", "url": "ws://127.0.0.1:9/b"}));
-        log.note_socket("Network.webSocketWillSendHandshakeRequest", &json!({"requestId": "2"}));
+        log.note_socket(
+            "Network.webSocketCreated",
+            &json!({"requestId": "2", "url": "ws://127.0.0.1:9/b"}),
+        );
+        log.note_socket(
+            "Network.webSocketWillSendHandshakeRequest",
+            &json!({"requestId": "2"}),
+        );
         log.note_socket("Network.webSocketFrameReceived", &json!({"requestId": "2"}));
         assert_eq!(log.sockets, ["a WebSocket to ws://127.0.0.1:9/b"]);
         assert_eq!(log.tried, ["a WebSocket to ws://10.0.0.1/a"]);
-        log.note_socket("Network.webTransportCreated", &json!({"transportId": "t", "url": "https://192.168.1.1:4433/"}));
-        log.note_socket("Network.webTransportConnectionEstablished", &json!({"transportId": "t"}));
-        log.note_socket("Network.directTCPSocketOpened", &json!({"identifier": "d", "remoteAddr": "10.1.1.1", "remotePort": 22}));
+        log.note_socket(
+            "Network.webTransportCreated",
+            &json!({"transportId": "t", "url": "https://192.168.1.1:4433/"}),
+        );
+        log.note_socket(
+            "Network.webTransportConnectionEstablished",
+            &json!({"transportId": "t"}),
+        );
+        log.note_socket(
+            "Network.directTCPSocketOpened",
+            &json!({"identifier": "d", "remoteAddr": "10.1.1.1", "remotePort": 22}),
+        );
         assert_eq!(log.sockets.len(), 3, "{:?}", log.sockets);
         assert!(log.sockets[2].ends_with("10.1.1.1:22"));
     }

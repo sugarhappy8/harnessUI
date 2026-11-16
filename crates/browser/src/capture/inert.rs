@@ -30,10 +30,10 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use dom_query::{Document, NodeData, NodeId, NodeRef};
-use html5ever::tendril::{StrTendril, TendrilSink};
-use html5ever::tree_builder::{QuirksMode, TreeBuilderOpts};
 #[allow(unused_imports)]
 use html5ever::namespace_url;
+use html5ever::tendril::{StrTendril, TendrilSink};
+use html5ever::tree_builder::{QuirksMode, TreeBuilderOpts};
 use html5ever::{Attribute, LocalName, ParseOpts, QualName, ns};
 use url::Url;
 
@@ -182,7 +182,11 @@ pub fn parse(html: &str) -> (Document, bool) {
 /// given SVG files (already cleaned) copied in as hidden shapes, and checked. `files` are
 /// the capture's files (paths inside the capture folder, with `/`). `Err` says why no
 /// safe copy could be made; then none is saved.
-pub fn make_inert(html: &str, sprites: &[String], files: &HashSet<String>) -> Result<Inert, String> {
+pub fn make_inert(
+    html: &str,
+    sprites: &[String],
+    files: &HashSet<String>,
+) -> Result<Inert, String> {
     let (doc, whole) = parse(html);
     let mode = doc.quirks_mode.get();
     let (_, _, body) = structure(&doc)?;
@@ -489,7 +493,12 @@ fn attrs_of(node: &NodeRef<'_>) -> Vec<(String, String)> {
         NodeData::Element(e) => e
             .attrs
             .iter()
-            .map(|a| (a.name.local.as_ref().to_ascii_lowercase(), a.value.to_string()))
+            .map(|a| {
+                (
+                    a.name.local.as_ref().to_ascii_lowercase(),
+                    a.value.to_string(),
+                )
+            })
             .collect(),
         _ => Vec::new(),
     })
@@ -503,7 +512,9 @@ fn is_our_policy(node: &NodeRef<'_>) -> bool {
         && attrs
             .iter()
             .any(|(n, v)| n == "http-equiv" && v.eq_ignore_ascii_case("content-security-policy"))
-        && attrs.iter().any(|(n, v)| n == "content" && v == COPY_POLICY)
+        && attrs
+            .iter()
+            .any(|(n, v)| n == "content" && v == COPY_POLICY)
 }
 
 /// `<meta>` kept: the copy's policy, `charset="utf-8"`, and a few that describe the page.
@@ -620,13 +631,19 @@ fn clean_attributes(node: &NodeRef<'_>, el: &QualName, files: &HashSet<String>) 
         let mut seen: HashSet<(String, String)> = HashSet::new();
         for mut a in old {
             let local = a.name.local.as_ref().to_ascii_lowercase();
-            if is_link && !matches!(local.as_str(), "rel" | "href" | "media" | "type" | "sizes" | "color") {
+            if is_link
+                && !matches!(
+                    local.as_str(),
+                    "rel" | "href" | "media" | "type" | "sizes" | "color"
+                )
+            {
                 continue;
             }
             if is_meta && !matches!(local.as_str(), "name" | "content" | "media" | "charset") {
                 continue;
             }
-            let Some(value) = attribute_value(&a.name, &local, a.value.as_ref(), el, &el_local, files)
+            let Some(value) =
+                attribute_value(&a.name, &local, a.value.as_ref(), el, &el_local, files)
             else {
                 continue;
             };
@@ -670,9 +687,7 @@ fn attribute_value(
             return match el_local {
                 "a" | "area" if el.ns == ns!(html) || svg => Some(link_value(&t)),
                 "use" if svg => t.starts_with('#').then_some(t),
-                "image" | "feimage" if svg => {
-                    (t.starts_with('#') || picture_ok(&t)).then_some(t)
-                }
+                "image" | "feimage" if svg => (t.starts_with('#') || picture_ok(&t)).then_some(t),
                 _ => (t.starts_with('#') || local_ok(&t)).then_some(t),
             };
         }
@@ -721,7 +736,9 @@ fn link_value(t: &str) -> String {
 
 /// A `data:image/…` address.
 fn is_data_image(t: &str) -> bool {
-    css::url_text(t).to_ascii_lowercase().starts_with("data:image/")
+    css::url_text(t)
+        .to_ascii_lowercase()
+        .starts_with("data:image/")
 }
 
 /// Whether a value used as an address would reach outside the copy's folder or run code.
@@ -780,7 +797,11 @@ fn srcset(value: &str, keep: &dyn Fn(&str) -> bool) -> String {
             while i < chars.len() && chars[i] != ',' {
                 i += 1;
             }
-            descriptor = chars[d_start..i].iter().collect::<String>().trim().to_string();
+            descriptor = chars[d_start..i]
+                .iter()
+                .collect::<String>()
+                .trim()
+                .to_string();
         }
         if url.is_empty() || !keep(&url) {
             continue;
@@ -861,7 +882,7 @@ mod tests {
         assert!(
             out.starts_with(&format!(
                 "<!DOCTYPE html>\n<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><meta charset=\"utf-8\"><!--{COMMENT}--></head><body>",
-                COPY_POLICY.replace('\'', "'")
+                COPY_POLICY
             )),
             "{out}"
         );
@@ -870,7 +891,10 @@ mod tests {
             out.contains("<div style=\"display:inline-block;width:100px;height:100px;\" data-captured-frame=\"\"></div>"),
             "the frame keeps only its box: {out}"
         );
-        assert!(out.contains("<img>"), "the picture loses its address: {out}");
+        assert!(
+            out.contains("<img>"),
+            "the picture loses its address: {out}"
+        );
         assert_quiet(&out);
         assert!(!out.contains("svg+xml"), "{out}");
     }
@@ -883,7 +907,9 @@ mod tests {
             .unwrap()
             .html;
         let policy = out.find("Content-Security-Policy").unwrap();
-        let shapes = out.find("<symbol id=\"dot\"").expect("the shapes are copied in");
+        let shapes = out
+            .find("<symbol id=\"dot\"")
+            .expect("the shapes are copied in");
         assert!(policy < shapes, "{out}");
         assert!(
             out.contains("<html lang=\"en\"><head>"),
@@ -915,34 +941,82 @@ mod tests {
 </body></html>"##;
         let out = inert(html);
         assert_quiet(&out);
-        assert!(!out.contains("evil.example") && !out.contains("cdn.example") && !out.contains("track.example"), "{out}");
-        assert!(out.contains("<link rel=\"stylesheet\" href=\"styles/site.css\">"), "{out}");
-        assert!(out.contains("<link rel=\"icon\" href=\"assets/dot.svg\">"), "{out}");
-        assert!(out.contains("<meta name=\"viewport\" content=\"width=device-width\">"), "{out}");
+        assert!(
+            !out.contains("evil.example")
+                && !out.contains("cdn.example")
+                && !out.contains("track.example"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<link rel=\"stylesheet\" href=\"styles/site.css\">"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<link rel=\"icon\" href=\"assets/dot.svg\">"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<meta name=\"viewport\" content=\"width=device-width\">"),
+            "{out}"
+        );
         assert!(
             out.contains("<img src=\"assets/hero.png\" srcset=\"assets/hero.png 1x, assets/dot.svg 3x\" alt=\"Hero\">"),
             "{out}"
         );
-        assert_eq!(out.matches("<img>").count(), 4, "four pictures lose their address: {out}");
-        assert!(out.contains("<img src=\"data:image/png;base64,AAAA\">"), "{out}");
-        assert!(out.contains("width:10px;background:url(&quot;about:invalid&quot;)"), "{out}");
+        assert_eq!(
+            out.matches("<img>").count(),
+            4,
+            "four pictures lose their address: {out}"
+        );
+        assert!(
+            out.contains("<img src=\"data:image/png;base64,AAAA\">"),
+            "{out}"
+        );
+        assert!(
+            out.contains("width:10px;background:url(&quot;about:invalid&quot;)"),
+            "{out}"
+        );
         assert!(!out.contains("u\\72l"), "{out}");
-        assert!(out.contains("<video src=\"assets/hero.png\"><source><track></video>"), "{out}");
+        assert!(
+            out.contains("<video src=\"assets/hero.png\"><source><track></video>"),
+            "{out}"
+        );
         assert!(out.contains("<a href=\"#\">x</a>"), "{out}");
-        assert!(out.contains("<a href=\"https://example.com/about\">about</a>"), "{out}");
+        assert!(
+            out.contains("<a href=\"https://example.com/about\">about</a>"),
+            "{out}"
+        );
         assert!(out.contains("<a href=\"#top\">top</a>"), "{out}");
         assert!(out.contains("<a href=\"#\">f</a>"), "{out}");
-        assert!(out.contains("<form><button>go</button><input type=\"image\" src=\"assets/hero.png\"></form>"), "{out}");
         assert!(
-            out.contains("<p class=\"md:flex hover:bg-blue\" aria-label=\"Photo: sunset\">text</p>"),
+            out.contains(
+                "<form><button>go</button><input type=\"image\" src=\"assets/hero.png\"></form>"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "<p class=\"md:flex hover:bg-blue\" aria-label=\"Photo: sunset\">text</p>"
+            ),
             "{out}"
         );
         assert!(out.contains("<a href=\"#\"><text>t</text></a>"), "{out}");
         assert!(out.contains("<image></image><use></use>"), "{out}");
-        assert!(out.contains("<rect fill=\"url(#g)\" filter=\"url(&quot;about:invalid&quot;)\"></rect>"), "{out}");
-        assert!(out.contains("<animate attributeName=\"opacity\" values=\"0;1\"></animate></svg>"), "{out}");
+        assert!(
+            out.contains(
+                "<rect fill=\"url(#g)\" filter=\"url(&quot;about:invalid&quot;)\"></rect>"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("<animate attributeName=\"opacity\" values=\"0;1\"></animate></svg>"),
+            "{out}"
+        );
         assert!(out.contains("<math><mi>x</mi></math>"), "{out}");
-        assert!(out.contains("<img src=\"assets/hero.png\">\n</body>"), "{out}");
+        assert!(
+            out.contains("<img src=\"assets/hero.png\">\n</body>"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -960,8 +1034,14 @@ mod tests {
         assert!(!out.contains("cdn.example"), "{out}");
         assert!(out.contains("<template shadowrootmode=\"open\"><style>:host{background:url(\"about:invalid\")}</style><img><slot></slot></template>"), "{out}");
         assert!(out.contains("<template><p>p</p></template>"), "{out}");
-        assert!(out.contains(".a{fill:url(#g)} .b{background:url(\"about:invalid\")}"), "{out}");
-        assert!(out.contains("<style>@import url(\"about:invalid\"); a{color:red}</style>"), "{out}");
+        assert!(
+            out.contains(".a{fill:url(#g)} .b{background:url(\"about:invalid\")}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<style>@import url(\"about:invalid\"); a{color:red}</style>"),
+            "{out}"
+        );
         assert!(!out.contains("a comment"), "{out}");
         assert!(out.contains("<textarea>&lt;script&gt;</textarea>"), "{out}");
         assert!(out.contains("kept text"), "{out}");
@@ -972,11 +1052,17 @@ mod tests {
         // No doctype: quirks mode, kept so; a frameset page gets a body of its own.
         let out = inert("<html><body><p>old page</p></body></html>");
         assert!(out.starts_with("<html><head><meta http-equiv="), "{out}");
-        let out = inert("<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\"><html><body><p>x</p></body></html>");
+        let out = inert(
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\"><html><body><p>x</p></body></html>",
+        );
         assert!(out.starts_with("<!DOCTYPE html PUBLIC"), "{out}");
-        let out = inert("<!DOCTYPE html><html><frameset><frame src=\"https://evil.example/\"></frameset></html>");
+        let out = inert(
+            "<!DOCTYPE html><html><frameset><frame src=\"https://evil.example/\"></frameset></html>",
+        );
         assert!(out.ends_with("</head><body></body></html>"), "{out}");
-        let out = inert("<!DOCTYPE html><title>t</title>text before<meta http-equiv=\"Content-Security-Policy\" content=\"default-src *\"><p>x");
+        let out = inert(
+            "<!DOCTYPE html><title>t</title>text before<meta http-equiv=\"Content-Security-Policy\" content=\"default-src *\"><p>x",
+        );
         assert_quiet(&out);
         assert_eq!(out.matches("Content-Security-Policy").count(), 1, "{out}");
     }
@@ -986,7 +1072,11 @@ mod tests {
         let ok = inert("<!DOCTYPE html><p>fine</p>");
         assert!(verify(&ok, &files(), QuirksMode::NoQuirks).is_ok());
         // The policy not first in the head, or a copy that would change when cleaned again.
-        let moved = ok.replacen("<head><meta http-equiv", "<head><title>x</title><meta http-equiv", 1);
+        let moved = ok.replacen(
+            "<head><meta http-equiv",
+            "<head><title>x</title><meta http-equiv",
+            1,
+        );
         assert!(verify(&moved, &files(), QuirksMode::NoQuirks).is_err());
         let dirty = ok.replace("<p>fine</p>", "<p onclick=\"x\">fine</p>");
         assert!(verify(&dirty, &files(), QuirksMode::NoQuirks).is_err());

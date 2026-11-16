@@ -83,9 +83,9 @@ pub(crate) fn endpoint_url(raw: &str) -> Result<Url, String> {
     if url.host().is_none() {
         return Err(format!("'{trimmed}' has no host"));
     }
-    let dotted_localhost = url.domain().is_some_and(|domain| {
-        domain.ends_with('.') && domain.trim_end_matches('.') == "localhost"
-    });
+    let dotted_localhost = url
+        .domain()
+        .is_some_and(|domain| domain.ends_with('.') && domain.trim_end_matches('.') == "localhost");
     if dotted_localhost {
         url.set_host(Some("localhost"))
             .map_err(|err| format!("'{trimmed}' is not a valid URL ({err})"))?;
@@ -1708,12 +1708,18 @@ mod tests {
         );
         assert_eq!(err.to_string(), "HTTP 401: bad key [API key] sent");
         assert_eq!(
-            scrub_key(ProviderError::Decode("said pw12 twice: pw12".into()), Some(" pw12 ")),
+            scrub_key(
+                ProviderError::Decode("said pw12 twice: pw12".into()),
+                Some(" pw12 ")
+            ),
             ProviderError::Decode("said [API key] twice: [API key]".into())
         );
         // A cut piece of a short key is too short to be secret (12 characters at least).
         assert_eq!(
-            scrub_key(ProviderError::Network("bad key secret…".into()), Some("secret7")),
+            scrub_key(
+                ProviderError::Network("bad key secret…".into()),
+                Some("secret7")
+            ),
             ProviderError::Network("bad key secret…".into())
         );
         // Shorter keys and missing ones change nothing.

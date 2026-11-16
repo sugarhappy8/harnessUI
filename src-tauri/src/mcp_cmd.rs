@@ -663,7 +663,9 @@ pub(crate) async fn carry_added_tools(store: &store::Store, tools: &[mcp_host::R
         .iter()
         .filter(|(tool, _, _)| !done.iter().any(|d| d == tool))
         .filter_map(|(tool, group, _)| {
-            let registered = tools.iter().any(|t| t.server == *group && t.exposed == *tool);
+            let registered = tools
+                .iter()
+                .any(|t| t.server == *group && t.exposed == *tool);
             let others: Vec<String> = tools
                 .iter()
                 .filter(|t| t.server == *group && t.exposed != *tool)
@@ -3589,14 +3591,29 @@ mod tests {
         };
         let prefs = store.get_chat(all_on).await.unwrap().unwrap().tool_prefs;
         assert!(enabled(&prefs).contains(&"browser_capture_site".to_string()));
-        assert_eq!(prefs.get("thinkingOff"), Some(&json!(true)), "the rest of the choice stays");
+        assert_eq!(
+            prefs.get("thinkingOff"),
+            Some(&json!(true)),
+            "the rest of the choice stays"
+        );
         let prefs = store.get_chat(some_on).await.unwrap().unwrap().tool_prefs;
-        assert_eq!(enabled(&prefs), part, "part of the group on: the new tool stays off");
+        assert_eq!(
+            enabled(&prefs),
+            part,
+            "part of the group on: the new tool stays off"
+        );
         let prefs = store.get_chat(defaults).await.unwrap().unwrap().tool_prefs;
-        assert!(prefs.get("enabled").is_none(), "no saved choice: the defaults decide");
+        assert!(
+            prefs.get("enabled").is_none(),
+            "no saved choice: the defaults decide"
+        );
         let last: Vec<String> = store.get_setting(DEFAULT_TOOLS).await.unwrap().unwrap();
         assert!(last.contains(&"browser_capture_site".to_string()));
-        let carried: Vec<String> = store.get_setting(ADDED_TOOLS_CARRIED).await.unwrap().unwrap();
+        let carried: Vec<String> = store
+            .get_setting(ADDED_TOOLS_CARRIED)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(carried, ["browser_capture_site"]);
 
         // Once only: switched off later, it stays off at the next start.
@@ -3617,6 +3634,12 @@ mod tests {
         // No saved last choice at all: nothing is written for it.
         let fresh = store::Store::open_in_memory().expect("store");
         carry_added_tools(&fresh, &tools).await;
-        assert!(fresh.get_setting::<Vec<String>>(DEFAULT_TOOLS).await.unwrap().is_none());
+        assert!(
+            fresh
+                .get_setting::<Vec<String>>(DEFAULT_TOOLS)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

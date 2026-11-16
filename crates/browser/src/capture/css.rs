@@ -156,7 +156,8 @@ fn walk<'i>(p: &mut CssParser<'i, '_>, out: &mut RawUrls, depth: usize, strings_
                     // The block is skipped by the next token read; what it holds is unknown.
                     out.complete = false;
                 } else {
-                    let urls = matches!(lname.as_str(), "image-set" | "-webkit-image-set" | "image");
+                    let urls =
+                        matches!(lname.as_str(), "image-set" | "-webkit-image-set" | "image");
                     let _ = p.parse_nested_block(|q| -> Result<(), ParseError<'i, ()>> {
                         walk(q, out, depth + 1, urls);
                         Ok(())
@@ -226,14 +227,14 @@ pub fn rewrite_raw(
     rewrite_spans(css, refs.iter().map(|r| (r.start, r.end, replace(r))))
 }
 
-fn rewrite_spans(
-    css: &str,
-    spans: impl Iterator<Item = (usize, usize, Option<String>)>,
-) -> String {
+fn rewrite_spans(css: &str, spans: impl Iterator<Item = (usize, usize, Option<String>)>) -> String {
     let mut out = String::with_capacity(css.len());
     let mut last = 0;
     for (start, end, new) in spans {
-        if start < last || end > css.len() || !css.is_char_boundary(start) || !css.is_char_boundary(end)
+        if start < last
+            || end > css.len()
+            || !css.is_char_boundary(start)
+            || !css.is_char_boundary(end)
         {
             continue;
         }
@@ -1038,16 +1039,29 @@ mod tests {
                    e{f:url(a b)}g{h:image-set(\"https://cdn.example/i.png\" 1x)}i{j:url(\"\")}";
         let out = confine(css, local).unwrap();
         assert!(out.contains("url(../assets/a.png)"), "{out}");
-        assert!(out.contains("url(#m)") && out.contains("url(data:image/png;base64,AA)"), "{out}");
+        assert!(
+            out.contains("url(#m)") && out.contains("url(data:image/png;base64,AA)"),
+            "{out}"
+        );
         assert!(out.contains("@import url(theme.css)"), "{out}");
-        for gone in ["attacker.example", "evil.example", "cdn.example", "data:text/css", "a b"] {
+        for gone in [
+            "attacker.example",
+            "evil.example",
+            "cdn.example",
+            "data:text/css",
+            "a b",
+        ] {
             assert!(!out.contains(gone), "{gone} is still in {out}");
         }
         assert_eq!(out.matches(INERT_URL).count(), 7, "{out}");
         // Confining again changes nothing.
         assert_eq!(confine(&out, local).unwrap(), out);
         // Text nested deeper than can be read is not confined at all.
-        let deep = format!("{}url(file://x/y){}", "(".repeat(MAX_NESTING + 5), ")".repeat(MAX_NESTING + 5));
+        let deep = format!(
+            "{}url(file://x/y){}",
+            "(".repeat(MAX_NESTING + 5),
+            ")".repeat(MAX_NESTING + 5)
+        );
         assert!(confine(&deep, local).is_none());
         assert_eq!(url_text(" \tda\nta:image/png,x "), "data:image/png,x");
     }

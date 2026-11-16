@@ -258,3 +258,12 @@ and `README.md`.
   file through the normal memory retries and drops it only as the last step. runtime
   (real server) all pass, app 877, vitest 844. Not done: Browse's own model + image
   download still takes the repository's first image file. Verification running.
+- Cross-package review of P3, P4, P6a: nothing critical, no safety rule weakened; P3's
+  last round and P6a verified (Stop, cards across reloads, per-chat Stop, attachments,
+  listeners). Real-model test passes. One major in P4: a made-up result written in the
+  app's own result format (`</tool_output id="…">`) wasn't caught. Minor: a helper asking
+  for a coding app through `call_tool` was told the user could switch it on; the computer
+  phrases still matched some coding requests ("write code to take a screenshot in
+  selenium") and missed some desktop ones ("close notepad"); a checklist step that can't be
+  done. Nits: a race that could leave the window minimised after a turn; *Continue* and
+  *Resume* without a click delay. Small last rounds for P4 and P3 running.

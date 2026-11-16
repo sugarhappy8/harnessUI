@@ -1443,7 +1443,10 @@ async fn a_short_key_a_local_server_echoes_is_scrubbed() {
         let err = client.list_models().await.unwrap_err();
         let shown = format!("{err} {}", err.user_message());
         assert!(!shown.contains("secret7"), "{kind:?}: {shown}");
-        assert!(shown.contains("bad key [API key] sent"), "{kind:?}: {shown}");
+        assert!(
+            shown.contains("bad key [API key] sent"),
+            "{kind:?}: {shown}"
+        );
         let mut request = simple_request("claude-opus-5-5");
         request.max_tokens = Some(100);
         let mut stream = client

@@ -860,15 +860,24 @@ fn hostile_pages(beacon: u16, ws: u16) -> HashMap<String, Page> {
     let sprite_b2 = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\"><symbol id=\"dot2\" viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\" fill=\"#3a3\"/></symbol><_:script xmlns:_=\"http://www.w3.org/2000/svg\">fetch(\"{b}/BEACON-B-sprite2\")</_:script><title>&lt;img src=x onerror=fetch('{b}/BEACON-B-title')&gt;</title></svg>"
     );
-    let c1 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"green\"/><_:script xmlns:_=\"http://www.w3.org/2000/svg\">document.documentElement.setAttribute(\"data-pwned\",\"C1\");fetch(\"{b}/BEACON-C1\")</_:script></svg>");
-    let c2 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"blue\"/><h.x:script xmlns:h.x=\"http://www.w3.org/1999/xhtml\">document.documentElement.setAttribute(\"data-pwned\",\"C2\");fetch(\"{b}/BEACON-C2\")</h.x:script></svg>");
-    let c3 = format!("<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY x \"&#60;script&#62;document.documentElement.setAttribute(&#34;data-pwned&#34;,&#34;C3&#34;);fetch(&#34;{b}/BEACON-C3&#34;)&#60;/script&#62;\">]><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"orange\"/>&x;</svg>");
-    let c4 = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" x=\">\" onload=\"document.documentElement.setAttribute('data-pwned','C4');fetch('{b}/BEACON-C4')\"><rect width=\"20\" height=\"20\"/></svg>");
-    let page_c = r#"<!DOCTYPE html><html><head><title>Pictures</title></head><body><h1>Pictures</h1>
+    let c1 = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"green\"/><_:script xmlns:_=\"http://www.w3.org/2000/svg\">document.documentElement.setAttribute(\"data-pwned\",\"C1\");fetch(\"{b}/BEACON-C1\")</_:script></svg>"
+    );
+    let c2 = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"blue\"/><h.x:script xmlns:h.x=\"http://www.w3.org/1999/xhtml\">document.documentElement.setAttribute(\"data-pwned\",\"C2\");fetch(\"{b}/BEACON-C2\")</h.x:script></svg>"
+    );
+    let c3 = format!(
+        "<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY x \"&#60;script&#62;document.documentElement.setAttribute(&#34;data-pwned&#34;,&#34;C3&#34;);fetch(&#34;{b}/BEACON-C3&#34;)&#60;/script&#62;\">]><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"orange\"/>&x;</svg>"
+    );
+    let c4 = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" x=\">\" onload=\"document.documentElement.setAttribute('data-pwned','C4');fetch('{b}/BEACON-C4')\"><rect width=\"20\" height=\"20\"/></svg>"
+    );
+    let page_c =
+        r#"<!DOCTYPE html><html><head><title>Pictures</title></head><body><h1>Pictures</h1>
 <img src="/c/p1.svg" width="20" height="20"><img src="/c/p2.svg" width="20" height="20">
 <img src="/c/p3.svg" width="20" height="20"><img src="/c/p4.svg" width="20" height="20">
 </body></html>"#
-        .to_string();
+            .to_string();
     let page_f = r#"<!DOCTYPE html><html><head><title>Files</title><link rel="stylesheet" href="/f/site.css"></head><body>
 <img src="file://attacker.example/share/pic.png" width="10" height="10">
 <div style="width:10px;height:10px;background:url('file://attacker.example/share/bg.png')"></div>
@@ -927,19 +936,14 @@ async fn capture_into(
     (out.is_error, out.joined_text())
 }
 
-/// The text of a saved file without the copy's own policy (which names `file:`, the
-/// scheme the copy's own files load with).
-fn without_policy(text: &str) -> String {
-    text.replace(browser::capture::html::COPY_POLICY, "")
-}
-
 /// Nothing in a saved copy can run, and nothing points anywhere but at its own files: the
 /// copy is parsed as a browser parses it and every element and attribute is looked at
 /// (page text may well quote markup; it is only text).
 fn assert_inert_files(folder: &Path, beacon: u16, site: u16) {
     let index = std::fs::read_to_string(folder.join("index.html")).unwrap();
     assert!(
-        index.contains("<html") && index.contains("<head><meta http-equiv=\"Content-Security-Policy\""),
+        index.contains("<html")
+            && index.contains("<head><meta http-equiv=\"Content-Security-Policy\""),
         "the policy comes first: {index}"
     );
     let outside = |v: &str| {
@@ -965,8 +969,20 @@ fn assert_inert_files(folder: &Path, beacon: u16, site: u16) {
             };
             let name = e.name.local.as_ref().to_ascii_lowercase();
             if [
-                "script", "noscript", "embed", "object", "applet", "iframe", "frame", "frameset",
-                "base", "portal", "fencedframe", "foreignobject", "xmp", "plaintext",
+                "script",
+                "noscript",
+                "embed",
+                "object",
+                "applet",
+                "iframe",
+                "frame",
+                "frameset",
+                "base",
+                "portal",
+                "fencedframe",
+                "foreignobject",
+                "xmp",
+                "plaintext",
             ]
             .contains(&name.as_str())
             {
@@ -1002,7 +1018,11 @@ fn assert_inert_files(folder: &Path, beacon: u16, site: u16) {
             }
         }
     }
-    assert!(problems.is_empty(), "{}: {problems:?}\n{index}", folder.display());
+    assert!(
+        problems.is_empty(),
+        "{}: {problems:?}\n{index}",
+        folder.display()
+    );
     if let Ok(dir) = std::fs::read_dir(folder.join("styles")) {
         for e in dir {
             let css = std::fs::read_to_string(e.unwrap().path()).unwrap();
@@ -1062,7 +1082,8 @@ async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
     .unwrap();
     let (_, seen) = open_recorded(&control, work.path(), &beacon).await;
     assert!(
-        seen.iter().any(|r| r.contains("attacker.example/control.png"))
+        seen.iter()
+            .any(|r| r.contains("attacker.example/control.png"))
             && seen.iter().any(|r| r.contains("BEACON-control")),
         "the recording proxy saw: {seen:?}"
     );
@@ -1070,20 +1091,33 @@ async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
 
     for page in ["a", "b", "c", "f", "e"] {
         let into = approved.join(page);
-        let (failed, text) = capture_into(&server, &chat, &site.url(&format!("/{page}/")), &into).await;
+        let (failed, text) =
+            capture_into(&server, &chat, &site.url(&format!("/{page}/")), &into).await;
         assert!(!failed, "/{page}/: {text}");
         let folder = only_dir(&dunce::canonicalize(&into).unwrap());
         assert_inert_files(&folder, beacon.port, site.port);
         let (dom, seen) = open_recorded(&folder.join("index.html"), work.path(), &beacon).await;
-        assert!(seen.is_empty(), "/{page}/: the copy made requests: {seen:?}");
+        assert!(
+            seen.is_empty(),
+            "/{page}/: the copy made requests: {seen:?}"
+        );
         assert!(!dom.contains("data-pwned"), "/{page}/: {dom}");
         let index = std::fs::read_to_string(folder.join("index.html")).unwrap();
         match page {
             "a" => assert!(index.contains("Copy of the page"), "{index}"),
             "b" => {
-                assert!(index.starts_with("<!DOCTYPE html>\n<html lang=\"en\"><head>"), "{index}");
-                assert!(index.contains("<symbol id=\"dot2\""), "the clean shapes are copied in: {index}");
-                assert!(!index.contains("<symbol id=\"dot\""), "a picture that is not well-formed XML is left out: {index}");
+                assert!(
+                    index.starts_with("<!DOCTYPE html>\n<html lang=\"en\"><head>"),
+                    "{index}"
+                );
+                assert!(
+                    index.contains("<symbol id=\"dot2\""),
+                    "the clean shapes are copied in: {index}"
+                );
+                assert!(
+                    !index.contains("<symbol id=\"dot\""),
+                    "a picture that is not well-formed XML is left out: {index}"
+                );
                 assert!(!index.contains("<img"), "{index}");
             }
             "c" => {
@@ -1092,10 +1126,17 @@ async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
                     .map(|e| e.unwrap().path())
                     .filter(|p| p.extension().is_some_and(|x| x == "svg"))
                     .collect();
-                assert_eq!(svgs.len(), 3, "the picture with a document type is left out: {svgs:?}");
+                assert_eq!(
+                    svgs.len(),
+                    3,
+                    "the picture with a document type is left out: {svgs:?}"
+                );
                 for svg in svgs {
                     let text = std::fs::read_to_string(&svg).unwrap();
-                    assert!(!text.contains("script") && !text.contains("onload"), "{text}");
+                    assert!(
+                        !text.contains("script") && !text.contains("onload"),
+                        "{text}"
+                    );
                     let (dom, seen) = open_recorded(&svg, work.path(), &beacon).await;
                     assert!(seen.is_empty(), "{}: requests {seen:?}", svg.display());
                     assert!(!dom.contains("data-pwned"), "{}: {dom}", svg.display());
@@ -1111,7 +1152,11 @@ async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
     // The capture itself never reached the beacon, and the policy kept the WebSocket from
     // even connecting.
     assert!(beacon.requests().is_empty(), "{:?}", beacon.requests());
-    assert!(ws.requests().is_empty(), "the WebSocket connected: {:?}", ws.requests());
+    assert!(
+        ws.requests().is_empty(),
+        "the WebSocket connected: {:?}",
+        ws.requests()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1141,8 +1186,6 @@ async fn a_websocket_that_starts_stops_the_capture_and_nothing_is_saved() {
         "the WebSocket did start here: {:?}",
         ws.requests()
     );
-    let left = std::fs::read_dir(&into)
-        .map(|d| d.count())
-        .unwrap_or(0);
+    let left = std::fs::read_dir(&into).map(|d| d.count()).unwrap_or(0);
     assert_eq!(left, 0, "no capture folder is left");
 }

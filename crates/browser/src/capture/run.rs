@@ -1030,8 +1030,7 @@ async fn work(
             .map(|f| f.path.clone())
             .chain(sheets.iter().filter_map(|s| s.path.clone()))
             .collect();
-        let Some(rewritten) =
-            css::confine(&rewritten, |t| inert::local_file(t, &path, &linkable))
+        let Some(rewritten) = css::confine(&rewritten, |t| inert::local_file(t, &path, &linkable))
         else {
             let what = if sheet.url.is_empty() {
                 format!("style sheet {}", sheet.stem)
@@ -1127,7 +1126,11 @@ async fn work(
         styles: page
             .get("styles")
             .and_then(Value::as_array)
-            .map(|list| (0..list.len()).map(|i| style_paths.get(&i).cloned()).collect())
+            .map(|list| {
+                (0..list.len())
+                    .map(|i| style_paths.get(&i).cloned())
+                    .collect()
+            })
             .unwrap_or_default(),
         srcsets: page
             .get("srcsets")
@@ -1171,8 +1174,7 @@ async fn work(
         let Some(text) = svg_texts.get(path) else {
             continue;
         };
-        if sprites.iter().map(String::len).sum::<usize>() + text.len()
-            <= 4 * html::MAX_SPRITE_BYTES
+        if sprites.iter().map(String::len).sum::<usize>() + text.len() <= 4 * html::MAX_SPRITE_BYTES
         {
             sprites.push(text.clone());
             if let Some(flag) = targets.inlined.get_mut(n) {
@@ -1196,7 +1198,10 @@ async fn work(
         }
     };
     if !copy.whole {
-        notes.push("The page was too large to read whole in time; the copy (index.html) stops there.".into());
+        notes.push(
+            "The page was too large to read whole in time; the copy (index.html) stops there."
+                .into(),
+        );
     }
     w.write("", "index.html", copy.html.as_bytes())?;
 

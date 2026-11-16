@@ -1458,7 +1458,11 @@ fn each_helper_has_a_conversation_of_its_own() {
     let first = helper_client(chat.clone(), 7);
     let second = helper_client(chat.clone(), 7);
     let name = |client: &OpenAiClient| client.config().conversation.clone().unwrap_or_default();
-    assert!(name(&first).starts_with("chat 7 helper "), "{}", name(&first));
+    assert!(
+        name(&first).starts_with("chat 7 helper "),
+        "{}",
+        name(&first)
+    );
     assert_ne!(name(&first), name(&second));
     assert_eq!(name(&chat), "chat 7");
 }
