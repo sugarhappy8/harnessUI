@@ -265,6 +265,7 @@ fn guide(groups: Vec<ToolGroup>, os: GuideOs, n_ctx: u32) -> ToolGuide {
         reach: Reach::CallTool,
         os,
         budget: tool_guide_budget(n_ctx),
+        sections: Vec::new(),
     }
 }
 
@@ -453,12 +454,14 @@ fn the_blocks_never_take_more_than_their_budget() {
         for os in [GuideOs::Windows, GuideOs::MacOs, GuideOs::Other] {
             for reach in &reaches {
                 for budget in (0..=2_400).step_by(41) {
-                    let g = ToolGuide {
+                    let mut g = ToolGuide {
                         groups: groups.clone(),
                         reach: reach.clone(),
                         os,
                         budget,
+                        sections: vec![capture_section()],
                     };
+                    g.groups.push(group("Browser", &[("browser_capture_site", "Capture.")]));
                     let size = tokens(&g);
                     assert!(size <= budget, "{size} > {budget} ({os:?}, {reach:?})");
                 }
@@ -468,6 +471,107 @@ fn the_blocks_never_take_more_than_their_budget() {
     let mut none = guide(twenty(), GuideOs::Windows, 4_096);
     none.budget = 30;
     assert!(tool_guide_blocks(&none, &Sanitizer::generic()).is_empty());
+}
+
+/// A part of the guide the app writes about one of its tools (the browser's capture method in
+/// the app; stand-in text here, the agent knows nothing about it).
+fn capture_section() -> GuideSection {
+    GuideSection {
+        tool: "browser_capture_site".into(),
+        full: vec![
+            "Rebuilding a website's look (browser_capture_site):".into(),
+            "- Capture the page, read report.md and plan the page as sections.".into(),
+        ],
+        short: "Website capture: capture, read report.md, rebuild with the user's own content."
+            .into(),
+    }
+}
+
+fn with_capture() -> Vec<ToolGroup> {
+    let mut groups = twenty();
+    groups.push(group(
+        "Browser",
+        &[
+            ("browser_navigate", "Open a web page in the agent's browser."),
+            (
+                "browser_capture_site",
+                "Save a web page's look to rebuild its design with the user's own content.",
+            ),
+        ],
+    ));
+    groups
+}
+
+/// [0.0.7] The app's own parts of the guide: in full when there is room, one line in the
+/// short guide, nothing at the smallest budgets, and only while the tool is on.
+#[test]
+fn the_app_writes_parts_of_the_guide_about_its_own_tools() {
+    let full_line = "- Capture the page, read report.md and plan the page as sections.";
+    let short_line = "Website capture: capture, read report.md, rebuild with the user's own content.";
+    let mut large = guide(with_capture(), GuideOs::Windows, 32_768);
+    large.sections.push(capture_section());
+    let text_large = text(&large);
+    assert!(
+        text_large.contains("\nRebuilding a website's look (browser_capture_site):\n"),
+        "{text_large}"
+    );
+    assert!(text_large.contains(full_line), "{text_large}");
+    assert!(!text_large.contains(short_line), "{text_large}");
+    // A smaller budget: the short guide, with the section's one line.
+    let mut small = large.clone();
+    small.budget = tool_guide_budget(8_192);
+    let text_small = text(&small);
+    assert!(text_small.contains(short_line), "{text_small}");
+    assert!(!text_small.contains(full_line), "{text_small}");
+    // The smallest: nothing of it.
+    let mut tiny = large.clone();
+    tiny.budget = 40;
+    assert!(!text(&tiny).contains("Website capture"));
+    // Off in the chat, or out of reach this turn: no part of it.
+    let mut off = guide(twenty(), GuideOs::Windows, 32_768);
+    off.sections.push(capture_section());
+    assert!(!text(&off).contains("Website capture") && !text(&off).contains("report.md"));
+    let mut far = large.clone();
+    far.reach = Reach::Only(vec!["read_file".into()]);
+    assert!(!text(&far).contains("report.md"));
+    // An added server's tool of the same name is not the app's own.
+    let mut lookalike = guide(twenty(), GuideOs::Windows, 32_768);
+    lookalike.groups.push(ToolGroup {
+        label: "web".into(),
+        own: false,
+        tools: vec![tool("browser_capture_site", "Captures sites.")],
+    });
+    lookalike.sections.push(capture_section());
+    assert!(!text(&lookalike).contains("report.md"));
+    // The same tools give the same text, whatever else is so.
+    assert_eq!(text(&large), text(&large.clone()));
+}
+
+/// [0.0.7 verification] call_tool cannot run run_subagent: the call_tool rule says so when
+/// run_subagent is on, as the loop's reply to a call to it does.
+#[test]
+fn the_call_tool_rule_says_what_it_cannot_run() {
+    let groups = sixty_nine();
+    let with = text(&guide(groups.clone(), GuideOs::MacOs, 131_072));
+    assert!(
+        with.contains(
+            "run it with call_tool, giving its name and its arguments; find_tools shows its \
+             arguments and examples. call_tool cannot run run_subagent."
+        ),
+        "{with}"
+    );
+    let mut without_subagent = groups.clone();
+    without_subagent.retain(|g| g.label != "Subagents");
+    assert!(
+        !text(&guide(without_subagent, GuideOs::MacOs, 131_072)).contains("cannot run"),
+        "without run_subagent"
+    );
+    // The group sizes say it too; without call_tool there is nothing to say.
+    let counts = text(&guide(groups.clone(), GuideOs::MacOs, 8_192));
+    assert!(counts.contains("call_tool cannot run run_subagent."), "{counts}");
+    let mut all = guide(groups, GuideOs::MacOs, 131_072);
+    all.reach = Reach::All;
+    assert!(!text(&all).contains("cannot run"));
 }
 
 #[test]

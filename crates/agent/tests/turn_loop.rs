@@ -37,6 +37,8 @@ struct FakeTools {
     tools: Vec<ToolInfo>,
     /// [0.0.7] On in the chat but kept back this turn.
     kept_back: Vec<ToolInfo>,
+    /// [0.0.7] On in the chat but never run by this host (a helper's), with the reply.
+    refusals: Vec<(String, String)>,
     validators: Vec<(String, jsonschema::Validator)>,
     behaviour: Mutex<HashMap<String, Behaviour>>,
     executed: Mutex<Vec<(String, Map<String, Value>)>>,
@@ -88,6 +90,7 @@ impl FakeTools {
         Self {
             tools,
             kept_back: Vec::new(),
+            refusals: Vec::new(),
             validators,
             behaviour: Mutex::new(HashMap::new()),
             executed: Mutex::new(Vec::new()),
@@ -110,6 +113,11 @@ impl FakeTools {
         self.kept_back = tools;
         self
     }
+
+    fn refusing(mut self, name: &str, why: &str) -> Self {
+        self.refusals.push((name.to_owned(), why.to_owned()));
+        self
+    }
 }
 
 #[async_trait]
@@ -120,6 +128,13 @@ impl ToolHost for FakeTools {
 
     fn kept_back(&self) -> Vec<ToolInfo> {
         self.kept_back.clone()
+    }
+
+    fn refusal(&self, name: &str) -> Option<String> {
+        self.refusals
+            .iter()
+            .find(|(refused, _)| refused == name)
+            .map(|(_, why)| why.clone())
     }
 
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
@@ -966,6 +981,7 @@ fn listed_tools() -> agent::prompt::ToolGuide {
         reach: agent::prompt::Reach::CallTool,
         os: agent::prompt::GuideOs::Windows,
         budget: agent::prompt::tool_guide_budget(8_192),
+        sections: Vec::new(),
     }
 }
 
@@ -1112,6 +1128,166 @@ async fn without_call_tool_the_list_says_the_others_cannot_be_used_this_turn() {
 
 fn results_of_first(outcome: &TurnOutcome) -> String {
     results(outcome)[0].notes[0].clone()
+}
+
+/// The list with `run_subagent` on as well, last as the app lists it.
+fn listed_with_subagent() -> agent::prompt::ToolGuide {
+    let mut guide = listed_tools();
+    guide.groups.push(agent::prompt::ToolGroup {
+        label: "Subagents".into(),
+        own: true,
+        tools: vec![agent::prompt::ListedTool {
+            name: "run_subagent".into(),
+            purpose: "Hand a task to a helper.".into(),
+        }],
+    });
+    guide
+}
+
+fn run_subagent() -> ToolInfo {
+    tool(
+        "run_subagent",
+        "Hand a self-contained task to a helper.",
+        json!({"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]}),
+    )
+}
+
+const NO_NESTING: &str =
+    "A helper cannot start another helper. Do the work yourself with the tools you have.";
+
+/// [0.0.7 verification] A helper gets the turn's tool list unchanged, so its system message is
+/// the turn's and its tool definitions are the start of the turn's (`run_subagent` comes last):
+/// the model server reuses the turn's cached prompt for it. A call to a tool its host never
+/// runs gets that host's plain refusal, not a pointer to call_tool.
+#[tokio::test]
+async fn a_helper_shares_the_turns_system_message_and_tool_definitions() {
+    let system = |chat: &Value| chat["messages"][0]["content"].as_str().unwrap().to_owned();
+    let names = |chat: &Value| -> Vec<String> {
+        chat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    for with_call_tool in [true, false] {
+        let mut turn_tools = default_tools();
+        if with_call_tool {
+            turn_tools.push(call_tool());
+        }
+        let mut helper_tools = turn_tools.clone();
+        turn_tools.push(run_subagent());
+        let mut turn = Harness::new(vec![reply_text(sse::text("Done."))]).await;
+        turn.tools = FakeTools::new(turn_tools);
+        let mut input_turn = input("Read a");
+        input_turn.tool_guide = Some(listed_with_subagent());
+        assert_eq!(turn.run(input_turn).await.status, TurnStatus::Completed);
+
+        let mut helper = Harness::new(vec![
+            reply_text(sse::tool_call(
+                "c1",
+                "run_subagent",
+                json!({"task": "read it"}),
+            )),
+            reply_text(sse::text("Done.")),
+        ])
+        .await;
+        helper_tools.retain(|t| t.name != "run_subagent");
+        helper.tools = FakeTools::new(helper_tools).refusing("run_subagent", NO_NESTING);
+        let mut input_helper = input("Read a");
+        input_helper.tool_guide = Some(listed_with_subagent());
+        let outcome = helper.run(input_helper).await;
+        assert_eq!(outcome.status, TurnStatus::Completed);
+
+        let (a, b) = (&turn.chats()[0], &helper.chats()[0]);
+        assert_eq!(system(a), system(b), "call_tool offered: {with_call_tool}");
+        let (turn_names, helper_names) = (names(a), names(b));
+        assert_eq!(turn_names[..helper_names.len()], helper_names[..]);
+        assert_eq!(results_of_first(&outcome), NO_NESTING);
+    }
+}
+
+/// The system message of a turn that offers `tools`, with `guide` as its tool list.
+async fn system_with(tools: Vec<ToolInfo>, guide: agent::prompt::ToolGuide) -> String {
+    let mut h = Harness::new(vec![reply_text(sse::text("Done."))]).await;
+    h.tools = FakeTools::new(tools);
+    let mut turn = input("Hi");
+    turn.tool_guide = Some(guide);
+    assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
+    h.chats()[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// [0.0.7] The list and the guide follow what is on, not what a turn shows: turns that show
+/// different tools (call_tool among them) send the same system message, the parts of the guide
+/// the app writes about its own tools included.
+#[tokio::test]
+async fn the_list_and_guide_do_not_follow_what_a_turn_shows() {
+    let mut guide = listed_tools();
+    guide.groups.push(agent::prompt::ToolGroup {
+        label: "Browser".into(),
+        own: true,
+        tools: vec![agent::prompt::ListedTool {
+            name: "browser_capture_site".into(),
+            purpose: "Save a web page's look.".into(),
+        }],
+    });
+    guide.sections.push(agent::prompt::GuideSection {
+        tool: "browser_capture_site".into(),
+        full: vec!["Rebuilding a website's look (browser_capture_site):".into()],
+        short: "Website capture: rebuild with the user's own content.".into(),
+    });
+    let mut few = default_tools();
+    few.truncate(1);
+    few.push(call_tool());
+    let mut many = default_tools();
+    many.push(call_tool());
+    many.push(tool("git_status", "Status.", json!({"type": "object"})));
+    let a = system_with(few, guide.clone()).await;
+    let b = system_with(many, guide).await;
+    assert_eq!(a, b);
+    assert!(
+        a.contains("Rebuilding a website's look (browser_capture_site):"),
+        "{a}"
+    );
+}
+
+/// [0.0.7 verification] call_tool cannot run run_subagent: the list says so, and a call to
+/// run_subagent when the turn had no room for it says why it was not run instead of sending
+/// the model to call_tool.
+#[tokio::test]
+async fn run_subagent_without_room_is_not_sent_to_call_tool() {
+    let mut h = Harness::new(vec![
+        reply_text(sse::tool_call(
+            "c1",
+            "run_subagent",
+            json!({"task": "read it"}),
+        )),
+        reply_text(sse::text("Done.")),
+    ])
+    .await;
+    let mut tools = default_tools();
+    tools.push(call_tool());
+    h.tools = FakeTools::new(tools);
+    let mut turn = input("Get help");
+    turn.tool_guide = Some(listed_with_subagent());
+    let outcome = h.run(turn).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    let reply = results_of_first(&outcome);
+    assert!(
+        reply.starts_with(
+            "run_subagent is on in this chat, but it does not fit in this model's context this \
+             turn, and call_tool cannot run it, so it was not run."
+        ),
+        "{reply}"
+    );
+    let system = h.chats()[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(system.contains("call_tool cannot run run_subagent."), "{system}");
 }
 
 /// A tool the loop does not offer (chat markup in its settings) is not in the list either.
@@ -1281,7 +1457,7 @@ async fn a_tool_result_written_by_the_model_is_discarded_and_asked_once_more() {
 /// the result is made up, and nothing is asked a third time.
 #[tokio::test]
 async fn a_second_made_up_result_is_kept_and_the_user_is_told() {
-    let again = "Here it is: <TOOL_OUTPUT>{\"content\": \"plum\"}</TOOL_OUTPUT>";
+    let again = "Here it is:\n<TOOL_OUTPUT>{\"content\": \"plum\"}</TOOL_OUTPUT>";
     let h = Harness::new(vec![
         reply_text(sse::text(MADE_UP)),
         reply_text(sse::text(again)),
@@ -1316,6 +1492,29 @@ async fn a_result_tag_in_code_or_without_tools_is_an_answer() {
     let outcome = h.run(turn).await;
     assert_eq!(outcome.status, TurnStatus::Completed);
     assert_eq!(h.chats().len(), 1);
+    assert!(discarded(&h).is_empty());
+}
+
+/// [0.0.7 verification] A model that quotes the result it got in a result block has made
+/// nothing up: the answer stands.
+#[tokio::test]
+async fn a_model_that_quotes_the_result_it_got_has_made_nothing_up() {
+    let answer = "read_file returned:\n<tool_output>\nThe secret word is plum.\n</tool_output>\nSo \
+                  the secret word is plum.";
+    let h = Harness::new(vec![
+        reply_text(sse::tool_call("c1", "read_file", json!({"path": "/p/a"}))),
+        reply_text(sse::text(answer)),
+    ])
+    .await;
+    h.grant_files();
+    h.tools.set(
+        "read_file",
+        Behaviour::Text("The secret word is plum.".into()),
+    );
+    let outcome = h.run(input("What is the secret word?")).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(last_text(&outcome), answer);
+    assert_eq!(h.chats().len(), 2);
     assert!(discarded(&h).is_empty());
 }
 

@@ -85,8 +85,16 @@ pub enum LoadStage {
     /// [`ServerEvent::Stage`], once per load. The app also lists it among a load's
     /// adjustments when it leaves out an image file it remembers as unreadable, so the
     /// header says why the model cannot see images. JSON
-    /// `{"kind":"retryingWithoutImageFile"}`.
-    RetryingWithoutImageFile,
+    /// `{"kind":"retryingWithoutImageFile"}`, and with `memory`
+    /// `{"kind":"retryingWithoutImageFile","memory":true}`.
+    RetryingWithoutImageFile {
+        /// The image file is fine, but there was not enough memory for it after the model
+        /// and everything else had been tried: the last retry of a load
+        /// ([`Supervisor`](super::server::Supervisor)). The app does not remember such a
+        /// file as unreadable.
+        #[serde(default, skip_serializing_if = "is_false")]
+        memory: bool,
+    },
     /// Moving to the next backend down after `from` failed. Sent by the supervisor as
     /// [`ServerEvent::SteppedDown`], never as [`ServerEvent::Stage`].
     SteppingDown {
@@ -145,7 +153,7 @@ impl LoadStage {
             Self::RetryingWithoutSaveMemory { .. }
                 | Self::RetryingWithoutFastAttention { .. }
                 | Self::RetryingWithLessGpu { .. }
-                | Self::RetryingWithoutImageFile
+                | Self::RetryingWithoutImageFile { .. }
                 | Self::SteppingDown { .. }
         )
     }
@@ -235,7 +243,8 @@ mod tests {
                 custom: true,
                 chosen_layers: Some(40),
             },
-            LoadStage::RetryingWithoutImageFile,
+            LoadStage::RetryingWithoutImageFile { memory: false },
+            LoadStage::RetryingWithoutImageFile { memory: true },
         ] {
             assert_eq!(
                 LoadStage::of_event(&ServerEvent::Stage(retry.clone())),
@@ -272,7 +281,8 @@ mod tests {
             LoadStage::RetryingWithoutFastAttention {
                 backend: BackendKind::Metal,
             },
-            LoadStage::RetryingWithoutImageFile,
+            LoadStage::RetryingWithoutImageFile { memory: false },
+            LoadStage::RetryingWithoutImageFile { memory: true },
             LoadStage::SteppingDown {
                 from: BackendKind::Vulkan,
                 to: BackendKind::Cpu,
@@ -341,8 +351,12 @@ mod tests {
                 r#"{"kind":"retryingWithoutFastAttention","backend":"vulkan"}"#,
             ),
             (
-                LoadStage::RetryingWithoutImageFile,
+                LoadStage::RetryingWithoutImageFile { memory: false },
                 r#"{"kind":"retryingWithoutImageFile"}"#,
+            ),
+            (
+                LoadStage::RetryingWithoutImageFile { memory: true },
+                r#"{"kind":"retryingWithoutImageFile","memory":true}"#,
             ),
             (
                 LoadStage::SteppingDown {

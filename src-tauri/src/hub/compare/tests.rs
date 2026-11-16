@@ -169,7 +169,7 @@ fn target() -> Target {
     Target::Gpu {
         name: "Test graphics card".into(),
         free_bytes: 16 * GB,
-        ram_free_bytes: 32 * GB,
+        ram_free_bytes: Some(32 * GB),
     }
 }
 
@@ -1165,7 +1165,7 @@ async fn an_installed_column_is_judged_as_settings_for_this_model() {
         &Target::Gpu {
             name: "Test graphics card".into(),
             free_bytes: 7_700_000_000,
-            ram_free_bytes: 32 * GB,
+            ram_free_bytes: Some(32 * GB),
         },
     );
     assert_eq!(old.verdict, Verdict::Yellow);
@@ -1960,7 +1960,7 @@ async fn the_repository_page_judges_an_installed_file_as_its_column() {
     let target = Target::Gpu {
         name: "Test graphics card".into(),
         free_bytes: 7_700_000_000,
-        ram_free_bytes: 32 * GB,
+        ram_free_bytes: Some(32 * GB),
     };
     let mut page = Vec::new();
     for v in &models::classify(&d.files).variants {

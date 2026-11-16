@@ -191,6 +191,16 @@ impl Wording {
             spaced.push(' ');
             words.extend(forms(word));
         }
+        // [0.0.7] A word that only ever comes as the start of a program's name is not the word
+        // by itself: "open google chrome" is not a web search.
+        for name in PROGRAM_NAMES {
+            if let Some((first, _)) = name.split_once(' ') {
+                let alone = spaced.matches(&format!(" {first} ")).count();
+                if alone > 0 && alone == spaced.matches(&format!(" {name} ")).count() {
+                    words.remove(first);
+                }
+            }
+        }
         Self { words, spaced }
     }
 
@@ -222,6 +232,10 @@ fn split_words(lower: &str) -> impl Iterator<Item = &str> {
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
 }
+
+/// [0.0.7] Programs whose name starts with a word that means something else by itself
+/// ([`Wording::of`]).
+const PROGRAM_NAMES: &[&str] = &["google chrome"];
 
 /// [0.0.7] Whether a text right after a word makes that word part of a file name: a dot and an
 /// extension (`.json`, `.py`), not a full stop before a space and not a program (`.exe`,
@@ -654,8 +668,15 @@ fn group_score(
 
 /// How many of a built-in group's strong and weak words a text has. A group that needs a
 /// strong word (rea's, `tool_catalog::OWN_WORDS_ONLY`) gets no weak words without one.
+/// [0.0.7] Phrases that need a context (`tool_catalog::WITH_CONTEXT`) count as strong words
+/// only when the text has one of their context phrases.
 fn listed_words(group: &tool_catalog::Group, wording: &Wording) -> (u32, u32) {
-    let strong = wording.count(group.strong);
+    let mut strong = wording.count(group.strong);
+    if let Some((phrases, context)) = group.with_context()
+        && context.iter().any(|phrase| wording.has(phrase))
+    {
+        strong += wording.count(phrases);
+    }
     let weak = if strong == 0 && group.needs_strong_word() {
         0
     } else {

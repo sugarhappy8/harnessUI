@@ -24,7 +24,8 @@ export function sameCallLimitFrom(text: string): number | null {
 
 /**
  * The limit a turn uses for a stored value, as `settings::same_call_limit` reads it: a whole
- * number from 0 up, held to 2..100; anything else (a negative or broken number, text) is 5.
+ * number from 0 up (42.0 is 42; one past 2^64 is still whole), held to 2..100; anything else
+ * (a negative or broken number, text) is 5.
  */
 export function storedSameCallLimit(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {

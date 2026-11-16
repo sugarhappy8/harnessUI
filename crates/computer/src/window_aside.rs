@@ -11,7 +11,8 @@
 //! - the end of that turn: restored where it was, without taking the keyboard, and the
 //!   user is told (the taskbar button flashes, the Dock icon bounces) ([`Comeback::Quietly`]);
 //! - Stop: restored and given the keyboard, since the user asked for it
-//!   ([`Comeback::Focused`]).
+//!   ([`Comeback::Focused`]). A restore that wins the race against Stop's own (the end of
+//!   the stopped turn) gives the keyboard too.
 //!
 //! Only a window the app minimised itself and that is still minimised comes back. A window
 //! the user brought back by hand is theirs: it is left where it is, and the next approved
@@ -153,10 +154,13 @@ impl WindowAside {
         self.minimising = false;
     }
 
-    /// The window came back on screen or got the focus, and not by this app's doing: it is
-    /// the user's again, even if they minimise it once more before the next decision.
-    pub fn brought_back(&mut self) {
-        if !self.minimising {
+    /// The window came back on screen or got the focus (a window event), and not by this
+    /// app's doing: it is the user's again, even if they minimise it once more before the
+    /// next decision. An event while the window is still minimised says nothing of the kind:
+    /// Windows activates a minimised window when the window in front of it closes, and a
+    /// change of display scale resizes it.
+    pub fn brought_back(&mut self, now: WindowNow) {
+        if !now.minimised && !self.minimising {
             self.holders.clear();
         }
     }
@@ -184,9 +188,14 @@ impl WindowAside {
 pub trait MainWindow: Send + Sync {
     fn now(&self) -> WindowNow;
     fn minimise(&self);
-    fn unminimise(&self);
+    /// The window is about to come back on screen: tell the page now, so approval cards
+    /// stop taking clicks before the window appears.
+    fn before_show(&self);
+    /// Brings the minimised window back on screen. Only [`Comeback::Focused`] may activate
+    /// it; the other ways must leave the keyboard where it is.
+    fn unminimise(&self, how: Comeback);
     /// The window is back on screen: finish bringing it back as `how` says, and tell the
-    /// page (approval cards start their input delay again).
+    /// page again (approval cards start their input delay from now).
     fn present(&self, how: Comeback);
 }
 
@@ -199,6 +208,9 @@ const MINIMISE_SETTLE: Duration = Duration::from_millis(100);
 const CARD_APPROVAL_FRESH: Duration = Duration::from_secs(10);
 /// Window events this soon after the app brought the window back are its own doing.
 const OWN_RESTORE_GRACE: Duration = Duration::from_millis(500);
+/// How long a Stop counts as pending for restores that run before its own, should its own
+/// never run (see [`Aside::stop_requested`]).
+const STOP_PENDING_FOR: Duration = Duration::from_secs(5);
 
 /// Runs [`WindowAside`]'s decisions against the main window: one minimise or restore at a
 /// time, under a lock the app's main thread never takes, so a restore and the minimise that
@@ -213,6 +225,7 @@ pub struct Aside {
     next_turn: AtomicU64,
     cards: Mutex<BTreeMap<i64, Instant>>,
     restored_at: Mutex<Option<Instant>>,
+    stop_at: Mutex<Option<Instant>>,
 }
 
 impl Default for Aside {
@@ -234,6 +247,7 @@ impl Aside {
             next_turn: AtomicU64::new(1),
             cards: Mutex::new(BTreeMap::new()),
             restored_at: Mutex::new(None),
+            stop_at: Mutex::new(None),
         }
     }
 
@@ -251,15 +265,23 @@ impl Aside {
 
     /// The user approved computer input of this chat on its card just now.
     pub fn card_approved(&self, chat: i64) {
-        lock(&self.cards).insert(chat, Instant::now());
+        self.card_approved_at(chat, Instant::now());
     }
 
-    /// Whether the user just approved this chat's input on its card. Asked once per input
-    /// call: the answer is used up.
+    fn card_approved_at(&self, chat: i64, at: Instant) {
+        lock(&self.cards).insert(chat, at);
+    }
+
+    /// Whether the user just approved this chat's input on its card (within
+    /// [`CARD_APPROVAL_FRESH`]). Asked once per input call: the answer is used up.
     pub fn take_card_approval(&self, chat: i64) -> bool {
+        self.take_card_approval_at(chat, Instant::now())
+    }
+
+    fn take_card_approval_at(&self, chat: i64, now: Instant) -> bool {
         lock(&self.cards)
             .remove(&chat)
-            .is_some_and(|at| at.elapsed() <= CARD_APPROVAL_FRESH)
+            .is_some_and(|at| now.saturating_duration_since(at) <= CARD_APPROVAL_FRESH)
     }
 
     /// Before approved input of this chat with the main window in its way (blocking):
@@ -307,18 +329,37 @@ impl Aside {
         self.bring_back(w, AsideEvent::TurnEnded { chat, turn });
     }
 
-    /// The user pressed Stop (blocking).
-    pub fn stopped(&self, w: &dyn MainWindow) {
-        lock(&self.cards).clear();
-        self.bring_back(w, AsideEvent::Stopped);
+    /// The user pressed Stop: call at once, before the turns are cancelled (not blocking).
+    /// Until [`Self::stopped`] has run, a restore that wins the race against it (the end of
+    /// the stopped turn, which also wants the operation lock) gives the window the keyboard,
+    /// as Stop's own restore would.
+    pub fn stop_requested(&self) {
+        *lock(&self.stop_at) = Some(Instant::now());
     }
 
-    /// The window came back on screen or got the focus (a window event), and not just now
-    /// by this app's own restore: it is the user's again.
-    pub fn brought_back(&self) {
+    fn stop_pending(&self) -> bool {
+        lock(&self.stop_at).is_some_and(|at| at.elapsed() < STOP_PENDING_FOR)
+    }
+
+    /// The user pressed Stop (blocking).
+    pub fn stopped(&self, w: &dyn MainWindow) {
+        let mine = Instant::now();
+        *lock(&self.stop_at) = Some(mine);
+        lock(&self.cards).clear();
+        self.bring_back(w, AsideEvent::Stopped);
+        // Unless another Stop came meanwhile.
+        let mut at = lock(&self.stop_at);
+        if *at == Some(mine) {
+            *at = None;
+        }
+    }
+
+    /// The window came back on screen or got the focus (a window event, with the window as
+    /// it is now), and not just now by this app's own restore: it is the user's again.
+    pub fn brought_back(&self, now: WindowNow) {
         let own = lock(&self.restored_at).is_some_and(|at| at.elapsed() < OWN_RESTORE_GRACE);
         if !own {
-            lock(&self.state).brought_back();
+            lock(&self.state).brought_back(now);
         }
     }
 
@@ -339,7 +380,14 @@ impl Aside {
         let WindowStep::Restore(how) = lock(&self.state).decide(event, seen) else {
             return;
         };
-        w.unminimise();
+        // Stop was pressed and its own restore has not run yet: this one gives the keyboard.
+        let how = if self.stop_pending() {
+            Comeback::Focused
+        } else {
+            how
+        };
+        w.before_show();
+        w.unminimise(how);
         self.wait_until(w, false);
         *lock(&self.restored_at) = Some(Instant::now());
         w.present(how);
@@ -510,7 +558,7 @@ mod tests {
     fn a_window_the_user_brought_back_and_minimised_again_stays_theirs() {
         let mut a = minimised_for(CHAT, TURN);
         // Seen as a window event, between two decisions: the user restored it…
-        a.brought_back();
+        a.brought_back(shown());
         // …and minimised it again before the turn ended.
         assert_eq!(a.decide(ended(CHAT, TURN), down()), Leave);
         assert_eq!(a.decide(card(CHAT), down()), Leave);
@@ -518,7 +566,7 @@ mod tests {
         // While the app is minimising, its own window events do not count.
         let mut a = WindowAside::new();
         assert_eq!(a.decide(input(CHAT, TURN), shown()), Minimise);
-        a.brought_back();
+        a.brought_back(shown());
         a.minimise_finished();
         assert_eq!(
             a.decide(ended(CHAT, TURN), down()),
@@ -633,6 +681,8 @@ mod tests {
         focused: bool,
         minimise_calls: usize,
         presented: Vec<Comeback>,
+        /// Every call that brings the window back, in order.
+        comeback: Vec<String>,
     }
 
     /// A main window that minimises and comes back at once, and records what happened.
@@ -675,12 +725,18 @@ mod tests {
             s.focused = false;
             s.minimise_calls += 1;
         }
-        fn unminimise(&self) {
-            self.shown().minimised = false;
+        fn before_show(&self) {
+            self.shown().comeback.push("before show".into());
+        }
+        fn unminimise(&self, how: Comeback) {
+            let mut s = self.shown();
+            s.minimised = false;
+            s.comeback.push(format!("unminimise {how:?}"));
         }
         fn present(&self, how: Comeback) {
             let mut s = self.shown();
             s.presented.push(how);
+            s.comeback.push(format!("present {how:?}"));
             if how == Comeback::Focused {
                 s.focused = true;
             }
@@ -709,6 +765,22 @@ mod tests {
         assert_eq!(
             w.shown().presented,
             vec![Comeback::InFront, Comeback::Quietly, Comeback::Focused]
+        );
+        // The page hears of each comeback before the window appears, and only Stop's may
+        // activate the window.
+        assert_eq!(
+            w.shown().comeback,
+            [
+                "before show",
+                "unminimise InFront",
+                "present InFront",
+                "before show",
+                "unminimise Quietly",
+                "present Quietly",
+                "before show",
+                "unminimise Focused",
+                "present Focused",
+            ]
         );
         // A turn that ended after Stop brought the window back changes nothing.
         aside.turn_ended(&w, CHAT, turn);
@@ -824,8 +896,8 @@ mod tests {
         let turn = aside.turn_started(CHAT);
         aside.before_input(&w, CHAT, &CancellationToken::new());
         // The user restores the window (a window event says so) and minimises it again.
-        w.unminimise();
-        aside.brought_back();
+        w.shown().minimised = false;
+        aside.brought_back(w.now());
         w.shown().minimised = true;
         aside.turn_ended(&w, CHAT, turn);
         assert!(w.shown().minimised);
@@ -841,10 +913,11 @@ mod tests {
         aside.before_input(&w, CHAT, &go);
         aside.approval_needed(&w, CHAT);
         // The user answers the card at once; the input steps aside again, and a window
-        // event left over from the app's restore arrives only now.
+        // event left over from the app's restore arrives only now, having read the window
+        // while it was on screen.
         let turn = aside.turn_started(CHAT);
         aside.before_input(&w, CHAT, &go);
-        aside.brought_back();
+        aside.brought_back(shown());
         aside.turn_ended(&w, CHAT, turn);
         assert!(!w.shown().minimised);
         assert_eq!(
@@ -873,5 +946,103 @@ mod tests {
         aside.card_approved(CHAT);
         aside.stopped(&w);
         assert!(!aside.take_card_approval(CHAT));
+    }
+
+    /// Windows activates a minimised window when the window in front of it closes (the app
+    /// the model used, say), and a change of display scale resizes it: window events while
+    /// it is still minimised are not the user bringing it back.
+    #[test]
+    fn a_window_event_while_still_minimised_is_not_the_users() {
+        for occasion in ["card", "turn end", "stop"] {
+            let aside = Aside::new();
+            let w = FakeWindow::default();
+            let turn = aside.turn_started(CHAT);
+            aside.before_input(&w, CHAT, &CancellationToken::new());
+            assert!(w.shown().minimised);
+            aside.brought_back(w.now());
+            match occasion {
+                "card" => aside.approval_needed(&w, CHAT),
+                "turn end" => aside.turn_ended(&w, CHAT, turn),
+                _ => aside.stopped(&w),
+            }
+            assert!(!w.shown().minimised, "{occasion}: left minimised");
+            assert_eq!(w.shown().presented.len(), 1, "{occasion}");
+        }
+        // The state machine itself, the same.
+        let mut a = minimised_for(CHAT, TURN);
+        a.brought_back(down());
+        a.brought_back(down_mac());
+        assert_eq!(
+            a.decide(ended(CHAT, TURN), down()),
+            Restore(Comeback::Quietly)
+        );
+    }
+
+    /// Stop and the end of the stopped turn both wait for the operation lock. When the
+    /// turn's end gets it first, its restore gives the keyboard, as Stop's would have.
+    #[test]
+    fn stop_gives_the_keyboard_even_when_the_stopped_turns_end_restores_first() {
+        let aside = Aside::new();
+        let w = FakeWindow::default();
+        let go = CancellationToken::new();
+        let turn = aside.turn_started(CHAT);
+        aside.before_input(&w, CHAT, &go);
+        // Stop: the app says so at once, then the end of the turn wins the race.
+        aside.stop_requested();
+        aside.turn_ended(&w, CHAT, turn);
+        aside.stopped(&w);
+        assert_eq!(w.shown().presented, vec![Comeback::Focused]);
+        assert!(w.shown().focused);
+        assert!(
+            w.shown()
+                .comeback
+                .contains(&"unminimise Focused".to_string())
+        );
+        // Once Stop's own restore has run, the next turn's end is the quiet one again.
+        let turn = aside.turn_started(CHAT);
+        aside.before_input(&w, CHAT, &go);
+        aside.turn_ended(&w, CHAT, turn);
+        assert_eq!(
+            w.shown().presented,
+            vec![Comeback::Focused, Comeback::Quietly]
+        );
+    }
+
+    /// Whichever of the two gets the operation lock first, the window comes back once, with
+    /// the keyboard.
+    #[test]
+    fn stop_and_the_turns_end_in_either_order_give_the_keyboard_once() {
+        for turn_end_first in [true, false] {
+            let aside = Aside::new();
+            let w = FakeWindow::default();
+            let turn = aside.turn_started(CHAT);
+            aside.before_input(&w, CHAT, &CancellationToken::new());
+            aside.stop_requested();
+            if turn_end_first {
+                aside.turn_ended(&w, CHAT, turn);
+                aside.stopped(&w);
+            } else {
+                aside.stopped(&w);
+                aside.turn_ended(&w, CHAT, turn);
+            }
+            let s = w.shown();
+            assert_eq!(
+                s.presented,
+                vec![Comeback::Focused],
+                "turn end first: {turn_end_first}"
+            );
+            assert!(!s.minimised);
+        }
+    }
+
+    #[test]
+    fn a_card_approval_expires_after_ten_seconds() {
+        let aside = Aside::new();
+        aside.turn_started(CHAT);
+        let at = Instant::now();
+        aside.card_approved_at(CHAT, at);
+        assert!(aside.take_card_approval_at(CHAT, at + Duration::from_millis(9_900)));
+        aside.card_approved_at(CHAT, at);
+        assert!(!aside.take_card_approval_at(CHAT, at + Duration::from_millis(10_100)));
     }
 }

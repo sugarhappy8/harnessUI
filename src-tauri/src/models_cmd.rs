@@ -104,6 +104,18 @@ async fn run_load(state: &AppState, model: PathBuf, plan: &Plan) -> AppResult<()
     Ok(())
 }
 
+/// 0.0.7 (P6b review m6): runs `change` (the D3 step that may stop a reply, a model check or
+/// another app's request) only once `check` (the backend the load would start on can run on
+/// this computer) passed. A refused check stops nothing and leaves the loaded model running.
+async fn after_backend_check<T>(
+    check: impl std::future::Future<Output = AppResult<()>>,
+    change: impl std::future::Future<Output = AppResult<T>>,
+) -> AppResult<T> {
+    let changed = change.await?;
+    check.await?;
+    Ok(changed)
+}
+
 /// After any settings change: whether the loaded model runs with older settings than the
 /// saved ones ("Settings changed. Restart the model to use them.").
 async fn refresh_settings_changed(state: &AppState) {
@@ -783,6 +795,7 @@ fn diagnostic_load(backend: &str, device: Option<String>) -> load::ResolvedLoad 
         ctx: 4096,
         ctx_choice: load::ContextSize::Fixed(4096),
         ctx_source: load::ContextSource::ModelSetting,
+        ctx_checkpoints: models::kv::MAX_CTX_CHECKPOINTS,
         gpu: load::GpuUse::All,
         save_memory: false,
         keep_in_memory: false,
@@ -796,6 +809,35 @@ fn diagnostic_load(backend: &str, device: Option<String>) -> load::ResolvedLoad 
 
 #[cfg(test)]
 mod tests {
+    /// 0.0.7 (P6b review m6): a load or reload whose backend cannot run here stops nothing.
+    /// Before, "Stop and restart" stopped the reply first and the backend was refused only
+    /// then.
+    #[tokio::test]
+    async fn a_backend_that_cannot_run_stops_nothing() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = |flag: Arc<AtomicBool>| async move {
+            flag.store(true, Ordering::SeqCst);
+            Ok(true)
+        };
+        let refused = crate::error::AppError::new(
+            "backend_unavailable",
+            "The vulkan backend is not usable on this computer.",
+            "Pick Auto in Settings → Local models.",
+            String::new(),
+        );
+        let err = super::after_backend_check(async { Err(refused) }, stop(stopped.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "backend_unavailable");
+        assert!(!stopped.load(Ordering::SeqCst), "nothing was stopped");
+        let waited = super::after_backend_check(async { Ok(()) }, stop(stopped.clone()))
+            .await
+            .unwrap();
+        assert!(waited && stopped.load(Ordering::SeqCst));
+    }
+
     /// D12: no tool, in any approval mode, reaches model settings through the generic
     /// setting command: neither the defaults for all models nor any model's own key is on
     /// its list (only their own validated commands write them).

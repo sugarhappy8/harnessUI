@@ -1001,19 +1001,24 @@ fn automatic_with_a_custom_placement_and_with_leave_free() {
     let plain = auto(ModelLoadSettings::default());
     assert_eq!(plain.ctx_choice, ContextSize::Auto);
     let input = d.fit_input(models::summary::KvCacheType::F16).unwrap();
+    let placer = Placer::new(&d, &m, false).unwrap();
+    // 0.0.7 review m4: with the model's sizes known, the split's own verdict, as the marks
+    // (fit.rs counted the input layer on the card, so it may only give less).
     assert_eq!(
         u64::from(plain.ctx),
-        models::fit::auto_ctx(&input, m.room(GpuUse::All))
-            .unwrap()
-            .ctx,
-        "without Fine control, fit.rs's Automatic, unchanged"
+        placer.auto(GpuUse::All, &plain.fine).unwrap().ctx,
+    );
+    assert!(
+        u64::from(plain.ctx)
+            >= models::fit::auto_ctx(&input, m.room(GpuUse::All))
+                .unwrap()
+                .ctx
     );
     // 20 of 41 layers on the card: the largest size whose split fits.
     let custom = auto(fine(FineControl {
         layers: LayersChoice::Count(20),
         ..FineControl::default()
     }));
-    let placer = Placer::new(&d, &m, false).unwrap();
     assert_eq!(
         u64::from(custom.ctx),
         placer.auto(GpuUse::All, &custom.fine).unwrap().ctx
@@ -1030,7 +1035,9 @@ fn automatic_with_a_custom_placement_and_with_leave_free() {
         placer.auto(GpuUse::All, &kv.fine).unwrap().ctx
     );
     assert!(kv.ctx > plain.ctx);
-    // As much as fits with Leave free: fit.rs's Automatic leaving that much free.
+    // As much as fits with Leave free: the largest size whose split keeps every layer on the
+    // card with that much left free (fit.rs's Automatic with that margin counted the input
+    // layer on the card too, so it may only give less).
     let leave = auto(ModelLoadSettings {
         gpu: GpuChoice::Fit,
         ..fine(FineControl {
@@ -1040,9 +1047,19 @@ fn automatic_with_a_custom_placement_and_with_leave_free() {
     });
     assert_eq!(
         u64::from(leave.ctx),
-        models::fit::auto_ctx_with_margin(&input, m.room(GpuUse::Fit), 512 * MIB)
-            .unwrap()
-            .ctx
+        placer.auto(GpuUse::Fit, &leave.fine).unwrap().ctx
+    );
+    let split = placer.work(u64::from(leave.ctx), GpuUse::Fit, &leave.fine).split;
+    assert_eq!(split.layers_on_gpu, split.units, "every layer on the card");
+    let next = placer
+        .work(u64::from(leave.ctx) + 1024, GpuUse::Fit, &leave.fine)
+        .split;
+    assert!(next.layers_on_gpu < next.units, "1,024 more tokens move one");
+    assert!(
+        u64::from(leave.ctx)
+            >= models::fit::auto_ctx_with_margin(&input, m.room(GpuUse::Fit), 512 * MIB)
+                .unwrap()
+                .ctx
     );
     assert!(leave.ctx > plain.ctx);
     // With All of it, Leave free changes nothing.

@@ -822,20 +822,41 @@ pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
         .map(Duration::from_secs_f64)
 }
 
-/// The shortest piece of a key that counts as part of it at the end of a cut text.
-const KEY_PIECE: usize = 4;
+/// The shortest piece of a key that counts as a secret where a text was cut.
+const KEY_PIECE: usize = 12;
+/// Beginnings that every key of a company shares: a piece no longer than these is not
+/// secret.
+const PUBLIC_KEY_PREFIXES: &[&str] = &[
+    "sk-ant-api03-",
+    "sk-ant-admin01-",
+    "sk-ant-",
+    "sk-proj-",
+    "sk-svcacct-",
+    "sk-admin-",
+    "sk-or-v1-",
+    "sk-",
+];
 
 /// `text` without `key`: every whole copy, and a piece of its beginning left where the text
-/// was cut short (before an ellipsis, or at the end of the text).
+/// was cut short (before an ellipsis, or at the end of the text) when the piece is long
+/// enough to be secret: at least 12 characters, and longer than the beginning all of the
+/// company's keys share. Ordinary text that merely ends like a key begins stays.
 fn without_key(text: &str, key: &str) -> String {
     let mut text = text.replace(key, "[API key]");
+    let public = PUBLIC_KEY_PREFIXES
+        .iter()
+        .filter(|prefix| key.starts_with(*prefix))
+        .map(|prefix| prefix.len())
+        .max()
+        .unwrap_or(0);
+    let shortest = KEY_PIECE.max(public + 1);
     // Where a cut can be: before each ellipsis, and the end. Last first, so earlier
     // positions stay valid while pieces are replaced.
     let mut cuts: Vec<usize> = text.match_indices('…').map(|(at, _)| at).collect();
     cuts.push(text.len());
     for end in cuts.into_iter().rev() {
         let body = &text[..end];
-        let piece = (KEY_PIECE..key.len())
+        let piece = (shortest..key.len())
             .rev()
             .filter(|n| key.is_char_boundary(*n))
             .find(|n| body.ends_with(&key[..*n]));
@@ -897,24 +918,56 @@ pub(crate) struct ModelFacts {
     pub thinking: Option<ThinkingModes>,
 }
 
-static FACTS: LazyLock<Mutex<HashMap<String, ModelFacts>>> = LazyLock::new(Default::default);
+/// Endpoints whose model facts are kept; the one used least recently is forgotten whole.
+const MAX_FACT_ENDPOINTS: usize = 16;
+/// Models kept for one endpoint: more than any list has (OpenRouter's has hundreds); past
+/// it that endpoint's facts start over.
+const MAX_FACT_MODELS: usize = 8_192;
 
-/// Keeps what a model list said about `model` at `endpoint`.
+/// What model lists said, by endpoint and then model, with when each endpoint was last used.
+#[derive(Default)]
+struct Facts {
+    endpoints: HashMap<String, (HashMap<String, ModelFacts>, u64)>,
+    clock: u64,
+}
+
+static FACTS: LazyLock<Mutex<Facts>> = LazyLock::new(Default::default);
+
+/// Keeps what a model list said about `model` at `endpoint`. A whole long list stays: only
+/// an endpoint not used for longest is forgotten when more than [`MAX_FACT_ENDPOINTS`] are
+/// kept.
 pub(crate) fn remember_facts(endpoint: &str, model: &str, facts: ModelFacts) {
-    if let Ok(mut map) = FACTS.lock() {
-        if map.len() >= MAX_REMEMBERED * 4 {
-            map.clear();
-        }
-        map.insert(memory_key(endpoint, model), facts);
+    let Ok(mut kept) = FACTS.lock() else {
+        return;
+    };
+    kept.clock += 1;
+    let now = kept.clock;
+    if !kept.endpoints.contains_key(endpoint)
+        && kept.endpoints.len() >= MAX_FACT_ENDPOINTS
+        && let Some(idle) = kept
+            .endpoints
+            .iter()
+            .min_by_key(|(_, (_, used))| *used)
+            .map(|(key, _)| key.clone())
+    {
+        kept.endpoints.remove(&idle);
     }
+    let (models, used) = kept.endpoints.entry(endpoint.to_owned()).or_default();
+    *used = now;
+    if models.len() >= MAX_FACT_MODELS && !models.contains_key(model) {
+        models.clear();
+    }
+    models.insert(model.to_owned(), facts);
 }
 
 /// What a model list said about `model` at `endpoint` earlier in this run.
 pub(crate) fn known_facts(endpoint: &str, model: &str) -> Option<ModelFacts> {
-    FACTS
-        .lock()
-        .ok()
-        .and_then(|map| map.get(&memory_key(endpoint, model)).cloned())
+    let mut kept = FACTS.lock().ok()?;
+    kept.clock += 1;
+    let now = kept.clock;
+    let (models, used) = kept.endpoints.get_mut(endpoint)?;
+    *used = now;
+    models.get(model).cloned()
 }
 
 /// Whether an OpenAI model id is one that can chat: the model list also has embedding,
@@ -1619,26 +1672,61 @@ mod tests {
             unreachable!()
         };
         assert!(message.ends_with("key [API key]…"), "{}", &message[1_950..]);
-        assert!(
-            !message.contains(&key[..KEY_PIECE]),
-            "{}",
-            &message[1_950..]
-        );
+        assert!(!message.contains(&key[..20]), "{}", &message[1_950..]);
         // Before an ellipsis followed by more text (a wait the server asked for).
         let text = format!("said {}… (it asks to try again in 40 seconds)", &key[..20]);
         assert_eq!(
             without_key(&text, key),
             "said [API key]… (it asks to try again in 40 seconds)"
         );
-        // A whole key mid-text, and a cut without an ellipsis.
+        // A whole key mid-text, and a cut after 20 characters without an ellipsis.
         assert_eq!(without_key(&format!("a {key} b"), key), "a [API key] b");
-        assert_eq!(
-            without_key(&format!("a {}", &key[..12]), key),
-            "a [API key]"
-        );
-        // Too short a piece to say, and text that only looks alike, stay.
+        assert_eq!(without_key(&format!("a {}", &key[..20]), key), "a [API key]");
+        // Ordinary text that ends like a key begins stays: too short a piece to be secret,
+        // or no longer than the beginning every Anthropic key has.
+        assert_eq!(without_key("No such tool: ask-a", key), "No such tool: ask-a");
         assert_eq!(without_key("ends with sk-", key), "ends with sk-");
+        assert_eq!(without_key("prefix sk-ant-api03-", key), "prefix sk-ant-api03-");
+        assert_eq!(
+            without_key("It was not found in this token", "token-abc123456"),
+            "It was not found in this token"
+        );
+        assert_eq!(
+            without_key("cut here: token-abc123…", "token-abc123456"),
+            "cut here: [API key]…"
+        );
+        assert_eq!(
+            without_key("cut here: token-abc12…", "token-abc123456"),
+            "cut here: token-abc12…",
+            "11 characters are too few to be secret"
+        );
         assert_eq!(without_key("nothing here", key), "nothing here");
+    }
+
+    #[test]
+    fn model_facts_are_kept_per_endpoint() {
+        let facts = |n: u32| ModelFacts {
+            context: Some(n),
+            ..ModelFacts::default()
+        };
+        let a = "https://facts-test-a.example/v1";
+        let b = "https://facts-test-b.example/v1";
+        // Two long lists (more than 1,024 models in all) both stay whole.
+        for endpoint in [a, b] {
+            for n in 0..700 {
+                remember_facts(endpoint, &format!("m{n}"), facts(n));
+            }
+        }
+        assert_eq!(known_facts(a, "m0").and_then(|f| f.context), Some(0));
+        assert_eq!(known_facts(b, "m699").and_then(|f| f.context), Some(699));
+        // When more endpoints come, the one used least recently is forgotten whole; one in
+        // use keeps its list.
+        for n in 0..MAX_FACT_ENDPOINTS {
+            remember_facts(&format!("https://facts-test-{n}.example/v1"), "m", facts(1));
+            assert!(known_facts(a, "m0").is_some(), "the endpoint in use stays");
+        }
+        assert!(known_facts(b, "m0").is_none(), "the idle endpoint went");
+        assert_eq!(known_facts(a, "m699").and_then(|f| f.context), Some(699));
     }
 
     #[test]

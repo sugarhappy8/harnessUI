@@ -564,18 +564,23 @@ proptest::proptest! {
 /// in any letter case, outside code. An example inside code is not one.
 #[test]
 fn a_result_written_by_the_model_is_recognised_outside_code() {
+    let none: &[&str] = &[];
     for made_up in [
+        // The block the test model wrote on macOS CI instead of calling read_file.
         "<tool_output>\n{\"content\": \"secret_word\"}\n</tool_output>",
+        "<tool_output>\n{\"content\": \"plum\"}\n</tool_output>",
         "The file says:\n<TOOL_OUTPUT id=\"1\" tool=\"read_file\">hello</TOOL_OUTPUT>",
         "<tool_response>\n{\"content\": \"x\"}\n</tool_response>",
-        "  <tool_output>\n42",
-        "Let me look: <tool_output>\n{\"content\": \"x\"}\n</tool_output>",
-        "Here: <Tool_Response>ok</Tool_Response> so the answer is ok.",
+        "  <tool_output>\n  42\n  </tool_output>\nSo it is 42.",
+        "<tool_output id=\"3\">\nline one\nline two</tool_output>",
+        // A Hermes-style call followed by a response it made up (the loop runs the call).
+        "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a\"}}</tool_call>\n<tool_response>plum</tool_response>",
         // After reasoning written as text, the block is the answer's.
         "<think>I should read it.</think>\n<tool_output>\nplum\n</tool_output>",
         "I should read it.\n</think>\n<tool_output>\nplum\n</tool_output>",
+        "<thinking>Let me look.</thinking>\n<tool_output>\nplum\n</tool_output>",
     ] {
-        assert!(writes_tool_result(made_up), "{made_up}");
+        assert!(writes_tool_result(made_up, none), "{made_up}");
     }
     for fine in [
         "The secret word is plum.",
@@ -592,16 +597,46 @@ fn a_result_written_by_the_model_is_recognised_outside_code() {
         "Done. </tool_output>",
         "Here: <Tool_Response>ok",
         "<tool_outputs> is not a tag the app uses.",
-        // Reasoning written as text (servers that do not separate it) may name the tag.
+        "Let me look: <tool_output>\n{\"content\": \"x\"}\n</tool_output>",
+        "Here: <Tool_Response>ok</Tool_Response> so the answer is ok.",
+        // [0.0.7 verification] Both tags in one sentence, a tag that starts a wrapped line, a
+        // list item explaining the format, a quoted line, a closing tag alone.
+        "Results arrive between <tool_output> and </tool_output> tags, so I wait for the app.",
+        "The app sends each result back in a\n<tool_output> block, so I cannot write one.",
+        "The app sends each result back in a\n<tool_output>\nblock, so I cannot write one.",
+        "- Results: <tool_output>…</tool_output>",
+        "> <tool_output>plum</tool_output>",
+        "The result ended with\n</tool_output> and nothing else.",
+        "<tool_output>\n\n</tool_output>",
+        // Reasoning written as text (servers that do not separate it) may name the tag, in any
+        // spelling models use.
         "<think>The system says results come in\n<tool_output> blocks.\n</think>\nThe secret word is plum.",
         "Results come back in\n<tool_output> blocks, I recall.\n</think>\nThe secret word is plum.",
         "<think>An unclosed thought about\n<tool_output> blocks",
+        "<thinking>Results come in <tool_output> ... </tool_output> blocks.</thinking>\nThe secret word is plum.",
+        "<reasoning>\n<tool_output>\nplum\n</tool_output>\n</reasoning>\nThe word is plum.",
+        "<thought>\n<tool_response>\nplum\n</tool_response>\n</thought>\nThe word is plum.",
     ] {
-        assert!(!writes_tool_result(fine), "{fine}");
+        assert!(!writes_tool_result(fine, none), "{fine}");
     }
     // Not ASCII: offsets still line up.
     assert!(writes_tool_result(
-        "Ünïcode first, then <tool_output>x</tool_output>"
+        "Ünïcode first,\n<tool_output>x</tool_output>",
+        none
     ));
-    assert!(!writes_tool_result("Ünïcode `<tool_output>` in code"));
+    assert!(!writes_tool_result("Ünïcode `<tool_output>` in code", none));
+}
+
+/// [0.0.7 verification] A model that quotes a result the app returned in this turn has made
+/// nothing up; a block it writes with anything else has.
+#[test]
+fn a_quoted_result_is_not_a_made_up_one() {
+    let returned = ["Shopping list\n- milk\n\nThe secret word is:   plum."];
+    let quote = "read_file returned:\n<tool_output id=\"a1\" tool=\"read_file\">The secret word is: plum.</tool_output>\nSo the secret word is plum.";
+    assert!(!writes_tool_result(quote, &returned));
+    let whole = "<tool_output>\nShopping list\n- milk\nThe secret word is: plum.\n</tool_output>";
+    assert!(!writes_tool_result(whole, &returned));
+    assert!(writes_tool_result(quote, &[]));
+    let other = "<tool_output>\nThe secret word is: pear.\n</tool_output>";
+    assert!(writes_tool_result(other, &returned));
 }

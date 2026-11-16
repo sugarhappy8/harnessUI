@@ -132,6 +132,11 @@ describe("SameCallLimit", () => {
     expect(storedSameCallLimit(3.5)).toBe(5);
     expect(storedSameCallLimit("7")).toBe(5);
     expect(storedSameCallLimit(null)).toBe(5);
+    // [0.0.7 verification] As the backend reads them (settings.rs tests the same values).
+    expect(storedSameCallLimit(42.0)).toBe(42);
+    expect(storedSameCallLimit(-0)).toBe(2);
+    expect(storedSameCallLimit(2 ** 64)).toBe(100);
+    expect(storedSameCallLimit(1e300)).toBe(100);
   });
 
   it("reads typed text as a whole number from 2 to 100", () => {

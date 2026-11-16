@@ -22,7 +22,8 @@ use crate::state::AppState;
 
 mod aside;
 pub use aside::{
-    approval_needed, card_approved, minimise_on_request, stopped, turn_ended, turn_started,
+    approval_needed, card_approved, minimise_on_request, stop_requested, stopped, turn_ended,
+    turn_started,
 };
 
 /// The computer server, when this OS has one.

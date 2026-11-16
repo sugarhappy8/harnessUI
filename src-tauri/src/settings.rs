@@ -49,11 +49,21 @@ pub fn parse_same_call_limit(value: &serde_json::Value) -> Option<u32> {
 }
 
 /// [0.0.7] The repeat limit a turn uses: the stored whole number held to 2..=100 (one written
-/// some other way outside that range counts as the nearest end), or 5 when it is missing or
-/// not a whole number. A stored value can never end every turn at its first call, nor let a
-/// loop run on.
+/// some other way outside that range counts as the nearest end, a whole number written with a
+/// fraction such as 42.0 as that number), or 5 when it is missing, negative or not a whole
+/// number. The settings panel reads it the same way (`storedSameCallLimit`). A stored value can
+/// never end every turn at its first call, nor let a loop run on.
 pub fn same_call_limit(stored: Option<&serde_json::Value>) -> u32 {
-    match stored.and_then(serde_json::Value::as_u64) {
+    let whole = stored.and_then(|value| {
+        value.as_u64().or_else(|| {
+            // 42.0, or a number past u64 such as 2^64: whole, so held to the range.
+            value
+                .as_f64()
+                .filter(|n| n.is_finite() && n.fract() == 0.0 && *n >= 0.0)
+                .map(|n| if n >= f64::from(u32::MAX) { u64::from(u32::MAX) } else { n as u64 })
+        })
+    });
+    match whole {
         Some(n) => agent::turn::repeat_limit(u32::try_from(n).unwrap_or(u32::MAX)),
         None => agent::turn::LOOP_STOP_AT,
     }
@@ -159,6 +169,14 @@ mod tests {
             (json!(12.5), 5),
             (json!("100"), 5),
             (json!(null), 5),
+            // [0.0.7 verification] As the settings panel reads them: a whole number written
+            // with a fraction is that number, one past u64 the top of the range.
+            (json!(42.0), 42),
+            (json!(1.0), 2),
+            (json!(-0.0), 2),
+            (json!(-3.0), 5),
+            (json!(18_446_744_073_709_551_616.0_f64), 100),
+            (json!(1e300), 100),
         ] {
             assert_eq!(same_call_limit(Some(&stored)), used, "{stored}");
         }

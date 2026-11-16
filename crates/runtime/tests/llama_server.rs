@@ -223,7 +223,9 @@ async fn a_broken_model_file_is_classified() {
                 failure,
                 exit_code,
                 stderr_tail,
+                image_file_loading,
             } => {
+                assert!(!image_file_loading);
                 assert_eq!(
                     *failure,
                     LoadFailure::ModelFileInvalid,
@@ -1398,6 +1400,9 @@ async fn a_broken_image_file_is_classified_and_the_model_loads_without_it() {
             "{name}\n{tail}"
         );
         assert!(!error.failure().may_succeed_on_another_backend());
+        // The server said it was loading the image file when it stopped (m11 of the P2
+        // review: what tells a memory failure there from the model's own).
+        assert!(error.while_loading_image_file(), "{name}\n{tail}");
         assert!(
             tail.contains(line),
             "{name}: the pinned build's line\n{tail}"
@@ -1458,7 +1463,7 @@ async fn a_broken_image_file_is_classified_and_the_model_loads_without_it() {
         states_and_stages(&events),
         vec![
             &ServerEvent::State(ServerState::Starting),
-            &ServerEvent::Stage(LoadStage::RetryingWithoutImageFile),
+            &ServerEvent::Stage(LoadStage::RetryingWithoutImageFile { memory: false }),
             &ServerEvent::State(ServerState::Starting),
             &ServerEvent::State(ServerState::Ready),
             &ServerEvent::State(ServerState::Stopping),

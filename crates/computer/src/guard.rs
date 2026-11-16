@@ -123,9 +123,16 @@ pub struct Held {
     pub buttons: Vec<MouseButton>,
 }
 
-/// The system's latest input within this of this app's latest event counts as that event
-/// (the system's clock for it is coarse: about 16 ms on Windows).
-const OWN_INPUT_SLACK: Duration = Duration::from_millis(100);
+/// The system's latest input counts as this app's latest event when it lies between this
+/// long before the moment the event was sent and [`OWN_INPUT_AFTER`] after it: the system
+/// stamps the event as it takes it, before the send returns, on a coarse clock (about
+/// 16 ms on Windows).
+const OWN_INPUT_BEFORE: Duration = Duration::from_millis(50);
+/// Input later than this after this app's latest event is the user's.
+const OWN_INPUT_AFTER: Duration = Duration::from_millis(25);
+/// The pointer counts as where this app's last move left it within this distance (a
+/// rounded or corrected position).
+const OWN_POINTER_SLACK: f64 = 1.5;
 
 /// What the guard knows about recent input, to tell the user's from its own
 /// ([`InputGuard::user_idle_for`]).
@@ -136,15 +143,32 @@ struct Activity {
     /// The latest input the system saw that was not this app's, looked up before every
     /// event this app sends.
     user: Option<Instant>,
+    /// Where this app's last pointer move left the pointer.
+    pointer: Option<GlobalPoint>,
 }
 
 impl Activity {
     /// The system's latest input, at `at`, may be this app's latest event.
     fn is_own(&self, at: Instant) -> bool {
-        self.sent.is_some_and(|sent| {
-            let gap = if at > sent { at - sent } else { sent - at };
-            gap <= OWN_INPUT_SLACK
-        })
+        self.sent
+            .is_some_and(|sent| at <= sent + OWN_INPUT_AFTER && at + OWN_INPUT_BEFORE >= sent)
+    }
+
+    /// The pointer, now at `now`, is not where this app's last move left it: the user moved
+    /// it since (input that the timing alone would take for this app's).
+    fn pointer_moved(&self, now: Option<GlobalPoint>) -> bool {
+        match (self.pointer, now) {
+            (Some(mine), Some(now)) => {
+                (now.x - mine.x).abs() > OWN_POINTER_SLACK
+                    || (now.y - mine.y).abs() > OWN_POINTER_SLACK
+            }
+            _ => false,
+        }
+    }
+
+    /// The system's latest input, at `at`, is the user's.
+    fn users(&self, at: Instant, pointer: Option<GlobalPoint>) -> bool {
+        !self.is_own(at) || self.pointer_moved(pointer)
     }
 }
 
@@ -172,6 +196,13 @@ impl Inner {
             .flatten()
     }
 
+    /// Where the pointer is now; never panics.
+    fn pointer(&self) -> Option<GlobalPoint> {
+        catch_unwind(AssertUnwindSafe(|| self.injector.cursor()))
+            .ok()
+            .flatten()
+    }
+
     /// Before an event: notes the system's latest input when it was not this app's own.
     fn note_user_input(&self) {
         let Some(at) = self
@@ -180,8 +211,9 @@ impl Inner {
         else {
             return;
         };
+        let pointer = self.pointer();
         let mut a = self.activity();
-        if !a.is_own(at) && a.user.is_none_or(|u| u < at) {
+        if a.users(at, pointer) && a.user.is_none_or(|u| u < at) {
             a.user = Some(at);
         }
     }
@@ -191,7 +223,11 @@ impl Inner {
         self.note_user_input();
         let r = self.injector.send(event, gate);
         if r.is_ok() {
-            self.activity().sent = Some(Instant::now());
+            let mut a = self.activity();
+            a.sent = Some(Instant::now());
+            if let InputEvent::Move { to } = event {
+                a.pointer = Some(*to);
+            }
         }
         r
     }
@@ -310,16 +346,20 @@ impl InputGuard {
 
     /// How long the user has left the keyboard and mouse alone, leaving out the input this
     /// app sent (the system counts injected input as input, on Windows at least). `None`
-    /// when the platform cannot tell. Input the user gave while this app's own events were
-    /// being sent, within [`OWN_INPUT_SLACK`] of one of them, can be taken for this app's.
+    /// when the platform cannot tell. The system's latest input is this app's only when it
+    /// lies within [`OWN_INPUT_BEFORE`] before to [`OWN_INPUT_AFTER`] after one of this app's
+    /// events and the pointer is where this app's last move left it; before every event the
+    /// guard notes the user's input the same way. A key the user pressed in that short time
+    /// around one of this app's events, with nothing after it, is taken for this app's.
     pub fn user_idle_for(&self) -> Option<Duration> {
         let age = self.inner.time_since_input()?;
         let now = Instant::now();
         let Some(at) = now.checked_sub(age) else {
             return Some(age);
         };
+        let pointer = self.inner.pointer();
         let a = *self.inner.activity();
-        if !a.is_own(at) {
+        if a.users(at, pointer) {
             return Some(age);
         }
         // The latest input is this app's own: the user's came before it.
@@ -1096,6 +1136,67 @@ mod tests {
         op.key_down(Key::Char('b'), Expect::App(&notepad()))
             .unwrap();
         op.key_up(Key::Char('b')).unwrap();
+        let idle = g.user_idle_for().unwrap();
+        assert!(idle < Duration::from_secs(1), "{idle:?}");
+    }
+
+    #[test]
+    fn input_just_after_this_apps_last_event_is_the_users() {
+        let d = desktop();
+        d.state().foreground = Some(1);
+        d.state().reports_input_time = true;
+        d.user_input(Duration::from_secs(5));
+        let g = guard(&d);
+        let mut op = g.begin(CancellationToken::new());
+        op.key_down(Key::Char('a'), Expect::App(&notepad()))
+            .unwrap();
+        op.key_up(Key::Char('a')).unwrap();
+        assert!(g.user_idle_for().unwrap() >= Duration::from_secs(5));
+        // The user presses a key 40 ms after this app's last one, then nothing more.
+        std::thread::sleep(Duration::from_millis(40));
+        d.user_input(Duration::ZERO);
+        let idle = g.user_idle_for().unwrap();
+        assert!(idle < Duration::from_secs(1), "{idle:?}");
+    }
+
+    #[test]
+    fn the_users_mouse_movement_during_this_apps_drag_counts() {
+        let d = desktop();
+        d.state().reports_input_time = true;
+        d.user_input(Duration::from_secs(5));
+        let g = guard(&d);
+        let id = notepad();
+        let mut op = g.begin(CancellationToken::new());
+        // This app drags across Notepad; between two of its moves the user moves the mouse
+        // (the system sees that input within a few milliseconds of this app's own).
+        op.move_to(p(100.0, 100.0), Expect::App(&id)).unwrap();
+        op.button_down(MouseButton::Left, p(100.0, 100.0), Expect::App(&id))
+            .unwrap();
+        op.move_to(p(150.0, 100.0), Expect::App(&id)).unwrap();
+        {
+            let mut st = d.state();
+            st.cursor = p(170.0, 130.0);
+            st.physical_input = st.injected_input;
+        }
+        op.move_to(p(200.0, 100.0), Expect::App(&id)).unwrap();
+        op.move_to(p(250.0, 100.0), Expect::App(&id)).unwrap();
+        op.button_up(MouseButton::Left).unwrap();
+        // The drag ended where this app put the pointer; the user's movement still counts.
+        let idle = g.user_idle_for().unwrap();
+        assert!(idle < Duration::from_secs(1), "{idle:?}");
+        // The pointer moved since this app's last move, with nothing else after it.
+        let d = desktop();
+        d.state().reports_input_time = true;
+        d.user_input(Duration::from_secs(5));
+        let g = guard(&d);
+        let mut op = g.begin(CancellationToken::new());
+        op.move_to(p(100.0, 100.0), Expect::App(&id)).unwrap();
+        assert!(g.user_idle_for().unwrap() >= Duration::from_secs(5));
+        {
+            let mut st = d.state();
+            st.cursor = p(120.0, 140.0);
+            st.physical_input = st.injected_input;
+        }
         let idle = g.user_idle_for().unwrap();
         assert!(idle < Duration::from_secs(1), "{idle:?}");
     }

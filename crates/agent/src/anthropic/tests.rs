@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::request::messages_body;
+use super::request::{messages_body, reply_prefix};
 use super::{
     MessagesDecoder, ReplayKey, ThinkingReplay, events_from_message, guess, parse_model,
-    parse_version,
+    parse_version, reply_hash,
 };
 use crate::cloud::{Fix, ModelFacts, ParamFixes, ThinkingModes};
 use crate::error::ProviderError;
@@ -41,7 +41,25 @@ fn adaptive_facts() -> ModelFacts {
 }
 
 fn body(req: &ChatRequest, facts: &ModelFacts, replay: Option<&ThinkingReplay>) -> Value {
-    messages_body(req, facts, replay, &ParamFixes::default())
+    messages_body(req, facts, replay, &ParamFixes::default(), false)
+}
+
+/// What the stream keeps when `request` is answered with `blocks`: the blocks, under
+/// everything the request sent and what the reply showed (`text`, `calls`).
+fn keep(
+    replay: &mut ThinkingReplay,
+    request: &ChatRequest,
+    facts: &ModelFacts,
+    text: &str,
+    calls: &[(&str, &str, Value)],
+    blocks: Vec<Value>,
+) {
+    let sent = messages_body(request, facts, Some(replay), &ParamFixes::default(), false);
+    let key = ReplayKey {
+        prefix: reply_prefix(&sent),
+        reply: reply_hash(text, calls.iter().map(|(id, name, input)| (*id, *name, input))),
+    };
+    replay.store(key, blocks);
 }
 
 /// A one-message request to `model`.
@@ -224,7 +242,7 @@ fn output_limit_follows_the_app_and_the_model() {
     crate::cloud::remember_fix(endpoint, "claude-opus-5-5", &Fix::Cap(1_000));
     let fixes = crate::cloud::remembered_fixes(endpoint, "claude-opus-5-5");
     assert_eq!(
-        messages_body(&request, &ModelFacts::default(), None, &fixes)["max_tokens"],
+        messages_body(&request, &ModelFacts::default(), None, &fixes, false)["max_tokens"],
         json!(1_000)
     );
 }
@@ -239,7 +257,7 @@ fn refused_fields_are_left_out() {
     let fixes = crate::cloud::remembered_fixes(endpoint, "claude-x");
     let mut request = tool_conversation();
     request.model = "claude-x".into();
-    let body = messages_body(&request, &adaptive_facts(), None, &fixes);
+    let body = messages_body(&request, &adaptive_facts(), None, &fixes, false);
     assert!(body.get("thinking").is_none());
     assert!(body.get("tool_choice").is_none());
     assert!(body.get("max_tokens").is_some());
@@ -279,10 +297,6 @@ fn forced_tool_use_only_where_allowed() {
     );
 }
 
-fn call_key(ids: &[&str]) -> ReplayKey {
-    ReplayKey::Calls(ids.iter().map(|id| (*id).to_owned()).collect())
-}
-
 /// The last assistant turn of a translated body.
 fn last_assistant(body: &Value) -> Value {
     body["messages"]
@@ -294,93 +308,129 @@ fn last_assistant(body: &Value) -> Value {
         .clone()
 }
 
-#[test]
-fn unchanged_replies_go_back_with_their_thinking() {
-    let thinking = json!({"type": "thinking", "thinking": "Check the city.", "signature": "sig-1"});
-    let redacted = json!({"type": "redacted_thinking", "data": "opaque"});
+fn thought(text: &str, signature: &str) -> Value {
+    json!({"type": "thinking", "thinking": text, "signature": signature})
+}
+
+/// A chat built step by step as the stream keeps it: "Hi" → "Hello." (thought), a call
+/// without arguments (thought), its result, a question with a picture, then "Let me check."
+/// with a call that failed.
+fn kept_chat() -> (ChatRequest, ThinkingReplay, Value) {
+    let facts = adaptive_facts();
     let mut replay = ThinkingReplay::default();
-    replay.store(
-        call_key(&["toolu_01"]),
-        vec![
-            thinking.clone(),
-            json!({"type": "text", "text": "Let me check."}),
-            redacted.clone(),
-            json!({"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Atlantis"}}),
-        ],
+    let mut request = tool_conversation();
+    let all = request.messages.clone();
+    // Turn 1: "Hi" → "Hello.".
+    request.messages = all[..2].to_vec();
+    keep(
+        &mut replay,
+        &request,
+        &facts,
+        "Hello.",
+        &[],
+        vec![thought("Greet.", "sig-0"), json!({"type": "text", "text": "Hello."})],
     );
-    // An earlier turn: a call, and a finished reply kept under its text.
-    replay.store(
-        call_key(&["toolu_00"]),
+    // Turn 2: a call without arguments, and its result.
+    request.messages.push(all[2].clone());
+    request
+        .messages
+        .push(ChatMessage::user("And the weather at home?"));
+    keep(
+        &mut replay,
+        &request,
+        &facts,
+        "",
+        &[("toolu_00", "get_weather", json!({}))],
         vec![
-            thinking.clone(),
+            thought("Look it up.", "sig-00"),
             json!({"type": "tool_use", "id": "toolu_00", "name": "get_weather", "input": {}}),
         ],
     );
-    replay.store(
-        ReplayKey::text("Hello."),
+    request.messages.push(ChatMessage::assistant_tool_calls(
+        None,
+        vec![ToolCall::function("toolu_00", "get_weather", "{}")],
+    ));
+    request
+        .messages
+        .push(ChatMessage::tool_result("toolu_00", "sunny"));
+    // Turn 3: the question with the picture, "Let me check." and a call.
+    request.messages.push(all[3].clone());
+    let thinking = thought("Check the city.", "sig-1");
+    let redacted = json!({"type": "redacted_thinking", "data": "opaque"});
+    keep(
+        &mut replay,
+        &request,
+        &facts,
+        "Let me check.",
+        &[("toolu_01", "get_weather", json!({"city": "Atlantis"}))],
         vec![
-            json!({"type": "thinking", "thinking": "Greet.", "signature": "sig-0"}),
-            json!({"type": "text", "text": "Hello."}),
+            thinking.clone(),
+            json!({"type": "text", "text": "Let me check."}),
+            redacted,
+            json!({"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Atlantis"}}),
         ],
     );
-    let mut request = tool_conversation();
-    request
-        .messages
-        .insert(3, ChatMessage::user("And the weather at home?"));
-    request.messages.insert(
-        4,
-        ChatMessage::assistant_tool_calls(
-            None,
-            vec![ToolCall::function("toolu_00", "get_weather", "{}")],
-        ),
-    );
-    request
-        .messages
-        .insert(5, ChatMessage::tool_result("toolu_00", "sunny"));
+    request.messages.push(all[4].clone());
+    request.messages.push(all[5].clone());
+    (request, replay, thinking)
+}
+
+#[test]
+fn unchanged_replies_go_back_with_their_thinking() {
+    let (mut request, replay, thinking) = kept_chat();
     let sent = body(&request, &adaptive_facts(), Some(&replay));
     let messages = sent["messages"].as_array().unwrap();
     // With thinking on, earlier turns go back as they were written: the model reads its
     // earlier thinking, and the prompt cache stays valid.
     assert_eq!(
         messages[1]["content"],
-        json!([{"type": "thinking", "thinking": "Greet.", "signature": "sig-0"}, {"type": "text", "text": "Hello."}])
+        json!([thought("Greet.", "sig-0"), {"type": "text", "text": "Hello."}])
     );
-    assert_eq!(messages[3]["content"][0], thinking, "{sent}");
+    assert_eq!(messages[3]["content"][0], thought("Look it up.", "sig-00"), "{sent}");
     // This turn: exactly as received, thinking and order kept.
     let current = last_assistant(&sent);
     assert_eq!(current["content"][0], thinking);
-    assert_eq!(current["content"][2], redacted);
+    assert_eq!(current["content"][2]["type"], json!("redacted_thinking"));
     assert_eq!(current["content"].as_array().unwrap().len(), 4);
-    // claude-sonnet-4-6 has no preserved thinking: no block_binding.
+    // A normal request never asks the API to drop blocks.
     assert!(sent["thinking"].get("block_binding").is_none(), "{sent}");
 
     // With thinking off, only this turn's steps go back with their thinking.
     request.thinking = Some(false);
     let off = body(&request, &adaptive_facts(), Some(&replay));
     let messages = off["messages"].as_array().unwrap();
-    assert_eq!(
-        messages[1]["content"],
-        json!([{"type": "text", "text": "Hello."}])
-    );
-    assert_eq!(last_assistant(&off)["content"][0], thinking);
+    assert_eq!(messages[1]["content"], json!([{"type": "text", "text": "Hello."}]));
     request.thinking = Some(true);
 
-    // A step the app changed (an old call's arguments shortened) goes as the app has it.
-    if let Some(calls) = request.messages[4].tool_calls.as_mut() {
+    // A step the app changed (an old call's arguments shortened) goes as the app has it,
+    // and so does everything after it: its history changed.
+    let mut shortened = request.clone();
+    if let Some(calls) = shortened.messages[4].tool_calls.as_mut() {
         calls[0].function.arguments = r#"{"city":"[shortened]"}"#.into();
     }
-    let changed = body(&request, &adaptive_facts(), Some(&replay));
+    let changed = body(&shortened, &adaptive_facts(), Some(&replay));
     assert_eq!(
         changed["messages"][3]["content"],
         json!([{"type": "tool_use", "id": "toolu_00", "name": "get_weather", "input": {"city": "[shortened]"}}])
     );
-    // So does a reply whose text changed.
-    request.messages[2] = ChatMessage::assistant("Hello!");
-    let changed = body(&request, &adaptive_facts(), Some(&replay));
     assert_eq!(
-        changed["messages"][1]["content"],
-        json!([{"type": "text", "text": "Hello!"}])
+        last_assistant(&changed)["content"][0],
+        json!({"type": "text", "text": "Let me check."})
     );
+    // An earlier reply whose text changed: it and every later reply go without thinking.
+    let mut edited = request.clone();
+    edited.messages[2] = ChatMessage::assistant("Hello!");
+    let changed = body(&edited, &adaptive_facts(), Some(&replay));
+    assert_eq!(changed["messages"][1]["content"], json!([{"type": "text", "text": "Hello!"}]));
+    assert_eq!(
+        last_assistant(&changed)["content"][0],
+        json!({"type": "text", "text": "Let me check."})
+    );
+    // So does everything when the system prompt changed.
+    let mut renamed = request.clone();
+    renamed.messages[0] = ChatMessage::system("You are a terse assistant.");
+    let changed = body(&renamed, &adaptive_facts(), Some(&replay));
+    assert!(!changed.to_string().contains("sig-"), "{changed}");
 
     // Without a replay store nothing is replayed.
     let plain = body(&request, &adaptive_facts(), None);
@@ -391,16 +441,50 @@ fn unchanged_replies_go_back_with_their_thinking() {
 }
 
 #[test]
-fn preserved_thinking_asks_for_drop_block_when_it_replays() {
+fn the_same_reply_twice_in_a_chat_keeps_each_thought_in_its_place() {
+    let facts = adaptive_facts();
     let mut replay = ThinkingReplay::default();
-    replay.store(
-        call_key(&["toolu_01"]),
-        vec![
-            json!({"type": "thinking", "thinking": "Check.", "signature": "sig-1"}),
-            json!({"type": "text", "text": "Let me check."}),
-            json!({"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Atlantis"}}),
-        ],
+    let mut request = simple("claude-opus-5-5");
+    request.thinking = Some(true);
+    request.messages = vec![ChatMessage::user("Delete a.txt")];
+    keep(
+        &mut replay,
+        &request,
+        &facts,
+        "Done.",
+        &[],
+        vec![thought("About a.txt", "sig-a"), json!({"type": "text", "text": "Done."})],
     );
+    request.messages.push(ChatMessage::assistant("Done."));
+    request.messages.push(ChatMessage::user("Delete b.txt"));
+    keep(
+        &mut replay,
+        &request,
+        &facts,
+        "Done.",
+        &[],
+        vec![thought("About b.txt", "sig-b"), json!({"type": "text", "text": "Done."})],
+    );
+    request.messages.push(ChatMessage::assistant("Done."));
+    request.messages.push(ChatMessage::user("What next?"));
+    let sent = body(&request, &facts, Some(&replay));
+    let messages = sent["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["content"][0]["signature"], json!("sig-a"), "{sent}");
+    assert_eq!(messages[3]["content"][0]["signature"], json!("sig-b"), "{sent}");
+    // Another chat with the same reply text after other messages finds none of them.
+    let mut other = simple("claude-opus-5-5");
+    other.thinking = Some(true);
+    other.messages = vec![
+        ChatMessage::user("Rename c.txt"),
+        ChatMessage::assistant("Done."),
+        ChatMessage::user("What next?"),
+    ];
+    let sent = body(&other, &facts, Some(&replay));
+    assert!(!sent.to_string().contains("sig-"), "{sent}");
+}
+
+#[test]
+fn drop_block_is_asked_for_only_when_recovering() {
     let always = ModelFacts {
         thinking: Some(ThinkingModes {
             adaptive: true,
@@ -414,39 +498,68 @@ fn preserved_thinking_asks_for_drop_block_when_it_replays() {
         "claude-haiku-5-5",
         "claude-fable-5-2",
     ] {
-        let mut request = tool_conversation();
+        let (mut request, _, _) = kept_chat();
         request.model = model.into();
-        let sent = body(&request, &always, Some(&replay));
+        let mut replay = ThinkingReplay::default();
+        let mut first = request.clone();
+        first.messages.truncate(request.messages.len() - 2);
+        keep(
+            &mut replay,
+            &first,
+            &always,
+            "Let me check.",
+            &[("toolu_01", "get_weather", json!({"city": "Atlantis"}))],
+            vec![
+                thought("Check.", "sig-1"),
+                json!({"type": "text", "text": "Let me check."}),
+                json!({"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Atlantis"}}),
+            ],
+        );
+        let normal =
+            messages_body(&request, &always, Some(&replay), &ParamFixes::default(), false);
         assert_eq!(
-            sent["thinking"]["block_binding"],
+            last_assistant(&normal)["content"][0]["signature"],
+            json!("sig-1"),
+            "{model}"
+        );
+        assert!(normal["thinking"].get("block_binding").is_none(), "{model}");
+        // The retry after "bound to a different conversation".
+        let recovery =
+            messages_body(&request, &always, Some(&replay), &ParamFixes::default(), true);
+        assert_eq!(
+            recovery["thinking"]["block_binding"],
             json!({"prefix_mismatch_behavior": "drop_block"}),
             "{model}"
         );
         // Nothing replayed: nothing to bind.
-        let sent = body(&request, &always, None);
-        assert!(sent["thinking"].get("block_binding").is_none(), "{model}");
-        // Thinking "off" on a model that always thinks: low effort, and still the binding.
+        let bare = messages_body(&request, &always, None, &ParamFixes::default(), true);
+        assert!(bare["thinking"].get("block_binding").is_none(), "{model}");
+        // Thinking "off" on a model that always thinks: low effort, and the binding as
+        // `adaptive`.
         request.thinking = Some(false);
-        let sent = body(&request, &always, Some(&replay));
+        let low = messages_body(&request, &always, Some(&replay), &ParamFixes::default(), true);
         assert_eq!(
-            sent["thinking"],
+            low["thinking"],
             json!({"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}),
             "{model}"
         );
-        assert_eq!(sent["output_config"], json!({"effort": "low"}), "{model}");
+        assert_eq!(low["output_config"], json!({"effort": "low"}), "{model}");
     }
     // Models before preserved thinking, and a refused setting, go without it.
-    let mut request = tool_conversation();
+    let (mut request, replay, _) = kept_chat();
     request.model = "claude-opus-5".into();
-    assert!(
-        body(&request, &always, Some(&replay))["thinking"]
-            .get("block_binding")
-            .is_none()
+    let sent = messages_body(
+        &request,
+        &adaptive_facts(),
+        Some(&replay),
+        &ParamFixes::default(),
+        true,
     );
+    assert!(sent["thinking"].get("block_binding").is_none());
     request.model = "claude-opus-5-5".into();
     let mut fixes = ParamFixes::default();
     fixes.add(&Fix::Drop("block_binding".into()));
-    let sent = messages_body(&request, &always, Some(&replay), &fixes);
+    let sent = messages_body(&request, &adaptive_facts(), Some(&replay), &fixes, true);
     assert!(sent["thinking"].get("block_binding").is_none());
     assert_eq!(sent["thinking"]["type"], json!("adaptive"));
 }
@@ -488,7 +601,7 @@ fn thinking_off_on_a_model_that_cannot_stop_asks_for_low_effort() {
     let mut fixes = ParamFixes::default();
     fixes.add(&Fix::Drop("output_config".into()));
     assert!(
-        messages_body(&request, &always, None, &fixes)
+        messages_body(&request, &always, None, &fixes, false)
             .get("output_config")
             .is_none()
     );
@@ -562,19 +675,26 @@ fn budget_thinking_needs_its_blocks_back() {
     let body = body(&request, &ModelFacts::default(), None);
     assert!(body.get("thinking").is_none(), "{body}");
     let mut replay = ThinkingReplay::default();
-    replay.store(
-        call_key(&["toolu_01"]),
+    let mut first = request.clone();
+    first.messages.truncate(4);
+    keep(
+        &mut replay,
+        &first,
+        &ModelFacts::default(),
+        "Let me check.",
+        &[("toolu_01", "get_weather", json!({"city": "Atlantis"}))],
         vec![
             json!({"type": "thinking", "thinking": "", "signature": "sig"}),
             json!({"type": "text", "text": "Let me check."}),
             json!({"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Atlantis"}}),
         ],
     );
-    let body = super::request::messages_body(
+    let body = messages_body(
         &request,
         &ModelFacts::default(),
         Some(&replay),
         &ParamFixes::default(),
+        false,
     );
     assert_eq!(body["thinking"]["type"], json!("enabled"));
 }
@@ -753,7 +873,8 @@ fn decode(
     body: &str,
     replay: Option<Arc<Mutex<ThinkingReplay>>>,
 ) -> (Vec<StreamEvent>, Option<ProviderError>) {
-    let mut decoder = MessagesDecoder::new(replay);
+    // The request these replies answer sent everything hashing to 7.
+    let mut decoder = MessagesDecoder::new(replay.map(|replay| (replay, 7)));
     let mut out = Vec::new();
     // Byte by byte: events split anywhere still decode.
     for byte in body.as_bytes() {
@@ -892,13 +1013,7 @@ fn reads_a_tool_call_in_pieces() {
     })));
     assert_eq!(events.last(), Some(&StreamEvent::Done));
     // No thinking: nothing to send back.
-    assert!(
-        replay
-            .lock()
-            .unwrap()
-            .find(&call_key(&["toolu_01T1x1fJ34qAmk2tNTrN7Up6"]))
-            .is_none()
-    );
+    assert_eq!(replay.lock().unwrap().len(), 0);
 }
 
 /// Thinking with its signature, then a tool call.
@@ -953,12 +1068,11 @@ fn thinking_streams_as_reasoning_and_is_kept_with_its_signature() {
         StreamEvent::Reasoning("I need the weather.".into())
     );
     assert_eq!(events[1], StreamEvent::Reasoning(" Use the tool.".into()));
-    let kept = replay
-        .lock()
-        .unwrap()
-        .find(&call_key(&["toolu_02"]))
-        .cloned()
-        .unwrap();
+    let key = ReplayKey {
+        prefix: 7,
+        reply: reply_hash("", [("toolu_02", "get_weather", &json!({"city": "Paris"}))]),
+    };
+    let kept = replay.lock().unwrap().find(&key).cloned().unwrap();
     assert_eq!(
         kept,
         vec![
@@ -990,12 +1104,12 @@ fn a_finished_reply_that_thought_is_kept_under_its_text() {
     let replay = Arc::new(Mutex::new(ThinkingReplay::default()));
     let (_, err) = decode(&stream, Some(replay.clone()));
     assert_eq!(err, None);
+    let key = ReplayKey {
+        prefix: 7,
+        reply: reply_hash("Hello.", []),
+    };
     assert_eq!(
-        replay
-            .lock()
-            .unwrap()
-            .find(&ReplayKey::text("Hello."))
-            .cloned(),
+        replay.lock().unwrap().find(&key).cloned(),
         Some(vec![
             json!({"type": "thinking", "thinking": "Greet.", "signature": "sig-0"}),
             json!({"type": "text", "text": "Hello."}),
@@ -1005,13 +1119,7 @@ fn a_finished_reply_that_thought_is_kept_under_its_text() {
     let cut = stream.replace("end_turn", "max_tokens");
     let replay = Arc::new(Mutex::new(ThinkingReplay::default()));
     decode(&cut, Some(replay.clone()));
-    assert!(
-        replay
-            .lock()
-            .unwrap()
-            .find(&ReplayKey::text("Hello."))
-            .is_none()
-    );
+    assert_eq!(replay.lock().unwrap().len(), 0);
 }
 
 #[test]
@@ -1035,13 +1143,7 @@ fn a_cut_stream_is_unfinished_and_not_kept() {
             StreamEvent::Done
         ]
     );
-    assert!(
-        replay
-            .lock()
-            .unwrap()
-            .find(&call_key(&["toolu_02"]))
-            .is_none()
-    );
+    assert_eq!(replay.lock().unwrap().len(), 0);
 }
 
 #[test]
@@ -1165,33 +1267,155 @@ fn a_whole_message_instead_of_a_stream() {
 
 #[test]
 fn the_replay_store_is_bounded_and_exact() {
+    let key = |prefix: u64, reply: u64| ReplayKey { prefix, reply };
     let mut replay = ThinkingReplay::default();
     let last = super::MAX_REPLAY_ENTRIES + 4;
     for n in 0..=last {
-        replay.store(call_key(&[&format!("c{n}")]), vec![json!({"n": n})]);
+        replay.store(key(n as u64, 1), vec![json!({"n": n})]);
     }
-    assert!(
-        replay.find(&call_key(&["c0"])).is_none(),
-        "the oldest are dropped"
-    );
-    let newest = format!("c{last}");
-    let before = format!("c{}", last - 1);
-    assert!(replay.find(&call_key(&[&newest])).is_some());
-    assert!(
-        replay.find(&call_key(&[&newest, &before])).is_none(),
-        "ids must match exactly"
-    );
-    replay.store(ReplayKey::text("Hi"), vec![json!({"text": "Hi"})]);
-    assert!(replay.find(&ReplayKey::text("Hi")).is_some());
-    assert!(replay.find(&ReplayKey::text("Hi!")).is_none());
-    replay.store(ReplayKey::Calls(Vec::new()), vec![json!({})]);
-    assert!(replay.find(&ReplayKey::Calls(Vec::new())).is_none());
+    // A safety limit far beyond a chat's replies: past it the oldest go first.
+    assert!(replay.find(&key(0, 1)).is_none(), "the oldest are dropped");
+    assert!(replay.find(&key(last as u64, 1)).is_some());
+    assert_eq!(replay.len(), super::MAX_REPLAY_ENTRIES);
+    // The prefix and the reply must both match.
+    assert!(replay.find(&key(last as u64, 2)).is_none());
+    // Keeping the same key again replaces it.
+    replay.store(key(last as u64, 1), vec![json!("again")]);
+    assert_eq!(replay.find(&key(last as u64, 1)), Some(&vec![json!("again")]));
+    assert_eq!(replay.len(), super::MAX_REPLAY_ENTRIES);
     replay.clear();
-    assert!(replay.find(&call_key(&[&newest])).is_none());
-    // One store for each endpoint and model, shared by the requests of a run.
-    let a = super::replay_for("https://api.anthropic.com/v1", "claude-opus-5-5");
-    let b = super::replay_for("https://api.anthropic.com/v1", "claude-opus-5-5");
-    let c = super::replay_for("https://api.anthropic.com/v1", "claude-sonnet-5-5");
-    assert!(Arc::ptr_eq(&a, &b));
-    assert!(!Arc::ptr_eq(&a, &c));
+    assert_eq!(replay.len(), 0);
+}
+
+/// Every use of the shared conversation stores is in this one test, so tests running at the
+/// same time cannot evict each other's.
+#[test]
+fn each_chat_has_its_own_store_and_an_idle_chat_goes_whole() {
+    let endpoint = "https://api.anthropic.com/v1#store-test";
+    let a = super::replay_for(endpoint, "claude-opus-5-5", "chat 1");
+    let b = super::replay_for(endpoint, "claude-opus-5-5", "chat 2");
+    assert!(Arc::ptr_eq(&a, &super::replay_for(endpoint, "claude-opus-5-5", "chat 1")));
+    assert!(!Arc::ptr_eq(&a, &b), "two chats never share kept thinking");
+    assert!(!Arc::ptr_eq(
+        &a,
+        &super::replay_for(endpoint, "claude-sonnet-5-5", "chat 1")
+    ));
+    // Two chats whose replies have the same text: each finds only its own.
+    let reply = ReplayKey {
+        prefix: 11,
+        reply: reply_hash("Done.", []),
+    };
+    a.lock().unwrap().store(reply, vec![json!("chat 1's thought")]);
+    assert!(b.lock().unwrap().find(&reply).is_none());
+    // The active chat keeps turn 1 while many other chats come and go; the chat used least
+    // recently is forgotten whole.
+    let active = super::replay_for(endpoint, "claude-opus-5-5", "active");
+    let turn_one = ReplayKey { prefix: 1, reply: 1 };
+    active.lock().unwrap().store(turn_one, vec![json!("turn 1")]);
+    let idle = super::replay_for(endpoint, "claude-opus-5-5", "idle");
+    idle.lock().unwrap().store(turn_one, vec![json!("idle")]);
+    for n in 0..(super::MAX_REPLAY_STORES * 2) {
+        let other = super::replay_for(endpoint, "claude-opus-5-5", &format!("other {n}"));
+        other.lock().unwrap().store(ReplayKey { prefix: 2, reply: 2 }, vec![json!(n)]);
+        // The active chat goes on.
+        let again = super::replay_for(endpoint, "claude-opus-5-5", "active");
+        assert!(Arc::ptr_eq(&again, &active));
+        assert_eq!(again.lock().unwrap().find(&turn_one), Some(&vec![json!("turn 1")]));
+    }
+    // The idle chat was forgotten: asking for it again gives an empty store.
+    let back = super::replay_for(endpoint, "claude-opus-5-5", "idle");
+    assert!(!Arc::ptr_eq(&back, &idle));
+    assert_eq!(back.lock().unwrap().len(), 0);
+}
+
+#[test]
+fn many_pictures_in_one_request_follow_claudes_limits() {
+    use base64::Engine as _;
+    let png = |width: u32, height: u32| {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        ContentPart::image(ImageUrl::from_base64("image/png", &data).unwrap())
+    };
+    // One message per picture; the first is 4,000 pixels wide.
+    let request_with = |count: usize| {
+        let mut request = simple("claude-opus-5-5");
+        request.messages = (0..count)
+            .map(|n| {
+                let side = if n == 0 { 4_000 } else { 1_000 };
+                ChatMessage::user(vec![ContentPart::text(format!("picture {n}")), png(side, 500)])
+            })
+            .collect();
+        request
+    };
+    let pictures = |sent: &Value| -> Vec<String> {
+        sent["messages"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["type"] != "text" || block["text"].as_str().unwrap().starts_with('['))
+            .map(|block| match block["type"].as_str() {
+                Some("image") => "image".to_owned(),
+                _ => block["text"].as_str().unwrap().to_owned(),
+            })
+            .collect()
+    };
+    // 20 pictures: up to 8,000 pixels a side is fine.
+    let sent = body(&request_with(20), &adaptive_facts(), None);
+    assert_eq!(pictures(&sent), vec!["image"; 20]);
+    // 21 pictures: each must be at most 3,000 pixels a side.
+    let sent = body(&request_with(21), &adaptive_facts(), None);
+    let seen = pictures(&sent);
+    assert!(seen[0].contains("at 4000 x 500 pixels"), "{}", seen[0]);
+    assert!(seen[0].contains("more than 20 pictures"), "{}", seen[0]);
+    assert!(seen[1..].iter().all(|p| p == "image"));
+    // A model with a window of 200,000 tokens or less (or one not known) takes at most 100
+    // pictures: the oldest become notes, the newest stay.
+    let small = ModelFacts {
+        context: Some(200_000),
+        ..adaptive_facts()
+    };
+    let sent = body(&request_with(103), &small, None);
+    let seen = pictures(&sent);
+    assert_eq!(seen.len(), 103);
+    assert!(seen[..3].iter().all(|p| p.contains("at most 100 pictures")), "{seen:?}");
+    assert!(seen[3..].iter().all(|p| p == "image"));
+    let unknown = ModelFacts {
+        context: None,
+        ..adaptive_facts()
+    };
+    assert!(pictures(&body(&request_with(101), &unknown, None))[0].contains("at most 100"));
+    // A larger window takes 600.
+    let sent = body(&request_with(103), &adaptive_facts(), None);
+    assert!(pictures(&sent)[1..].iter().all(|p| p == "image"));
+}
+
+#[test]
+fn a_jpeg_whose_size_comes_after_large_metadata_is_measured() {
+    use base64::Engine as _;
+    // SOI, two 65,000-byte metadata segments (Exif, colour profile), then a start of frame
+    // of 9,000 x 100: the size comes after the first 64 KiB.
+    let mut jpeg = vec![0xFF, 0xD8];
+    for marker in [0xE1, 0xE2] {
+        jpeg.extend_from_slice(&[0xFF, marker]);
+        jpeg.extend_from_slice(&65_000u16.to_be_bytes());
+        jpeg.extend(std::iter::repeat_n(0u8, 64_998));
+    }
+    jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x64, 0x23, 0x28, 0x03]);
+    jpeg.extend(std::iter::repeat_n(0u8, 32));
+    let data = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+    // The start of frame is about 130,000 bytes in, far past the first 64 KiB decoded.
+    assert!(jpeg.len() > 100_000);
+    let mut request = simple("claude-opus-5-5");
+    request.messages = vec![ChatMessage::user(vec![ContentPart::image(
+        ImageUrl::from_base64("image/jpeg", &data).unwrap(),
+    )])];
+    let block = body(&request, &adaptive_facts(), None)["messages"][0]["content"][0].clone();
+    assert!(
+        block["text"].as_str().unwrap_or_default().contains("at 9000 x 100 pixels"),
+        "{}",
+        block["type"]
+    );
 }

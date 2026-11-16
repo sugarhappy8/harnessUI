@@ -31,8 +31,8 @@ use crate::parse::{
     strip_tool_markup, writes_tool_result,
 };
 use crate::prompt::{
-    Preamble, Projection, Reach, SystemParts, ToolGuide, append_result_note, pinned_for_prompt,
-    project, sanitize_schema, schema_has_raw_control_tokens, system_message,
+    Preamble, Projection, RUN_SUBAGENT, Reach, SystemParts, ToolGuide, append_result_note,
+    pinned_for_prompt, project, sanitize_schema, schema_has_raw_control_tokens, system_message,
 };
 use crate::stream::{
     AccumulatedToolCall, ArgumentsStatus, FinishReason, StreamEvent, Timings, ToolCallAccumulator,
@@ -512,9 +512,12 @@ impl<'a> Turn<'a> {
             guide.without(&self.unlisted_tools)
         };
         let offered = |name: &str| self.tool(name).is_some();
+        // A tool this host never runs (a helper's `run_subagent`) is not one the turn left out:
+        // a helper's list then reads as its turn's, and keeps the cached prompt.
+        let refused = |name: &str| self.deps.tools.refusal(name).is_some();
         guide.reach = if offered(CALL_TOOL) {
             Reach::CallTool
-        } else if guide.names().all(offered) {
+        } else if guide.names().all(|name| offered(name) || refused(name)) {
             Reach::All
         } else {
             Reach::Only(
@@ -1235,7 +1238,7 @@ impl<'a> Turn<'a> {
                         && !wrap_up
                         && self.tools_on
                         && reply.calls.is_empty()
-                        && writes_tool_result(&reply.content);
+                        && writes_tool_result(&reply.content, &self.returned_results());
                     if made_up && !made_up_retried && self.mistakes < MAX_MISTAKES {
                         made_up_retried = true;
                         self.mistakes += 1;
@@ -1468,6 +1471,15 @@ impl<'a> Turn<'a> {
         self.tools.iter().find(|tool| tool.name == name)
     }
 
+    /// [0.0.7] The text of every tool result the app returned in this turn: a result block the
+    /// model writes that only quotes one of them is not a made-up result.
+    fn returned_results(&self) -> Vec<&str> {
+        self.turn
+            .iter()
+            .flat_map(|message| message.tool_results().map(|result| result.text.as_str()))
+            .collect()
+    }
+
     /// Checks a native call: known tool, readable arguments, repair, validation.
     fn check_native(&self, call: AccumulatedToolCall) -> Pending {
         let raw = match &call.status {
@@ -1568,8 +1580,18 @@ impl<'a> Turn<'a> {
     fn no_such_tool(&self, name: &str) -> String {
         // [0.0.7] A tool that is on in the chat but not in this turn's list: the tool list in
         // the system message names it, so the model is told how to run it, or that it cannot
-        // this turn.
+        // this turn and why. A tool this host never runs is refused plainly.
+        if let Some(refusal) = self.deps.tools.refusal(name) {
+            return refusal;
+        }
         let listed = self.tool_guide().is_some_and(|guide| guide.lists(name));
+        if listed && name == RUN_SUBAGENT {
+            return format!(
+                "{name} is on in this chat, but it does not fit in this model's context this \
+                 turn, and {CALL_TOOL} cannot run it, so it was not run. Do the task yourself \
+                 with the tools in your list of callable tools, or answer with what you have."
+            );
+        }
         if listed && self.tool(CALL_TOOL).is_some() {
             return format!(
                 "{name} is on in this chat but not in your list of callable tools this turn, so \

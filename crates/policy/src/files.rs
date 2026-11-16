@@ -94,6 +94,11 @@ pub fn always_ask_reason(canonical: &str, kind: WriteKind, flavor: Flavor) -> Op
     if STARTUP_FILES.contains(name) {
         return Some("changing a shell start-up file always asks");
     }
+    // 0.0.7 (P2 review m9): the app loads an image file it finds next to a model by itself
+    // (`*mmproj*.gguf`, the names `hub::image_file::beside` looks for).
+    if name.contains("mmproj") && name.ends_with(".gguf") {
+        return Some("writing a model's image file always asks");
+    }
     if CONFIG_FILES.contains(name) {
         return Some("changing git or credential configuration always asks");
     }
@@ -324,6 +329,41 @@ mod tests {
             "/home/u/proj/codex/src/main.rs",
             "/home/u/proj/.codexrc-notes/x",
             "/home/u/proj/CLAUDE.md",
+        ] {
+            assert_eq!(always_ask_reason(p, WriteKind::Create, P), None, "{p}");
+        }
+    }
+
+    /// 0.0.7 (P2 review m9): the app loads an image file it finds next to a model by itself
+    /// (a name with "mmproj" that ends in ".gguf", as `hub::image_file::beside` looks for),
+    /// so writing one always asks, wherever it is; other files with such words do not.
+    #[test]
+    fn writing_a_models_image_file_always_asks() {
+        for p in [
+            "/home/u/.local/share/harnessui/models/someone/Model-GGUF/mmproj-Model-F16.gguf",
+            "/home/u/models/Model.MMPROJ-f16.GGUF",
+            "/tmp/mmproj.gguf",
+        ] {
+            assert!(always_ask_reason(p, WriteKind::Create, P).is_some(), "{p}");
+            assert_eq!(
+                keep_asking(p, WriteKind::Overwrite { existing_len: 3, new_len: 9 }, P),
+                Some(KeepAsking::Sensitive),
+                "{p}"
+            );
+        }
+        assert!(
+            always_ask_reason(
+                "C:\\Users\\me\\harnessUI\\models\\x\\Model.mmproj-f16.gguf",
+                WriteKind::Edit,
+                W
+            )
+            .is_some()
+        );
+        for p in [
+            "/home/u/models/Model-Q4_K_M.gguf",
+            "/home/u/proj/mmproj-notes.md",
+            "/home/u/proj/mmproj.gguf.txt",
+            "/home/u/proj/mmproj/readme.txt",
         ] {
             assert_eq!(always_ask_reason(p, WriteKind::Create, P), None, "{p}");
         }

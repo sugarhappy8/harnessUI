@@ -9,7 +9,9 @@
 //!   expected total; a `200` restarts from zero; a `416` means "already complete, verify".
 //! - The finished file is hashed and compared before it is renamed into place.
 //! - 0.0.7: a file already at its final name with its published size and SHA-256 (it
-//!   finished before) is checked again, never downloaded again.
+//!   finished before) is checked again, never downloaded again, and the caller is told it
+//!   did not write it ([`Downloaded::fetched`]). Checking a file reports its progress
+//!   ([`Progress::Checking`]) and stops on cancel.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -133,15 +135,26 @@ fn hex(bytes: &[u8]) -> String {
 
 /// SHA-256 of a file, in lowercase hex.
 pub async fn sha256_file(path: &Path) -> std::io::Result<String> {
+    sha256_file_with(path, &|_| {}).await
+}
+
+/// [`sha256_file`], telling `checked` the bytes read so far after each MiB.
+async fn sha256_file_with(
+    path: &Path,
+    checked: &(dyn Fn(u64) + Send + Sync),
+) -> std::io::Result<String> {
     let mut f = tokio::fs::File::open(path).await?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
+    let mut total = 0u64;
     loop {
         let n = f.read(&mut buf).await?;
         if n == 0 {
             break;
         }
         h.update(&buf[..n]);
+        total += n as u64;
+        checked(total);
     }
     Ok(hex(&h.finalize()))
 }
@@ -156,11 +169,13 @@ pub async fn discard_partial(dest: &Path) {
 /// The SHA-256 of the file at `dest` when it is already the finished file of `spec`: its
 /// published size and checksum. `None` when it has to be downloaded: no file there, another
 /// size or content, or no published checksum to tell (then it is downloaded again, as
-/// before 0.0.7). Hashing a large file takes a while, so `cancel` stops it.
+/// before 0.0.7). Hashing a large file takes a while, so `cancel` stops it and `progress`
+/// hears how far it got.
 async fn finished_already(
     spec: &FileSpec,
     dest: &Path,
     cancel: &CancellationToken,
+    progress: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<Option<String>, DownloadError> {
     let Some(expected) = &spec.sha256 else {
         return Ok(None);
@@ -169,11 +184,33 @@ async fn finished_already(
         Ok(m) if m.is_file() && m.len() == spec.size => {}
         _ => return Ok(None),
     }
+    let checked = |n: u64| progress(Progress::Checking(n));
     let actual = tokio::select! {
         _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
-        r = sha256_file(dest) => r?,
+        r = sha256_file_with(dest, &checked) => r?,
     };
     Ok((&actual == expected).then_some(actual))
+}
+
+/// How far [`download_file_checked`] got, for its `progress`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// Bytes of the file on disk so far.
+    Bytes(u64),
+    /// Bytes of the file checked so far (its SHA-256 worked out): a file found already at
+    /// its final name, or the finished download before it is renamed into place.
+    Checking(u64),
+}
+
+/// What [`download_file_checked`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Downloaded {
+    /// The file's SHA-256.
+    pub sha256: String,
+    /// Whether this call wrote the file (renamed its own partial file into place). `false`
+    /// when the file was already there with its published size and SHA-256: the caller then
+    /// must not treat it as its own, for example never delete it on cancel.
+    pub fetched: bool,
 }
 
 /// Downloads `spec` to `dest`, resuming a matching partial file. `progress` gets the
@@ -189,11 +226,36 @@ pub async fn download_file(
     cancel: &CancellationToken,
     progress: &(dyn Fn(u64) + Send + Sync),
 ) -> Result<String, DownloadError> {
-    if let Some(sha) = finished_already(spec, dest, cancel).await? {
+    let bytes = |p: Progress| {
+        if let Progress::Bytes(n) = p {
+            progress(n);
+        }
+    };
+    download_file_checked(client, spec, dest, cancel, &bytes)
+        .await
+        .map(|d| d.sha256)
+}
+
+/// [`download_file`], saying whether it wrote the file ([`Downloaded::fetched`]) and how far
+/// a check of the file got ([`Progress::Checking`]).
+pub async fn download_file_checked(
+    client: &HfClient,
+    spec: &FileSpec,
+    dest: &Path,
+    cancel: &CancellationToken,
+    progress: &(dyn Fn(Progress) + Send + Sync),
+) -> Result<Downloaded, DownloadError> {
+    if let Some(sha) = finished_already(spec, dest, cancel, progress).await? {
         discard_partial(dest).await;
-        progress(spec.size);
-        return Ok(sha);
+        progress(Progress::Bytes(spec.size));
+        return Ok(Downloaded {
+            sha256: sha,
+            fetched: false,
+        });
     }
+    let checked = |n: u64| progress(Progress::Checking(n));
+    let bytes = |n: u64| progress(Progress::Bytes(n));
+    let progress = &bytes;
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -221,7 +283,12 @@ pub async fn download_file(
         }
     }
 
-    let actual = sha256_file(&part).await?;
+    // The check of a large file takes a while: reported as it goes, and stopped by `cancel`
+    // (the whole partial file stays, so a resume only checks it again).
+    let actual = tokio::select! {
+        _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+        r = sha256_file_with(&part, &checked) => r?,
+    };
     if spec
         .sha256
         .as_ref()
@@ -232,7 +299,10 @@ pub async fn download_file(
     }
     tokio::fs::rename(&part, dest).await?;
     let _ = tokio::fs::remove_file(&meta_path).await;
-    Ok(actual)
+    Ok(Downloaded {
+        sha256: actual,
+        fetched: true,
+    })
 }
 
 async fn fetch_once(
@@ -699,5 +769,86 @@ mod tests {
         .unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 3);
         assert_eq!(std::fs::read(&dest).unwrap(), b);
+    }
+
+    /// 0.0.7 (P6b review C1, m5): a download says whether it wrote the file itself, so a
+    /// cancelled download never deletes a file it only found in place (another app's copy, a
+    /// model taken off the list, a file put there by hand); and checking a file, which takes
+    /// minutes for a large one, is reported as it goes.
+    #[tokio::test]
+    async fn a_download_says_whether_it_wrote_the_file_and_how_the_check_goes() {
+        let b = body(3 << 20);
+        let sha = sha_of(&b);
+        let (url, hits) = server(b.clone(), sha.clone(), None).await;
+        let client = HfClient::for_test(&url);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("m.gguf");
+        let s = spec(&b, Some(sha.clone()));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = |seen: &Arc<std::sync::Mutex<Vec<Progress>>>| {
+            let seen = seen.clone();
+            move |p: Progress| seen.lock().unwrap().push(p)
+        };
+
+        // Downloaded: written by this download, and checked before it got its name.
+        let got = download_file_checked(
+            &client,
+            &s,
+            &dest,
+            &CancellationToken::new(),
+            &record(&seen),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            got,
+            Downloaded {
+                sha256: sha.clone(),
+                fetched: true
+            }
+        );
+        let events = seen.lock().unwrap().clone();
+        let last_byte = events
+            .iter()
+            .rposition(|p| *p == Progress::Bytes(b.len() as u64));
+        let checked = events
+            .iter()
+            .rposition(|p| *p == Progress::Checking(b.len() as u64));
+        assert!(last_byte.is_some() && checked > last_byte, "{events:?}");
+
+        // Found in place (the same file already there): not written by this download, and
+        // the check is reported while it runs, then the file counts as whole.
+        seen.lock().unwrap().clear();
+        let found = download_file_checked(
+            &client,
+            &s,
+            &dest,
+            &CancellationToken::new(),
+            &record(&seen),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            found,
+            Downloaded {
+                sha256: sha,
+                fetched: false
+            }
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "nothing fetched");
+        let events = seen.lock().unwrap().clone();
+        let checks: Vec<u64> = events
+            .iter()
+            .filter_map(|p| match p {
+                Progress::Checking(n) => Some(*n),
+                Progress::Bytes(_) => None,
+            })
+            .collect();
+        assert!(
+            checks.len() >= 3,
+            "a 3 MiB file is checked in 1 MiB steps: {events:?}"
+        );
+        assert!(checks.windows(2).all(|w| w[0] < w[1]), "{checks:?}");
+        assert_eq!(events.last(), Some(&Progress::Bytes(b.len() as u64)));
     }
 }

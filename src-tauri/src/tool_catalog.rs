@@ -59,6 +59,67 @@ pub struct Group {
 /// brings in all seven of its tools (`tool_select::WHOLE_GROUPS`).
 pub const OWN_WORDS_ONLY: &[&str] = &[reverse::server::SERVER_NAME, computer::SERVER_NAME];
 
+/// [0.0.7] Phrases that mean a group only when the request also says whose machine it is
+/// about: (server, phrases, context). The computer group's "open settings", "set the volume",
+/// "open excel" or "open chrome" also name what a program does ("add a menu item to open
+/// settings", "how do I open excel files in python", "launch chrome with puppeteer"), so they
+/// count as strong words only beside one of the context phrases ("on my laptop, open
+/// settings"). A false match brings in all seven computer tools for the rest of the chat,
+/// while a missed one still leaves them in the tool list, reachable through `call_tool`.
+pub const WITH_CONTEXT: &[(&str, &[&str], &[&str])] = &[(
+    computer::SERVER_NAME,
+    &[
+        "open settings",
+        "set the volume",
+        "mute the sound",
+        "open excel",
+        "in excel",
+        "into excel",
+        "open word",
+        "into word",
+        "open powerpoint",
+        "open chrome",
+        "launch chrome",
+        "open firefox",
+        "launch firefox",
+        "open safari",
+        "launch safari",
+        "open edge",
+        "open photoshop",
+        "open vs code",
+        "open vscode",
+        "open finder",
+        "in finder",
+        "in file explorer",
+        "in task manager",
+        "in outlook",
+        "in discord",
+        "double click the",
+        "double click on",
+        "right click the",
+        "right click on",
+        "start button",
+        "switch to the other window",
+        "on the keyboard",
+        "with the keyboard",
+        "the taskbar",
+        "the wallpaper",
+    ],
+    &[
+        "my computer",
+        "my pc",
+        "my laptop",
+        "my mac",
+        "this computer",
+        "this pc",
+        "this laptop",
+        "this mac",
+        "my screen",
+        "my desktop",
+        "on the desktop",
+    ],
+)];
+
 impl Group {
     /// Whether the words of its tools' names also point at this group (`tool_select`).
     pub fn counts_tool_names(&self) -> bool {
@@ -69,6 +130,15 @@ impl Group {
     /// words then adding to the match (`tool_select`, `find_tools`).
     pub fn needs_strong_word(&self) -> bool {
         OWN_WORDS_ONLY.contains(&self.server)
+    }
+
+    /// [0.0.7] Its phrases that count as strong words only beside one of its context phrases
+    /// ([`WITH_CONTEXT`]): (phrases, context).
+    pub fn with_context(&self) -> Option<(&'static [&'static str], &'static [&'static str])> {
+        WITH_CONTEXT
+            .iter()
+            .find(|(server, _, _)| *server == self.server)
+            .map(|(_, phrases, context)| (*phrases, *context))
     }
 }
 
@@ -187,177 +257,119 @@ pub const GROUPS: &[Group] = &[
     Group {
         server: "computer",
         label: "Computer",
-        // [0.0.7] A request is about the desktop only with one of these: something to do with
-        // the machine ("use my pc", "take a screenshot", "set the volume"), a place on it ("my
-        // screen", "open file explorer", "the start menu button"), or an app named with what to
-        // do with it ("open chrome", "in excel", "into word"). Words that also mean code
-        // ("chrome", "excel", "screen", "mouse", "laptop", "click") never match alone: they are
-        // weak words, which only add to a match (`OWN_WORDS_ONLY`). A phrase that runs into a
-        // file name ("open settings.json") is not the phrase (`tool_select::Wording`).
+        // [0.0.7] A request is about the desktop only with one of these: something done on the
+        // machine ("use my pc", "take a screenshot", "minimize all windows"), a place on it
+        // ("open file explorer", "the start menu button") or an app named with what to do with
+        // it ("open notepad", "open google chrome", "open microsoft excel"). Words that also
+        // mean code ("chrome", "excel", "screen", "mouse", "laptop", "click") never match alone:
+        // they are weak words, which only add to a match (`OWN_WORDS_ONLY`); phrases that also
+        // name what a program does need the request to say whose machine it is
+        // (`WITH_CONTEXT`); and a phrase that runs into a file name ("open settings.json") is
+        // not the phrase (`tool_select::Wording`). Precision comes first: a missed request
+        // still finds the tools in the tool list.
         strong: &[
             // The machine.
             "use my computer",
             "use my pc",
             "use my laptop",
-            "use the computer",
-            "use your computer",
+            "use my mac",
             "control my computer",
             "control my pc",
             "control my laptop",
-            "my screen",
-            "look at the screen",
-            "my desktop",
+            "control my mac",
             "take a screenshot",
             "make a screenshot",
-            "screenshot of my",
-            "screenshot of the screen",
+            "screenshot of my screen",
+            "screenshot of my desktop",
+            "look at my screen",
+            "what is on my screen",
+            "what s on my screen",
+            "see my screen",
             "move the mouse",
             "move my mouse",
-            "mouse pointer",
-            "mouse cursor",
-            "move the cursor",
-            "on the keyboard",
-            "with the keyboard",
-            "my keyboard",
-            "double click the",
-            "double click on",
-            "right click the",
-            "right click on",
-            "taskbar",
             "open the start menu",
             "open start menu",
             "start menu button",
-            "in the start menu",
-            "from the start menu",
-            "click the start button",
-            "press the start button",
-            "click start",
             "open spotlight",
-            "spotlight search",
-            "in spotlight",
             "open launchpad",
-            "in launchpad",
-            "minimize all",
-            "minimise all",
-            "other window",
-            "minimize the window",
-            "minimise the window",
-            "maximize the window",
-            "maximise the window",
-            "switch windows",
-            "set the volume",
+            "minimize all windows",
+            "minimise all windows",
             "turn up the volume",
             "turn down the volume",
-            "mute the sound",
-            "my wallpaper",
-            "change the wallpaper",
-            "desktop background",
-            "desktop wallpaper",
-            "open settings",
-            "system settings",
-            "system preferences",
-            "windows settings",
+            "change my wallpaper",
             "open the settings app",
+            "open system settings",
+            "open system preferences",
+            "open windows settings",
             "open file explorer",
             "open the file explorer",
-            "in file explorer",
-            "in the file explorer",
-            "windows explorer",
-            "open finder",
-            "open the finder",
-            "in finder",
-            "in the finder",
-            "open control panel",
-            "open the control panel",
-            "in control panel",
-            "in the control panel",
+            "open windows explorer",
             "open task manager",
             "open the task manager",
-            "in task manager",
-            "in the task manager",
+            "open control panel",
+            "open the control panel",
+            "open the recycle bin",
+            "empty the recycle bin",
+            "empty the trash",
             // Apps, with what to do with them.
             "open notepad",
-            "in notepad",
-            "into notepad",
             "launch notepad",
             "start notepad",
-            "open wordpad",
-            "in wordpad",
-            "open word",
-            "into word",
-            "microsoft word",
-            "ms word",
-            "launch word",
-            "open excel",
-            "in excel",
-            "into excel",
-            "launch excel",
-            "start excel",
-            "open powerpoint",
-            "in powerpoint",
-            "into powerpoint",
-            "launch powerpoint",
+            "into notepad",
+            "type this into word",
+            "type it into word",
+            "paste this into word",
+            "paste it into word",
+            "open microsoft word",
+            "launch microsoft word",
+            "open microsoft excel",
+            "launch microsoft excel",
+            "open microsoft edge",
+            "launch microsoft edge",
+            "open microsoft teams",
+            "launch microsoft teams",
+            "open teams",
+            "start teams",
+            "launch teams",
+            "open google chrome",
+            "launch google chrome",
+            "start google chrome",
             "open outlook",
-            "in outlook",
             "launch outlook",
-            "open chrome",
-            "launch chrome",
-            "start chrome",
-            "open firefox",
-            "launch firefox",
-            "start firefox",
-            "open safari",
-            "launch safari",
-            "microsoft edge",
-            "edge browser",
+            "open wordpad",
             "open spotify",
-            "in spotify",
-            "on spotify",
             "launch spotify",
             "start spotify",
+            "music on spotify",
             "open discord",
-            "in discord",
             "launch discord",
             "open slack",
             "launch slack",
             "start slack",
-            "open teams",
-            "start teams",
-            "launch teams",
-            "microsoft teams",
             "open zoom",
             "launch zoom",
             "open whatsapp",
             "open telegram",
-            "open photoshop",
-            "in photoshop",
-            "launch photoshop",
             "open paint",
-            "in paint",
-            "ms paint",
-            "microsoft paint",
             "open the calculator",
             "open calculator",
             "launch calculator",
             "start calculator",
             "open vlc",
-            "in vlc",
             "launch vlc",
             "open steam",
             "launch steam",
             "start steam",
-            "open vs code",
             "launch vs code",
-            "start vs code",
-            "open vscode",
             "launch vscode",
             "open the photos app",
-            "open photos",
+            "open the camera app",
         ],
         weak: &[
             "computer",
             "pc",
             "laptop",
+            "mac",
             "screen",
             "desktop",
             "mouse",
@@ -1894,6 +1906,17 @@ pub(crate) mod tests {
             assert!(!g.label.is_empty());
             for k in g.strong.iter().chain(g.weak) {
                 assert_eq!(*k, k.to_lowercase(), "{}: keyword {k}", g.server);
+            }
+            // [0.0.7] Phrases with a context: written as the matcher reads them.
+            if let Some((phrases, context)) = g.with_context() {
+                for k in phrases.iter().chain(context) {
+                    assert_eq!(*k, k.to_lowercase(), "{}: keyword {k}", g.server);
+                    assert!(
+                        k.split(' ').all(|w| !w.is_empty() && w.chars().all(char::is_alphanumeric)),
+                        "{}: keyword {k}",
+                        g.server
+                    );
+                }
             }
             assert!(
                 ENTRIES.iter().any(|e| e.group == g.server),

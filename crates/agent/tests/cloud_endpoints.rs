@@ -450,16 +450,13 @@ async fn a_tool_using_turn_against_claude() {
         second["system"][0]["cache_control"],
         json!({"type": "ephemeral", "ttl": "1h"})
     );
-    // Claude Opus 5.5 binds thinking blocks to the conversation: a block whose earlier
-    // history the app changed is dropped by the API instead of failing the request.
+    // A normal request asks no beta: the block goes back where it was written, after the
+    // same history.
     assert!(requests[0].header("anthropic-beta").is_none());
-    assert_eq!(
-        requests[1].header("anthropic-beta"),
-        Some("thinking-binding-controls-2026-08-01")
-    );
+    assert!(requests[1].header("anthropic-beta").is_none());
     assert_eq!(
         second["thinking"],
-        json!({"type": "adaptive", "display": "summarized", "block_binding": {"prefix_mismatch_behavior": "drop_block"}})
+        json!({"type": "adaptive", "display": "summarized"})
     );
     assert_eq!(
         first["system"], second["system"],
@@ -640,6 +637,9 @@ async fn claude_bad_keys_and_errors_never_show_the_key() {
 
 #[tokio::test]
 async fn claude_refused_thinking_blocks_are_dropped_once() {
+    // "Bound to a different conversation": the documented recovery is one request with
+    // `drop_block` on a model with preserved thinking; the chat's kept blocks are then
+    // forgotten, so its later requests need no such setting.
     let refusal = error(
         "invalid_request_error",
         "messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\".",
@@ -647,6 +647,7 @@ async fn claude_refused_thinking_blocks_are_dropped_once() {
     let server = claude_server(vec![
         sse(thinking_tool_stream("toolu_03")),
         Reply::json(400, &refusal),
+        sse(thinking_tool_stream("toolu_04")),
         sse(text_stream("Answer.")),
     ])
     .await;
@@ -658,18 +659,66 @@ async fn claude_refused_thinking_blocks_are_dropped_once() {
     let (outcome, _, _) = run(&client, caps(true), template).await;
     assert_eq!(outcome.status, TurnStatus::Completed);
     let requests = messages_requests(&server);
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     let replayed = requests[1].json();
     assert_eq!(
         replayed["messages"][1]["content"][0]["type"],
         json!("thinking")
     );
+    assert!(replayed["thinking"].get("block_binding").is_none());
+    // The recovery keeps the blocks and asks the API to drop the invalid ones.
+    let recovery = requests[2].json();
+    assert_eq!(
+        recovery["messages"][1]["content"][0]["type"],
+        json!("thinking")
+    );
+    assert_eq!(
+        recovery["thinking"]["block_binding"],
+        json!({"prefix_mismatch_behavior": "drop_block"})
+    );
+    assert_eq!(
+        requests[2].header("anthropic-beta"),
+        Some("thinking-binding-controls-2026-08-01")
+    );
+    // The next step: the old blocks are gone, the recovery's own reply goes back, and no
+    // setting is needed any more.
+    let next = requests[3].json();
+    assert_eq!(
+        next["messages"][1]["content"],
+        json!([{"type": "tool_use", "id": "toolu_03", "name": "get_weather", "input": {"city": "Paris"}}])
+    );
+    assert_eq!(next["messages"][3]["content"][0]["type"], json!("thinking"));
+    assert!(next["thinking"].get("block_binding").is_none());
+    assert!(requests[3].header("anthropic-beta").is_none());
+}
+
+#[tokio::test]
+async fn a_bound_block_on_a_model_without_preserved_thinking_is_left_out() {
+    // No `drop_block` for a model without preserved thinking: the blocks are left out.
+    let refusal = error(
+        "invalid_request_error",
+        "messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.",
+    );
+    let server = claude_server(vec![
+        sse(thinking_tool_stream("toolu_05")),
+        Reply::json(400, &refusal),
+        sse(text_stream("Answer.")),
+    ])
+    .await;
+    let client = claude(&server);
+    let template = RequestTemplate {
+        model: "claude-sonnet-4-6".into(),
+        ..RequestTemplate::default()
+    };
+    let (outcome, _, _) = run(&client, caps(true), template).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    let requests = messages_requests(&server);
+    assert_eq!(requests.len(), 3);
     let retried = requests[2].json();
     assert_eq!(
         retried["messages"][1]["content"],
-        json!([{"type": "tool_use", "id": "toolu_03", "name": "get_weather", "input": {"city": "Paris"}}])
+        json!([{"type": "tool_use", "id": "toolu_05", "name": "get_weather", "input": {"city": "Paris"}}])
     );
-    // Nothing replayed, nothing to bind.
     assert!(retried["thinking"].get("block_binding").is_none());
     assert!(requests[2].header("anthropic-beta").is_none());
 }
@@ -1116,8 +1165,10 @@ async fn a_reply_stopped_by_the_safety_filter_is_discarded() {
 
 #[tokio::test]
 async fn a_thinking_binding_the_api_refuses_is_left_out_and_remembered() {
-    // An account or platform without the beta: the setting is refused, the request goes
-    // again with the thinking blocks but without it, and later requests leave it out.
+    // An account or platform without the beta. The server says "bound to a different
+    // conversation" for every replayed block, and refuses the setting: the recovery with
+    // `drop_block` is refused, the blocks are left out, and once that is accepted the
+    // setting is not tried again for the model.
     let server = {
         let replies = Arc::new(Mutex::new(std::collections::VecDeque::from(vec![
             sse(thinking_tool_stream("toolu_09")),
@@ -1130,12 +1181,22 @@ async fn a_thinking_binding_the_api_refuses_is_left_out_and_remembered() {
             if let Some(id) = path.strip_prefix("/v1/models/") {
                 return Reply::json(200, &model_entry(id));
             }
-            if request.json()["thinking"].get("block_binding").is_some() {
+            let body = request.json();
+            if body["thinking"].get("block_binding").is_some() {
                 return Reply::json(
                     400,
                     &error(
                         "invalid_request_error",
                         "thinking.block_binding: Extra inputs are not permitted",
+                    ),
+                );
+            }
+            if body.to_string().contains("\"signature\"") {
+                return Reply::json(
+                    400,
+                    &error(
+                        "invalid_request_error",
+                        "messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.",
                     ),
                 );
             }
@@ -1155,33 +1216,131 @@ async fn a_thinking_binding_the_api_refuses_is_left_out_and_remembered() {
     let (outcome, _, _) = run(&client, caps(true), template.clone()).await;
     assert_eq!(outcome.status, TurnStatus::Completed);
     let requests = messages_requests(&server);
-    assert_eq!(requests.len(), 3, "first step, refused binding, retried");
-    assert!(
-        requests[1].json()["thinking"]
-            .get("block_binding")
-            .is_some()
-    );
-    let retried = requests[2].json();
-    assert!(retried["thinking"].get("block_binding").is_none());
-    assert!(requests[2].header("anthropic-beta").is_none());
     assert_eq!(
-        retried["messages"][1]["content"][0]["type"],
-        json!("thinking")
+        requests.len(),
+        4,
+        "first step, refused block, refused setting, blocks left out"
     );
-    // The next turn replays its step's thinking without asking for the binding again.
+    assert!(requests[1].json()["thinking"].get("block_binding").is_none());
+    assert!(requests[2].json()["thinking"].get("block_binding").is_some());
+    let retried = requests[3].json();
+    assert!(retried["thinking"].get("block_binding").is_none());
+    assert!(requests[3].header("anthropic-beta").is_none());
+    assert!(!retried.to_string().contains("\"signature\""));
+    // The next turn: the setting is not tried again; a refused block is left out at once.
     let (outcome, _, _) = run(&client, caps(true), template).await;
     assert_eq!(outcome.status, TurnStatus::Completed);
     let later = messages_requests(&server);
-    assert_eq!(later.len(), 5, "no refused request in the second turn");
-    assert_eq!(
-        later[4].json()["messages"][1]["content"][0]["type"],
-        json!("thinking")
-    );
-    assert!(
-        later[3..]
+    assert_eq!(later.len(), 7, "first step, refused block, blocks left out");
+    assert!(later[4..].iter().all(|r| r.json()["thinking"].get("block_binding").is_none()));
+}
+
+#[tokio::test]
+async fn two_chats_with_the_same_replies_never_exchange_thinking() {
+    // The verifier's probe: two chats on one endpoint and model, both answered "Done.".
+    // Chat A's next request must carry chat A's thinking, not chat B's.
+    let server = MockServer::start(|request: &Recorded| {
+        let path = request.path();
+        if let Some(id) = path.strip_prefix("/v1/models/") {
+            return Reply::json(200, &model_entry(id));
+        }
+        let body = request.json();
+        let who = body["messages"]
+            .as_array()
+            .unwrap()
             .iter()
-            .all(|r| r.json()["thinking"].get("block_binding").is_none())
-    );
+            .rev()
+            .find(|m| m["role"] == "user")
+            .and_then(|m| m["content"].as_array())
+            .and_then(|c| c.iter().rev().find_map(|b| b["text"].as_str()))
+            .unwrap_or_default()
+            .to_owned();
+        let mut out = start(10, 0);
+        out += &event(
+            "content_block_start",
+            &json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+        );
+        out += &event(
+            "content_block_delta",
+            &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": format!("Thinking about: {who}")}}),
+        );
+        out += &event(
+            "content_block_delta",
+            &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": format!("SIG[{who}]")}}),
+        );
+        out += &event(
+            "content_block_stop",
+            &json!({"type": "content_block_stop", "index": 0}),
+        );
+        out += &event(
+            "content_block_start",
+            &json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+        );
+        out += &event(
+            "content_block_delta",
+            &json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Done."}}),
+        );
+        out += &event(
+            "content_block_stop",
+            &json!({"type": "content_block_stop", "index": 1}),
+        );
+        out += &stop("end_turn", 5);
+        sse(out.into_bytes())
+    })
+    .await;
+    let chat = |name: &str| claude(&server).for_conversation(name);
+    let send = |client: OpenAiClient, messages: Vec<ChatMessage>| async move {
+        let mut request = ChatRequest::new("claude-opus-5-5", messages);
+        request.thinking = Some(true);
+        request.max_tokens = Some(1_000);
+        collect(&client, &request).await.unwrap();
+    };
+    let system = || ChatMessage::system("You help with files.");
+    send(chat("chat A"), vec![system(), ChatMessage::user("Chat A: delete secret-A.txt")]).await;
+    send(chat("chat B"), vec![system(), ChatMessage::user("Chat B: rename b.txt")]).await;
+    // Chat A's second turn (a new client, as each turn gets).
+    send(
+        chat("chat A"),
+        vec![
+            system(),
+            ChatMessage::user("Chat A: delete secret-A.txt"),
+            ChatMessage::assistant("Done."),
+            ChatMessage::user("Chat A: what next?"),
+        ],
+    )
+    .await;
+    // Chat B's second turn, with the same words as chat A's first one: still its own.
+    send(
+        chat("chat B"),
+        vec![
+            system(),
+            ChatMessage::user("Chat B: rename b.txt"),
+            ChatMessage::assistant("Done."),
+            ChatMessage::user("Chat A: what next?"),
+        ],
+    )
+    .await;
+    let posts = messages_requests(&server);
+    assert_eq!(posts.len(), 4);
+    let a = posts[2].json().to_string();
+    assert!(a.contains("SIG[Chat A: delete secret-A.txt]"), "{a}");
+    assert!(!a.contains("Chat B"), "{a}");
+    let b = posts[3].json().to_string();
+    assert!(b.contains("SIG[Chat B: rename b.txt]"), "{b}");
+    assert!(!b.contains("secret-A"), "{b}");
+    // A request that belongs to no chat keeps nothing for the chats either.
+    send(
+        claude(&server),
+        vec![
+            system(),
+            ChatMessage::user("Chat A: delete secret-A.txt"),
+            ChatMessage::assistant("Done."),
+            ChatMessage::user("Chat A: what next?"),
+        ],
+    )
+    .await;
+    let lone = messages_requests(&server)[4].json().to_string();
+    assert!(!lone.contains("SIG["), "{lone}");
 }
 
 #[tokio::test]

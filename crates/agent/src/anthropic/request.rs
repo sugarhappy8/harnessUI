@@ -1,8 +1,11 @@
 //! A [`ChatRequest`] (Chat Completions shape) in the form of Claude's Messages API.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use serde_json::{Map, Value, json};
 
-use super::{ReplayKey, ThinkingReplay, guess};
+use super::{ReplayKey, ThinkingReplay, guess, reply_hash};
 use crate::cloud::{ModelFacts, ParamFixes, ThinkingModes};
 use crate::history::STOPPED_TEXT;
 use crate::types::{ChatMessage, ChatRequest, ContentPart, MessageContent, Role, ToolChoice};
@@ -32,16 +35,28 @@ const ROOM_WITH_THINKING: u32 = 8_192;
 const MAX_IMAGE_BASE64: usize = 10_000_000;
 /// The longest side of a picture Claude takes, in pixels.
 const MAX_IMAGE_SIDE: u32 = 8_000;
+/// Above this many pictures in one request, every picture must be smaller.
+const MANY_IMAGES: usize = 20;
+/// The longest side of each picture in a request with more than [`MANY_IMAGES`] ("resize
+/// each image so that neither dimension exceeds 3,000 px").
+const MANY_IMAGES_SIDE: u32 = 3_000;
+/// Pictures in one request at most: 100 for a model with a window of 200,000 tokens or
+/// less (also when the window is not known), 600 for the others.
+const MOST_IMAGES_SMALL_WINDOW: usize = 100;
+const MOST_IMAGES: usize = 600;
 
 /// The Messages API body for `req`, streamed. `facts` is what the model list said about the
 /// model (the name decides what it did not say); `replay` holds the thinking blocks of this
-/// tool-use loop's earlier steps (`None` sends none); `fixes` is what the API refused earlier
-/// for this model.
+/// conversation's earlier responses (`None` sends none); `fixes` is what the API refused
+/// earlier for this model. With `recovering`, the request is sent again after the API said a
+/// replayed thinking block is bound to a different conversation: on a model with preserved
+/// thinking it asks the API to drop such blocks (`block_binding`, the documented recovery).
 pub(crate) fn messages_body(
     req: &ChatRequest,
     facts: &ModelFacts,
     replay: Option<&ThinkingReplay>,
     fixes: &ParamFixes,
+    recovering: bool,
 ) -> Value {
     let guessed = guess(&req.model);
     let cap = fixes
@@ -59,16 +74,25 @@ pub(crate) fn messages_body(
         max_tokens = max_tokens.max(ROOM_WITH_THINKING.min(cap));
     }
     let with_tools = !req.tools.is_empty();
+    let system = system_text(&req.messages);
+    let tool_list = with_tools.then(|| tools(req));
     // Earlier turns' thinking goes back too while the model thinks.
     let replay_earlier = req.thinking == Some(true) || lowered;
-    let converted = convert(&req.messages, with_tools, replay, replay_earlier);
+    let mut pictures = Pictures::new(&req.messages, facts.context);
+    let converted = convert(
+        &req.messages,
+        with_tools,
+        replay,
+        replay_earlier,
+        PrefixHasher::new(&system, tool_list.as_ref()),
+        &mut pictures,
+    );
     let mut messages = converted.messages;
     mark_newest_block(&mut messages);
 
     let mut body = Map::new();
     body.insert("model".into(), Value::String(req.model.clone()));
     body.insert("max_tokens".into(), Value::from(max_tokens));
-    let system = system_text(&req.messages);
     if !system.trim().is_empty() {
         // The one-hour lifetime: the tools and the system prompt stay cached while a chat
         // waits for an approval or a reply (Anthropic: for gaps of 5 to 60 minutes). Longer
@@ -85,12 +109,18 @@ pub(crate) fn messages_body(
         .and_then(|t| t.get("type"))
         .and_then(Value::as_str)
         .is_some_and(|kind| kind == "adaptive" || kind == "enabled");
-    // Preserved thinking: a replayed block whose earlier history changed (the app shortened
-    // an old tool result, a summary replaced old turns) is dropped instead of failing the
-    // request. Only with thinking on (Anthropic refuses it beside `between_tools`); a model
-    // that thinks at low effort says `adaptive` for it, which is what it does anyway.
+    // Recovery from a block "bound to a different conversation" on a model with preserved
+    // thinking: the API drops the blocks whose earlier history changed instead of refusing
+    // the request. Only for that retry ("Don't send it on all your conversations to hide
+    // errors"): kept responses are found by everything before them, so a normal request
+    // replays only blocks whose history is unchanged. Only with thinking on (refused beside
+    // `between_tools`); a model that thinks at low effort says `adaptive`, as it does anyway.
     let binding = json!({"prefix_mismatch_behavior": "drop_block"});
-    if converted.replayed_thinking && guessed.preserved_thinking && !fixes.drops("block_binding") {
+    if recovering
+        && converted.replayed_thinking
+        && guessed.preserved_thinking
+        && !fixes.drops("block_binding")
+    {
         match thinking.as_mut() {
             Some(Value::Object(param)) if thinking_on => {
                 param.insert("block_binding".into(), binding);
@@ -101,8 +131,8 @@ pub(crate) fn messages_body(
             _ => {}
         }
     }
-    if with_tools {
-        body.insert("tools".into(), tools(req));
+    if let Some(tool_list) = tool_list {
+        body.insert("tools".into(), tool_list);
         if let Some(choice) = tool_choice(req, thinking_on || !guessed.forced_tool_use) {
             body.insert("tool_choice".into(), choice);
         }
@@ -120,6 +150,68 @@ pub(crate) fn messages_body(
         }
     }
     Value::Object(body)
+}
+
+/// The hash of everything a request sends before a reply: its system prompt and tools, then
+/// each block of each turn with its role (cache markers left out, and turns of one role
+/// joined or not: the same blocks in the same order hash alike).
+#[derive(Clone)]
+pub(crate) struct PrefixHasher(DefaultHasher);
+
+impl PrefixHasher {
+    /// Starts with the request's system prompt and tool list.
+    fn new(system: &str, tools: Option<&Value>) -> Self {
+        let mut hasher = DefaultHasher::new();
+        system.trim().hash(&mut hasher);
+        tools.map(Value::to_string).hash(&mut hasher);
+        Self(hasher)
+    }
+
+    /// Adds one block of a turn of `role`.
+    fn block(&mut self, role: &str, block: &Value) {
+        role.hash(&mut self.0);
+        match block {
+            Value::Object(map) if map.contains_key("cache_control") => {
+                let mut map = map.clone();
+                map.remove("cache_control");
+                Value::Object(map).to_string().hash(&mut self.0);
+            }
+            other => other.to_string().hash(&mut self.0),
+        }
+    }
+
+    /// The hash of everything added so far.
+    fn finish(&self) -> u64 {
+        self.0.clone().finish()
+    }
+}
+
+/// The key prefix of the reply to `body`: the hash of everything it sends, as a later
+/// request of the conversation sends it before that reply.
+pub(crate) fn reply_prefix(body: &Value) -> u64 {
+    let system = body
+        .pointer("/system/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut hasher = PrefixHasher::new(system, body.get("tools"));
+    for message in body
+        .get("messages")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+    {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        for block in message
+            .get("content")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+        {
+            hasher.block(role, block);
+        }
+    }
+    hasher.finish()
 }
 
 /// The text of every system message, joined.
@@ -227,62 +319,45 @@ struct Converted {
     replayed_thinking: bool,
 }
 
-/// The kept blocks of an assistant step, when the app's copy of it is what the model wrote:
-/// the same text and the same tool calls (id, name and arguments). A step the app changed
-/// (an old call's long arguments shortened) goes as the app has it, without its thinking.
-fn kept_blocks(
-    message: &ChatMessage,
-    with_tools: bool,
-    replay: &ThinkingReplay,
-) -> Option<Vec<Value>> {
-    let calls = message.tool_calls.as_deref().unwrap_or_default();
+/// The key of an assistant step that follows `prefix`: what the model wrote, as the app
+/// keeps it (its text, its tool calls with ids, names and arguments).
+fn key_of(message: &ChatMessage, prefix: u64) -> ReplayKey {
     let text = message
         .content
         .as_ref()
         .map(MessageContent::text)
         .unwrap_or_default();
-    let key = if calls.is_empty() {
-        if text.is_empty() {
-            return None;
-        }
-        ReplayKey::text(&text)
-    } else {
-        if !with_tools {
-            return None;
-        }
-        ReplayKey::Calls(calls.iter().map(|call| call.id.clone()).collect())
-    };
-    let blocks = replay.find(&key)?;
-    let kept_text: String = blocks
+    let calls = message.tool_calls.as_deref().unwrap_or_default();
+    let inputs: Vec<Value> = calls
         .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .collect();
-    let kept_calls: Vec<&Value> = blocks
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
-        .collect();
-    let same_calls = kept_calls.len() == calls.len()
-        && kept_calls.iter().zip(calls).all(|(kept, call)| {
-            let input = serde_json::from_str::<Value>(&call.function.arguments)
+        .map(|call| {
+            serde_json::from_str::<Value>(&call.function.arguments)
                 .ok()
                 .filter(Value::is_object)
-                .unwrap_or_else(|| json!({}));
-            kept.get("id").and_then(Value::as_str) == Some(call.id.as_str())
-                && kept.get("name").and_then(Value::as_str) == Some(call.function.name.as_str())
-                && kept.get("input") == Some(&input)
-        });
-    (kept_text == text && same_calls).then(|| blocks.clone())
+                .unwrap_or_else(|| json!({}))
+        })
+        .collect();
+    let reply = reply_hash(
+        &text,
+        calls
+            .iter()
+            .zip(&inputs)
+            .map(|(call, input)| (call.id.as_str(), call.function.name.as_str(), input)),
+    );
+    ReplayKey { prefix, reply }
 }
 
-/// The messages after the system message, as Messages API turns. With `replay`, kept
-/// responses go back block for block: the steps of the current tool-use loop always, and
-/// with `replay_earlier` the earlier turns too.
+/// The messages after the system message, as Messages API turns. With `replay`, a kept
+/// response goes back block for block where it was written (the same text and calls after
+/// the same history): the steps of the current tool-use loop always, and with
+/// `replay_earlier` the earlier turns too. `hasher` starts with the system prompt and tools.
 fn convert(
     chat: &[ChatMessage],
     with_tools: bool,
     replay: Option<&ThinkingReplay>,
     replay_earlier: bool,
+    mut hasher: PrefixHasher,
+    pictures: &mut Pictures,
 ) -> Converted {
     let body: Vec<&ChatMessage> = chat.iter().filter(|m| m.role != Role::System).collect();
     // The current tool-use loop starts after the last user message that is not part of
@@ -296,18 +371,32 @@ fn convert(
         })
         .map_or(0, |(index, _)| index + 1);
     let mut messages: Vec<Value> = Vec::new();
+    // The conversation must start with a user turn.
+    if body.first().is_some_and(|first| first.role == Role::Assistant) {
+        push(
+            &mut messages,
+            &mut hasher,
+            "user",
+            vec![text_block("(continued)")],
+        );
+    }
     let mut unreplayed = false;
     let mut replayed_thinking = false;
     for (index, message) in body.iter().enumerate() {
         match message.role {
             Role::System => {}
-            Role::User => push(&mut messages, "user", user_blocks(message)),
+            Role::User => {
+                let blocks = content_blocks(message.content.as_ref(), pictures);
+                push(&mut messages, &mut hasher, "user", blocks);
+            }
             Role::Assistant => {
                 let calls = message.tool_calls.as_deref().unwrap_or_default();
                 let in_loop = with_tools && index >= loop_start && !calls.is_empty();
                 let kept = replay
                     .filter(|_| in_loop || replay_earlier)
-                    .and_then(|replay| kept_blocks(message, with_tools, replay));
+                    .filter(|_| with_tools || calls.is_empty())
+                    .and_then(|replay| replay.find(&key_of(message, hasher.finish())))
+                    .cloned();
                 let blocks = match kept {
                     Some(blocks) => {
                         replayed_thinking |= blocks.iter().any(|block| {
@@ -320,23 +409,16 @@ fn convert(
                     }
                     None => {
                         unreplayed |= in_loop;
-                        assistant_blocks(message, with_tools)
+                        assistant_blocks(message, with_tools, pictures)
                     }
                 };
-                push(&mut messages, "assistant", blocks);
+                push(&mut messages, &mut hasher, "assistant", blocks);
             }
-            Role::Tool => push(&mut messages, "user", result_blocks(message, with_tools)),
+            Role::Tool => {
+                let blocks = result_blocks(message, with_tools, pictures);
+                push(&mut messages, &mut hasher, "user", blocks);
+            }
         }
-    }
-    // The conversation must start with a user turn.
-    if messages
-        .first()
-        .is_some_and(|first| first.get("role").and_then(Value::as_str) != Some("user"))
-    {
-        messages.insert(
-            0,
-            json!({"role": "user", "content": [text_block("(continued)")]}),
-        );
     }
     Converted {
         messages,
@@ -346,14 +428,18 @@ fn convert(
 }
 
 /// Appends a turn, joining it to the previous one when the role is the same (tool results
-/// and the user text after them become one user turn, results first).
-fn push(messages: &mut Vec<Value>, role: &str, mut blocks: Vec<Value>) {
+/// and the user text after them become one user turn, results first), and adds its blocks
+/// to `hasher`.
+fn push(messages: &mut Vec<Value>, hasher: &mut PrefixHasher, role: &str, mut blocks: Vec<Value>) {
     if blocks.is_empty() {
         blocks.push(text_block(if role == "assistant" {
             STOPPED_TEXT
         } else {
             "."
         }));
+    }
+    for block in &blocks {
+        hasher.block(role, block);
     }
     if let Some(last) = messages.last_mut()
         && last.get("role").and_then(Value::as_str) == Some(role)
@@ -369,9 +455,61 @@ fn text_block(text: &str) -> Value {
     json!({"type": "text", "text": text})
 }
 
+/// The pictures of one request, and what Anthropic's vision limits allow for each: the most
+/// pictures one request may hold (the newest stay), and above 20 pictures a smaller size.
+pub(crate) struct Pictures {
+    /// Pictures in the request.
+    total: usize,
+    /// The most one request may hold.
+    most: usize,
+    /// Pictures converted so far, oldest first.
+    seen: usize,
+}
+
+impl Pictures {
+    /// Counts the pictures of `messages`; `window` is the model's context window when the
+    /// model list said.
+    fn new(messages: &[ChatMessage], window: Option<u32>) -> Self {
+        let total = messages
+            .iter()
+            .filter(|message| message.role != Role::System)
+            .filter_map(|message| match &message.content {
+                Some(MessageContent::Parts(parts)) => Some(parts),
+                _ => None,
+            })
+            .flatten()
+            .filter(|part| matches!(part, ContentPart::ImageUrl { .. }))
+            .count();
+        let most = match window {
+            Some(window) if window > 200_000 => MOST_IMAGES,
+            _ => MOST_IMAGES_SMALL_WINDOW,
+        };
+        Self {
+            total,
+            most,
+            seen: 0,
+        }
+    }
+
+    /// The block of the next picture: the picture, or a note where Claude would refuse it.
+    fn next(&mut self, url: &str) -> Value {
+        let index = self.seen;
+        self.seen += 1;
+        if index + self.most < self.total {
+            return text_block(&format!(
+                "[An older picture was left out here: Claude takes at most {} pictures in one \
+                 request.]",
+                self.most
+            ));
+        }
+        let many = self.total.min(self.most) > MANY_IMAGES;
+        image_block(url, if many { MANY_IMAGES_SIDE } else { MAX_IMAGE_SIDE })
+    }
+}
+
 /// Text and image blocks of a message's content; empty text is left out (the API refuses
 /// empty text blocks).
-fn content_blocks(content: Option<&MessageContent>) -> Vec<Value> {
+fn content_blocks(content: Option<&MessageContent>, pictures: &mut Pictures) -> Vec<Value> {
     match content {
         None => Vec::new(),
         Some(MessageContent::Text(text)) if text.is_empty() => Vec::new(),
@@ -381,15 +519,17 @@ fn content_blocks(content: Option<&MessageContent>) -> Vec<Value> {
             .filter_map(|part| match part {
                 ContentPart::Text { text } if text.is_empty() => None,
                 ContentPart::Text { text } => Some(text_block(text)),
-                ContentPart::ImageUrl { image_url } => Some(image_block(&image_url.url)),
+                ContentPart::ImageUrl { image_url } => Some(pictures.next(&image_url.url)),
             })
             .collect(),
     }
 }
 
 /// An image as a base64 `source`, from the inline data URI the app sends. A type the API
-/// does not read becomes a note instead.
-fn image_block(url: &str) -> Value {
+/// does not read, or a picture larger than Claude takes (10 MB of base64, or more than
+/// `max_side` pixels a side), becomes a note instead: a picture Claude refuses would fail
+/// every later request of the chat (the app accepts attachments up to 20 MB).
+fn image_block(url: &str, max_side: u32) -> Value {
     let parsed = url
         .strip_prefix("data:")
         .and_then(|rest| rest.split_once(','))
@@ -408,32 +548,64 @@ fn image_block(url: &str) -> Value {
             "[image of type {mime}: Claude reads only JPEG, PNG, GIF and WebP images]"
         ));
     }
-    // A picture Claude refuses would fail every later request of the chat, so it goes as a
-    // note (the app accepts attachments up to 20 MB).
     if data.len() > MAX_IMAGE_BASE64 {
         return text_block(
             "[A picture was left out here: it is larger than the 10 MB that Claude takes.]",
         );
     }
-    if let Some((width, height)) = picture_size(&head_bytes(data))
-        && width.max(height) > MAX_IMAGE_SIDE
+    if let Some((width, height)) = picture_size_of(data)
+        && width.max(height) > max_side
     {
+        let rule = if max_side < MAX_IMAGE_SIDE {
+            format!(
+                "the {} pixels a side that Claude takes when a request has more than \
+                 {MANY_IMAGES} pictures",
+                group_digits(max_side)
+            )
+        } else {
+            format!("the {} pixels a side that Claude takes", group_digits(max_side))
+        };
         return text_block(&format!(
-            "[A picture was left out here: at {width} x {height} pixels it is larger than the \
-             8,000 pixels a side that Claude takes.]"
+            "[A picture was left out here: at {width} x {height} pixels it is larger than \
+             {rule}.]"
         ));
     }
     json!({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}})
 }
 
-/// The first 64 KiB or so of base64 `data`, decoded (enough for a picture's header).
-fn head_bytes(data: &str) -> Vec<u8> {
+/// `8000` → `8,000`.
+fn group_digits(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// The width and height of the picture in base64 `data`, decoding only as far as its header
+/// needs: the first 64 KiB, and for a JPEG whose size comes after large Exif or colour data,
+/// more until it is found (the picture is in memory already).
+fn picture_size_of(data: &str) -> Option<(u32, u32)> {
     use base64::Engine as _;
-    let take = data.len().min(87_380) / 4 * 4;
-    let head = data.get(..take).unwrap_or_default();
-    base64::engine::general_purpose::STANDARD
-        .decode(head)
-        .unwrap_or_default()
+    let mut take = 87_380;
+    loop {
+        let end = data.len().min(take) / 4 * 4;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.get(..end)?)
+            .ok()?;
+        if let Some(size) = picture_size(&bytes) {
+            return Some(size);
+        }
+        let jpeg = bytes.starts_with(&[0xFF, 0xD8]);
+        if !jpeg || end >= data.len() / 4 * 4 {
+            return None;
+        }
+        take = take.saturating_mul(4);
+    }
 }
 
 /// The width and height a picture's header gives (PNG, GIF, WebP, JPEG); `None` when the
@@ -509,14 +681,10 @@ fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-fn user_blocks(message: &ChatMessage) -> Vec<Value> {
-    content_blocks(message.content.as_ref())
-}
-
 /// An assistant step: its text, then its tool calls (as `tool_use` blocks, or as text when
 /// the request offers no tools, since the API refuses tool blocks without tools).
-fn assistant_blocks(message: &ChatMessage, with_tools: bool) -> Vec<Value> {
-    let mut blocks = content_blocks(message.content.as_ref());
+fn assistant_blocks(message: &ChatMessage, with_tools: bool, pictures: &mut Pictures) -> Vec<Value> {
+    let mut blocks = content_blocks(message.content.as_ref(), pictures);
     for call in message.tool_calls.as_deref().unwrap_or_default() {
         let input = match serde_json::from_str::<Value>(&call.function.arguments) {
             Ok(Value::Object(map)) => Value::Object(map),
@@ -546,8 +714,8 @@ fn assistant_blocks(message: &ChatMessage, with_tools: bool) -> Vec<Value> {
 
 /// A tool result: a `tool_result` block (with `is_error` for a call that failed, was refused
 /// or did not run), or its text when the request offers no tools.
-fn result_blocks(message: &ChatMessage, with_tools: bool) -> Vec<Value> {
-    let mut content = content_blocks(message.content.as_ref());
+fn result_blocks(message: &ChatMessage, with_tools: bool, pictures: &mut Pictures) -> Vec<Value> {
+    let mut content = content_blocks(message.content.as_ref(), pictures);
     if !with_tools {
         let name = message.name.as_deref().unwrap_or("a tool");
         let mut blocks = vec![text_block(&format!("[Result of the tool {name}]"))];

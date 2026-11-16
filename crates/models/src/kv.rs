@@ -1617,6 +1617,7 @@ mod tests {
                 gemma4_12b_except(&["attention.shared_kv_layers"])
                     .u32("gemma4.attention.shared_kv_layers", 30),
             ),
+            summary(gated_delta("qwen35", 32)),
         ];
         let layouts = [
             KvLayout::from(F16),
@@ -1799,6 +1800,7 @@ mod tests {
                 .str("general.architecture", "kimi-linear")
                 .u32("kimi-linear.block_count", 2)
                 .u64(&format!("kimi-linear.{heads}"), u64::MAX)
+                .u32_array("kimi-linear.attention.head_count_kv", &[0, 8])
                 .u32("kimi-linear.kda.head_dim", u32::MAX),
         );
         assert_eq!(kda.recurrent_state_bytes, u64::MAX);

@@ -58,6 +58,9 @@ struct Loaded {
     path: PathBuf,
     resolved: ResolvedLoad,
     footprint: Footprint,
+    /// The computer's available memory when its server last became ready, before any
+    /// saved copy of a chat (0.0.7 review M1, `Freed::copies_held`).
+    ready_ram: Option<u64>,
 }
 
 /// How long "Stop and restart" waits for a stopped reply or model check to wind down
@@ -243,30 +246,37 @@ impl RuntimeManager {
         Some((backend, device, needed))
     }
 
-    /// Memory a load would free by replacing the loaded model (D2b), for Automatic.
-    pub fn freed_memory(&self) -> Freed {
+    /// Memory a load would free by replacing the loaded model (D2b), for Automatic, with
+    /// the computer's available memory now (`available_now`, `None` when the system does
+    /// not say).
+    pub fn freed_memory(&self, available_now: Option<u64>) -> Freed {
         let gpu = self.probed_with.lock().ok().and_then(|p| p.clone());
         let status = self.status();
-        let on_cpu = status.backend.as_deref() == Some("cpu")
-            && matches!(
-                status.state,
-                RuntimeStateDto::Ready | RuntimeStateDto::Starting
-            );
-        let ram_bytes = if on_cpu {
+        let running = matches!(
+            status.state,
+            RuntimeStateDto::Ready | RuntimeStateDto::Starting
+        );
+        let on_cpu = status.backend.as_deref() == Some("cpu") && running;
+        let loaded = self.current.lock().ok().and_then(|c| c.clone());
+        let mut ram_bytes = if on_cpu {
             // Item 6: from the ready report once it is known (the conversation memory, the
             // working space and the repacked weights, which are not mapped from the file).
             match self.report.lock().ok().and_then(|r| r.clone()) {
                 Some(report) => crate::offload::report_freed_ram(&report),
-                None => self
-                    .current
-                    .lock()
-                    .ok()
-                    .and_then(|c| c.as_ref().map(|l| l.footprint.anon))
-                    .unwrap_or(0),
+                None => loaded.as_ref().map_or(0, |l| l.footprint.anon),
             }
         } else {
             0
         };
+        // 0.0.7 review M1: the saved copies of the chat it holds, wherever it runs, so a
+        // Reload after a long chat does not count them as taken and needed at once.
+        if running && let Some(l) = &loaded {
+            ram_bytes = ram_bytes.saturating_add(Freed::copies_held(
+                l.footprint.copies,
+                l.ready_ram,
+                available_now,
+            ));
+        }
         Freed { gpu, ram_bytes }
     }
 
@@ -499,6 +509,9 @@ impl RuntimeManager {
     /// header says why the model cannot see images. When the image file fails during this
     /// load, the supervisor loads the model again without it: the file is remembered as
     /// unreadable before this returns, and the loaded copy counts as loaded without one.
+    /// When it is left out because there was not enough memory for it (`memory`), the file
+    /// is fine: it is not remembered, and the load still counts as the one asked for, so
+    /// "Settings changed" stays off and picking the model again does not reload it.
     pub async fn load(
         self: Arc<Self>,
         model: PathBuf,
@@ -536,6 +549,7 @@ impl RuntimeManager {
                 path: model.clone(),
                 resolved: settings.clone(),
                 footprint,
+                ready_ram: None,
             });
         }
         self.forget_report();
@@ -559,7 +573,7 @@ impl RuntimeManager {
                 load_stage: Some(LoadStage::Starting),
                 ctx_source: Some(settings.ctx_source),
                 adjustments: if image_file_left_out {
-                    vec![LoadStage::RetryingWithoutImageFile]
+                    vec![LoadStage::RetryingWithoutImageFile { memory: false }]
                 } else {
                     Vec::new()
                 },
@@ -603,14 +617,22 @@ impl RuntimeManager {
                     continue;
                 }
                 // The image file could not be read, so the model is loading again without
-                // it: remembered (on its Installed row) before anything after it is handled.
+                // it: remembered (on its Installed row) before anything after it is handled,
+                // and what runs (what "Settings changed" compares) has none. Left out for
+                // memory, the file is fine and the load is still the one asked for.
                 if matches!(
                     event,
-                    ServerEvent::Stage(LoadStage::RetryingWithoutImageFile)
+                    ServerEvent::Stage(LoadStage::RetryingWithoutImageFile { memory: false })
                 ) && let Some(image) = &mmproj
                 {
                     me.remember_unreadable_image_file(&events_model, image)
                         .await;
+                    if me.loads.is_current(seq)
+                        && let Ok(mut current) = me.current.lock()
+                        && let Some(loaded) = current.as_mut()
+                    {
+                        loaded.resolved.mmproj = None;
+                    }
                 }
                 let ready = matches!(event, ServerEvent::State(ServerState::Ready));
                 me.on_event(event);
@@ -638,13 +660,13 @@ impl RuntimeManager {
                     if let Some(pid) = server.pid() {
                         crate::children::track(&me2.app, pid, &running.backend.server);
                     }
-                    // 0.0.7 (P2): loaded again without its image file, so what runs (and
-                    // what "Settings changed" compares) has none.
-                    if running.launch.mmproj.is_none()
-                        && let Ok(mut current) = me2.current.lock()
+                    // 0.0.7 review M1: the computer's memory before any saved copy of a
+                    // chat, to tell later how many the server holds.
+                    if let Ok(mut current) = me2.current.lock()
                         && let Some(loaded) = current.as_mut()
                     {
-                        loaded.resolved.mmproj = None;
+                        loaded.ready_ram =
+                            models::hardware::system_memory().map(|m| m.available_bytes);
                     }
                     if let Ok(mut e) = me2.endpoint.lock() {
                         *e = Some(Endpoint {
@@ -1009,6 +1031,8 @@ fn launch_config(
         // Item 6: only what reaches the command line; without a device the placement
         // words are left out by `build_args` (threads and fast attention stay).
         fine: settings.fine.clone(),
+        // 0.0.7 review M2: sized for this computer when the load was resolved.
+        ctx_checkpoints: settings.ctx_checkpoints,
         ..LaunchConfig::new(model, settings.ctx, port, api_key)
     }
 }
@@ -1635,6 +1659,7 @@ mod tests {
             ctx: 24_576,
             ctx_choice: crate::load_settings::ContextSize::Auto,
             ctx_source: crate::load_settings::ContextSource::Automatic,
+            ctx_checkpoints: models::kv::MAX_CTX_CHECKPOINTS,
             gpu,
             save_memory,
             keep_in_memory,
@@ -1677,6 +1702,20 @@ mod tests {
         assert_eq!(l.gpu, GpuUse::Off);
         assert_eq!(l.device, None);
         assert!(!l.save_memory && !l.keep_in_memory);
+        // 0.0.7 review M2: the saved copies sized for this computer reach the command line.
+        for (copies, word) in [(1, "1"), (5, "5"), (8, "8")] {
+            let r = ResolvedLoad {
+                ctx_checkpoints: copies,
+                ..resolved(GpuUse::All, false, false)
+            };
+            for c in [vulkan, cpu] {
+                let args = runtime::build_args(&launch(&r, c));
+                assert!(
+                    args.windows(2).any(|w| w == ["--ctx-checkpoints", word]),
+                    "{args:?}"
+                );
+            }
+        }
     }
 
     /// Reload after a step-down (D2c, D3): the load starts again on the backend the

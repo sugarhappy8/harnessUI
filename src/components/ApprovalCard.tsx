@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ShieldAlert, ShieldQuestion } from "lucide-react";
 import type { ApprovalRequest, KeepAsking } from "../lib/types";
 import { useApprovalMode, useChatMode } from "../lib/approvalMode";
 import { toErrorInfo, useApp } from "../store/app";
-import { onMainWindowShown } from "../lib/windowShown";
+import { useInputDelay } from "../lib/useInputDelay";
 import { AllowAllConfirm } from "./AllowAllButton";
 
 /**
@@ -54,16 +54,15 @@ function reasonText(request: ApprovalRequest, allowAll: boolean): string | null 
  *
  * [0.0.7] The window may have been minimised while computer use acted, and the app brings
  * it back for the card, in front of the window the user was clicking in. So the delay
- * starts again each time the app brought the window back, and whenever the page becomes
- * visible again; time while it is hidden does not count. Not when the window merely gets
- * the focus: the click that focuses a card shown in front is the user's deliberate one.
+ * starts again each time the app brings the window back, and whenever the page becomes
+ * visible again (`useInputDelay`).
  */
 export function ApprovalCard(props: {
   request: ApprovalRequest;
   onDecide: (decision: "allowOnce" | "allowForChat" | "deny", note: string | null) => void;
 }) {
   const { request } = props;
-  const [armed, setArmed] = useState(false);
+  const { armed, armedRef } = useInputDelay(CARD_INPUT_DELAY_MS);
   const [note, setNote] = useState("");
   const [showNote, setShowNote] = useState(false);
   const [confirmAll, setConfirmAll] = useState(false);
@@ -71,32 +70,10 @@ export function ApprovalCard(props: {
   const allowAll = useChatMode(request.chatId) !== "ask";
   const denyRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    let live = true;
-    let timer: number | undefined;
-    const restart = () => {
-      // A Tauri listener can still be called once after the cleanup.
-      if (!live) return;
-      window.clearTimeout(timer);
-      setArmed(false);
-      if (document.visibilityState === "hidden") return;
-      timer = window.setTimeout(() => setArmed(true), CARD_INPUT_DELAY_MS);
-    };
-    restart();
-    document.addEventListener("visibilitychange", restart);
-    const stopShown = onMainWindowShown(restart);
-    return () => {
-      live = false;
-      window.clearTimeout(timer);
-      document.removeEventListener("visibilitychange", restart);
-      stopShown();
-    };
-  }, []);
-
   const reason = reasonText(request, allowAll);
   const always = request.card === "onceOnly";
   const decide = (d: "allowOnce" | "allowForChat" | "deny") => {
-    if (!armed) return;
+    if (!armedRef.current) return;
     props.onDecide(d, d === "deny" && note.trim() ? note.trim() : null);
   };
   // "Allow all in this chat": the chat is switched first, and only then is this card
@@ -177,7 +154,7 @@ export function ApprovalCard(props: {
         {!always && !allowAll && (
           <button
             type="button"
-            onClick={() => armed && setConfirmAll(true)}
+            onClick={() => armedRef.current && setConfirmAll(true)}
             aria-disabled={!armed}
             className="rounded-md border border-border px-3 py-1 hover:bg-bg-muted aria-disabled:opacity-50"
           >

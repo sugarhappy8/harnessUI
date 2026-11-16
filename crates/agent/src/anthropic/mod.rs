@@ -58,10 +58,11 @@ pub(crate) use stream::{MessagesDecoder, events_from_message};
 /// `temperature`, `top_p` and `top_k`, which the app never sends to Claude.
 pub(crate) const API_VERSION: &str = "2026-10-21";
 
-/// Responses kept for sending their thinking back, for each endpoint and model; older
-/// entries are dropped first.
-const MAX_REPLAY_ENTRIES: usize = 256;
-/// Endpoints and models with kept responses; a handful at most.
+/// Responses kept for one conversation: a safety limit far beyond a long chat's replies;
+/// past it the oldest go first.
+const MAX_REPLAY_ENTRIES: usize = 4_096;
+/// Conversations (chats with one endpoint and model) whose responses are kept; the one used
+/// least recently is forgotten whole.
 const MAX_REPLAY_STORES: usize = 32;
 /// How long a model lookup that failed is not tried again.
 const FAILED_LOOKUP_PAUSE: Duration = Duration::from_secs(120);
@@ -75,74 +76,114 @@ const FACTS_LOOKUP: Duration = Duration::from_secs(10);
 /// Pages of the model list read (1,000 models each).
 const MAX_MODEL_PAGES: usize = 5;
 
-/// What finds a kept response in a later request: the ids of the tools it called, in
-/// order, or for a reply that called none, its text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReplayKey {
-    /// The `tool_use` ids, in order.
-    Calls(Vec<String>),
-    /// A hash of the reply's whole text.
-    Text(u64),
+/// What finds a kept response in a later request: a hash of everything the request that
+/// produced it sent before it (the system prompt, the tools and every earlier block, without
+/// cache markers), and a hash of what the reply showed (its text and its tool calls). The
+/// same reply text at another place, in this chat or another one, has another key, and so
+/// does a reply whose earlier history changed: such a block would not be valid there anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ReplayKey {
+    /// Everything before the reply ([`request::PrefixHasher`]).
+    pub prefix: u64,
+    /// What the reply showed ([`reply_hash`]).
+    pub reply: u64,
 }
 
-impl ReplayKey {
-    /// The key of a reply without tool calls whose whole text is `text`.
-    pub(crate) fn text(text: &str) -> Self {
-        let mut hasher = DefaultHasher::new();
-        text.hash(&mut hasher);
-        Self::Text(hasher.finish())
+/// The hash of what a reply showed: its whole text, then each tool call's id, name and
+/// arguments, in order.
+pub(crate) fn reply_hash<'a>(
+    text: &str,
+    calls: impl IntoIterator<Item = (&'a str, &'a str, &'a Value)>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    for (id, name, input) in calls {
+        id.hash(&mut hasher);
+        name.hash(&mut hasher);
+        input.to_string().hash(&mut hasher);
     }
+    hasher.finish()
 }
 
-/// The content blocks of responses that thought, kept so later requests can send them back
-/// exactly as received.
+/// The content blocks of one conversation's responses that thought, kept so its later
+/// requests can send them back exactly as received.
 #[derive(Debug, Default)]
 pub(crate) struct ThinkingReplay {
-    entries: VecDeque<(ReplayKey, Vec<Value>)>,
+    entries: HashMap<ReplayKey, Vec<Value>>,
+    /// Keys in the order they were kept, for the safety limit.
+    order: VecDeque<ReplayKey>,
 }
 
 impl ThinkingReplay {
-    /// Keeps the blocks of a response. A key without call ids keeps nothing.
+    /// Keeps the blocks of a response.
     pub(crate) fn store(&mut self, key: ReplayKey, blocks: Vec<Value>) {
-        if key == ReplayKey::Calls(Vec::new()) {
-            return;
+        if self.entries.insert(key, blocks).is_some() {
+            self.order.retain(|kept| *kept != key);
+        } else if self.order.len() >= MAX_REPLAY_ENTRIES
+            && let Some(oldest) = self.order.pop_front()
+        {
+            // A safety limit far beyond a long chat's replies.
+            self.entries.remove(&oldest);
         }
-        self.entries.retain(|(kept, _)| *kept != key);
-        if self.entries.len() >= MAX_REPLAY_ENTRIES {
-            self.entries.pop_front();
-        }
-        self.entries.push_back((key, blocks));
+        self.order.push_back(key);
     }
 
     /// The blocks of the response with this key.
     pub(crate) fn find(&self, key: &ReplayKey) -> Option<&Vec<Value>> {
-        self.entries
-            .iter()
-            .rev()
-            .find(|(kept, _)| kept == key)
-            .map(|(_, blocks)| blocks)
+        self.entries.get(key)
     }
 
-    /// Forgets everything (after the API refused a replayed block).
+    /// How many responses are kept.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Forgets everything (after the API refused a replayed block of this conversation).
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.order.clear();
     }
 }
 
-static REPLAYS: LazyLock<Mutex<HashMap<String, Arc<Mutex<ThinkingReplay>>>>> =
-    LazyLock::new(Default::default);
+/// The kept responses of each conversation, with when each was last used.
+#[derive(Default)]
+struct Conversations {
+    stores: HashMap<String, (Arc<Mutex<ThinkingReplay>>, u64)>,
+    clock: u64,
+}
 
-/// The kept responses of `model` at `endpoint` (its API URL), for this run of the app: a
-/// chat's next turn finds the thinking of the turns before it.
-pub(crate) fn replay_for(endpoint: &str, model: &str) -> Arc<Mutex<ThinkingReplay>> {
-    let Ok(mut stores) = REPLAYS.lock() else {
+static REPLAYS: LazyLock<Mutex<Conversations>> = LazyLock::new(Default::default);
+
+/// The kept responses of one conversation (a chat: `conversation`) with `model` at
+/// `endpoint` (its API URL), for this run of the app, so a chat's next turn finds the
+/// thinking of the turns before it and no other chat ever does. When more conversations are
+/// kept than [`MAX_REPLAY_STORES`], the one used least recently is forgotten whole, never
+/// part of a conversation that is still going.
+pub(crate) fn replay_for(
+    endpoint: &str,
+    model: &str,
+    conversation: &str,
+) -> Arc<Mutex<ThinkingReplay>> {
+    let Ok(mut kept) = REPLAYS.lock() else {
         return Arc::default();
     };
-    let key = format!("{endpoint}\n{model}");
-    if !stores.contains_key(&key) && stores.len() >= MAX_REPLAY_STORES {
-        stores.clear();
+    kept.clock += 1;
+    let now = kept.clock;
+    let key = format!("{endpoint}\n{model}\n{conversation}");
+    if !kept.stores.contains_key(&key)
+        && kept.stores.len() >= MAX_REPLAY_STORES
+        && let Some(idle) = kept
+            .stores
+            .iter()
+            .min_by_key(|(_, (_, used))| *used)
+            .map(|(key, _)| key.clone())
+    {
+        kept.stores.remove(&idle);
     }
-    stores.entry(key).or_default().clone()
+    let entry = kept.stores.entry(key).or_default();
+    entry.1 = now;
+    entry.0.clone()
 }
 
 /// A Claude model's family, from its name.
@@ -479,6 +520,14 @@ fn thinking_block_refused(body: &[u8]) -> bool {
             || text.contains("invalid signature"))
 }
 
+/// The API refused a replayed thinking block because what came before it changed ("bound to
+/// a different conversation"): the documented recovery is one request with `drop_block`.
+fn bound_to_another_conversation(body: &[u8]) -> bool {
+    String::from_utf8_lossy(body)
+        .to_lowercase()
+        .contains("bound to a different conversation")
+}
+
 /// The API refused the `block_binding` setting or its beta (an account or platform without
 /// the beta: "block_binding: Extra inputs are not permitted", or the header's value). Not the
 /// refusal of a thinking block, which names the setting as a way out.
@@ -501,8 +550,11 @@ fn binding_refused(body: &[u8]) -> bool {
 /// Streams one reply in Claude's own format. The request is translated, sent with this
 /// endpoint's key in `x-api-key`, and its event stream read into the same events as a chat
 /// completion. A request refused for a parameter is sent again without it (and once that is
-/// accepted, the parameter is left out for this model until the app quits); one refused for
-/// a thinking block sent back is sent again without thinking blocks.
+/// accepted, the parameter is left out for this model until the app quits). One refused
+/// because a thinking block sent back is "bound to a different conversation" is sent again
+/// once with `drop_block` (models with preserved thinking), else without thinking blocks;
+/// either way the conversation's kept blocks are forgotten, so its later requests need
+/// neither.
 ///
 /// # Errors
 /// Any [`ProviderError`]; [`ProviderError::Refused`] inside the stream when the company's
@@ -522,8 +574,19 @@ pub(crate) async fn stream(
     };
     let endpoint = client.api_url().as_str().to_owned();
     let url = crate::client::join(client.api_url(), "messages");
-    let replay = replay_for(&endpoint, &req.model);
+    // This conversation's kept responses: a chat's own, or this client's for a request that
+    // belongs to no chat.
+    let replay = match &client.config().conversation {
+        Some(conversation) => replay_for(&endpoint, &req.model, conversation),
+        None => client.own_replay().clone(),
+    };
+    let forget = || {
+        if let Ok(mut kept) = replay.lock() {
+            kept.clear();
+        }
+    };
     let mut replay_thinking = true;
+    let mut recovering = false;
     let mut round = 0;
     // Fixes found for this request: kept for the model once a request with them is accepted.
     let mut pending: Vec<cloud::Fix> = Vec::new();
@@ -535,12 +598,24 @@ pub(crate) async fn stream(
         let body = {
             let kept = replay.lock().ok();
             let kept = kept.as_deref().filter(|_| replay_thinking);
-            request::messages_body(req, &facts, kept, &fixes)
+            request::messages_body(req, &facts, kept, &fixes, recovering)
         };
+        if recovering {
+            // The recovery request carries the blocks; later requests of the conversation
+            // carry none of them (the API needs `drop_block` no more).
+            forget();
+        }
         let beta = body
             .pointer("/thinking/block_binding")
             .is_some()
             .then_some(BINDING_BETA);
+        // The reply is kept under the history as the conversation's next request sends it:
+        // after a recovery, without the forgotten blocks.
+        let prefix = if recovering {
+            request::reply_prefix(&request::messages_body(req, &facts, None, &fixes, false))
+        } else {
+            request::reply_prefix(&body)
+        };
         match client
             .send_stream_request(url.clone(), &body, &cancel, beta)
             .await?
@@ -549,7 +624,7 @@ pub(crate) async fn stream(
                 for fix in &pending {
                     cloud::remember_fix(&endpoint, &req.model, fix);
                 }
-                let decoder = MessagesDecoder::new(Some(replay.clone()));
+                let decoder = MessagesDecoder::new(Some((replay.clone(), prefix)));
                 return client
                     .open_stream(response, cancel, WireDecoder::Messages(decoder))
                     .await;
@@ -563,19 +638,28 @@ pub(crate) async fn stream(
                 if round < MAX_FIX_ROUNDS {
                     round += 1;
                     if status == 400 && replay_thinking && thinking_block_refused(&error_body) {
-                        if let Ok(mut kept) = replay.lock() {
-                            kept.clear();
+                        let can_drop = !recovering
+                            && bound_to_another_conversation(&error_body)
+                            && replay.lock().ok().is_some_and(|kept| {
+                                request::messages_body(req, &facts, Some(&*kept), &fixes, true)
+                                    .pointer("/thinking/block_binding")
+                                    .is_some()
+                            });
+                        if can_drop {
+                            recovering = true;
+                        } else {
+                            forget();
+                            replay_thinking = false;
                         }
-                        replay_thinking = false;
                         continue;
                     }
-                    let binding = cloud::Fix::Drop("block_binding".to_owned());
-                    if status == 400
-                        && beta.is_some()
-                        && binding_refused(&error_body)
-                        && fixes.add(&binding)
-                    {
-                        pending.push(binding);
+                    if status == 400 && beta.is_some() && binding_refused(&error_body) {
+                        let binding = cloud::Fix::Drop("block_binding".to_owned());
+                        if fixes.add(&binding) {
+                            pending.push(binding);
+                        }
+                        forget();
+                        replay_thinking = false;
                         continue;
                     }
                     if let Value::Object(sent) = &body {

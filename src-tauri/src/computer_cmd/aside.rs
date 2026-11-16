@@ -8,17 +8,25 @@
 //!
 //! - for an approval card of that chat: in front of the other windows without taking the
 //!   keyboard (Windows: raised as always-on-top for a moment; macOS: ordered in front), and
-//!   its taskbar button flashes or its Dock icon bounces. The page is told, and every card
-//!   on screen starts its input delay again, so a click meant for another application
-//!   cannot land on Allow;
+//!   its taskbar button flashes or its Dock icon bounces;
 //! - at the end of that turn: restored without taking the keyboard, and the user is told
 //!   the same way;
-//! - on Stop: restored and given the keyboard, since the user asked for it.
+//! - on Stop: restored and given the keyboard, since the user asked for it. A restore that
+//!   wins the race against Stop's own (the end of the stopped turn) gives the keyboard too.
 //!
-//! Restoring a window is `ShowWindow(SW_RESTORE)` on Windows, which Windows does not let
-//! take the keyboard from the application the user works in (the taskbar button flashes
-//! instead), and `deminiaturize` on macOS, which leaves the active application active. Only
+//! The page is told just before the window comes back and again once it is on screen, and
+//! every approval card and Allow all / Full access confirmation on screen starts its input
+//! delay again, so a click meant for another application cannot land on it.
+//!
+//! The quiet restores never activate the window: on Windows `ShowWindow(SW_SHOWNOACTIVATE)`
+//! ([`computer::restore_window_without_activating`]; Tauri's own restore is
+//! `ShowWindow(SW_RESTORE)`, which activates it whenever Windows lets this app take the
+//! foreground), on macOS `deminiaturize`, which leaves the active application active. Only
 //! Stop focuses the window (`set_focus`, which on Windows may tap Alt to be allowed to).
+//!
+//! A window event (focus, a resize) while the window is not minimised means the user brought
+//! it back. Events while it is still minimised do not: Windows activates a minimised window
+//! when the window in front of it closes, and a change of display scale resizes it.
 //!
 //! The red border and the Stop window are windows of their own and stay.
 
@@ -71,7 +79,28 @@ impl MainWindow for TauriWindow {
         let _ = self.w.minimize();
     }
 
-    fn unminimise(&self) {
+    fn before_show(&self) {
+        let _ = self.app.emit_to(crate::MAIN_WINDOW, MAIN_WINDOW_SHOWN, ());
+    }
+
+    fn unminimise(&self, how: Comeback) {
+        #[cfg(target_os = "windows")]
+        if how != Comeback::Focused {
+            match restore_without_activating(&self.app, &self.w) {
+                Quiet::Done => {
+                    // Brings Tauri's idea of the window up to date; with the window back on
+                    // screen nothing happens there.
+                    if self.w.is_minimized().is_ok_and(|m| !m) {
+                        let _ = self.w.unminimize();
+                    }
+                    return;
+                }
+                // The main thread is busy; the restore runs once it is free.
+                Quiet::Late => return,
+                Quiet::NoHandle => {}
+            }
+        }
+        let _ = how;
         let _ = self.w.unminimize();
     }
 
@@ -89,6 +118,38 @@ impl MainWindow for TauriWindow {
             Comeback::Quietly => self.tell_the_user(),
         }
         let _ = self.app.emit_to(crate::MAIN_WINDOW, MAIN_WINDOW_SHOWN, ());
+    }
+}
+
+/// How a restore without activation went.
+#[cfg(target_os = "windows")]
+enum Quiet {
+    Done,
+    Late,
+    NoHandle,
+}
+
+/// Restores the minimised window without activating it, on the main thread, which owns it.
+#[cfg(target_os = "windows")]
+fn restore_without_activating(app: &AppHandle, w: &WebviewWindow) -> Quiet {
+    let Ok(hwnd) = w.hwnd() else {
+        return Quiet::NoHandle;
+    };
+    let addr = hwnd.0 as usize;
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let sent = app.run_on_main_thread(move || {
+        // SAFETY: the main window is one of this app's windows; this runs on the main
+        // thread, which owns it.
+        let _ = tx.send(unsafe {
+            computer::restore_window_without_activating(addr as *mut std::ffi::c_void)
+        });
+    });
+    if sent.is_err() {
+        return Quiet::NoHandle;
+    }
+    match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+        Ok(_) => Quiet::Done,
+        Err(_) => Quiet::Late,
     }
 }
 
@@ -122,14 +183,25 @@ fn order_front(app: &AppHandle, w: &WebviewWindow) {
 }
 
 /// The user brought the window back (from the taskbar, the Dock, Alt+Tab): it is theirs
-/// until the next approved input that it is in the way of. The app's own restore is told
-/// apart by [`computer::Aside::brought_back`].
+/// until the next approved input that it is in the way of. The app's own restore, and
+/// events while the window is still minimised, are told apart by
+/// [`computer::Aside::brought_back`].
 fn follow_window_events(w: &WebviewWindow) {
     FOLLOW.call_once(|| {
-        w.on_window_event(|event| match event {
-            WindowEvent::Focused(true) => ASIDE.brought_back(),
-            WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => ASIDE.brought_back(),
-            _ => {}
+        let win = w.clone();
+        w.on_window_event(move |event| {
+            let back = match event {
+                WindowEvent::Focused(true) => true,
+                WindowEvent::Resized(size) => size.width > 0 && size.height > 0,
+                _ => false,
+            };
+            if back {
+                // Window events run on the main thread, where reading the window is direct.
+                ASIDE.brought_back(WindowNow {
+                    visible: win.is_visible().unwrap_or(false),
+                    minimised: win.is_minimized().unwrap_or(true),
+                });
+            }
         });
     });
 }
@@ -191,8 +263,15 @@ pub fn turn_ended(app: &AppHandle, chat_id: i64, turn: u64) {
     on_blocking_thread(app, move |w| ASIDE.turn_ended(w, chat_id, turn));
 }
 
+/// The user pressed Stop: call before the turns are cancelled, so a restore that wins the
+/// race against Stop's own (the end of the stopped turn) gives the keyboard too.
+pub fn stop_requested() {
+    ASIDE.stop_requested();
+}
+
 /// The user pressed Stop: the stop hotkey or the indicator's Stop button.
 pub fn stopped(app: &AppHandle) {
+    ASIDE.stop_requested();
     on_blocking_thread(app, |w| ASIDE.stopped(w));
 }
 
@@ -257,12 +336,20 @@ mod tests {
         );
         let hotkey = include_str!("../hotkey.rs");
         assert!(hotkey.contains("crate::computer_cmd::stopped(app);"));
+        // Stop is known before the turns are cancelled, and so before any turn can end.
+        let stop_now = &hotkey[hotkey.find("pub fn stop_now(").expect("stop_now")..];
+        let pending = stop_now
+            .find("crate::computer_cmd::stop_requested();")
+            .expect("stop_requested");
+        let cancel = stop_now.find("generation.cancel()").expect("cancel");
+        assert!(pending < cancel);
         let wiring = include_str!("../computer_cmd.rs");
         assert!(wiring.contains("approved_on_card: Arc::new(aside::take_card_approval)"));
     }
 
-    /// The page listens for the event the app sends when it brought the window back
-    /// (approval cards start their input delay again).
+    /// The page listens for the event the app sends when it brings the window back:
+    /// approval cards and the Allow all / Full access confirmations start their input delay
+    /// again.
     #[test]
     fn the_page_listens_for_the_window_coming_back() {
         let page = include_str!("../../../src/lib/windowShown.ts");
@@ -270,7 +357,11 @@ mod tests {
             "export const MAIN_WINDOW_SHOWN = \"{}\";",
             super::MAIN_WINDOW_SHOWN
         )));
+        let delay = include_str!("../../../src/lib/useInputDelay.ts");
+        assert!(delay.contains("onMainWindowShown(restart)"));
         let card = include_str!("../../../src/components/ApprovalCard.tsx");
-        assert!(card.contains("onMainWindowShown(restart)"));
+        assert!(card.contains("useInputDelay(CARD_INPUT_DELAY_MS)"));
+        let confirms = include_str!("../../../src/components/AllowAllButton.tsx");
+        assert!(confirms.contains("useInputDelay(CONFIRM_INPUT_DELAY_MS)"));
     }
 }

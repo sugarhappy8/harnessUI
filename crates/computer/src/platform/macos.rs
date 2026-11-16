@@ -643,6 +643,12 @@ impl Injector for MacInjector {
         })
     }
 
+    fn cursor(&self) -> Option<GlobalPoint> {
+        let e = CGEvent::new(None)?;
+        let p = CGEvent::location(Some(&e));
+        Some(GlobalPoint::new(p.x, p.y))
+    }
+
     fn time_since_input(&self) -> Option<Duration> {
         // kCGAnyInputEventType is (CGEventType)~0.
         let secs = CGEventSource::seconds_since_last_event_type(

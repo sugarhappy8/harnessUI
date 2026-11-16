@@ -125,7 +125,6 @@ pub struct HardwareDto {
 
 async fn detect(state: &AppState) -> (Target, HardwareDto) {
     let ram = models::hardware::system_memory();
-    let ram_free = ram.map(|m| m.available_bytes).unwrap_or(0);
     let backends = state.runtime.backends(false).await;
     let mib = 1024 * 1024;
     for kind in [
@@ -162,7 +161,8 @@ async fn detect(state: &AppState) -> (Target, HardwareDto) {
                 Target::Gpu {
                     name: d.description.clone(),
                     free_bytes: free,
-                    ram_free_bytes: ram_free,
+                    // 0.0.7 review m5: unknown stays unknown, not 0.
+                    ram_free_bytes: ram.map(|m| m.available_bytes),
                 },
                 "gpu",
             )
@@ -694,6 +694,11 @@ struct StoredSummary {
         skip_serializing_if = "Vec::is_empty"
     )]
     unreadable_projectors: Vec<image_file::FileStamp>,
+    /// 0.0.7 (P6b review m4): the image file the app downloaded for this model itself (with
+    /// it, or by "Download the image file"), the only one Delete may remove. Absent for one
+    /// found next to the model, in rows saved before, and for imports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    downloaded_projector: Option<String>,
 }
 
 /// Reads the image files remembered as unreadable leniently (see [`lenient_hub`]).
@@ -843,6 +848,8 @@ async fn register_installed_in(
         repo_file: saved.repo_file,
         hub: saved.hub,
         unreadable_projectors: unreadable,
+        // Set by the download that brought the image file (`note_downloaded_image`).
+        downloaded_projector: None,
     };
     let id = store
         .upsert_model(ModelInput {
@@ -1000,31 +1007,56 @@ pub async fn delete_model(
     let Some(rec) = state.store.get_model(store::ModelId(id)).await? else {
         return Err(AppError::not_found("model"));
     };
+    // The same file loaded under another spelling (a link, a mapped drive) is unloaded too,
+    // so its files are never deleted while llama-server has them open (0.0.6 item 8).
+    let loaded = state
+        .runtime
+        .status()
+        .model_path
+        .is_some_and(|p| crate::model_options::same_file(&p, &rec.path));
+    let unload = loaded.then(|| state.runtime.unload());
+    let note = remove_installed(
+        &state.store,
+        &rec,
+        delete_files,
+        &models_dir(&app).await,
+        unload,
+    )
+    .await?;
+    state.runtime.forget_unloaded(&rec.path);
+    Ok(note)
+}
+
+/// What [`delete_model`] does with the row `rec` (0.0.7, P6): works out what goes from disk
+/// ([`removal_plan`], for a download with `delete_files`), then unloads the model (`unload`,
+/// when it is the one loaded), deletes those files and forgets the row. It never refuses.
+async fn remove_installed(
+    store: &store::Store,
+    rec: &store::ModelRecord,
+    delete_files: bool,
+    models_dir: &Path,
+    unload: Option<impl std::future::Future<Output = ()>>,
+) -> AppResult<Option<String>> {
     let removal = if delete_files && rec.source == ModelSource::Download {
-        let others: Vec<store::ModelRecord> = state
-            .store
+        let others: Vec<store::ModelRecord> = store
             .list_models()
             .await?
             .into_iter()
             .filter(|m| m.id != rec.id)
             .collect();
-        removal_plan(&rec, &models_dir(&app).await, &others)
+        removal_plan(rec, models_dir, &others)
     } else {
         Removal::default()
     };
-    // The same file loaded under another spelling (a link, a mapped drive) is unloaded too,
-    // so its files are never deleted while llama-server has them open (0.0.6 item 8).
-    let loaded = state.runtime.status().model_path;
-    if loaded.is_some_and(|p| crate::model_options::same_file(&p, &rec.path)) {
-        state.runtime.unload().await;
+    if let Some(unload) = unload {
+        unload.await;
     }
     for f in &removal.delete {
         let _ = std::fs::remove_file(f);
     }
-    state.store.delete_model(rec.id).await?;
-    crate::model_options::forget(&state.store, &rec.path).await; // [0.0.6 item 8, WP8]
-    state.runtime.forget_unloaded(&rec.path);
-    Ok(kept_note(removal.outside.len()))
+    store.delete_model(rec.id).await?;
+    crate::model_options::forget(store, &rec.path).await; // [0.0.6 item 8, WP8]
+    Ok(kept_note(&removal))
 }
 
 /// What Delete removes from disk for a downloaded model (0.0.7, P6).
@@ -1034,6 +1066,48 @@ struct Removal {
     delete: Vec<PathBuf>,
     /// Files left in place because they are outside the models folder.
     outside: Vec<PathBuf>,
+    /// The image file the plan looked at, if any.
+    image: Option<PathBuf>,
+}
+
+/// What Delete with files would remove for the downloaded model `rec` ([`removal_plan`]),
+/// for its question: the bytes, and whether some files would stay because they are outside
+/// the models folder.
+fn delete_preview(
+    rec: &store::ModelRecord,
+    models_dir: &Path,
+    others: &[store::ModelRecord],
+) -> (u64, bool) {
+    let _ = (models_dir, others);
+    (rec.size_bytes, false)
+}
+
+/// 0.0.7 (P6b review m4): records that the app downloaded `image` for the installed model at
+/// `model_path` itself, so Delete may remove it with the model. Nothing happens for a model
+/// that is not on the list.
+pub(crate) async fn note_downloaded_image(
+    store: &store::Store,
+    model_path: &str,
+    image: &Path,
+) -> AppResult<()> {
+    let Some(rec) = store.model_by_path(model_path).await? else {
+        return Ok(());
+    };
+    let mut stored: StoredSummary =
+        serde_json::from_value(rec.gguf_summary.clone()).unwrap_or_default();
+    stored.downloaded_projector = Some(image.display().to_string());
+    store
+        .upsert_model(ModelInput {
+            path: rec.path,
+            repo: rec.repo,
+            file_name: rec.file_name,
+            size_bytes: rec.size_bytes,
+            sha256: rec.sha256,
+            gguf_summary: serde_json::to_value(&stored).unwrap_or_default(),
+            source: rec.source,
+        })
+        .await?;
+    Ok(())
 }
 
 /// The files Delete removes for the downloaded model `rec`: every shard of a split model
@@ -1050,8 +1124,11 @@ fn removal_plan(
         serde_json::from_value(rec.gguf_summary.clone()).unwrap_or_default();
     let dir = dunce::canonicalize(models_dir).ok();
     let mut files = shard_siblings(Path::new(&rec.path));
-    files.extend(stored.projector.map(PathBuf::from));
-    let mut out = Removal::default();
+    let mut out = Removal {
+        image: stored.projector.map(PathBuf::from),
+        ..Removal::default()
+    };
+    files.extend(out.image.clone());
     for file in files {
         let Ok(real) = dunce::canonicalize(&file) else {
             continue;
@@ -1069,8 +1146,8 @@ fn removal_plan(
 }
 
 /// What Delete says when it left files in place because they are outside the models folder.
-fn kept_note(outside: usize) -> Option<String> {
-    match outside {
+fn kept_note(removal: &Removal) -> Option<String> {
+    match removal.outside.len() {
         0 => None,
         1 => Some(
             "Removed from the list. Its file is outside the models folder, so it was left where it is."
@@ -1597,8 +1674,37 @@ mod tests {
         assert_eq!(serde_json::to_value(&other).unwrap()["intelMac"], false);
     }
 
-    /// A model on the Installed list at `path`, downloaded, with `projector` recorded.
+    /// A model on the Installed list at `path`, downloaded, with `projector` recorded as the
+    /// image file the app downloaded for it.
     fn downloaded(id: i64, path: &Path, projector: Option<&Path>) -> store::ModelRecord {
+        let image = projector.map(|p| p.display().to_string());
+        with_summary(
+            id,
+            path,
+            StoredSummary {
+                architecture: Some("sample".into()),
+                projector: image.clone(),
+                downloaded_projector: image,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// A downloaded model at `path` whose recorded image file was found next to it, not
+    /// downloaded by the app.
+    fn found_image(id: i64, path: &Path, image: &Path) -> store::ModelRecord {
+        with_summary(
+            id,
+            path,
+            StoredSummary {
+                architecture: Some("sample".into()),
+                projector: Some(image.display().to_string()),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn with_summary(id: i64, path: &Path, stored: StoredSummary) -> store::ModelRecord {
         store::ModelRecord {
             id: store::ModelId(id),
             path: path.display().to_string(),
@@ -1606,12 +1712,7 @@ mod tests {
             file_name: String::new(),
             size_bytes: 1,
             sha256: None,
-            gguf_summary: serde_json::to_value(StoredSummary {
-                architecture: Some("sample".into()),
-                projector: projector.map(|p| p.display().to_string()),
-                ..Default::default()
-            })
-            .unwrap(),
+            gguf_summary: serde_json::to_value(stored).unwrap(),
             added_at: 0,
             source: ModelSource::Download,
         }
@@ -1658,7 +1759,7 @@ mod tests {
             vec![shard1.clone(), shard2.clone(), image.clone()]
         );
         assert!(plan.outside.is_empty());
-        assert_eq!(kept_note(plan.outside.len()), None);
+        assert_eq!(kept_note(&plan), None);
 
         // Another model of the repository uses the image file: recorded, or found next to it.
         let q4 = repo.join("Sample-7B-Q4_K_M.gguf");
@@ -1697,13 +1798,14 @@ mod tests {
         assert!(plan.delete.is_empty());
         assert_eq!(plan.outside, vec![old_model.clone(), old_image.clone()]);
         assert_eq!(
-            kept_note(plan.outside.len()).as_deref(),
+            kept_note(&plan).as_deref(),
             Some(
                 "Removed from the list. Its files are outside the models folder, so they were left where they are."
             )
         );
+        let plan = removal_plan(&downloaded(4, &old_model, None), &models, &[]);
         assert_eq!(
-            kept_note(1).as_deref(),
+            kept_note(&plan).as_deref(),
             Some(
                 "Removed from the list. Its file is outside the models folder, so it was left where it is."
             )
@@ -1714,25 +1816,158 @@ mod tests {
         assert_eq!(plan.outside.len(), 3);
     }
 
-    /// 0.0.7 (P6): `delete_model` works out what to delete before it unloads anything, and
-    /// no longer refuses (it said "Only files inside the models folder are deleted; this one
-    /// was left in place." after it had unloaded the model).
+    /// P6b review m4: Delete removes only an image file the app downloaded for the model. One
+    /// found next to it (put there by hand, or by another app) and recorded at registration or
+    /// at a load stays.
     #[test]
-    fn delete_plans_before_it_unloads_and_never_refuses() {
-        let source = include_str!("hub.rs");
-        let start = source.find("pub async fn delete_model(").unwrap();
-        let body = &source[start..];
-        let body = &body[..body.find("\n}\n").unwrap()];
-        let plan = body.find("removal_plan(").expect("a plan");
-        let unload = body
-            .find("state.runtime.unload().await")
-            .expect("an unload");
-        assert!(plan < unload, "the plan comes first");
+    fn delete_keeps_an_image_file_the_app_did_not_download() {
+        let root = scratch();
+        let models = root.0.join("models");
+        let repo = models.join("example-quants/Sample-7B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let model = repo.join("Sample-7B-Q4_K_M.gguf");
+        let image = repo.join("mmproj-Sample-F16.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
+        std::fs::write(&image, b"gguf").unwrap();
+        let plan = removal_plan(&found_image(1, &model, &image), &models, &[]);
+        assert_eq!(plan.delete, vec![model.clone()]);
+        assert!(plan.outside.is_empty());
+        let plan = removal_plan(&downloaded(1, &model, Some(image.as_path())), &models, &[]);
+        assert_eq!(plan.delete, vec![model.clone(), image.clone()]);
+        // Only the downloaded image file outside the models folder: the note says so.
+        let elsewhere = root.0.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let far_image = elsewhere.join("mmproj-Sample-F16.gguf");
+        std::fs::write(&far_image, b"gguf").unwrap();
+        let plan = removal_plan(&downloaded(1, &model, Some(far_image.as_path())), &models, &[]);
+        assert_eq!(plan.delete, vec![model.clone()]);
         assert_eq!(
-            body.matches("Err(").count(),
-            1,
-            "only a missing row is refused"
+            kept_note(&plan).as_deref(),
+            Some(
+                "Removed from the list. Its image file is outside the models folder, so it was left where it is."
+            )
         );
-        assert!(body.contains("return Err(AppError::not_found(\"model\"));"));
+    }
+
+    /// P6b review nit: a split model whose names are spelled `-OF-` and `.GGUF` keeps that
+    /// spelling, so Delete finds every part and a cancelled download sees them as in use.
+    #[test]
+    fn a_split_model_keeps_the_spelling_of_its_names() {
+        let root = scratch();
+        let models = root.0.join("models");
+        let repo = models.join("example-quants/Big-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let first = repo.join("Big-Q4_K_M-00001-OF-00002.GGUF");
+        let second = repo.join("Big-Q4_K_M-00002-OF-00002.GGUF");
+        std::fs::write(&first, b"gguf").unwrap();
+        std::fs::write(&second, b"gguf").unwrap();
+        assert_eq!(shard_siblings(&first), vec![first.clone(), second.clone()]);
+        let big = downloaded(1, &first, None);
+        assert_eq!(
+            removal_plan(&big, &models, &[]).delete,
+            vec![first.clone(), second.clone()]
+        );
+        assert!(used_by_installed(&[big], &second));
+    }
+
+    /// P6b review nit: Delete's question counts what really goes: every part and the image
+    /// file the app downloaded, inside the models folder, and says when files stay outside.
+    #[test]
+    fn the_delete_question_counts_what_goes() {
+        let root = scratch();
+        let models = root.0.join("models");
+        let repo = models.join("example-quants/Sample-7B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let model = repo.join("Sample-7B-Q4_K_M.gguf");
+        let image = repo.join("mmproj-Sample-F16.gguf");
+        std::fs::write(&model, vec![0u8; 1000]).unwrap();
+        std::fs::write(&image, vec![0u8; 300]).unwrap();
+        let rec = downloaded(1, &model, Some(image.as_path()));
+        assert_eq!(delete_preview(&rec, &models, &[]), (1300, false));
+        let old = root.0.join("old-models");
+        std::fs::create_dir_all(&old).unwrap();
+        let away = old.join("Old-Q4_K_M.gguf");
+        std::fs::write(&away, vec![0u8; 500]).unwrap();
+        assert_eq!(
+            delete_preview(&downloaded(2, &away, None), &models, &[]),
+            (0, true)
+        );
+        assert_eq!(
+            delete_preview(
+                &downloaded(3, &repo.join("Gone-Q4_K_M.gguf"), None),
+                &models,
+                &[]
+            ),
+            (0, false)
+        );
+    }
+
+    async fn on_the_list(store: &store::Store, rec: &store::ModelRecord) -> store::ModelRecord {
+        store
+            .upsert_model(ModelInput {
+                path: rec.path.clone(),
+                repo: rec.repo.clone(),
+                file_name: rec.file_name.clone(),
+                size_bytes: rec.size_bytes,
+                sha256: rec.sha256.clone(),
+                gguf_summary: rec.gguf_summary.clone(),
+                source: rec.source,
+            })
+            .await
+            .unwrap();
+        store.model_by_path(&rec.path).await.unwrap().unwrap()
+    }
+
+    /// 0.0.7 (P6): a model always leaves the list. Its files go only after the model was
+    /// unloaded; a model whose file is gone, or in a folder used before "Change folder", is
+    /// taken off the list (before, Delete refused, after it had unloaded the model).
+    #[tokio::test]
+    async fn a_model_always_leaves_the_list_and_is_unloaded_before_its_files_go() {
+        let root = scratch();
+        let models = root.0.join("models");
+        let repo = models.join("example-quants/Sample-7B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        let none = || None::<std::future::Ready<()>>;
+
+        // Its file is gone.
+        let gone = on_the_list(&store, &downloaded(0, &repo.join("Gone.gguf"), None)).await;
+        assert_eq!(
+            remove_installed(&store, &gone, true, &models, none())
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(store.get_model(gone.id).await.unwrap().is_none());
+
+        // In an old folder: kept there, and said so.
+        let old = root.0.join("old-models");
+        std::fs::create_dir_all(&old).unwrap();
+        let away_file = old.join("Old-Q4_K_M.gguf");
+        std::fs::write(&away_file, b"gguf").unwrap();
+        let away = on_the_list(&store, &downloaded(0, &away_file, None)).await;
+        let note = remove_installed(&store, &away, true, &models, none())
+            .await
+            .unwrap();
+        assert!(note.unwrap().contains("outside the models folder"));
+        assert!(away_file.exists());
+        assert!(store.get_model(away.id).await.unwrap().is_none());
+
+        // Loaded: unloaded while its files are still there, then they go.
+        let model = repo.join("Sample-7B-Q4_K_M.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
+        let loaded = on_the_list(&store, &downloaded(0, &model, None)).await;
+        let there_at_unload = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = there_at_unload.clone();
+        let file = model.clone();
+        let unload = async move {
+            seen.store(file.exists(), std::sync::atomic::Ordering::SeqCst);
+        };
+        remove_installed(&store, &loaded, true, &models, Some(unload))
+            .await
+            .unwrap();
+        assert!(there_at_unload.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!model.exists());
+        assert!(store.get_model(loaded.id).await.unwrap().is_none());
     }
 }

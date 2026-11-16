@@ -314,37 +314,71 @@ pub fn strip_tool_markup(text: &str) -> String {
 /// chat templates (Qwen, Hermes) put results in.
 const RESULT_TAGS: &[&str] = &["tool_output", "tool_response"];
 
+/// Names of reasoning written as text, as models write it when the server does not separate
+/// it: `<think>` (DeepSeek, Qwen), `<thinking>`, `<reasoning>`, `<thought>`, `<reflection>`.
+const REASONING_TAGS: &[&str] = &["think", "thinking", "reasoning", "thought", "reflection"];
+
 /// [0.0.7] Whether a reply holds a tool result the model wrote itself: a tool-result block
-/// ([`RESULT_TAGS`], any ASCII letter case) as a block, not as a word. That is a line that
-/// starts with its opening or closing tag, or an opening tag whose closing tag follows; outside
-/// code blocks, inline code and reasoning written as `<think>` text. Only the app writes
+/// ([`RESULT_TAGS`], any ASCII letter case) written as a block of its own, outside code
+/// blocks, inline code and reasoning written as text ([`REASONING_TAGS`]). A block of its own
+/// is an opening tag alone on its line, content, and a closing tag that ends a line; or one
+/// whole line made of an opening tag, content and its closing tag. Only the app writes
 /// results; a small model that was told results arrive in such blocks sometimes writes one
-/// instead of calling the tool, and makes the result up. A tag named in a sentence ("results
-/// arrive in <tool_output> blocks", as the system message itself says), an example in code,
-/// or reasoning about one does not count: such an answer is a real one.
-pub fn writes_tool_result(text: &str) -> bool {
+/// instead of calling the tool, and makes the result up.
+///
+/// Not counted, so such an answer stands: a tag named in a sentence or a list item ("results
+/// arrive between <tool_output> and </tool_output> tags", "- Results: <tool_output>…"), a tag
+/// that starts a wrapped line of a sentence, a quoted line ("> <tool_output>…"), an example in
+/// code, reasoning about one, and a block whose content is part of a result the app returned
+/// in this turn (`returned`): the model quoting what it got.
+pub fn writes_tool_result(text: &str, returned: &[&str]) -> bool {
     // ASCII lower case keeps every byte offset, and so does blanking the reasoning out.
-    let visible = without_think(&text.to_ascii_lowercase());
+    let visible = without_reasoning(&text.to_ascii_lowercase());
     let code = CodeMap::new(&visible);
-    let tags_at = |tag: &str| -> Vec<usize> {
-        find_outside_code(&visible, tag, &code)
-            .filter(|at| tag_ends(&visible[at + tag.len()..]))
-            .collect()
+    let quoted = |content: &str| {
+        let content = squeezed(content);
+        returned
+            .iter()
+            .any(|result| squeezed(&result.to_ascii_lowercase()).contains(&content))
     };
     RESULT_TAGS.iter().any(|name| {
-        let opening = tags_at(&format!("<{name}"));
-        let closing = tags_at(&format!("</{name}"));
-        let starts_line = |at: &usize| {
-            visible[..*at]
-                .rsplit('\n')
-                .next()
-                .is_none_or(|before| before.trim().is_empty())
-        };
-        opening.iter().chain(&closing).any(starts_line)
-            || opening
-                .iter()
-                .any(|open| closing.iter().any(|close| close > open))
+        let opening = format!("<{name}");
+        let closing = format!("</{name}>");
+        let closings: Vec<usize> = find_outside_code(&visible, &closing, &code).collect();
+        find_outside_code(&visible, &opening, &code).any(|open| {
+            if !tag_ends(&visible[open + opening.len()..]) {
+                return false;
+            }
+            let line_start = visible[..open].rfind('\n').map_or(0, |at| at + 1);
+            let line_end = visible[open..].find('\n').map_or(visible.len(), |at| open + at);
+            // Nothing before it on its line, and the tag itself on that line.
+            let Some(after_tag) = visible[open..line_end].find('>').map(|at| open + at + 1) else {
+                return false;
+            };
+            if !visible[line_start..open].trim().is_empty() {
+                return false;
+            }
+            let Some(&close) = closings.iter().find(|close| **close >= after_tag) else {
+                return false;
+            };
+            let after_close = close + closing.len();
+            let close_line_end = visible[after_close..]
+                .find('\n')
+                .map_or(visible.len(), |at| after_close + at);
+            let alone = visible[after_tag..line_end].trim().is_empty();
+            let one_line = close < line_end;
+            let content = &visible[after_tag..close];
+            visible[after_close..close_line_end].trim().is_empty()
+                && (alone || one_line)
+                && !content.trim().is_empty()
+                && !quoted(content)
+        })
     })
+}
+
+/// A text with every run of white space made one space, without white space at either end.
+fn squeezed(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Whether a tag name ends where it was found: `<tool_output>`, `<tool_output id="1">` or a
@@ -356,32 +390,36 @@ fn tag_ends(after: &str) -> bool {
         .is_none_or(|c| c == '>' || c == '/' || c.is_whitespace())
 }
 
-/// The text with reasoning written as `<think>` text blanked out, so offsets stay the same:
-/// from `<think>` to the end of its `</think>` (or to the end of the text), and from the
-/// start to a first `</think>` that has no `<think>` before it (the chat template opened it
-/// in the prompt).
-fn without_think(lower: &str) -> String {
-    const OPEN: &str = "<think>";
-    const CLOSE: &str = "</think>";
-    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut from = 0;
-    if let Some(close) = lower.find(CLOSE)
-        && lower.find(OPEN).is_none_or(|open| close < open)
-    {
-        from = close + CLOSE.len();
-        spans.push(0..from);
-    }
-    while let Some(open) = lower[from..].find(OPEN).map(|at| from + at) {
-        let end = lower[open..]
-            .find(CLOSE)
-            .map_or(lower.len(), |at| open + at + CLOSE.len());
-        spans.push(open..end);
-        from = end;
-    }
+/// The text with reasoning written as text ([`REASONING_TAGS`]) blanked out, so offsets stay
+/// the same: from an opening tag to the end of its closing tag (or to the end of the text), and
+/// from the start to a first closing tag that has no opening tag before it (the chat template
+/// opened it in the prompt).
+fn without_reasoning(lower: &str) -> String {
     let mut bytes = lower.as_bytes().to_vec();
-    for span in spans {
-        // Whole characters only: each span starts at `<` and ends after `>` or at the end.
-        bytes[span].fill(b' ');
+    for name in REASONING_TAGS {
+        let open_tag = format!("<{name}>");
+        let close_tag = format!("</{name}>");
+        // Each name is looked for in what earlier names left, so nested reasoning goes too.
+        let text = String::from_utf8(bytes.clone()).unwrap_or_default();
+        let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut from = 0;
+        if let Some(close) = text.find(&close_tag)
+            && text.find(&open_tag).is_none_or(|open| close < open)
+        {
+            from = close + close_tag.len();
+            spans.push(0..from);
+        }
+        while let Some(open) = text[from..].find(&open_tag).map(|at| from + at) {
+            let end = text[open..]
+                .find(&close_tag)
+                .map_or(text.len(), |at| open + at + close_tag.len());
+            spans.push(open..end);
+            from = end;
+        }
+        for span in spans {
+            // Whole characters only: each span starts at `<` and ends after `>` or at the end.
+            bytes[span].fill(b' ');
+        }
     }
     String::from_utf8(bytes).unwrap_or_default()
 }

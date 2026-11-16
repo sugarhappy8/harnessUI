@@ -376,6 +376,15 @@ export interface FitResult {
    * (its free memory less what is kept for other programs), not only the whole.
    */
   computerShort: boolean;
+  /**
+   * What the saved copies of a long chat take at most in the computer's memory (0.0.7), not in
+   * `neededBytes`: they build up during a chat. Absent from older answers: 0.
+   */
+  copiesBytes?: number;
+  /** Not even one saved copy fits what the computer has left: yellow at most, never red. */
+  copiesShort?: boolean;
+  /** The computer's free memory could not be read (a graphics card's computer). */
+  computerUnknown?: boolean;
   /** The backend's 0.0.4 sentence; the screens word the figures with `fitLine` (words.ts). */
   sentence: string;
 }
@@ -431,6 +440,8 @@ export interface DownloadGroup {
   bytesPerSecond: number | null;
   /** A file without a published checksum is part of this download. */
   unverified: boolean;
+  /** [0.0.7 P6b] A file is being checked (minutes for a large one): the row says so. */
+  checking?: boolean;
 }
 
 export interface ModelSummaryView {
@@ -459,6 +470,11 @@ export interface InstalledModel {
   /** [0.0.7 P2] Its image file could not be read and no other usable one is there, so it loads
    *  without image input. */
   imageFileUnreadable?: boolean;
+  /** [0.0.7 P6b] For a download: what Delete would remove from disk (its parts and the image
+   *  file the app downloaded, inside the models folder), and whether some of its files would
+   *  stay because they are outside the models folder. */
+  deleteBytes?: number;
+  keptOutside?: boolean;
 }
 
 /** [0.0.7 P2] What an installed model's Hugging Face repository offers as its image file. */
@@ -1244,6 +1260,11 @@ export interface MemoryBar {
   freeAfterUnload: boolean;
   otherBytes: number;
   need: Parts;
+  /**
+   * What the saved copies of a long chat may take besides, later (computer memory only;
+   * 0.0.7). Not in `need`: they build up during a chat. Absent from older answers: 0.
+   */
+  copiesBytes?: number;
 }
 
 export type PictureSource =
@@ -1277,6 +1298,11 @@ export interface OffloadPreview {
   mark: Verdict;
   fits: Fits;
   custom: boolean;
+  /**
+   * Not even one saved copy of a long chat fits what the computer has left (0.0.7): the mark
+   * is yellow at most for that; the computer bar's `copiesBytes` says how much.
+   */
+  copiesShort?: boolean;
 }
 
 /** Where the loaded model went (the ready line's memory report). */

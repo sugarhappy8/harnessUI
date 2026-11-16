@@ -30,7 +30,9 @@
 //!   focus, that Stop was not pressed, and that the handle still belongs to the same
 //!   process and is shown (not minimised, not cloaked).
 //! - **Latest input:** `GetLastInputInfo` against `GetTickCount` (injected input counts;
-//!   the guard leaves out this app's own).
+//!   the guard leaves out this app's own), and `GetCursorPos`.
+//! - **The main window coming back without the keyboard** (stepping aside, 9.3):
+//!   [`restore_window_without_activating`].
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -58,11 +60,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowExW, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GetAncestor, GetClassNameW,
     GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowDisplayAffinity, GetWindowLongW,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_SWAPBUTTON, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SetCursorPos, SetForegroundWindow, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WindowFromPoint,
+    GetWindowPlacement, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindow, IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_SWAPBUTTON,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SetCursorPos,
+    SetForegroundWindow, SetWindowDisplayAffinity, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WindowFromPoint,
 };
 use windows::core::{BOOL, PWSTR, w};
 
@@ -120,6 +123,49 @@ fn process_path(pid: u32) -> Option<String> {
         Some(String::from_utf16_lossy(
             &buf[..(len as usize).min(buf.len())],
         ))
+    }
+}
+
+/// Brings one of this app's minimised windows back on screen without activating it, so the
+/// keyboard stays with the application in use: how the main window comes back after it
+/// stepped aside (9.3) for an approval card or at the end of a turn. Returns false when
+/// the window was not minimised.
+///
+/// `ShowWindow(SW_RESTORE)`, what Tauri's unminimise does, activates the window whenever
+/// Windows lets this app take the foreground (it got the last input, or Alt was pressed).
+/// `SW_SHOWNOACTIVATE` restores the window to its normal size and position without that. A
+/// window that was maximised when it was minimised would come back un-maximised that way,
+/// and no ShowWindow command maximises without activating, so such a window is restored
+/// with `SW_SHOWMAXIMIZED`; if that activated it, the foreground goes straight back to the
+/// window that had it.
+///
+/// # Safety
+///
+/// `hwnd` is one of this app's windows; call on the thread that owns it (the main thread).
+pub unsafe fn restore_window_without_activating(hwnd: *mut c_void) -> bool {
+    let hwnd = HWND(hwnd);
+    // SAFETY: plain calls on the caller's window; the placement is a valid struct of the
+    // size it says.
+    unsafe {
+        if !IsIconic(hwnd).as_bool() {
+            return false;
+        }
+        let mut wp = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        let maximised =
+            GetWindowPlacement(hwnd, &mut wp).is_ok() && wp.flags.contains(WPF_RESTORETOMAXIMIZED);
+        if !maximised {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            return true;
+        }
+        let before = GetForegroundWindow();
+        let _ = ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        if GetForegroundWindow() == hwnd && !before.is_invalid() && before != hwnd {
+            let _ = SetForegroundWindow(before);
+        }
+        true
     }
 }
 
@@ -699,6 +745,14 @@ impl Injector for WinInjector {
                     && SetForegroundWindow(hwnd).as_bool()
             }
         })
+    }
+
+    fn cursor(&self) -> Option<GlobalPoint> {
+        let mut pt = POINT::default();
+        // SAFETY: pt is a valid POINT.
+        unsafe { GetCursorPos(&mut pt) }
+            .ok()
+            .map(|_| GlobalPoint::new(f64::from(pt.x), f64::from(pt.y)))
     }
 
     fn time_since_input(&self) -> Option<Duration> {

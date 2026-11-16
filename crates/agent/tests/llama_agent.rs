@@ -465,6 +465,7 @@ async fn real_llama_server_agent_turn() {
         reach: agent::prompt::Reach::All,
         os: agent::prompt::GuideOs::this_os(),
         budget: agent::prompt::tool_guide_budget(n_ctx),
+        sections: Vec::new(),
     });
     let outcome = tokio::time::timeout(
         Duration::from_secs(300),

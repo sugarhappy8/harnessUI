@@ -36,8 +36,8 @@ use crate::types::{ChatMessage, ContentPart, ImageUrl, MessageContent, Role, Too
 // `<tool_call_guide>`, after the agent instructions).
 mod guide;
 pub use guide::{
-    GUIDE_TAG, GuideOs, LIST_TAG, ListedTool, Reach, ToolGroup, ToolGuide, tool_guide_blocks,
-    tool_guide_budget,
+    GUIDE_TAG, GuideOs, GuideSection, LIST_TAG, ListedTool, RUN_SUBAGENT, Reach, ToolGroup,
+    ToolGuide, tool_guide_blocks, tool_guide_budget,
 };
 
 /// The character inserted after the first character of a control token to break it up. A

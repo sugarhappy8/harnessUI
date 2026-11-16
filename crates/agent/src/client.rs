@@ -13,8 +13,8 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::anthropic::MessagesDecoder;
+use crate::anthropic::{MessagesDecoder, ThinkingReplay};
 use crate::cloud;
 use crate::error::{ProviderError, as_u32, bounded, error_from_body};
 use crate::stream::{ChunkParser, StreamDecoder, StreamEvent};
@@ -90,6 +90,10 @@ pub struct ClientConfig {
     /// that for the local llama-server, which reads the whole prompt before it sends its
     /// headers and can take minutes on a long prompt.
     pub request_timeout: Option<Duration>,
+    /// [0.0.7 P5] The conversation (chat) the requests belong to: Claude's thinking is kept
+    /// for each conversation and sent back only within it, also in its later turns. `None`
+    /// keeps it for this client only (one turn).
+    pub conversation: Option<String>,
 }
 
 impl fmt::Debug for ClientConfig {
@@ -101,6 +105,7 @@ impl fmt::Debug for ClientConfig {
             .field("loopback", &self.loopback)
             .field("connect_timeout", &self.connect_timeout)
             .field("request_timeout", &self.request_timeout)
+            .field("conversation", &self.conversation)
             .finish()
     }
 }
@@ -118,6 +123,7 @@ impl ClientConfig {
             loopback,
             connect_timeout: Duration::from_secs(10),
             request_timeout: Some(Duration::from_secs(300)),
+            conversation: None,
         }
     }
 
@@ -131,22 +137,16 @@ impl ClientConfig {
             loopback: true,
             connect_timeout: Duration::from_secs(5),
             request_timeout: None,
+            conversation: None,
         }
     }
 }
 
+/// [0.0.7 P5] This computer, as the key check and the "Cloud" mark read it
+/// ([`cloud::endpoint_place`]): `localhost` (also with a trailing dot), loopback addresses and
+/// the unspecified ones (`0.0.0.0`, `0`, `[::]`), so none of them goes through a system proxy.
 fn is_loopback_url(base_url: &str) -> bool {
-    let Ok((url, _)) = parse_base(base_url) else {
-        return false;
-    };
-    match url.host() {
-        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
-        Some(url::Host::Ipv6(ip)) => {
-            IpAddr::V6(ip).is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
-        }
-        None => false,
-    }
+    cloud::endpoint_place(base_url) == cloud::EndpointPlace::ThisComputer
 }
 
 /// A model an endpoint offers.
@@ -266,6 +266,9 @@ pub struct OpenAiClient {
     api: Url,
     /// The server root for vendor endpoints (`/props`, `/api/ps`, `/api/v1/models`).
     root: Url,
+    /// Claude's thinking kept for this client's requests when they belong to no
+    /// conversation ([`ClientConfig::conversation`]; shared by clones).
+    replay: Arc<Mutex<ThinkingReplay>>,
 }
 
 /// [0.0.7 P5] The redirect rule of a client for a server that is not on this machine: at most
@@ -343,7 +346,16 @@ impl OpenAiClient {
             config,
             api,
             root,
+            replay: Arc::default(),
         })
+    }
+
+    /// [0.0.7 P5] The same client for the requests of one conversation (a chat), so Claude's
+    /// thinking is kept for that conversation alone ([`ClientConfig::conversation`]).
+    #[must_use]
+    pub fn for_conversation(mut self, conversation: impl Into<String>) -> Self {
+        self.config.conversation = Some(conversation.into());
+        self
     }
 
     /// The configuration this client was built from.
@@ -359,6 +371,11 @@ impl OpenAiClient {
     /// The API root (`.../v1`).
     pub(crate) fn api_url(&self) -> &Url {
         &self.api
+    }
+
+    /// Claude's thinking kept for this client's requests that belong to no conversation.
+    pub(crate) fn own_replay(&self) -> &Arc<Mutex<ThinkingReplay>> {
+        &self.replay
     }
 
     /// Streams a chat completion. The request is always sent with `stream: true` and

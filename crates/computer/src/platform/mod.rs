@@ -328,6 +328,11 @@ pub trait Injector: Send + Sync {
     fn time_since_input(&self) -> Option<Duration> {
         None
     }
+    /// Where the pointer is now, in the coordinates of [`InputEvent::Move`]. `None` when the
+    /// platform cannot tell.
+    fn cursor(&self) -> Option<GlobalPoint> {
+        None
+    }
 }
 
 type PidsFn = Arc<dyn Fn() -> Vec<u32> + Send + Sync>;

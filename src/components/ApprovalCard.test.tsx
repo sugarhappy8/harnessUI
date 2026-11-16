@@ -351,6 +351,19 @@ describe("ApprovalCard after the window comes back (0.0.7)", () => {
     expect(allowDisabled()).toBe("true");
   });
 
+  it("ignores a click in the same moment the window comes back, before the card is drawn again", () => {
+    const onDecide = vi.fn();
+    render(<ApprovalCard request={base} onDecide={onDecide} />);
+    wait(CARD_INPUT_DELAY_MS + 10);
+    const allow = screen.getByText("Allow once");
+    act(() => {
+      for (const h of [...shown.handlers]) h();
+      // A plain DOM click: React has not drawn the card again yet.
+      allow.click();
+    });
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
   it("keeps working when the window merely gets the focus", () => {
     const onDecide = vi.fn();
     render(<ApprovalCard request={base} onDecide={onDecide} />);

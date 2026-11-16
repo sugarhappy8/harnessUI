@@ -591,7 +591,12 @@ pub fn judge_in(
 /// The largest size whose verdict is Green, else the largest that is Yellow, else `None`
 /// (the floor is Red), among the sizes Automatic chooses from (`fit::Sizes`: the floor,
 /// the multiples of 1,024 between, and the cap). Assumes the verdict only gets worse as the
-/// size grows; a binary search, so a huge cap costs about 60 verdicts.
+/// size grows; a binary search, so a huge cap costs about 60 verdicts. For a verdict of
+/// the caller's own (Leave free's Automatic, `offload::Placer::auto`).
+pub fn auto_ctx_by(verdict: impl Fn(u64) -> Verdict, floor: u64, cap: u64) -> Option<AutoCtx> {
+    auto_by(verdict, floor, cap)
+}
+
 fn auto_by(verdict: impl Fn(u64) -> Verdict, floor: u64, cap: u64) -> Option<AutoCtx> {
     let sizes = Sizes::new(floor, cap);
     let wanted = verdict(sizes.get(0));

@@ -519,6 +519,11 @@ pub struct ResolvedLoad {
     pub ctx_choice: ContextSize,
     /// Why `ctx` is what it is.
     pub ctx_source: ContextSource,
+    /// Saved copies of a long chat llama-server may keep (`--ctx-checkpoints`), sized for
+    /// this computer like Automatic's number ([`copies_for`], 0.0.7 review M2), so not
+    /// compared either. Absent in a value written before: the most.
+    #[serde(default = "most_copies")]
+    pub ctx_checkpoints: u32,
     pub gpu: GpuUse,
     pub save_memory: bool,
     pub keep_in_memory: bool,
@@ -615,6 +620,10 @@ pub struct ModelLoadInfo {
     /// "Where the model goes" for these choices: the instant estimate, from the same split,
     /// memory and verdict as the marks above (item 6, section 4.1).
     pub picture: crate::offload::OffloadPreview,
+}
+
+fn most_copies() -> u32 {
+    models::kv::MAX_CTX_CHECKPOINTS
 }
 
 impl ResolvedLoad {
@@ -966,11 +975,11 @@ impl LayerFacts {
     }
 }
 
-// The estimate counts as many saved copies of short-memory layers as a launch lets
-// llama-server keep (`--ctx-checkpoints`): the two crates do not depend on each other, so
-// the app, which uses both, holds them to one number.
+// The most saved copies a launch lets llama-server keep (`--ctx-checkpoints`) and the most
+// the memory estimate gives a load (`models::fit::copies`): the two crates do not depend on
+// each other, so the app, which uses both, holds them to one number.
 const _: () = assert!(
-    runtime::llama::launch::CTX_CHECKPOINTS as u64 == models::kv::CTX_CHECKPOINTS,
+    runtime::llama::launch::MAX_CTX_CHECKPOINTS == models::kv::MAX_CTX_CHECKPOINTS,
     "--ctx-checkpoints and the memory estimate's saved copies differ"
 );
 
@@ -1168,11 +1177,29 @@ pub struct Freed {
     /// The loaded model's estimated size on a graphics device, when it was loaded while
     /// that device's free memory was probed: (backend name, device name, bytes).
     pub gpu: Option<(String, String, u64)>,
-    /// The loaded model's conversation memory and compute buffers, when it runs on the
-    /// processor. Its weights are mapped from the file, which the system already counts as
-    /// memory it can reclaim on Linux and macOS (not on Windows: the estimate is lower
-    /// there, which is the safe side).
+    /// The loaded model's memory in the computer that unloading it gives back: when it
+    /// runs on the processor its conversation memory and compute buffers; wherever it runs
+    /// the saved copies of the chat it holds ([`Freed::copies_held`], 0.0.7 review M1).
+    /// Its weights are mapped from the file, which the system already counts as memory it
+    /// can reclaim on Linux and macOS (not on Windows: the estimate is lower there, which is
+    /// the safe side).
     pub ram_bytes: u64,
+}
+
+impl Freed {
+    /// The saved copies the loaded model holds now, as far as the computer can tell: what
+    /// its available memory fell by since the model became ready (`at_ready`, `now`), at
+    /// most `copies`, the most it may keep ([`Footprint::copies`]). The copies build up
+    /// during a long chat, so right after a load there are none to give back, and after a
+    /// long chat the next load's estimate must not see them as taken (a Reload would
+    /// otherwise count them twice: held by the running server and needed by the new one).
+    /// Without both figures, all of `copies`.
+    pub fn copies_held(copies: u64, at_ready: Option<u64>, now: Option<u64>) -> u64 {
+        match (at_ready, now) {
+            (Some(at_ready), Some(now)) => copies.min(at_ready.saturating_sub(now)),
+            _ => copies,
+        }
+    }
 }
 
 /// What a loaded model takes, for [`Freed`], and (item 6) what the ready line's memory
@@ -1187,6 +1214,9 @@ pub struct Footprint {
     pub layers: Option<std::sync::Arc<models::LayerSizes>>,
     /// The image projector loaded with it (not in llama.cpp's memory report).
     pub projector_bytes: u64,
+    /// The most the saved copies of a long chat take in the computer's memory: the load's
+    /// [`ResolvedLoad::ctx_checkpoints`] copies at its context (0.0.7 review M1).
+    pub copies: u64,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -1214,6 +1244,9 @@ pub struct Machine {
     pub gpu_freed_bytes: u64,
     /// The computer's memory; 0 when the system does not say.
     pub ram_total_bytes: u64,
+    /// The system did not say how much of the computer's memory is free (0.0.7 review m5):
+    /// [`Self::ram_free_bytes`] is then 0 and the saved copies are not checked against it.
+    pub ram_unknown: bool,
     /// [`Self::ram_free_bytes`] counts the loaded model as free.
     pub ram_free_after_unload: bool,
     /// Logical processors ("threads"); 0 when not known.
@@ -1343,8 +1376,19 @@ impl Machine {
                 .collect(),
             // Set by the caller, which reads the system (`plan_from`).
             ram_total_bytes: 0,
+            ram_unknown: false,
             threads: 0,
         }
+    }
+
+    /// The saved copies of a long chat a load with `gpu` keeps when the model's own part in
+    /// the computer's memory is `computer_part` ([`models::fit::copies`]): they get half of
+    /// what is left of the computer's memory after the reserve and that part; unknown when
+    /// the system did not say.
+    pub fn copies(&self, gpu: GpuUse, copy_bytes: u64, computer_part: u64) -> models::fit::Copies {
+        let spare = (!self.ram_unknown)
+            .then(|| self.room(gpu).computer().saturating_sub(computer_part));
+        models::fit::copies(copy_bytes, spare)
     }
 }
 
@@ -1358,11 +1402,13 @@ pub fn device_choice(
     overrides.device.resolve(defaults.device.as_deref())
 }
 
-/// Automatic's pick for a load with `gpu` and `fine` (D2b; item 6, 3.2): with a custom
-/// placement or the conversation memory in computer memory, the largest size whose split
-/// fits (`placement::auto_ctx_placed_in`, when the model's sizes are known); with As much
-/// as fits and Leave free set, fit.rs's Automatic leaving that much free; otherwise
-/// fit.rs's Automatic (WP1b), unchanged. `None` without a header, or when not even the
+/// Automatic's pick for a load with `gpu` and `fine` (D2b; item 6, 3.2): whenever the
+/// model's sizes are known, the largest size whose split the panel's own verdict accepts
+/// (`offload::Placer::auto`: the marks, "too large" and Automatic agree, 0.0.7 review m4),
+/// with As much as fits and Leave free set the largest whose split keeps every layer on the
+/// card with that much left free; without the sizes, fit.rs's Automatic (WP1b), leaving
+/// Leave free's amount free with As much as fits. The saved copies of a long chat never
+/// count: they are sized to what is left. `None` without a header, or when not even the
 /// floor fits.
 pub(crate) fn automatic(
     facts: Option<&ModelFacts>,
@@ -1372,10 +1418,7 @@ pub(crate) fn automatic(
     fine: &FineLaunch,
 ) -> Option<models::fit::AutoCtx> {
     let facts = facts?;
-    if (fine.custom_placement() || fine.kv_in_computer_memory)
-        && machine.graphics(gpu)
-        && let Some(placer) = crate::offload::Placer::new(facts, machine, save_memory)
-    {
+    if let Some(placer) = crate::offload::Placer::new(facts, machine, save_memory) {
         return placer.auto(gpu, fine);
     }
     let input = facts.fit_input(kv_layout(save_memory, fine))?;
@@ -1385,6 +1428,58 @@ pub(crate) fn automatic(
             models::fit::auto_ctx_with_margin(&input, room, u64::from(mib).saturating_mul(MIB))
         }
         _ => models::fit::auto_ctx(&input, room),
+    }
+}
+
+/// The saved copies of a long chat a load of `facts` with these choices keeps at `ctx`
+/// tokens (0.0.7 review M2): the launch passes their number (`--ctx-checkpoints`) and the
+/// panel's picture shows what they take. With the model's sizes, sized from the computer's
+/// part of its split ([`crate::offload::Placer::work`]); without them from fit.rs's: on a
+/// graphics card nothing when the whole model fits there with the spare, else what does
+/// not; on the processor and Apple silicon all of it.
+pub fn copies_for(
+    facts: &ModelFacts,
+    machine: &Machine,
+    gpu: GpuUse,
+    save_memory: bool,
+    fine: &FineLaunch,
+    ctx: u64,
+) -> models::fit::Copies {
+    if let Some(placer) = crate::offload::Placer::new(facts, machine, save_memory) {
+        return placer.work(ctx, gpu, fine).copies;
+    }
+    match facts.fit_input(kv_layout(save_memory, fine)) {
+        Some(input) => copies_without_sizes(&input, machine, gpu, ctx),
+        None => models::fit::copies(0, None),
+    }
+}
+
+/// [`copies_for`] from fit.rs's numbers, when the model's sizes are not known.
+pub(crate) fn copies_without_sizes(
+    input: &models::FitInput,
+    machine: &Machine,
+    gpu: GpuUse,
+    ctx: u64,
+) -> models::fit::Copies {
+    let needed = input.needed_at(ctx);
+    let part = match machine.memory_kind(gpu) {
+        models::placement::MemoryKind::Separate => needed
+            .saturating_add(models::fit::SPARE_BYTES)
+            .saturating_sub(machine.room(gpu).whole),
+        models::placement::MemoryKind::Processor | models::placement::MemoryKind::Unified => {
+            needed
+        }
+    };
+    machine.copies(gpu, input.kv.copy_bytes(ctx), part)
+}
+
+/// A mark that the saved copies of a long chat make yellow when not even one fits what the
+/// computer has left: never red for them, never worse than yellow (0.0.7 review M2).
+pub fn with_copies(mark: Verdict, copies: &models::fit::Copies) -> Verdict {
+    if mark == Verdict::Green && copies.short {
+        Verdict::Yellow
+    } else {
+        mark
     }
 }
 
@@ -1436,10 +1531,14 @@ pub fn resolve(
     };
     // Never a size the commands would refuse, whatever the facts say.
     let ctx = ctx.clamp(*CTX_RANGE.start(), *CTX_RANGE.end());
+    let ctx_checkpoints = facts.map_or(models::kv::MAX_CTX_CHECKPOINTS, |f| {
+        copies_for(f, machine, gpu, save_memory, &fine, u64::from(ctx)).count
+    });
     ResolvedLoad {
         ctx,
         ctx_choice,
         ctx_source,
+        ctx_checkpoints,
         gpu,
         save_memory,
         keep_in_memory: overrides.keep_in_memory.resolve(defaults.keep_in_memory),
@@ -1466,7 +1565,8 @@ pub fn context_sizes(trained: Option<u32>) -> Vec<u32> {
 
 /// The fit marks of one panel (item 6, 4.1): through `placement::judge_in` on the model's
 /// split whenever its sizes are known (every readable real file), else fit.rs's rule of
-/// WP1b. Unknown (no header) is yellow: the app cannot say.
+/// WP1b; yellow at most for saved copies of a long chat that do not fit what is left
+/// ([`with_copies`]). Unknown (no header) is yellow: the app cannot say.
 struct Marks<'a> {
     machine: &'a Machine,
     placer: Option<&'a crate::offload::Placer<'a>>,
@@ -1478,11 +1578,25 @@ impl Marks<'_> {
     fn at(&self, ctx: u32, gpu: GpuUse, fine: &FineLaunch) -> Verdict {
         match (self.placer, self.input) {
             (Some(placer), _) => placer.judge(u64::from(ctx), gpu, fine).0,
-            (None, Some(input)) => {
-                models::fit::verdict_at(input, u64::from(ctx), self.machine.room(gpu))
-            }
+            (None, Some(input)) => self.without_sizes(
+                models::fit::verdict_at(input, u64::from(ctx), self.machine.room(gpu)),
+                input,
+                gpu,
+                u64::from(ctx),
+            ),
             (None, None) => Verdict::Yellow,
         }
+    }
+
+    /// fit.rs's `mark` at `ctx` tokens with the saved copies' share ([`with_copies`]).
+    fn without_sizes(
+        &self,
+        mark: Verdict,
+        input: &models::FitInput,
+        gpu: GpuUse,
+        ctx: u64,
+    ) -> Verdict {
+        with_copies(mark, &copies_without_sizes(input, self.machine, gpu, ctx))
     }
 
     /// The mark of Automatic, whose pick is `auto`: red when not even the floor fits.
@@ -1496,7 +1610,7 @@ impl Marks<'_> {
             (_, _, None) => Verdict::Yellow,
             (None, _, Some(_)) => Verdict::Red,
             (Some(a), Some(placer), _) => placer.judge(a.ctx, gpu, fine).0,
-            (Some(a), None, _) => a.verdict,
+            (Some(a), None, Some(input)) => self.without_sizes(a.verdict, input, gpu, a.ctx),
         }
     }
 }
@@ -1689,6 +1803,9 @@ impl Plan {
                 .and_then(|l| l.sizes.clone())
                 .map(std::sync::Arc::new),
             projector_bytes: input.projector_bytes,
+            copies: input
+                .kv
+                .checkpoints_at(ctx, self.resolved.ctx_checkpoints),
         }
     }
 }
@@ -1761,15 +1878,16 @@ async fn plan_from(state: &crate::state::AppState, path: &str, source: Source) -
     let facts = read_facts(model, mmproj.as_deref()).await;
     let found = state.runtime.backends(false).await;
     let memory = models::hardware::system_memory();
-    let ram = memory.map_or(0, |m| m.available_bytes);
+    let ram = memory.map(|m| m.available_bytes);
     let mut machine = Machine::from_probes(
         &found,
         defaults.backend.as_deref(),
         device_choice(&overrides, &defaults).as_deref(),
-        ram,
-        &state.runtime.freed_memory(),
+        ram.unwrap_or(0),
+        &state.runtime.freed_memory(ram),
     );
     machine.ram_total_bytes = memory.map_or(0, |m| m.total_bytes);
+    machine.ram_unknown = memory.is_none();
     machine.threads = usage::logical_processors();
     let resolved = resolve(&overrides, &defaults, mmproj, facts.as_ref(), &machine);
     Plan {
@@ -2282,6 +2400,7 @@ mod tests {
                 ctx: 16_384,
                 ctx_choice: ContextSize::Fixed(16_384),
                 ctx_source: ContextSource::DefaultSetting,
+                ctx_checkpoints: models::kv::MAX_CTX_CHECKPOINTS,
                 gpu: GpuUse::Fit,
                 save_memory: true,
                 keep_in_memory: false,
@@ -3157,6 +3276,246 @@ mod tests {
         // 15.73 GB leave with the 1 GB spare, so part of it would be on the processor,
         // which has room; 32,768 need 12.67 + 1.04 + 0.81.
         assert_eq!(at(65_536), Some(Verdict::Yellow));
+    }
+
+    // ---- 0.0.7 P1 review: the saved copies of a long chat ----------------------------------
+
+    /// One saved copy of Gemma 4 12B in f16: 1,024 cells of 327,680 bytes (320 MiB).
+    const GEMMA4_COPY: u64 = 335_544_320;
+
+    /// Gemma 4 12B Q8_0 (12.7 GB), with its parts' sizes when `sized`: the input layer
+    /// (262,144 × 3,840 values in q8_0, 1,069,547,520 bytes) stays in the computer's memory,
+    /// the tied output is a second copy of it, the rest is 48 equal blocks.
+    fn gemma4_facts(sized: bool) -> ModelFacts {
+        let s = models::ModelSummary::from_header(
+            &models::gguf::read_prefix(&gemma4_header().build()).unwrap(),
+        );
+        let file = 12_669_649_120u64;
+        let input = 1_069_547_520u64;
+        let block = (file - input) / 48;
+        let sizes = sized.then(|| models::LayerSizes {
+            input_bytes: input,
+            output_bytes: input,
+            layers: vec![
+                models::LayerSize {
+                    dense_bytes: block,
+                    expert_bytes: 0,
+                };
+                48
+            ],
+            other_bytes: file - input - block * 48,
+        });
+        ModelFacts {
+            file_name: "gemma-4-12B-coder-heretic-Q8_0.gguf".into(),
+            size_bytes: file,
+            weights_bytes: file,
+            projector_bytes: 0,
+            header: Some(HeaderFacts::from_summary(&s)),
+            layers: LayerFacts::from_summary(&s, sizes),
+        }
+    }
+
+    /// The saved copies the running server gives back: what the computer's available memory
+    /// fell by since it became ready, at most the most it may keep.
+    #[test]
+    fn the_copies_given_back_are_what_the_computer_lost() {
+        let most = 8 * GEMMA4_COPY;
+        // Right after the load: none yet.
+        assert_eq!(Freed::copies_held(most, Some(6 * GB), Some(6 * GB)), 0);
+        // Memory freed elsewhere meanwhile: none.
+        assert_eq!(Freed::copies_held(most, Some(6 * GB), Some(7 * GB)), 0);
+        // Part of a long chat.
+        assert_eq!(Freed::copies_held(most, Some(6 * GB), Some(5 * GB)), GB);
+        // More lost than the copies can be (other programs grew): the copies at most.
+        assert_eq!(Freed::copies_held(most, Some(6 * GB), Some(GB)), most);
+        // Without both figures, the most.
+        assert_eq!(Freed::copies_held(most, None, Some(GB)), most);
+        assert_eq!(Freed::copies_held(most, Some(GB), None), most);
+        assert_eq!(Freed::copies_held(0, Some(6 * GB), Some(GB)), 0);
+    }
+
+    /// Review M1: a Reload after a long chat keeps its context and its copies. The running
+    /// server's copies are given back when it is replaced (`Freed::copies_held`), so they are
+    /// not counted as taken and as needed at once; before, the reviewer's 16 GB card with
+    /// 6.5 GB of computer memory available fell from 32,768 tokens to the 4,096 floor.
+    #[test]
+    fn a_reload_after_a_long_chat_keeps_its_context() {
+        let auto = ModelLoadSettings::default();
+        let ready = 6_500_000_000u64;
+        for sized in [false, true] {
+            let facts = gemma4_facts(sized);
+            let at = |available: u64, freed: u64| {
+                let machine = Machine::from_probes(
+                    &pc(),
+                    None,
+                    None,
+                    available,
+                    &Freed {
+                        gpu: None,
+                        ram_bytes: freed,
+                    },
+                );
+                let r = resolve(&auto, &auto_defaults(), None, Some(&facts), &machine);
+                let plan = Plan {
+                    resolved: r.clone(),
+                    facts: Some(facts.clone()),
+                    machine: machine.clone(),
+                    overrides: auto.clone(),
+                    defaults: auto_defaults(),
+                    saved: true,
+                };
+                let info = build_info("/m", &facts, auto.clone(), auto_defaults(), r.clone(), &machine, None);
+                (r, plan.footprint(), info)
+            };
+            let (first, footprint, info) = at(ready, 0);
+            assert_eq!(first.ctx, 32_768, "sized {sized}");
+            assert_eq!(info.fit, Some(Verdict::Green));
+            // 4.5 GB left after the reserve (less the input layer when sized): half of it
+            // holds 6 copies of 320 MiB (5 when sized).
+            assert_eq!(first.ctx_checkpoints, if sized { 5 } else { 6 });
+            assert_eq!(
+                footprint.copies,
+                u64::from(first.ctx_checkpoints) * GEMMA4_COPY
+            );
+            assert_eq!(info.picture.computer.copies_bytes, footprint.copies);
+            // A long chat: the copies built up, the computer has that much less available.
+            let now = ready - footprint.copies;
+            let held = Freed::copies_held(footprint.copies, Some(ready), Some(now));
+            let (again, _, info) = at(now, held);
+            assert_eq!(
+                (again.ctx, again.ctx_checkpoints),
+                (first.ctx, first.ctx_checkpoints),
+                "sized {sized}"
+            );
+            assert_eq!(info.fit, Some(Verdict::Green));
+            // The reviewer's figures: 8 copies (2.5 GiB) held, 3.8 GB available.
+            let held = Freed::copies_held(8 * GEMMA4_COPY, Some(ready), Some(3_800_000_000));
+            assert_eq!(held, 8 * GEMMA4_COPY);
+            let (reload, _, info) = at(3_800_000_000, held);
+            assert_eq!(reload.ctx, 32_768);
+            assert_ne!(info.fit, Some(Verdict::Red));
+            // Without giving them back the copies only shrink: never the floor, never red.
+            let (unfreed, _, info) = at(3_800_000_000, 0);
+            assert_eq!(unfreed.ctx, 32_768);
+            assert!(unfreed.ctx_checkpoints < first.ctx_checkpoints);
+            assert_eq!(info.fit, Some(Verdict::Green));
+        }
+    }
+
+    /// OLMo 3 7B (`olmo2`, a window of 4,096 in 24 of 32 layers): a saved copy is 1.5 GiB.
+    fn olmo3_facts() -> ModelFacts {
+        let s = models::ModelSummary::from_header(
+            &models::gguf::read_prefix(
+                &models::gguf::testing::Writer::new()
+                    .str("general.architecture", "olmo2")
+                    .u32("olmo2.block_count", 32)
+                    .u32("olmo2.context_length", 65_536)
+                    .u32("olmo2.embedding_length", 4096)
+                    .u32("olmo2.attention.head_count", 32)
+                    .u32("olmo2.attention.head_count_kv", 32)
+                    .u32("olmo2.attention.sliding_window", 4096)
+                    .u32("olmo2.vocab_size", 100_278)
+                    .build(),
+            )
+            .unwrap(),
+        );
+        ModelFacts {
+            file_name: "Olmo-3-7B-Instruct-Q4_K_M.gguf".into(),
+            size_bytes: 4_470_000_000,
+            weights_bytes: 4_470_000_000,
+            projector_bytes: 0,
+            header: Some(HeaderFacts::from_summary(&s)),
+            layers: LayerFacts::from_summary(&s, None),
+        }
+    }
+
+    /// Review M2: a model whose copies are large is never too large because of them. OLMo 3
+    /// 7B Q4_K_M at 32,768 tokens on the 16 GB card with 8 GB of computer memory available
+    /// (0.0.7 before the review: red, "12 GB in the computer's memory"): about 11 GB on the
+    /// card, and one copy of 1.5 GiB in the 3 GB the computer gives the copies, which the
+    /// launch passes as `--ctx-checkpoints 1`.
+    #[test]
+    fn large_copies_never_make_a_model_too_large() {
+        let facts = olmo3_facts();
+        let fixed = ModelLoadSettings {
+            context: ContextChoice::Fixed(32_768),
+            ..ModelLoadSettings::default()
+        };
+        let machine = Machine::from_probes(&pc(), None, None, 8 * GB, &Freed::default());
+        let r = resolve(&fixed, &auto_defaults(), None, Some(&facts), &machine);
+        assert_eq!((r.ctx, r.ctx_checkpoints), (32_768, 1));
+        let info = build_info("/m", &facts, fixed, auto_defaults(), r, &machine, None);
+        assert_eq!(info.fit, Some(Verdict::Green));
+        assert!(!info.too_large);
+        assert_eq!(info.picture.computer.copies_bytes, 1536 * MIB);
+        assert!(!info.picture.copies_short);
+        // Automatic takes its cap.
+        let auto = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts), &machine);
+        assert_eq!(auto.ctx, 32_768);
+        // With so little memory free that not even one copy fits: yellow, and said, but the
+        // same context and never red.
+        let tight = Machine::from_probes(&pc(), None, None, 3 * GB, &Freed::default());
+        let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts), &tight);
+        assert_eq!((r.ctx, r.ctx_checkpoints), (32_768, 1));
+        let info = build_info("/m", &facts, ModelLoadSettings::default(), auto_defaults(), r, &tight, None);
+        assert_eq!(info.fit, Some(Verdict::Yellow));
+        assert!(info.picture.copies_short);
+        assert_eq!(info.picture.mark, Verdict::Yellow);
+        assert!(info.context_options.iter().all(|o| o.fit != Verdict::Red));
+    }
+
+    /// Review m5: when the system does not say how much of the computer's memory is free,
+    /// the copies are not checked against 0: the most of them, and no worse mark for them.
+    #[test]
+    fn unknown_computer_memory_stays_unknown() {
+        for facts in [gemma4_facts(false), gemma4_facts(true), olmo3_facts()] {
+            let mut machine = Machine::from_probes(&pc(), None, None, 0, &Freed::default());
+            machine.ram_unknown = true;
+            let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts), &machine);
+            assert_eq!(r.ctx_checkpoints, models::kv::MAX_CTX_CHECKPOINTS);
+            let info = build_info("/m", &facts, ModelLoadSettings::default(), auto_defaults(), r, &machine, None);
+            assert!(!info.picture.copies_short);
+            // Known to be 0 instead: one copy, said to be short.
+            machine.ram_unknown = false;
+            let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts), &machine);
+            assert_eq!(r.ctx_checkpoints, 1);
+        }
+    }
+
+    /// Review m4: Automatic and the marks agree. With the model's sizes known, Automatic
+    /// never picks a size its own mark calls too large: Gemma 4 12B Q8_0 on the 16 GB card
+    /// at every amount of computer memory available (before the review, with 4.7 to 5.8 GB
+    /// free, Automatic took 32,768 while the marks said red).
+    #[test]
+    fn automatic_never_picks_a_size_its_marks_call_too_large() {
+        let facts = gemma4_facts(true);
+        let auto = ModelLoadSettings::default();
+        let mut reds = 0;
+        for tenths in 0..=160u64 {
+            let machine =
+                Machine::from_probes(&pc(), None, None, tenths * GB / 10, &Freed::default());
+            let r = resolve(&auto, &auto_defaults(), None, Some(&facts), &machine);
+            let info = build_info("/m", &facts, auto.clone(), auto_defaults(), r.clone(), &machine, None);
+            let marked = info
+                .context_options
+                .iter()
+                .find(|o| o.choice == ContextSize::Fixed(r.ctx))
+                .map(|o| o.fit);
+            if info.too_large {
+                // Not even the floor: Automatic says so, and "Load anyway" uses the floor.
+                assert_eq!(info.context_options[0].tokens, 0, "{tenths}");
+                assert_eq!(info.fit, Some(Verdict::Red));
+                reds += 1;
+            } else {
+                assert_ne!(info.fit, Some(Verdict::Red), "{tenths}");
+                assert_eq!(info.context_options[0].fit, info.fit.unwrap(), "{tenths}");
+                if let Some(mark) = marked {
+                    assert_ne!(mark, Verdict::Red, "{tenths}: {}", r.ctx);
+                }
+            }
+        }
+        // The input layer (1.07 GB) and the reserve: too large only below about 3 GB.
+        assert!((1..=31).contains(&reds), "{reds}");
     }
 
     /// The short-memory estimate against the pinned llama.cpp's own measurement: set

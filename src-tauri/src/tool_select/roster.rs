@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use agent::prompt::{GuideOs, ListedTool, Reach, Sanitizer, ToolGroup, ToolGuide};
+use agent::prompt::{GuideOs, GuideSection, ListedTool, Reach, Sanitizer, ToolGroup, ToolGuide};
 use mcp_host::RegisteredTool;
 
 use super::finder;
@@ -31,11 +31,24 @@ pub fn tool_guide(tools: &[RegisteredTool], builtin: &BTreeSet<String>, n_ctx: u
     ordered.sort_by_key(|tool| crate::subagent::is_tool(tool));
     let mut groups: Vec<(String, ToolGroup)> = Vec::new();
     let mut call_tool = false;
+    let mut sections = Vec::new();
     for tool in ordered {
         let own = builtin.contains(&tool.server);
         if own && finder::is_own(tool) {
             call_tool |= tool.original == finder::CALL_TOOL;
             continue;
+        }
+        // [0.0.7] The method for rebuilding a website's look, as the browser crate words it
+        // (`browser::capture::guide`): part of the guide while its tool is on.
+        if own && tool.server == BROWSER && tool.original == browser::capture::TOOL {
+            sections.push(GuideSection {
+                tool: tool.exposed.clone(),
+                full: browser::capture::guide::GUIDE
+                    .iter()
+                    .map(|line| (*line).to_owned())
+                    .collect(),
+                short: browser::capture::guide::GUIDE_SHORT.to_owned(),
+            });
         }
         let purpose = match tool_catalog::entry_for(tool, own) {
             Some(entry) => entry.purpose.to_owned(),
@@ -67,8 +80,12 @@ pub fn tool_guide(tools: &[RegisteredTool], builtin: &BTreeSet<String>, n_ctx: u
         },
         os: GuideOs::this_os(),
         budget: agent::prompt::tool_guide_budget(n_ctx),
+        sections,
     }
 }
+
+/// The built-in browser server's name.
+const BROWSER: &str = "browser";
 
 /// About how many tokens the list and the guide take in the system message, by the loop's
 /// own estimate (the blocks and the blank lines before them).
@@ -100,9 +117,10 @@ pub struct Fitted {
 /// first: the core file tools while the selection is on, every tool when a turn shows all of
 /// them (`every_tool_shown`). In a 4,096-token context the core file tools take nearly all the
 /// room, so the list and guide make do with what is left, often nothing, instead of pushing
-/// `edit_file` out of every turn. The loop decides how the model reaches the tools a turn does
-/// not show only once it knows them (`agent::prompt::Reach`), so the budget becomes the most
-/// any of its choices takes: the loop never writes more than was counted here.
+/// `edit_file` out of every turn. What is counted is the form the guess about how the model
+/// reaches the tools picks (with `call_tool`, as nearly every turn with the selection on has
+/// it), and the budget becomes exactly that: whatever the loop then decides
+/// (`agent::prompt::Reach`), it never writes more than was counted here.
 pub fn fitted(
     tools: &[RegisteredTool],
     builtin: &BTreeSet<String>,
@@ -118,48 +136,13 @@ pub fn fitted(
         .fold(0u32, |sum, tool| sum.saturating_add(tool.cost));
     let mut guide = tool_guide(tools, builtin, n_ctx);
     guide.budget = guide.budget.min(room.saturating_sub(first));
-    let tokens = most_tokens(&guide);
+    let tokens = tokens(&guide);
     guide.budget = tokens;
     Fitted {
         guide,
         tokens,
         room: room.saturating_sub(tokens),
     }
-}
-
-/// The most tokens the loop may write for this list and guide, whatever it decides about how
-/// the model reaches the tools a turn does not show (every section of the guide counted).
-fn most_tokens(guide: &ToolGuide) -> u32 {
-    let every: Vec<String> = guide.names().map(str::to_owned).collect();
-    let mut reaches = vec![Reach::All, Reach::Only(every)];
-    if guide.reach == Reach::CallTool {
-        reaches.push(Reach::CallTool);
-    }
-    reaches
-        .into_iter()
-        .map(|reach| {
-            tokens(&ToolGuide {
-                reach,
-                ..guide.clone()
-            })
-        })
-        .max()
-        .unwrap_or(0)
-}
-
-/// The list as a helper started by `run_subagent` gets it: without the tools a helper is
-/// not offered (`run_subagent` itself and the coding apps, `subagent::offered_to_helper`).
-pub fn for_helper(guide: &ToolGuide) -> ToolGuide {
-    let not_offered: Vec<String> = guide
-        .groups
-        .iter()
-        .flat_map(|group| &group.tools)
-        .map(|tool| tool.name.clone())
-        .filter(|name| {
-            name == crate::subagent::TOOL_NAME || crate::outside_agent::is_tool_name(name)
-        })
-        .collect();
-    guide.without(&not_offered)
 }
 
 #[cfg(test)]
@@ -331,6 +314,12 @@ mod tests {
             assert!(fitted.room >= core, "{n_ctx}: {} < {core}", fitted.room);
             assert!(fitted.tokens <= agent::prompt::tool_guide_budget(n_ctx));
             assert_eq!(fitted.guide.budget, fitted.tokens);
+            // [0.0.7 verification] What is counted is what a turn with call_tool sends, not
+            // the largest form any turn could send.
+            let mut sent = tool_guide(&on, &builtin, n_ctx);
+            assert_eq!(sent.reach, Reach::CallTool);
+            sent.budget = sent.budget.min(room.saturating_sub(core));
+            assert_eq!(fitted.tokens, tokens(&sent), "{n_ctx}");
             // Whatever the loop then decides, it writes no more than was counted.
             for reach in [
                 Reach::CallTool,
@@ -356,14 +345,36 @@ mod tests {
         );
     }
 
+    /// [0.0.7] While the browser's capture tool is on, the guide carries the method for
+    /// rebuilding a website's look as the browser crate words it; not otherwise, and not for an
+    /// added server's tool of that name.
     #[test]
-    fn a_helper_gets_the_list_without_the_tools_it_is_not_offered() {
+    fn the_capture_method_comes_with_the_capture_tool() {
+        let mut builtin = builtin();
+        builtin.insert(BROWSER.to_owned());
         let mut tools = on();
-        tools.push(registered("coding_apps", "ask_codex", "Ask Codex."));
-        let guide = tool_guide(&tools, &builtin(), 32_768);
-        let helper = for_helper(&guide);
-        assert!(guide.lists("run_subagent") && guide.lists("ask_codex"));
-        assert!(!helper.lists("run_subagent") && !helper.lists("ask_codex"));
-        assert!(helper.lists("read_file") && helper.lists("weather__forecast"));
+        tools.push(registered(
+            BROWSER,
+            browser::capture::TOOL,
+            "Save a web page's look.",
+        ));
+        let guide = tool_guide(&tools, &builtin, 32_768);
+        assert_eq!(guide.sections.len(), 1);
+        let section = &guide.sections[0];
+        assert_eq!(section.tool, browser::capture::TOOL);
+        let full: Vec<String> = browser::capture::guide::GUIDE
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect();
+        assert_eq!(section.full, full);
+        assert_eq!(section.short, browser::capture::guide::GUIDE_SHORT);
+        let text = agent::prompt::tool_guide_blocks(&guide, &Sanitizer::generic()).join("\n\n");
+        assert!(text.contains(browser::capture::guide::GUIDE[0]), "{text}");
+        // Off in the chat: nothing.
+        assert!(tool_guide(&on(), &builtin, 32_768).sections.is_empty());
+        // An added server's tool of that name: nothing.
+        let mut lookalike = on();
+        lookalike.push(registered("web", browser::capture::TOOL, "Captures sites."));
+        assert!(tool_guide(&lookalike, &builtin, 32_768).sections.is_empty());
     }
 }

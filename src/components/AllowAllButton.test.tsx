@@ -26,6 +26,16 @@ const ipcMock = vi.hoisted(() => ({
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 
+// [0.0.7] The app's "main window shown" event, sent by hand here.
+const shown = vi.hoisted(() => ({ handlers: new Set<() => void>() }));
+vi.mock("../lib/windowShown", () => ({
+  MAIN_WINDOW_SHOWN: "main-window-shown",
+  onMainWindowShown: (handler: () => void) => {
+    shown.handlers.add(handler);
+    return () => shown.handlers.delete(handler);
+  },
+}));
+
 const {
   APPROVAL_HINTS,
   APPROVAL_MODES,
@@ -193,6 +203,33 @@ describe("ApprovalModeMenu", () => {
       vi.advanceTimersByTime(10);
     });
     expect(document.activeElement).toBe(on);
+  });
+
+  it("ignores the confirm button again for a moment when the app brings its window back", async () => {
+    await show();
+    await pick("Ask first", "Full access");
+    const dialog = screen.getByRole("alertdialog");
+    const confirm = within(dialog).getByRole("button", { name: "Turn on Full access" });
+    arm();
+    expect(confirm.getAttribute("aria-disabled")).toBe("false");
+    // The window stepped aside for computer use and a card brought it back under the
+    // pointer: a click meant for another app, at once and a little later, does nothing.
+    act(() => {
+      for (const h of [...shown.handlers]) h();
+      confirm.click();
+    });
+    expect(ipcMock.setChatApprovalMode).not.toHaveBeenCalled();
+    expect(confirm.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      vi.advanceTimersByTime(CONFIRM_INPUT_DELAY_MS - 100);
+    });
+    fireEvent.click(confirm);
+    expect(ipcMock.setChatApprovalMode).not.toHaveBeenCalled();
+    arm();
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    expect(ipcMock.setChatApprovalMode).toHaveBeenCalledWith(CHAT, "fullAccess");
   });
 
   it("changes nothing when the Full access confirmation is cancelled", async () => {

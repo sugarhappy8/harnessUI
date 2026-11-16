@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use models::download::{FileSpec, download_file, resumable_bytes};
+use models::download::{FileSpec, Progress, download_file, resumable_bytes};
 use serde::{Deserialize, Serialize};
 use store::{DownloadPatch, DownloadStatus, ModelSource, NewDownload};
 use tauri::{AppHandle, Emitter, Manager};
@@ -65,6 +65,9 @@ pub struct DownloadGroupDto {
     pub error: Option<AppError>,
     pub bytes_per_second: Option<f64>,
     pub unverified: bool,
+    /// 0.0.7 (P6b review m5): a file is being checked (its SHA-256 worked out), which takes
+    /// minutes for a large one; the row says so instead of "downloading".
+    pub checking: bool,
 }
 
 #[derive(Default)]
@@ -75,6 +78,42 @@ struct Live {
     last_emit: Option<Instant>,
     last_persist: Option<Instant>,
     window: Option<(Instant, u64)>,
+    /// A file is being checked now ([`Progress::Checking`]).
+    checking: bool,
+}
+
+impl Live {
+    /// Notes progress on `file` at `now`. Returns whether to tell the window, and whether to
+    /// save the bytes on the file's row.
+    fn note(&mut self, file: &str, p: Progress, now: Instant) -> (bool, bool) {
+        let Progress::Bytes(n) = p else {
+            return (false, false);
+        };
+        self.done.insert(file.to_string(), n);
+        let total: u64 = self.done.values().sum();
+        match self.window {
+            Some((t0, b0)) if now.duration_since(t0) >= Duration::from_secs(2) => {
+                let secs = now.duration_since(t0).as_secs_f64();
+                self.speed = Some(total.saturating_sub(b0) as f64 / secs);
+                self.window = Some((now, total));
+            }
+            None => self.window = Some((now, total)),
+            _ => {}
+        }
+        let emit = self
+            .last_emit
+            .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(300));
+        if emit {
+            self.last_emit = Some(now);
+        }
+        let persist = self
+            .last_persist
+            .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(3));
+        if persist {
+            self.last_persist = Some(now);
+        }
+        (emit, persist)
+    }
 }
 
 /// What a finished download saves with the model besides its file (0.0.6 item 4): the
@@ -183,12 +222,31 @@ fn file_whole(dest: &Path, size: u64) -> bool {
     std::fs::metadata(dest).is_ok_and(|m| m.is_file() && m.len() == size)
 }
 
+/// The code of [`last_step_error`]: the group's files were all finished and checked when
+/// its last step failed.
+const LAST_STEP_FAILED: &str = "download_not_added";
+
+/// Whether a failed row failed at the group's last step, after its file was finished and
+/// checked ([`mark_failed`] with [`last_step_error`]), not while it was being downloaded.
+fn failed_at_last_step(row: &store::Download) -> bool {
+    row.status == DownloadStatus::Failed
+        && row
+            .error
+            .as_deref()
+            .and_then(|e| serde_json::from_str::<AppError>(e).ok())
+            .is_some_and(|e| e.code == LAST_STEP_FAILED)
+}
+
 /// Whether a row's file needs no more downloading: the group is done with it, or the file
-/// is whole and only the group's last step (adding the model) is left, or failed.
-fn file_done(status: DownloadStatus, whole: bool) -> bool {
-    match status {
+/// is whole and only the group's last step (adding the model) is left, or failed. 0.0.7
+/// (P6b review M1): a row that failed while downloading never counts, whatever is at its
+/// final name (an older or damaged file of the same size the fetch never replaced): it is
+/// downloaded again, so checked, and not fetched again when it is the same file.
+fn file_done(row: &store::Download, whole: bool) -> bool {
+    match row.status {
         DownloadStatus::Completed => true,
-        DownloadStatus::Verifying | DownloadStatus::Failed => whole,
+        DownloadStatus::Verifying => whole,
+        DownloadStatus::Failed => whole && failed_at_last_step(row),
         _ => false,
     }
 }
@@ -196,10 +254,10 @@ fn file_done(status: DownloadStatus, whole: bool) -> bool {
 /// What Resume makes of a row: `None` leaves it (the group is done with it); a whole file
 /// waits for the last step again (`Verifying`), so it is never downloaded again; any other
 /// file is downloaded (`Queued`), going on from its partial file.
-fn status_on_resume(status: DownloadStatus, whole: bool) -> Option<DownloadStatus> {
-    if status == DownloadStatus::Completed {
+fn status_on_resume(row: &store::Download, whole: bool) -> Option<DownloadStatus> {
+    if row.status == DownloadStatus::Completed {
         None
-    } else if file_done(status, whole) {
+    } else if file_done(row, whole) {
         Some(DownloadStatus::Verifying)
     } else {
         Some(DownloadStatus::Queued)
@@ -208,14 +266,16 @@ fn status_on_resume(status: DownloadStatus, whole: bool) -> Option<DownloadStatu
 
 /// The status the UI shows for a group, from its rows and whether its task runs. A finished
 /// file (`Verifying`) is progress only while the task runs: a group paused after its first
-/// file is paused, and one that stopped for any other reason can be resumed.
+/// file is paused, and one that stopped for any other reason can be resumed. A cancelled
+/// row means "cancelled" only while Cancel stops the task (P6b review m2): left over by a
+/// cancel that did not finish, the group shows as paused, so Cancel and Resume are there.
 fn group_status(rows: &[DownloadStatus], running: bool) -> DownloadStatus {
     use DownloadStatus as S;
     if rows.iter().all(|s| *s == S::Completed) {
         S::Completed
     } else if rows.contains(&S::Failed) {
         S::Failed
-    } else if rows.contains(&S::Cancelled) {
+    } else if running && rows.contains(&S::Cancelled) {
         S::Cancelled
     } else if rows.contains(&S::Paused) || !running {
         S::Paused
@@ -258,8 +318,8 @@ enum Start {
     Replace(String),
     /// Another download writes some of its files (another model of the repository that
     /// shares the image file, or the image file for another model): refused until that one
-    /// is done.
-    Busy,
+    /// is done. `running`: that download's task runs (else it is paused or failed).
+    Busy { running: bool },
 }
 
 /// Decides [`Start`] for a new download of `new` that writes `dests`, from every download
@@ -293,7 +353,9 @@ fn plan_start(
     let all_there = dests.iter().all(|d| busy.iter().any(|r| &r.dest_path == d));
     let same_kind = meta_of(group).is_some_and(|m| m.image_file_for == new.image_file_for);
     if !(one_group && all_there && same_kind) {
-        return Start::Busy;
+        return Start::Busy {
+            running: busy.iter().any(|r| running(&r.group_id)),
+        };
     }
     let failed = rows
         .iter()
@@ -309,8 +371,10 @@ fn plan_start(
 
 /// A new download refused because another download writes some of its files
 /// ([`Start::Busy`]). An image file for an installed model is written next to that model, so
-/// once the other download is done the model finds it there and uses it.
-fn busy_error(image_file: bool) -> AppError {
+/// once the other download is done the model finds it there and uses it. `running`: that
+/// download runs (else it is paused or failed).
+fn busy_error(image_file: bool, running: bool) -> AppError {
+    let _ = running;
     if image_file {
         AppError::new(
             "already_downloading",
@@ -405,7 +469,7 @@ fn last_step_error(image_file: bool, e: &AppError) -> AppError {
 async fn requeue(store: &store::Store, group: &str) -> AppResult<()> {
     for row in store.list_downloads(Some(group.to_string())).await? {
         let whole = file_whole(Path::new(&row.dest_path), row.size_bytes);
-        if let Some(status) = status_on_resume(row.status, whole) {
+        if let Some(status) = status_on_resume(&row, whole) {
             store
                 .update_download(
                     row.id,
@@ -439,19 +503,103 @@ async fn mark_failed(store: &store::Store, group: &str, err: &AppError) -> AppRe
     Ok(())
 }
 
+/// 0.0.7 (P6b review C1): the settings key of the files a group wrote itself (renamed from
+/// its own partial file into place), the only finished files Cancel may delete. Kept beside
+/// the group's metadata, so nothing that builds a `GroupMeta` changes.
+fn written_key(group: &str) -> String {
+    format!("downloadWritten:{group}")
+}
+
+/// The files `group` wrote itself ([`written_key`]); none when they cannot be read (then
+/// Cancel keeps every finished file).
+async fn written_by(store: &store::Store, group: &str) -> Vec<String> {
+    store
+        .get_setting(&written_key(group))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Remembers that `group` wrote the file at `dest` itself.
+async fn note_written(store: &store::Store, group: &str, dest: &str) -> AppResult<()> {
+    let mut written = written_by(store, group).await;
+    if !written.iter().any(|d| d == dest) {
+        written.push(dest.to_string());
+        store.set_setting(&written_key(group), &written).await?;
+    }
+    Ok(())
+}
+
 /// The finished files Cancel deletes besides the partial ones: those the group finished
 /// (whole at their final name, never added to Installed), except a file an installed model
 /// uses (`in_use`: its own file, or its image file, which two models can share).
-fn finished_files_to_delete(
+fn files_to_delete_on_cancel(
     rows: &[store::Download],
+    written: &[String],
+    root: Option<&Path>,
     in_use: impl Fn(&Path) -> bool,
 ) -> Vec<PathBuf> {
+    let _ = (written, root);
     rows.iter()
         .filter(|r| matches!(r.status, DownloadStatus::Verifying | DownloadStatus::Failed))
         .filter(|r| file_whole(Path::new(&r.dest_path), r.size_bytes))
         .map(|r| PathBuf::from(&r.dest_path))
         .filter(|p| !in_use(p))
         .collect()
+}
+
+/// Deletes a cancelled group's files and forgets it: its partial files, and the finished
+/// files [`files_to_delete_on_cancel`] allows (the models folder, or for an image file the
+/// model's own folder, is where they may be).
+async fn clean_up(store: &store::Store, group: &str, models_dir: &Path) -> AppResult<()> {
+    let rows = store.list_downloads(Some(group.to_string())).await?;
+    let meta: Option<GroupMeta> = store.get_setting(&meta_key(group)).await.ok().flatten();
+    let written = written_by(store, group).await;
+    for row in &rows {
+        if row.status != DownloadStatus::Completed {
+            models::download::discard_partial(Path::new(&row.dest_path)).await;
+        }
+    }
+    let root = match meta.as_ref().and_then(|m| m.image_file_for.as_deref()) {
+        Some(model) => Path::new(model).parent().map(Path::to_path_buf),
+        None => Some(models_dir.to_path_buf()),
+    };
+    match store.list_models().await {
+        Ok(installed) => {
+            let in_use = |p: &Path| crate::hub::used_by_installed(&installed, p);
+            for path in files_to_delete_on_cancel(&rows, &written, root.as_deref(), in_use) {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    tracing::warn!("a finished file of a cancelled download stayed: {e}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("the finished files of a cancelled download stayed: {e}"),
+    }
+    store.delete_download_group(group.to_string()).await?;
+    let _ = store.delete_setting(&meta_key(group)).await;
+    let _ = store.delete_setting(&written_key(group)).await;
+    Ok(())
+}
+
+/// What the app does with a group it finds when it starts.
+#[derive(Debug, PartialEq, Eq)]
+enum AtStart {
+    /// It was going when the app stopped: it goes on.
+    Resume,
+    /// It was being cancelled when the app stopped: the cancel is finished.
+    FinishCancel,
+    /// Paused, failed or done: it stays as it is.
+    Leave,
+}
+
+/// [`AtStart`] for a group with rows in `statuses`.
+fn at_start(statuses: &[DownloadStatus]) -> AtStart {
+    if resumes_at_start(statuses) {
+        AtStart::Resume
+    } else {
+        AtStart::Leave
+    }
 }
 
 impl DownloadManager {
@@ -510,6 +658,7 @@ impl DownloadManager {
             error,
             bytes_per_second: live.and_then(|l| l.speed),
             unverified: rows.iter().any(|r| r.sha256.is_empty()),
+            checking: false,
         }))
     }
 
@@ -543,7 +692,8 @@ impl DownloadManager {
         files: Vec<(FileSpec, PathBuf)>,
     ) -> AppResult<String> {
         let state = app.state::<AppState>();
-        let group = match self.record(&state.store, &meta, &files).await? {
+        let _starting = self.starting.lock().await;
+        let group = match self.record_locked(&state.store, &meta, &files).await? {
             Recorded::Join(group) => return Ok(group),
             Recorded::New(group) | Recorded::Resume(group) => group,
             Recorded::Replaced { new, old } => {
@@ -557,10 +707,8 @@ impl DownloadManager {
         Ok(group)
     }
 
-    /// 0.0.7 (P6): checks a new download against the downloads not finished yet
-    /// ([`plan_start`]) and records what it decided, while holding `starting`, so two starts
-    /// at once (a double click, the image file asked for twice) cannot both find nothing and
-    /// then write one file.
+    /// [`Self::record_locked`] holding `starting`, as [`Self::start`] does.
+    #[cfg(test)]
     async fn record(
         &self,
         store: &store::Store,
@@ -568,6 +716,19 @@ impl DownloadManager {
         files: &[(FileSpec, PathBuf)],
     ) -> AppResult<Recorded> {
         let _starting = self.starting.lock().await;
+        self.record_locked(store, meta, files).await
+    }
+
+    /// 0.0.7 (P6): checks a new download against the downloads not finished yet
+    /// ([`plan_start`]) and records what it decided. The caller holds `starting`, so two
+    /// starts at once (a double click, the image file asked for twice) cannot both find
+    /// nothing and then write one file, and a resume or cancel cannot come in between.
+    async fn record_locked(
+        &self,
+        store: &store::Store,
+        meta: &GroupMeta,
+        files: &[(FileSpec, PathBuf)],
+    ) -> AppResult<Recorded> {
         let dests: Vec<String> = files
             .iter()
             .map(|(_, dest)| dest.display().to_string())
@@ -607,7 +768,7 @@ impl DownloadManager {
                 let new = insert_group(store, meta, files).await?;
                 Ok(Recorded::Replaced { new, old })
             }
-            Start::Busy => Err(busy_error(meta.image_file_for.is_some())),
+            Start::Busy { running } => Err(busy_error(meta.image_file_for.is_some(), running)),
         }
     }
 
@@ -626,9 +787,18 @@ impl DownloadManager {
             }
         }
         for (g, statuses) in groups {
-            if resumes_at_start(&statuses) {
-                tracing::info!(group = %g, "resuming an interrupted download");
-                self.spawn_group(app.clone(), g);
+            match at_start(&statuses) {
+                AtStart::Resume => {
+                    tracing::info!(group = %g, "resuming an interrupted download");
+                    self.spawn_group(app.clone(), g);
+                }
+                AtStart::FinishCancel => {
+                    tracing::info!(group = %g, "finishing a cancel the app stopped during");
+                    if let Err(e) = self.cancel(app, &g).await {
+                        tracing::warn!(group = %g, "could not finish the cancel: {e}");
+                    }
+                }
+                AtStart::Leave => {}
             }
         }
     }
@@ -685,10 +855,7 @@ impl DownloadManager {
         let client = crate::hub::hf_client(app).await?;
         let rows = state.store.list_downloads(Some(group.to_string())).await?;
         for row in rows {
-            if file_done(
-                row.status,
-                file_whole(Path::new(&row.dest_path), row.size_bytes),
-            ) {
+            if file_done(&row, file_whole(Path::new(&row.dest_path), row.size_bytes)) {
                 continue;
             }
             let spec = FileSpec {
@@ -817,31 +984,9 @@ impl DownloadManager {
             let Ok(mut all) = self.live.lock() else {
                 return;
             };
-            let live = all.entry(group.to_string()).or_default();
-            live.done.insert(file.to_string(), n);
-            let total: u64 = live.done.values().sum();
-            match live.window {
-                Some((t0, b0)) if now.duration_since(t0) >= Duration::from_secs(2) => {
-                    let secs = now.duration_since(t0).as_secs_f64();
-                    live.speed = Some(total.saturating_sub(b0) as f64 / secs);
-                    live.window = Some((now, total));
-                }
-                None => live.window = Some((now, total)),
-                _ => {}
-            }
-            let emit = live
-                .last_emit
-                .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(300));
-            if emit {
-                live.last_emit = Some(now);
-            }
-            let persist = live
-                .last_persist
-                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(3));
-            if persist {
-                live.last_persist = Some(now);
-            }
-            (emit, persist)
+            all.entry(group.to_string())
+                .or_default()
+                .note(file, Progress::Bytes(n), now)
         };
         if !(emit || persist) {
             return;
@@ -952,13 +1097,18 @@ impl DownloadManager {
     /// never downloaded again ([`status_on_resume`]).
     pub async fn resume(self: &Arc<Self>, app: &AppHandle, group: &str) -> AppResult<()> {
         let state = app.state::<AppState>();
-        requeue(&state.store, group).await?;
+        self.ready_to_resume(&state.store, group).await?;
         self.spawn_group(app.clone(), group.to_string());
         Ok(())
     }
 
+    /// Readies a stopped group to go on ([`requeue`]).
+    async fn ready_to_resume(&self, store: &store::Store, group: &str) -> AppResult<()> {
+        requeue(store, group).await
+    }
+
     /// Stops the group, deletes its partial files and forgets it. 0.0.7 (P6): the files it
-    /// finished go too, unless an installed model uses them ([`finished_files_to_delete`]).
+    /// finished go too, unless an installed model uses them ([`files_to_delete_on_cancel`]).
     pub async fn cancel(&self, app: &AppHandle, group: &str) -> AppResult<()> {
         let token = self
             .running
@@ -971,26 +1121,8 @@ impl DownloadManager {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
         let state = app.state::<AppState>();
-        let rows = state.store.list_downloads(Some(group.to_string())).await?;
         let mut dto = self.group_dto(&state.store, group).await?;
-        for row in &rows {
-            if row.status != DownloadStatus::Completed {
-                models::download::discard_partial(Path::new(&row.dest_path)).await;
-            }
-        }
-        match state.store.list_models().await {
-            Ok(installed) => {
-                let in_use = |p: &Path| crate::hub::used_by_installed(&installed, p);
-                for path in finished_files_to_delete(&rows, in_use) {
-                    if let Err(e) = tokio::fs::remove_file(&path).await {
-                        tracing::warn!("a finished file of a cancelled download stayed: {e}");
-                    }
-                }
-            }
-            Err(e) => tracing::warn!("the finished files of a cancelled download stayed: {e}"),
-        }
-        state.store.delete_download_group(group.to_string()).await?;
-        let _ = state.store.delete_setting(&meta_key(group)).await;
+        clean_up(&state.store, group, &crate::hub::models_dir(app).await).await?;
         if let Some(d) = dto.as_mut() {
             d.status = "cancelled".into();
             self.emit(app, d.clone());
@@ -1243,8 +1375,8 @@ mod tests {
         let rows = store.list_downloads(Some("g".into())).await.unwrap();
         assert!(rows.iter().all(|r| r.error.is_none()), "errors cleared");
         // The group's task then skips the finished file and downloads the other one.
-        assert!(file_done(rows[0].status, file_whole(&model, 100)));
-        assert!(!file_done(rows[1].status, file_whole(&image, 50)));
+        assert!(file_done(&rows[0], file_whole(&model, 100)));
+        assert!(!file_done(&rows[1], file_whole(&image, 50)));
 
         // A finished file that is gone since is downloaded again.
         std::fs::remove_file(&model).unwrap();
@@ -1252,9 +1384,13 @@ mod tests {
         assert_eq!(statuses(&store, "g").await, vec![S::Queued, S::Queued]);
 
         // Every row: what Resume makes of it.
-        assert_eq!(status_on_resume(S::Completed, true), None);
-        assert_eq!(status_on_resume(S::Verifying, true), Some(S::Verifying));
-        assert_eq!(status_on_resume(S::Failed, true), Some(S::Verifying));
+        let at = |s: DownloadStatus| row("g", Path::new("/models/m.gguf"), 1, s);
+        assert_eq!(status_on_resume(&at(S::Completed), true), None);
+        assert_eq!(status_on_resume(&at(S::Verifying), true), Some(S::Verifying));
+        assert_eq!(
+            status_on_resume(&last_step_failed(at(S::Failed)), true),
+            Some(S::Verifying)
+        );
         for s in [
             S::Queued,
             S::Downloading,
@@ -1262,11 +1398,42 @@ mod tests {
             S::Verifying,
             S::Failed,
         ] {
-            assert_eq!(status_on_resume(s, false), Some(S::Queued), "{s:?}");
+            assert_eq!(status_on_resume(&at(s), false), Some(S::Queued), "{s:?}");
         }
         // A file whole at its name that this group did not finish is checked by
         // `download_file`, which does not fetch it again when it matches its checksum.
-        assert_eq!(status_on_resume(S::Paused, true), Some(S::Queued));
+        assert_eq!(status_on_resume(&at(S::Paused), true), Some(S::Queued));
+    }
+
+    /// `row` as `mark_failed` leaves it after the group's last step failed.
+    fn last_step_failed(mut row: store::Download) -> store::Download {
+        let err = last_step_error(false, &AppError::internal("locked"));
+        row.status = S::Failed;
+        row.error = Some(serde_json::to_string(&err).unwrap());
+        row
+    }
+
+    /// P6b review M1: a row that failed while downloading, with a file of the right size at
+    /// its final name (an older or damaged copy the failed fetch never replaced), is
+    /// downloaded, and so checked, again on Resume; before, it was added to Installed
+    /// unchecked. Only a row whose last step failed after its file was checked counts as
+    /// finished.
+    #[tokio::test]
+    async fn resume_checks_a_file_a_failed_download_left_at_its_name() {
+        let dir = Scratch::new();
+        let older = dir.path().join("Sample-7B-Q8_0.gguf");
+        std::fs::write(&older, vec![7u8; 100]).unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g", &older, 100, S::Failed).await;
+        requeue(&store, "g").await.unwrap();
+        assert_eq!(statuses(&store, "g").await, vec![S::Queued]);
+        let rows = store.list_downloads(Some("g".into())).await.unwrap();
+        assert!(!file_done(&rows[0], true));
+
+        let checked = last_step_error(false, &AppError::internal("locked"));
+        mark_failed(&store, "g", &checked).await.unwrap();
+        requeue(&store, "g").await.unwrap();
+        assert_eq!(statuses(&store, "g").await, vec![S::Verifying]);
     }
 
     /// The bug: paused after its first file finished, a group showed "downloading" with a
@@ -1313,6 +1480,82 @@ mod tests {
         assert!(resumes_at_start(&[S::Verifying, S::Verifying]));
         assert!(!resumes_at_start(&[S::Verifying, S::Failed]));
         assert!(!resumes_at_start(&[S::Completed, S::Completed]));
+    }
+
+    /// P6b review m2: a cancel the app stopped during (closed, or a store error half way)
+    /// left rows like Verifying and Cancelled: the group showed "cancelled" with no buttons
+    /// and blocked new downloads of its files for good. Now the cancel is finished at the next
+    /// start, and until then the group shows as paused, with Cancel and Resume.
+    #[test]
+    fn a_cancel_left_half_done_is_finished_and_can_be_cancelled_again() {
+        assert_eq!(at_start(&[S::Verifying, S::Cancelled]), AtStart::FinishCancel);
+        assert_eq!(at_start(&[S::Cancelled, S::Queued]), AtStart::FinishCancel);
+        assert_eq!(at_start(&[S::Verifying, S::Downloading]), AtStart::Resume);
+        assert_eq!(at_start(&[S::Verifying, S::Paused]), AtStart::Leave);
+        assert_eq!(at_start(&[S::Completed]), AtStart::Leave);
+        assert_eq!(group_status(&[S::Verifying, S::Cancelled], false), S::Paused);
+        // While Cancel stops its task, it shows as cancelled.
+        assert_eq!(group_status(&[S::Verifying, S::Cancelled], true), S::Cancelled);
+    }
+
+    /// P6b review m3: Resume waits for a start that is checking and recording a download, so
+    /// a Download of the same failed group cannot forget it while the resumed one writes its
+    /// partial file.
+    #[tokio::test]
+    async fn resume_waits_for_a_start_in_progress() {
+        let dir = Scratch::new();
+        let model = dir.path().join("Sample-7B-Q8_0.gguf");
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g", &model, 100, S::Paused).await;
+        let manager = DownloadManager::default();
+        let starting = manager.starting.lock().await;
+        let resume = manager.ready_to_resume(&store, "g");
+        tokio::pin!(resume);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut resume)
+                .await
+                .is_err(),
+            "it waits"
+        );
+        assert_eq!(statuses(&store, "g").await, vec![S::Paused]);
+        drop(starting);
+        resume.await.unwrap();
+        assert_eq!(statuses(&store, "g").await, vec![S::Queued]);
+    }
+
+    /// P6b review m5: checking a file (minutes for a large one) shows as "checking the file"
+    /// with its progress, instead of "downloading" at 0 bytes. The check of a file that just
+    /// finished downloading keeps its bytes, so the bar does not go back.
+    #[tokio::test]
+    async fn checking_a_file_shows_as_checking() {
+        let mut live = Live::default();
+        let t = Instant::now();
+        live.note("m.gguf", Progress::Checking(5), t);
+        assert!(live.checking);
+        assert_eq!(live.done["m.gguf"], 5);
+        live.note("m.gguf", Progress::Checking(9), t);
+        assert_eq!(live.done["m.gguf"], 9);
+        live.note("mmproj.gguf", Progress::Bytes(3), t);
+        assert!(!live.checking, "downloading again");
+        live.note("mmproj.gguf", Progress::Bytes(100), t);
+        live.note("mmproj.gguf", Progress::Checking(10), t);
+        assert!(live.checking);
+        assert_eq!(live.done["mmproj.gguf"], 100);
+
+        let dir = Scratch::new();
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g", &dir.path().join("m.gguf"), 100, S::Downloading).await;
+        let manager = DownloadManager::default();
+        manager
+            .live
+            .lock()
+            .unwrap()
+            .entry("g".into())
+            .or_default()
+            .note("m.gguf", Progress::Checking(5), t);
+        let dto = manager.group_dto(&store, "g").await.unwrap().unwrap();
+        assert!(dto.checking);
+        assert_eq!(serde_json::to_value(&dto).unwrap()["checking"], true);
     }
 
     /// A group's saved metadata: a model download, or (`image_file_for`) the image file of
@@ -1436,7 +1679,7 @@ mod tests {
         // Another model of the repository that shares the image file waits for it.
         assert_eq!(
             plan(&model, &[&q8, &image], &running, &metas, &["a"]),
-            Start::Busy
+            Start::Busy { running: true }
         );
         assert_eq!(plan(&model, &[&q8], &running, &metas, &["a"]), Start::New);
 
@@ -1450,7 +1693,9 @@ mod tests {
         ] {
             assert_eq!(
                 plan(&image_for_q4, &[&image], &rows, &metas, running),
-                Start::Busy
+                Start::Busy {
+                    running: !running.is_empty()
+                }
             );
         }
         // The image file for Q4 asked for again follows its own download.
@@ -1477,11 +1722,11 @@ mod tests {
         // ... but not for another model, or a model download that writes that file.
         assert_eq!(
             plan(&image_for_q8, &single, &img4(S::Paused), &metas, &[]),
-            Start::Busy
+            Start::Busy { running: false }
         );
         assert_eq!(
             plan(&model, &[&q8, &image], &img4(S::Paused), &metas, &[]),
-            Start::Busy
+            Start::Busy { running: false }
         );
 
         // Done and cancelled downloads write nothing.
@@ -1493,20 +1738,39 @@ mod tests {
         assert_eq!(plan(&model, &[&q4], &[], &metas, &[]), Start::New);
         // A download whose saved metadata cannot be read is left alone.
         let unknown = vec![row("lost", &q4, 1, S::Paused)];
-        assert_eq!(plan(&model, &[&q4], &unknown, &metas, &[]), Start::Busy);
+        assert_eq!(
+            plan(&model, &[&q4], &unknown, &metas, &[]),
+            Start::Busy { running: false }
+        );
 
-        let err = busy_error(false);
+        let err = busy_error(false, true);
         assert_eq!(err.code, "already_downloading");
         assert_eq!(
             err.message,
             "One of this model's files is already being downloaded."
         );
         assert!(err.next_step.contains("Downloads"));
-        let err = busy_error(true);
+        let err = busy_error(true, true);
         assert_eq!(
             err.message,
             "This image file is already being downloaded with another model. This model uses it too once that download is done."
         );
+        // P6b review nit: a download that is paused or failed is not "being downloaded".
+        let err = busy_error(false, false);
+        assert_eq!(
+            err.message,
+            "One of this model's files is part of another download, which has stopped."
+        );
+        assert_eq!(
+            err.next_step,
+            "Resume or cancel that download in Downloads, then try again."
+        );
+        let err = busy_error(true, false);
+        assert_eq!(
+            err.message,
+            "This image file is part of another model's download, which has stopped. This model uses it too once that download is done."
+        );
+        assert!(!err.message.contains("being downloaded"));
     }
 
     /// Checking and recording are one step: two starts at once (a double click on Download)
@@ -1623,14 +1887,17 @@ mod tests {
         assert_eq!(statuses(&store, &new).await, vec![S::Queued]);
     }
 
-    /// The bug: Cancel deleted only the partial files, so a file the group had finished
-    /// (often gigabytes) stayed on disk, not on the Installed list but in the folder's size.
-    /// A file an installed model uses stays: its own file, or its image file, which two
-    /// models of one repository can share.
+    /// The bug of P6: Cancel deleted only the partial files, so a file the group had finished
+    /// (often gigabytes) stayed on disk. P6b review C1: Cancel then deleted every whole file
+    /// at a row's final name, also one the download only found there (another app's copy, a
+    /// model taken off the list, a file copied in by hand) or one a failed fetch never
+    /// replaced. Now it deletes only the files the group wrote itself, inside the models folder
+    /// once links are followed, that no installed model uses; when unsure, the file stays.
     #[test]
-    fn cancel_deletes_the_finished_files_no_installed_model_uses() {
+    fn cancel_deletes_only_files_the_download_wrote() {
         let dir = Scratch::new();
-        let repo = dir.path().join("example-quants/Sample-7B-GGUF");
+        let models = dir.path().join("models");
+        let repo = models.join("example-quants/Sample-7B-GGUF");
         std::fs::create_dir_all(&repo).unwrap();
         let q8 = repo.join("Sample-7B-Q8_0.gguf");
         let image = repo.join("mmproj-Sample-F16.gguf");
@@ -1641,60 +1908,130 @@ mod tests {
             row("g", &image, 50, S::Verifying),
             row("g", &repo.join("Sample-7B-BF16.gguf"), 10, S::Downloading),
         ];
+        let text = |p: &PathBuf| p.display().to_string();
+        let both = vec![text(&q8), text(&image)];
+        let root = Some(models.as_path());
         let used = |models: Vec<store::ModelRecord>| {
             move |p: &Path| crate::hub::used_by_installed(&models, p)
         };
-        // Nothing installed uses them: both finished files go.
+        // Both written by the group, nothing installed uses them: both go.
         assert_eq!(
-            finished_files_to_delete(&rows, used(Vec::new())),
+            files_to_delete_on_cancel(&rows, &both, root, used(Vec::new())),
             vec![q8.clone(), image.clone()]
         );
+        // The image file was found in place (the same file already there): it stays.
+        assert_eq!(
+            files_to_delete_on_cancel(&rows, &[text(&q8)], root, used(Vec::new())),
+            vec![q8.clone()]
+        );
+        assert!(files_to_delete_on_cancel(&rows, &[], root, used(Vec::new())).is_empty());
         // Another model of the repository is installed next to the image file (a load finds
         // it there), or has it recorded: the image file stays.
         let q4 = repo.join("Sample-7B-Q4_K_M.gguf");
         std::fs::write(&q4, vec![3u8; 10]).unwrap();
         assert_eq!(
-            finished_files_to_delete(&rows, used(vec![installed(&q4, None)])),
-            vec![q8.clone()]
-        );
-        let elsewhere = dir.path().join("Other-Q4_K_M.gguf");
-        std::fs::write(&elsewhere, vec![3u8; 10]).unwrap();
-        assert_eq!(
-            finished_files_to_delete(
-                &rows,
-                used(vec![installed(&elsewhere, Some(image.as_path()))])
-            ),
+            files_to_delete_on_cancel(&rows, &both, root, used(vec![installed(&q4, None)])),
             vec![q8.clone()]
         );
         // A model on the list downloaded again: its file stays.
-        assert_eq!(
-            finished_files_to_delete(&rows, used(vec![installed(&q8, None)])),
-            Vec::<PathBuf>::new()
+        assert!(
+            files_to_delete_on_cancel(&rows, &both, root, used(vec![installed(&q8, None)]))
+                .is_empty()
         );
         // Every shard of a split model on the list stays.
         let shard2 = repo.join("Sample-7B-Q2_K-00002-of-00002.gguf");
         std::fs::write(&shard2, vec![4u8; 10]).unwrap();
         let split = installed(&repo.join("Sample-7B-Q2_K-00001-of-00002.gguf"), None);
         assert!(
-            finished_files_to_delete(&[row("g", &shard2, 10, S::Verifying)], used(vec![split]))
+            files_to_delete_on_cancel(
+                &[row("g", &shard2, 10, S::Verifying)],
+                &[text(&shard2)],
+                root,
+                used(vec![split])
+            )
+            .is_empty()
+        );
+        // Not whole (another size): not the file the group wrote.
+        assert!(
+            files_to_delete_on_cancel(&[row("g", &q8, 101, S::Verifying)], &both, root, |_| false)
                 .is_empty()
         );
-        // Not whole (another size): not a file the group finished.
-        assert!(
-            finished_files_to_delete(&[row("g", &q8, 101, S::Verifying)], |_| false).is_empty()
-        );
-        // Whole after the last step failed: deleted too. A paused row's file found at its name
-        // was not finished by this group, so it stays.
+        // Written, then the last step failed: deleted. A failed row's older file that its
+        // fetch never replaced stays, whatever its size.
         assert_eq!(
-            finished_files_to_delete(
+            files_to_delete_on_cancel(
                 &[
-                    row("g", &q8, 100, S::Failed),
-                    row("g", &image, 50, S::Paused)
+                    last_step_failed(row("g", &q8, 100, S::Failed)),
+                    row("g", &image, 50, S::Failed)
                 ],
+                &[text(&q8)],
+                root,
                 |_| false
             ),
             vec![q8.clone()]
         );
+        // Outside the folder it may be in, or no folder known: nothing goes.
+        let other = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(
+            files_to_delete_on_cancel(&rows, &both, Some(other.as_path()), |_| false).is_empty()
+        );
+        assert!(files_to_delete_on_cancel(&rows, &both, None, |_| false).is_empty());
+    }
+
+    /// P6b review C1, on the saved downloads: Cancel discards the partial files, deletes only
+    /// the files the download wrote, and forgets the group; the same file found in place and a
+    /// failed row's older file survive.
+    #[tokio::test]
+    async fn a_cancelled_download_keeps_what_it_did_not_write() {
+        let dir = Scratch::new();
+        let models = dir.path().join("models");
+        let repo = models.join("example-quants/Sample-7B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let wrote = repo.join("Sample-7B-Q8_0-00001-of-00002.gguf");
+        let found = repo.join("mmproj-Sample-F16.gguf");
+        let older = repo.join("Sample-7B-Q8_0-00002-of-00002.gguf");
+        std::fs::write(&wrote, vec![1u8; 100]).unwrap();
+        std::fs::write(&found, vec![2u8; 50]).unwrap();
+        std::fs::write(&older, vec![3u8; 30]).unwrap();
+        let part = PathBuf::from(format!("{}.part", older.display()));
+        std::fs::write(&part, b"partial").unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g", &wrote, 100, S::Verifying).await;
+        recorded(&store, "g", &found, 50, S::Verifying).await;
+        recorded(&store, "g", &older, 30, S::Failed).await;
+        note_written(&store, "g", &wrote.display().to_string())
+            .await
+            .unwrap();
+        clean_up(&store, "g", &models).await.unwrap();
+        assert!(!wrote.exists(), "the file it wrote goes");
+        assert!(found.exists(), "the same file found in place stays");
+        assert!(older.exists(), "the older file a failed fetch never replaced stays");
+        assert!(!part.exists(), "its partial file goes");
+        assert!(store.list_downloads(Some("g".into())).await.unwrap().is_empty());
+        assert!(written_by(&store, "g").await.is_empty());
+    }
+
+    /// P6b review C1: a file the download wrote through a folder linked to somewhere outside
+    /// the models folder (another drive) stays on Cancel.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_download_leaves_a_linked_folder_alone() {
+        let dir = Scratch::new();
+        let models = dir.path().join("models");
+        let outside = dir.path().join("other-drive/example-quants");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::create_dir_all(outside.join("Sample-7B-GGUF")).unwrap();
+        std::os::unix::fs::symlink(&outside, models.join("example-quants")).unwrap();
+        let linked = models.join("example-quants/Sample-7B-GGUF/Sample-7B-Q8_0.gguf");
+        std::fs::write(&linked, vec![1u8; 100]).unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g", &linked, 100, S::Verifying).await;
+        note_written(&store, "g", &linked.display().to_string())
+            .await
+            .unwrap();
+        clean_up(&store, "g", &models).await.unwrap();
+        assert!(linked.exists());
     }
 
     /// The bug: when adding the finished model to Installed (or recording an image file on

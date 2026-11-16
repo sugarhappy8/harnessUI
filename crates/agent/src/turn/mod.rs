@@ -169,6 +169,13 @@ pub trait ToolHost: Send + Sync {
     fn kept_back(&self) -> Vec<ToolInfo> {
         Vec::new()
     }
+    /// [0.0.7] Why this host never runs a tool that is on in the chat, if it never does (a
+    /// helper is not offered `run_subagent` or the coding apps), in words for the model. The
+    /// tool list in the system message still names such a tool, so a helper's system message is
+    /// the turn's and the model server keeps its cached prompt; a call to it gets this answer.
+    fn refusal(&self, _name: &str) -> Option<String> {
+        None
+    }
     /// Validates arguments against the tool's full schema (compiled once in the host).
     ///
     /// # Errors

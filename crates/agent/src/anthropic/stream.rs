@@ -11,15 +11,16 @@
 //! - `error` ends the stream with that error; a `refusal` stop ends it with
 //!   [`ProviderError::Refused`], so nothing from the refused reply is used.
 //!
-//! A response that called tools keeps its blocks (thinking with signatures, text, tool calls)
-//! in the [`ThinkingReplay`], so the next step of the loop sends them back unchanged.
+//! A finished response that thought keeps its blocks (thinking with signatures, text, tool
+//! calls) in its conversation's [`ThinkingReplay`], under everything its request sent before
+//! it and what it showed, so later requests of that conversation send them back unchanged.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 
-use super::{ReplayKey, ThinkingReplay, error_from};
+use super::{ReplayKey, ThinkingReplay, error_from, reply_hash};
 use crate::error::{ProviderError, as_u32, bounded};
 use crate::sse::{SseDecoder, SseEvent};
 use crate::stream::{FinishReason, StreamEvent, Usage};
@@ -96,7 +97,9 @@ fn finish_reason(stop: &str) -> FinishReason {
 #[derive(Debug)]
 pub(crate) struct MessagesDecoder {
     sse: SseDecoder,
-    replay: Option<Arc<Mutex<ThinkingReplay>>>,
+    /// Where a response that thought is kept, and the hash of everything its request sent
+    /// before it ([`super::request::reply_prefix`]).
+    replay: Option<(Arc<Mutex<ThinkingReplay>>, u64)>,
     blocks: BTreeMap<usize, Block>,
     counts: Counts,
     stop_reason: Option<String>,
@@ -106,8 +109,9 @@ pub(crate) struct MessagesDecoder {
 }
 
 impl MessagesDecoder {
-    /// A decoder that keeps a response that called tools in `replay`.
-    pub(crate) fn new(replay: Option<Arc<Mutex<ThinkingReplay>>>) -> Self {
+    /// A decoder that keeps a finished response that thought in `replay`, under the given
+    /// hash of what its request sent before it.
+    pub(crate) fn new(replay: Option<(Arc<Mutex<ThinkingReplay>>, u64)>) -> Self {
         Self {
             sse: SseDecoder::new(),
             replay,
@@ -406,16 +410,17 @@ impl MessagesDecoder {
     /// Not kept: a reply cut off, one with a block the app cannot send back, one with
     /// arguments that are not a JSON object.
     fn keep_for_replay(&mut self) {
-        let Some(replay) = &self.replay else {
+        let Some((replay, prefix)) = &self.replay else {
             return;
         };
-        let calls_tools = match self.stop_reason.as_deref() {
-            Some("tool_use") => true,
-            Some("end_turn" | "stop_sequence") => false,
-            _ => return,
-        };
+        if !matches!(
+            self.stop_reason.as_deref(),
+            Some("tool_use" | "end_turn" | "stop_sequence")
+        ) {
+            return;
+        }
         let mut blocks = Vec::new();
-        let mut call_ids = Vec::new();
+        let mut calls: Vec<(String, String, Value)> = Vec::new();
         let mut text = String::new();
         let mut thought = false;
         for block in self.blocks.values() {
@@ -448,17 +453,21 @@ impl MessagesDecoder {
                             _ => return,
                         }
                     };
-                    call_ids.push(id.clone());
+                    calls.push((id.clone(), name.clone(), input.clone()));
                     blocks
                         .push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
                 }
                 Block::Other => return,
             }
         }
-        let key = match (calls_tools, call_ids.is_empty()) {
-            (true, false) => ReplayKey::Calls(call_ids),
-            (false, true) if !text.is_empty() => ReplayKey::text(&text),
-            _ => return,
+        let key = ReplayKey {
+            prefix: *prefix,
+            reply: reply_hash(
+                &text,
+                calls
+                    .iter()
+                    .map(|(id, name, input)| (id.as_str(), name.as_str(), input)),
+            ),
         };
         if thought && let Ok(mut replay) = replay.lock() {
             replay.store(key, blocks);

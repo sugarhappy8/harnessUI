@@ -175,3 +175,16 @@ and `README.md`.
   `fitted()` reserved more room than the sent form needs; mixed instructions for
   `run_subagent` at 6–8k. All being fixed by P4 (round 2), which also wires P7's capture
   method into the call guide.
+- P7 review (real captures of hostile local pages): paths and writes, size caps, the
+  address checks for ordinary requests, the text the model reads, the grant and keywords
+  sound. One critical: a hostile page could make the saved copy run script and call out
+  when opened (elements in a foreign namespace slipped past the in-page clean-up; a page
+  that replaced its root element left the no-script policy without effect; the picture
+  block could land before that policy). Three major: saved SVG pictures could run script
+  when opened directly; WebSocket traffic during a capture is not checked; `file://`
+  addresses kept in the copy (an SMB request on Windows). Minor: new tool off for anyone
+  who ever changed tools; no test with a hostile page. Decided: the copy is re-read in Rust
+  with a real HTML parser and cleaned from that tree (the tree a browser builds from the
+  file), SVGs rebuilt from a real XML parser, WebSocket blocked during a capture, and a new
+  built-in tool follows its group when the whole group is on. All being fixed by P7
+  (round 1).

@@ -381,8 +381,8 @@ export function fitLine(fit: FitResult): string {
       : `Needs about ${amountGb(fit.neededBytes)}; ${FIT_HAS[device](amountGb(fit.availableBytes))}`,
   ];
   if (fit.verdict === "red" && device === "graphicsCard" && fit.computerShort) {
-    // The part in the computer's memory does not fit there (with As much as fits, the only
-    // way a model is too large on a card), as Settings for this model's second bar shows.
+    // The model's part in the computer's memory does not fit there, as Settings for this
+    // model's second bar shows (the saved copies of a long chat never make it too large).
     parts.push(`The computer's memory has ${amountGb(fit.computerFreeBytes)} free, not enough for its part.`);
     if (fit.computerBytes <= fit.computerFreeBytes) {
       parts.push("Part of that memory is kept free for other programs.");
@@ -395,14 +395,36 @@ export function fitLine(fit: FitResult): string {
   } else if (device === "processor") {
     parts.push("It would run on the processor.");
   }
+  const copies = copiesShownBytes(fit.copiesBytes);
   if (fit.verdict !== "green") {
     if (fit.suggestedCtx !== null && fit.suggestedCtx > 0) {
       parts.push(`It has room if it remembers up to ${tokensWithWords(fit.suggestedCtx)}.`);
-    } else if (fit.verdict === "yellow") {
-      parts.push(fit.partialOffload ? "Part of it would run on the processor, which is slower." : "It only just fits.");
+    } else if (fit.verdict === "yellow" && fit.partialOffload) {
+      parts.push("Part of it would run on the processor, which is slower.");
+    } else if (fit.verdict === "yellow" && !(fit.copiesShort && copies > 0)) {
+      parts.push("It only just fits.");
     }
   }
+  if (fit.computerUnknown) {
+    parts.push("The computer's memory couldn't be read.");
+    if (copies > 0) parts.push(`Long chats will use up to ${amountGb(copies)} of it.`);
+  } else if (fit.copiesShort && copies > 0 && fit.verdict !== "red") {
+    parts.push(longChatsWords(copies));
+  }
   return parts.join(" ");
+}
+
+/** A saved copies figure as shown: a finite amount above zero, else 0. */
+function copiesShownBytes(bytes: number | undefined): number {
+  return bytes !== undefined && Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+}
+
+/**
+ * Why a model is only yellow when not even one saved copy of a long chat fits the computer's
+ * memory that is left (0.0.7): never "too large" for that.
+ */
+export function longChatsWords(copiesBytes: number): string {
+  return `Long chats will use about ${amountGb(copiesBytes)} more of the computer's memory, which may not have that much free.`;
 }
 
 /**
@@ -657,23 +679,33 @@ export function barTitle(bar: MemoryBar, kind: "graphics" | "computer" | "shared
   return name ? `Graphics card · ${name} · ${capacityGb(bar.totalBytes)}` : `Graphics card · ${capacityGb(bar.totalBytes)}`;
 }
 
-/** A bar's legend, part by part, in words and numbers (never colour alone). */
-export function barLegend(bar: MemoryBar): { part: "model" | "context" | "compute" | "imageReader" | "other" | "free"; words: string; bytes: number }[] {
-  const items: { part: "model" | "context" | "compute" | "imageReader" | "other" | "free"; words: string; bytes: number }[] = [
+/** One part of a bar's legend. */
+export type LegendPart = "model" | "context" | "compute" | "imageReader" | "other" | "copies" | "free";
+
+/**
+ * A bar's legend, part by part, in words and numbers (never colour alone). The saved copies
+ * of a long chat (computer memory, 0.0.7) are their own item, after other programs: they
+ * build up during a chat, so "Free after loading" does not count them.
+ */
+export function barLegend(bar: MemoryBar): { part: LegendPart; words: string; bytes: number }[] {
+  const items: { part: LegendPart; words: string; bytes: number }[] = [
     { part: "model", words: "Model", bytes: bar.need.model },
     { part: "context", words: "Conversation memory", bytes: bar.need.context },
     { part: "compute", words: "Working space", bytes: bar.need.compute },
   ];
   if (bar.need.imageReader > 0) items.push({ part: "imageReader", words: "Image reader", bytes: bar.need.imageReader });
   items.push({ part: "other", words: "Other programs", bytes: bar.otherBytes });
+  const copies = copiesShownBytes(bar.copiesBytes);
+  if (copies > 0) items.push({ part: "copies", words: "Saved copies of long chats", bytes: copies });
   const free = freeAfterLoading(bar);
   // When the model needs more than is free, nothing is left; the needs line says by how much.
   if (free > 0 || partsTotal(bar.need) <= bar.freeBytes) items.push({ part: "free", words: "Free after loading", bytes: free });
   return items;
 }
 
-/** One legend item: "Model 9.9 GB". */
-export function legendWords(item: { words: string; bytes: number }): string {
+/** One legend item: "Model 9.9 GB"; the saved copies "Saved copies of long chats (up to 2.5 GB)". */
+export function legendWords(item: { part?: LegendPart; words: string; bytes: number }): string {
+  if (item.part === "copies") return `${item.words} (up to ${amountGb(item.bytes)})`;
   return `${item.words} ${amountGb(item.bytes)}`;
 }
 
@@ -698,7 +730,10 @@ export function pictureWarning(p: OffloadPreview, opts: { apple: boolean; saveMe
   switch (p.fits) {
     case "fits":
     case "partial":
-      return null;
+      // Yellow only because not even one saved copy of a long chat fits what is left.
+      return p.copiesShort && copiesShownBytes(p.computer.copiesBytes) > 0
+        ? longChatsWords(copiesShownBytes(p.computer.copiesBytes))
+        : null;
     case "tight":
       return `It only just fits. Programs that use ${graphicsPlace(opts.apple)}, such as games or video, may stop it from loading.`;
     case "wontFitGraphics": {

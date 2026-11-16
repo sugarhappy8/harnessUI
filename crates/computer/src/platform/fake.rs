@@ -435,6 +435,10 @@ impl Injector for FakeInjector {
         Ok(())
     }
 
+    fn cursor(&self) -> Option<GlobalPoint> {
+        Some(self.0.state().cursor)
+    }
+
     fn time_since_input(&self) -> Option<Duration> {
         let s = self.0.state();
         if !s.reports_input_time {

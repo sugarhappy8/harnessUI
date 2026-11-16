@@ -294,6 +294,31 @@ describe("Models → Installed", () => {
     confirm.mockRestore();
   });
 
+  it("[0.0.7 P6b] asks about what Delete really removes: its image file too, and not files outside the folder", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    ipcMock.listInstalledModels.mockResolvedValue([
+      { ...SMALL, deleteBytes: 1_300_000_000, keptOutside: false },
+      { ...BIG, deleteBytes: 1_000_000_000, keptOutside: true },
+      { ...model(3, "away.gguf"), deleteBytes: 0, keptOutside: true },
+      { ...model(4, "gone.gguf"), deleteBytes: 0, keptOutside: false },
+    ]);
+    await show();
+    await click(screen.getByRole("button", { name: "Delete small.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith("Delete small.gguf? This removes 1.3 GB from disk.");
+    await click(screen.getByRole("button", { name: "Delete big.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Delete big.gguf? This removes 1.0 GB from disk. Files outside the models folder stay where they are.",
+    );
+    await click(screen.getByRole("button", { name: "Delete away.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove away.gguf from the list? Its files are outside the models folder, so they stay where they are.",
+    );
+    await click(screen.getByRole("button", { name: "Delete gone.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith("Remove gone.gguf from the list? Its file is no longer on disk.");
+    expect(ipcMock.deleteModel).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
   it("says what the model was made for in plain words: tokens with words, no jargon badges", async () => {
     ipcMock.listInstalledModels.mockResolvedValue([
       {

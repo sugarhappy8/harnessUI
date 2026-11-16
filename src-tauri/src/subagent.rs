@@ -246,6 +246,12 @@ impl ToolHost for NoNesting {
             .filter(|tool| not_for_helpers(&tool.name).is_none())
             .collect()
     }
+    fn refusal(&self, name: &str) -> Option<String> {
+        // [0.0.7] The tool list names them (it is the turn's), so a call gets the plain answer.
+        not_for_helpers(name)
+            .map(str::to_owned)
+            .or_else(|| self.0.refusal(name))
+    }
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
         if let Some(refusal) = not_for_helpers(name) {
             return Err(vec![refusal.to_owned()]);

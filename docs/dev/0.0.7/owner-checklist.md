@@ -48,7 +48,27 @@ On the Windows PC:
    harnessUI's window while the model clicks where harnessUI covers Notepad: the click is
    refused ("covered by this app's own window") and harnessUI stays. Let go of the mouse
    for two seconds: the next such click minimises harnessUI and lands in Notepad. Do the
-   same with Allow all and with typing while harnessUI has the keyboard.
+   same with Allow all and with typing while harnessUI has the keyboard. Once harnessUI is
+   back (you brought it back), it is minimised again only after 1.5 s without input.
+8. Run two chats. While harnessUI is minimised for one of them, let a card of the other
+   chat wait for more than a second; when harnessUI comes back, a click right away on
+   *Allow* does nothing, and a moment later it works.
+9. Open the Allow all or Full access confirmation (header menu or Settings → Permissions)
+   and leave it open, with a chat running under *Allow for this chat* or Allow all that
+   minimises harnessUI. When a card brings harnessUI back under your pointer, a click right
+   away on the confirm button does nothing.
+10. After a card, click Notepad: harnessUI goes behind it (it is not left always on top),
+    and the Stop bar stays above harnessUI.
+11. While the agent has minimised harnessUI, close the app the model used (so Windows hands
+    the focus to another window), and another time change the display scale: harnessUI
+    still comes back for the next card, at the end of the turn and on Stop.
+12. Press Stop several times during the minimise animation: harnessUI always comes back,
+    with the keyboard.
+13. Answer a card and touch nothing until the next card or the end of the turn, and once
+    after the model pressed Alt (for example `alt` or `alt+f`): harnessUI still comes back
+    without the keyboard (type something: it goes to Notepad). Try it with harnessUI
+    maximised too: it comes back maximised.
+14. With the red border on screen, cards still take clicks after the short delay.
 
 ## Image files (P2)
 On the Windows PC:
@@ -74,7 +94,8 @@ On the Windows PC:
 Repeat the Windows computer-use steps (first section) with TextEdit: typing reaches TextEdit
 after answering a card, harnessUI's window comes to the front for a card even while
 TextEdit is active (TextEdit stays the active app until you click the card), and the Dock
-icon bounces for a card and at the end of the turn.
+icon bounces for a card and at the end of the turn. The first click on a card shown in
+front only makes harnessUI the active app (expected on a Mac); click again to answer.
 
 ## Cloud endpoints (P5) — needs your own API keys
 1. **Anthropic (Claude):** Settings → Endpoints → Anthropic, paste the key. *Test* lists the

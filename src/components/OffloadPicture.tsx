@@ -19,6 +19,8 @@ const PART_CLASS: Record<ReturnType<typeof barLegend>[number]["part"], string> =
   compute: "bg-accent/45",
   imageReader: "bg-success/70",
   other: "bg-fg-muted/35",
+  // What long chats may take later: drawn in the free part, lighter than what loading takes.
+  copies: "bg-accent-2/30",
   free: "bg-transparent",
 };
 
@@ -37,7 +39,13 @@ function Bar(props: { bar: MemoryBar; kind: "graphics" | "computer" | "shared"; 
     1,
   );
   const share = (bytes: number) => `${Math.min(100, Math.max(0, (bytes / whole) * 100)).toFixed(2)}%`;
-  const sentence = `${title}: ${legend.map((i) => `${i.words.toLowerCase()} ${amountGb(i.bytes)}`).join(", ")}.`;
+  const sentence = `${title}: ${legend
+    .map((i) =>
+      i.part === "copies"
+        ? `${i.words.toLowerCase()} (up to ${amountGb(i.bytes)})`
+        : `${i.words.toLowerCase()} ${amountGb(i.bytes)}`,
+    )
+    .join(", ")}.`;
   const marker = kind === "shared" && limitBytes != null && limitBytes > 0 && bar.totalBytes > 0 ? limitBytes : null;
   return (
     <div className="space-y-1" data-bar={kind}>

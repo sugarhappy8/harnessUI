@@ -286,7 +286,10 @@ fn everyday_desktop_requests_find_the_computer_group() {
             &["browser", "computer"],
         ),
         ("press the Start menu button", &["computer"]),
-        ("put these numbers in Excel", &["computer"]),
+        // [0.0.7 verification] "in excel" also names what a program does: it needs the request
+        // to say whose machine it is.
+        ("put these numbers in Excel", &[]),
+        ("on my pc, put these numbers in Excel", &["computer"]),
         ("can you use my computer?", &["computer"]),
         // A screenshot may be of the agent's browser page or of the screen: both groups.
         (
@@ -315,10 +318,12 @@ fn everyday_desktop_requests_find_the_computer_group() {
     }
 }
 
-/// [0.0.7 review m1] A match brings in all seven computer tools for the rest of the chat, so
-/// coding requests that share words with the desktop ("chrome", "excel", "laptop", "click",
-/// "open settings.json") never bring the group in; everyday desktop requests do, also those
-/// that named an app or a place the first list did not know.
+/// [0.0.7 review m1, verification] A match brings in all seven computer tools for the rest of
+/// the chat (about 1,500 tokens), while a miss still leaves them in the tool list, reachable
+/// through call_tool: so coding and file requests that share words with the desktop
+/// ("chrome", "excel", "my desktop", "with the keyboard", "open settings") never bring the
+/// group in, and the owner's everyday desktop requests do. Phrases that also name what a
+/// program does count only when the request says whose machine it is ("on my laptop, …").
 #[test]
 fn the_computer_group_needs_a_desktop_request() {
     let all: Vec<Candidate> = on(&[
@@ -368,21 +373,70 @@ fn the_computer_group_needs_a_desktop_request() {
         "if char in word: count it",
         "build a task manager app in react",
         "build a file explorer component",
+        // [0.0.7 verification] Coding and file requests that name a desktop thing.
+        "the project folder is on my desktop",
+        "save the report to my desktop",
+        "I have a python file on my desktop, run it",
+        "the website looks broken on my screen",
+        "the modal is cut off on my screen",
+        "make the dropdown usable with the keyboard",
+        "the menu should be navigable with the keyboard",
+        "change the mouse cursor to a pointer on hover",
+        "move the cursor to the end of the input field",
+        "handle double click on the table row",
+        "add a context menu on right click on the canvas",
+        "when I click start the timer does not begin",
+        "when I click the start button the game freezes",
+        "write a function to set the volume of the audio element",
+        "add a button to mute the sound",
+        "add a menu item to open settings",
+        "the csv opens with broken characters in excel",
+        "export the table so it opens in excel",
+        "how do I open excel files in python",
+        "how to open word documents with python-docx",
+        "generate a microsoft word document from markdown",
+        "the email renders badly in outlook",
+        "my bot does not respond in discord",
+        "write a microsoft teams bot in node",
+        "the flexbox layout breaks in microsoft edge",
+        "launch chrome with puppeteer in headless mode",
+        "how do I open chrome devtools",
+        "my app uses 90% cpu in task manager",
+        "show the file in file explorer from my electron app",
+        "reveal the file in finder from swift",
+        "open photos from the gallery in my react native app",
+        "the popup opens in the other window",
+        "open vs code settings and change the font",
+        "read the system settings from the registry in c#",
+        "detect when the user presses a key on the keyboard",
+        "write a script that changes the desktop wallpaper",
+        "open the terminal in vs code",
     ] {
         assert!(!computer(message), "{message}");
     }
     for message in [
+        // The owner's own words.
         "open Notepad and type hello",
-        "open notepad.exe",
-        "type hello into notepad",
         "use my pc to open Chrome",
+        "take a screenshot",
+        "on my laptop, open settings",
+        "open Google Chrome",
+        "open Microsoft Excel",
+        "can you control my Mac?",
+        // More everyday ways to ask.
+        "open notepad.exe",
+        "open notepad++ and paste this",
+        "type hello into notepad",
         "use my computer to open spotify",
         "can you use my computer?",
-        "on my laptop, open settings",
+        "use my mac to open safari",
         "take a screenshot and tell me what you see",
         "what's on my screen",
+        "look at my screen and tell me what's wrong",
         "type this into Word",
-        "put this in a spreadsheet in excel",
+        "open Microsoft Word and write a letter",
+        "launch google chrome",
+        "open microsoft edge",
         "open the calculator",
         "open calculator app",
         "open paint",
@@ -392,17 +446,31 @@ fn the_computer_group_needs_a_desktop_request() {
         "launch vs code",
         "open steam",
         "open the photos app",
-        "open microsoft edge",
+        "open outlook and check my mail",
+        "play some music on spotify",
         "minimize all windows",
-        "switch to the other window",
-        "set the volume to 50%",
         "change my wallpaper",
-        "click the start button",
+        "open the recycle bin",
         "press the Start menu button",
         "open File Explorer and show me my downloads",
+        // Phrases that need to know whose machine it is, with it.
+        "on my mac, open safari",
+        "on my laptop, set the volume to 50%",
+        "click the start button on my screen",
+        "double-click the icon on the desktop",
     ] {
         assert!(computer(message), "{message}");
     }
+    // [0.0.7 verification] "google" in "google chrome" is the program, not a web search.
+    let groups = |message: &str| -> BTreeSet<String> {
+        matching_groups(&all, &Wording::of(message), &[])
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect()
+    };
+    assert_eq!(groups("open Google Chrome"), names(&["computer"]).into_iter().collect());
+    assert!(groups("google the latest tokio release").contains("search"));
+    assert!(groups("open google chrome and google the weather").contains("search"));
 }
 
 /// [0.0.7] The computer group comes whole: a model that can take a screenshot but not click

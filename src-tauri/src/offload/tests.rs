@@ -103,6 +103,7 @@ fn resolved(ctx: u32, gpu: GpuUse, fine: FineLaunch) -> ResolvedLoad {
         ctx,
         ctx_choice: ContextSize::Fixed(ctx),
         ctx_source: ContextSource::ModelSetting,
+        ctx_checkpoints: models::kv::MAX_CTX_CHECKPOINTS,
         gpu,
         save_memory: false,
         keep_in_memory: false,
@@ -1038,7 +1039,7 @@ fn model_on_card(sizes: &LayerSizes, layers: Layers, experts: ExpertsPick) -> u6
         &PlacementInput {
             sizes,
             kv_per_layer: Vec::new(),
-            checkpoints: 0,
+            copies: 0,
             compute_gpu: 0,
             compute_cpu: 0,
             projector: 0,

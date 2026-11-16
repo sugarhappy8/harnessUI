@@ -14,6 +14,7 @@ mod supervisor;
 
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -29,7 +30,7 @@ pub use supervisor::{
 };
 
 use super::backend::{Backend, BackendKind};
-use super::failure::{LoadFailure, classify};
+use super::failure::{LoadFailure, classify_load};
 use super::launch::{LaunchConfig, REDACTED, build_args, build_env_on};
 use super::lines::{LineReader, Tail};
 use super::props::Props;
@@ -158,6 +159,10 @@ pub enum StartError {
         exit_code: Option<i32>,
         /// The last lines of stderr.
         stderr_tail: Vec<String>,
+        /// 0.0.7: the server had said it was loading the image file (`mmproj_model`), which
+        /// it does only after the model and its context loaded
+        /// ([`StartError::while_loading_image_file`]).
+        image_file_loading: bool,
     },
     /// The model did not finish loading in time; the process tree was killed.
     #[error("llama-server did not become ready within {} s", after.as_secs())]
@@ -195,6 +200,18 @@ impl StartError {
             Self::PortOwnedByOther { .. } => LoadFailure::PortInUse,
             Self::InvalidConfig(_) | Self::Spawn(_) | Self::Props { .. } => LoadFailure::Unknown,
         }
+    }
+
+    /// Whether the process exited while it loaded the image file (0.0.7): after the model
+    /// and its context had loaded, so running out of memory then was for the image file.
+    pub fn while_loading_image_file(&self) -> bool {
+        matches!(
+            self,
+            Self::Exited {
+                image_file_loading: true,
+                ..
+            }
+        )
     }
 
     /// The last lines of stderr, when the process ran.
@@ -266,6 +283,8 @@ async fn start_inner(
         })?;
 
     let launch = &spec.launch;
+    // The image file as the server is given it, which is how it names it in its log.
+    let image = launch.mmproj.as_deref().and_then(Path::to_str);
     let process = SpawnSpec::new(&spec.backend.server, &spec.backend.dir)
         .args(build_args(launch))
         .env(build_env_on(spec.backend.base_env(), launch))
@@ -276,9 +295,14 @@ async fn start_inner(
     let stdin = child.take_stdin();
     let tail = Arc::new(Mutex::new(Tail::new(STDERR_TAIL_LINES)));
     let log = Arc::new(Mutex::new(LogInfo::default()));
+    let image_file_loading = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::with_capacity(2);
     if let Some(stdout) = child.take_stdout() {
-        readers.push(tokio::spawn(read_stdout(stdout, events.clone())));
+        readers.push(tokio::spawn(read_stdout(
+            stdout,
+            events.clone(),
+            image_file_loading.clone(),
+        )));
     }
     if let Some(stderr) = child.take_stderr() {
         readers.push(tokio::spawn(read_stderr(
@@ -316,18 +340,20 @@ async fn start_inner(
 
     match outcome {
         LoadOutcome::Exited(code) => {
+            // The readers have finished: the last stage the server named is final.
             let stderr_tail = server.finish_after_exit(code).await;
             return Err(StartError::Exited {
-                failure: classify(&stderr_tail, code),
+                failure: classify_load(&stderr_tail, code, image),
                 exit_code: code,
                 stderr_tail,
+                image_file_loading: image_file_loading.load(Ordering::Relaxed),
             });
         }
         LoadOutcome::TimedOut => {
             let stderr_tail = server.kill_and_collect().await;
             return Err(StartError::Timeout {
                 after: spec.load_timeout,
-                failure: classify(&stderr_tail, None),
+                failure: classify_load(&stderr_tail, None, image),
                 stderr_tail,
             });
         }
@@ -358,9 +384,10 @@ async fn start_inner(
         let code = status.code();
         let stderr_tail = server.finish_after_exit(code).await;
         return Err(StartError::Exited {
-            failure: classify(&stderr_tail, code),
+            failure: classify_load(&stderr_tail, code, image),
             exit_code: code,
             stderr_tail,
+            image_file_loading: image_file_loading.load(Ordering::Relaxed),
         });
     }
     if !same_model_file(&props.model_path, &launch.model) {
@@ -475,16 +502,27 @@ fn parse_props(body: &[u8]) -> Result<Props, String> {
     Ok(props)
 }
 
-async fn read_stdout(stdout: tokio::process::ChildStdout, events: UnboundedSender<ServerEvent>) {
+/// Reads the managed-child protocol. `image_file_loading` follows the stage the server last
+/// named: whether it is loading the image file (`mmproj_model`, 0.0.7).
+async fn read_stdout(
+    stdout: tokio::process::ChildStdout,
+    events: UnboundedSender<ServerEvent>,
+    image_file_loading: Arc<AtomicBool>,
+) {
     let mut reader = LineReader::new(stdout);
     while let Some(line) = reader.next_line().await {
         let event = match parse_child_line(&line) {
             Some(ChildState::Loading {
                 current, progress, ..
-            }) => ServerEvent::Progress {
-                stage: current,
-                value: progress,
-            },
+            }) => {
+                if let Some(stage) = &current {
+                    image_file_loading.store(stage == "mmproj_model", Ordering::Relaxed);
+                }
+                ServerEvent::Progress {
+                    stage: current,
+                    value: progress,
+                }
+            }
             // Readiness is decided by /health and /props; the state line only reports where
             // the model went.
             Some(ChildState::Ready {
@@ -777,9 +815,18 @@ mod tests {
             failure: LoadFailure::OutOfMemory,
             exit_code: Some(1),
             stderr_tail: tail.clone(),
+            image_file_loading: false,
         };
         assert_eq!(exited.failure(), LoadFailure::OutOfMemory);
         assert_eq!(exited.stderr_tail(), tail.as_slice());
+        assert!(!exited.while_loading_image_file());
+        let image = StartError::Exited {
+            failure: LoadFailure::OutOfMemory,
+            exit_code: None,
+            stderr_tail: tail.clone(),
+            image_file_loading: true,
+        };
+        assert!(image.while_loading_image_file());
         let port = StartError::PortOwnedByOther {
             port: 1,
             stderr_tail: vec![],

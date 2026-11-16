@@ -1989,11 +1989,9 @@ pub async fn run(
         helper_input.history = Vec::new();
         helper_input.summary = None;
         helper_input.app_notes.clear();
-        // [0.0.7] Its tool list leaves out what a helper is not offered.
-        helper_input.tool_guide = helper_input
-            .tool_guide
-            .as_ref()
-            .map(crate::tool_select::roster::for_helper);
+        // [0.0.7] The same tool list too, unchanged, so its system message is the turn's and
+        // the model server reuses the cached prompt; its host refuses what a helper is not
+        // offered (`subagent::NoNesting::refusal`).
         tools.helper = Some(HelperSetup {
             app: app.clone(),
             client: req.client.clone(),

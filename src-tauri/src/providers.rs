@@ -198,6 +198,53 @@ pub fn key_may_stay(old_base_url: &str, new_base_url: &str) -> bool {
     )
 }
 
+/// [0.0.7 P5] Whether a key may be saved for the endpoint: anything but "the keychain has
+/// none" (a keychain that cannot be read may still hold one), so no check passes by default.
+fn may_hold_key(secrets: &dyn store::secrets::SecretStore, id: store::ProviderId) -> bool {
+    !matches!(secrets.get(&secret_key(id)), Ok(None))
+}
+
+/// [0.0.7 P5] What saving an endpoint at `base_url` does with its key before the endpoint is
+/// saved. A key, new or saved, may go to `base_url` only as `agent::check_key_transport`
+/// allows; a saved key never follows the endpoint to another scheme, host or port (the save
+/// is refused unless a new key comes with the new address or the key is removed). A saved
+/// key that must go (removal asked for, or a new key for another address) is removed here,
+/// so it can never be left with the new address; when the keychain cannot remove it,
+/// nothing is saved.
+fn prepare_key(
+    secrets: &dyn store::secrets::SecretStore,
+    id: Option<store::ProviderId>,
+    saved_base_url: Option<&str>,
+    base_url: &str,
+    new_key: bool,
+    clear: bool,
+) -> AppResult<()> {
+    let may_hold = id.is_some_and(|id| may_hold_key(secrets, id));
+    let kept = may_hold && !clear;
+    if new_key || kept {
+        agent::check_key_transport(base_url).map_err(AppError::bad_request)?;
+    }
+    let moves = saved_base_url.is_some_and(|saved| !key_may_stay(saved, base_url));
+    if kept && moves && !new_key {
+        return Err(AppError::bad_request(PASTE_THE_NEW_KEY));
+    }
+    if let Some(id) = id
+        && may_hold
+        && (clear || (new_key && moves))
+    {
+        secrets.delete(&secret_key(id)).map_err(|e| {
+            AppError::new(
+                "keychain",
+                "The saved API key could not be removed from the system keychain, so nothing \
+                 was saved.",
+                "Unlock the keychain and try again.",
+                e.to_string(),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// [0.0.7 P5] What a saved key that would follow an endpoint to another address gets.
 const PASTE_THE_NEW_KEY: &str = "The saved API key is not sent to a new address. Paste the API \
      key for the new address, or remove the saved key.";
@@ -256,12 +303,7 @@ pub async fn client_for(
 pub async fn list_providers(state: State<'_, AppState>) -> AppResult<Vec<ProviderDto>> {
     let mut out = Vec::new();
     for p in state.store.list_providers().await? {
-        let has_key = state
-            .secrets
-            .get(&secret_key(p.id))
-            .ok()
-            .flatten()
-            .is_some();
+        let has_key = may_hold_key(state.secrets.as_ref(), p.id);
         let context = chosen_context(&state, p.id).await;
         out.push(dto(&p, has_key, context));
     }
@@ -275,29 +317,10 @@ pub async fn save_provider(
 ) -> AppResult<ProviderDto> {
     let base_url = provider.base_url.trim().trim_end_matches('/').to_string();
     check_base_url(&base_url)?;
-    // [0.0.7 P5] A key never travels over plain http:// to a server on the internet: not a
-    // new key, and not one already saved for this endpoint.
     let new_key = provider
         .api_key
         .as_deref()
         .is_some_and(|key| !key.trim().is_empty());
-    let kept_key = !provider.clear_api_key
-        && provider
-            .id
-            .is_some_and(|id| state.secrets.get(&secret_key(id)).ok().flatten().is_some());
-    if new_key || kept_key {
-        agent::check_key_transport(&base_url).map_err(AppError::bad_request)?;
-    }
-    // [0.0.7 P5] A key saved for one address never follows the endpoint to another one (a
-    // changed company or address): the new address needs its own key.
-    if kept_key
-        && !new_key
-        && let Some(id) = provider.id
-        && let Some(saved) = state.store.get_provider(id).await?
-        && !key_may_stay(&saved.base_url, &base_url)
-    {
-        return Err(AppError::bad_request(PASTE_THE_NEW_KEY));
-    }
     if let Some(n) = provider.context_length
         && crate::settings::parse_remote_context(&serde_json::json!(n)).is_none()
     {
@@ -310,6 +333,20 @@ pub async fn save_provider(
     } else {
         provider.name.trim().to_string()
     };
+    // [0.0.7 P5] The key's checks, and its removal when it must go, before anything is
+    // saved ([`prepare_key`]).
+    let saved_base_url = match provider.id {
+        Some(id) => state.store.get_provider(id).await?.map(|p| p.base_url),
+        None => None,
+    };
+    prepare_key(
+        state.secrets.as_ref(),
+        provider.id,
+        saved_base_url.as_deref(),
+        &base_url,
+        new_key,
+        provider.clear_api_key,
+    )?;
     let id = state
         .store
         .upsert_provider(store::ProviderInput {
@@ -322,9 +359,6 @@ pub async fn save_provider(
         })
         .await?;
     let key = secret_key(id);
-    if provider.clear_api_key {
-        let _ = state.secrets.delete(&key);
-    }
     if let Some(api_key) = provider.api_key.filter(|k| !k.trim().is_empty()) {
         state.secrets.set(&key, api_key.trim()).map_err(|e| {
             AppError::new(
@@ -347,7 +381,7 @@ pub async fn save_provider(
         .get_provider(id)
         .await?
         .ok_or_else(|| AppError::not_found("endpoint"))?;
-    let has_key = state.secrets.get(&key).ok().flatten().is_some();
+    let has_key = may_hold_key(state.secrets.as_ref(), id);
     Ok(dto(&saved, has_key, provider.context_length))
 }
 
@@ -451,6 +485,92 @@ mod tests {
         assert!(!key_may_stay("https://example.com", "http://example.com"));
         assert!(!key_may_stay("not a url", "not a url"));
         assert!(PASTE_THE_NEW_KEY.contains("Paste the API key for the new address"));
+    }
+
+    /// A keychain double: what `get` answers, whether `delete` works, and what was deleted.
+    struct Keychain {
+        get: Result<Option<String>, store::secrets::SecretError>,
+        delete_fails: bool,
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Keychain {
+        fn new(get: Result<Option<String>, store::secrets::SecretError>, delete_fails: bool) -> Self {
+            Self {
+                get,
+                delete_fails,
+                deleted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn deleted(&self) -> Vec<String> {
+            self.deleted.lock().unwrap().clone()
+        }
+    }
+
+    impl store::secrets::SecretStore for Keychain {
+        fn get(&self, _: &str) -> Result<Option<String>, store::secrets::SecretError> {
+            self.get.clone()
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), store::secrets::SecretError> {
+            Ok(())
+        }
+        fn delete(&self, key: &str) -> Result<(), store::secrets::SecretError> {
+            if self.delete_fails {
+                return Err(store::secrets::SecretError::NoAccess("locked".into()));
+            }
+            self.deleted.lock().unwrap().push(key.to_owned());
+            Ok(())
+        }
+    }
+
+    /// [0.0.7 P5] The key rules hold when the keychain fails: a keychain that cannot be read
+    /// counts as holding a key, and a key that cannot be removed stops the save.
+    #[test]
+    fn the_key_rules_hold_when_the_keychain_fails() {
+        let locked = || Err(store::secrets::SecretError::NoAccess("locked".into()));
+        let id = Some(store::ProviderId(3));
+        let openai = Some("https://api.openai.com/v1");
+        let code = |r: AppResult<()>| r.unwrap_err().message;
+        // Unreadable: a moved endpoint without a new key is refused, as with a saved key.
+        let keychain = Keychain::new(locked(), false);
+        let refused = prepare_key(&keychain, id, openai, "https://openrouter.ai/api/v1", false, false);
+        assert_eq!(code(refused), PASTE_THE_NEW_KEY);
+        // Unreadable: no key over plain http to the internet either.
+        let refused = prepare_key(
+            &keychain,
+            id,
+            Some("http://api.example.com/v1"),
+            "http://api.example.com/v1",
+            false,
+            false,
+        );
+        assert_eq!(code(refused), agent::cloud::KEY_OVER_HTTP);
+        // Removal asked for but the keychain refuses: nothing is saved.
+        let failing = Keychain::new(Ok(Some("sk-old".into())), true);
+        let refused = prepare_key(&failing, id, openai, "https://api.openai.com/v1", false, true);
+        assert!(code(refused).starts_with("The saved API key could not be removed"));
+        // Unreadable and removal asked for: removed before anything else.
+        let keychain = Keychain::new(locked(), false);
+        prepare_key(&keychain, id, openai, "https://openrouter.ai/api/v1", false, true).unwrap();
+        assert_eq!(keychain.deleted(), ["provider-api-key:3"]);
+        // A new key for a new address: the old key goes first, so it is never left with the
+        // new address; a keychain that cannot remove it stops the save.
+        let keychain = Keychain::new(Ok(Some("sk-old".into())), false);
+        prepare_key(&keychain, id, openai, "https://openrouter.ai/api/v1", true, false).unwrap();
+        assert_eq!(keychain.deleted(), ["provider-api-key:3"]);
+        let failing = Keychain::new(Ok(Some("sk-old".into())), true);
+        assert!(prepare_key(&failing, id, openai, "https://openrouter.ai/api/v1", true, false).is_err());
+        // No key saved: a move needs nothing; the same address keeps a saved key.
+        let empty = Keychain::new(Ok(None), true);
+        prepare_key(&empty, id, openai, "https://openrouter.ai/api/v1", false, false).unwrap();
+        let saved = Keychain::new(Ok(Some("sk-old".into())), true);
+        prepare_key(&saved, id, openai, "https://api.openai.com/v1/", false, false).unwrap();
+        assert!(saved.deleted().is_empty());
+        // A new endpoint has no saved key.
+        prepare_key(&saved, None, None, "https://api.openai.com/v1", true, false).unwrap();
+        assert!(may_hold_key(&Keychain::new(locked(), false), store::ProviderId(3)));
+        assert!(!may_hold_key(&Keychain::new(Ok(None), false), store::ProviderId(3)));
     }
 
     /// [0.0.7 P5] The chat header's marks: "Cloud" with the host for the internet, and how

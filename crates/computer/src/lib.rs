@@ -46,6 +46,9 @@ pub use window_aside::{
     Aside, AsideEvent, Comeback, MainWindow, WindowAside, WindowNow, WindowStep,
 };
 
+#[cfg(target_os = "windows")]
+pub use platform::windows::restore_window_without_activating;
+
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
     ACCESSIBILITY_SETTINGS_URL, SCREEN_RECORDING_SETTINGS_URL, accessibility_granted,
