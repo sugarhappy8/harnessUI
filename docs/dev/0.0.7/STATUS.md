@@ -100,3 +100,10 @@ and `README.md`.
   restores without the keyboard; steps aside only when in the way; under a grant only right
   after a card answer or 1.5 s without input; state keyed by turn; ownership checks on the
   main thread). computer 146, app 849, vitest 832 pass. Independent verification running.
+- P5 round 1 done: all 3 major, 7 minor and the nits fixed (one shared address parser; cloud
+  Automatic = min(reported, company size): Claude 200K, Haiku 5.5 100K, OpenAI/OpenRouter
+  128K, abliteration.ai 32,768; keys never kept across a host change; stream errors scrubbed;
+  only localhost/private IP literals count as local — a `.local` name with a key now needs
+  https; effort low where thinking can't be switched off; earlier thinking replayed when
+  unchanged; 1-hour cache on system/tools; big pictures become a note for Claude).
+  agent 229 lib / 19 cloud / 84 turn_loop, vitest 832. Independent verification running.
