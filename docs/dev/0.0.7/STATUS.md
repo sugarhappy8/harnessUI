@@ -317,3 +317,12 @@ and `README.md`.
   steer the classification; the automatic lookup's answer could be dropped; a nameless
   old-style image file in a shared folder marked text-only models. Round 2 running (also
   Browse taking the model's own image file).
+- P1 round-1 verification: both majors fixed; the per-layer port exact against the pinned
+  binary (9 short-memory models, 10 hybrid/recurrent models to the digit, 2 MLA models);
+  the real server keeps exactly the number of copies the app asks for; the owner's Gemma 4
+  12B table confirmed on a 16 GB card (Q8_0: Automatic 32,768 green, 65,536 yellow; Q6_K and
+  Q4_K_M green). No critical or major. Minor: unknown computer memory still made models
+  red on a graphics card (older than 0.0.7); a starting load's copies counted as freed;
+  Apple silicon sized copies against the Metal working set; the freed figure is
+  system-wide; the copy count not re-sized after a step-down; two doc figures. Small round
+  2 running.
