@@ -66,3 +66,10 @@ and `README.md`.
   keyboard action could take the keyboard while the user typed in harnessUI; it minimised
   even when not in the way; the state machine keyed on the chat, not the turn; hardening
   (cloaked windows, ownership check on the main thread). All being fixed by P3 (round 1).
+- P4 built: `<tool_list>` + `<tool_call_guide>` in the system message (stable across turns,
+  ≤5 % of context / 2,400 tokens, steps down to shorter forms), computer keywords widened and
+  the whole computer group shown together, made-up `<tool_output>` replies retried once with
+  a note, hints after failed PowerShell/zsh commands, wrong-call messages list what a tool
+  takes, `sameCallLimit` setting (2–100, default 5) in Settings → General. Real model
+  (Qwen3-0.6B, greedy) still calls read_file with the list and guide. Under independent
+  review. Evals/benchmarks don't get the list (separate turn input) — note for later.

@@ -98,6 +98,7 @@
     "allow-list-audit",
     "allow-export-audit",
     "allow-resolve-approval",
+    "allow-pending-approvals",
     "allow-get-approval-mode",
     "allow-set-approval-mode",
     "allow-get-allow-all-default",

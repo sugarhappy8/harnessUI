@@ -2788,4 +2788,92 @@ mod tests {
             assert!(cut_document_notes(None, full_access).is_empty());
         }
     }
+
+    fn card(id: &str, chat_id: i64, card: policy::CardKind) -> ApprovalDto {
+        ApprovalDto {
+            id: id.into(),
+            chat_id,
+            call_id: format!("call-{id}"),
+            server: "builtin".into(),
+            tool: "run_command".into(),
+            summary: format!("Run a command ({id})"),
+            preview: "ls".into(),
+            card,
+            reason: policy::AskReason::Normal,
+            keep_asking: None,
+        }
+    }
+
+    /// [0.0.7 P6] The bug: a card waiting when the window reloaded was lost (Rust kept only
+    /// its answer channel), so the reply showed as running and waited until Stop. The cards
+    /// waiting now are kept as the window was sent them, oldest first, until answered.
+    #[test]
+    fn the_cards_waiting_are_kept_for_a_window_that_reloads() {
+        let pending = PendingApprovals::default();
+        assert!(pending.cards().is_empty());
+        let mut answers = Vec::new();
+        for (id, chat, kind) in [
+            ("b", 3, policy::CardKind::Grantable),
+            ("a", 4, policy::CardKind::OnceOnly),
+            ("c", 3, policy::CardKind::OnceOnly),
+        ] {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            answers.push(rx);
+            pending
+                .0
+                .lock()
+                .unwrap()
+                .insert(id.into(), PendingCard::new(tx, card(id, chat, kind)));
+        }
+        let cards = pending.cards();
+        let ids: Vec<&str> = cards.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a", "c"], "in the order they came");
+        assert_eq!(cards[0].chat_id, 3);
+        assert_eq!(cards[0].summary, "Run a command (b)");
+        // The buttons still follow the card that was sent.
+        let m = pending.0.lock().unwrap();
+        assert!(m["b"].grantable && !m["a"].grantable);
+        drop(m);
+        // An answered card is gone.
+        let answered = pending.0.lock().unwrap().remove("a").unwrap();
+        let _ = answered.tx.send(Approval::AllowOnce);
+        let ids: Vec<String> = pending.cards().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec!["b".to_string(), "c".to_string()]);
+        // As the webview reads it (src/lib/types.ts `ApprovalRequest`).
+        let json = serde_json::to_value(&pending.cards()[0]).unwrap();
+        assert_eq!(json["chatId"], 3);
+        assert_eq!(json["callId"], "call-b");
+        assert_eq!(json["card"], "grantable");
+    }
+
+    /// [0.0.7 P6] `pending_approvals` is the main window's alone: granted there only,
+    /// registered, and it checks the calling window first, like its neighbours. The webview
+    /// calls it by this name.
+    #[test]
+    fn pending_approvals_is_for_the_main_window_only() {
+        assert!(include_str!("../capabilities/main.json").contains("\"allow-pending-approvals\""));
+        for other in [
+            include_str!("../capabilities/overlay.json"),
+            include_str!("../capabilities/indicator.json"),
+        ] {
+            assert!(!other.contains("pending-approvals"));
+        }
+        assert!(
+            include_str!("../commands.list")
+                .lines()
+                .any(|l| l.trim() == "pending_approvals")
+        );
+        assert!(include_str!("lib.rs").contains("turns::pending_approvals,"));
+        let body = include_str!("turns.rs")
+            .split_once("pub fn pending_approvals(")
+            .unwrap()
+            .1;
+        let body = body.split_once('{').unwrap().1;
+        let first = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap();
+        assert_eq!(first, "crate::commands::only_main_window(window.label())?;");
+        assert!(
+            include_str!("../../src/lib/ipc.ts")
+                .contains("invoke<ApprovalRequest[]>(\"pending_approvals\")")
+        );
+    }
 }

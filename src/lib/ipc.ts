@@ -278,8 +278,10 @@ export const importModel = (path: string) => invoke<InstalledModel>("import_mode
 export const imageFileOffer = (path: string) =>
   invoke<import("./types").ImageFileOffer>("image_file_offer", { path });
 export const downloadImageFile = (path: string) => invoke<string>("download_image_file", { path });
+/** Takes a model off the Installed list (`deleteFiles`: and a download's files). [0.0.7 P6]
+ *  Resolves to a note for the user when files were left in place (outside the models folder). */
 export const deleteModel = (id: number, deleteFiles: boolean) =>
-  invoke<void>("delete_model", { id, deleteFiles });
+  invoke<string | null>("delete_model", { id, deleteFiles });
 export const diskUsage = () => invoke<DiskUsage>("disk_usage");
 export const setModelsDir = (path: string) => invoke<void>("set_models_dir", { path });
 export const hardwareInfo = () => invoke<HardwareInfo>("hardware_info");
@@ -328,6 +330,9 @@ export function onStopRequested(handler: () => void): Promise<UnlistenFn> {
 // Agent turns: approvals
 export const resolveApproval = (id: string, decision: "allowOnce" | "allowForChat" | "deny", note: string | null) =>
   invoke<void>("resolve_approval", { id, decision, note });
+/** [0.0.7 P6] The approval cards waiting for an answer now, oldest first (a window that
+ *  reloaded while one waited heard its `approval-request` before it reloaded). */
+export const pendingApprovals = () => invoke<ApprovalRequest[]>("pending_approvals");
 // Approval modes: Ask first, Allow all or Full access (only these commands change them)
 /** How a chat's tool calls are approved, as the app names the modes. */
 export type ApprovalModeName = "ask" | "allowAll" | "fullAccess";

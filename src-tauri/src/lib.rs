@@ -182,6 +182,8 @@ pub fn run() {
             permissions::list_audit,
             permissions::export_audit,
             turns::resolve_approval,
+            // [0.0.7 P6] The approval cards waiting, for a window that reloaded.
+            turns::pending_approvals,
             approvals::get_approval_mode,
             approvals::set_approval_mode,
             approvals::get_allow_all_default,

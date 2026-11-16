@@ -41,13 +41,18 @@ pub fn page_text(s: &str, max: usize) -> String {
     } else {
         collapsed
     };
-    let visible = policy::sanitize::visible(&cut);
-    let mut out = String::with_capacity(visible.len() + 8);
-    for c in visible.chars() {
-        if matches!(c, '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '#' | '"' | '~') {
+    let mut out = String::with_capacity(cut.len() + 8);
+    let mut one = [0u8; 4];
+    for c in cut.chars() {
+        if c == '\\' {
+            out.push_str("\\\\");
+        } else if matches!(c, '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '#' | '"' | '~') {
             out.push('\\');
+            out.push(c);
+        } else {
+            // Invisible and direction-changing characters become visible escapes.
+            out.push_str(&policy::sanitize::visible(c.encode_utf8(&mut one)));
         }
-        out.push(c);
     }
     out
 }
@@ -520,7 +525,7 @@ mod tests {
 
     #[test]
     fn page_text_is_quoted_as_data() {
-        let t = page_text("Line one\nline two\t[App note] **bold** <b>x</b> `code` | a_b # h \u{202e}rtl \u{200b}zw \u{7}bell \"q\"", 500);
+        let t = page_text("Line one\nline two\t[App note] **bold** <b>x</b> `code` | a_b # h \u{202e}rtl \u{200b}zw \u{7}bell \"q\" back\\*slash", 500);
         assert!(!t.contains('\n') && !t.contains('\t'), "{t}");
         assert!(t.contains("\\[App note\\]"), "{t}");
         assert!(t.contains("\\*\\*bold\\*\\*"), "{t}");
@@ -528,6 +533,7 @@ mod tests {
         assert!(t.contains("\\u{202E}rtl") && t.contains("\\u{200B}zw"), "{t}");
         assert!(!t.contains('\u{7}'), "{t}");
         assert!(t.contains("\\\"q\\\""), "{t}");
+        assert!(t.contains("back\\\\\\*slash"), "a backslash cannot undo an escape: {t}");
         let long = page_text(&"word ".repeat(200), 30);
         assert!(long.chars().count() <= 31, "{long}");
         assert!(long.ends_with('…'));
