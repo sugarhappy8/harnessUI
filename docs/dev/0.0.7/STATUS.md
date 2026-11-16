@@ -351,3 +351,7 @@ and `README.md`.
   fake a port-in-use or invalid-device line (those checks run before the image-file
   verdict); and with width only ranking, text-only Gemma 2 could take Gemma 3's image file
   in a shared folder. Quick round 3 running.
+- P2 round 3 done: once the server reached the image file, port-in-use and invalid-device
+  lines are no longer believed (real ones happen at start-up); a trusted header width
+  that differs from the model's rules a file out again (the recorded file stays exempt).
+  runtime (real server) all pass, app 112. P2 finished.

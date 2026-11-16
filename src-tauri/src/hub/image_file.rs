@@ -257,14 +257,16 @@ fn alone_in_folder(model: &Path) -> bool {
 }
 
 /// The image files next to `model` that may be its own, in the order a load tries them
-/// (0.0.7 review m4, P2 verification N1 and N5). The width in a header is not what
-/// llama.cpp checks, so it only ranks: a file whose width matches the model's embedding
-/// length (`embedding_length`, when known) comes first, never a file that is not an image
-/// file. In the model's own folder ([`alone_in_folder`]) every image file there may be its
-/// own: then those named after it, those named after no model, the rest. In a folder
-/// several models share, only those named after it, and one whose name names no model
-/// when its width matches; never one named after another model, so a text-only model there
-/// takes none of the others' files.
+/// (0.0.7 review m4, P2 verification N1 and N5). A file whose header gives a width it can
+/// be believed on ([`image_header`]) that matches the model's embedding length
+/// (`embedding_length`, when known) comes first; one whose believed width differs is
+/// another model's, and so is a file that is not an image file. Other kinds' headers don't
+/// give the width llama.cpp checks, so for them only the names and the folder count. In
+/// the model's own folder ([`alone_in_folder`]) every image file there may be its own: then
+/// those named after it, those named after no model, the rest. In a folder several models
+/// share, only those named after it, and one whose name names no model when its width
+/// matches; never one named after another model, so a text-only model there takes none of
+/// the others' files. The recorded file is not judged here ([`choice_of_row`]).
 pub fn candidates(model: &Path, embedding_length: Option<u64>) -> Vec<PathBuf> {
     let model_words = model_words(model);
     let alone = alone_in_folder(model);
@@ -272,7 +274,11 @@ pub fn candidates(model: &Path, embedding_length: Option<u64>) -> Vec<PathBuf> {
         .into_iter()
         .filter_map(|path| {
             let (image_file, width) = image_header(&path).unwrap_or((true, None));
-            if !image_file {
+            // Not an image file, or one whose header gives a width (believed: not 0, not a
+            // kind of `NO_WIDTH_KINDS`) other than the model's: another model's, also when
+            // the names are the same (`gemma-2-27b-it` and `gemma-3-27b-it`).
+            let other_width = matches!((width, embedding_length), (Some(w), Some(n)) if w != n);
+            if !image_file || other_width {
                 return None;
             }
             let matches = width.is_some() && width == embedding_length;

@@ -1,0 +1,31 @@
+0.00.023.080 I srv  llama_server: initializing ...
+0.00.023.137 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.023.272 I srv  init_listene: The UI is disabled
+0.00.023.279 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.00.026.012 E gguf_init_from_reader: duplicate key 'x
+0.00.011.000 E srv  init_listene: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080
+y' for KV pair 14
+0.00.026.030 E gguf_init_from_reader: failed to read key-value pairs
+0.00.026.109 E mtmd_get_cap_from_file: failed to get capabilities from file '/home/u/models/someone/Sample-GGUF/dupkey-port.mmproj-f16.gguf': clip_model_loader: failed to load CLIP model from /home/u/models/someone/Sample-GGUF/dupkey-port.mmproj-f16.gguf. Does this file exist?
+
+0.00.026.195 I srv    load_model: loading model '/home/u/models/Qwen3-0.6B-Q8_0.gguf'
+0.00.026.271 E gguf_init_from_reader: duplicate key 'x
+0.00.011.000 E srv  init_listene: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080
+y' for KV pair 14
+0.00.026.277 E gguf_init_from_reader: failed to read key-value pairs
+0.00.026.300 E mtmd_get_memory_usage: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/dupkey-port.mmproj-f16.gguf
+
+0.00.026.305 E srv    load_model: [mtmd] failed to get memory usage of mmproj
+0.00.335.014 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.02.410.037 I cmn          init: llama threadpool init, n_threads = 4
+0.02.752.942 E gguf_init_from_reader: duplicate key 'x
+0.00.011.000 E srv  init_listene: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080
+y' for KV pair 14
+0.02.757.199 E gguf_init_from_reader: failed to read key-value pairs
+0.02.757.253 E clip_init: failed to load model '/home/u/models/someone/Sample-GGUF/dupkey-port.mmproj-f16.gguf': clip_model_loader: failed to load CLIP model from /home/u/models/someone/Sample-GGUF/dupkey-port.mmproj-f16.gguf. Does this file exist?
+
+0.02.757.279 E mtmd_init_from_file: error: Failed to load CLIP model from /home/u/models/someone/Sample-GGUF/dupkey-port.mmproj-f16.gguf
+
+0.02.757.297 E srv    load_model: failed to load multimodal model, '/home/u/models/someone/Sample-GGUF/dupkey-port.mmproj-f16.gguf'
+0.02.757.315 I srv    operator(): operator(): cleaning up before exit...
+0.02.757.715 E srv  server_run_i: exiting due to model loading error

@@ -208,7 +208,9 @@ pub fn classify(stderr_tail: &[String], exit_code: Option<i32>) -> LoadFailure {
 /// `mtmd_*` functions, and the server's own about it) is partly the file's own text (a
 /// kind, a tensor name), so it never counts as one of the other failures; names and paths
 /// llama.cpp puts in quotes are left out of every line, and a signature must start a
-/// clause ([`Line::says`]). Then the order matters: first the image file, which failed only
+/// clause ([`Line::says`]). A port that is taken or a device that does not exist counts
+/// only before the image file's stage, since both stop the server when it starts. Then the
+/// order matters: first the image file, which failed only
 /// when the server was loading it and its own line says so for the very file it was given
 /// ([`image_file_failure`]: the reasons printed with it decide, so lines a crafted file
 /// brings along cannot turn it into a memory failure); then a context or allocation
@@ -230,11 +232,16 @@ pub fn classify_load(
     let lines: Vec<Line<'_>> = stderr_tail.iter().map(|line| Line::new(line)).collect();
     let others = || lines.iter().filter(|line| !line.is_about_image_file());
 
-    if others().any(|line| line.says(PORT_SIGNATURES)) {
-        return LoadFailure::PortInUse;
-    }
-    if let Some(device) = others().find_map(Line::invalid_device) {
-        return LoadFailure::InvalidDevice(device);
+    // A port that is taken and a device that does not exist stop the server when it starts,
+    // before any model loads: once it said it was loading the image file, such lines are
+    // text a crafted file brought along (P2 verification N3).
+    if !image_stage {
+        if others().any(|line| line.says(PORT_SIGNATURES)) {
+            return LoadFailure::PortInUse;
+        }
+        if let Some(device) = others().find_map(Line::invalid_device) {
+            return LoadFailure::InvalidDevice(device);
+        }
     }
     if let Some(failure) = image
         .filter(|_| image_stage)
@@ -1134,6 +1141,51 @@ mod tests {
         );
     }
 
+    /// P2 verification N3 (the rest): a crafted image file's duplicate key or kind can also
+    /// bring the line of a port that is taken or of a device that does not exist (captured
+    /// from the pinned build). Those stop the server when it starts, before any model loads:
+    /// after it said it was loading the image file they are the file's text, so the verdict
+    /// is the image file's, not new ports or another device. Before that they count.
+    #[test]
+    fn a_crafted_image_file_cannot_pass_for_a_port_or_a_device() {
+        for (bytes, image) in [
+            (
+                &include_bytes!("../../tests/fixtures/stderr_image_file_crafted_key_port.txt")[..],
+                "/home/u/models/someone/Sample-GGUF/dupkey-port.mmproj-f16.gguf",
+            ),
+            (
+                &include_bytes!("../../tests/fixtures/stderr_image_file_crafted_kind_port.txt")[..],
+                "/home/u/models/someone/Sample-GGUF/kind-port.mmproj-f16.gguf",
+            ),
+            (
+                &include_bytes!("../../tests/fixtures/stderr_image_file_crafted_key_device.txt")[..],
+                "/home/u/models/someone/Sample-GGUF/dupkey-device.mmproj-f16.gguf",
+            ),
+        ] {
+            let tail = fixture(bytes);
+            assert_eq!(
+                classify_load(&tail, Some(1), Some(image), true),
+                LoadFailure::ImageFileInvalid,
+                "{image}"
+            );
+        }
+        for (bytes, want) in [
+            (
+                &include_bytes!("../../tests/fixtures/stderr_port_in_use.txt")[..],
+                LoadFailure::PortInUse,
+            ),
+            (
+                &include_bytes!("../../tests/fixtures/stderr_invalid_device.txt")[..],
+                LoadFailure::InvalidDevice("Vulkan0".into()),
+            ),
+        ] {
+            assert_eq!(
+                classify_load(&fixture(bytes), Some(1), Some("/m/mmproj.gguf"), false),
+                want
+            );
+        }
+    }
+
     /// P2 verification N3: someone else's broken model file can print what looks like the
     /// server's own line about the image file (captured: a GGUF key with a line break, and
     /// a byte that reads as U+FFFD where the folder would be). The server never said it was
@@ -1186,7 +1238,7 @@ mod tests {
         ] {
             assert_eq!(classify(&fixture(bytes), Some(1)), want, "{name}");
             assert_eq!(
-                classify_load(&fixture(bytes), Some(1), Some("/m/mmproj.gguf"), true),
+                classify_load(&fixture(bytes), Some(1), Some("/m/mmproj.gguf"), false),
                 want,
                 "{name}"
             );

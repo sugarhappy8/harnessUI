@@ -271,6 +271,14 @@ def answer_card(s, label, timeout=30):
     s.click_button(label)
 
 
+def reply_shown(s, text, timeout=5):
+    """Waits until the page shows `text` of a message drawn as a turn ended. Message rows use
+    `content-visibility: auto` (src/styles.css): WebKit lays out a new row, and only then puts
+    its text in innerText, at its next rendering update, which can come a moment after the turn
+    is idle."""
+    s.wait_for(lambda: text in s.page_text().replace("\u2009", " "), timeout, f"the page to show {text!r}")
+
+
 # [0.0.7] A button that sets the agent going (the step limit's Continue, the Task tab's Resume,
 # an approval card's choices) ignores clicks for a moment after it appears, and again when the
 # window is shown or the page becomes visible (`src/lib/useInputDelay.ts`). It shows
@@ -926,8 +934,8 @@ def p_stop(c, notes):
     Fake.queue.append({"content": "second version"})
     s.click_button("Regenerate")
     wait_idle(s)
-    assert "second version" in s.page_text()
-    assert "2 / 2" in s.page_text().replace(" ", " "), "no version arrows after regenerate"
+    reply_shown(s, "second version")
+    reply_shown(s, "2 / 2")  # the version arrows
 
 
 @probe("mcp-config")
@@ -971,7 +979,8 @@ def p_regen_error(c, notes):
     wait_idle(s)
     msgs = messages(s, chat)
     notes.append(str([(m["role"], m.get("status")) for m in msgs]))
-    assert msgs[-1]["status"] == "complete" and "worked the second time" in s.page_text()
+    assert msgs[-1]["status"] == "complete", msgs[-1]
+    reply_shown(s, "worked the second time")
     assert [m["role"] for m in msgs] == ["user", "assistant"], msgs
     # Edit and resend the user message.
     Fake.queue.append({"content": "answer to the edited one"})
@@ -984,7 +993,7 @@ def p_regen_error(c, notes):
     s.type(bid, " edited")
     s.click_button("Send")
     wait_idle(s)
-    assert "answer to the edited one" in s.page_text(), s.page_text()[-300:]
+    reply_shown(s, "answer to the edited one")
     users = [m["content"] for m in Fake.requests[-1]["messages"] if m["role"] == "user"]
     notes.append("user messages sent: " + json.dumps(users)[:200])
     assert len(users) == 1 and "first edited" in json.dumps(users), users

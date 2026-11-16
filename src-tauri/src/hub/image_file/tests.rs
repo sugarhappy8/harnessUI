@@ -928,7 +928,8 @@ async fn image_files_of_other_models_are_not_used() {
     .unwrap();
     // Another model's name, though its width matches Gemma's: not Gemma's.
     std::fs::write(at("mmproj-renamed-F16.gguf"), image_header("gemma3", 3840)).unwrap();
-    // Gemma's name, another width in its header: still Gemma's, after the one that matches.
+    // Gemma's name, but its header gives another width: another model's, once the model's
+    // width is known; before that, Gemma's by its name.
     std::fs::write(
         at("mmproj-Gemma-3-12B-it-BF16.gguf"),
         image_header("gemma3", 2560),
@@ -946,10 +947,7 @@ async fn image_files_of_other_models_are_not_used() {
     let qwen_vl = at("Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf");
     assert_eq!(
         names(&candidates(&gemma, Some(3840))),
-        [
-            "mmproj-Gemma-3-12B-it-f16.gguf",
-            "mmproj-Gemma-3-12B-it-BF16.gguf"
-        ]
+        ["mmproj-Gemma-3-12B-it-f16.gguf"]
     );
     assert_eq!(
         names(&candidates(&gemma, None)),
@@ -981,6 +979,57 @@ async fn image_files_of_other_models_are_not_used() {
     assert_eq!(
         stored(&store, &gemma).await.projector,
         Some(at("mmproj-Gemma-3-12B-it-f16.gguf").display().to_string())
+    );
+}
+
+/// P2 verification (round 2): the words of `gemma-2-27b-it` and `gemma-3-27b-it` are the
+/// same, so names alone take Gemma 3's image file for the text-only Gemma 2 in a folder
+/// holding both. A width the header gives (not 0, a kind whose header is believed) that
+/// differs from the model's embedding length rules a file out; one that matches comes
+/// first. The text-only model then takes none and says nothing.
+#[tokio::test]
+async fn a_width_the_header_gives_rules_out_another_models_file() {
+    let dir = Scratch::new();
+    let at = |name: &str| dir.path().join(name);
+    std::fs::write(at("gemma-2-27b-it-Q4_K_M.gguf"), model_header(4608)).unwrap();
+    std::fs::write(at("gemma-3-27b-it-Q4_K_M.gguf"), model_header(5376)).unwrap();
+    std::fs::write(
+        at("mmproj-gemma-3-27b-it-f16.gguf"),
+        image_header("gemma3", 5376),
+    )
+    .unwrap();
+    std::fs::write(at("mmproj-F16.gguf"), image_header("gemma3", 5376)).unwrap();
+    let gemma2 = at("gemma-2-27b-it-Q4_K_M.gguf");
+    let gemma3 = at("gemma-3-27b-it-Q4_K_M.gguf");
+    assert!(candidates(&gemma2, Some(4608)).is_empty());
+    assert_eq!(
+        names(&candidates(&gemma3, Some(5376))),
+        ["mmproj-F16.gguf", "mmproj-gemma-3-27b-it-f16.gguf"]
+    );
+    let store = imported(&gemma2).await;
+    let gemma2_text = gemma2.display().to_string();
+    assert_eq!(stored(&store, &gemma2).await.projector, None);
+    mark_unreadable(&store, &gemma2, &at("mmproj-gemma-3-27b-it-f16.gguf")).await;
+    assert_eq!(choice_for(&store, &gemma2_text).await, Choice::default());
+    // Recorded (with a download): kept whatever its header says, as for every kind.
+    let store = store::Store::open_in_memory().unwrap();
+    let size = std::fs::metadata(&gemma2).unwrap().len();
+    let recorded = at("mmproj-F16.gguf").display().to_string();
+    register_installed_in(
+        &store,
+        &gemma2,
+        Some("google/gemma-2-27b-it-GGUF".into()),
+        size,
+        None,
+        Some(recorded.clone()),
+        store::ModelSource::Download,
+        SavedFacts::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        choice_for(&store, &gemma2_text).await.path.as_deref(),
+        Some(recorded.as_str())
     );
 }
 
