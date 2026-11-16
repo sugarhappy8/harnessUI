@@ -342,18 +342,24 @@ async fn start_inner(
         LoadOutcome::Exited(code) => {
             // The readers have finished: the last stage the server named is final.
             let stderr_tail = server.finish_after_exit(code).await;
+            let image_stage = image_file_loading.load(Ordering::Relaxed);
             return Err(StartError::Exited {
-                failure: classify_load(&stderr_tail, code, image),
+                failure: classify_load(&stderr_tail, code, image, image_stage),
                 exit_code: code,
                 stderr_tail,
-                image_file_loading: image_file_loading.load(Ordering::Relaxed),
+                image_file_loading: image_stage,
             });
         }
         LoadOutcome::TimedOut => {
             let stderr_tail = server.kill_and_collect().await;
             return Err(StartError::Timeout {
                 after: spec.load_timeout,
-                failure: classify_load(&stderr_tail, None, image),
+                failure: classify_load(
+                    &stderr_tail,
+                    None,
+                    image,
+                    image_file_loading.load(Ordering::Relaxed),
+                ),
                 stderr_tail,
             });
         }
@@ -383,11 +389,12 @@ async fn start_inner(
     if let Ok(Some(status)) = server.child.try_wait() {
         let code = status.code();
         let stderr_tail = server.finish_after_exit(code).await;
+        let image_stage = image_file_loading.load(Ordering::Relaxed);
         return Err(StartError::Exited {
-            failure: classify_load(&stderr_tail, code, image),
+            failure: classify_load(&stderr_tail, code, image, image_stage),
             exit_code: code,
             stderr_tail,
-            image_file_loading: image_file_loading.load(Ordering::Relaxed),
+            image_file_loading: image_stage,
         });
     }
     if !same_model_file(&props.model_path, &launch.model) {

@@ -153,6 +153,8 @@ async fn detect(state: &AppState) -> (Target, HardwareDto) {
             (
                 Target::AppleUnified {
                     working_set_bytes: free,
+                    // 0.0.7 review: the saved copies of a long chat take this memory.
+                    ram_free_bytes: ram.map(|m| m.available_bytes),
                 },
                 "apple",
             )
@@ -168,7 +170,9 @@ async fn detect(state: &AppState) -> (Target, HardwareDto) {
             )
         };
         let usable = match &target {
-            Target::AppleUnified { working_set_bytes } => *working_set_bytes,
+            Target::AppleUnified {
+                working_set_bytes, ..
+            } => *working_set_bytes,
             Target::Gpu { free_bytes, .. } => *free_bytes,
             Target::Cpu { .. } => 0,
         };
@@ -562,8 +566,13 @@ pub async fn download_start(
         .iter()
         .find(|v| v.label == label)
         .ok_or_else(|| AppError::not_found("model file"))?;
+    // The repository's image file that goes with the chosen model (0.0.7: a repository
+    // may hold several models' image files), as Installed offers it.
     let projector = if with_projector {
-        classified.projectors.first()
+        variant
+            .files
+            .first()
+            .and_then(|f| image_file::best_for(&classified.projectors, &f.path))
     } else {
         None
     };
@@ -586,7 +595,7 @@ pub async fn download_start(
         &detail.commit,
         &label,
         &variant.files,
-        projector,
+        projector.as_ref(),
         None,
         Some(facts),
         image_files,

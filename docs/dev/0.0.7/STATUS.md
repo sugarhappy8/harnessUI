@@ -326,3 +326,8 @@ and `README.md`.
   Apple silicon sized copies against the Metal working set; the freed figure is
   system-wide; the copy count not re-sized after a step-down; two doc figures. Small round
   2 running.
+- Local CI run on the tree as of ~12:00 UTC (before P1/P2 round 2): `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -D warnings`, `npm run lint`, `npm run
+  typecheck`, `npm test` (78 files, 847 tests), `npm run build`, spawn check, notices
+  check, docs test, and `cargo test --workspace --no-fail-fast` with the real llama-server
+  and test model: 2,980 passed, 0 failed, 7 ignored.

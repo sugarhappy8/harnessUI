@@ -140,6 +140,9 @@ pub struct OffloadPreview {
     /// says how much more of the computer's memory long chats will use (the computer's
     /// bar's `copiesBytes`).
     pub copies_short: bool,
+    /// The system did not say how much of the computer's memory is free (round 2): its bar
+    /// has no free figure, and nothing was checked against it.
+    pub computer_unknown: bool,
 }
 
 /// The key of the draft `overrides` of the model at `path`: the first 16 hex digits of
@@ -452,6 +455,7 @@ fn preview(
         fits,
         custom: graphics && resolved.fine.custom_placement(),
         copies_short: worked.copies.short,
+        computer_unknown: machine.ram_unknown,
     }
 }
 
@@ -577,6 +581,7 @@ fn not_readable(
         fits: fits.1,
         custom: graphics && resolved.fine.custom_placement(),
         copies_short: copies.short,
+        computer_unknown: machine.ram_unknown,
     }
 }
 

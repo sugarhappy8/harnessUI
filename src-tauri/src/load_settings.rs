@@ -1193,11 +1193,14 @@ impl Freed {
     /// during a long chat, so right after a load there are none to give back, and after a
     /// long chat the next load's estimate must not see them as taken (a Reload would
     /// otherwise count them twice: held by the running server and needed by the new one).
-    /// Without both figures, all of `copies`.
+    /// Without both figures, none: a server still starting, or a computer that does not
+    /// say, gives back nothing that can be counted on (round 2). The figure is the whole
+    /// computer's: what other programs take meanwhile is counted too, up to `copies`
+    /// (ARCHITECTURE.md 7.3).
     pub fn copies_held(copies: u64, at_ready: Option<u64>, now: Option<u64>) -> u64 {
         match (at_ready, now) {
             (Some(at_ready), Some(now)) => copies.min(at_ready.saturating_sub(now)),
-            _ => copies,
+            _ => 0,
         }
     }
 }
@@ -1296,6 +1299,11 @@ impl Machine {
             Some(K::Metal) if gpu != GpuUse::Off => {
                 Room::apple(self.gpu_free_bytes, self.ram_free_bytes)
             }
+            // Round 2: a computer that does not say how much memory is free is not checked
+            // on its side (unknown is not 0).
+            Some(K::Vulkan | K::Cuda | K::Rocm) if gpu != GpuUse::Off && self.ram_unknown => {
+                Room::graphics_card_unknown_computer(self.gpu_free_bytes)
+            }
             Some(K::Vulkan | K::Cuda | K::Rocm) if gpu != GpuUse::Off => {
                 Room::graphics_card(self.gpu_free_bytes, self.ram_free_bytes)
             }
@@ -1383,11 +1391,19 @@ impl Machine {
 
     /// The saved copies of a long chat a load with `gpu` keeps when the model's own part in
     /// the computer's memory is `computer_part` ([`models::fit::copies`]): they get half of
-    /// what is left of the computer's memory after the reserve and that part; unknown when
-    /// the system did not say.
+    /// what is left of the computer's memory after the reserve and that part (on Apple
+    /// silicon the computer's memory too, never the Metal working set, round 2; with the
+    /// loaded model's memory counted free as the picture's single bar counts it); unknown
+    /// when the system did not say.
     pub fn copies(&self, gpu: GpuUse, copy_bytes: u64, computer_part: u64) -> models::fit::Copies {
-        let spare =
-            (!self.ram_unknown).then(|| self.room(gpu).computer().saturating_sub(computer_part));
+        let unified = self.memory_kind(gpu) == models::placement::MemoryKind::Unified;
+        let freed = if unified { self.gpu_freed_bytes } else { 0 };
+        let spare = (!self.ram_unknown).then(|| {
+            self.ram_free_bytes
+                .saturating_add(freed)
+                .saturating_sub(models::fit::RAM_RESERVE_BYTES)
+                .saturating_sub(computer_part)
+        });
         models::fit::copies(copy_bytes, spare)
     }
 }
@@ -3324,9 +3340,10 @@ mod tests {
         assert_eq!(Freed::copies_held(most, Some(6 * GB), Some(5 * GB)), GB);
         // More lost than the copies can be (other programs grew): the copies at most.
         assert_eq!(Freed::copies_held(most, Some(6 * GB), Some(GB)), most);
-        // Without both figures, the most.
-        assert_eq!(Freed::copies_held(most, None, Some(GB)), most);
-        assert_eq!(Freed::copies_held(most, Some(GB), None), most);
+        // Without both figures, none (round 2): a server still starting has no figure from
+        // when it was ready, and holds no copies yet.
+        assert_eq!(Freed::copies_held(most, None, Some(GB)), 0);
+        assert_eq!(Freed::copies_held(most, Some(GB), None), 0);
         assert_eq!(Freed::copies_held(0, Some(6 * GB), Some(GB)), 0);
     }
 
@@ -3513,7 +3530,27 @@ mod tests {
                 None,
             );
             assert!(!info.picture.copies_short);
-            // Known to be 0 instead: one copy, said to be short.
+            // Round 2, item 1: nor is the model's own part in the computer's memory (Gemma 4's
+            // 1.07 GB input layer): never red for it, Automatic takes its cap, the picture
+            // says the computer's memory could not be read.
+            assert_eq!(info.fit, Some(Verdict::Green), "{}", facts.file_name);
+            assert!(!info.too_large);
+            assert_eq!(info.resolved.ctx, 32_768);
+            assert!(info.picture.computer_unknown);
+            assert!(info.context_options.iter().all(|o| o.fit != Verdict::Red));
+            let plan = Plan {
+                resolved: info.resolved.clone(),
+                facts: Some(facts.clone()),
+                machine: machine.clone(),
+                overrides: ModelLoadSettings::default(),
+                defaults: auto_defaults(),
+                saved: true,
+            };
+            let fit = crate::hub::compare::installed_fit(&plan, 65_536).expect("a header");
+            assert!(fit.computer_unknown && !fit.computer_short && !fit.copies_short);
+            assert_ne!(fit.verdict, Verdict::Red);
+            // Known to be 0 instead: one copy, said to be short (and red where the model's
+            // own part does not fit).
             machine.ram_unknown = false;
             let r = resolve(
                 &ModelLoadSettings::default(),
@@ -3523,7 +3560,57 @@ mod tests {
                 &machine,
             );
             assert_eq!(r.ctx_checkpoints, 1);
+            let info = build_info(
+                "/m",
+                &facts,
+                ModelLoadSettings::default(),
+                auto_defaults(),
+                r,
+                &machine,
+                None,
+            );
+            assert!(!info.picture.computer_unknown);
         }
+    }
+
+    /// Round 2, item 3: on Apple silicon the saved copies take the computer's memory, not
+    /// the Metal working set: a 16 GB Mac (10.7 GB working set) with 6 GB free and OLMo 3
+    /// 7B at 8,192 tokens (7.8 GB): one copy, short (the working set would have said one
+    /// copy, not short).
+    #[test]
+    fn apple_copies_take_the_computers_memory() {
+        let facts = olmo3_facts();
+        let mac = Machine::from_probes(
+            &[
+                probe(
+                    runtime::BackendKind::Metal,
+                    &[("MTL0", "Apple M2", 10_922, 10_204)],
+                ),
+                probe(runtime::BackendKind::Cpu, &[("CPU", "CPU", 0, 0)]),
+            ],
+            None,
+            None,
+            6 * GB,
+            &Freed::default(),
+        );
+        assert!(mac.apple());
+        let fixed = ModelLoadSettings {
+            context: ContextChoice::Fixed(8192),
+            ..ModelLoadSettings::default()
+        };
+        let r = resolve(&fixed, &auto_defaults(), None, Some(&facts), &mac);
+        let copies = copies_for(&facts, &mac, r.gpu, r.save_memory, &r.fine, 8192);
+        assert_eq!((copies.count, copies.short), (1, true));
+        let info = build_info("/m", &facts, fixed, auto_defaults(), r, &mac, None);
+        assert!(info.picture.copies_short);
+        assert_eq!(info.fit, Some(Verdict::Yellow));
+        // With 20 GB free: half of the 18 GB left after the reserve, less the model, holds 3.
+        let roomy = Machine {
+            ram_free_bytes: 20 * GB,
+            ..mac.clone()
+        };
+        let copies = copies_for(&facts, &roomy, GpuUse::All, false, &FineLaunch::default(), 8192);
+        assert_eq!((copies.count, copies.short), (3, false));
     }
 
     /// Review m4: Automatic and the marks agree. With the model's sizes known, Automatic

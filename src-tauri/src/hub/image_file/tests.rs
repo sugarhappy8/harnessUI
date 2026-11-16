@@ -884,17 +884,38 @@ fn names(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-/// m4: in a folder several models share, another model's image file is never used: not
-/// when its width differs from the model's embedding length (llama.cpp refuses that), and,
-/// where the width is unknown, not when its name is another model's. Its own, by width or
-/// name, comes first; one whose name names no model is used after them. A text-only model
-/// there gets none, and says nothing about the others' files.
+/// The model at `model` on a fresh store, imported (no repository, nothing recorded).
+async fn imported(model: &Path) -> store::Store {
+    let store = store::Store::open_in_memory().unwrap();
+    let size = std::fs::metadata(model).unwrap().len();
+    register_installed_in(
+        &store,
+        model,
+        None,
+        size,
+        None,
+        None,
+        store::ModelSource::Import,
+        SavedFacts::default(),
+    )
+    .await
+    .unwrap();
+    store
+}
+
+/// m4, and P2 verification N1/N5: in a folder several models share, a model uses an image
+/// file named after it (one whose width matches its embedding length first), and one whose
+/// name names no model only when its width matches; never one named after another model,
+/// whatever its width (the width in a header is not what llama.cpp checks, so it only
+/// ranks), nor one that is not an image file. A text-only model there gets none, and says
+/// nothing about the others' files.
 #[tokio::test]
 async fn image_files_of_other_models_are_not_used() {
     let dir = Scratch::new();
     let at = |name: &str| dir.path().join(name);
     std::fs::write(at("Gemma-3-12B-it-Q4_K_M.gguf"), model_header(3840)).unwrap();
     std::fs::write(at("Qwen3-8B-Q4_K_M.gguf"), model_header(4096)).unwrap();
+    std::fs::write(at("Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"), model_header(3584)).unwrap();
     std::fs::write(
         at("mmproj-Gemma-3-12B-it-f16.gguf"),
         image_header("gemma3", 3840),
@@ -905,105 +926,216 @@ async fn image_files_of_other_models_are_not_used() {
         image_header("pixtral", 5120),
     )
     .unwrap();
-    // Renamed by hand, but made for Gemma: the width says so.
+    // Another model's name, though its width matches Gemma's: not Gemma's.
     std::fs::write(at("mmproj-renamed-F16.gguf"), image_header("gemma3", 3840)).unwrap();
-    // Named after Gemma, but another width: not Gemma's.
+    // Gemma's name, another width in its header: still Gemma's, after the one that matches.
     std::fs::write(
         at("mmproj-Gemma-3-12B-it-BF16.gguf"),
         image_header("gemma3", 2560),
     )
     .unwrap();
-    // Named after nothing, and the old LLaVA kind that names CLIP's own width there.
+    // Named after nothing: the old LLaVA kind (its header names CLIP's own width), and one
+    // whose width matches the Qwen 2.5 VL model.
     std::fs::write(at("mmproj-model-f16.gguf"), image_header("mlp", 768)).unwrap();
+    std::fs::write(at("mmproj-F16.gguf"), image_header("qwen25vl", 3584)).unwrap();
     // Not an image file at all, though named like one.
     std::fs::write(at("mmproj-Gemma-3-12B-it-Q8_0.gguf"), model_header(3840)).unwrap();
 
     let gemma = at("Gemma-3-12B-it-Q4_K_M.gguf");
     let qwen = at("Qwen3-8B-Q4_K_M.gguf");
+    let qwen_vl = at("Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf");
     assert_eq!(
         names(&candidates(&gemma, Some(3840))),
         [
             "mmproj-Gemma-3-12B-it-f16.gguf",
-            "mmproj-renamed-F16.gguf",
-            "mmproj-model-f16.gguf"
+            "mmproj-Gemma-3-12B-it-BF16.gguf"
         ]
     );
-    // The text-only model: only the file that names no model, of a kind whose width the
-    // header does not give.
-    assert_eq!(
-        names(&candidates(&qwen, Some(4096))),
-        ["mmproj-model-f16.gguf"]
-    );
-    // Its width unknown (a row saved before 0.0.7): by name only.
     assert_eq!(
         names(&candidates(&gemma, None)),
         [
             "mmproj-Gemma-3-12B-it-f16.gguf",
-            "mmproj-Gemma-3-12B-it-BF16.gguf",
-            "mmproj-model-f16.gguf"
+            "mmproj-Gemma-3-12B-it-BF16.gguf"
         ]
     );
-    assert_eq!(names(&candidates(&qwen, None)), ["mmproj-model-f16.gguf"]);
-    std::fs::remove_file(at("mmproj-model-f16.gguf")).unwrap();
+    assert_eq!(
+        names(&candidates(&qwen_vl, Some(3584))),
+        ["mmproj-F16.gguf"]
+    );
+    assert!(candidates(&qwen_vl, None).is_empty());
+    // The text-only model: none, by width or by name.
     assert!(candidates(&qwen, Some(4096)).is_empty());
     assert!(candidates(&qwen, None).is_empty());
 
     // The text-only model on the Installed list: no image file, and nothing to say about
     // the others' files, even one remembered as unreadable.
-    let store = store::Store::open_in_memory().unwrap();
-    let size = std::fs::metadata(&qwen).unwrap().len();
-    register_installed_in(
-        &store,
-        &qwen,
-        None,
-        size,
-        None,
-        None,
-        store::ModelSource::Import,
-        SavedFacts::default(),
-    )
-    .await
-    .unwrap();
+    let store = imported(&qwen).await;
     let qwen_text = qwen.display().to_string();
     assert_eq!(stored(&store, &qwen).await.embedding_length, Some(4096));
     assert_eq!(stored(&store, &qwen).await.projector, None);
+    mark_unreadable(&store, &qwen, &at("mmproj-model-f16.gguf")).await;
     mark_unreadable(&store, &qwen, &at("mmproj-Gemma-3-12B-it-f16.gguf")).await;
     assert_eq!(choice_for(&store, &qwen_text).await, Choice::default());
     // Gemma gets its own.
-    let store = store::Store::open_in_memory().unwrap();
-    let size = std::fs::metadata(&gemma).unwrap().len();
-    register_installed_in(
-        &store,
-        &gemma,
-        None,
-        size,
-        None,
-        None,
-        store::ModelSource::Import,
-        SavedFacts::default(),
-    )
-    .await
-    .unwrap();
+    let store = imported(&gemma).await;
     assert_eq!(
         stored(&store, &gemma).await.projector,
         Some(at("mmproj-Gemma-3-12B-it-f16.gguf").display().to_string())
     );
 }
 
+/// P2 verification N1: real headers of image files whose width llama.cpp takes from their
+/// weights: MiniCPM-V 2.6, 4 and 4.5, Llama3-V 2.5 and MiniCPM-o 2.6 (`resampler`, width 0)
+/// and Ultravox 0.5 (its header says 4096 for a model of 2048). In the model's own folder
+/// each is used; recorded with a download, it is never dropped; so the model sees images
+/// and Installed offers nothing more.
+#[tokio::test]
+async fn image_files_whose_header_gives_no_usable_width_are_used() {
+    for (model_name, embedding_length, image_name, kind, width) in [
+        (
+            "ggml-model-Q4_K_M.gguf",
+            3584,
+            "mmproj-model-f16.gguf",
+            "resampler",
+            0,
+        ),
+        (
+            "ggml-model-Q4_K_M.gguf",
+            2560,
+            "mmproj-model-f16.gguf",
+            "resampler",
+            0,
+        ),
+        (
+            "ggml-model-Q4_K_M.gguf",
+            4096,
+            "mmproj-model-f16.gguf",
+            "resampler",
+            0,
+        ),
+        (
+            "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+            2048,
+            "mmproj-ultravox-v0_5-llama-3_2-1b-f16.gguf",
+            "ultravox",
+            4096,
+        ),
+    ] {
+        let what = format!("{model_name} {embedding_length} {kind}");
+        let dir = Scratch::new();
+        let model = dir.path().join(model_name);
+        let image = dir.path().join(image_name);
+        std::fs::write(&model, model_header(embedding_length)).unwrap();
+        std::fs::write(&image, image_header(kind, width)).unwrap();
+        assert_eq!(
+            names(&candidates(&model, Some(u64::from(embedding_length)))),
+            [image_name],
+            "{what}"
+        );
+        // Downloaded with it: recorded, and kept.
+        let store = store::Store::open_in_memory().unwrap();
+        let size = std::fs::metadata(&model).unwrap().len();
+        let image_text = image.display().to_string();
+        register_installed_in(
+            &store,
+            &model,
+            Some("openbmb/MiniCPM-V-2_6-gguf".into()),
+            size,
+            None,
+            Some(image_text.clone()),
+            store::ModelSource::Download,
+            SavedFacts::default(),
+        )
+        .await
+        .unwrap();
+        let model_text = model.display().to_string();
+        let choice = choice_for(&store, &model_text).await;
+        assert_eq!(choice.path.as_deref(), Some(image_text.as_str()), "{what}");
+        assert!(!choice.left_out && !choice.found, "{what}");
+        assert!(!prepare_for_load(&store, &model_text, Some(&image_text)).await);
+        assert_eq!(
+            stored(&store, &model).await.projector.as_deref(),
+            Some(image_text.as_str()),
+            "{what}"
+        );
+    }
+}
+
+/// P2 verification N5: a folder several models share, with an image file whose name
+/// names no model and whose header gives no usable width (the old LLaVA kind): no model
+/// there takes it, so none of them says after a load that it could not be read. In the
+/// model's own folder it is used.
+#[tokio::test]
+async fn a_nameless_image_file_in_a_shared_folder_is_nobodys() {
+    let dir = Scratch::new();
+    let at = |name: &str| dir.path().join(name);
+    std::fs::write(at("Qwen3-8B-Q4_K_M.gguf"), model_header(4096)).unwrap();
+    std::fs::write(
+        at("Mistral-7B-Instruct-v0.3-Q4_K_M.gguf"),
+        model_header(4096),
+    )
+    .unwrap();
+    std::fs::write(at("mmproj-model-f16.gguf"), image_header("mlp", 768)).unwrap();
+    for model in [
+        "Qwen3-8B-Q4_K_M.gguf",
+        "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+    ] {
+        let model = at(model);
+        assert!(
+            candidates(&model, Some(4096)).is_empty(),
+            "{}",
+            model.display()
+        );
+        let store = imported(&model).await;
+        assert_eq!(stored(&store, &model).await.projector, None);
+        mark_unreadable(&store, &model, &at("mmproj-model-f16.gguf")).await;
+        assert_eq!(
+            choice_for(&store, &model.display().to_string()).await,
+            Choice::default()
+        );
+    }
+    // Its own folder (the quantizations and parts of one model): used.
+    let own = Scratch::new();
+    for name in [
+        "llava-v1.6-mistral-7b.Q4_K_M.gguf",
+        "llava-v1.6-mistral-7b.Q8_0.gguf",
+        "llava-v1.6-mistral-7b-Q2_K-00001-of-00002.gguf",
+        "llava-v1.6-mistral-7b-Q2_K-00002-of-00002.gguf",
+    ] {
+        std::fs::write(own.path().join(name), model_header(4096)).unwrap();
+    }
+    std::fs::write(
+        own.path().join("mmproj-model-f16.gguf"),
+        image_header("mlp", 768),
+    )
+    .unwrap();
+    assert_eq!(
+        names(&candidates(
+            &own.path().join("llava-v1.6-mistral-7b.Q4_K_M.gguf"),
+            Some(4096)
+        )),
+        ["mmproj-model-f16.gguf"]
+    );
+}
+
 /// m4: a row saved before the embedding length was kept gets it when the next load asks
-/// which image file to use, so the width check applies from then on.
+/// which image file to use; a file whose width matches is then tried first.
 #[tokio::test]
 async fn the_embedding_length_is_filled_in_when_a_load_asks() {
     let dir = Scratch::new();
-    let model = dir.path().join("Qwen3-8B-Q4_K_M.gguf");
+    let model = dir.path().join("Qwen3-VL-8B-Q4_K_M.gguf");
     std::fs::write(&model, model_header(4096)).unwrap();
-    // Named after nothing, made for another model: only the width tells.
     std::fs::write(
         dir.path().join("mmproj-F16.gguf"),
         image_header("gemma3", 3840),
     )
     .unwrap();
-    let store = installed(&model, None).await;
+    std::fs::write(
+        dir.path().join("mmproj-BF16.gguf"),
+        image_header("qwen3vl_merger", 4096),
+    )
+    .unwrap();
+    let store = imported(&model).await;
     let rec = store
         .model_by_path(&model.display().to_string())
         .await
@@ -1013,12 +1145,43 @@ async fn the_embedding_length_is_filled_in_when_a_load_asks() {
     old.embedding_length = None;
     old.projector = None;
     save(&store, &rec, &old).await.unwrap();
-    assert_eq!(names(&candidates(&model, None)), ["mmproj-F16.gguf"]);
     assert_eq!(
-        choice_for(&store, &model.display().to_string()).await,
-        Choice::default()
+        names(&candidates(&model, None)),
+        ["mmproj-F16.gguf", "mmproj-BF16.gguf"]
+    );
+    let choice = choice_for(&store, &model.display().to_string()).await;
+    assert_eq!(
+        choice.path,
+        Some(dir.path().join("mmproj-BF16.gguf").display().to_string())
     );
     assert_eq!(stored(&store, &model).await.embedding_length, Some(4096));
+}
+
+/// Browse's own download of a model with its image file takes the one that goes with the
+/// chosen model, as Installed offers it (a repository may hold several models' image
+/// files); one that names no model next; and by precision and size among equals.
+#[test]
+fn browse_takes_the_image_file_of_the_chosen_model() {
+    let files = vec![
+        repo_file("mmproj-Sample-4B-F16.gguf", 800),
+        repo_file("mmproj-Sample-27B-F16.gguf", 900),
+        repo_file("mmproj-F16.gguf", 850),
+    ];
+    let projectors = models::classify(&files).projectors;
+    let best = |model: &str| best_for(&projectors, model).map(|f| f.path);
+    assert_eq!(
+        best("Q4/Sample-27B-Q4_K_M.gguf").as_deref(),
+        Some("mmproj-Sample-27B-F16.gguf")
+    );
+    assert_eq!(
+        best("Sample-4B-Q4_K_M.gguf").as_deref(),
+        Some("mmproj-Sample-4B-F16.gguf")
+    );
+    assert_eq!(
+        best("Other-Q4_K_M.gguf").as_deref(),
+        Some("mmproj-F16.gguf")
+    );
+    assert_eq!(best_for(&[], "Sample-4B-Q4_K_M.gguf"), None);
 }
 
 /// m4: the words of a name that name a model, without its precision, kind or quantization.
@@ -1038,6 +1201,7 @@ fn the_words_that_name_a_model() {
         ("mmproj-F16.gguf", vec![]),
         ("mmproj-model-f16.gguf", vec![]),
         ("Model-UD-IQ4_XS.gguf", vec![]),
+        ("ggml-model-Q4_K_M.gguf", vec![]),
         (
             "google_gemma-3-4b-it-Q8_0.gguf",
             vec!["google", "gemma", "4b", "it"],

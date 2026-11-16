@@ -29,10 +29,16 @@ const PART_CLASS: Record<ReturnType<typeof barLegend>[number]["part"], string> =
  * when the model needs more than there is), its legend in words and numbers, and what the
  * model needs of the memory that is free.
  */
-function Bar(props: { bar: MemoryBar; kind: "graphics" | "computer" | "shared"; limitBytes?: number | null }) {
-  const { bar, kind, limitBytes } = props;
-  const title = visiblePath(barTitle(bar, kind));
-  const legend = barLegend(bar);
+function Bar(props: {
+  bar: MemoryBar;
+  kind: "graphics" | "computer" | "shared";
+  limitBytes?: number | null;
+  /** The computer's memory could not be read (its bar has no free figure). */
+  unknown?: boolean;
+}) {
+  const { bar, kind, limitBytes, unknown = false } = props;
+  const title = visiblePath(barTitle(bar, kind, unknown));
+  const legend = barLegend(bar, unknown);
   const whole = Math.max(
     bar.totalBytes > 0 ? bar.totalBytes : 0,
     legend.reduce((a, i) => a + (i.bytes > 0 ? i.bytes : 0), 0),
@@ -79,7 +85,7 @@ function Bar(props: { bar: MemoryBar; kind: "graphics" | "computer" | "shared"; 
         ))}
       </ul>
       {marker !== null && <p className="text-[11px] text-fg-muted">{appleLimitWords(marker)}</p>}
-      <p className="text-xs text-fg-muted">{needsWords(bar)}</p>
+      <p className="text-xs text-fg-muted">{needsWords(bar, unknown)}</p>
     </div>
   );
 }
@@ -109,11 +115,16 @@ export function OffloadPicture(props: {
         Where the model goes
       </h3>
       {picture.unified ? (
-        <Bar bar={picture.computer} kind="shared" limitBytes={picture.graphicsLimitBytes} />
+        <Bar
+          bar={picture.computer}
+          kind="shared"
+          limitBytes={picture.graphicsLimitBytes}
+          unknown={picture.computerUnknown === true}
+        />
       ) : (
         <>
           {picture.graphics && <Bar bar={picture.graphics} kind="graphics" />}
-          <Bar bar={picture.computer} kind="computer" />
+          <Bar bar={picture.computer} kind="computer" unknown={picture.computerUnknown === true} />
         </>
       )}
       <div className="space-y-1 text-xs">

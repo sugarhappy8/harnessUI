@@ -32,8 +32,12 @@ pub enum Target {
         free_bytes: u64,
         ram_free_bytes: Option<u64>,
     },
-    /// Apple silicon: the Metal working-set limit applies.
-    AppleUnified { working_set_bytes: u64 },
+    /// Apple silicon: the Metal working-set limit applies; the computer's free memory
+    /// (`None` when the system does not say) holds the saved copies of a long chat.
+    AppleUnified {
+        working_set_bytes: u64,
+        ram_free_bytes: Option<u64>,
+    },
     /// CPU only.
     Cpu { ram_free_bytes: u64 },
 }
@@ -42,7 +46,9 @@ impl Target {
     fn primary_bytes(&self) -> u64 {
         match *self {
             Target::Gpu { free_bytes, .. } => free_bytes,
-            Target::AppleUnified { working_set_bytes } => working_set_bytes,
+            Target::AppleUnified {
+                working_set_bytes, ..
+            } => working_set_bytes,
             Target::Cpu { ram_free_bytes } => ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES),
         }
     }
@@ -66,21 +72,31 @@ impl Target {
     fn free_bytes(&self) -> u64 {
         match *self {
             Target::Gpu { free_bytes, .. } => free_bytes,
-            Target::AppleUnified { working_set_bytes } => working_set_bytes,
+            Target::AppleUnified {
+                working_set_bytes, ..
+            } => working_set_bytes,
             Target::Cpu { ram_free_bytes } => ram_free_bytes,
         }
     }
     /// The memory as [`Room`] counts it: on a graphics card its free memory and, with part
-    /// of the model on the processor, the computer's memory besides; on Apple silicon the
-    /// working set only (this target does not say how much of the rest is free).
+    /// of the model on the processor, the computer's memory besides (unbounded when the
+    /// computer's memory could not be read: not checked); on Apple silicon the working set
+    /// only (the part beyond it is not estimated here).
     fn room(&self) -> Room {
         match *self {
             Target::Gpu {
                 free_bytes,
-                ram_free_bytes,
+                ram_free_bytes: Some(ram),
                 ..
-            } => Room::graphics_card(free_bytes, ram_free_bytes.unwrap_or(0)),
-            Target::AppleUnified { working_set_bytes } => Room {
+            } => Room::graphics_card(free_bytes, ram),
+            Target::Gpu {
+                free_bytes,
+                ram_free_bytes: None,
+                ..
+            } => Room::graphics_card_unknown_computer(free_bytes),
+            Target::AppleUnified {
+                working_set_bytes, ..
+            } => Room {
                 whole: working_set_bytes,
                 partial: working_set_bytes,
                 separate: false,
@@ -88,16 +104,16 @@ impl Target {
             Target::Cpu { ram_free_bytes } => Room::processor(ram_free_bytes),
         }
     }
-    /// The computer's free memory is known (always but on a graphics card whose computer
-    /// did not say).
-    fn computer_known(&self) -> bool {
-        !matches!(
-            self,
-            Target::Gpu {
-                ram_free_bytes: None,
-                ..
+    /// The computer's memory less the reserve, which the model's own part there and the
+    /// saved copies of a long chat share; `None` when the system did not say.
+    fn computer(&self) -> Option<u64> {
+        match *self {
+            Target::Gpu { ram_free_bytes, .. } | Target::AppleUnified { ram_free_bytes, .. } => {
+                ram_free_bytes
             }
-        )
+            Target::Cpu { ram_free_bytes } => Some(ram_free_bytes),
+        }
+        .map(|ram| ram.saturating_sub(RAM_RESERVE_BYTES))
     }
 }
 
@@ -361,8 +377,8 @@ pub struct Room {
     /// the reserve. The same as `whole` when the model runs on the processor.
     pub partial: u64,
     /// The main device has memory of its own (a graphics card), so the computer's memory
-    /// is `partial − whole` (0.0.7, [`Self::computer`]). False on the processor and on
-    /// Apple silicon, where it is all one memory.
+    /// is `partial − whole` (0.0.7). False on the processor and on Apple silicon, where it
+    /// is all one memory.
     pub separate: bool,
 }
 
@@ -383,6 +399,17 @@ impl Room {
         Self {
             whole: free_bytes,
             partial: free_bytes.saturating_add(ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES)),
+            separate: true,
+        }
+    }
+
+    /// A graphics card whose computer did not say how much of its memory is free (0.0.7
+    /// review): the card is checked as ever, the computer's side not at all (unknown is not
+    /// 0), so a model is never red for what stays in the computer's memory.
+    pub fn graphics_card_unknown_computer(free_bytes: u64) -> Self {
+        Self {
+            whole: free_bytes,
+            partial: u64::MAX,
             separate: true,
         }
     }
@@ -414,17 +441,6 @@ impl Room {
         let device = needed.saturating_add(spare);
         let green = device <= self.whole;
         (green, green || device <= self.partial)
-    }
-
-    /// The computer's memory less the reserve, which the model's own part there and the
-    /// saved copies of a long chat share: on a graphics card what there is besides the card
-    /// (`partial − whole`); on the processor and on Apple silicon all of it (`partial`).
-    pub fn computer(&self) -> u64 {
-        if self.separate {
-            self.partial.saturating_sub(self.whole)
-        } else {
-            self.partial
-        }
     }
 }
 
@@ -499,10 +515,10 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
             .saturating_sub(room.whole),
         (false, _) => needed,
     };
-    let known = target.computer_known();
+    let computer = target.computer();
     let copies = input.copies_at(
         input.ctx,
-        known.then(|| room.computer().saturating_sub(computer_part)),
+        computer.map(|c| c.saturating_sub(computer_part)),
     );
     let base = |verdict, suggested_ctx, partial_offload, sentence| FitResult {
         verdict,
@@ -516,7 +532,7 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
         computer_short: false,
         copies_bytes: copies.bytes,
         copies_short: copies.short,
-        computer_unknown: !known,
+        computer_unknown: computer.is_none(),
         sentence,
     };
 
@@ -673,6 +689,7 @@ mod tests {
             &i,
             &Target::AppleUnified {
                 working_set_bytes: 11 * GB,
+                ram_free_bytes: Some(16 * GB),
             },
         );
         assert_eq!(r.verdict, Verdict::Red);
@@ -1015,6 +1032,7 @@ mod tests {
             &i,
             &Target::AppleUnified {
                 working_set_bytes: 10 * GB,
+                ram_free_bytes: Some(12 * GB),
             },
         );
         assert_eq!(
@@ -1370,6 +1388,85 @@ mod tests {
             (r.copies_bytes, r.copies_short, r.verdict),
             (0, false, Verdict::Green)
         );
+    }
+
+    /// Round 2, item 1: a graphics card whose computer did not say how much memory is free
+    /// checks the card as ever and the computer's side not at all: unknown is not 0, so a
+    /// model that does not fit the card is yellow (part of it would be on the processor),
+    /// never red, and the answer says the computer's memory could not be read.
+    #[test]
+    fn unknown_computer_memory_is_not_zero() {
+        let room = Room::graphics_card_unknown_computer(15 * GIB);
+        assert_eq!(room.verdict(10 * GB), Verdict::Green);
+        assert_eq!(room.verdict(15 * GIB), Verdict::Yellow);
+        assert_eq!(room.verdict(u64::MAX), Verdict::Yellow);
+        let input = FitInput {
+            ctx: 32_768,
+            projector_bytes: 0,
+            ..gemma4(Q8_0, gemma4_kv())
+        };
+        let card = |free: u64| Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: free,
+            ram_free_bytes: None,
+        };
+        let r = check(&input, &card(15 * GIB));
+        assert_eq!((r.verdict, r.computer_unknown), (Verdict::Green, true));
+        // An 8 GB card: part of it on the processor, which cannot be checked: not red.
+        let r = check(&input, &card(8 * GIB));
+        assert_eq!(r.verdict, Verdict::Yellow);
+        assert!(r.partial_offload && r.computer_unknown && !r.copies_short);
+        // Known to have nothing free, the same model is too large for the 8 GB card.
+        let r = check(
+            &input,
+            &Target::Gpu {
+                name: "GPU".into(),
+                free_bytes: 8 * GIB,
+                ram_free_bytes: Some(0),
+            },
+        );
+        assert_eq!((r.verdict, r.computer_unknown), (Verdict::Red, false));
+    }
+
+    /// Round 2, item 3: on Apple silicon the saved copies take the computer's memory, not
+    /// the Metal working set. A 16 GB Mac with a 10.7 GB working set and 6 GB free: OLMo 3
+    /// 7B at 8,192 tokens (7.8 GB) fits the working set, but the 4 GB left after the reserve
+    /// does not hold even one copy of 1.5 GiB besides it: yellow, never red.
+    #[test]
+    fn apple_copies_take_the_computers_memory() {
+        let olmo3 = KvSize {
+            per_cell: 8 * 16_384,
+            window_per_cell: 24 * 16_384,
+            window: 4096,
+            fixed: 0,
+            checkpoint_per_cell: 24 * 16_384,
+            copy_fixed: 0,
+        };
+        let input = FitInput {
+            weights_bytes: 4_470_000_000,
+            kv: olmo3,
+            vocab_size: 100_278,
+            ctx: 8192,
+            max_ctx: Some(65_536),
+            ..Default::default()
+        };
+        let mac = |ram: Option<u64>| Target::AppleUnified {
+            working_set_bytes: 10_700_000_000,
+            ram_free_bytes: ram,
+        };
+        let r = check(&input, &mac(Some(6 * GB)));
+        assert!(input.needed_at(8192) + SPARE_BYTES <= 10_700_000_000);
+        assert_eq!(r.verdict, Verdict::Yellow);
+        assert_eq!((r.copies_bytes, r.copies_short), (3 * GIB / 2, true));
+        // With 20 GB free the copies fit: half of what is left after the model holds 3.
+        let r = check(&input, &mac(Some(20 * GB)));
+        assert_eq!(r.verdict, Verdict::Green);
+        let left = 18 * GB - input.needed_at(8192);
+        assert_eq!(r.copies_bytes, (left / 2 / (3 * GIB / 2)) * (3 * GIB / 2));
+        assert!(!r.copies_short);
+        // Unknown: not checked, and said.
+        let r = check(&input, &mac(None));
+        assert_eq!((r.verdict, r.computer_unknown, r.copies_short), (Verdict::Green, true, false));
     }
 
     /// The models whose copies are largest, on a 16 GB card with 16 GB of computer memory

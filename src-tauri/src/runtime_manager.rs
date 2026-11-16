@@ -269,8 +269,11 @@ impl RuntimeManager {
             0
         };
         // 0.0.7 review M1: the saved copies of the chat it holds, wherever it runs, so a
-        // Reload after a long chat does not count them as taken and needed at once.
-        if running && let Some(l) = &loaded {
+        // Reload after a long chat does not count them as taken and needed at once. Only
+        // a ready server holds any (round 2: one still starting has none yet).
+        if status.state == RuntimeStateDto::Ready
+            && let Some(l) = &loaded
+        {
             ram_bytes = ram_bytes.saturating_add(Freed::copies_held(
                 l.footprint.copies,
                 l.ready_ram,

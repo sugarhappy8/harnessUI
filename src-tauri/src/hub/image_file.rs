@@ -136,6 +136,7 @@ pub fn beside(model: &Path) -> Vec<PathBuf> {
 /// kind, and the words of precisions and quantizations (`Q4_K_M` reads as "q4", "k", "m").
 const NAMELESS_WORDS: &[&str] = &[
     "gguf",
+    "ggml",
     "mmproj",
     "model",
     "models",
@@ -193,60 +194,94 @@ fn name_tier(model_words: &[String], file_name: &str) -> u8 {
     }
 }
 
-/// The [`name_words`] of the file at `path`.
-fn file_words(path: &Path) -> Vec<String> {
-    path.file_name()
-        .map(|n| name_words(&n.to_string_lossy()))
-        .unwrap_or_default()
-}
+/// The kinds of image file whose header does not give the width llama.cpp checks (it
+/// takes theirs from their weights, `clip_n_mmproj_embd`): the old LLaVA kinds name the
+/// encoder's own width there, MiniCPM-V's `resampler` 0, Ultravox's that of its own layer.
+const NO_WIDTH_KINDS: &[&str] = &["mlp", "mlp_norm", "ldp", "ldpv2", "resampler", "ultravox"];
 
-/// What an image file's header says about whether it is the image file of a model whose
-/// embedding length is `embedding_length` (0.0.7 review m4): `Some(true)` when the width of
-/// what it makes (`clip.vision.projection_dim`, or the audio one) equals it, which llama.cpp
-/// requires; `Some(false)` when it differs, or when the file is not an image file at all;
-/// `None` when that cannot be told (a header that cannot be read, which a load then finds
-/// out about; no embedding length known; the old LLaVA kinds, whose header holds the
-/// encoder's own width there and llama.cpp reads theirs from the weights).
-fn width_fits(image: &Path, embedding_length: Option<u64>) -> Option<bool> {
+/// What an image file's header says (0.0.7): whether it is an image file at all, and the
+/// width of what it makes when the header gives one llama.cpp would agree with
+/// (`clip.vision.projection_dim`, or the audio one: not 0, not of [`NO_WIDTH_KINDS`]).
+/// `None` when the header cannot be read (a damaged file, which a load then finds out
+/// about).
+fn image_header(image: &Path) -> Option<(bool, Option<u64>)> {
     let header = models::read_file(image).ok()?;
     let image_file =
         header.architecture() == Some("clip") || header.get_str("general.type") == Some("mmproj");
-    if !image_file {
-        return Some(false);
-    }
-    let wanted = embedding_length?;
     let kind = header.get_str("clip.projector_type").unwrap_or("mlp");
-    if matches!(kind, "mlp" | "mlp_norm" | "ldp" | "ldpv2") {
-        return None;
-    }
     let width = header
         .get_u64("clip.vision.projection_dim")
-        .or_else(|| header.get_u64("clip.audio.projection_dim"))?;
-    Some(width == wanted)
+        .or_else(|| header.get_u64("clip.audio.projection_dim"))
+        .filter(|&w| w > 0 && !NO_WIDTH_KINDS.contains(&kind));
+    Some((image_file, width))
+}
+
+/// The words of the name of the model file at `path`, without the part number of a split
+/// model (`-00001-of-00003`).
+fn model_words(path: &Path) -> Vec<String> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let stem = name.strip_suffix(".gguf").unwrap_or(&name);
+    let unsplit = match stem.rsplit_once("-of-") {
+        Some((before, total)) if total.len() == 5 && total.bytes().all(|b| b.is_ascii_digit()) => {
+            match before.rsplit_once('-') {
+                Some((base, part))
+                    if part.len() == 5 && part.bytes().all(|b| b.is_ascii_digit()) =>
+                {
+                    base
+                }
+                _ => stem,
+            }
+        }
+        _ => stem,
+    };
+    name_words(unsplit)
+}
+
+/// Whether the model at `model` is the only model in its folder (P2 verification N5): every
+/// model file there (a `.gguf` whose name has no "mmproj") is a quantization or a part of
+/// the same model, by the words of its name, as in the folder a download makes for one.
+fn alone_in_folder(model: &Path) -> bool {
+    let (Some(dir), own) = (model.parent(), model_words(model)) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).all(|entry| {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        !name.ends_with(".gguf") || name.contains("mmproj") || model_words(&entry.path()) == own
+    })
 }
 
 /// The image files next to `model` that may be its own, in the order a load tries them
-/// (0.0.7 review m4): first those made for it (the width matches its embedding length) or,
-/// where that cannot be told, named after it; then those whose name names no model
-/// (`mmproj-F16.gguf`). Never one whose width differs, one that is not an image file, or,
-/// where the width cannot be told, one named after another model; when the model's own name
-/// names nothing, no name counts against a file. `embedding_length` is the model's, when
-/// known.
+/// (0.0.7 review m4, P2 verification N1 and N5). The width in a header is not what
+/// llama.cpp checks, so it only ranks: a file whose width matches the model's embedding
+/// length (`embedding_length`, when known) comes first, never a file that is not an image
+/// file. In the model's own folder ([`alone_in_folder`]) every image file there may be its
+/// own: then those named after it, those named after no model, the rest. In a folder
+/// several models share, only those named after it, and one whose name names no model
+/// when its width matches; never one named after another model, so a text-only model there
+/// takes none of the others' files.
 pub fn candidates(model: &Path, embedding_length: Option<u64>) -> Vec<PathBuf> {
-    let model_words = file_words(model);
+    let model_words = model_words(model);
+    let alone = alone_in_folder(model);
     let mut tiered: Vec<(u8, PathBuf)> = beside(model)
         .into_iter()
         .filter_map(|path| {
-            let tier = match width_fits(&path, embedding_length) {
-                Some(true) => 0,
-                Some(false) => return None,
-                None => {
-                    let name = path.file_name()?.to_string_lossy().into_owned();
-                    match name_tier(&model_words, &name) {
-                        2 => return None,
-                        tier => tier,
-                    }
-                }
+            let (image_file, width) = image_header(&path).unwrap_or((true, None));
+            if !image_file {
+                return None;
+            }
+            let matches = width.is_some() && width == embedding_length;
+            let name = name_tier(&model_words, &path.file_name()?.to_string_lossy());
+            let tier = match (alone, name) {
+                _ if matches && (alone || name < 2) => 0,
+                (true, name) => 1 + name,
+                (false, 0) => 1,
+                (false, _) => return None,
             };
             Some((tier, path))
         })
@@ -339,6 +374,23 @@ fn last_part(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// A repository's image files (`projectors`, ranked as Browse ranks them) in the order
+/// they go with the model file `model` (a path, or a path in the repository): those named
+/// after it, those named after no model, then the others (0.0.7 review m4), the ranking
+/// kept within each.
+fn for_model(mut projectors: Vec<RepoFile>, model: &str) -> Vec<RepoFile> {
+    let words = model_words(Path::new(last_part(&model.replace('\\', "/"))));
+    projectors.sort_by_key(|f| name_tier(&words, last_part(&f.path)));
+    projectors
+}
+
+/// The image file Browse downloads with the model file `model` (a path in its repository):
+/// the first of the repository's image files `projectors` for it ([`for_model`]), so a
+/// repository with several models' image files gives the chosen model its own.
+pub(super) fn best_for(projectors: &[RepoFile], model: &str) -> Option<RepoFile> {
+    for_model(projectors.to_vec(), model).into_iter().next()
+}
+
 /// The image file to download from a repository listing for the model at `model`: those
 /// named after it first, then those named after no model, then the others (0.0.7 review
 /// m4: a repository may hold the image files of several sizes of a model), each by the
@@ -351,13 +403,10 @@ pub fn pick(
     unreadable: &[FileStamp],
     model: &str,
 ) -> (Offer, Option<RepoFile>) {
-    let mut projectors = models::classify(files).projectors;
+    let projectors = for_model(models::classify(files).projectors, model);
     if projectors.is_empty() {
         return (Offer::NoImageFile, None);
     }
-    let model_words = file_words(Path::new(model));
-    // Stable: the ranking stays within each tier.
-    projectors.sort_by_key(|f| name_tier(&model_words, last_part(&f.path)));
     let remembered = |f: &RepoFile| {
         unreadable
             .iter()
@@ -447,17 +496,12 @@ async fn save(
 }
 
 /// The choice for the row of the model at `path` as it is saved ([`choose`] among
-/// [`candidates`]). A recorded image file whose width differs from the model's is not its
-/// own (one a 0.0.7 build before this recorded from a shared folder).
+/// [`candidates`]). The recorded image file is never set aside for the width in its
+/// header, which llama.cpp does not check (P2 verification N1).
 pub(super) fn choice_of_row(path: &str, stored: &StoredSummary) -> Choice {
-    let width = stored.embedding_length;
-    let recorded = stored
-        .projector
-        .as_deref()
-        .filter(|p| width_fits(Path::new(p), width) != Some(false));
     choose(
-        recorded,
-        &candidates(Path::new(path), width),
+        stored.projector.as_deref(),
+        &candidates(Path::new(path), stored.embedding_length),
         &stored.unreadable_projectors,
         FileStamp::of,
     )

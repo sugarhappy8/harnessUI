@@ -1316,6 +1316,8 @@ export interface OffloadPreview {
    * is yellow at most for that; the computer bar's `copiesBytes` says how much.
    */
   copiesShort?: boolean;
+  /** The computer's free memory could not be read: its bar has no free figure. */
+  computerUnknown?: boolean;
 }
 
 /** Where the loaded model went (the ready line's memory report). */

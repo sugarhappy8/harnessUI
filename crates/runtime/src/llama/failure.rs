@@ -153,7 +153,11 @@ const CONTEXT_SIGNATURES: &[&str] = &[
     "failed to allocate compute pp buffers",
 ];
 
-/// Allocation failures on any backend.
+/// Allocation failures on any backend. The last is where ggml stops when a buffer could
+/// not be allocated and nothing checked it, as for the image file's weights at the pinned
+/// build: printed straight to stderr as "<file>:<line>: GGML_ASSERT(buffer) failed", often
+/// as the only line, because the allocator's own lines go through the asynchronous logger
+/// that the abort cuts off (0.0.7, `tests/fixtures/stderr_image_file_out_of_memory.txt`).
 const ALLOCATION_SIGNATURES: &[&str] = &[
     "cudamalloc failed",
     "out of memory",
@@ -162,6 +166,7 @@ const ALLOCATION_SIGNATURES: &[&str] = &[
     "failed to allocate",
     "unable to allocate",
     "insufficient memory",
+    "ggml_assert(buffer) failed",
 ];
 
 /// The model file itself could not be opened or parsed, which fails the same way on every
@@ -191,27 +196,32 @@ const PORT_SIGNATURES: &[&str] = &["couldn't bind http server socket"];
 /// Classifies a failed load from the last lines of stderr and the exit code, for a load
 /// given no image file. See [`classify_load`].
 pub fn classify(stderr_tail: &[String], exit_code: Option<i32>) -> LoadFailure {
-    classify_load(stderr_tail, exit_code, None)
+    classify_load(stderr_tail, exit_code, None, false)
 }
 
-/// Classifies a failed load from the last lines of stderr, the exit code and the image
-/// file the load was given (`--mmproj`, 0.0.7), as the server was given its path.
+/// Classifies a failed load from the last lines of stderr, the exit code, the image file
+/// the load was given (`--mmproj`, 0.0.7, as the server was given its path), and whether
+/// the server had said on stdout that it was loading it (`image_stage`: the managed-child
+/// stage `mmproj_model`, which no text from a file can fake).
 ///
 /// What the server and llama.cpp print about the image file (lines from `clip_*` and
 /// `mtmd_*` functions, and the server's own about it) is partly the file's own text (a
 /// kind, a tensor name), so it never counts as one of the other failures; names and paths
 /// llama.cpp puts in quotes are left out of every line, and a signature must start a
-/// clause ([`Line::says`]). Then the order matters: a context or allocation failure comes
-/// first, also while the image file loads (less of the model on the graphics card or
-/// another backend may make room for it); then the image file, which failed only when the
-/// server says so for the very file it was given ([`image_file_failure`]); then the model
-/// file, from what the GGUF reader and the model loader printed after the server last
-/// measured the image file, because it reads the image file with the same reader before
-/// the model loads and goes on when that fails.
+/// clause ([`Line::says`]). Then the order matters: first the image file, which failed only
+/// when the server was loading it and its own line says so for the very file it was given
+/// ([`image_file_failure`]: the reasons printed with it decide, so lines a crafted file
+/// brings along cannot turn it into a memory failure); then a context or allocation
+/// failure, also while the image file loads (less of the model on the graphics card or
+/// another backend may make room for it); then the model file. The last two are read only
+/// from what was printed after the server last measured the image file: it reads the image
+/// file with the same GGUF reader before the model loads and goes on when that fails, and
+/// nothing is allocated before.
 pub fn classify_load(
     stderr_tail: &[String],
     exit_code: Option<i32>,
     image: Option<&str>,
+    image_stage: bool,
 ) -> LoadFailure {
     if matches!(exit_code, Some(code) if code == STATUS_DLL_NOT_FOUND || code == STATUS_INVALID_IMAGE_FORMAT)
     {
@@ -226,23 +236,28 @@ pub fn classify_load(
     if let Some(device) = others().find_map(Line::invalid_device) {
         return LoadFailure::InvalidDevice(device);
     }
-    if others().any(|line| line.says(CONTEXT_SIGNATURES)) {
-        return LoadFailure::ContextTooLarge;
-    }
-    if others().any(|line| line.says(ALLOCATION_SIGNATURES)) {
-        return LoadFailure::OutOfMemory;
-    }
-    if let Some(failure) = image.and_then(|image| image_file_failure(&lines, image)) {
+    if let Some(failure) = image
+        .filter(|_| image_stage)
+        .and_then(|image| image_file_failure(&lines, image))
+    {
         return failure;
     }
     let after_measuring = lines
         .iter()
         .rposition(Line::is_measuring)
         .map_or(0, |at| at + 1);
-    if lines[after_measuring..]
-        .iter()
-        .filter(|line| !line.is_about_image_file())
-        .any(|line| line.func.starts_with(GGUF_READER) || line.says(MODEL_FILE_SIGNATURES))
+    let loading = || {
+        lines[after_measuring..]
+            .iter()
+            .filter(|line| !line.is_about_image_file())
+    };
+    if loading().any(|line| line.says(CONTEXT_SIGNATURES)) {
+        return LoadFailure::ContextTooLarge;
+    }
+    if loading().any(|line| line.says(ALLOCATION_SIGNATURES)) {
+        return LoadFailure::OutOfMemory;
+    }
+    if loading().any(|line| line.func.starts_with(GGUF_READER) || line.says(MODEL_FILE_SIGNATURES))
     {
         return LoadFailure::ModelFileInvalid;
     }
@@ -688,8 +703,9 @@ mod tests {
     const GARBAGE: &str = "/home/u/models/someone/Sample-GGUF/mmproj-Sample-F16.gguf";
     const OWNERS: &str = r"C:\Users\me\harnessUI\models\mradermacher\Ministral-3-14B-Reasoning-2512-Uncensored-GGUF\Ministral-3-14B-Reasoning-2512-Uncensored.mmproj-f16.gguf";
 
+    /// A load given `image` that failed after the server said it was loading it.
     fn with_image(tail: &[String], image: &str) -> LoadFailure {
-        classify_load(tail, Some(1), Some(image))
+        classify_load(tail, Some(1), Some(image), true)
     }
 
     /// 0.0.7: the image file failed after the model loaded, captured from the pinned build
@@ -774,6 +790,12 @@ mod tests {
             LoadFailure::Unknown
         );
         assert_eq!(classify(&all, Some(1)), LoadFailure::Unknown);
+        // The server never said it was loading the image file (stdout): stderr alone, which
+        // text from files reaches, cannot make it the image file's failure (P2 verification N3).
+        assert_eq!(
+            classify_load(&all, Some(1), Some(path), false),
+            LoadFailure::Unknown
+        );
         let echoed = lines(&format!(
             "E srv  log_server_r: request: error: failed to load multimodal model, '{path}'"
         ));
@@ -855,7 +877,7 @@ mod tests {
             "0.03.900.000 E ggml_metal_buffer_init: error: failed to allocate buffer, size = 812.00 MiB",
         ] {
             for image in [None, Some("/m/mmproj-F16.gguf")] {
-                let failure = classify_load(&tail(alloc), Some(134), image);
+                let failure = classify_load(&tail(alloc), Some(134), image, image.is_some());
                 assert_eq!(failure, LoadFailure::OutOfMemory, "{alloc}");
                 assert!(failure.may_succeed_on_another_backend());
             }
@@ -872,7 +894,7 @@ mod tests {
                         E mtmd_get_cap_from_file: failed to get capabilities from file '/m/mmproj.gguf': clip_model_loader: failed to load CLIP model from /m/mmproj.gguf. Does this file exist?\n\
                         E srv    load_model: [mtmd] failed to get memory usage of mmproj";
         for image in [None, Some("/m/mmproj.gguf")] {
-            let load = |tail: &[String]| classify_load(tail, Some(1), image);
+            let load = |tail: &[String]| classify_load(tail, Some(1), image, image.is_some());
             assert_eq!(load(&lines(measured)), LoadFailure::Unknown);
             let weights = lines(&format!(
                 "{measured}\nE alloc_tensor_range: failed to allocate CUDA0 buffer of size 9437184000\n\
@@ -914,7 +936,7 @@ mod tests {
         );
         let tail = [before_model.clone(), device_lost.clone()].concat();
         for image in [None, Some(GARBAGE)] {
-            let failure = classify_load(&tail, Some(1), image);
+            let failure = classify_load(&tail, Some(1), image, image.is_some());
             assert_eq!(failure, LoadFailure::Unknown, "{image:?}");
             assert!(failure.may_succeed_on_another_backend());
         }
@@ -927,7 +949,7 @@ mod tests {
              0.00.900.001 E llama_model_load_from_file_impl: failed to load model",
         );
         assert_eq!(
-            classify_load(&truncated, Some(1), Some("/m/mmproj-F16.gguf")),
+            classify_load(&truncated, Some(1), Some("/m/mmproj-F16.gguf"), true),
             LoadFailure::Unknown
         );
         // The model's own file broken after the image file was measured is still the model's.
@@ -937,7 +959,7 @@ mod tests {
         ]
         .concat();
         assert_eq!(
-            classify_load(&broken_model, Some(1), Some(GARBAGE)),
+            classify_load(&broken_model, Some(1), Some(GARBAGE), true),
             LoadFailure::ModelFileInvalid
         );
     }
@@ -947,7 +969,7 @@ mod tests {
     #[test]
     fn text_from_files_does_not_change_the_classification() {
         for image in [None, Some("/m/mmproj-F16.gguf")] {
-            let load = |text: &str| classify_load(&lines(text), Some(1), image);
+            let load = |text: &str| classify_load(&lines(text), Some(1), image, image.is_some());
             assert_eq!(
                 load(
                     "0.00.020.000 E llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'failed to load multimodal model'\n\
@@ -1014,6 +1036,124 @@ mod tests {
         );
     }
 
+    /// The image file of the captured logs below.
+    const SMOLVLM: &str =
+        "/home/u/models/ggml-org/SmolVLM-256M-Instruct-GGUF/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf";
+
+    /// P2 verification N2: at the pinned build an image file that does not fit stops the
+    /// server at ggml's assertion, and the allocator's own lines, which go through the
+    /// asynchronous logger, are usually lost (5 runs of 6; captured in
+    /// `tests/fixtures/stderr_image_file_out_of_memory.txt`). The assertion is running out
+    /// of memory, also while the image file loads; another assertion, or its words quoted
+    /// from a file, is not.
+    #[test]
+    fn running_out_of_memory_for_the_image_file_ends_at_an_assertion() {
+        let tail = fixture(include_bytes!(
+            "../../tests/fixtures/stderr_image_file_out_of_memory.txt"
+        ));
+        for (image, stage) in [(Some(SMOLVLM), true), (Some(SMOLVLM), false), (None, false)] {
+            assert_eq!(
+                classify_load(&tail, Some(134), image, stage),
+                LoadFailure::OutOfMemory,
+                "{image:?} {stage}"
+            );
+        }
+        for text in [
+            r"C:\a\llama.cpp\ggml\src\ggml-backend.cpp:328: GGML_ASSERT(buffer) failed",
+            "/src/ggml/src/ggml-backend.cpp:328: GGML_ASSERT(buffer) failed\n\
+             0.00.244.243 E ggml_backend_cpu_buffer_type_alloc_buffer: failed to allocate buffer of size 103756800",
+        ] {
+            assert_eq!(
+                classify_load(&lines(text), None, Some(SMOLVLM), true),
+                LoadFailure::OutOfMemory,
+                "{text}"
+            );
+        }
+        for text in [
+            "/src/tools/mtmd/clip.cpp:4705: GGML_ASSERT(cur && \"tensor not found in ctx_data\") failed",
+            "0.00.100.000 W load: control-looking token: 1 'GGML_ASSERT(buffer) failed' was not control-type",
+        ] {
+            assert_eq!(
+                classify_load(&lines(text), None, Some(SMOLVLM), true),
+                LoadFailure::Unknown,
+                "{text}"
+            );
+        }
+    }
+
+    /// P2 verification N3: a crafted image file's duplicate key and its kind are printed
+    /// with raw line breaks, so they bring lines that look like an allocation failure
+    /// (captured from the pinned build). After the server said it was loading the image
+    /// file, its own line for exactly that file decides from the reasons printed with it:
+    /// the failure stays the image file's, and no memory retry repeats at every load.
+    #[test]
+    fn a_crafted_image_file_cannot_pass_for_running_out_of_memory() {
+        for (bytes, image) in [
+            (
+                &include_bytes!("../../tests/fixtures/stderr_image_file_crafted_key.txt")[..],
+                "/home/u/models/someone/Sample-GGUF/dupkey-oom.mmproj-f16.gguf",
+            ),
+            (
+                &include_bytes!("../../tests/fixtures/stderr_image_file_crafted_kind.txt")[..],
+                "/home/u/models/someone/Sample-GGUF/projtype.mmproj-f16.gguf",
+            ),
+        ] {
+            let tail = fixture(bytes);
+            assert_eq!(
+                classify_load(&tail, Some(1), Some(image), true),
+                LoadFailure::ImageFileInvalid,
+                "{image}"
+            );
+        }
+        // What it brings while the server measures it, before the model loads, is not the
+        // model's failure either: here the model's own file then turns out broken.
+        let tail = fixture(include_bytes!(
+            "../../tests/fixtures/stderr_image_file_crafted_key.txt"
+        ));
+        let measured: Vec<String> = tail
+            .iter()
+            .take_while(|l| !l.contains("control-looking token"))
+            .cloned()
+            .collect();
+        let broken_model = [
+            measured,
+            lines(
+                "0.00.200.000 E gguf_init_from_file_impl: failed to read header\n\
+                 0.00.200.001 E llama_model_load_from_file_impl: failed to load model",
+            ),
+        ]
+        .concat();
+        assert_eq!(
+            classify_load(
+                &broken_model,
+                Some(1),
+                Some("/home/u/models/someone/Sample-GGUF/dupkey-oom.mmproj-f16.gguf"),
+                false
+            ),
+            LoadFailure::ModelFileInvalid
+        );
+    }
+
+    /// P2 verification N3: someone else's broken model file can print what looks like the
+    /// server's own line about the image file (captured: a GGUF key with a line break, and
+    /// a byte that reads as U+FFFD where the folder would be). The server never said it was
+    /// loading the image file, so the model's file is to blame and the image file is left
+    /// alone.
+    #[test]
+    fn a_model_file_cannot_blame_the_image_file() {
+        let tail = fixture(include_bytes!(
+            "../../tests/fixtures/stderr_model_fakes_image_file_line.txt"
+        ));
+        assert!(
+            tail.iter()
+                .any(|l| l.contains("failed to load multimodal model"))
+        );
+        assert_eq!(
+            classify_load(&tail, Some(1), Some(SMOLVLM), false),
+            LoadFailure::ModelFileInvalid
+        );
+    }
+
     /// Logs that say nothing about an image file stay as they were, with or without one.
     #[test]
     fn logs_without_an_image_file_are_unchanged() {
@@ -1046,7 +1186,7 @@ mod tests {
         ] {
             assert_eq!(classify(&fixture(bytes), Some(1)), want, "{name}");
             assert_eq!(
-                classify_load(&fixture(bytes), Some(1), Some("/m/mmproj.gguf")),
+                classify_load(&fixture(bytes), Some(1), Some("/m/mmproj.gguf"), true),
                 want,
                 "{name}"
             );

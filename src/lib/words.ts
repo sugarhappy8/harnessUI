@@ -681,10 +681,15 @@ export function freeAfterLoading(bar: MemoryBar): number {
   return Math.max(0, bar.freeBytes - partsTotal(bar.need));
 }
 
-/** A bar's title: "Graphics card · AMD Radeon RX 9070 XT · 16 GB", "Computer memory · 32 GB". */
-export function barTitle(bar: MemoryBar, kind: "graphics" | "computer" | "shared"): string {
-  if (kind === "shared") return `Memory · shared by the processor and Apple graphics · ${capacityGb(bar.totalBytes)}`;
-  if (kind === "computer") return `Computer memory · ${capacityGb(bar.totalBytes)}`;
+/**
+ * A bar's title: "Graphics card · AMD Radeon RX 9070 XT · 16 GB", "Computer memory · 32 GB";
+ * without a size when the computer's memory could not be read (`unknown`).
+ */
+export function barTitle(bar: MemoryBar, kind: "graphics" | "computer" | "shared", unknown = false): string {
+  if (kind === "shared") {
+    return unknown ? "Memory · shared by the processor and Apple graphics" : `Memory · shared by the processor and Apple graphics · ${capacityGb(bar.totalBytes)}`;
+  }
+  if (kind === "computer") return unknown ? "Computer memory" : `Computer memory · ${capacityGb(bar.totalBytes)}`;
   const name = bar.name.trim();
   return name ? `Graphics card · ${name} · ${capacityGb(bar.totalBytes)}` : `Graphics card · ${capacityGb(bar.totalBytes)}`;
 }
@@ -697,16 +702,19 @@ export type LegendPart = "model" | "context" | "compute" | "imageReader" | "othe
  * of a long chat (computer memory, 0.0.7) are their own item, after other programs: they
  * build up during a chat, so "Free after loading" does not count them.
  */
-export function barLegend(bar: MemoryBar): { part: LegendPart; words: string; bytes: number }[] {
+export function barLegend(bar: MemoryBar, unknown = false): { part: LegendPart; words: string; bytes: number }[] {
   const items: { part: LegendPart; words: string; bytes: number }[] = [
     { part: "model", words: "Model", bytes: bar.need.model },
     { part: "context", words: "Conversation memory", bytes: bar.need.context },
     { part: "compute", words: "Working space", bytes: bar.need.compute },
   ];
   if (bar.need.imageReader > 0) items.push({ part: "imageReader", words: "Image reader", bytes: bar.need.imageReader });
-  items.push({ part: "other", words: "Other programs", bytes: bar.otherBytes });
+  // The computer's memory could not be read: what other programs use and what is left are
+  // not known either.
+  if (!unknown) items.push({ part: "other", words: "Other programs", bytes: bar.otherBytes });
   const copies = copiesShownBytes(bar.copiesBytes);
   if (copies > 0) items.push({ part: "copies", words: "Saved copies of long chats", bytes: copies });
+  if (unknown) return items;
   const free = freeAfterLoading(bar);
   // When the model needs more than is free, nothing is left; the needs line says by how much.
   if (free > 0 || partsTotal(bar.need) <= bar.freeBytes) items.push({ part: "free", words: "Free after loading", bytes: free });
@@ -719,8 +727,12 @@ export function legendWords(item: { part?: LegendPart; words: string; bytes: num
   return `${item.words} ${amountGb(item.bytes)}`;
 }
 
-/** "Needs about 11.7 GB of the 15 GB free now." (or "… free once the loaded model is unloaded."). */
-export function needsWords(bar: MemoryBar): string {
+/**
+ * "Needs about 11.7 GB of the 15 GB free now." (or "… free once the loaded model is unloaded.");
+ * with the computer's memory unknown, the need and that it couldn't be read.
+ */
+export function needsWords(bar: MemoryBar, unknown = false): string {
+  if (unknown) return `Needs about ${amountGb(partsTotal(bar.need))}. The computer's memory couldn't be read.`;
   const when = bar.freeAfterUnload ? "free once the loaded model is unloaded" : "free now";
   return `Needs about ${amountGb(partsTotal(bar.need))} of the ${amountGb(bar.freeBytes)} ${when}.`;
 }
