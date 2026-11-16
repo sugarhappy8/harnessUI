@@ -95,3 +95,8 @@ and `README.md`.
   74 MB vs 275 MB with the default 32 on Gemma 3 270M). Gemma 4 12B at 65,536: 1,504 MiB on
   the card, 2.5 GiB of saved copies in computer memory (10 GiB at the default 32). Under
   independent review.
+- P3 round 1 done: all nine review findings fixed (cards re-armed when the window is shown;
+  three ways back: Stop focuses, a card comes to the front without the keyboard, turn end
+  restores without the keyboard; steps aside only when in the way; under a grant only right
+  after a card answer or 1.5 s without input; state keyed by turn; ownership checks on the
+  main thread). computer 146, app 849, vitest 832 pass. Independent verification running.

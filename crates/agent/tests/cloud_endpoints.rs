@@ -1054,7 +1054,10 @@ async fn keys_are_cleaned_from_errors_inside_streams_and_from_cut_messages() {
         let err = failure.expect("the stream ends with the error");
         let shown = format!("{err} {}", err.user_message());
         assert!(holds_no_key_piece(&shown), "{kind:?}: {shown}");
-        assert!(shown.contains("upstream said [API key]"), "{kind:?}: {shown}");
+        assert!(
+            shown.contains("upstream said [API key]"),
+            "{kind:?}: {shown}"
+        );
     }
 }
 
@@ -1085,14 +1088,19 @@ async fn a_reply_stopped_by_the_safety_filter_is_discarded() {
     match &outcome.status {
         TurnStatus::Failed { code, message } => {
             assert_eq!(code, "refused");
-            assert!(message.starts_with("The model declined to answer"), "{message}");
+            assert!(
+                message.starts_with("The model declined to answer"),
+                "{message}"
+            );
         }
         other => panic!("{other:?}"),
     }
     let events = events.0.lock().unwrap();
     let streamed = events
         .iter()
-        .position(|e| matches!(e, TurnEvent::ContentDelta { text } if text.contains("Here is how to")))
+        .position(
+            |e| matches!(e, TurnEvent::ContentDelta { text } if text.contains("Here is how to")),
+        )
         .expect("the partial text streamed");
     let discarded = events
         .iter()
@@ -1125,7 +1133,10 @@ async fn a_thinking_binding_the_api_refuses_is_left_out_and_remembered() {
             if request.json()["thinking"].get("block_binding").is_some() {
                 return Reply::json(
                     400,
-                    &error("invalid_request_error", "thinking.block_binding: Extra inputs are not permitted"),
+                    &error(
+                        "invalid_request_error",
+                        "thinking.block_binding: Extra inputs are not permitted",
+                    ),
                 );
             }
             replies
@@ -1145,18 +1156,32 @@ async fn a_thinking_binding_the_api_refuses_is_left_out_and_remembered() {
     assert_eq!(outcome.status, TurnStatus::Completed);
     let requests = messages_requests(&server);
     assert_eq!(requests.len(), 3, "first step, refused binding, retried");
-    assert!(requests[1].json()["thinking"].get("block_binding").is_some());
+    assert!(
+        requests[1].json()["thinking"]
+            .get("block_binding")
+            .is_some()
+    );
     let retried = requests[2].json();
     assert!(retried["thinking"].get("block_binding").is_none());
     assert!(requests[2].header("anthropic-beta").is_none());
-    assert_eq!(retried["messages"][1]["content"][0]["type"], json!("thinking"));
+    assert_eq!(
+        retried["messages"][1]["content"][0]["type"],
+        json!("thinking")
+    );
     // The next turn replays its step's thinking without asking for the binding again.
     let (outcome, _, _) = run(&client, caps(true), template).await;
     assert_eq!(outcome.status, TurnStatus::Completed);
     let later = messages_requests(&server);
     assert_eq!(later.len(), 5, "no refused request in the second turn");
-    assert_eq!(later[4].json()["messages"][1]["content"][0]["type"], json!("thinking"));
-    assert!(later[3..].iter().all(|r| r.json()["thinking"].get("block_binding").is_none()));
+    assert_eq!(
+        later[4].json()["messages"][1]["content"][0]["type"],
+        json!("thinking")
+    );
+    assert!(
+        later[3..]
+            .iter()
+            .all(|r| r.json()["thinking"].get("block_binding").is_none())
+    );
 }
 
 #[tokio::test]
@@ -1169,10 +1194,20 @@ async fn a_fix_is_kept_only_once_the_retried_request_is_accepted() {
             let mut posts = posts.lock().unwrap();
             *posts += 1;
             match *posts {
-                1 => openai_error("Unsupported parameter: 'top_k'", Some("top_k"), Some("unsupported_parameter")),
-                2 => Reply::json(400, &json!({"error": {"message": "The model is busy with another request."}})),
+                1 => openai_error(
+                    "Unsupported parameter: 'top_k'",
+                    Some("top_k"),
+                    Some("unsupported_parameter"),
+                ),
+                2 => Reply::json(
+                    400,
+                    &json!({"error": {"message": "The model is busy with another request."}}),
+                ),
                 _ => {
-                    assert!(request.json().get("top_k").is_some(), "top_k was remembered too early");
+                    assert!(
+                        request.json().get("top_k").is_some(),
+                        "top_k was remembered too early"
+                    );
                     common::sse_reply(common::sse::text("Fine."))
                 }
             }
@@ -1191,19 +1226,28 @@ async fn a_fix_is_kept_only_once_the_retried_request_is_accepted() {
 async fn a_cloud_companys_model_list_is_read_once_a_run_for_context_sizes() {
     let server = MockServer::start(|request: &Recorded| {
         if request.path() == "/v1/models" {
-            return Reply::json(200, &json!({"data": [
-                {"id": "openai/gpt-x", "name": "GPT X", "context_length": 400_000},
-                {"id": "small/model", "name": "Small", "context_length": 0}
-            ]}));
+            return Reply::json(
+                200,
+                &json!({"data": [
+                    {"id": "openai/gpt-x", "name": "GPT X", "context_length": 400_000},
+                    {"id": "small/model", "name": "Small", "context_length": 0}
+                ]}),
+            );
         }
         Reply::not_found()
     })
     .await;
     let client =
         OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::OpenRouter)).unwrap();
-    assert_eq!(client.context_length("openai/gpt-x").await.unwrap(), Some(400_000));
+    assert_eq!(
+        client.context_length("openai/gpt-x").await.unwrap(),
+        Some(400_000)
+    );
     assert_eq!(server.requests().len(), 1, "after the first");
-    assert_eq!(client.context_length("openai/gpt-x").await.unwrap(), Some(400_000));
+    assert_eq!(
+        client.context_length("openai/gpt-x").await.unwrap(),
+        Some(400_000)
+    );
     assert_eq!(server.requests().len(), 1, "after the second");
     assert_eq!(client.context_length("small/model").await.unwrap(), None);
     assert_eq!(server.requests().len(), 1, "after small");
@@ -1213,8 +1257,12 @@ async fn a_cloud_companys_model_list_is_read_once_a_run_for_context_sizes() {
     assert_eq!(server.requests().len(), 2, "looked for once");
     assert_eq!(client.context_length("gone/model").await.unwrap(), None);
     // Another client for the same endpoint (the next turn) uses the same memory.
-    let next = OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::OpenRouter)).unwrap();
-    assert_eq!(next.context_length("openai/gpt-x").await.unwrap(), Some(400_000));
+    let next =
+        OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::OpenRouter)).unwrap();
+    assert_eq!(
+        next.context_length("openai/gpt-x").await.unwrap(),
+        Some(400_000)
+    );
     assert_eq!(server.requests().len(), 2, "{:?}", server.requests());
 }
 

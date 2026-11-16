@@ -44,10 +44,10 @@ pub mod thinking;
 pub mod turn;
 pub mod types;
 
+pub use anthropic::thinking_can_stop;
 pub use client::{
     ChatStream, ClientConfig, ListedModel, ModelInfo, OpenAiClient, ProviderKind, Token,
 };
-pub use anthropic::thinking_can_stop;
 pub use cloud::{
     EndpointPlace, check_key_transport, default_context, endpoint_host, endpoint_origin,
     endpoint_place, images_in_tool_results,

@@ -13,7 +13,7 @@ vi.mock("../../store/app", () => ({
   toErrorInfo: (e: unknown) => ({ code: "bad_request", message: String(e), nextStep: "", details: null }),
 }));
 
-const { SameCallLimit, sameCallLimitFrom } = await import("./SameCallLimit");
+const { SameCallLimit, sameCallLimitFrom, storedSameCallLimit } = await import("./SameCallLimit");
 
 async function show() {
   await act(async () => {
@@ -55,7 +55,9 @@ describe("SameCallLimit", () => {
     expect(box().value).toBe("5");
     expect(box().min).toBe("2");
     expect(box().max).toBe("100");
-    expect(screen.getByText(/The model is warned two calls before\./)).toBeTruthy();
+    expect(
+      screen.getByText(/The model is warned two calls before the limit \(one call before at 3, no warning at 2\)\./),
+    ).toBeTruthy();
     expect(ipcMock.getSetting).toHaveBeenCalledWith("sameCallLimit");
   });
 
@@ -69,6 +71,11 @@ describe("SameCallLimit", () => {
     expect(box().value).toBe("100");
     cleanup();
     stored = "7";
+    await show();
+    expect(box().value).toBe("5");
+    // [0.0.7 review] A stored negative number is not sensible: 5, as a turn reads it.
+    cleanup();
+    stored = -3;
     await show();
     expect(box().value).toBe("5");
   });
@@ -115,6 +122,16 @@ describe("SameCallLimit", () => {
     await typeAndLeave("9");
     expect(box().value).toBe("6");
     expect(screen.getByText(/The settings could not be saved\./)).toBeTruthy();
+  });
+
+  it("reads a stored value as a turn does", () => {
+    expect(storedSameCallLimit(12)).toBe(12);
+    expect(storedSameCallLimit(0)).toBe(2);
+    expect(storedSameCallLimit(1000)).toBe(100);
+    expect(storedSameCallLimit(-3)).toBe(5);
+    expect(storedSameCallLimit(3.5)).toBe(5);
+    expect(storedSameCallLimit("7")).toBe(5);
+    expect(storedSameCallLimit(null)).toBe(5);
   });
 
   it("reads typed text as a whole number from 2 to 100", () => {

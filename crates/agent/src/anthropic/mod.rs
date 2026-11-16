@@ -374,7 +374,11 @@ async fn facts(client: &OpenAiClient, model: &str) -> ModelFacts {
         segments.push(model);
     }
     let found = match tokio::time::timeout(FACTS_LOOKUP, client.get_json(url)).await {
-        Ok(Ok(value)) => Some(parse_model(&value).map(|(_, facts)| facts).unwrap_or_default()),
+        Ok(Ok(value)) => Some(
+            parse_model(&value)
+                .map(|(_, facts)| facts)
+                .unwrap_or_default(),
+        ),
         Ok(Err(err)) if crate::client::is_not_found(&err) => Some(ModelFacts::default()),
         _ => None,
     };
@@ -483,9 +487,15 @@ fn binding_refused(body: &[u8]) -> bool {
     text.contains("anthropic-beta")
         || text.contains(BINDING_BETA)
         || (text.contains("block_binding")
-            && ["extra inputs", "not permitted", "unknown", "unexpected", "not supported"]
-                .iter()
-                .any(|words| text.contains(words)))
+            && [
+                "extra inputs",
+                "not permitted",
+                "unknown",
+                "unexpected",
+                "not supported",
+            ]
+            .iter()
+            .any(|words| text.contains(words)))
 }
 
 /// Streams one reply in Claude's own format. The request is translated, sent with this

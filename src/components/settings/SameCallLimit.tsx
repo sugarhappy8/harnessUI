@@ -6,7 +6,8 @@ import { ErrorBanner } from "../ErrorBanner";
 
 // [0.0.7] Settings → General: how many times in a row the model may make the same call (the
 // same tool with the same arguments) before the turn stops. The app warns the model two calls
-// before. The backend checks the number when it is saved and again when a turn reads it.
+// before the limit (one call before at 3; at 2 there is no room for a warning). The backend
+// checks the number when it is saved and again when a turn reads it.
 
 /** The setting's key ("sameCallLimit" in `src-tauri/src/settings.rs`). */
 export const SAME_CALL_LIMIT = "sameCallLimit";
@@ -21,6 +22,17 @@ export function sameCallLimitFrom(text: string): number | null {
   return Math.min(MAX_SAME_CALL_LIMIT, Math.max(MIN_SAME_CALL_LIMIT, n));
 }
 
+/**
+ * The limit a turn uses for a stored value, as `settings::same_call_limit` reads it: a whole
+ * number from 0 up, held to 2..100; anything else (a negative or broken number, text) is 5.
+ */
+export function storedSameCallLimit(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return DEFAULT_SAME_CALL_LIMIT;
+  }
+  return Math.min(MAX_SAME_CALL_LIMIT, Math.max(MIN_SAME_CALL_LIMIT, value));
+}
+
 /** "Stop when the model makes the same call this many times in a row" (setting "sameCallLimit"). */
 export function SameCallLimit() {
   const [saved, setSaved] = useState<number>(DEFAULT_SAME_CALL_LIMIT);
@@ -33,8 +45,7 @@ export function SameCallLimit() {
       .then((v) => {
         if (!alive) return;
         // A number saved some other way shows as a turn uses it.
-        const n = typeof v === "number" ? sameCallLimitFrom(String(v)) : null;
-        const value = n ?? DEFAULT_SAME_CALL_LIMIT;
+        const value = storedSameCallLimit(v);
         setSaved(value);
         setText(String(value));
       })
@@ -83,7 +94,8 @@ export function SameCallLimit() {
         />
       </label>
       <p className="mt-1 text-xs text-fg-muted">
-        The model is warned two calls before. From 2 to 100; 5 unless you change it.
+        The model is warned two calls before the limit (one call before at 3, no warning at 2).
+        From 2 to 100; 5 unless you change it.
       </p>
       {error && (
         <div className="mt-2">

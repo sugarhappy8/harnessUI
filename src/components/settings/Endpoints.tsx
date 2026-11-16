@@ -12,6 +12,7 @@ import {
   SERVER_CHOICES,
   choiceFor,
   hostOf,
+  originOf,
   switchChoice,
 } from "./endpointPresets";
 
@@ -19,7 +20,7 @@ import {
 // P5] Ready-made choices for Anthropic, OpenAI, OpenRouter and abliteration.ai (pick one,
 // paste the key), a context size for each endpoint, Edit, and a "Cloud" mark on an endpoint
 // on the internet. The backend checks every value again when it is saved: it refuses an API
-// key over plain http:// to a server on the internet.
+// key over plain http:// to a server on the internet, and a saved key for a new address.
 
 interface Form {
   /** The endpoint being edited; `null` for a new one. */
@@ -28,10 +29,22 @@ interface Form {
   name: string;
   baseUrl: string;
   apiKey: string;
-  /** The endpoint has a key saved: an empty box keeps it. */
+  /** The endpoint has a key saved. An empty box keeps it while the address keeps its
+   *  scheme, host and port; a key is never sent to a new address. */
   keySaved: boolean;
+  /** The address the saved key is for. */
+  savedUrl: string | null;
+  /** "Remove the saved key" is ticked. */
+  removeKey: boolean;
   /** `null`: Automatic. */
   contextLength: number | null;
+}
+
+/** The saved key stays with the endpoint as the form now stands. */
+function keyStays(form: Form): boolean {
+  if (!form.keySaved || form.removeKey || form.savedUrl === null) return false;
+  const saved = originOf(form.savedUrl);
+  return saved !== null && saved === originOf(form.baseUrl);
 }
 
 function newForm(): Form {
@@ -43,6 +56,8 @@ function newForm(): Form {
     baseUrl: first.baseUrl,
     apiKey: "",
     keySaved: false,
+    savedUrl: null,
+    removeKey: false,
     contextLength: null,
   };
 }
@@ -55,6 +70,8 @@ function editForm(p: Provider): Form {
     baseUrl: p.baseUrl,
     apiKey: "",
     keySaved: p.hasApiKey,
+    savedUrl: p.baseUrl,
+    removeKey: false,
     contextLength: p.contextLength ?? null,
   };
 }
@@ -70,6 +87,8 @@ export function Endpoints() {
   const [status, setStatus] = useState<Record<number, string>>({});
   const [error, setError] = useState<ErrorInfo | null>(null);
   const refreshModelOptions = useApp((s) => s.refreshModelOptions);
+  const activeChatId = useApp((s) => s.activeChatId);
+  const openChat = useApp((s) => s.openChat);
 
   const load = useCallback(async () => {
     try {
@@ -110,13 +129,16 @@ export function Endpoints() {
         kind: form.kind,
         baseUrl: form.baseUrl.trim(),
         apiKey: form.apiKey.trim() || null,
-        clearApiKey: false,
+        // Removed on request, or left behind when the address moved without a new key.
+        clearApiKey: form.keySaved && form.apiKey.trim() === "" && !keyStays(form),
         contextLength: form.contextLength,
       });
       setForm(null);
       await load();
       // Lists its models for the model picker at once, and says whether the key works.
       await test(saved.id);
+      // The open chat's "Cloud" mark and Thinking switch follow the edited endpoint.
+      if (activeChatId != null && openChat) await openChat(activeChatId);
     } catch (err) {
       setError(toErrorInfo(err));
     }
@@ -134,6 +156,9 @@ export function Endpoints() {
 
   const choice = form ? choiceFor(form.kind) : null;
   const company = choice?.company;
+  const stays = form ? keyStays(form) : false;
+  const keyMoved = !!form && form.keySaved && !form.removeKey && !stays;
+  const automatic = company?.defaultContext ?? null;
   const contextOptions =
     form?.contextLength != null && !CONTEXT_CHOICES.includes(form.contextLength)
       ? [...CONTEXT_CHOICES, form.contextLength].sort((a, b) => a - b)
@@ -259,12 +284,29 @@ export function Endpoints() {
             id="p-key"
             type="password"
             autoComplete="off"
-            required={!!company && !form.keySaved}
+            required={!!company && !stays}
             value={form.apiKey}
-            placeholder={form.keySaved ? "saved (leave empty to keep it)" : company ? "paste your key" : "optional"}
+            placeholder={stays ? "saved (leave empty to keep it)" : company ? "paste your key" : "optional"}
+            aria-describedby={keyMoved ? "p-key-moved" : undefined}
             onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
             className="rounded-md border border-border bg-bg px-2 py-1"
           />
+          {keyMoved && (
+            <p id="p-key-moved" className="col-span-2 text-xs text-fg-muted">
+              The saved key is for {hostOf(form.savedUrl ?? "")} and is not sent to a new address.
+              {company ? " Paste the key for this address." : " Paste a key if this server needs one."}
+            </p>
+          )}
+          {form.keySaved && (
+            <label className="col-span-2 flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                checked={form.removeKey}
+                onChange={(e) => setForm({ ...form, removeKey: e.target.checked })}
+              />
+              Remove the saved key
+            </label>
+          )}
           <label htmlFor="p-ctx">Context size</label>
           <select
             id="p-ctx"
@@ -281,12 +323,15 @@ export function Endpoints() {
             ))}
           </select>
           <p id="p-ctx-help" className="col-span-2 text-xs text-fg-muted">
-            How much of a chat the app sends at most. Automatic: the size the server reports for
-            each model, or else{" "}
-            {company
-              ? `${company.defaultContext.toLocaleString()} tokens`
-              : "the size chosen below for servers that report none"}
-            . A smaller size sends less of a long chat{company ? ", which costs less" : ""}.
+            How much of a chat the app sends with each message at most.{" "}
+            {company && automatic !== null
+              ? `Automatic: what the server reports for each model, at most ${automatic.toLocaleString()} tokens${
+                  company.contextNote ? ` (${company.contextNote})` : ""
+                }. A long chat sends up to this much with every message, and the company charges for each token.`
+              : "Automatic: what the server reports for each model, or else the size chosen below for servers that report none."}
+            {company && automatic !== null && form.contextLength !== null && form.contextLength > automatic
+              ? " A larger size uses much more of your credit with every message of a long chat."
+              : ""}
           </p>
           <div className="col-span-2 flex justify-end gap-2">
             <button type="button" onClick={() => setForm(null)} className="px-2 py-1">
@@ -358,8 +403,9 @@ function RemoteContext(props: { onError: (e: ErrorInfo) => void }) {
       <p id="remote-ctx-help" className="text-xs text-fg-muted">
         Most servers say how much context their model uses. For one that does not, the app plans
         with this size. If it is larger than what the server really uses, older messages can be
-        dropped without warning. An AI company&apos;s endpoint uses the size the company documents
-        instead, and any endpoint the size chosen for it with Edit.
+        dropped without warning. This size is not used for an AI company&apos;s endpoint, which
+        plans with what its server reports up to a size of its own, nor for an endpoint given a
+        size with Edit.
       </p>
       <select
         id="remote-ctx"

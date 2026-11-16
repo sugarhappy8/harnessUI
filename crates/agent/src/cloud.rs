@@ -1021,7 +1021,11 @@ mod tests {
             let client = crate::OpenAiClient::new(config);
             if scheme == "http" {
                 // No key over plain http to the internet, however the address is written.
-                assert_eq!(check_key_transport(raw), Err(KEY_OVER_HTTP.to_owned()), "{raw}");
+                assert_eq!(
+                    check_key_transport(raw),
+                    Err(KEY_OVER_HTTP.to_owned()),
+                    "{raw}"
+                );
                 assert!(client.is_err(), "{raw}");
             } else {
                 assert!(check_key_transport(raw).is_ok(), "{raw}");
@@ -1033,7 +1037,13 @@ mod tests {
             }
         }
         // An address that cannot be read gets no key, and no client is made for it.
-        for raw in ["", "http://", "::", "ftp://api.example.com", "http://exa mple.com"] {
+        for raw in [
+            "",
+            "http://",
+            "::",
+            "ftp://api.example.com",
+            "http://exa mple.com",
+        ] {
             assert_eq!(
                 check_key_transport(raw),
                 Err(UNREADABLE_ADDRESS.to_owned()),
@@ -1077,8 +1087,16 @@ mod tests {
         assert!(check_key_transport("http://192.168.1.5:8000/v1").is_ok());
         assert!(check_key_transport("https://nas:8000").is_ok());
         // A local-looking name can lead anywhere: https, or the server's IP address.
-        for name in ["http://nas:8000", "http://studio.local", "http://box.lan/v1"] {
-            assert_eq!(check_key_transport(name), Err(KEY_OVER_HTTP.to_owned()), "{name}");
+        for name in [
+            "http://nas:8000",
+            "http://studio.local",
+            "http://box.lan/v1",
+        ] {
+            assert_eq!(
+                check_key_transport(name),
+                Err(KEY_OVER_HTTP.to_owned()),
+                "{name}"
+            );
         }
         assert_eq!(
             check_key_transport("http://api.example.com/v1"),
@@ -1109,9 +1127,18 @@ mod tests {
             default_context(ProviderKind::Anthropic, "claude-haiku-4-5-20251001"),
             Some(200_000)
         );
-        assert_eq!(default_context(ProviderKind::OpenAi, "gpt-5.5"), Some(128_000));
-        assert_eq!(default_context(ProviderKind::OpenRouter, "x/y"), Some(128_000));
-        assert_eq!(default_context(ProviderKind::Abliteration, "m"), Some(32_768));
+        assert_eq!(
+            default_context(ProviderKind::OpenAi, "gpt-5.5"),
+            Some(128_000)
+        );
+        assert_eq!(
+            default_context(ProviderKind::OpenRouter, "x/y"),
+            Some(128_000)
+        );
+        assert_eq!(
+            default_context(ProviderKind::Abliteration, "m"),
+            Some(32_768)
+        );
         assert_eq!(default_context(ProviderKind::Generic, "m"), None);
         assert_eq!(default_context(ProviderKind::Ollama, "m"), None);
         assert!(images_in_tool_results(ProviderKind::Anthropic));
@@ -1577,7 +1604,10 @@ mod tests {
         let key = "sk-ant-api03-PROBEKEY0123456789abcdefghijklmnopqrstuvwxyz";
         let long = format!("{} key {key} tail", "x".repeat(1_980));
         let cut = crate::error::bounded(&long);
-        assert!(cut.ends_with('…') && !cut.contains(key), "the probe must straddle the cut");
+        assert!(
+            cut.ends_with('…') && !cut.contains(key),
+            "the probe must straddle the cut"
+        );
         let err = scrub_key(
             ProviderError::Http {
                 status: 400,
@@ -1589,7 +1619,11 @@ mod tests {
             unreachable!()
         };
         assert!(message.ends_with("key [API key]…"), "{}", &message[1_950..]);
-        assert!(!message.contains(&key[..KEY_PIECE]), "{}", &message[1_950..]);
+        assert!(
+            !message.contains(&key[..KEY_PIECE]),
+            "{}",
+            &message[1_950..]
+        );
         // Before an ellipsis followed by more text (a wait the server asked for).
         let text = format!("said {}… (it asks to try again in 40 seconds)", &key[..20]);
         assert_eq!(
@@ -1598,7 +1632,10 @@ mod tests {
         );
         // A whole key mid-text, and a cut without an ellipsis.
         assert_eq!(without_key(&format!("a {key} b"), key), "a [API key] b");
-        assert_eq!(without_key(&format!("a {}", &key[..12]), key), "a [API key]");
+        assert_eq!(
+            without_key(&format!("a {}", &key[..12]), key),
+            "a [API key]"
+        );
         // Too short a piece to say, and text that only looks alike, stay.
         assert_eq!(without_key("ends with sk-", key), "ends with sk-");
         assert_eq!(without_key("nothing here", key), "nothing here");

@@ -358,7 +358,10 @@ fn unchanged_replies_go_back_with_their_thinking() {
     request.thinking = Some(false);
     let off = body(&request, &adaptive_facts(), Some(&replay));
     let messages = off["messages"].as_array().unwrap();
-    assert_eq!(messages[1]["content"], json!([{"type": "text", "text": "Hello."}]));
+    assert_eq!(
+        messages[1]["content"],
+        json!([{"type": "text", "text": "Hello."}])
+    );
     assert_eq!(last_assistant(&off)["content"][0], thinking);
     request.thinking = Some(true);
 
@@ -374,7 +377,10 @@ fn unchanged_replies_go_back_with_their_thinking() {
     // So does a reply whose text changed.
     request.messages[2] = ChatMessage::assistant("Hello!");
     let changed = body(&request, &adaptive_facts(), Some(&replay));
-    assert_eq!(changed["messages"][1]["content"], json!([{"type": "text", "text": "Hello!"}]));
+    assert_eq!(
+        changed["messages"][1]["content"],
+        json!([{"type": "text", "text": "Hello!"}])
+    );
 
     // Without a replay store nothing is replayed.
     let plain = body(&request, &adaptive_facts(), None);
@@ -402,7 +408,12 @@ fn preserved_thinking_asks_for_drop_block_when_it_replays() {
         }),
         ..adaptive_facts()
     };
-    for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"] {
+    for model in [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-2",
+    ] {
         let mut request = tool_conversation();
         request.model = model.into();
         let sent = body(&request, &always, Some(&replay));
@@ -414,11 +425,24 @@ fn preserved_thinking_asks_for_drop_block_when_it_replays() {
         // Nothing replayed: nothing to bind.
         let sent = body(&request, &always, None);
         assert!(sent["thinking"].get("block_binding").is_none(), "{model}");
+        // Thinking "off" on a model that always thinks: low effort, and still the binding.
+        request.thinking = Some(false);
+        let sent = body(&request, &always, Some(&replay));
+        assert_eq!(
+            sent["thinking"],
+            json!({"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}),
+            "{model}"
+        );
+        assert_eq!(sent["output_config"], json!({"effort": "low"}), "{model}");
     }
     // Models before preserved thinking, and a refused setting, go without it.
     let mut request = tool_conversation();
     request.model = "claude-opus-5".into();
-    assert!(body(&request, &always, Some(&replay))["thinking"].get("block_binding").is_none());
+    assert!(
+        body(&request, &always, Some(&replay))["thinking"]
+            .get("block_binding")
+            .is_none()
+    );
     request.model = "claude-opus-5-5".into();
     let mut fixes = ParamFixes::default();
     fixes.add(&Fix::Drop("block_binding".into()));
@@ -463,7 +487,11 @@ fn thinking_off_on_a_model_that_cannot_stop_asks_for_low_effort() {
     request.thinking = Some(false);
     let mut fixes = ParamFixes::default();
     fixes.add(&Fix::Drop("output_config".into()));
-    assert!(messages_body(&request, &always, None, &fixes).get("output_config").is_none());
+    assert!(
+        messages_body(&request, &always, None, &fixes)
+            .get("output_config")
+            .is_none()
+    );
 }
 
 #[test]
@@ -502,7 +530,10 @@ fn pictures_larger_than_claude_takes_become_a_note() {
         let block = picture(mime, bytes);
         assert_eq!(block["type"], json!("text"), "{mime}");
         assert!(
-            block["text"].as_str().unwrap().contains(&format!("at {size} pixels")),
+            block["text"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("at {size} pixels")),
             "{block}"
         );
     }
@@ -514,7 +545,11 @@ fn pictures_larger_than_claude_takes_become_a_note() {
         url: format!("data:image/png;base64,{big}"),
     })])];
     let block = body(&request, &adaptive_facts(), None)["messages"][0]["content"][0].clone();
-    assert!(block["text"].as_str().unwrap().contains("10 MB"), "{}", block["type"]);
+    assert!(
+        block["text"].as_str().unwrap().contains("10 MB"),
+        "{}",
+        block["type"]
+    );
 }
 
 #[test]
@@ -956,7 +991,11 @@ fn a_finished_reply_that_thought_is_kept_under_its_text() {
     let (_, err) = decode(&stream, Some(replay.clone()));
     assert_eq!(err, None);
     assert_eq!(
-        replay.lock().unwrap().find(&ReplayKey::text("Hello.")).cloned(),
+        replay
+            .lock()
+            .unwrap()
+            .find(&ReplayKey::text("Hello."))
+            .cloned(),
         Some(vec![
             json!({"type": "thinking", "thinking": "Greet.", "signature": "sig-0"}),
             json!({"type": "text", "text": "Hello."}),
@@ -966,7 +1005,13 @@ fn a_finished_reply_that_thought_is_kept_under_its_text() {
     let cut = stream.replace("end_turn", "max_tokens");
     let replay = Arc::new(Mutex::new(ThinkingReplay::default()));
     decode(&cut, Some(replay.clone()));
-    assert!(replay.lock().unwrap().find(&ReplayKey::text("Hello.")).is_none());
+    assert!(
+        replay
+            .lock()
+            .unwrap()
+            .find(&ReplayKey::text("Hello."))
+            .is_none()
+    );
 }
 
 #[test]
@@ -990,7 +1035,13 @@ fn a_cut_stream_is_unfinished_and_not_kept() {
             StreamEvent::Done
         ]
     );
-    assert!(replay.lock().unwrap().find(&call_key(&["toolu_02"])).is_none());
+    assert!(
+        replay
+            .lock()
+            .unwrap()
+            .find(&call_key(&["toolu_02"]))
+            .is_none()
+    );
 }
 
 #[test]

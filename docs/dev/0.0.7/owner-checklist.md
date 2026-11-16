@@ -80,14 +80,23 @@ icon bounces for a card and at the end of the turn.
 1. **Anthropic (Claude):** Settings → Endpoints → Anthropic, paste the key. *Test* lists the
    models by name. In a chat the *Cloud* mark's tooltip names `api.anthropic.com`. With
    Thinking on, run a multi-step tool task in an approved folder: no error about thinking,
-   and the Thinking area fills. Attach a picture. A second long turn should cost fewer
-   tokens (cached). Try a wrong key: the message is plain and never shows the key. Set a
-   smaller memory with *Edit*.
-2. **OpenAI:** only chat models are listed. A tool turn on a GPT-5-family model and on a
-   4.1-type model works (no error about `max_tokens` or temperature). Try a tool that
-   returns a screenshot.
-3. **OpenRouter:** models listed with names and sizes; a tool turn on a Claude model through
+   and the Thinking area fills. Send a second message in the same chat: it should report
+   many cached tokens (the earlier turn's thinking goes back unchanged). Leave an approval
+   card waiting for more than five minutes, then allow it: the tools and system prompt
+   should still come from the cache. Attach a picture. Try a wrong key: the message is plain
+   and never shows the key. *Edit* shows "at most 200,000 tokens" for Automatic; choose
+   1,000,000 and see the note about credit.
+2. **Claude Opus 5.5:** the header's switch says *On*/*Low*; with *Low* a short question is
+   answered quickly, and a long chat's automatic summary still works (not "Could not
+   summarise").
+3. **OpenAI:** only chat models are listed (no *-pro*, Codex or deep research models). A tool
+   turn on a GPT-5-family model and on a 4.1-type model works (no error about `max_tokens` or
+   temperature). Try a tool that returns a screenshot.
+4. **OpenRouter:** models listed with names and sizes; a tool turn on a Claude model through
    OpenRouter and on an open model.
-4. **abliteration.ai:** *Test*, then a chat that uses tools.
-5. **All:** an `http://` internet address with a key is refused; Ollama on your own network
-   over `http://` with a key works and shows no *Cloud* mark.
+5. **abliteration.ai:** *Test*, then a chat that uses tools.
+6. **All:** an `http://` internet address with a key is refused; Ollama at your network's IP
+   address (for example `http://192.168.1.20:11434`) over `http://` with a key works and
+   shows no *Cloud* mark, while the same server by name (`http://desktop.local:11434`) shows
+   the mark and needs https for a key. Edit the OpenAI endpoint and switch it to
+   OpenRouter: Save asks for the OpenRouter key instead of sending the OpenAI one.

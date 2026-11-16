@@ -900,6 +900,10 @@ impl ToolHost for AppTools {
     fn tools(&self) -> Vec<ToolInfo> {
         tool_infos(&self.enabled)
     }
+    fn kept_back(&self) -> Vec<ToolInfo> {
+        // [0.0.7] Only checked by the loop, for the tool list (`ToolHost::kept_back`).
+        tool_infos(&self.hidden)
+    }
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
         // [0.0.4 tool selection] A `call_tool` call is checked as the tool it names, against
         // that tool's own schema; every other call exactly as before.
@@ -1714,16 +1718,11 @@ pub(crate) async fn assemble(
     if !full_access {
         enabled.retain(|t| !crate::approvals::only_in_full_access(t));
     }
-    // [0.0.7] Every tool that is on, shown this turn or not, for the tool list in the system
-    // message: made before the split, so it does not change with what a turn shows.
-    let tool_guide = crate::tool_select::roster::tool_guide(
-        &enabled,
-        &crate::tool_catalog::builtin_servers(&state.host),
-        req.caps.n_ctx,
-    );
     // [0.0.4 tool selection] Of the tools that are on in the chat, the ones shown to the
     // model this turn. The rest stay reachable through `find_tools` and `call_tool`.
-    let (mut enabled, hidden) = if turn {
+    // [0.0.7] With them, the tool list for the system message, made from every tool that is
+    // on, so it does not change with what a turn shows (`tool_select::roster::fitted`).
+    let (mut enabled, hidden, tool_guide) = if turn {
         crate::tool_select::for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx).await
     } else {
         crate::tool_select::preview_for_turn(&state, &req.chat, &history, enabled, req.caps.n_ctx)

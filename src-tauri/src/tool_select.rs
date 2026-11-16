@@ -16,8 +16,10 @@
 //! - A tool that is on but not shown stays reachable: [`finder`] has `find_tools` and
 //!   `call_tool`, and the rules that make `call_tool` exactly as safe as a direct call.
 //! - [0.0.7] The system message lists every tool that is on ([`roster`]), so the model
-//!   knows what it can reach; what that list takes is left out of the definitions' room.
-//!   The computer group is shown whole or not at all ([`WHOLE_GROUPS`]).
+//!   knows what it can reach; what that list takes is left out of the definitions' room,
+//!   but never the room of the core file tools ([`roster::fitted`]). The computer group is
+//!   shown whole or not at all ([`WHOLE_GROUPS`]), and only a strong word of its own brings
+//!   it in (`tool_catalog::OWN_WORDS_ONLY`).
 
 pub mod finder;
 pub mod roster;
@@ -25,6 +27,7 @@ pub mod roster;
 use std::collections::BTreeSet;
 
 use agent::HistoryMessage;
+use agent::prompt::ToolGuide;
 use mcp_host::RegisteredTool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -168,14 +171,23 @@ pub struct Wording {
 }
 
 impl Wording {
-    /// Prepares a text.
+    /// Prepares a text. [0.0.7] A word that is the start of a file name (`settings` in
+    /// `settings.json`) ends every phrase there: "open settings.json" is about a file, not
+    /// about "open settings". A program's file (`notepad.exe`) is still the program.
     pub fn of(text: &str) -> Self {
         let lower = text.to_lowercase();
         let mut words = BTreeSet::new();
         let mut spaced = String::with_capacity(lower.len() + 2);
         spaced.push(' ');
+        let mut rest = lower.as_str();
         for word in split_words(&lower) {
+            // `split_words` gives the words in order, so each is found after the one before.
+            let at = rest.find(word).unwrap_or(0) + word.len();
+            rest = &rest[at..];
             spaced.push_str(word);
+            if starts_file_extension(rest) {
+                spaced.push('.');
+            }
             spaced.push(' ');
             words.extend(forms(word));
         }
@@ -209,6 +221,20 @@ fn split_words(lower: &str) -> impl Iterator<Item = &str> {
     lower
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
+}
+
+/// [0.0.7] Whether a text right after a word makes that word part of a file name: a dot and an
+/// extension (`.json`, `.py`), not a full stop before a space and not a program (`.exe`,
+/// `.app`).
+fn starts_file_extension(after: &str) -> bool {
+    let Some(extension) = after.strip_prefix('.') else {
+        return false;
+    };
+    let extension: String = extension
+        .chars()
+        .take_while(|c| c.is_alphanumeric())
+        .collect();
+    !extension.is_empty() && !matches!(extension.as_str(), "exe" | "app")
 }
 
 /// A word and what it may be a form of: "commits", "committing" and "committed" all give
@@ -1123,13 +1149,15 @@ pub fn waiting_with(waiting: &[String], names: &[String], first: bool) -> Vec<St
 /// Splits the tools that are on in the chat into those shown to the model this turn and
 /// those kept back (reachable through `find_tools` and `call_tool`). Decided once, when
 /// the turn starts; what was shown is remembered for the chat, so the list only grows.
+/// [0.0.7] Also the tool list and guide for the system message, made from every tool that is
+/// on and held to what is left once the tools that come first are counted ([`roster::fitted`]).
 pub async fn for_turn(
     state: &AppState,
     chat: &store::Chat,
     history: &[HistoryMessage],
     enabled: Vec<RegisteredTool>,
     n_ctx: u32,
-) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
+) -> (Vec<RegisteredTool>, Vec<RegisteredTool>, ToolGuide) {
     choose(state, chat, history, enabled, n_ctx, true).await
 }
 
@@ -1141,7 +1169,7 @@ pub async fn preview_for_turn(
     history: &[HistoryMessage],
     enabled: Vec<RegisteredTool>,
     n_ctx: u32,
-) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
+) -> (Vec<RegisteredTool>, Vec<RegisteredTool>, ToolGuide) {
     choose(state, chat, history, enabled, n_ctx, false).await
 }
 
@@ -1152,17 +1180,24 @@ async fn choose(
     enabled: Vec<RegisteredTool>,
     n_ctx: u32,
     remember: bool,
-) -> (Vec<RegisteredTool>, Vec<RegisteredTool>) {
+) -> (Vec<RegisteredTool>, Vec<RegisteredTool>, ToolGuide) {
     let setting = settings(state).await;
-    if !setting.auto || enabled.is_empty() {
-        return (enabled, Vec::new());
-    }
-    // What the definitions may take of this model's context: [0.0.7] less the tool list and
-    // guide in the system message, made from the same tools as `turns::assemble` makes it.
+    // [0.0.7] The tool list and guide, from every tool that is on (the same whatever a turn
+    // shows), and what the definitions may take of this model's context besides them. They
+    // never take the room of the core file tools, nor of any tool when every tool is shown.
     let builtin = tool_catalog::builtin_servers(&state.host);
-    let guide = roster::tokens(&roster::tool_guide(&enabled, &builtin, n_ctx));
     let other = other_fixed_for_turn(state, chat, history).await;
-    let room = allowance(n_ctx, other.tokens_in(n_ctx).saturating_add(guide));
+    let fitted = roster::fitted(
+        &enabled,
+        &builtin,
+        n_ctx,
+        other.tokens_in(n_ctx),
+        !setting.auto,
+    );
+    if !setting.auto || enabled.is_empty() {
+        return (enabled, Vec::new(), fitted.guide);
+    }
+    let room = fitted.room;
     let candidates: Vec<Candidate> = enabled
         .iter()
         .map(|tool| Candidate::of(tool, builtin.contains(&tool.server)))
@@ -1187,7 +1222,8 @@ async fn choose(
         allowance: Some(room),
     });
     if !remember {
-        return split(enabled, &shown);
+        let (shown, hidden) = split(enabled, &shown);
+        return (shown, hidden, fitted.guide);
     }
     let stored = crate::mcp_cmd::change_selection_memory(state, chat.id, |was_shown, found| {
         *was_shown = remembered(was_shown, &shown);
@@ -1202,7 +1238,8 @@ async fn choose(
             e.message
         );
     }
-    split(enabled, &shown)
+    let (shown, hidden) = split(enabled, &shown);
+    (shown, hidden, fitted.guide)
 }
 
 #[cfg(test)]

@@ -12,9 +12,11 @@ export interface Company {
   keyUrl: string;
   /** That page's address as the form shows it. */
   keyPage: string;
-  /** The context size the app plans with when the server does not say (the Rust
-   *  `agent::default_context`). */
+  /** The most the app sends in one request on "Automatic", and the size when the server does
+   *  not say (the Rust `agent::default_context`). */
   defaultContext: number;
+  /** A model with a size of its own, said in the help text. */
+  contextNote?: string;
 }
 
 /** One choice in the form's "Company or server" list. */
@@ -40,6 +42,7 @@ export const COMPANY_CHOICES: EndpointChoice[] = [
       keyUrl: "https://platform.claude.com/settings/keys",
       keyPage: "platform.claude.com",
       defaultContext: 200_000,
+      contextNote: "100,000 for Claude Haiku 5.5, which costs more per token above that",
     },
   },
   {
@@ -63,7 +66,7 @@ export const COMPANY_CHOICES: EndpointChoice[] = [
       name: "OpenRouter",
       keyUrl: "https://openrouter.ai/keys",
       keyPage: "openrouter.ai/keys",
-      defaultContext: 32_768,
+      defaultContext: 128_000,
     },
   },
   {
@@ -114,6 +117,20 @@ export function switchChoice(
   const name = fields.name.trim() === "" || fields.name === before.name ? after.name : fields.name;
   const filled = fields.baseUrl.trim() === "" || ENDPOINT_CHOICES.some((c) => c.baseUrl === fields.baseUrl.trim());
   return { name, baseUrl: filled ? after.baseUrl : fields.baseUrl };
+}
+
+/** The scheme, host and port an address names ("https://api.anthropic.com:443"), as the
+ *  backend compares them before it keeps a saved key for an edited endpoint; null when the
+ *  address cannot be read. */
+export function originOf(baseUrl: string): string | null {
+  try {
+    const url = new URL(baseUrl.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    const port = url.port || (url.protocol === "https:" ? "443" : "80");
+    return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
+  } catch {
+    return null;
+  }
 }
 
 /** The host an address names ("api.anthropic.com"), or the address itself when it is not one. */

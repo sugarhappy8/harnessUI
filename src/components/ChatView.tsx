@@ -294,6 +294,8 @@ export function ChatView() {
   // Thinking on and off: a local model that can think, or [0.0.7 P5] Claude on its endpoint.
   const thinkingSwitch =
     !!detail && ((!!modelRef?.startsWith("local:") && !!runtime?.thinking) || !!detail.chat.endpointThinking);
+  // [0.0.7 P5] A model whose thinking cannot stop (Claude Opus 5.5): "off" is "low".
+  const offWord = detail?.chat.endpointThinkingLow ? "low" : "off";
 
   // [0.0.5 memory] The summary the model gets instead of the earlier messages, and the
   // message its line goes under.
@@ -378,8 +380,14 @@ export function ChatView() {
                   <button
                     type="button"
                     aria-pressed={detail.chat.thinking}
-                    aria-label={`Thinking ${detail.chat.thinking ? "on" : "off"}`}
-                    title={detail.chat.thinking ? "Thinking is on: slower, often better answers" : "Thinking is off: faster answers"}
+                    aria-label={`Thinking ${detail.chat.thinking ? "on" : offWord}`}
+                    title={
+                      detail.chat.thinking
+                        ? "Thinking is on: slower, often better answers"
+                        : offWord === "low"
+                          ? "Thinking is low: this model always thinks a little; faster answers"
+                          : "Thinking is off: faster answers"
+                    }
                     onClick={() =>
                       void ipc
                         .setChatThinking(detail.chat.id, !detail.chat.thinking)
@@ -393,10 +401,10 @@ export function ChatView() {
                     {/* "On" or "Off" at every width; "Thinking on" from @5xl while the chat has no
                         meter yet, from @7xl beside the meter (which takes that room first). */}
                     <span data-thinking="short" className={used === null ? "@5xl:hidden" : "@7xl:hidden"}>
-                      {detail.chat.thinking ? "On" : "Off"}
+                      {detail.chat.thinking ? "On" : offWord === "low" ? "Low" : "Off"}
                     </span>
                     <span data-thinking="full" className={used === null ? "hidden @5xl:inline" : "hidden @7xl:inline"}>
-                      Thinking {detail.chat.thinking ? "on" : "off"}
+                      Thinking {detail.chat.thinking ? "on" : offWord}
                     </span>
                   </button>
                 )}

@@ -101,6 +101,20 @@ fn is_subsequence(earlier: &[String], later: &[String]) -> bool {
 
 // ---- words --------------------------------------------------------------------------------
 
+/// [0.0.7 review] A phrase that runs into a file name is not the phrase: "open settings.json"
+/// is about a file. A full stop and a program's file are not file names.
+#[test]
+fn a_phrase_does_not_run_into_a_file_name() {
+    assert!(!Wording::of("open settings.json and set tabSize").has("open settings"));
+    assert!(!Wording::of("Open Settings.JSON").has("open settings"));
+    // The word itself is still there.
+    assert!(Wording::of("open settings.json").has("settings"));
+    assert!(Wording::of("Please open settings.").has("open settings"));
+    assert!(Wording::of("open settings. Then wait").has("open settings"));
+    assert!(Wording::of("open notepad.exe").has("open notepad"));
+    assert!(Wording::of("go to youtube.com").has("go to"));
+}
+
 #[test]
 fn a_keyword_matches_its_plural_and_its_ing_and_ed_forms() {
     for (text, keyword) in [
@@ -262,7 +276,8 @@ fn everyday_desktop_requests_find_the_computer_group() {
         ("use my pc to open Chrome", &["computer"]),
         ("on my laptop, open settings", &["computer"]),
         ("type this into Word", &["computer"]),
-        ("open the app", &["computer"]),
+        // [0.0.7 review] An app with no name could be code: nothing.
+        ("open the app", &[]),
         ("open File Explorer and show me my downloads", &["computer"]),
         // "click" means the browser by itself (a page has buttons too); the desktop's own
         // words bring the computer group in beside it.
@@ -297,6 +312,96 @@ fn everyday_desktop_requests_find_the_computer_group() {
             .collect();
         let want: BTreeSet<String> = expected.iter().map(|g| g.to_string()).collect();
         assert_eq!(got, want, "{message}");
+    }
+}
+
+/// [0.0.7 review m1] A match brings in all seven computer tools for the rest of the chat, so
+/// coding requests that share words with the desktop ("chrome", "excel", "laptop", "click",
+/// "open settings.json") never bring the group in; everyday desktop requests do, also those
+/// that named an app or a place the first list did not know.
+#[test]
+fn the_computer_group_needs_a_desktop_request() {
+    let all: Vec<Candidate> = on(&[
+        "files",
+        "terminal",
+        "git",
+        "skills",
+        "browser",
+        "computer",
+        "artifacts",
+        "search",
+    ])
+    .into_iter()
+    .filter(|t| !is_always_shown(t) && !is_core(t))
+    .collect();
+    let computer = |message: &str| {
+        matching_groups(&all, &Wording::of(message), &[])
+            .iter()
+            .any(|(group, _)| group == "computer")
+    };
+    for message in [
+        "chrome extension code",
+        "write a chrome extension that blocks ads",
+        "excel formula in python",
+        "read the excel file with pandas",
+        "open settings.json and set tabSize to 2",
+        "open utils.py and add type annotations",
+        "open the app.py file",
+        "open the calculator.py file and fix the add function",
+        "fix the click handler in my app",
+        "detect a click on the canvas",
+        "type the open function signature",
+        "press release about our new app",
+        "what model fits my laptop",
+        "which model runs best on my pc",
+        "computer science homework: explain recursion",
+        "the start menu of my game",
+        "mouse over event in javascript",
+        "keyboard shortcuts in vim",
+        "screen reader accessibility in react",
+        "cursor based pagination for the api",
+        "desktop app with tauri",
+        "make a program with a window and an icon",
+        "I attached a screenshot of the error",
+        "add infinite scroll to the list",
+        "implement drag and drop upload",
+        "if char in word: count it",
+        "build a task manager app in react",
+        "build a file explorer component",
+    ] {
+        assert!(!computer(message), "{message}");
+    }
+    for message in [
+        "open Notepad and type hello",
+        "open notepad.exe",
+        "type hello into notepad",
+        "use my pc to open Chrome",
+        "use my computer to open spotify",
+        "can you use my computer?",
+        "on my laptop, open settings",
+        "take a screenshot and tell me what you see",
+        "what's on my screen",
+        "type this into Word",
+        "put this in a spreadsheet in excel",
+        "open the calculator",
+        "open calculator app",
+        "open paint",
+        "open teams",
+        "start teams",
+        "open vlc and play the movie",
+        "launch vs code",
+        "open steam",
+        "open the photos app",
+        "open microsoft edge",
+        "minimize all windows",
+        "switch to the other window",
+        "set the volume to 50%",
+        "change my wallpaper",
+        "click the start button",
+        "press the Start menu button",
+        "open File Explorer and show me my downloads",
+    ] {
+        assert!(computer(message), "{message}");
     }
 }
 
@@ -499,12 +604,14 @@ fn reverse_engineering_matches_by_its_own_words_only() {
             .map_or(0, |(_, s)| s)
     };
     assert!(score("decompile this program") > score("decompile this"));
-    // "screenshot" and "drag" are only in the names of browser and computer tools.
+    // "screenshot" and "drag" are only in the names of browser and computer tools. The
+    // browser matches by the words of its tools' names; [0.0.7] the computer group matches by
+    // its own words only ("take a screenshot"), so "drag" brings in nothing.
     assert_eq!(
         groups(&all, "take a screenshot"),
         set(&["browser", "computer"])
     );
-    assert_eq!(groups(&all, "drag it to the left"), set(&["computer"]));
+    assert_eq!(groups(&all, "drag it to the left"), set(&[]));
     // An added server named like rea's group is an ordinary group: its tools' names count.
     let added = vec![external(
         "reverse",
@@ -541,7 +648,8 @@ fn a_request_to_organise_shows_the_folder_tools_in_full_access() {
 #[test]
 fn a_plain_request_shows_the_companions_and_the_core_file_tools() {
     let tools = default_set();
-    assert_eq!(tools.len(), 26);
+    // [0.0.7 P7] 27 since browser_capture_site.
+    assert_eq!(tools.len(), 27);
     let shown = pick(
         &tools,
         &["Please read notes.txt and tell me what it says"],

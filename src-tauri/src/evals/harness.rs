@@ -270,6 +270,26 @@ pub async fn run(
         path_separator: if cfg!(windows) { "\\" } else { "/" }.into(),
         full_access: false,
     });
+    // [0.0.7] The tool list and call guide a chat with these tools sends (8.5), so a run
+    // measures what real chats send. Every tool is offered, so they get only the room the
+    // tools leave. The repeat limit stays at its default (5): saved runs are compared with
+    // each other, and a setting that is not saved with them must not change their results.
+    let offered: Vec<mcp_host::RegisteredTool> = tools
+        .host
+        .tools()
+        .into_iter()
+        .filter(|t| t.schema_error.is_none() && tools.rules.offers(&t.server, &t.original))
+        .collect();
+    input.tool_guide = Some(
+        crate::tool_select::roster::fitted(
+            &offered,
+            &crate::tool_catalog::builtin_servers(&tools.host),
+            model.caps.n_ctx,
+            crate::tool_select::fixed_tokens(&input.system_prompt, None),
+            true,
+        )
+        .guide,
+    );
 
     // Stop, or the time limit, whichever comes first.
     let token = cancel.child_token();

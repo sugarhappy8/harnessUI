@@ -32,6 +32,8 @@ export interface Chat {
   cloudHost?: string | null;
   /** [0.0.7 P5] The model is on an endpoint whose thinking the app switches (Claude). */
   endpointThinking?: boolean;
+  /** [0.0.7 P5] ...but its thinking cannot stop: "off" asks it to think little ("Low"). */
+  endpointThinkingLow?: boolean;
 }
 
 export type Role = "system" | "user" | "assistant" | "tool";

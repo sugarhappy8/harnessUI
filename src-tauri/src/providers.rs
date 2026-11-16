@@ -431,11 +431,23 @@ mod tests {
             "https://api.anthropic.com",
             "https://API.anthropic.com:443/v1"
         ));
-        assert!(key_may_stay("http://192.168.1.5:8000", "http://192.168.1.5:8000/v1"));
+        assert!(key_may_stay(
+            "http://192.168.1.5:8000",
+            "http://192.168.1.5:8000/v1"
+        ));
         // Another company, host, port or scheme.
-        assert!(!key_may_stay("https://api.openai.com/v1", "https://openrouter.ai/api/v1"));
-        assert!(!key_may_stay("http://192.168.1.5:8000", "http://192.168.1.6:8000"));
-        assert!(!key_may_stay("http://192.168.1.5:8000", "http://192.168.1.5:8001"));
+        assert!(!key_may_stay(
+            "https://api.openai.com/v1",
+            "https://openrouter.ai/api/v1"
+        ));
+        assert!(!key_may_stay(
+            "http://192.168.1.5:8000",
+            "http://192.168.1.6:8000"
+        ));
+        assert!(!key_may_stay(
+            "http://192.168.1.5:8000",
+            "http://192.168.1.5:8001"
+        ));
         assert!(!key_may_stay("https://example.com", "http://example.com"));
         assert!(!key_may_stay("not a url", "not a url"));
         assert!(PASTE_THE_NEW_KEY.contains("Paste the API key for the new address"));
@@ -456,11 +468,19 @@ mod tests {
         let openai = marks_for(OpenAi, "https://api.openai.com/v1", "gpt-5.5");
         assert_eq!(openai.cloud_host.as_deref(), Some("api.openai.com"));
         assert!(!openai.thinking && !openai.thinking_low);
-        assert_eq!(marks_for(Generic, "http://127.0.0.1:11434", "m"), ChatMarks::default());
-        assert_eq!(marks_for(Generic, "http://192.168.1.5:8000", "m"), ChatMarks::default());
+        assert_eq!(
+            marks_for(Generic, "http://127.0.0.1:11434", "m"),
+            ChatMarks::default()
+        );
+        assert_eq!(
+            marks_for(Generic, "http://192.168.1.5:8000", "m"),
+            ChatMarks::default()
+        );
         // A name other than localhost can lead anywhere: marked.
         assert_eq!(
-            marks_for(Generic, "http://nas.local:11434", "m").cloud_host.as_deref(),
+            marks_for(Generic, "http://nas.local:11434", "m")
+                .cloud_host
+                .as_deref(),
             Some("nas.local")
         );
         // An address no host can be read from is marked with the address itself.
@@ -492,7 +512,10 @@ mod tests {
         let opus = "claude-opus-5-5";
         // "Automatic" for Claude: at most 200,000 of the 1,000,000 the model takes, so a long
         // chat does not send close to a million tokens with every message.
-        assert_eq!(plan_context(Anthropic, opus, Some(1_000_000), None, 4_096), 200_000);
+        assert_eq!(
+            plan_context(Anthropic, opus, Some(1_000_000), None, 4_096),
+            200_000
+        );
         // Claude Haiku 5.5 costs five times as much per token above 100,000.
         assert_eq!(
             plan_context(Anthropic, "claude-haiku-5-5", Some(1_000_000), None, 4_096),
@@ -517,17 +540,29 @@ mod tests {
         );
         assert_eq!(plan_context(Anthropic, opus, None, None, 16_384), 200_000);
         assert_eq!(plan_context(OpenAi, "gpt-5.5", None, None, 4_096), 128_000);
-        assert_eq!(plan_context(OpenAi, "gpt-5.5", None, Some(65_536), 4_096), 65_536);
+        assert_eq!(
+            plan_context(OpenAi, "gpt-5.5", None, Some(65_536), 4_096),
+            65_536
+        );
         assert_eq!(
             plan_context(OpenRouter, "x/y", Some(1_048_576), None, 4_096),
             128_000
         );
-        assert_eq!(plan_context(OpenRouter, "x/y", Some(32_768), None, 4_096), 32_768);
-        assert_eq!(plan_context(Abliteration, "m", Some(131_072), None, 4_096), 32_768);
+        assert_eq!(
+            plan_context(OpenRouter, "x/y", Some(32_768), None, 4_096),
+            32_768
+        );
+        assert_eq!(
+            plan_context(Abliteration, "m", Some(131_072), None, 4_096),
+            32_768
+        );
         // Servers that are not a company's: what they report, else the user's setting.
         assert_eq!(plan_context(Generic, "m", None, None, 16_384), 16_384);
         assert_eq!(plan_context(Generic, "m", Some(8_192), None, 16_384), 8_192);
-        assert_eq!(plan_context(Generic, "m", Some(262_144), None, 16_384), 262_144);
+        assert_eq!(
+            plan_context(Generic, "m", Some(262_144), None, 16_384),
+            262_144
+        );
     }
 
     /// [0.0.7 P5] The endpoint list says which endpoints are on the internet.

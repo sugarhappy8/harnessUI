@@ -87,17 +87,19 @@ pub(crate) fn messages_body(
         .is_some_and(|kind| kind == "adaptive" || kind == "enabled");
     // Preserved thinking: a replayed block whose earlier history changed (the app shortened
     // an old tool result, a summary replaced old turns) is dropped instead of failing the
-    // request. Only with thinking on (Anthropic refuses it beside `between_tools`).
-    if thinking_on
-        && converted.replayed_thinking
-        && guessed.preserved_thinking
-        && !fixes.drops("block_binding")
-        && let Some(Value::Object(param)) = thinking.as_mut()
-    {
-        param.insert(
-            "block_binding".into(),
-            json!({"prefix_mismatch_behavior": "drop_block"}),
-        );
+    // request. Only with thinking on (Anthropic refuses it beside `between_tools`); a model
+    // that thinks at low effort says `adaptive` for it, which is what it does anyway.
+    let binding = json!({"prefix_mismatch_behavior": "drop_block"});
+    if converted.replayed_thinking && guessed.preserved_thinking && !fixes.drops("block_binding") {
+        match thinking.as_mut() {
+            Some(Value::Object(param)) if thinking_on => {
+                param.insert("block_binding".into(), binding);
+            }
+            None if lowered => {
+                thinking = Some(json!({"type": "adaptive", "block_binding": binding}));
+            }
+            _ => {}
+        }
     }
     if with_tools {
         body.insert("tools".into(), tools(req));
@@ -437,10 +439,25 @@ fn head_bytes(data: &str) -> Vec<u8> {
 /// The width and height a picture's header gives (PNG, GIF, WebP, JPEG); `None` when the
 /// header is not in `bytes` or cannot be read.
 fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    let be16 = |at: usize| Some(u32::from(u16::from_be_bytes([*bytes.get(at)?, *bytes.get(at + 1)?])));
-    let le16 = |at: usize| Some(u32::from(u16::from_le_bytes([*bytes.get(at)?, *bytes.get(at + 1)?])));
+    let be16 = |at: usize| {
+        Some(u32::from(u16::from_be_bytes([
+            *bytes.get(at)?,
+            *bytes.get(at + 1)?,
+        ])))
+    };
+    let le16 = |at: usize| {
+        Some(u32::from(u16::from_le_bytes([
+            *bytes.get(at)?,
+            *bytes.get(at + 1)?,
+        ])))
+    };
     let le24 = |at: usize| {
-        Some(u32::from_le_bytes([*bytes.get(at)?, *bytes.get(at + 1)?, *bytes.get(at + 2)?, 0]))
+        Some(u32::from_le_bytes([
+            *bytes.get(at)?,
+            *bytes.get(at + 1)?,
+            *bytes.get(at + 2)?,
+            0,
+        ]))
     };
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         let width = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);

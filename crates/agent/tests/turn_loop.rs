@@ -1162,7 +1162,9 @@ async fn a_kept_back_tool_with_chat_markup_is_never_listed() {
     assert!(first.contains("- git_status: "), "{first}");
     assert!(!first.contains("git_commit"), "{first}");
     assert!(
-        app_notes(&h).iter().all(|note| !note.contains("Not offered")),
+        app_notes(&h)
+            .iter()
+            .all(|note| !note.contains("Not offered")),
         "{:?}",
         app_notes(&h)
     );

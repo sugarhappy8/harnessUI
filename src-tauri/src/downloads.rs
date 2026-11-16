@@ -341,7 +341,7 @@ enum Recorded {
     /// one now shows (cancelled).
     Replaced {
         new: String,
-        old: Option<DownloadGroupDto>,
+        old: Option<Box<DownloadGroupDto>>,
     },
 }
 
@@ -548,7 +548,7 @@ impl DownloadManager {
             Recorded::New(group) | Recorded::Resume(group) => group,
             Recorded::Replaced { new, old } => {
                 if let Some(old) = old {
-                    self.emit(app, old);
+                    self.emit(app, *old);
                 }
                 new
             }
@@ -601,7 +601,7 @@ impl DownloadManager {
             Start::Replace(group) => {
                 let old = self.group_dto(store, &group).await?.map(|mut d| {
                     d.status = status_name(DownloadStatus::Cancelled).into();
-                    d
+                    Box::new(d)
                 });
                 forget_group(store, &group, &dests).await?;
                 let new = insert_group(store, meta, files).await?;

@@ -389,10 +389,16 @@ fn without_the_finder_the_list_has_names_only_and_no_call_tool_rule() {
 /// tools the model can reach.
 #[test]
 fn without_room_for_call_tool_the_others_cannot_be_used_this_turn() {
-    let core: Vec<String> = ["list_dir", "read_file", "search_files", "write_file", "edit_file"]
-        .iter()
-        .map(|n| (*n).to_owned())
-        .collect();
+    let core: Vec<String> = [
+        "list_dir",
+        "read_file",
+        "search_files",
+        "write_file",
+        "edit_file",
+    ]
+    .iter()
+    .map(|n| (*n).to_owned())
+    .collect();
     let mut tools = guide(twenty(), GuideOs::Windows, 32_768);
     tools.reach = Reach::Only(core);
     let list = text(&tools);
@@ -416,7 +422,10 @@ fn without_room_for_call_tool_the_others_cannot_be_used_this_turn() {
     // Within reach, the shell part is there; write_file is not, so the file tools go unnamed.
     tools.reach = Reach::Only(vec!["run_command".to_owned()]);
     let shell = text(&tools);
-    assert!(shell.contains("run_command uses Windows PowerShell 5.1"), "{shell}");
+    assert!(
+        shell.contains("run_command uses Windows PowerShell 5.1"),
+        "{shell}"
+    );
     assert!(
         shell.contains("\n- > writes UTF-16 here, and there is no <<EOF.\n"),
         "{shell}"

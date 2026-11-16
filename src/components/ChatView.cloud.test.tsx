@@ -82,4 +82,33 @@ describe("the chat header's Cloud mark", () => {
     show(detail("remote:4:gpt-5", { cloudHost: "api.openai.com", endpointThinking: false }));
     expect(screen.queryByRole("button", { name: /Thinking/ })).toBeNull();
   });
+
+  it("says Low, not Off, for a Claude model whose thinking cannot stop", () => {
+    show(
+      detail("remote:3:claude-opus-5-5", {
+        cloudHost: "api.anthropic.com",
+        endpointThinking: true,
+        endpointThinkingLow: true,
+        thinking: false,
+      }),
+    );
+    const button = screen.getByRole("button", { name: "Thinking low" });
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    expect(button.title).toBe("Thinking is low: this model always thinks a little; faster answers");
+    expect(button.querySelector("[data-thinking='short']")!.textContent).toBe("Low");
+    expect(button.querySelector("[data-thinking='full']")!.textContent).toBe("Thinking low");
+    cleanup();
+    // On reads the same for every model.
+    show(
+      detail("remote:3:claude-opus-5-5", {
+        cloudHost: "api.anthropic.com",
+        endpointThinking: true,
+        endpointThinkingLow: true,
+        thinking: true,
+      }),
+    );
+    expect(screen.getByRole("button", { name: "Thinking on" }).title).toBe(
+      "Thinking is on: slower, often better answers",
+    );
+  });
 });

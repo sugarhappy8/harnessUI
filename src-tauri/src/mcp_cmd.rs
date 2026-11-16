@@ -1396,8 +1396,8 @@ async fn chat_tool_list(
         .map(|(tool, dto)| crate::tool_select::Candidate::of(tool, dto.builtin))
         .collect();
     // With the model's context known, the list is also held to what fits in it: [0.0.7] less
-    // the tool list and guide in the system message, made from the tools that are on as
-    // `turns::assemble` makes it.
+    // the tool list and guide in the system message, made from the tools that are on and
+    // counted as a turn counts them (`tool_select::roster::fitted`).
     let known_context = match turn_context {
         Some(n) => Some(n),
         None => context_for_defaults(state, chat).await.tokens(),
@@ -1411,14 +1411,16 @@ async fn chat_tool_list(
                 .map(|(tool, _)| tool.clone())
                 .collect();
             let builtin = crate::tool_catalog::builtin_servers(&state.host);
-            guide_tokens = crate::tool_select::roster::tokens(
-                &crate::tool_select::roster::tool_guide(&on, &builtin, n),
-            );
             let other = crate::tool_select::other_fixed(state, chat).await;
-            Some(crate::tool_select::allowance(
+            let fitted = crate::tool_select::roster::fitted(
+                &on,
+                &builtin,
                 n,
-                crate::tool_select::FixedPart::tokens_in(&other, n).saturating_add(guide_tokens),
-            ))
+                crate::tool_select::FixedPart::tokens_in(&other, n),
+                !setting.auto,
+            );
+            guide_tokens = fitted.tokens;
+            Some(fitted.room)
         }
         None => None,
     };

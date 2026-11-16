@@ -8,15 +8,20 @@
 //! The PowerShell texts are Windows PowerShell 5.1's own resource strings, as published with
 //! PowerShell's source (`ParserStrings.resx`: `InvalidEndOfLine` "The token '{0}' is not a
 //! valid statement separator in this version.", `RedirectionNotSupported` "The '{0}' operator
-//! is reserved for future use.", `UnexpectedToken` "Unexpected token '{0}' in expression or
-//! statement."; `ParameterBinderStrings.resx`: `NamedParameterNotFound` "A parameter cannot
-//! be found that matches parameter name '{1}'.", `AmbiguousParameter` "Parameter cannot be
-//! processed because the parameter name '{1}' is ambiguous. Possible matches include:{6}.";
-//! `DiscoveryExceptions.resx`: `CommandNotFoundException` "The term '{0}' is not recognized
-//! as the name of a cmdlet, function, script file, or operable program."), and .NET's
-//! `DirectoryNotFoundException` ("Could not find a part of the path '{0}'."). PowerShell 7
-//! words the last one "as a name of", so only "is not recognized as" is matched. zsh prints
-//! "zsh:1: no matches found: <pattern>" for a command line run with `-c`.
+//! is reserved for future use.", `AmpersandNotAllowed` "The ampersand (&) character is not
+//! allowed. The & operator is reserved for future use; wrap an ampersand in double quotation
+//! marks ("&") to pass it as part of a string.", `UnexpectedToken` "Unexpected token '{0}' in
+//! expression or statement."; `ParameterBinderStrings.resx`: `NamedParameterNotFound` "A
+//! parameter cannot be found that matches parameter name '{1}'.", `AmbiguousParameter`
+//! "Parameter cannot be processed because the parameter name '{1}' is ambiguous. Possible
+//! matches include:{6}."; `DiscoveryExceptions.resx`: `CommandNotFoundException` "The term
+//! '{0}' is not recognized as the name of a cmdlet, function, script file, or operable
+//! program."), and .NET's `DirectoryNotFoundException` ("Could not find a part of the path
+//! '{0}'."). PowerShell 7 words the term one "as a name of", so only "is not recognized as"
+//! is matched. PowerShell starts an error record with the command it is about ("Get-ChildItem
+//! : A parameter cannot be found…", an alias such as `ls` shown as its command), and that
+//! word, not the command line it echoes, decides a parameter hint. zsh prints "zsh:1: no
+//! matches found: <pattern>" for a command line run with `-c`.
 //!
 //! What a hint says is fixed text: nothing of the output is quoted, so what a program prints
 //! can at most choose among these lines. A hint never changes what ran or the exit status;
@@ -58,12 +63,16 @@ const DEV_NULL: &str = "Windows has no /dev/null: use 2>$null, > $null or | Out-
 const INPUT_REDIRECTION: &str = "PowerShell has no < input redirection and no here-documents \
                                  (<<EOF): pipe text in instead, as in Get-Content <file> | \
                                  <command>";
+const AMPERSAND: &str = "Windows PowerShell 5.1 takes & only at the start, to run a program: put \
+                         a URL or text that holds & in quotes ('https://example.com/?a=1&b=2'), \
+                         put ; between commands, and start a program that should keep running \
+                         with Start-Process";
 const QUOTED_PROGRAM: &str = "To run a program at a quoted path, put & in front: & \
                               'C:\\Program Files\\App\\app.exe' <arguments>";
 const CURL: &str = "In Windows PowerShell 5.1, curl and wget are Invoke-WebRequest: run curl.exe \
                     for the real curl";
-const ZSH_PATTERN: &str =
-    "zsh reads ? * and [ ] as file patterns: put the URL or pattern in quotes";
+const ZSH_PATTERN: &str = "zsh reads ? * and [ ] as file patterns and stops when no file \
+                           matches: put a URL, or a pattern meant for the program, in quotes";
 
 /// One-line hints for a failed command whose output shows a common mistake for its shell
 /// (module documentation), in a fixed order, each at most once.
@@ -88,8 +97,13 @@ pub fn command_hints(shell: HintShell, command: &str, output: &str) -> Vec<&'sta
             if flat.contains("is not a valid statement separator in this version") {
                 add(AND_OR);
             }
-            if flat.contains("operator is reserved for future use") {
+            // [0.0.7 review] Not "operator is reserved for future use" alone: the ampersand
+            // message says that too.
+            if flat.contains("The '<' operator is reserved for future use") {
                 add(INPUT_REDIRECTION);
+            }
+            if flat.contains("The ampersand (&) character is not allowed") {
+                add(AMPERSAND);
             }
             let first = command.trim_start();
             if flat.contains("Unexpected token")
@@ -109,17 +123,21 @@ pub fn command_hints(shell: HintShell, command: &str, output: &str) -> Vec<&'sta
             if flat.contains("A parameter cannot be found that matches parameter name")
                 || flat.contains("is ambiguous. Possible matches include")
             {
-                add(if flat.contains("Remove-Item") {
-                    REMOVE_ITEM
-                } else if flat.contains("Get-ChildItem") {
-                    GET_CHILD_ITEM
-                } else if flat.contains("Copy-Item") {
-                    COPY_ITEM
-                } else if flat.contains("Invoke-WebRequest") {
-                    CURL
-                } else {
-                    WHOLE_WORD_PARAMETERS
-                });
+                // The command each error is about, not every command the output names (it
+                // echoes the whole command line).
+                let commands = parameter_error_commands(&flat);
+                if commands.is_empty() {
+                    add(WHOLE_WORD_PARAMETERS);
+                }
+                for command in commands {
+                    add(match command.to_ascii_lowercase().as_str() {
+                        "remove-item" => REMOVE_ITEM,
+                        "get-childitem" => GET_CHILD_ITEM,
+                        "copy-item" => COPY_ITEM,
+                        "invoke-webrequest" => CURL,
+                        _ => WHOLE_WORD_PARAMETERS,
+                    });
+                }
             }
             for term in unrecognized_terms(&flat) {
                 match term.to_ascii_lowercase().as_str() {
@@ -143,7 +161,31 @@ pub fn command_hints(shell: HintShell, command: &str, output: &str) -> Vec<&'sta
     hints
 }
 
-/// The names in "The term 'NAME' is not recognized as …" messages.
+/// The commands PowerShell's parameter errors are about: the word before " : A parameter
+/// cannot be found…" or " : Parameter cannot be processed…", in the order of the errors.
+fn parameter_error_commands(flat: &str) -> Vec<&str> {
+    const MARKS: &[&str] = &[
+        " : A parameter cannot be found that matches parameter name",
+        " : Parameter cannot be processed because the parameter name",
+    ];
+    let mut found: Vec<(usize, &str)> = MARKS
+        .iter()
+        .flat_map(|mark| flat.match_indices(mark))
+        .filter_map(|(at, _)| {
+            // `flat` has single spaces, so the last piece is the word just before.
+            let word = flat[..at].rsplit(' ').next().unwrap_or("");
+            (!word.is_empty()).then_some((at, word))
+        })
+        .collect();
+    found.sort_by_key(|(at, _)| *at);
+    found.into_iter().map(|(_, word)| word).collect()
+}
+
+/// The longest term looked for in "The term 'NAME' is not recognized as …", in bytes.
+const MAX_TERM_BYTES: usize = 120;
+
+/// The names in "The term 'NAME' is not recognized as …" messages. Each search for the end of
+/// a name only looks a short way ahead, so a long output is read in one pass.
 fn unrecognized_terms(flat: &str) -> Vec<&str> {
     const OPEN: &str = "The term '";
     const CLOSE: &str = "' is not recognized as";
@@ -151,9 +193,13 @@ fn unrecognized_terms(flat: &str) -> Vec<&str> {
     let mut rest = flat;
     while let Some(at) = rest.find(OPEN) {
         let after = &rest[at + OPEN.len()..];
-        match after.find(CLOSE) {
+        let mut reach = after.len().min(MAX_TERM_BYTES + CLOSE.len());
+        while !after.is_char_boundary(reach) {
+            reach -= 1;
+        }
+        match after[..reach].find(CLOSE) {
             // A term is one word; a longer stretch is not one message.
-            Some(end) if end <= 120 && !after[..end].contains(' ') => {
+            Some(end) if !after[..end].contains(' ') => {
                 out.push(&after[..end]);
                 rest = &after[end + CLOSE.len()..];
             }
@@ -326,6 +372,88 @@ mod tests {
         assert!(QUOTED_PROGRAM.contains("& 'C:\\Program Files\\App\\app.exe'"));
     }
 
+    /// [0.0.7 review] PowerShell 5.1 says "operator is reserved for future use" of `&` too: a
+    /// URL with & or a trailing & gets the hint about &, not the one about `<`.
+    #[test]
+    fn an_ampersand_is_not_input_redirection() {
+        let ampersand = |command: &str| {
+            ps_error(&[
+                "At line:2 char:21",
+                &format!("+ {command}"),
+                "+                     ~",
+                "The ampersand (&) character is not allowed. The & operator is reserved for future use; wrap an ampersand in double quotation marks (\"&\") to pass it as part of a string.",
+                "    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException",
+                "    + FullyQualifiedErrorId : AmpersandNotAllowed",
+            ])
+        };
+        for command in ["curl https://x/?a=1&b=2", "npm run dev &", "a & b"] {
+            assert_eq!(
+                command_hints(PS, command, &ampersand(command)),
+                [AMPERSAND],
+                "{command}"
+            );
+        }
+        assert!(AMPERSAND.contains("Start-Process"));
+    }
+
+    /// [0.0.7 review] The command a parameter error is about decides the hint, not the
+    /// command line PowerShell echoes under it.
+    #[test]
+    fn the_command_of_a_parameter_error_decides_its_hint() {
+        let ls = ps_error(&[
+            "Get-ChildItem : A parameter cannot be found that matches parameter name 'la'.",
+            "At line:2 char:35",
+            "+ Remove-Item dist -Recurse -Force; ls -la",
+            "+                                   ~~~",
+            "    + CategoryInfo          : InvalidArgument: (:) [Get-ChildItem], ParameterBindingException",
+            "    + FullyQualifiedErrorId : NamedParameterNotFound,Microsoft.PowerShell.Commands.GetChildItemCommand",
+        ]);
+        assert_eq!(
+            command_hints(PS, "Remove-Item dist -Recurse -Force; ls -la", &ls),
+            [GET_CHILD_ITEM]
+        );
+        // Two errors: two hints, in their order.
+        let both = format!(
+            "{}{}",
+            ps_error(&[
+                "Remove-Item : A parameter cannot be found that matches parameter name 'rf'.",
+                "+ rm -rf dist; ls -la",
+            ]),
+            ps_error(&[
+                "Get-ChildItem : A parameter cannot be found that matches parameter name 'la'.",
+                "+ rm -rf dist; ls -la",
+            ]),
+        );
+        assert_eq!(
+            command_hints(PS, "rm -rf dist; ls -la", &both),
+            [REMOVE_ITEM, GET_CHILD_ITEM]
+        );
+        // Without the command's name, the general hint.
+        let bare = "A parameter cannot be found that matches parameter name 'x'.";
+        assert_eq!(command_hints(PS, "x -x", bare), [WHOLE_WORD_PARAMETERS]);
+    }
+
+    /// [0.0.7 review] A long output costs one pass, whatever it holds: hints are found in the
+    /// async tool call, before its result goes back.
+    #[test]
+    fn a_long_output_is_read_in_one_pass() {
+        let started = std::time::Instant::now();
+        let open_only = "The term 'x ".repeat(90_000);
+        assert!(command_hints(PS, "x", &open_only).is_empty());
+        let unclosed = format!("{}' is not recognized as", "The term '".repeat(100_000));
+        assert!(command_hints(PS, "x", &unclosed).is_empty());
+        let long_term = format!("The term '{}' is not recognized as", "g".repeat(1_000_000));
+        assert!(command_hints(PS, "x", &long_term).is_empty());
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "{elapsed:?} for about 3 MB"
+        );
+        // Terms are still found, also next to text that is not ASCII.
+        let grep = "é The term 'grep' is not recognized as the name of a cmdlet.";
+        assert_eq!(command_hints(PS, "grep x", grep), [GREP]);
+    }
+
     #[test]
     fn curl_is_invoke_web_request_in_powershell_5_1() {
         let output = ps_error(&[
@@ -397,6 +525,7 @@ mod tests {
             VARIABLE_FIRST,
             DEV_NULL,
             INPUT_REDIRECTION,
+            AMPERSAND,
             QUOTED_PROGRAM,
             CURL,
             ZSH_PATTERN,

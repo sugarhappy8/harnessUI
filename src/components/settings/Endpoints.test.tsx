@@ -6,7 +6,7 @@ import type { Provider } from "../../lib/types";
 // "Cloud" mark, Edit and the context size of an endpoint.
 
 const KEY_OVER_HTTP =
-  "An API key is sent to a server on the internet only over https://, so that no one on the way can read it. Change the address to start with https://.";
+  "An API key is sent over plain http:// only to this computer or to a local network address such as 192.168.1.20, so that no one on the way can read it. Change the address to start with https://, or use the server's local IP address.";
 
 let providers: Provider[] = [];
 
@@ -21,9 +21,11 @@ const ipcMock = vi.hoisted(() => ({
 }));
 vi.mock("../../lib/ipc", () => ipcMock);
 const refreshModelOptions = vi.hoisted(() => vi.fn(async () => undefined));
+const openChat = vi.hoisted(() => vi.fn(async (id: number | null) => void id));
 vi.mock("../../store/app", () => ({
   toErrorInfo: (e: unknown) => ({ code: "bad_request", message: String(e), nextStep: "", details: "" }),
-  useApp: (select: (s: { refreshModelOptions: () => Promise<void> }) => unknown) => select({ refreshModelOptions }),
+  useApp: (select: (s: Record<string, unknown>) => unknown) =>
+    select({ refreshModelOptions, activeChatId: 5, openChat }),
 }));
 const openUrl = vi.hoisted(() => vi.fn(async (url: string) => void url));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
@@ -199,6 +201,8 @@ describe("Settings → Endpoints", () => {
     });
     expect(ipcMock.testProvider).toHaveBeenCalledWith(7);
     expect(refreshModelOptions).toHaveBeenCalled();
+    // The open chat is read again, so its "Cloud" mark follows the endpoint.
+    expect(openChat).toHaveBeenCalledWith(5);
     const row = screen.getByRole("listitem");
     expect(row.textContent).toContain("Connected · 2 model(s)");
     expect(row.textContent).toContain(`at most ${(200000).toLocaleString()} tokens`);
@@ -245,5 +249,98 @@ describe("Settings → Endpoints", () => {
       contextLength: null,
     });
     expect(ipcMock.testProvider).toHaveBeenCalledWith(1);
+  });
+
+  it("never carries a saved key to a new address", async () => {
+    providers = [
+      provider({ id: 3, name: "OpenAI", kind: "openai", baseUrl: "https://api.openai.com/v1" }),
+      provider({ id: 4, name: "Box", kind: "generic", baseUrl: "http://192.168.1.5:8000/v1", cloud: false }),
+    ];
+    await show();
+    // Another company: the key must be pasted again.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit OpenAI" }));
+    });
+    expect(field("API key").required).toBe(false);
+    expect(document.getElementById("p-key-moved")).toBeNull();
+    await choose("Company or server", "openrouter");
+    expect(field("Address").value).toBe("https://openrouter.ai/api/v1");
+    expect(field("API key").required).toBe(true);
+    expect(field("API key").placeholder).toBe("paste your key");
+    expect(document.getElementById("p-key-moved")!.textContent).toContain(
+      "The saved key is for api.openai.com and is not sent to a new address.",
+    );
+    await type("API key", "sk-or-new");
+    await submit();
+    expect(ipcMock.saveProvider).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 3, kind: "openrouter", apiKey: "sk-or-new", clearApiKey: false }),
+    );
+    // The same host with another path keeps it.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit Box" }));
+    });
+    await type("Address", "http://192.168.1.5:8000/v2");
+    expect(field("API key").placeholder).toBe("saved (leave empty to keep it)");
+    expect(document.getElementById("p-key-moved")).toBeNull();
+    // A server moved to another address without a key: the saved key is dropped.
+    await type("Address", "http://192.168.1.6:8000/v1");
+    expect(field("API key").required).toBe(false);
+    expect(document.getElementById("p-key-moved")!.textContent).toContain("Paste a key if this server needs one.");
+    await submit();
+    expect(ipcMock.saveProvider).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 4, baseUrl: "http://192.168.1.6:8000/v1", apiKey: null, clearApiKey: true }),
+    );
+  });
+
+  it("removes a saved key on request", async () => {
+    providers = [provider({})];
+    await show();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit Anthropic" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: "Remove the saved key" }));
+    });
+    // A company's endpoint then needs a new key.
+    expect(field("API key").required).toBe(true);
+    await type("API key", "sk-ant-new");
+    await submit();
+    expect(ipcMock.saveProvider).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 1, apiKey: "sk-ant-new", clearApiKey: false }),
+    );
+    // A server's endpoint can go without one.
+    providers = [provider({ id: 2, name: "Box", kind: "generic", baseUrl: "http://10.0.0.2:8000/v1", cloud: false })];
+    cleanup();
+    await show();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit Box" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox", { name: "Remove the saved key" }));
+    });
+    await submit();
+    expect(ipcMock.saveProvider).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 2, apiKey: null, clearApiKey: true }),
+    );
+  });
+
+  it("says how much a company's Automatic sends, and that more costs more", async () => {
+    await show();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Add an endpoint/ }));
+    });
+    const help = () => document.getElementById("p-ctx-help")!.textContent!;
+    expect(help()).toContain(`at most ${(200_000).toLocaleString()} tokens`);
+    expect(help()).toContain("100,000 for Claude Haiku 5.5");
+    expect(help()).not.toContain("much more of your credit");
+    await choose("Context size", "1000000");
+    expect(help()).toContain("uses much more of your credit");
+    await choose("Context size", "65536");
+    expect(help()).not.toContain("much more of your credit");
+    await choose("Company or server", "openrouter");
+    await choose("Context size", "");
+    expect(help()).toContain(`at most ${(128_000).toLocaleString()} tokens`);
+    await choose("Company or server", "ollama");
+    expect(help()).toContain("the size chosen below for servers that report none");
   });
 });

@@ -7,12 +7,12 @@
 //! changes which tools are on, and the model server can keep its cached prompt.
 //!
 //! The list and the guide take part of the system message, so the room left for tool
-//! definitions is smaller by what they take ([`tokens`]): the selection and the Tools panel
-//! count them, as the loop's own check does.
+//! definitions is smaller by what they take: the selection, the Tools panel and the turn get
+//! them from [`fitted`], which never lets them take the room of the core file tools.
 
 use std::collections::BTreeSet;
 
-use agent::prompt::{GuideOs, ListedTool, Sanitizer, ToolGroup, ToolGuide};
+use agent::prompt::{GuideOs, ListedTool, Reach, Sanitizer, ToolGroup, ToolGuide};
 use mcp_host::RegisteredTool;
 
 use super::finder;
@@ -59,7 +59,12 @@ pub fn tool_guide(tools: &[RegisteredTool], builtin: &BTreeSet<String>, n_ctx: u
     }
     ToolGuide {
         groups: groups.into_iter().map(|(_, group)| group).collect(),
-        finder: call_tool,
+        // The loop decides once it knows the turn's tools; this is the guess before that.
+        reach: if call_tool {
+            Reach::CallTool
+        } else {
+            Reach::All
+        },
         os: GuideOs::this_os(),
         budget: agent::prompt::tool_guide_budget(n_ctx),
     }
@@ -73,6 +78,73 @@ pub fn tokens(guide: &ToolGuide) -> u32 {
         return 0;
     }
     agent::estimate_tokens(&format!("\n\n{}", blocks.join("\n\n")))
+}
+
+/// [0.0.7 review M1] A turn's tool list and guide, and the room they leave for tool
+/// definitions.
+#[derive(Debug, Clone)]
+pub struct Fitted {
+    /// The list and guide, held to what was counted for them ([`ToolGuide::budget`]).
+    pub guide: ToolGuide,
+    /// About how many tokens they take at most, by the loop's estimate.
+    pub tokens: u32,
+    /// What tool definitions may take: [`super::allowance`] less `tokens`.
+    pub room: u32,
+}
+
+/// [0.0.7 review M1] The list and guide ([`tool_guide`]) for a turn in a context of `n_ctx`
+/// tokens whose other fixed part takes `other` tokens, and the room left for tool
+/// definitions.
+///
+/// They take at most their share of the context, and never the room of the tools that come
+/// first: the core file tools while the selection is on, every tool when a turn shows all of
+/// them (`every_tool_shown`). In a 4,096-token context the core file tools take nearly all the
+/// room, so the list and guide make do with what is left, often nothing, instead of pushing
+/// `edit_file` out of every turn. The loop decides how the model reaches the tools a turn does
+/// not show only once it knows them (`agent::prompt::Reach`), so the budget becomes the most
+/// any of its choices takes: the loop never writes more than was counted here.
+pub fn fitted(
+    tools: &[RegisteredTool],
+    builtin: &BTreeSet<String>,
+    n_ctx: u32,
+    other: u32,
+    every_tool_shown: bool,
+) -> Fitted {
+    let room = super::allowance(n_ctx, other);
+    let first = tools
+        .iter()
+        .map(|tool| super::Candidate::of(tool, builtin.contains(&tool.server)))
+        .filter(|tool| every_tool_shown || super::is_core(tool))
+        .fold(0u32, |sum, tool| sum.saturating_add(tool.cost));
+    let mut guide = tool_guide(tools, builtin, n_ctx);
+    guide.budget = guide.budget.min(room.saturating_sub(first));
+    let tokens = most_tokens(&guide);
+    guide.budget = tokens;
+    Fitted {
+        guide,
+        tokens,
+        room: room.saturating_sub(tokens),
+    }
+}
+
+/// The most tokens the loop may write for this list and guide, whatever it decides about how
+/// the model reaches the tools a turn does not show (every section of the guide counted).
+fn most_tokens(guide: &ToolGuide) -> u32 {
+    let every: Vec<String> = guide.names().map(str::to_owned).collect();
+    let mut reaches = vec![Reach::All, Reach::Only(every)];
+    if guide.reach == Reach::CallTool {
+        reaches.push(Reach::CallTool);
+    }
+    reaches
+        .into_iter()
+        .map(|reach| {
+            tokens(&ToolGuide {
+                reach,
+                ..guide.clone()
+            })
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// The list as a helper started by `run_subagent` gets it: without the tools a helper is
@@ -146,7 +218,7 @@ mod tests {
     #[test]
     fn every_tool_that_is_on_is_listed_by_group_with_run_subagent_last() {
         let guide = tool_guide(&on(), &builtin(), 32_768);
-        assert!(guide.finder);
+        assert_eq!(guide.reach, Reach::CallTool);
         let groups: Vec<(&str, bool, Vec<&str>)> = guide
             .groups
             .iter()
@@ -192,7 +264,7 @@ mod tests {
     fn without_call_tool_there_is_no_finder_and_nothing_on_lists_nothing() {
         let mut tools = on();
         tools.retain(|t| t.server != "toolfinder");
-        assert!(!tool_guide(&tools, &builtin(), 32_768).finder);
+        assert_eq!(tool_guide(&tools, &builtin(), 32_768).reach, Reach::All);
         let empty = tool_guide(&[], &builtin(), 32_768);
         assert!(empty.groups.is_empty());
         assert_eq!(tokens(&empty), 0);
@@ -220,6 +292,68 @@ mod tests {
         let text = agent::prompt::tool_guide_blocks(&a, &Sanitizer::generic()).join("\n\n");
         assert_eq!(size, agent::estimate_tokens(&format!("\n\n{text}")));
         assert!(size > 50 && size <= a.budget, "{size}");
+    }
+
+    /// [0.0.7 review M1] The tools a new chat has on, with their real definitions (the groups
+    /// that need the running app, artifacts, web search, stored output and the task, are left
+    /// out: they come after the core file tools all the same).
+    fn real_tools(host: &mcp_host::Host) -> (Vec<RegisteredTool>, BTreeSet<String>) {
+        let on: Vec<RegisteredTool> = host
+            .tools()
+            .into_iter()
+            .filter(|t| ["files", "browser", "skills", "toolfinder"].contains(&t.server.as_str()))
+            .filter(|t| !(t.server == "files" && tools::files::organize::is_tool(&t.original)))
+            .collect();
+        (on, tool_catalog::builtin_servers(host))
+    }
+
+    /// [0.0.7 review M1] In a 4,096-token context the list and guide never push a core file
+    /// tool out (before, they left `edit_file` out of every turn): they get what is left once
+    /// those are counted, and the loop never writes more than was counted.
+    #[test]
+    fn the_list_and_guide_never_take_the_room_of_the_core_file_tools() {
+        let host = tool_catalog::tests::builtin_host();
+        let (on, builtin) = real_tools(&host);
+        let candidates: Vec<super::super::Candidate> = on
+            .iter()
+            .map(|t| super::super::Candidate::of(t, builtin.contains(&t.server)))
+            .collect();
+        let core: u32 = candidates
+            .iter()
+            .filter(|t| super::super::is_core(t))
+            .map(|t| t.cost)
+            .sum();
+        let other = super::super::fixed_tokens("You are a helpful assistant.", None);
+        for n_ctx in [4_096, 6_144, 8_192, 16_384, 32_768] {
+            let fitted = fitted(&on, &builtin, n_ctx, other, false);
+            let room = super::super::allowance(n_ctx, other);
+            assert_eq!(fitted.room, room - fitted.tokens, "{n_ctx}");
+            assert!(fitted.room >= core, "{n_ctx}: {} < {core}", fitted.room);
+            assert!(fitted.tokens <= agent::prompt::tool_guide_budget(n_ctx));
+            assert_eq!(fitted.guide.budget, fitted.tokens);
+            // Whatever the loop then decides, it writes no more than was counted.
+            for reach in [
+                Reach::CallTool,
+                Reach::All,
+                Reach::Only(vec!["read_file".into()]),
+            ] {
+                let mut guide = fitted.guide.clone();
+                guide.reach = reach;
+                assert!(tokens(&guide) <= fitted.tokens, "{n_ctx}");
+            }
+        }
+        // 4,096 tokens: the five core file tools take nearly all the room. In a large
+        // context the list and guide take their share.
+        assert!(fitted(&on, &builtin, 4_096, other, false).tokens < 200);
+        assert!(fitted(&on, &builtin, 32_768, other, false).tokens > 500);
+        // When every tool is shown, they get only what all the tools leave.
+        let all: u32 = candidates.iter().map(|t| t.cost).sum();
+        let every = fitted(&on, &builtin, 16_384, other, true);
+        assert!(
+            every.tokens <= super::super::allowance(16_384, other).saturating_sub(all),
+            "{}",
+            every.tokens
+        );
     }
 
     #[test]

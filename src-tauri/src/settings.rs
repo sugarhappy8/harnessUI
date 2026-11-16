@@ -36,7 +36,8 @@ pub fn steps_per_turn(stored: Option<&serde_json::Value>) -> u32 {
 }
 
 /// [0.0.7] "Stop when the model makes the same call this many times in a row" (8.2, loop
-/// detection). Read when a turn starts; the model is told it repeats itself two calls before.
+/// detection). Read when a turn starts; the model is told it repeats itself two calls before
+/// the limit (one call before at 3; at 2 there is no room for a warning).
 pub const SAME_CALL_LIMIT: &str = "sameCallLimit";
 
 /// [0.0.7] A repeat limit as it may be saved: a whole number from 2 to 100.
