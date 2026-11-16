@@ -758,10 +758,16 @@ fn website_capture_requests_bring_the_capture_tool() {
             .into_iter()
             .map(|(group, _)| group)
             .collect();
-        assert!(groups.contains(&"browser".to_string()), "{request}: {groups:?}");
+        assert!(
+            groups.contains(&"browser".to_string()),
+            "{request}: {groups:?}"
+        );
         // Under the cap, the group's places go to the tools the request points at most.
         let shown = pick(&default_set(), &[request], &[], &[]);
-        assert!(shown.contains(&"browser_capture_site".to_string()), "{request}: {shown:?}");
+        assert!(
+            shown.contains(&"browser_capture_site".to_string()),
+            "{request}: {shown:?}"
+        );
     }
     let shown = pick(
         &default_set(),
@@ -769,7 +775,10 @@ fn website_capture_requests_bring_the_capture_tool() {
         &[],
         &[],
     );
-    assert!(!shown.contains(&"browser_capture_site".to_string()), "{shown:?}");
+    assert!(
+        !shown.contains(&"browser_capture_site".to_string()),
+        "{shown:?}"
+    );
 }
 
 /// Two groups match and not everything fits: they take turns, so the smaller group is not
