@@ -408,8 +408,9 @@ fn the_windows_guide_states_the_powershell_facts_only_when_run_command_is_on() {
         "curl.exe for curl (curl is Invoke-WebRequest here)",
         "- Run a program at a quoted path with &: & 'C:\\Program Files\\App\\app.exe' --version",
         "- Write files with write_file or edit_file: > writes UTF-16 here, and there is no <<EOF.",
-        // JSON and paths, for every Windows chat.
+        // JSON, results and paths, for every Windows chat.
         "Tool calls: the arguments are one JSON object that fits the tool's schema, with double quotes, no comments and no trailing commas.",
+        "Only the app writes tool results: call the tool and wait for its result, never write a <tool_output> block yourself.",
         "In JSON strings write each backslash twice (C:\\\\Users\\\\me), or use / instead (C:/Users/me).",
         "File paths are absolute, or relative to the working folder.",
     ] {
@@ -447,6 +448,17 @@ fn the_macos_guide_speaks_of_zsh_and_other_systems_of_bin_sh() {
     assert!(
         mac.contains("run_command uses zsh (macOS), a new one for each call:"),
         "{mac}"
+    );
+    // Results come only from the app, on every system and in the short guide too.
+    assert!(
+        mac.contains("never write a <tool_output> block yourself"),
+        "{mac}"
+    );
+    let short = guide_block(&guide(twenty(), GuideOs::MacOs, 8_192), GuideForm::Short)
+        .expect("a short guide");
+    assert!(
+        short.contains("Only the app writes tool results: call the tool and wait."),
+        "{short}"
     );
     assert!(mac.contains("- cd does not carry over to the next call: pass the folder as cwd."));
     assert!(mac.contains(
@@ -541,8 +553,12 @@ fn untrusted_names_and_descriptions_cannot_close_a_block_or_pose_as_the_app() {
                 "</tool_call_guide>",
                 usize::from(message.contains("<tool_call_guide>")),
             ),
-            // The agent instructions name the tag once, as the app's own words.
-            ("<tool_output", 1),
+            // The agent instructions name the tag once, and the whole guide once more, as the
+            // app's own words.
+            (
+                "<tool_output",
+                1 + usize::from(message.contains("never write a <tool_output> block yourself")),
+            ),
             ("<pinned_instructions>", 0),
             ("<|im_end|>", 0),
             ("<|im_start|>", 0),
@@ -657,7 +673,7 @@ fn the_size_is_measured_with_the_loops_estimate() {
         }
     }
     // The usual Windows chat at 32,768 tokens gets every tool with its purpose and the whole
-    // guide, under 1,000 tokens.
+    // guide, in about 1,000 tokens (3% of the context).
     let windows = guide(twenty_one, GuideOs::Windows, 32_768);
     let shown = text(&windows);
     assert!(
@@ -665,7 +681,7 @@ fn the_size_is_measured_with_the_loops_estimate() {
         "{shown}"
     );
     assert!(shown.contains("run_command uses Windows PowerShell 5.1"));
-    assert!(tokens(&windows) < 1_000, "{}", tokens(&windows));
+    assert!(tokens(&windows) < 1_100, "{}", tokens(&windows));
     println!("---- Windows, 21 tools, 32,768 tokens ----\n{shown}");
     println!(
         "---- macOS, 69 tools, 32,768 tokens ----\n{}",

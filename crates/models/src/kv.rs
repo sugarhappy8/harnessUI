@@ -264,10 +264,10 @@ impl KvShape {
 
     /// The rotation matrices a quantized cache gives each layer of one of its two caches
     /// (`llama_kv_cache` constructor and `init_rotation`): when every layer of that cache
-    /// has the same key head size, a key matrix of `n_rot_k²` entries, `n_rot_k` the
-    /// largest power of two from 64 that divides it; when they share a value head size, a
-    /// value matrix of 64². Both need layer 0's head size (whatever cache it is in) to be a
-    /// multiple of 64. f16 has none.
+    /// has the same key head size, a key matrix of `n_rot_k²` f32 entries, `n_rot_k`
+    /// starting at 64 and doubled while twice it divides that size; when they share a value
+    /// head size, a value matrix of 64². Both need layer 0's head size (whatever cache it is
+    /// in) to be a multiple of 64. f16 has none.
     fn rotation(&self, layout: KvLayout, window: bool) -> (u64, u64) {
         if layout.cache == KvCacheType::F16 {
             return (0, 0);

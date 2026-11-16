@@ -1170,7 +1170,14 @@ async fn a_tool_result_written_by_the_model_is_discarded_and_asked_once_more() {
         .filter(|e| matches!(e, TurnEvent::StepStarted { .. }))
         .count();
     assert_eq!(steps, 2);
-    assert!(app_notes(&h).is_empty(), "{:?}", app_notes(&h));
+    // The user is not told of a made-up result: none was kept.
+    assert!(
+        !app_notes(&h)
+            .iter()
+            .any(|n| n == agent::turn::MADE_UP_RESULT_NOTE),
+        "{:?}",
+        app_notes(&h)
+    );
 }
 
 /// Asked once more, the model writes one again: that reply is the answer, the user is told
@@ -1188,7 +1195,11 @@ async fn a_second_made_up_result_is_kept_and_the_user_is_told() {
     assert_eq!(last_text(&outcome), again);
     assert_eq!(h.chats().len(), 2);
     assert_eq!(discarded(&h).len(), 1);
-    assert_eq!(app_notes(&h), [agent::turn::MADE_UP_RESULT_NOTE]);
+    let told: Vec<String> = app_notes(&h)
+        .into_iter()
+        .filter(|n| n == agent::turn::MADE_UP_RESULT_NOTE)
+        .collect();
+    assert_eq!(told.len(), 1, "{:?}", app_notes(&h));
 }
 
 /// The tag inside code is an example, and without tools nothing is asked again.

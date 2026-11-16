@@ -113,7 +113,7 @@ fn remembered_files_are_replaced_and_kept_to_a_limit() {
     // The same path again (the file changed and failed again): replaced, not added.
     let a2 = stamp(Path::new("/m/mmproj-a.gguf"), 2, 2);
     assert_eq!(remember(&list, a2.clone()), vec![a2.clone()]);
-    assert!(is_unreadable(&[a2.clone()], &a2));
+    assert!(is_unreadable(std::slice::from_ref(&a2), &a2));
     assert!(!is_unreadable(&[a2], &a));
     let mut list = Vec::new();
     for n in 0..(MAX_UNREADABLE as u64 + 3) {
@@ -185,7 +185,12 @@ fn the_choice_for_a_load() {
     let recorded_text = recorded.display().to_string();
 
     // Recorded and readable: that one, even with others beside it.
-    let c = choose(Some(&recorded_text), &[near.clone()], &[], all());
+    let c = choose(
+        Some(&recorded_text),
+        std::slice::from_ref(&near),
+        &[],
+        all(),
+    );
     assert_eq!(
         c,
         Choice {
@@ -206,7 +211,7 @@ fn the_choice_for_a_load() {
     );
     // The recorded one is gone: beside it.
     let gone = on_disk(vec![files[1].clone()]);
-    let c = choose(Some(&recorded_text), &[near.clone()], &[], gone);
+    let c = choose(Some(&recorded_text), std::slice::from_ref(&near), &[], gone);
     assert_eq!(c.path, Some(near.display().to_string()));
     assert!(c.found && !c.left_out);
     // The recorded one could not be read: another one beside it (the same file there is
@@ -220,7 +225,12 @@ fn the_choice_for_a_load() {
     );
     assert_eq!(c.path, Some(near.display().to_string()));
     assert!(c.found && !c.left_out);
-    let c = choose(Some(&recorded_text), &[recorded.clone()], &bad, all());
+    let c = choose(
+        Some(&recorded_text),
+        std::slice::from_ref(&recorded),
+        &bad,
+        all(),
+    );
     assert_eq!(
         c,
         Choice {

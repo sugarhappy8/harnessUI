@@ -39,3 +39,12 @@ and `README.md`.
     file leaves the group "downloading" forever; a downloaded model whose files are gone or
     outside the models folder can't be removed from Installed; `load()` stops the old model
     before checking the backend can run; deleting with files keeps the image file.
+    Added from P6a: an approval card pending when the window reloads is lost (keep the card
+    in `PendingCard` in `turns.rs` and read it back at startup).
+- P3 (computer use) built: harnessUI minimises itself before approved input and comes back
+  for cards, turn end and Stop; keyboard handed back to the planned window; 27 new tests.
+  Under independent review.
+- P6a (chat/frontend fixes) built: all six bugs fixed with tests (vitest 804, app 827).
+  Under independent review. To re-check in the integration e2e run: "stop and regenerate"
+  and "regenerate after error" failed in P6a's real-app run under 100% CPU (text present in
+  the rows, `innerText` caught up ~1.5 s later because of `content-visibility: auto`).
