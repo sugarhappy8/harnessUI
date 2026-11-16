@@ -400,3 +400,11 @@ and `README.md`.
   Location; the last-choice lock. browser lib 167, browser_e2e 30, capture_e2e 7 (with the
   verifier's hostile pages), app mcp_cmd/toolset 43. The verifier is re-checking with its
   harness. Disk: 4.4 GB free → pruned idle build output → 11 GB.
+- P7 round-2 re-verification: all seven fixed — every round-1 hostile page re-captured
+  through the real tool and opened offline made no request and leaked nothing; ~20 minutes
+  of other attempts (escaped function names, @property, paint(), element(), image()
+  fallbacks, @font-face src forms, @import with layer/supports, nesting, @layer/@container/
+  @scope/@starting-style, data:/blob: shared workers, importScripts, EventSource,
+  worklets, a service worker registered mid-capture) got nothing through. Agrees holding
+  service workers is safe. Hardening nit left for later: check `waitingForDebugger` when a
+  web worker attaches. P7 finished.
