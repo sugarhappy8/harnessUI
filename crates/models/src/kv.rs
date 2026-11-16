@@ -1242,8 +1242,11 @@ mod tests {
     /// -ngl 0 --fit off -v`, "llama_kv_cache: size = ..."): 12 + 15 MiB at 4,096 tokens,
     /// 96 + 15 at 32,768, 1.5 + 7.5 at 512, and with `-fa on -ctk q8_0 -ctv q8_0` at 4,096
     /// 6.38 + 7.97 MiB with rotation buffers of 0.80 + 3.98 MiB; its saved copies were
-    /// logged at 7.506 MiB each (7,864,320 bytes of rows and 512 cells' positions), and with
-    /// the app's `--ctx-checkpoints 8` at most 8 were kept.
+    /// logged at 7.506 MiB each (7,864,320 bytes of rows and 512 cells' positions). In a
+    /// 20-turn chat of 16,058 tokens llama.cpp's default kept 32 and the server's memory grew
+    /// by 275 MB before it levelled off; with the app's `--ctx-checkpoints 8` it never kept
+    /// more than 8 (7 there, as it also thins them) and grew by 74 MB, about 12 MB of it the
+    /// first reply's other buffers.
     #[test]
     fn real_short_memory_model_if_available() {
         let Ok(path) = std::env::var("TEST_SWA_GGUF") else {

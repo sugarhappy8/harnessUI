@@ -8,6 +8,8 @@
 //! - Resume uses `Range` and asks for uncompressed bytes. A `206` must report the
 //!   expected total; a `200` restarts from zero; a `416` means "already complete, verify".
 //! - The finished file is hashed and compared before it is renamed into place.
+//! - 0.0.7: a file already at its final name with its published size and SHA-256 (it
+//!   finished before) is checked again, never downloaded again.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -151,8 +153,35 @@ pub async fn discard_partial(dest: &Path) {
     let _ = tokio::fs::remove_file(meta).await;
 }
 
+/// The SHA-256 of the file at `dest` when it is already the finished file of `spec`: its
+/// published size and checksum. `None` when it has to be downloaded: no file there, another
+/// size or content, or no published checksum to tell (then it is downloaded again, as
+/// before 0.0.7). Hashing a large file takes a while, so `cancel` stops it.
+async fn finished_already(
+    spec: &FileSpec,
+    dest: &Path,
+    cancel: &CancellationToken,
+) -> Result<Option<String>, DownloadError> {
+    let Some(expected) = &spec.sha256 else {
+        return Ok(None);
+    };
+    match tokio::fs::metadata(dest).await {
+        Ok(m) if m.is_file() && m.len() == spec.size => {}
+        _ => return Ok(None),
+    }
+    let actual = tokio::select! {
+        _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+        r = sha256_file(dest) => r?,
+    };
+    Ok((&actual == expected).then_some(actual))
+}
+
 /// Downloads `spec` to `dest`, resuming a matching partial file. `progress` gets the
 /// bytes on disk so far (call sites throttle it). Returns the verified SHA-256.
+///
+/// 0.0.7: a file already at `dest` with the published size and SHA-256 is not downloaded
+/// again (a download resumed after its file finished, or another download of the same
+/// file); a partial file left beside it is discarded.
 pub async fn download_file(
     client: &HfClient,
     spec: &FileSpec,
@@ -160,6 +189,11 @@ pub async fn download_file(
     cancel: &CancellationToken,
     progress: &(dyn Fn(u64) + Send + Sync),
 ) -> Result<String, DownloadError> {
+    if let Some(sha) = finished_already(spec, dest, cancel).await? {
+        discard_partial(dest).await;
+        progress(spec.size);
+        return Ok(sha);
+    }
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }

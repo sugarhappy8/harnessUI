@@ -1178,7 +1178,11 @@ mod tests {
         assert_eq!(room.verdict_with(16 * GB, 5 * GB), Verdict::Yellow);
         assert_eq!(room.verdict_with(16 * GB, 5 * GB + 1), Verdict::Red);
         // Without them, the 0.0.6 verdict.
-        for room in [room, Room::processor(12 * GB), Room::apple(11 * GB, 15 * GB)] {
+        for room in [
+            room,
+            Room::processor(12 * GB),
+            Room::apple(11 * GB, 15 * GB),
+        ] {
             for needed in [0, 10 * GB, 15 * GB, 21 * GB, u64::MAX] {
                 assert_eq!(room.verdict_with(needed, 0), room.verdict(needed));
             }
@@ -1211,7 +1215,10 @@ mod tests {
             (r.computer_bytes, r.computer_free_bytes),
             (5 * GIB / 2, 4 * GB)
         );
-        assert_eq!(auto_ctx(&input, Room::graphics_card(15 * GIB, 4 * GB)), None);
+        assert_eq!(
+            auto_ctx(&input, Room::graphics_card(15 * GIB, 4 * GB)),
+            None
+        );
         // With 5 GB free it fits.
         let r = check(
             &input,

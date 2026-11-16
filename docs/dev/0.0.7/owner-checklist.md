@@ -61,3 +61,19 @@ On the Windows PC:
 Repeat the Windows computer-use steps (first section) with TextEdit: typing reaches TextEdit
 after answering a card, and harnessUI's window comes to the front for a card even while
 TextEdit is active.
+
+## Cloud endpoints (P5) — needs your own API keys
+1. **Anthropic (Claude):** Settings → Endpoints → Anthropic, paste the key. *Test* lists the
+   models by name. In a chat the *Cloud* mark's tooltip names `api.anthropic.com`. With
+   Thinking on, run a multi-step tool task in an approved folder: no error about thinking,
+   and the Thinking area fills. Attach a picture. A second long turn should cost fewer
+   tokens (cached). Try a wrong key: the message is plain and never shows the key. Set a
+   smaller memory with *Edit*.
+2. **OpenAI:** only chat models are listed. A tool turn on a GPT-5-family model and on a
+   4.1-type model works (no error about `max_tokens` or temperature). Try a tool that
+   returns a screenshot.
+3. **OpenRouter:** models listed with names and sizes; a tool turn on a Claude model through
+   OpenRouter and on an open model.
+4. **abliteration.ai:** *Test*, then a chat that uses tools.
+5. **All:** an `http://` internet address with a key is refused; Ollama on your own network
+   over `http://` with a key works and shows no *Cloud* mark.
