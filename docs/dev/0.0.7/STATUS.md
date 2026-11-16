@@ -384,3 +384,8 @@ and `README.md`.
   crate's library test program would not start (STATUS_ENTRYPOINT_NOT_FOUND) — every other
   test program, and the same one on 0.0.6, starts; an agent is finding the import by
   cross-compiling for Windows here and comparing with 0.0.6.
+- Same CI run, macOS: everything passed except `free_port_is_bindable` (an older test: a
+  parallel test was given the same port in between; fixed in the test with a few tries,
+  still requiring a bindable port); the Intel Mac smoke test failed only because no disk
+  image was built. Linux: everything passed (lint, clippy, all workspace tests with the
+  real llama-server, cargo-deny).
