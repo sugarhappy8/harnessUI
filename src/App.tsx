@@ -8,7 +8,7 @@ import { FirstRun } from "./components/FirstRun";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { AppNotices } from "./components/AppNotices";
 import { FullAccessStartCheck } from "./components/AllowAllButton";
-import { followRunningTurn, turnChatId, useApp, toErrorInfo } from "./store/app";
+import { followApprovals, followRunningTurn, turnChatId, useApp, toErrorInfo } from "./store/app";
 import * as ipc from "./lib/ipc";
 import { listenInEffect } from "./lib/listen";
 
@@ -20,19 +20,15 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // null while loading; true once first run was completed or skipped.
   const [firstRunDone, setFirstRunDone] = useState<boolean | null>(ipc.isTauri() ? null : true);
-  const { refreshChats, refreshModelOptions, setRuntime, newChat, stop, showError, addApproval, removeApproval } =
-    useApp();
+  const { refreshChats, refreshModelOptions, setRuntime, newChat, stop, showError } = useApp();
 
   // Approval cards: Rust sends each request only to this window with a random id.
-  // [0.0.7 P6] Each listener is stopped even when it starts after the cleanup ran.
+  // [0.0.7 P6] Each listener is stopped even when it starts after the cleanup ran, and the
+  // cards waiting when this window (re)loaded are read once.
   useEffect(() => {
     if (!ipc.isTauri()) return;
-    const offs = [
-      listenInEffect(() => ipc.onApprovalRequest(addApproval)),
-      listenInEffect(() => ipc.onApprovalClosed(removeApproval)),
-    ];
-    return () => offs.forEach((f) => f());
-  }, [addApproval, removeApproval]);
+    return followApprovals();
+  }, []);
 
   // [0.0.7 P6] Which chat's reply the app is writing, also one that went on while this
   // window reloaded.

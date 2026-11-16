@@ -104,6 +104,15 @@ pub enum Scope {
     /// (0.0.6, item 5). Never prompts and is never granted, like [`Scope::AppData`], but it
     /// is not the app's own data: what comes back is content from outside the conversation.
     FileAnalysisSession,
+    /// Saving a copy of a site's front end into an approved folder (0.0.7, P7:
+    /// `browser_capture_site`): the site (scheme + host + port) the agent's browser opens
+    /// and the canonical folder the copy is written into. A grant covers capturing pages of
+    /// that site into that folder again in this chat. A [`Scope::Site`] or
+    /// [`Scope::FileWrite`] grant does not cover it, and it covers neither.
+    SiteCapture {
+        origin: String,
+        folder: String,
+    },
 }
 
 impl Scope {

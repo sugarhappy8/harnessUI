@@ -719,3 +719,48 @@ export function followRunningTurn(): () => void {
     return unlisten;
   });
 }
+
+/** [0.0.7 P6] Follows the approval cards: their `approval-request` and `approval-closed`
+ *  events and, once both listen, the cards waiting now. A window that reloaded while a card
+ *  waited heard its request before it reloaded, so the reply waited until Stop. A card closed
+ *  while the answer is on its way stays closed. Returns the function that stops following;
+ *  outside the app it follows nothing. */
+export function followApprovals(): () => void {
+  if (!ipc.isTauri()) return () => undefined;
+  const closed = new Set<string>();
+  let listening = 0;
+  let stopped = false;
+  const readWaiting = () => {
+    Promise.resolve()
+      .then(() => ipc.pendingApprovals())
+      .then((cards) => {
+        if (stopped) return;
+        const { approvals, addApproval } = useApp.getState();
+        for (const card of cards) {
+          if (!closed.has(card.id) && !approvals.some((a) => a.id === card.id)) addApproval(card);
+        }
+      })
+      .catch(() => undefined);
+  };
+  // Asked once both listen, so no card shown or closed in between is missed.
+  const started = (unlisten: () => void) => {
+    listening += 1;
+    if (listening === 2) readWaiting();
+    return unlisten;
+  };
+  const offs = [
+    listenInEffect(async () => started(await ipc.onApprovalRequest((r) => useApp.getState().addApproval(r)))),
+    listenInEffect(async () =>
+      started(
+        await ipc.onApprovalClosed((id) => {
+          closed.add(id);
+          useApp.getState().removeApproval(id);
+        }),
+      ),
+    ),
+  ];
+  return () => {
+    stopped = true;
+    offs.forEach((off) => off());
+  };
+}
