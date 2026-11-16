@@ -372,7 +372,10 @@ fn convert(
         .map_or(0, |(index, _)| index + 1);
     let mut messages: Vec<Value> = Vec::new();
     // The conversation must start with a user turn.
-    if body.first().is_some_and(|first| first.role == Role::Assistant) {
+    if body
+        .first()
+        .is_some_and(|first| first.role == Role::Assistant)
+    {
         push(
             &mut messages,
             &mut hasher,
@@ -503,7 +506,14 @@ impl Pictures {
             ));
         }
         let many = self.total.min(self.most) > MANY_IMAGES;
-        image_block(url, if many { MANY_IMAGES_SIDE } else { MAX_IMAGE_SIDE })
+        image_block(
+            url,
+            if many {
+                MANY_IMAGES_SIDE
+            } else {
+                MAX_IMAGE_SIDE
+            },
+        )
     }
 }
 
@@ -563,7 +573,10 @@ fn image_block(url: &str, max_side: u32) -> Value {
                 group_digits(max_side)
             )
         } else {
-            format!("the {} pixels a side that Claude takes", group_digits(max_side))
+            format!(
+                "the {} pixels a side that Claude takes",
+                group_digits(max_side)
+            )
         };
         return text_block(&format!(
             "[A picture was left out here: at {width} x {height} pixels it is larger than \
@@ -683,7 +696,11 @@ fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// An assistant step: its text, then its tool calls (as `tool_use` blocks, or as text when
 /// the request offers no tools, since the API refuses tool blocks without tools).
-fn assistant_blocks(message: &ChatMessage, with_tools: bool, pictures: &mut Pictures) -> Vec<Value> {
+fn assistant_blocks(
+    message: &ChatMessage,
+    with_tools: bool,
+    pictures: &mut Pictures,
+) -> Vec<Value> {
     let mut blocks = content_blocks(message.content.as_ref(), pictures);
     for call in message.tool_calls.as_deref().unwrap_or_default() {
         let input = match serde_json::from_str::<Value>(&call.function.arguments) {

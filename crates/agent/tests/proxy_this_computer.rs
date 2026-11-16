@@ -74,8 +74,10 @@ fn no_system_proxy_sees_a_local_endpoints_key() {
             );
         }
         // The proxy is really in effect: a server on the internet (no key) goes through it.
-        let mut config =
-            ClientConfig::new(format!("http://far-away.invalid:{port}"), ProviderKind::Vllm);
+        let mut config = ClientConfig::new(
+            format!("http://far-away.invalid:{port}"),
+            ProviderKind::Vllm,
+        );
         config.connect_timeout = Duration::from_millis(500);
         assert!(!config.loopback);
         let _ = OpenAiClient::new(config).unwrap().list_models().await;

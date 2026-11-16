@@ -495,7 +495,10 @@ mod tests {
     }
 
     impl Keychain {
-        fn new(get: Result<Option<String>, store::secrets::SecretError>, delete_fails: bool) -> Self {
+        fn new(
+            get: Result<Option<String>, store::secrets::SecretError>,
+            delete_fails: bool,
+        ) -> Self {
             Self {
                 get,
                 delete_fails,
@@ -534,7 +537,14 @@ mod tests {
         let code = |r: AppResult<()>| r.unwrap_err().message;
         // Unreadable: a moved endpoint without a new key is refused, as with a saved key.
         let keychain = Keychain::new(locked(), false);
-        let refused = prepare_key(&keychain, id, openai, "https://openrouter.ai/api/v1", false, false);
+        let refused = prepare_key(
+            &keychain,
+            id,
+            openai,
+            "https://openrouter.ai/api/v1",
+            false,
+            false,
+        );
         assert_eq!(code(refused), PASTE_THE_NEW_KEY);
         // Unreadable: no key over plain http to the internet either.
         let refused = prepare_key(
@@ -548,29 +558,84 @@ mod tests {
         assert_eq!(code(refused), agent::cloud::KEY_OVER_HTTP);
         // Removal asked for but the keychain refuses: nothing is saved.
         let failing = Keychain::new(Ok(Some("sk-old".into())), true);
-        let refused = prepare_key(&failing, id, openai, "https://api.openai.com/v1", false, true);
+        let refused = prepare_key(
+            &failing,
+            id,
+            openai,
+            "https://api.openai.com/v1",
+            false,
+            true,
+        );
         assert!(code(refused).starts_with("The saved API key could not be removed"));
         // Unreadable and removal asked for: removed before anything else.
         let keychain = Keychain::new(locked(), false);
-        prepare_key(&keychain, id, openai, "https://openrouter.ai/api/v1", false, true).unwrap();
+        prepare_key(
+            &keychain,
+            id,
+            openai,
+            "https://openrouter.ai/api/v1",
+            false,
+            true,
+        )
+        .unwrap();
         assert_eq!(keychain.deleted(), ["provider-api-key:3"]);
         // A new key for a new address: the old key goes first, so it is never left with the
         // new address; a keychain that cannot remove it stops the save.
         let keychain = Keychain::new(Ok(Some("sk-old".into())), false);
-        prepare_key(&keychain, id, openai, "https://openrouter.ai/api/v1", true, false).unwrap();
+        prepare_key(
+            &keychain,
+            id,
+            openai,
+            "https://openrouter.ai/api/v1",
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(keychain.deleted(), ["provider-api-key:3"]);
         let failing = Keychain::new(Ok(Some("sk-old".into())), true);
-        assert!(prepare_key(&failing, id, openai, "https://openrouter.ai/api/v1", true, false).is_err());
+        assert!(
+            prepare_key(
+                &failing,
+                id,
+                openai,
+                "https://openrouter.ai/api/v1",
+                true,
+                false
+            )
+            .is_err()
+        );
         // No key saved: a move needs nothing; the same address keeps a saved key.
         let empty = Keychain::new(Ok(None), true);
-        prepare_key(&empty, id, openai, "https://openrouter.ai/api/v1", false, false).unwrap();
+        prepare_key(
+            &empty,
+            id,
+            openai,
+            "https://openrouter.ai/api/v1",
+            false,
+            false,
+        )
+        .unwrap();
         let saved = Keychain::new(Ok(Some("sk-old".into())), true);
-        prepare_key(&saved, id, openai, "https://api.openai.com/v1/", false, false).unwrap();
+        prepare_key(
+            &saved,
+            id,
+            openai,
+            "https://api.openai.com/v1/",
+            false,
+            false,
+        )
+        .unwrap();
         assert!(saved.deleted().is_empty());
         // A new endpoint has no saved key.
         prepare_key(&saved, None, None, "https://api.openai.com/v1", true, false).unwrap();
-        assert!(may_hold_key(&Keychain::new(locked(), false), store::ProviderId(3)));
-        assert!(!may_hold_key(&Keychain::new(Ok(None), false), store::ProviderId(3)));
+        assert!(may_hold_key(
+            &Keychain::new(locked(), false),
+            store::ProviderId(3)
+        ));
+        assert!(!may_hold_key(
+            &Keychain::new(Ok(None), false),
+            store::ProviderId(3)
+        ));
     }
 
     /// [0.0.7 P5] The chat header's marks: "Cloud" with the host for the internet, and how

@@ -9,7 +9,11 @@
 //!   blocks (text, base64 images, `tool_use`, `tool_result` with `is_error`); tools carry
 //!   `input_schema`; `tool_choice` is `auto`, `none` or `any` with
 //!   `disable_parallel_tool_use`; `max_tokens` is always sent, at most what the model
-//!   accepts. Sampling values are never sent (API version 2026-10-21 removed them).
+//!   accepts. Sampling values are never sent (API version 2026-10-21 removed them). A
+//!   picture Claude would refuse becomes a note: over 10 MB or 8,000 pixels a side; in a
+//!   request with more than 20 pictures, over 3,000 pixels; beyond the most pictures one
+//!   request may hold (100, or 600 for a model with a window over 200,000 tokens), the
+//!   oldest.
 //! - **Thinking:** with the chat's thinking on, the model's own form (`adaptive`, or
 //!   `enabled` with a budget on models before 4.6), with `display: "summarized"` so the
 //!   Thinking area shows it; off, `disabled` or `between_tools` where the model accepts one,
@@ -18,14 +22,18 @@
 //!   Anthropic's model list (`capabilities.thinking.types`), else from its name ([`guess`]).
 //! - **Thinking blocks are sent back unchanged**, as the documentation requires within a
 //!   tool-use loop and recommends across turns (models that keep earlier thinking read it,
-//!   and an unchanged history keeps the prompt cache): [`ThinkingReplay`] keeps each
-//!   response that thought, keyed by its call ids or its text, for each endpoint and model
-//!   while the app runs, and a later request replays it block for block when the app's copy
-//!   of that reply is unchanged. On models with preserved thinking the request also says
+//!   and an unchanged history keeps the prompt cache). Each conversation (a chat, named by
+//!   [`crate::ClientConfig::conversation`]) has its own [`ThinkingReplay`] while the app
+//!   runs; no other chat ever sees it, and the chat used least recently is forgotten whole.
+//!   A response that thought is kept under everything its request sent before it and what
+//!   it showed ([`ReplayKey`]), so a later request of the chat replays it block for block
+//!   exactly where it was written, after the same history; an edited history replays
+//!   nothing after the edit (its blocks would not be valid there). If the API still refuses
+//!   a block as "bound to a different conversation", the request goes again once with
 //!   `block_binding.prefix_mismatch_behavior: drop_block` (beta
-//!   `thinking-binding-controls-2026-08-01`), so a block whose earlier history the app
-//!   shortened is dropped by the API instead of failing the request. A request the API
-//!   refuses because of a block anyway is sent again once without any.
+//!   `thinking-binding-controls-2026-08-01`, models with preserved thinking: the documented
+//!   recovery, not sent otherwise), else without thinking blocks, and the chat's kept blocks
+//!   are forgotten.
 //! - **Prompt caching:** a `cache_control` breakpoint on the system prompt (which caches the
 //!   tools with it) with the one-hour lifetime, so a chat that waits for an approval or a
 //!   reply keeps it, and one with the five-minute lifetime on the newest message, so each

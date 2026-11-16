@@ -840,7 +840,9 @@ async fn generate(
         reply_to,
         user_message_id,
         // [0.0.7 P5] Claude's thinking is kept for this chat alone.
-        client: target.client.for_conversation(format!("chat {}", chat.id.0)),
+        client: target
+            .client
+            .for_conversation(format!("chat {}", chat.id.0)),
         model_ref: target.model_ref,
         caps,
         template,

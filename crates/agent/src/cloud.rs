@@ -1681,12 +1681,21 @@ mod tests {
         );
         // A whole key mid-text, and a cut after 20 characters without an ellipsis.
         assert_eq!(without_key(&format!("a {key} b"), key), "a [API key] b");
-        assert_eq!(without_key(&format!("a {}", &key[..20]), key), "a [API key]");
+        assert_eq!(
+            without_key(&format!("a {}", &key[..20]), key),
+            "a [API key]"
+        );
         // Ordinary text that ends like a key begins stays: too short a piece to be secret,
         // or no longer than the beginning every Anthropic key has.
-        assert_eq!(without_key("No such tool: ask-a", key), "No such tool: ask-a");
+        assert_eq!(
+            without_key("No such tool: ask-a", key),
+            "No such tool: ask-a"
+        );
         assert_eq!(without_key("ends with sk-", key), "ends with sk-");
-        assert_eq!(without_key("prefix sk-ant-api03-", key), "prefix sk-ant-api03-");
+        assert_eq!(
+            without_key("prefix sk-ant-api03-", key),
+            "prefix sk-ant-api03-"
+        );
         assert_eq!(
             without_key("It was not found in this token", "token-abc123456"),
             "It was not found in this token"

@@ -1221,8 +1221,16 @@ async fn a_thinking_binding_the_api_refuses_is_left_out_and_remembered() {
         4,
         "first step, refused block, refused setting, blocks left out"
     );
-    assert!(requests[1].json()["thinking"].get("block_binding").is_none());
-    assert!(requests[2].json()["thinking"].get("block_binding").is_some());
+    assert!(
+        requests[1].json()["thinking"]
+            .get("block_binding")
+            .is_none()
+    );
+    assert!(
+        requests[2].json()["thinking"]
+            .get("block_binding")
+            .is_some()
+    );
     let retried = requests[3].json();
     assert!(retried["thinking"].get("block_binding").is_none());
     assert!(requests[3].header("anthropic-beta").is_none());
@@ -1232,7 +1240,11 @@ async fn a_thinking_binding_the_api_refuses_is_left_out_and_remembered() {
     assert_eq!(outcome.status, TurnStatus::Completed);
     let later = messages_requests(&server);
     assert_eq!(later.len(), 7, "first step, refused block, blocks left out");
-    assert!(later[4..].iter().all(|r| r.json()["thinking"].get("block_binding").is_none()));
+    assert!(
+        later[4..]
+            .iter()
+            .all(|r| r.json()["thinking"].get("block_binding").is_none())
+    );
 }
 
 #[tokio::test]
@@ -1296,8 +1308,16 @@ async fn two_chats_with_the_same_replies_never_exchange_thinking() {
         collect(&client, &request).await.unwrap();
     };
     let system = || ChatMessage::system("You help with files.");
-    send(chat("chat A"), vec![system(), ChatMessage::user("Chat A: delete secret-A.txt")]).await;
-    send(chat("chat B"), vec![system(), ChatMessage::user("Chat B: rename b.txt")]).await;
+    send(
+        chat("chat A"),
+        vec![system(), ChatMessage::user("Chat A: delete secret-A.txt")],
+    )
+    .await;
+    send(
+        chat("chat B"),
+        vec![system(), ChatMessage::user("Chat B: rename b.txt")],
+    )
+    .await;
     // Chat A's second turn (a new client, as each turn gets).
     send(
         chat("chat A"),

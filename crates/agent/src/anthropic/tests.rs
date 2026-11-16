@@ -57,7 +57,10 @@ fn keep(
     let sent = messages_body(request, facts, Some(replay), &ParamFixes::default(), false);
     let key = ReplayKey {
         prefix: reply_prefix(&sent),
-        reply: reply_hash(text, calls.iter().map(|(id, name, input)| (*id, *name, input))),
+        reply: reply_hash(
+            text,
+            calls.iter().map(|(id, name, input)| (*id, *name, input)),
+        ),
     };
     replay.store(key, blocks);
 }
@@ -328,7 +331,10 @@ fn kept_chat() -> (ChatRequest, ThinkingReplay, Value) {
         &facts,
         "Hello.",
         &[],
-        vec![thought("Greet.", "sig-0"), json!({"type": "text", "text": "Hello."})],
+        vec![
+            thought("Greet.", "sig-0"),
+            json!({"type": "text", "text": "Hello."}),
+        ],
     );
     // Turn 2: a call without arguments, and its result.
     request.messages.push(all[2].clone());
@@ -386,7 +392,11 @@ fn unchanged_replies_go_back_with_their_thinking() {
         messages[1]["content"],
         json!([thought("Greet.", "sig-0"), {"type": "text", "text": "Hello."}])
     );
-    assert_eq!(messages[3]["content"][0], thought("Look it up.", "sig-00"), "{sent}");
+    assert_eq!(
+        messages[3]["content"][0],
+        thought("Look it up.", "sig-00"),
+        "{sent}"
+    );
     // This turn: exactly as received, thinking and order kept.
     let current = last_assistant(&sent);
     assert_eq!(current["content"][0], thinking);
@@ -399,7 +409,10 @@ fn unchanged_replies_go_back_with_their_thinking() {
     request.thinking = Some(false);
     let off = body(&request, &adaptive_facts(), Some(&replay));
     let messages = off["messages"].as_array().unwrap();
-    assert_eq!(messages[1]["content"], json!([{"type": "text", "text": "Hello."}]));
+    assert_eq!(
+        messages[1]["content"],
+        json!([{"type": "text", "text": "Hello."}])
+    );
     request.thinking = Some(true);
 
     // A step the app changed (an old call's arguments shortened) goes as the app has it,
@@ -421,7 +434,10 @@ fn unchanged_replies_go_back_with_their_thinking() {
     let mut edited = request.clone();
     edited.messages[2] = ChatMessage::assistant("Hello!");
     let changed = body(&edited, &adaptive_facts(), Some(&replay));
-    assert_eq!(changed["messages"][1]["content"], json!([{"type": "text", "text": "Hello!"}]));
+    assert_eq!(
+        changed["messages"][1]["content"],
+        json!([{"type": "text", "text": "Hello!"}])
+    );
     assert_eq!(
         last_assistant(&changed)["content"][0],
         json!({"type": "text", "text": "Let me check."})
@@ -453,7 +469,10 @@ fn the_same_reply_twice_in_a_chat_keeps_each_thought_in_its_place() {
         &facts,
         "Done.",
         &[],
-        vec![thought("About a.txt", "sig-a"), json!({"type": "text", "text": "Done."})],
+        vec![
+            thought("About a.txt", "sig-a"),
+            json!({"type": "text", "text": "Done."}),
+        ],
     );
     request.messages.push(ChatMessage::assistant("Done."));
     request.messages.push(ChatMessage::user("Delete b.txt"));
@@ -463,14 +482,25 @@ fn the_same_reply_twice_in_a_chat_keeps_each_thought_in_its_place() {
         &facts,
         "Done.",
         &[],
-        vec![thought("About b.txt", "sig-b"), json!({"type": "text", "text": "Done."})],
+        vec![
+            thought("About b.txt", "sig-b"),
+            json!({"type": "text", "text": "Done."}),
+        ],
     );
     request.messages.push(ChatMessage::assistant("Done."));
     request.messages.push(ChatMessage::user("What next?"));
     let sent = body(&request, &facts, Some(&replay));
     let messages = sent["messages"].as_array().unwrap();
-    assert_eq!(messages[1]["content"][0]["signature"], json!("sig-a"), "{sent}");
-    assert_eq!(messages[3]["content"][0]["signature"], json!("sig-b"), "{sent}");
+    assert_eq!(
+        messages[1]["content"][0]["signature"],
+        json!("sig-a"),
+        "{sent}"
+    );
+    assert_eq!(
+        messages[3]["content"][0]["signature"],
+        json!("sig-b"),
+        "{sent}"
+    );
     // Another chat with the same reply text after other messages finds none of them.
     let mut other = simple("claude-opus-5-5");
     other.thinking = Some(true);
@@ -515,8 +545,13 @@ fn drop_block_is_asked_for_only_when_recovering() {
                 json!({"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Atlantis"}}),
             ],
         );
-        let normal =
-            messages_body(&request, &always, Some(&replay), &ParamFixes::default(), false);
+        let normal = messages_body(
+            &request,
+            &always,
+            Some(&replay),
+            &ParamFixes::default(),
+            false,
+        );
         assert_eq!(
             last_assistant(&normal)["content"][0]["signature"],
             json!("sig-1"),
@@ -524,8 +559,13 @@ fn drop_block_is_asked_for_only_when_recovering() {
         );
         assert!(normal["thinking"].get("block_binding").is_none(), "{model}");
         // The retry after "bound to a different conversation".
-        let recovery =
-            messages_body(&request, &always, Some(&replay), &ParamFixes::default(), true);
+        let recovery = messages_body(
+            &request,
+            &always,
+            Some(&replay),
+            &ParamFixes::default(),
+            true,
+        );
         assert_eq!(
             recovery["thinking"]["block_binding"],
             json!({"prefix_mismatch_behavior": "drop_block"}),
@@ -537,7 +577,13 @@ fn drop_block_is_asked_for_only_when_recovering() {
         // Thinking "off" on a model that always thinks: low effort, and the binding as
         // `adaptive`.
         request.thinking = Some(false);
-        let low = messages_body(&request, &always, Some(&replay), &ParamFixes::default(), true);
+        let low = messages_body(
+            &request,
+            &always,
+            Some(&replay),
+            &ParamFixes::default(),
+            true,
+        );
         assert_eq!(
             low["thinking"],
             json!({"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}),
@@ -1281,7 +1327,10 @@ fn the_replay_store_is_bounded_and_exact() {
     assert!(replay.find(&key(last as u64, 2)).is_none());
     // Keeping the same key again replaces it.
     replay.store(key(last as u64, 1), vec![json!("again")]);
-    assert_eq!(replay.find(&key(last as u64, 1)), Some(&vec![json!("again")]));
+    assert_eq!(
+        replay.find(&key(last as u64, 1)),
+        Some(&vec![json!("again")])
+    );
     assert_eq!(replay.len(), super::MAX_REPLAY_ENTRIES);
     replay.clear();
     assert_eq!(replay.len(), 0);
@@ -1294,7 +1343,10 @@ fn each_chat_has_its_own_store_and_an_idle_chat_goes_whole() {
     let endpoint = "https://api.anthropic.com/v1#store-test";
     let a = super::replay_for(endpoint, "claude-opus-5-5", "chat 1");
     let b = super::replay_for(endpoint, "claude-opus-5-5", "chat 2");
-    assert!(Arc::ptr_eq(&a, &super::replay_for(endpoint, "claude-opus-5-5", "chat 1")));
+    assert!(Arc::ptr_eq(
+        &a,
+        &super::replay_for(endpoint, "claude-opus-5-5", "chat 1")
+    ));
     assert!(!Arc::ptr_eq(&a, &b), "two chats never share kept thinking");
     assert!(!Arc::ptr_eq(
         &a,
@@ -1305,22 +1357,39 @@ fn each_chat_has_its_own_store_and_an_idle_chat_goes_whole() {
         prefix: 11,
         reply: reply_hash("Done.", []),
     };
-    a.lock().unwrap().store(reply, vec![json!("chat 1's thought")]);
+    a.lock()
+        .unwrap()
+        .store(reply, vec![json!("chat 1's thought")]);
     assert!(b.lock().unwrap().find(&reply).is_none());
     // The active chat keeps turn 1 while many other chats come and go; the chat used least
     // recently is forgotten whole.
     let active = super::replay_for(endpoint, "claude-opus-5-5", "active");
-    let turn_one = ReplayKey { prefix: 1, reply: 1 };
-    active.lock().unwrap().store(turn_one, vec![json!("turn 1")]);
+    let turn_one = ReplayKey {
+        prefix: 1,
+        reply: 1,
+    };
+    active
+        .lock()
+        .unwrap()
+        .store(turn_one, vec![json!("turn 1")]);
     let idle = super::replay_for(endpoint, "claude-opus-5-5", "idle");
     idle.lock().unwrap().store(turn_one, vec![json!("idle")]);
     for n in 0..(super::MAX_REPLAY_STORES * 2) {
         let other = super::replay_for(endpoint, "claude-opus-5-5", &format!("other {n}"));
-        other.lock().unwrap().store(ReplayKey { prefix: 2, reply: 2 }, vec![json!(n)]);
+        other.lock().unwrap().store(
+            ReplayKey {
+                prefix: 2,
+                reply: 2,
+            },
+            vec![json!(n)],
+        );
         // The active chat goes on.
         let again = super::replay_for(endpoint, "claude-opus-5-5", "active");
         assert!(Arc::ptr_eq(&again, &active));
-        assert_eq!(again.lock().unwrap().find(&turn_one), Some(&vec![json!("turn 1")]));
+        assert_eq!(
+            again.lock().unwrap().find(&turn_one),
+            Some(&vec![json!("turn 1")])
+        );
     }
     // The idle chat was forgotten: asking for it again gives an empty store.
     let back = super::replay_for(endpoint, "claude-opus-5-5", "idle");
@@ -1345,7 +1414,10 @@ fn many_pictures_in_one_request_follow_claudes_limits() {
         request.messages = (0..count)
             .map(|n| {
                 let side = if n == 0 { 4_000 } else { 1_000 };
-                ChatMessage::user(vec![ContentPart::text(format!("picture {n}")), png(side, 500)])
+                ChatMessage::user(vec![
+                    ContentPart::text(format!("picture {n}")),
+                    png(side, 500),
+                ])
             })
             .collect();
         request
@@ -1355,7 +1427,9 @@ fn many_pictures_in_one_request_follow_claudes_limits() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|block| block["type"] != "text" || block["text"].as_str().unwrap().starts_with('['))
+            .filter(|block| {
+                block["type"] != "text" || block["text"].as_str().unwrap().starts_with('[')
+            })
             .map(|block| match block["type"].as_str() {
                 Some("image") => "image".to_owned(),
                 _ => block["text"].as_str().unwrap().to_owned(),
@@ -1380,7 +1454,10 @@ fn many_pictures_in_one_request_follow_claudes_limits() {
     let sent = body(&request_with(103), &small, None);
     let seen = pictures(&sent);
     assert_eq!(seen.len(), 103);
-    assert!(seen[..3].iter().all(|p| p.contains("at most 100 pictures")), "{seen:?}");
+    assert!(
+        seen[..3].iter().all(|p| p.contains("at most 100 pictures")),
+        "{seen:?}"
+    );
     assert!(seen[3..].iter().all(|p| p == "image"));
     let unknown = ModelFacts {
         context: None,
@@ -1414,7 +1491,10 @@ fn a_jpeg_whose_size_comes_after_large_metadata_is_measured() {
     )])];
     let block = body(&request, &adaptive_facts(), None)["messages"][0]["content"][0].clone();
     assert!(
-        block["text"].as_str().unwrap_or_default().contains("at 9000 x 100 pixels"),
+        block["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at 9000 x 100 pixels"),
         "{}",
         block["type"]
     );
