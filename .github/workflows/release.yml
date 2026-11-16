@@ -52,7 +52,7 @@ jobs:
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
             echo "Updater key: set"
           else
-            echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is not set. Every release must be able to update itself, so it needs the updater key: see README.md, \"In-app updates\", and run python3 -I scripts/setup_updater.py once on your own computer."
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is not set. Every release must be able to update itself, so it needs the updater key: see README.md, \"In-app updates\", and run python3 -I scripts/setup_updater.py (on Windows: py scripts\\setup_updater.py or python scripts\\setup_updater.py) once on your own computer."
             fail=1
           fi
           if message=$(python3 -I scripts/setup_updater.py --check); then
@@ -112,41 +112,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The release notes: this version's entry in CHANGELOG.md, then where to download.
-      # tauri-action puts them on the release page and into latest.json, and the app shows
-      # them under "What's new" in its update box. A missing entry stops the run here,
-      # before the build. A long entry is shortened: an action's input must fit in one
-      # environment variable, which Windows limits to 32,767 characters.
+      # What's new: this version's entry in CHANGELOG.md as plain text, without the download
+      # paragraph (scripts/release_notes.py app). tauri-action copies the release body into
+      # latest.json as `notes`, which the app shows as plain text under "What's new" in its
+      # update box. The release page gets the entry as written and where to download from the
+      # verify job, when it publishes the release. A missing entry stops the run here, before
+      # the build. A long entry is shortened: an action's input must fit in one environment
+      # variable, which Windows limits to 32,767 characters.
       - name: Release notes from CHANGELOG.md
         id: notes
         shell: bash
-        run: |
-          python3 - <<'PY'
-          import json, os
-
-          version = json.load(open("src-tauri/tauri.conf.json", encoding="utf-8"))["version"]
-          lines = open("CHANGELOG.md", encoding="utf-8").read().splitlines()
-          start = next((i for i, line in enumerate(lines) if line == f"## {version}" or line.startswith(f"## {version} (")), None)
-          if start is None:
-              raise SystemExit(f"::error::CHANGELOG.md has no entry for {version} (a line '## {version} (date)'). It is what the release page and the app's What's new show.")
-          end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
-          notes = "\n".join(lines[start + 1 : end]).strip()
-          if len(notes) > 20000:
-              cut = notes.rfind("\n", 0, 20000)
-              notes = notes[: cut if cut > 0 else 20000].rstrip() + "\n\n(Shortened here: the whole list is in CHANGELOG.md.)"
-          download = (
-              f"Download: Windows 10 or 11 (64-bit): {os.environ['STABLE_WINDOWS']}. "
-              f"Mac with macOS 13.3 or later (Apple silicon or Intel): {os.environ['STABLE_MAC']}. "
-              "The files with the version in their names are the same installers. These builds are not "
-              "code-signed: on Windows choose More info, then Run anyway; on a Mac right-click the app and "
-              "choose Open. harnessUI 0.0.8 and later update themselves; 0.0.7 and older cannot, so install "
-              "this version once by hand. See README.md for details."
-          )
-          delim = "EOF_" + os.urandom(8).hex()
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as out:
-              out.write(f"body<<{delim}\n{notes}\n\n{download}\n{delim}\n")
-          print(f"Release notes: the CHANGELOG.md entry for {version} ({len(notes)} characters) and the download paragraph.")
-          PY
+        run: python3 -I scripts/release_notes.py app
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.rust-targets }}
@@ -217,7 +193,9 @@ jobs:
           releaseCommitish: ${{ github.sha }}
           args: ${{ matrix.args }} --config src-tauri/tauri.updater.conf.json
       # The copy under the name that never changes. The installer must be the only one in
-      # its folder and carry this version in its name, or the run stops.
+      # its folder and carry this version in its name, or the run stops. The version is
+      # written without a newline: Python on Windows ends a printed line with CR LF, and
+      # bash's $(...) removes only the LF, so the CR would stay in the version and the tag.
       - name: Upload the installer under its name without the version
         shell: bash
         env:
@@ -226,7 +204,7 @@ jobs:
           PATTERN: ${{ matrix.pattern }}
           STABLE: ${{ matrix.name == 'Windows' && env.STABLE_WINDOWS || env.STABLE_MAC }}
         run: |
-          version=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          version=$(python3 -c "import json,sys;sys.stdout.write(json.load(open('src-tauri/tauri.conf.json'))['version'])")
           tag="v$version"
           shopt -s nullglob
           # shellcheck disable=SC2206 # PATTERN is a glob on purpose
@@ -313,13 +291,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="v$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
+          tag="v$(python3 -c "import json,sys;sys.stdout.write(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
           gh release upload "$tag" release-catalog/models.json release-catalog/models.json.minisig --clobber --repo "$GITHUB_REPOSITORY"
 
   # Fails the run when the draft release is incomplete: an installer missing, a copy under
   # the name without the version missing or not the same file as its twin, latest.json
   # without every platform or pointing at a file the release does not have, or the catalog
-  # missing. Reading a draft release needs the workflow's write permission.
+  # missing. Otherwise it publishes the release with the page's notes (the CHANGELOG.md
+  # entry as written, then where to download). Reading a draft release needs the
+  # workflow's write permission.
   #
   # The macOS build is universal, so tauri-action lists the same update archive under both
   # darwin-aarch64 and darwin-x86_64 (and darwin-universal, which no updater asks for). An
@@ -335,7 +315,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          version=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          version=$(python3 -c "import json,sys;sys.stdout.write(json.load(open('src-tauri/tauri.conf.json'))['version'])")
           tag="v$version"
           # One line per file: name, size, SHA-256 (when GitHub gives it), address in GitHub's API.
           listing=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | [.name, (.size | tostring), (.digest // ""), .apiUrl] | @tsv')
@@ -389,6 +369,13 @@ jobs:
               if [ -z "$url" ] || [ -z "$signature" ]; then
                 echo "::error::latest.json must list $platform with an address and a signature"; fail=1; continue
               fi
+              # `tauri build` writes the version into the signed comment of each update file,
+              # and installed copies (requireSignedVersion in tauri.updater.conf.json) refuse
+              # a file whose signed version is missing or not the one latest.json announces.
+              signed=$(base64 -d <<< "$signature" 2>/dev/null | sed -n 's/^trusted comment: //p' | tr '\t' '\n' | sed -n 's/^version://p')
+              if [ "$signed" != "$version" ]; then
+                echo "::error::latest.json's $platform signature is for version '${signed:-none}', not $version: installed copies would refuse this update"; fail=1
+              fi
               file=$(awk -F'\t' -v id="${url##*/}" '{ n = split($4, part, "/"); if (part[n] == id) print $1 }' <<< "$listing")
               if [ -z "$file" ]; then
                 echo "::error::latest.json's $platform entry points at $url, which is not a file of $tag"; fail=1
@@ -407,5 +394,8 @@ jobs:
             echo "::error::$tag stays a draft: fix the problems above, then run this workflow again."
             exit 1
           fi
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+          # The page's notes: the CHANGELOG.md entry as written, then where to download.
+          # latest.json keeps the plain text the build gave it (publish job, Release notes).
+          python3 -I scripts/release_notes.py page "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --notes-file "$RUNNER_TEMP/release-notes.md"
           echo "Published $tag."

@@ -6,17 +6,19 @@ workflow signs each release's update files with a private key kept as a reposito
 and an installed copy accepts an update only when its signature matches the public key
 that copy was built with. Run this once, on your own computer, from the repository root:
 
-    python3 -I scripts/setup_updater.py               (Windows: python scripts\\setup_updater.py)
+    python3 -I scripts/setup_updater.py               (Windows: py scripts\\setup_updater.py)
     python3 -I scripts/setup_updater.py --key PATH    (keep the key file somewhere else)
     python3 -I scripts/setup_updater.py --check       (release.yml: is a usable public key committed?)
 
 What it does:
 - Stops, changing nothing, when src-tauri/tauri.updater.conf.json already has a public key:
   a new key would leave every installed copy unable to update.
-- Runs `npx tauri signer generate -w <key file>` (run `npm ci` first), which asks for a
-  password. The key file is ~/.tauri/harnessui.key unless --key says otherwise. A key file
-  that already exists is never overwritten; when it and its .pub both exist, it offers to
-  use them.
+- Runs the Tauri CLI's `tauri signer generate -w <key file>` (run `npm ci` first), which asks
+  for a password. The key file is ~/.tauri/harnessui.key unless --key says otherwise. A key
+  file that already exists is never overwritten; when it and its .pub both exist, it offers
+  to use them. The CLI's script is started with node, not with `npx`: on Windows npx is a
+  batch file that cmd.exe runs, and cmd.exe would take characters such as & or ^ in the key
+  file's path (a Windows user name may hold them) as its own.
 - Writes the public key (the .pub file's contents) into plugins.updater.pubkey of
   src-tauri/tauri.updater.conf.json.
 - With the GitHub CLI (`gh`) installed, offers to save the two repository secrets; otherwise
@@ -44,7 +46,8 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "src-tauri" / "tauri.updater.conf.json"
 APP_CONFIG = ROOT / "src-tauri" / "tauri.conf.json"
-TAURI_CLI = ROOT / "node_modules" / "@tauri-apps" / "cli" / "package.json"
+# The Tauri CLI's own script (its package's `bin`), run with node.
+TAURI_CLI = ROOT / "node_modules" / "@tauri-apps" / "cli" / "tauri.js"
 DEFAULT_KEY = Path("~") / ".tauri" / "harnessui.key"
 COMMENT = "untrusted comment:"
 PRIVATE_SECRET = "TAURI_SIGNING_PRIVATE_KEY"
@@ -145,7 +148,8 @@ def check_config(config_text: str) -> tuple[bool, str]:
         return False, (
             "src-tauri/tauri.updater.conf.json has no public key (plugins.updater.pubkey). "
             "Every release must be able to update itself: run python3 -I scripts/setup_updater.py "
-            "once on your own computer (README.md, \"In-app updates\")."
+            "(on Windows: py scripts\\setup_updater.py or python scripts\\setup_updater.py) once "
+            "on your own computer (README.md, \"In-app updates\")."
         )
     try:
         written, kid = parse_pubkey(value)
@@ -163,7 +167,7 @@ def version_of(app_config_text: str) -> str:
     return json.loads(app_config_text)["version"]
 
 
-# --- Talking to the person and to npx and gh -----------------------------------------------
+# --- Talking to the person and to node and gh ----------------------------------------------
 
 
 def ask(question: str) -> bool:
@@ -181,9 +185,9 @@ class Stop(Exception):
 
 def generate(key: Path, which: Callable, run: Callable) -> None:
     """Makes a new key pair with the Tauri CLI, which asks for the password itself."""
-    npx = which("npx")
-    if npx is None:
-        raise Stop("npx was not found. Install Node.js 22, run `npm ci` in the repository, then run this again.")
+    node = which("node")
+    if node is None:
+        raise Stop("node was not found. Install Node.js 22, run `npm ci` in the repository, then run this again.")
     if not TAURI_CLI.is_file():
         raise Stop("The Tauri CLI is not installed here. Run `npm ci` in the repository, then run this again.")
     key.parent.mkdir(parents=True, exist_ok=True)
@@ -192,9 +196,9 @@ def generate(key: Path, which: Callable, run: Callable) -> None:
     # CI=true in the environment would make the CLI skip the password question.
     env = {k: v for k, v in os.environ.items() if k != "CI"}
     sys.stdout.flush()
-    done = run([npx, "tauri", "signer", "generate", "-w", str(key)], cwd=str(ROOT), env=env)
+    done = run([node, str(TAURI_CLI), "signer", "generate", "-w", str(key)], cwd=str(ROOT), env=env)
     if done.returncode != 0:
-        raise Stop("`npx tauri signer generate` did not finish. Nothing was written into tauri.updater.conf.json.")
+        raise Stop("`tauri signer generate` did not finish. Nothing was written into tauri.updater.conf.json.")
 
 
 def save_secrets(key: Path, repo: str, which: Callable, run: Callable, ask: Callable) -> bool:

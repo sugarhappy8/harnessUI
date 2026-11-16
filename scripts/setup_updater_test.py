@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Tests for scripts/setup_updater.py that run on any computer.
 
-The real setup runs `npx tauri signer generate` and `gh` on the owner's computer. These
-tests check what does not need them: how a public key file is read (and a private key
-refused), how the key goes into tauri.updater.conf.json without changing its layout, the
-check release.yml runs, and the setup's choices with stand-ins for npx and gh. No real key
+The real setup runs the Tauri CLI's `tauri signer generate` with node, and `gh`, on the
+owner's computer. These tests check what does not need them: how a public key file is read
+(and a private key refused), how the key goes into tauri.updater.conf.json without changing
+its layout, the check release.yml runs, and the setup's choices with stand-ins for node and
+gh. No real key
 is made: the public key is the catalog's test fixture, and the "private key" files are
 placeholder text.
 
@@ -133,6 +134,7 @@ class TheReleaseCheck(unittest.TestCase):
         ok, message = su.check_config(empty_config())
         self.assertFalse(ok)
         self.assertIn("python3 -I scripts/setup_updater.py", message)
+        self.assertIn("py scripts\\setup_updater.py", message, "a stock Windows Python has no python3")
 
     def test_the_key_as_tauri_writes_it_passes(self):
         ok, message = su.check_config(su.with_pubkey(empty_config(), tauri_form()))
@@ -161,10 +163,10 @@ class TheReleaseCheck(unittest.TestCase):
 
 
 class FakeTools:
-    """Stand-ins for npx and gh: records every call, and `npx tauri signer generate -w PATH`
-    writes PATH (placeholder text) and PATH.pub (the test public key in Tauri's form)."""
+    """Stand-ins for node and gh: records every call, and `node <tauri.js> signer generate -w
+    PATH` writes PATH (placeholder text) and PATH.pub (the test public key in Tauri's form)."""
 
-    def __init__(self, have=("npx", "gh"), fail=()):
+    def __init__(self, have=("node", "gh"), fail=()):
         self.have = have
         self.fail = fail
         self.calls = []
@@ -177,7 +179,7 @@ class FakeTools:
         tool = Path(cmd[0]).name
         if tool in self.fail:
             return SimpleNamespace(returncode=1)
-        if tool == "npx":
+        if tool == "node":
             key = Path(cmd[cmd.index("-w") + 1])
             key.write_text(PLACEHOLDER_PRIVATE, encoding="utf-8")
             key.with_name(key.name + ".pub").write_text(tauri_form(), encoding="utf-8")
@@ -224,12 +226,13 @@ class Setup(unittest.TestCase):
         self.assertEqual(self.config.read_text(encoding="utf-8"), before)
 
     def test_a_new_key_pair_without_gh(self):
-        tools = FakeTools(have=("npx",))
+        tools = FakeTools(have=("node",))
         code, out, asked = self.setup(tools)
         self.assertEqual(code, 0, out)
         self.assertEqual(self.config.read_bytes(), su.with_pubkey(empty_config(), tauri_form()).encode())
         (cmd, kwargs), = tools.calls
-        self.assertEqual(cmd, ["/fake/bin/npx", "tauri", "signer", "generate", "-w", str(self.key)])
+        # node itself, never npx: on Windows npx is a batch file and cmd.exe would read the path.
+        self.assertEqual(cmd, ["/fake/bin/node", str(su.TAURI_CLI), "signer", "generate", "-w", str(self.key)])
         self.assertEqual(kwargs["cwd"], str(su.ROOT))
         self.assertNotIn("CI", kwargs["env"])
         self.assertNotIn("input", kwargs, "the CLI asks for the password itself")
@@ -244,13 +247,13 @@ class Setup(unittest.TestCase):
 
     def test_a_file_with_windows_line_endings_keeps_them(self):
         self.config.write_bytes(empty_config().replace("\n", "\r\n").encode())
-        code, out, _ = self.setup(FakeTools(have=("npx",)))
+        code, out, _ = self.setup(FakeTools(have=("node",)))
         self.assertEqual(code, 0, out)
         written = self.config.read_bytes()
         self.assertEqual(written, su.with_pubkey(empty_config(), tauri_form()).replace("\n", "\r\n").encode())
 
     def test_ci_in_the_environment_does_not_skip_the_password(self):
-        tools = FakeTools(have=("npx",))
+        tools = FakeTools(have=("node",))
         with mock.patch.dict(su.os.environ, {"CI": "true"}):
             self.setup(tools)
         self.assertNotIn("CI", tools.calls[0][1]["env"])
@@ -316,11 +319,11 @@ class Setup(unittest.TestCase):
                 self.assertEqual(tools.calls, [])
                 self.assertEqual(self.config.read_text(encoding="utf-8"), empty_config())
 
-    def test_without_npx_or_the_tauri_cli_it_says_to_run_npm_ci(self):
+    def test_without_node_or_the_tauri_cli_it_says_to_run_npm_ci(self):
         code, out, _ = self.setup(FakeTools(have=()))
         self.assertEqual(code, 1)
         self.assertIn("npm ci", out)
-        with mock.patch.object(su, "TAURI_CLI", self.dir / "missing" / "package.json"):
+        with mock.patch.object(su, "TAURI_CLI", self.dir / "missing" / "tauri.js"):
             tools = FakeTools()
             code, out, _ = self.setup(tools)
         self.assertEqual(code, 1)
@@ -329,7 +332,7 @@ class Setup(unittest.TestCase):
         self.assertEqual(self.config.read_text(encoding="utf-8"), empty_config())
 
     def test_a_failed_generate_writes_nothing(self):
-        code, out, _ = self.setup(FakeTools(fail=("npx",)))
+        code, out, _ = self.setup(FakeTools(fail=("node",)))
         self.assertEqual(code, 1)
         self.assertEqual(self.config.read_text(encoding="utf-8"), empty_config())
 
