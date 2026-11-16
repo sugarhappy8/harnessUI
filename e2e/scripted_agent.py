@@ -2874,8 +2874,8 @@ def p_task_state(c, notes):
     # 5. Resume sends the continue message; the request carries the task note, once.
     Fake.requests.clear()
     Fake.queue.append({"content": "Continuing with the switch."})
-    # [0.0.7] Resume takes no click during its input delay (it has just appeared, after the
-    # reload), and one once it is over.
+    # [0.0.7] Resume takes no click during its input delay, and one once it is over: a click
+    # straight after the reload, as this one was before, may come too early.
     click_too_early(s, aside, "Resume")
     time.sleep(0.5)
     assert not Fake.requests and status() == "paused", "Resume took a click during its input delay"

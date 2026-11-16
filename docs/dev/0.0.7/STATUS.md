@@ -346,3 +346,8 @@ and `README.md`.
   answer; a nameless image file in a shared folder belongs to no one; Browse downloads the
   chosen model's own image file. runtime (real server) all pass, models 147, app 160,
   vitest 850. Quick re-verification running.
+- P2 round-2 re-verification: N1, N2 (all 6 real out-of-memory captures now classified as
+  out of memory), N4, N5, Browse and the nits fixed. Left: a crafted image file can still
+  fake a port-in-use or invalid-device line (those checks run before the image-file
+  verdict); and with width only ranking, text-only Gemma 2 could take Gemma 3's image file
+  in a shared folder. Quick round 3 running.
