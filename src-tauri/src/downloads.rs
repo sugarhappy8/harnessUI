@@ -985,4 +985,360 @@ mod tests {
         assert_eq!(back.projector.as_deref(), Some("mmproj-Sample-F16.gguf"));
         assert!(back.model_files.is_empty());
     }
+
+    // ---- 0.0.7 (P6) bug fixes ------------------------------------------------------------
+
+    use DownloadStatus as S;
+
+    /// A folder of its own for one test, removed when it is dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("downloads-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A row of group `group` for the file at `dest`.
+    fn row(group: &str, dest: &Path, size: u64, status: DownloadStatus) -> store::Download {
+        store::Download {
+            id: store::DownloadId(1),
+            group_id: group.into(),
+            repo: "example-quants/Sample-7B-GGUF".into(),
+            file: dest
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            url: String::new(),
+            dest_path: dest.display().to_string(),
+            size_bytes: size,
+            sha256: String::new(),
+            bytes_done: 0,
+            status,
+            etag: None,
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// A model on the Installed list at `path`, with the image file `projector` recorded.
+    fn installed(path: &Path, projector: Option<&Path>) -> store::ModelRecord {
+        store::ModelRecord {
+            id: store::ModelId(1),
+            path: path.display().to_string(),
+            repo: Some("example-quants/Sample-7B-GGUF".into()),
+            file_name: String::new(),
+            size_bytes: 1,
+            sha256: None,
+            gguf_summary: serde_json::json!({
+                "architecture": "sample",
+                "projector": projector.map(|p| p.display().to_string()),
+            }),
+            added_at: 0,
+            source: ModelSource::Download,
+        }
+    }
+
+    /// Records the file at `dest` (`size` bytes) in group `group` of `store`, with `status`.
+    async fn recorded(
+        store: &store::Store,
+        group: &str,
+        dest: &Path,
+        size: u64,
+        status: DownloadStatus,
+    ) {
+        let id = store
+            .insert_download(NewDownload {
+                group_id: group.into(),
+                repo: "example-quants/Sample-7B-GGUF".into(),
+                file: dest.file_name().unwrap().to_string_lossy().into_owned(),
+                url: String::new(),
+                dest_path: dest.display().to_string(),
+                size_bytes: size,
+                sha256: String::new(),
+            })
+            .await
+            .unwrap();
+        let error = (status == S::Failed).then(|| "{}".to_string());
+        store
+            .update_download(
+                id,
+                DownloadPatch {
+                    status: Some(status),
+                    error: Some(error),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn statuses(store: &store::Store, group: &str) -> Vec<DownloadStatus> {
+        store
+            .list_downloads(Some(group.into()))
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.status)
+            .collect()
+    }
+
+    /// A file is whole when it has its full size at its final name.
+    #[test]
+    fn a_whole_file_has_its_full_size() {
+        let dir = Scratch::new();
+        let file = dir.path().join("Sample-7B-Q8_0.gguf");
+        assert!(!file_whole(&file, 100), "not there");
+        std::fs::write(&file, vec![0u8; 100]).unwrap();
+        assert!(file_whole(&file, 100));
+        assert!(!file_whole(&file, 101), "another size");
+        assert!(!file_whole(dir.path(), 0), "a folder");
+    }
+
+    /// The bug: a vision model whose model file finished and whose image file failed. Resume
+    /// set every row that was not done back to Queued, so the model file (12.7 GB in the
+    /// owner's case) was downloaded again from zero, over the good file. Now a finished file
+    /// waits for the last step and only the image file is downloaded again.
+    #[tokio::test]
+    async fn resume_never_downloads_a_finished_file_again() {
+        let dir = Scratch::new();
+        let model = dir.path().join("Sample-7B-Q8_0.gguf");
+        let image = dir.path().join("mmproj-Sample-F16.gguf");
+        std::fs::write(&model, vec![0u8; 100]).unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g", &model, 100, S::Verifying).await;
+        recorded(&store, "g", &image, 50, S::Failed).await;
+        requeue(&store, "g").await.unwrap();
+        assert_eq!(statuses(&store, "g").await, vec![S::Verifying, S::Queued]);
+        let rows = store.list_downloads(Some("g".into())).await.unwrap();
+        assert!(rows.iter().all(|r| r.error.is_none()), "errors cleared");
+        // The group's task then skips the finished file and downloads the other one.
+        assert!(file_done(rows[0].status, file_whole(&model, 100)));
+        assert!(!file_done(rows[1].status, file_whole(&image, 50)));
+
+        // A finished file that is gone since is downloaded again.
+        std::fs::remove_file(&model).unwrap();
+        requeue(&store, "g").await.unwrap();
+        assert_eq!(statuses(&store, "g").await, vec![S::Queued, S::Queued]);
+
+        // Every row: what Resume makes of it.
+        assert_eq!(status_on_resume(S::Completed, true), None);
+        assert_eq!(status_on_resume(S::Verifying, true), Some(S::Verifying));
+        assert_eq!(status_on_resume(S::Failed, true), Some(S::Verifying));
+        for s in [S::Queued, S::Downloading, S::Paused, S::Verifying, S::Failed] {
+            assert_eq!(status_on_resume(s, false), Some(S::Queued), "{s:?}");
+        }
+        // A file whole at its name that this group did not finish is checked by
+        // `download_file`, which does not fetch it again when it matches its checksum.
+        assert_eq!(status_on_resume(S::Paused, true), Some(S::Queued));
+    }
+
+    /// The bug: paused after its first file finished, a group showed "downloading" with a
+    /// Pause that did nothing and no Resume, and it started again by itself at the next start
+    /// of the app. A finished file now counts as progress only while the group's task runs.
+    #[test]
+    fn a_group_paused_after_its_first_file_is_paused() {
+        assert_eq!(group_status(&[S::Verifying, S::Paused], false), S::Paused);
+        assert_eq!(status_name(S::Paused), "paused");
+        // Also while its task is still ending.
+        assert_eq!(group_status(&[S::Verifying, S::Paused], true), S::Paused);
+        assert!(!resumes_at_start(&[S::Verifying, S::Paused]));
+        assert!(!resumes_at_start(&[S::Verifying, S::Paused, S::Queued]));
+
+        // While the task runs, a finished file is progress.
+        assert_eq!(group_status(&[S::Verifying, S::Downloading], true), S::Downloading);
+        assert_eq!(group_status(&[S::Verifying, S::Queued], true), S::Downloading);
+        assert_eq!(group_status(&[S::Queued, S::Queued], true), S::Queued);
+        // Stopped any other way (nothing runs it): it can be resumed.
+        assert_eq!(group_status(&[S::Verifying, S::Verifying], false), S::Paused);
+        assert_eq!(group_status(&[S::Verifying, S::Queued], false), S::Paused);
+        // Done, failed and cancelled.
+        assert_eq!(group_status(&[S::Completed, S::Completed], false), S::Completed);
+        assert_eq!(group_status(&[S::Verifying, S::Failed], false), S::Failed);
+        assert_eq!(
+            group_status(&[S::Verifying, S::Cancelled, S::Queued], true),
+            S::Cancelled
+        );
+
+        // At the next start an interrupted group goes on; a failed or finished one does not.
+        assert!(resumes_at_start(&[S::Verifying, S::Downloading, S::Queued]));
+        assert!(resumes_at_start(&[S::Verifying, S::Verifying]));
+        assert!(!resumes_at_start(&[S::Verifying, S::Failed]));
+        assert!(!resumes_at_start(&[S::Completed, S::Completed]));
+    }
+
+    /// The bug: two downloads of one file (a double click on Download, Download again after
+    /// Back, two models of one repository sharing one image file, "Download the image file")
+    /// wrote the same partial file at once and spoiled each other.
+    #[test]
+    fn two_downloads_never_write_one_file() {
+        let dir = Path::new("/models/example-quants/Sample-7B-GGUF");
+        let q4 = dir.join("Sample-7B-Q4_K_M.gguf");
+        let q8 = dir.join("Sample-7B-Q8_0.gguf");
+        let image = dir.join("mmproj-Sample-F16.gguf");
+        let text = |p: &PathBuf| p.display().to_string();
+        let rows = vec![
+            row("a", &q4, 1, S::Downloading),
+            row("a", &image, 1, S::Queued),
+        ];
+        // The same model again: that download is it.
+        assert_eq!(
+            overlap(&rows, &[text(&q4), text(&image)]),
+            Overlap::Same("a".into())
+        );
+        assert_eq!(overlap(&rows, &[text(&q4)]), Overlap::Same("a".into()));
+        // Its image file alone (Models → Installed) follows that download too.
+        assert_eq!(overlap(&rows, &[text(&image)]), Overlap::Same("a".into()));
+        // Another model of the repository that shares the image file waits for it.
+        assert_eq!(overlap(&rows, &[text(&q8), text(&image)]), Overlap::Part);
+        assert_eq!(overlap(&rows, &[text(&q8)]), Overlap::None);
+
+        // A paused or failed download can go on, so it counts; a done or cancelled one not.
+        let stopped = vec![row("a", &q4, 1, S::Paused), row("b", &q8, 1, S::Failed)];
+        assert_eq!(overlap(&stopped, &[text(&q8)]), Overlap::Same("b".into()));
+        assert_eq!(overlap(&stopped, &[text(&q4), text(&q8)]), Overlap::Part);
+        let over = vec![row("a", &q4, 1, S::Completed), row("b", &q4, 1, S::Cancelled)];
+        assert_eq!(overlap(&over, &[text(&q4)]), Overlap::None);
+        assert_eq!(overlap(&[], &[text(&q4)]), Overlap::None);
+
+        let err = already_downloading();
+        assert_eq!(err.code, "already_downloading");
+        assert_eq!(
+            err.message,
+            "One of this model's files is already being downloaded."
+        );
+        assert!(err.next_step.contains("Downloads"));
+    }
+
+    /// The bug: Cancel deleted only the partial files, so a file the group had finished
+    /// (often gigabytes) stayed on disk, not on the Installed list but in the folder's size.
+    /// A file an installed model uses stays: its own file, or its image file, which two
+    /// models of one repository can share.
+    #[test]
+    fn cancel_deletes_the_finished_files_no_installed_model_uses() {
+        let dir = Scratch::new();
+        let repo = dir.path().join("example-quants/Sample-7B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let q8 = repo.join("Sample-7B-Q8_0.gguf");
+        let image = repo.join("mmproj-Sample-F16.gguf");
+        std::fs::write(&q8, vec![1u8; 100]).unwrap();
+        std::fs::write(&image, vec![2u8; 50]).unwrap();
+        let rows = vec![
+            row("g", &q8, 100, S::Verifying),
+            row("g", &image, 50, S::Verifying),
+            row("g", &repo.join("Sample-7B-BF16.gguf"), 10, S::Downloading),
+        ];
+        let used = |models: Vec<store::ModelRecord>| {
+            move |p: &Path| crate::hub::used_by_installed(&models, p)
+        };
+        // Nothing installed uses them: both finished files go.
+        assert_eq!(
+            finished_files_to_delete(&rows, used(Vec::new())),
+            vec![q8.clone(), image.clone()]
+        );
+        // Another model of the repository is installed next to the image file (a load finds
+        // it there), or has it recorded: the image file stays.
+        let q4 = repo.join("Sample-7B-Q4_K_M.gguf");
+        std::fs::write(&q4, vec![3u8; 10]).unwrap();
+        assert_eq!(
+            finished_files_to_delete(&rows, used(vec![installed(&q4, None)])),
+            vec![q8.clone()]
+        );
+        let elsewhere = dir.path().join("Other-Q4_K_M.gguf");
+        std::fs::write(&elsewhere, vec![3u8; 10]).unwrap();
+        assert_eq!(
+            finished_files_to_delete(&rows, used(vec![installed(&elsewhere, Some(&image))])),
+            vec![q8.clone()]
+        );
+        // A model on the list downloaded again: its file stays.
+        assert_eq!(
+            finished_files_to_delete(&rows, used(vec![installed(&q8, None)])),
+            Vec::<PathBuf>::new()
+        );
+        // Every shard of a split model on the list stays.
+        let shard2 = repo.join("Sample-7B-Q2_K-00002-of-00002.gguf");
+        std::fs::write(&shard2, vec![4u8; 10]).unwrap();
+        let split = installed(&repo.join("Sample-7B-Q2_K-00001-of-00002.gguf"), None);
+        assert!(
+            finished_files_to_delete(&[row("g", &shard2, 10, S::Verifying)], used(vec![split]))
+                .is_empty()
+        );
+        // Not whole (another size): not a file the group finished.
+        assert!(finished_files_to_delete(&[row("g", &q8, 101, S::Verifying)], |_| false).is_empty());
+        // Whole after the last step failed: deleted too. A paused row's file found at its name
+        // was not finished by this group, so it stays.
+        assert_eq!(
+            finished_files_to_delete(
+                &[row("g", &q8, 100, S::Failed), row("g", &image, 50, S::Paused)],
+                |_| false
+            ),
+            vec![q8.clone()]
+        );
+    }
+
+    /// The bug: when adding the finished model to Installed (or recording an image file on
+    /// its model) failed, the error went only to the log: the rows stayed "verifying", the
+    /// group showed 100% with a Pause that did nothing, and it started again at every start
+    /// of the app. Now its rows fail with the error in plain words, and Resume tries that
+    /// step again without downloading anything.
+    #[tokio::test]
+    async fn a_failed_last_step_shows_its_error_and_resumes_without_downloading() {
+        let dir = Scratch::new();
+        let model = dir.path().join("Sample-7B-Q8_0.gguf");
+        let image = dir.path().join("mmproj-Sample-F16.gguf");
+        std::fs::write(&model, vec![0u8; 100]).unwrap();
+        std::fs::write(&image, vec![0u8; 50]).unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        recorded(&store, "g", &model, 100, S::Verifying).await;
+        recorded(&store, "g", &image, 50, S::Verifying).await;
+        let cause = AppError::new(
+            "not_gguf",
+            "This file is not a GGUF model the app can read.",
+            "Pick a .gguf file.",
+            "bad magic",
+        );
+        mark_failed(&store, "g", &last_step_error(false, &cause))
+            .await
+            .unwrap();
+        let now = statuses(&store, "g").await;
+        assert_eq!(now, vec![S::Failed, S::Failed]);
+        assert_eq!(status_name(group_status(&now, false)), "error");
+        assert!(!resumes_at_start(&now), "it does not start again by itself");
+        let rows = store.list_downloads(Some("g".into())).await.unwrap();
+        let shown: AppError = serde_json::from_str(rows[0].error.as_deref().unwrap()).unwrap();
+        assert_eq!(shown.code, "download_not_added");
+        assert_eq!(
+            shown.message,
+            "The model was downloaded, but it could not be added to Installed. This file is not a GGUF model the app can read."
+        );
+        assert_eq!(
+            shown.next_step,
+            "Resume to try again. If it fails again, cancel the download."
+        );
+        assert_eq!(shown.details, "not_gguf: bad magic");
+
+        requeue(&store, "g").await.unwrap();
+        assert_eq!(statuses(&store, "g").await, vec![S::Verifying, S::Verifying]);
+        let rows = store.list_downloads(Some("g".into())).await.unwrap();
+        assert!(rows.iter().all(|r| r.error.is_none()));
+
+        let image_step = last_step_error(true, &AppError::internal("locked"));
+        assert_eq!(
+            image_step.message,
+            "The image file was downloaded, but it could not be added to its model. Something went wrong inside the app."
+        );
+    }
 }
