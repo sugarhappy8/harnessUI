@@ -486,15 +486,20 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     send: async (text, parentId, images, documents, mentions, copyAttachments) => {
+      // [0.0.7 P6a review] The app writes one reply at a time: while one runs (also one this
+      // window did not start), a send would only be refused, and must leave that reply's view,
+      // its chat's notice and the error line as they are.
+      if (turnChatId(get()) !== null) return;
       let chatId = get().activeChatId;
       if (chatId === null) {
         await get().newChat();
         chatId = get().activeChatId;
       }
-      if (chatId === null) return;
+      if (chatId === null || turnChatId(get()) !== null) return;
       const parent = parentId === undefined ? lastMessageId(get().detail) : parentId;
+      const generation = newGeneration(chatId);
       set({
-        generation: newGeneration(chatId),
+        generation,
         turnNotes: null,
         stoppedTurns: withoutChat(get().stoppedTurns, chatId),
         error: null,
@@ -506,15 +511,18 @@ export const useApp = create<AppState>((set, get) => {
           (e) => onStreamEvent(id, e),
         );
       } catch (err) {
-        set({ generation: null, error: toErrorInfo(err) });
+        // Only this send's own view is cleared, never one that took its place.
+        set(get().generation === generation ? { generation: null, error: toErrorInfo(err) } : { error: toErrorInfo(err) });
       }
     },
 
     regenerate: async (assistantMessageId) => {
       const chatId = get().activeChatId;
-      if (chatId === null) return;
+      // [0.0.7 P6a review] As for `send`: nothing while a reply runs.
+      if (chatId === null || turnChatId(get()) !== null) return;
+      const generation = newGeneration(chatId);
       set({
-        generation: newGeneration(chatId),
+        generation,
         turnNotes: null,
         stoppedTurns: withoutChat(get().stoppedTurns, chatId),
         error: null,
@@ -522,7 +530,7 @@ export const useApp = create<AppState>((set, get) => {
       try {
         await ipc.regenerate(chatId, assistantMessageId, (e) => onStreamEvent(chatId, e));
       } catch (err) {
-        set({ generation: null, error: toErrorInfo(err) });
+        set(get().generation === generation ? { generation: null, error: toErrorInfo(err) } : { error: toErrorInfo(err) });
       }
     },
 
@@ -703,21 +711,33 @@ export function refreshModelsAfterDownloads(): Promise<() => void> {
 export function followRunningTurn(): () => void {
   if (!ipc.isTauri()) return () => undefined;
   let heard = false;
-  return listenInEffect(async () => {
+  // [0.0.7 P6a review] Set when following stops. React's development mode starts every effect,
+  // stops it and starts it again: the follower it stopped could still be answered (or, until
+  // its listener is removed, hear an event) after a newer event, and showed a reply running
+  // that had ended, with the message box off and Stop doing nothing until a reload.
+  let stopped = false;
+  const stopListening = listenInEffect(async () => {
     const unlisten = await ipc.onTurnRunning((chatId) => {
+      if (stopped) return;
       heard = true;
       useApp.getState().setRunningTurn(chatId);
     });
     // Asked once listening has started, so nothing said in between is missed; what is heard
     // while the answer is on its way is newer than it.
-    ipc
-      .runningTurn()
-      .then((chatId) => {
-        if (!heard) useApp.getState().setRunningTurn(chatId);
-      })
-      .catch(() => undefined);
+    if (!stopped) {
+      ipc
+        .runningTurn()
+        .then((chatId) => {
+          if (!heard && !stopped) useApp.getState().setRunningTurn(chatId);
+        })
+        .catch(() => undefined);
+    }
     return unlisten;
   });
+  return () => {
+    stopped = true;
+    stopListening();
+  };
 }
 
 /** [0.0.7 P6] Follows the approval cards: their `approval-request` and `approval-closed`
@@ -745,7 +765,7 @@ export function followApprovals(): () => void {
   // Asked once both listen, so no card shown or closed in between is missed.
   const started = (unlisten: () => void) => {
     listening += 1;
-    if (listening === 2) readWaiting();
+    if (listening === 2 && !stopped) readWaiting();
     return unlisten;
   };
   const offs = [

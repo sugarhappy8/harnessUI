@@ -368,7 +368,12 @@ pub async fn image_file_offer(
 /// the model's repository (listed again, so the size and checksum are the Hub's now) is
 /// downloaded into the model's folder like any download (resumable, checked against its
 /// published size and SHA-256), then recorded on the model's row. Returns the download's
-/// id; the same file already downloading returns that download's id.
+/// id. 0.0.7 (P6): `DownloadManager::start` decides, in one step with recording it, what
+/// happens when that file is downloading already: the image file asked for again for this
+/// model follows its download (going on with it when it stopped, starting afresh in place of
+/// one that failed); a download of it for another model (another quant of the repository)
+/// is left alone and this one is refused, saying this model uses that file too once it is
+/// done.
 #[tauri::command]
 pub async fn download_image_file(
     window: tauri::WebviewWindow,
@@ -403,30 +408,6 @@ pub async fn download_image_file(
         )
     })?;
     let manager = app.state::<Arc<DownloadManager>>().inner().clone();
-    // The same file downloading already (the button pressed again after the dialog was
-    // closed and opened): follow that download, going on with it if it stopped.
-    let dest_text = dest.display().to_string();
-    if let Some(earlier) = state
-        .store
-        .list_downloads(None)
-        .await?
-        .into_iter()
-        .find(|r| {
-            r.dest_path == dest_text
-                && !matches!(
-                    r.status,
-                    store::DownloadStatus::Completed | store::DownloadStatus::Cancelled
-                )
-        })
-    {
-        if matches!(
-            earlier.status,
-            store::DownloadStatus::Failed | store::DownloadStatus::Paused
-        ) {
-            manager.resume(&app, &earlier.group_id).await?;
-        }
-        return Ok(earlier.group_id);
-    }
     let meta = GroupMeta {
         repo: detail.id.clone(),
         commit: detail.commit.clone(),

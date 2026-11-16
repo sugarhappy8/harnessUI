@@ -73,3 +73,14 @@ and `README.md`.
   takes, `sameCallLimit` setting (2–100, default 5) in Settings → General. Real model
   (Qwen3-0.6B, greedy) still calls read_file with the list and guide. Under independent
   review. Evals/benchmarks don't get the list (separate turn input) — note for later.
+- P5 review: no critical issue; 3 major: (M1) a one-character address typo (`http:/host`)
+  made the key check and the Cloud mark read a different host than the client (key over
+  plain http, no Cloud mark); (M2) Automatic planned 1,000,000 tokens for Claude models
+  (decided: Automatic = min(reported, company default) = 200,000 for Claude, 100,000 for
+  Haiku 5.5; larger only by explicit choice); (M3) a saved key followed an edited endpoint to
+  a new host. 7 minor (key left in mid-stream error text; refused partial reply kept;
+  "local network" by name not address; thinking off not really off on some Claude models;
+  history edits break replayed thinking; Claude's 10 MB image limit; Responses-only OpenAI
+  models listed) plus nits. All being fixed by P5 (round 1).
+- P2 review: no critical; 2 major + 11 minor recorded in `review-p2-findings.md` (the
+  automatic Hugging Face listing becomes user-triggered). To fix after P6b; m5 given to P6b.

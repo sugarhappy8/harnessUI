@@ -18,8 +18,8 @@ const ipcMock = vi.hoisted(() => ({
     throw new Error("not read in these tests");
   }),
   listChats: vi.fn(async () => [] as unknown[]),
-  sendMessage: vi.fn(async (..._args: unknown[]) => undefined),
-  regenerate: vi.fn(async (..._args: unknown[]) => undefined),
+  sendMessage: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
+  regenerate: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
   /** Starts listening when the test says so, as Tauri's `listen` does (asynchronously). Tauri
    *  calls the handler from before `listen` resolves until the listener is removed. */
   onTurnRunning: vi.fn(

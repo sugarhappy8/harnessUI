@@ -123,11 +123,37 @@ pub struct Held {
     pub buttons: Vec<MouseButton>,
 }
 
+/// The system's latest input within this of this app's latest event counts as that event
+/// (the system's clock for it is coarse: about 16 ms on Windows).
+const OWN_INPUT_SLACK: Duration = Duration::from_millis(100);
+
+/// What the guard knows about recent input, to tell the user's from its own
+/// ([`InputGuard::user_idle_for`]).
+#[derive(Debug, Default, Clone, Copy)]
+struct Activity {
+    /// When this app last sent an event.
+    sent: Option<Instant>,
+    /// The latest input the system saw that was not this app's, looked up before every
+    /// event this app sends.
+    user: Option<Instant>,
+}
+
+impl Activity {
+    /// The system's latest input, at `at`, may be this app's latest event.
+    fn is_own(&self, at: Instant) -> bool {
+        self.sent.is_some_and(|sent| {
+            let gap = if at > sent { at - sent } else { sent - at };
+            gap <= OWN_INPUT_SLACK
+        })
+    }
+}
+
 struct Inner {
     injector: Arc<dyn Injector>,
     me: SelfProcess,
     epoch: Arc<AtomicU64>,
     held: Mutex<Held>,
+    activity: Mutex<Activity>,
 }
 
 impl Inner {
@@ -135,11 +161,46 @@ impl Inner {
         self.held.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn activity(&self) -> MutexGuard<'_, Activity> {
+        self.activity.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// How long ago the system saw its latest input; never panics.
+    fn time_since_input(&self) -> Option<Duration> {
+        catch_unwind(AssertUnwindSafe(|| self.injector.time_since_input()))
+            .ok()
+            .flatten()
+    }
+
+    /// Before an event: notes the system's latest input when it was not this app's own.
+    fn note_user_input(&self) {
+        let Some(at) = self
+            .time_since_input()
+            .and_then(|age| Instant::now().checked_sub(age))
+        else {
+            return;
+        };
+        let mut a = self.activity();
+        if !a.is_own(at) && a.user.is_none_or(|u| u < at) {
+            a.user = Some(at);
+        }
+    }
+
+    /// Sends one event with the activity noted around it.
+    fn send_noted(&self, event: &InputEvent, gate: &Gate) -> Result<(), InputError> {
+        self.note_user_input();
+        let r = self.injector.send(event, gate);
+        if r.is_ok() {
+            self.activity().sent = Some(Instant::now());
+        }
+        r
+    }
+
     /// Sends a release, never letting a panic in the platform code escape (this runs from
     /// drop guards during unwinding).
     fn send_release(&self, event: InputEvent) {
         let r = catch_unwind(AssertUnwindSafe(|| {
-            self.injector.send(&event, &Gate::always())
+            self.send_noted(&event, &Gate::always())
         }));
         match r {
             Ok(Ok(())) => {}
@@ -208,6 +269,7 @@ impl InputGuard {
                 me,
                 epoch: Arc::new(AtomicU64::new(0)),
                 held: Mutex::new(Held::default()),
+                activity: Mutex::new(Activity::default()),
             }),
         }
     }
@@ -244,6 +306,30 @@ impl InputGuard {
     /// What the guard currently holds.
     pub fn held(&self) -> Held {
         self.inner.held().clone()
+    }
+
+    /// How long the user has left the keyboard and mouse alone, leaving out the input this
+    /// app sent (the system counts injected input as input, on Windows at least). `None`
+    /// when the platform cannot tell. Input the user gave while this app's own events were
+    /// being sent, within [`OWN_INPUT_SLACK`] of one of them, can be taken for this app's.
+    pub fn user_idle_for(&self) -> Option<Duration> {
+        let age = self.inner.time_since_input()?;
+        let now = Instant::now();
+        let Some(at) = now.checked_sub(age) else {
+            return Some(age);
+        };
+        let a = *self.inner.activity();
+        if !a.is_own(at) {
+            return Some(age);
+        }
+        // The latest input is this app's own: the user's came before it.
+        Some(a.user.map_or(age, |u| now.saturating_duration_since(u)))
+    }
+
+    /// A gate that Stop closes ([`StopHandle::release_all`]), for steps outside an
+    /// operation that must not happen after Stop (handing the keyboard back).
+    pub(crate) fn gate(&self) -> Gate {
+        Gate::new(self.inner.epoch.clone())
     }
 
     pub fn injector(&self) -> &Arc<dyn Injector> {
@@ -416,7 +502,7 @@ impl Op {
 
     fn send(&self, event: InputEvent) -> Result<(), OpError> {
         self.live()?;
-        self.inner.injector.send(&event, &self.gate)?;
+        self.inner.send_noted(&event, &self.gate)?;
         Ok(())
     }
 
@@ -443,7 +529,7 @@ impl Op {
 
     /// Releases a button. Always sent.
     pub fn button_up(&mut self, button: MouseButton) -> Result<(), OpError> {
-        let r = self.inner.injector.send(
+        let r = self.inner.send_noted(
             &InputEvent::Button {
                 button,
                 down: false,
@@ -479,8 +565,7 @@ impl Op {
     pub fn key_up(&mut self, key: Key) -> Result<(), OpError> {
         let r = self
             .inner
-            .injector
-            .send(&InputEvent::Key { key, down: false }, &Gate::always());
+            .send_noted(&InputEvent::Key { key, down: false }, &Gate::always());
         forget(&mut self.keys, key);
         forget(&mut self.inner.held().keys, key);
         r.map_err(OpError::from)
@@ -977,6 +1062,42 @@ mod tests {
         assert!(d.state().keys_down.contains(&Key::Meta));
         drop(g);
         assert!(d.state().keys_down.is_empty());
+    }
+
+    #[test]
+    fn the_users_idle_time_leaves_out_this_apps_own_input() {
+        let d = desktop();
+        d.state().foreground = Some(1);
+        let g = guard(&d);
+        // The platform cannot tell.
+        assert_eq!(g.user_idle_for(), None);
+        d.state().reports_input_time = true;
+        d.user_input(Duration::from_secs(5));
+        let idle = g.user_idle_for().unwrap();
+        assert!(idle >= Duration::from_secs(5), "{idle:?}");
+        // This app's own events count as input for the system, not for the user.
+        let mut op = g.begin(CancellationToken::new());
+        op.key_down(Key::Char('a'), Expect::App(&notepad()))
+            .unwrap();
+        op.key_up(Key::Char('a')).unwrap();
+        assert!(d.state().injected_input.is_some());
+        let idle = g.user_idle_for().unwrap();
+        assert!(idle >= Duration::from_secs(5), "{idle:?}");
+        // A refused event sends nothing.
+        let e = op.move_to(p(600.0, 100.0), Expect::NotSelf).unwrap_err();
+        assert_eq!(e, OpError::Refused(Refusal::SelfPointer));
+        // The user's input after this app's counts.
+        std::thread::sleep(Duration::from_millis(150));
+        d.user_input(Duration::ZERO);
+        let idle = g.user_idle_for().unwrap();
+        assert!(idle < Duration::from_secs(1), "{idle:?}");
+        // And it is still the user's once this app sends more.
+        std::thread::sleep(Duration::from_millis(150));
+        op.key_down(Key::Char('b'), Expect::App(&notepad()))
+            .unwrap();
+        op.key_up(Key::Char('b')).unwrap();
+        let idle = g.user_idle_for().unwrap();
+        assert!(idle < Duration::from_secs(1), "{idle:?}");
     }
 
     #[test]

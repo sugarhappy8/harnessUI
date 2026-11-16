@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { CheckCheck, Pause, Play, RotateCcw, Trash2 } from "lucide-react";
-import { useApp } from "../../store/app";
+import { turnChatId, useApp } from "../../store/app";
 import * as api from "../task/api";
 import { ClearTaskDialog } from "../task/ClearTaskDialog";
 import { NEXT_STATUS, ConstraintsEditor, StepsEditor, TextEditor } from "../task/TaskEditors";
@@ -28,7 +28,10 @@ export function TaskTab(props: { chatId: number }) {
   const { chatId } = props;
   const task = useTasks((s) => s.byChat[chatId]);
   const problem = useTasks((s) => s.problems[chatId]);
-  const generation = useApp((s) => s.generation);
+  // [0.0.7 P6a review] The chat whose reply is being written: this window's own, or one the app
+  // reports (also a reply that went on while the window reloaded, which sends this window no
+  // events).
+  const turnChat = useApp(turnChatId);
   const activeChatId = useApp((s) => s.activeChatId);
   // What is being edited, for the chat it was started in.
   const [edited, setEdited] = useState<{ chatId: number; what: Editing }>({ chatId, what: null });
@@ -41,8 +44,8 @@ export function TaskTab(props: { chatId: number }) {
     void useTasks.getState().load(chatId);
   }, [chatId]);
 
-  const runningHere = generation !== null && generation.chatId === chatId;
-  const anyRunning = generation !== null;
+  const runningHere = turnChat === chatId;
+  const anyRunning = turnChat !== null;
 
   async function act(f: () => Promise<Task | null | void>): Promise<boolean> {
     setBusy(true);
@@ -68,13 +71,15 @@ export function TaskTab(props: { chatId: number }) {
   async function pause() {
     if (!(await setStatus("paused"))) return;
     // The same stop as the Stop button, only for a turn of this chat.
-    const g = useApp.getState().generation;
-    if (g && g.chatId === chatId) await useApp.getState().stop(chatId);
+    if (turnChatId(useApp.getState()) === chatId) await useApp.getState().stop(chatId);
   }
 
   async function resume() {
+    // Not while a reply runs (the app writes one at a time): the task would be set active and
+    // nothing sent.
+    if (turnChatId(useApp.getState()) !== null) return;
     if (!(await setStatus("active"))) return;
-    if (useApp.getState().activeChatId === chatId && useApp.getState().generation === null) {
+    if (useApp.getState().activeChatId === chatId && turnChatId(useApp.getState()) === null) {
       await useApp.getState().send(RESUME_MESSAGE);
     }
   }

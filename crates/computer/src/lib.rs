@@ -42,7 +42,9 @@ pub use server::{
     SERVER_NAME, StepAside, TOOL_CLICK, TOOL_DRAG, TOOL_KEY, TOOL_MOVE, TOOL_SCREENSHOT,
     TOOL_SCROLL, TOOL_TYPE,
 };
-pub use window_aside::{AsideEvent, WindowAside, WindowNow, WindowStep};
+pub use window_aside::{
+    Aside, AsideEvent, Comeback, MainWindow, WindowAside, WindowNow, WindowStep,
+};
 
 #[cfg(target_os = "macos")]
 pub use platform::macos::{

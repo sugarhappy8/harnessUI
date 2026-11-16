@@ -98,6 +98,9 @@ const CODING_APPS = "coding_apps";
 const CODING_NOTE =
   "Lets the model hand a task to Claude Code or Codex on this computer. They work online with your own account. Every request asks you first, except in Full access.";
 
+/** No tools: what the panel holds before the shown chat's own list is read. */
+const NO_TOOLS: ToolDto[] = [];
+
 /** The chat's switched-on tools after turning `names` on or off. */
 function switched(list: ToolDto[], names: string[], on: boolean): string[] {
   const current = new Set(list.filter((t) => t.enabledInChat && !t.companion).map((t) => t.exposed));
@@ -132,7 +135,12 @@ export function ToolsPanel(props: {
   /** The chat's stored working folder (null: the first approved folder). */
   workingFolder?: string | null;
 }) {
-  const [tools, setTools] = useState<ToolDto[]>([]);
+  // [0.0.7 P6a review] The tools read last, with the chat they were read for. Only the shown
+  // chat's own list is shown and switched: a switch saves the whole list to the shown chat,
+  // so until its own list is read (or when that read fails) there is nothing to switch.
+  const [read, setRead] = useState<{ chatId: number; list: ToolDto[] } | null>(null);
+  const ownList = read !== null && read.chatId === props.chatId;
+  const tools = ownList ? read.list : NO_TOOLS;
   const [folders, setFolders] = useState<ApprovedFolder[]>([]);
   const [loaded, setLoaded] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
@@ -161,7 +169,7 @@ export function ToolsPanel(props: {
     ipc
       .listChatTools(chatId)
       .then((list) => {
-        if (shownChat.current === chatId) setTools(list);
+        if (shownChat.current === chatId) setRead({ chatId, list });
       })
       .catch((e) => showError(toErrorInfo(e)));
   }, [props.chatId, showError]);
@@ -230,6 +238,7 @@ export function ToolsPanel(props: {
   }
 
   function toggle(names: string[], on: boolean) {
+    if (!ownList) return;
     void save(switched(tools, names, on));
   }
 
@@ -244,11 +253,16 @@ export function ToolsPanel(props: {
       toggle(codingNames, false);
       return;
     }
+    if (!ownList) return;
+    const chatId = props.chatId;
     setFinding(true);
     try {
       setCoding(await ipc.findCodingApps());
-      const list = await ipc.listChatTools(props.chatId);
-      setTools(list);
+      const list = await ipc.listChatTools(chatId);
+      // [0.0.7 P6a review] Into this panel only while it still shows that chat: after a switch
+      // it would be the next chat's list, and a switch there would save it to that chat. The
+      // chat it was switched on in still gets its coding apps below.
+      if (shownChat.current === chatId) setRead({ chatId, list });
       const names = list
         .filter((t) => t.server === CODING_APPS && !t.companion && t.available && !t.schemaError)
         .map((t) => t.exposed);
@@ -506,7 +520,7 @@ export function ToolsPanel(props: {
                   type="checkbox"
                   role="switch"
                   checked={codingOn}
-                  disabled={finding}
+                  disabled={finding || !ownList}
                   onChange={(e) => void switchCodingApps(e.target.checked)}
                 />
                 Coding apps (experimental)

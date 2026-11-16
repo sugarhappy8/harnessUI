@@ -1,7 +1,7 @@
 //! The built-in `browser` server (ARCHITECTURE.md 9.3, 13.3): `browser_navigate`,
 //! `browser_snapshot`, `browser_find`, `browser_read_text`, `browser_click`,
 //! `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_screenshot`,
-//! `browser_back`.
+//! `browser_back`, and (0.0.7, P7) `browser_capture_site` ([`crate::capture`]).
 //!
 //! `describe` turns arguments into a policy action scoped to the site (scheme + host +
 //! port) the action touches; blocked schemes and addresses are hard limits; D8 submit
@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use mcp_host::{BuiltinServer, CallContext, ChatContext, Content, Described, ToolDef, ToolOutput};
+use policy::path::Flavor;
 use policy::sanitize::{one_line, visible};
 use policy::{Action, Risk, Scope};
 use serde_json::{Map, Value, json};
@@ -22,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::approval::NavigationApprover;
+use crate::capture;
 use crate::config::BrowserConfig;
 use crate::discovery::{self, BrowserUnavailable, FoundBrowser};
 use crate::intent::{self, ElementInfo, SubmitIntent, SubmitReason};
@@ -905,6 +907,107 @@ impl BrowserServer {
         )
     }
 
+    /// [0.0.7 P7] `browser_capture_site`: the site goes through the same address checks as
+    /// `browser_navigate`, the folder through the same path sandbox as `write_file`, and the
+    /// grant scope names both (`Scope::SiteCapture`).
+    async fn describe_capture(
+        &self,
+        tool: &str,
+        args: &Map<String, Value>,
+        chat: &ChatContext,
+    ) -> Described {
+        let a = match capture::describe::parse_args(args) {
+            Ok(a) => a,
+            Err(e) => return Described::Invalid(e),
+        };
+        let running = self.running().await;
+        let current = running.as_ref().and_then(|b| {
+            let st = b.lock();
+            let tab = st.active.clone()?;
+            st.main_frame(&tab).map(|f| (f.url.clone(), f.origin.clone()))
+        });
+        let (url, reload) = match &a.url {
+            Some(raw) => match netpolicy::parse_user_url(raw) {
+                Ok(u) => (u, false),
+                Err(e) => return Described::Invalid(e),
+            },
+            None => match current
+                .as_ref()
+                .and_then(|(href, _)| Url::parse(href).ok())
+                .filter(|u| matches!(u.scheme(), "http" | "https"))
+            {
+                Some(u) => (u, true),
+                None => {
+                    return Described::Invalid(
+                        "The agent's browser has no web page open. Give url, the address of the page to capture.".into(),
+                    );
+                }
+            },
+        };
+        if running.is_none()
+            && let Err(e) = self.availability()
+        {
+            return Described::Invalid(e.for_model());
+        }
+        let shown = one_line(url.as_str(), 500);
+        let ips = match netpolicy::check_url(&url, &self.address_policy(), &self.inner.dns).await {
+            Ok(ips) => ips,
+            Err(why) => return hard_limit(tool, &shown, why),
+        };
+        let origin = netpolicy::origin_of(&url).unwrap_or_else(|| "null".into());
+        let host = policy::sanitize::display_host(&url).unwrap_or_default();
+        let folder = match capture::describe::check_folder(chat, a.folder.as_deref(), Flavor::native())
+        {
+            Ok(f) => f,
+            Err(why) => {
+                return hard_limit(tool, a.folder.as_deref().unwrap_or("the working folder"), why);
+            }
+        };
+        let addresses = ips
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (summary, preview) =
+            capture::describe::card(&host, &shown, &origin, &addresses, &folder, &a, reload);
+        // Allow all: capturing the site the tab is already on sends nothing anywhere new.
+        let same_site =
+            current.as_ref().map(|(_, o)| o.as_str()) == Some(origin.as_str()) && origin != "null";
+        let sensitive = folder.always_asks.is_some();
+        Described::Action(Action {
+            server: "browser".into(),
+            tool: tool.into(),
+            summary: one_line(&summary, 200),
+            preview: visible(&preview),
+            scope: Scope::SiteCapture {
+                origin: origin.clone(),
+                folder: folder.canonical.clone(),
+            },
+            risk: if sensitive {
+                Risk::AlwaysAsk
+            } else {
+                Risk::Normal
+            },
+            read_only: false,
+            outbound: true,
+            keep_asking: sensitive.then_some(policy::KeepAsking::Sensitive),
+            network: !same_site,
+            hard_limit: None,
+            payload: json!({
+                "url": url.as_str(),
+                "origin": origin,
+                "folder": folder.canonical,
+                "approved": folder.approved,
+                "exists": folder.exists,
+                "wasSymlink": folder.was_symlink,
+                "widths": a.widths,
+                "scroll": a.scroll,
+                "maxTotalBytes": a.caps.total,
+                "maxFiles": a.caps.files,
+            }),
+        })
+    }
+
     async fn describe_back(&self, tool: &str) -> Described {
         let b = match self.running().await {
             Some(b) => b,
@@ -1075,6 +1178,20 @@ fn tool_defs() -> Vec<ToolDef> {
             vec![],
             false,
         ),
+        def(
+            capture::TOOL,
+            "Save a web page's front end (page with scripts off, styles, pictures, fonts, animations, screenshots, report.md) into a new folder in an approved folder. For studying a design and rebuilding it with the user's own content; never copy other people's logos, brand names or sign-in pages.",
+            json!({
+                "url": {"type": "string", "description": "The page (http or https). Leave out to capture the page open in the agent's browser."},
+                "folder": {"type": "string", "description": "An approved folder; the copy goes into a new folder inside it named after the site and the time. Default: the working folder."},
+                "widths": {"type": "array", "items": {"type": "integer", "minimum": capture::describe::MIN_WIDTH, "maximum": capture::describe::MAX_WIDTH}, "minItems": 1, "maxItems": capture::describe::MAX_WIDTHS, "description": "Screen widths in pixels; the first is used for the copy. Default [1440, 390]."},
+                "scroll": {"type": "boolean", "description": "Scroll through the page first so late pictures and scroll effects load. Default true."},
+                "max_total_mb": {"type": "integer", "minimum": 1, "maximum": capture::assets::MAX_TOTAL_MB, "description": "Size limit for the whole copy. Default 300."},
+                "max_files": {"type": "integer", "minimum": 1, "maximum": capture::assets::MAX_FILES, "description": "File limit. Default 2000."}
+            }),
+            vec![],
+            false,
+        ),
     ]
 }
 
@@ -1097,7 +1214,7 @@ impl BuiltinServer for BrowserServer {
         &self,
         tool: &str,
         args: &Map<String, Value>,
-        _chat: &ChatContext,
+        chat: &ChatContext,
     ) -> Described {
         // No side effects here (describe may run for a call that is never approved, and
         // for one chat while another chat's call is running): which chat gets the cards
@@ -1107,6 +1224,9 @@ impl BuiltinServer for BrowserServer {
             && let Err(e) = self.availability()
         {
             return Described::Invalid(e.for_model());
+        }
+        if tool == capture::TOOL {
+            return self.describe_capture(tool, args, chat).await;
         }
         match tool {
             "browser_navigate" => self.describe_navigate(tool, args).await,
@@ -1136,7 +1256,7 @@ impl BuiltinServer for BrowserServer {
             _ = ctx.cancel.cancelled() => return ToolOutput::error("Stopped by the user."),
         };
         let p = &action.payload;
-        let browser = if tool == "browser_navigate" {
+        let browser = if tool == "browser_navigate" || tool == capture::TOOL {
             let started = tokio::select! {
                 r = self.ensure_browser() => r,
                 _ = ctx.cancel.cancelled() => return ToolOutput::error("Stopped by the user."),
@@ -1174,7 +1294,7 @@ impl BuiltinServer for BrowserServer {
             .cloned()
             .and_then(|v| serde_json::from_value(v).ok());
         let expected_navigation = match tool {
-            "browser_navigate" | "browser_back" => {
+            "browser_navigate" | "browser_back" | capture::TOOL => {
                 payload_str(p, "origin").map(|o| (o.to_string(), tab.clone()))
             }
             _ => None,
@@ -1192,10 +1312,18 @@ impl BuiltinServer for BrowserServer {
             },
         );
         let budget = budget_chars(ctx.chat.result_cap_tokens);
-        let work = self.run(&browser, tool, args, action, &tab, budget, &cancel);
-        let result = tokio::select! {
-            r = work => r,
-            _ = cancel.cancelled() => Err(Stopped),
+        let result = if tool == capture::TOOL {
+            let work = self.run_capture(&browser, action, &tab, &ctx, budget, &cancel);
+            tokio::select! {
+                r = work => r,
+                _ = cancel.cancelled() => Err(Stopped),
+            }
+        } else {
+            let work = self.run(&browser, tool, args, action, &tab, budget, &cancel);
+            tokio::select! {
+                r = work => r,
+                _ = cancel.cancelled() => Err(Stopped),
+            }
         };
         browser.end_call();
         let mut output = match result {
@@ -1519,6 +1647,110 @@ impl BrowserServer {
         }
     }
 
+    /// [0.0.7 P7] Runs an approved `browser_capture_site`. The address and the folder are
+    /// checked again right before anything is opened or written.
+    async fn run_capture(
+        &self,
+        b: &Arc<Browser>,
+        action: &Action,
+        tab: &str,
+        ctx: &CallContext,
+        budget: usize,
+        cancel: &CancellationToken,
+    ) -> Result<ToolOutput, Stopped> {
+        let p = &action.payload;
+        let out: Result<ToolOutput, String> = async {
+            let url = Url::parse(payload_str(p, "url").ok_or("internal error: no address was approved")?)
+                .map_err(|e| e.to_string())?;
+            // The address may resolve differently now; check again right before.
+            netpolicy::check_url(&url, &self.address_policy(), &self.inner.dns).await?;
+            let folder = capture::describe::Folder {
+                canonical: payload_str(p, "folder")
+                    .ok_or("internal error: no folder was approved")?
+                    .to_string(),
+                approved: payload_str(p, "approved").unwrap_or("").to_string(),
+                exists: p.get("exists").and_then(Value::as_bool).unwrap_or(false),
+                was_symlink: p.get("wasSymlink").and_then(Value::as_bool).unwrap_or(false),
+                always_asks: None,
+            };
+            capture::describe::recheck_folder(&ctx.chat, &folder, Flavor::native())?;
+            let widths: Vec<u32> = p
+                .get("widths")
+                .and_then(Value::as_array)
+                .map(|w| {
+                    w.iter()
+                        .filter_map(Value::as_u64)
+                        .filter_map(|n| u32::try_from(n).ok())
+                        .filter(|n| {
+                            (capture::describe::MIN_WIDTH..=capture::describe::MAX_WIDTH).contains(n)
+                        })
+                        .take(capture::describe::MAX_WIDTHS)
+                        .collect()
+                })
+                .filter(|w: &Vec<u32>| !w.is_empty())
+                .unwrap_or_else(|| capture::describe::DEFAULT_WIDTHS.to_vec());
+            let defaults = capture::assets::Caps::default();
+            let caps = capture::assets::Caps {
+                per_file: defaults.per_file,
+                total: p
+                    .get("maxTotalBytes")
+                    .and_then(Value::as_u64)
+                    .map_or(defaults.total, |t| t.clamp(1, defaults.total)),
+                files: p
+                    .get("maxFiles")
+                    .and_then(Value::as_u64)
+                    .and_then(|f| usize::try_from(f).ok())
+                    .map_or(defaults.files, |f| f.clamp(1, defaults.files)),
+            };
+            let plan = capture::run::Plan {
+                url,
+                folder: std::path::PathBuf::from(&folder.canonical),
+                widths,
+                scroll: p.get("scroll").and_then(Value::as_bool).unwrap_or(true),
+                caps,
+                policy: self.address_policy(),
+            };
+            let progress = ctx.progress.clone();
+            let say = move |line: String| {
+                if let Some(p) = &progress {
+                    p(line);
+                }
+            };
+            let captured = capture::run::run(b, tab, &plan, cancel, &say).await?;
+            let host = policy::sanitize::display_host(&plan.url).unwrap_or_default();
+            let mut text = capture::run::result_text(&captured, &host, budget);
+            let pictures: Vec<&(u32, String)> = captured.first_screens.iter().take(2).collect();
+            if !pictures.is_empty() {
+                text.push_str(&format!(
+                    "\nPictures below: the first screen {}.",
+                    pictures
+                        .iter()
+                        .map(|(w, _)| format!("{w} px wide"))
+                        .collect::<Vec<_>>()
+                        .join(", then ")
+                ));
+            }
+            let mut content = vec![Content::Text { text }];
+            for (_, jpg) in pictures {
+                content.push(Content::Image {
+                    mime: "image/jpeg".into(),
+                    data_base64: jpg.clone(),
+                });
+            }
+            Ok(ToolOutput {
+                content,
+                full_text: Some(captured.report.clone()),
+                ..Default::default()
+            })
+        }
+        .await;
+        match out {
+            Ok(o) => Ok(o),
+            Err(e) if e == "Stopped by the user." => Err(Stopped),
+            Err(e) => Ok(ToolOutput::error(e)),
+        }
+    }
+
     /// A click approved without a card must still not be a submission now: the page may
     /// have turned the element into a submit button since the card was shown.
     fn recheck_intent(
@@ -1581,7 +1813,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_names_are_the_fixed_ten() {
+    fn tool_names_are_the_fixed_eleven() {
         let names: Vec<String> = tool_defs().into_iter().map(|t| t.name).collect();
         assert_eq!(
             names,
@@ -1595,7 +1827,8 @@ mod tests {
                 "browser_fill_form",
                 "browser_press_key",
                 "browser_screenshot",
-                "browser_back"
+                "browser_back",
+                "browser_capture_site"
             ]
         );
         for t in tool_defs() {

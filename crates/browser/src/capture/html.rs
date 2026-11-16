@@ -217,8 +217,8 @@ mod tests {
         assert!(out.contains(r#"href="assets/sprite.svg#dot""#), "{out}");
         assert!(out.contains(r#"href="styles/site.css""#), "{out}");
         assert!(out.contains(BLANK_PICTURE), "{out}");
-        assert!(out.contains("about:invalid about:invalid"), "unknown tokens load nothing: {out}");
-        assert!(out.contains("hcap-other-u0"), "another nonce is plain text: {out}");
+        // Unknown tokens load nothing; another nonce is plain text.
+        assert!(out.contains("<p>about:invalid hcap-other-u0 about:invalid</p>"), "{out}");
     }
 
     #[test]

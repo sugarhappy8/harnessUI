@@ -198,6 +198,9 @@ pub(crate) struct State {
     released: VecDeque<String>,
     /// Recent block reasons: (URL, reason, when).
     blocks: VecDeque<(String, String, Instant)>,
+    /// [0.0.7 P7] While `browser_capture_site` runs: which requests passed the checks and
+    /// what each became (`crate::capture::netlog`).
+    pub capture: Option<crate::capture::netlog::CaptureLog>,
 }
 
 impl State {
@@ -329,6 +332,9 @@ pub(crate) struct Browser {
     /// Distinguishes this browser from a later restart, so actions described against
     /// an earlier one are refused.
     pub epoch: u64,
+    /// [0.0.7 P7] Every request of every target is paused and checked, not only page loads:
+    /// on while `browser_capture_site` runs, so every file it saves came through the checks.
+    capture_checks: std::sync::atomic::AtomicBool,
 }
 
 impl Browser {
@@ -363,6 +369,7 @@ impl Browser {
             policy,
             stderr_tail,
             epoch,
+            capture_checks: std::sync::atomic::AtomicBool::new(false),
         });
         tokio::spawn(Self::run_events(Arc::downgrade(&browser), events));
         let setup = async {
@@ -741,6 +748,13 @@ impl Browser {
                 let this = self.clone();
                 tokio::spawn(async move { this.on_request_paused(session, params).await });
             }
+            // [0.0.7 P7] What each request of a capture's tab became.
+            m if m.starts_with("Network.") => {
+                let mut s = self.lock();
+                if let Some(log) = s.capture.as_mut().filter(|l| l.session == session) {
+                    log.on_event(m, &params);
+                }
+            }
             _ => {}
         }
     }
@@ -896,6 +910,14 @@ impl Browser {
     }
 
     fn fetch_patterns(&self) -> Value {
+        // [0.0.7 P7] While a capture runs, every request is checked (pictures, fonts, style
+        // sheets, scripts…), not only page loads.
+        if self
+            .capture_checks
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return json!([{"urlPattern": "*", "requestStage": "Request"}]);
+        }
         let mut patterns =
             vec![json!({"urlPattern": "*", "resourceType": "Document", "requestStage": "Request"})];
         if !self.config.strict_sites.is_empty() {
@@ -905,6 +927,35 @@ impl Browser {
             }
         }
         Value::Array(patterns)
+    }
+
+    /// [0.0.7 P7] Switches the checks of every request on or off on every target that is
+    /// set up (a target set up later reads the switch itself).
+    pub(crate) async fn set_capture_checks(&self, on: bool) {
+        self.capture_checks
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+        let sessions: Vec<String> = self
+            .lock()
+            .sessions
+            .iter()
+            .filter(|(_, info)| info.ready)
+            .map(|(s, _)| s.clone())
+            .collect();
+        let patterns = self.fetch_patterns();
+        for session in sessions {
+            if let Err(e) = self
+                .cdp
+                .call(
+                    "Fetch.enable",
+                    json!({"patterns": patterns}),
+                    Some(&session),
+                    CMD,
+                )
+                .await
+            {
+                tracing::debug!(error = %e, "could not change which requests are checked");
+            }
+        }
     }
 
     async fn setup_session(self: Arc<Self>, session: String, kind: TargetKind) {
@@ -1299,6 +1350,12 @@ impl Browser {
             self.block(&session, &request_id, &url_str, &why).await;
             return;
         }
+        // [0.0.7 P7] A capture saves only responses to requests that got this far.
+        if let Some(network_id) = params.get("networkId").and_then(Value::as_str)
+            && let Some(log) = self.lock().capture.as_mut()
+        {
+            log.note_checked(network_id);
+        }
         let origin = netpolicy::origin_of(&url).unwrap_or_else(|| "null".into());
         let tab = self.lock().sessions.get(&session).map(|i| i.tab.clone());
         let Some(tab) = tab else {
@@ -1414,6 +1471,9 @@ impl Browser {
         {
             let mut s = self.lock();
             s.record_block(url, why);
+            if let Some(log) = s.capture.as_mut() {
+                log.note_blocked(url, why);
+            }
             s.note(format!(
                 "Blocked a request to {}: {why}",
                 policy::sanitize::one_line(url, 200)

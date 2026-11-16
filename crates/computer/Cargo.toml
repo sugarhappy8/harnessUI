@@ -31,12 +31,14 @@ image = { workspace = true }
 xcap = { workspace = true }
 # Keyboard input, routed through the main thread.
 enigo = { workspace = true }
-# SendInput for the pointer, window and process lookups, elevation, display affinity.
+# SendInput for the pointer, window and process lookups, elevation, display affinity,
+# the time since the latest input.
 # Same major as Tauri and the other crates.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Security",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

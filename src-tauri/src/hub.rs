@@ -1050,7 +1050,7 @@ fn removal_plan(
         serde_json::from_value(rec.gguf_summary.clone()).unwrap_or_default();
     let dir = dunce::canonicalize(models_dir).ok();
     let mut files = shard_siblings(Path::new(&rec.path));
-    let _ = stored;
+    files.extend(stored.projector.map(PathBuf::from));
     let mut out = Removal::default();
     for file in files {
         let Ok(real) = dunce::canonicalize(&file) else {
@@ -1061,6 +1061,8 @@ fn removal_plan(
         }
         if dir.as_ref().is_some_and(|d| real.starts_with(d)) {
             out.delete.push(file);
+        } else if !out.outside.contains(&file) {
+            out.outside.push(file);
         }
     }
     out
@@ -1097,9 +1099,7 @@ pub(crate) fn used_by_installed(models: &[store::ModelRecord], file: &Path) -> b
                 .projector
                 .as_deref()
                 .is_some_and(|p| same(Path::new(p)))
-            || image_file::beside(model)
-                .iter()
-                .any(|p| same(p.as_path()))
+            || image_file::beside(model).iter().any(|p| same(p.as_path()))
     })
 }
 
@@ -1724,9 +1724,15 @@ mod tests {
         let body = &source[start..];
         let body = &body[..body.find("\n}\n").unwrap()];
         let plan = body.find("removal_plan(").expect("a plan");
-        let unload = body.find("state.runtime.unload().await").expect("an unload");
+        let unload = body
+            .find("state.runtime.unload().await")
+            .expect("an unload");
         assert!(plan < unload, "the plan comes first");
-        assert_eq!(body.matches("Err(").count(), 1, "only a missing row is refused");
+        assert_eq!(
+            body.matches("Err(").count(),
+            1,
+            "only a missing row is refused"
+        );
         assert!(body.contains("return Err(AppError::not_found(\"model\"));"));
     }
 }

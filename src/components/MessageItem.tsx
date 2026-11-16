@@ -102,6 +102,9 @@ export const MessageItem = memo(function MessageItem(props: Props) {
             className="w-full max-w-[85%]"
             onSubmit={(e) => {
               e.preventDefault();
+              // [0.0.7 P6a review] A box opened before a reply started stays open: it sends once
+              // the reply is done (the app writes one at a time), keeping what was written.
+              if (props.busy) return;
               const text = draft.trim();
               // With attachments left, the text may be empty (a message with only an image).
               if (text || kept.length > 0) props.onEditResend(m, text, kept);
@@ -175,7 +178,7 @@ export const MessageItem = memo(function MessageItem(props: Props) {
               </button>
               <button
                 type="submit"
-                disabled={!draft.trim() && kept.length === 0}
+                disabled={props.busy || (!draft.trim() && kept.length === 0)}
                 className="rounded-md bg-accent px-3 py-1 text-accent-fg disabled:opacity-50"
               >
                 Send

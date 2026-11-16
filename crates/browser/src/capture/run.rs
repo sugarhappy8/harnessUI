@@ -312,6 +312,7 @@ fn decode(b64: &str) -> Option<Vec<u8>> {
 }
 
 /// The first screen and the full page at `width` (the page at its top).
+#[allow(clippy::too_many_arguments)]
 async fn take_shots(
     b: &Browser,
     session: &str,
@@ -686,7 +687,6 @@ async fn work(
             None => (Vec::new(), HashSet::new(), Vec::new(), false),
         }
     };
-    let index = by_url(&entries);
     let folder_name = names::capture_folder_name(&plan.url, chrono::Local::now());
     let mut w = Writer::create(&plan.folder, &folder_name)?;
     let mut budget = Budget::new(plan.caps);
@@ -709,6 +709,24 @@ async fn work(
         }
     }
 
+    // Style sheets come first among the files: room is set aside for them now, and they
+    // are written once the files they name are saved.
+    let mut style_room: Vec<bool> = Vec::new();
+    for sheet in &sheets {
+        match budget.take(sheet.text.len() as u64 + 1024) {
+            Ok(()) => style_room.push(true),
+            Err(why) => {
+                let what = if sheet.url.is_empty() {
+                    format!("style sheet {}", sheet.stem)
+                } else {
+                    page_url(&sheet.url)
+                };
+                skipped.push((what, why.words(&plan.caps)));
+                style_room.push(false);
+            }
+        }
+    }
+
     // Pictures, fonts, icons, animation files and videos.
     let mut saved: HashMap<String, String> = HashMap::new();
     let mut lottie_files = 0usize;
@@ -722,10 +740,13 @@ async fn work(
         .collect();
     candidates.sort_by_key(|(k, e)| (k.priority(), e.order));
     let saving_started = Instant::now();
+    let was_blocked = |e: &NetEntry| e.urls.iter().any(|u| blocked.iter().any(|(b, _)| b == u));
     for (kind, e) in candidates {
         let label = page_url(e.final_url());
         if let Err(why) = usable(e, &checked, &plan.policy) {
-            if !matches!(why, SkipReason::Failed(_)) || kind != Kind::Animation {
+            // Requests the checks refused are listed under "Not captured" with the reason;
+            // data the page failed to fetch is not part of its look.
+            if !was_blocked(e) && (!matches!(why, SkipReason::Failed(_)) || kind != Kind::Animation) {
                 skipped.push((label, why.words(&plan.caps)));
             }
             continue;
@@ -743,21 +764,19 @@ async fn work(
             skipped.push((label, why.words(&plan.caps)));
             continue;
         }
-        let bytes = match body(b, session, &e.request_id).await {
+        let fetched = body(b, session, &e.request_id).await;
+        budget.give_back(estimate);
+        let mut bytes = match fetched {
             Ok(bytes) => bytes,
             Err(_) => {
-                budget.give_back(estimate);
                 skipped.push((label, SkipReason::Gone.words(&plan.caps)));
                 continue;
             }
         };
-        let mut bytes = bytes;
-        if bytes.len() as u64 > plan.caps.per_file {
-            budget.give_back(estimate);
-            skipped.push((label, SkipReason::TooLarge.words(&plan.caps)));
+        if let Err(why) = budget.take(bytes.len() as u64) {
+            skipped.push((label, why.words(&plan.caps)));
             continue;
         }
-        budget.adjust(estimate, bytes.len() as u64);
         let head = &bytes[..bytes.len().min(64)];
         let ext = assets::extension_for(kind, &e.mime, e.final_url(), head);
         if kind == Kind::Animation {
@@ -806,9 +825,11 @@ async fn work(
     }
 
     // Style sheets: names first (an @import names another sheet), then the rewritten text.
-    for sheet in &mut sheets {
-        let name = w.name("styles", &sheet.stem, "css");
-        sheet.path = Some(format!("styles/{name}"));
+    for (sheet, room) in sheets.iter_mut().zip(&style_room) {
+        if *room {
+            let name = w.name("styles", &sheet.stem, "css");
+            sheet.path = Some(format!("styles/{name}"));
+        }
     }
     let sheet_by_url: HashMap<String, String> = sheets
         .iter()
@@ -836,9 +857,6 @@ async fn work(
                 saved.get(file).map(|p| format!("../{p}{frag}"))
             }
         });
-        if budget.take(rewritten.len() as u64).is_err() {
-            budget.force(rewritten.len() as u64);
-        }
         let file_name = path.trim_start_matches("styles/");
         let rel = w.write("styles", file_name, rewritten.as_bytes())?;
         facts.push((rel.clone(), css::facts(&sheet.text, &sheet.base)));
@@ -858,7 +876,9 @@ async fn work(
     for e in script_entries {
         let label = page_url(e.final_url());
         if let Err(why) = usable(e, &checked, &plan.policy) {
-            skipped.push((label, why.words(&plan.caps)));
+            if !was_blocked(e) {
+                skipped.push((label, why.words(&plan.caps)));
+            }
             continue;
         }
         let Ok(bytes) = body(b, session, &e.request_id).await else {
@@ -1045,7 +1065,6 @@ async fn work(
     let report_text = report::build(&input);
     w.write("", "report.md", report_text.as_bytes())?;
     let bytes: u64 = w.files.iter().map(|f| f.bytes).sum();
-    let _ = page_text;
     Ok(Captured {
         folder: w.root().to_path_buf(),
         report: report_text,

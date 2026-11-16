@@ -26,24 +26,30 @@
 //!   never take the focus, and always-on-top windows come last, as when Windows picks the
 //!   next window after a minimise. Handing the keyboard back is `SetForegroundWindow`, on
 //!   the main thread while this app's window has the focus (Windows lets only the program
-//!   in front give it away), after checking that the handle still belongs to the same
-//!   process.
+//!   in front give it away): in that one step it checks that this app still has the
+//!   focus, that Stop was not pressed, and that the handle still belongs to the same
+//!   process and is shown (not minimised, not cloaked).
+//! - **Latest input:** `GetLastInputInfo` against `GetTickCount` (injected input counts;
+//!   the guard leaves out this app's own).
 
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute,
 };
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::{
     OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, INPUT_0, INPUT_MOUSE, IsWindowEnabled, MOUSE_EVENT_FLAGS,
+    GetAsyncKeyState, GetLastInputInfo, INPUT, INPUT_0, INPUT_MOUSE, IsWindowEnabled,
+    LASTINPUTINFO, MOUSE_EVENT_FLAGS,
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
@@ -266,16 +272,21 @@ fn reachable(hwnd: HWND) -> bool {
     shown && !click_through && !is_cloaked(hwnd)
 }
 
-/// The top-level window belongs to `me`: its own process, or the process of the window
-/// that owns it.
-fn is_mine(hwnd: HWND, me: &SelfProcess) -> bool {
+/// The process of a top-level window, and of the window that owns it.
+fn owner_pids(hwnd: HWND) -> Vec<u32> {
     // SAFETY: GetAncestor accepts any handle and returns null for a stale one.
     let owner = unsafe { GetAncestor(hwnd, GA_ROOTOWNER) };
     let mut pids = vec![window_pid(hwnd)];
     if !owner.is_invalid() {
         pids.push(window_pid(owner));
     }
-    me.owns_any(&pids)
+    pids
+}
+
+/// The top-level window belongs to `me`: its own process, or the process of the window
+/// that owns it.
+fn is_mine(hwnd: HWND, me: &SelfProcess) -> bool {
+    me.owns_any(&owner_pids(hwnd))
 }
 
 struct WinInjector {
@@ -654,24 +665,55 @@ impl Injector for WinInjector {
         topmost.map(|h| self.target_for(h)).transpose()
     }
 
-    fn bring_to_front(&self, window: &WindowRef) -> Result<bool, InputError> {
-        if self.me.owns_any(&[window.pid]) {
+    fn bring_to_front(
+        &self,
+        window: &WindowRef,
+        me: &SelfProcess,
+        gate: &Gate,
+    ) -> Result<bool, InputError> {
+        if me.owns_any(&[window.pid]) {
             return Ok(false);
         }
         let (id, pid) = (window.window_id as usize, window.pid);
-        // On the main thread, which owns this app's window that has the focus.
+        let mine = me.pids();
+        let gate = gate.clone();
+        // On the main thread, which owns this app's window that has the focus, and where
+        // Stop brings this app's window back: checked and done in one step.
         run_on_main(&*self.main, MAIN_THREAD_TIMEOUT, move || {
+            // SAFETY: plain call.
+            let front = unsafe { GetForegroundWindow() };
+            let front_is_mine =
+                !front.is_invalid() && owner_pids(front).iter().any(|p| mine.contains(p));
+            if !front_is_mine || !gate.is_open() {
+                return false;
+            }
             let hwnd = HWND(id as *mut c_void);
             // SAFETY: plain calls. A handle that closed, or was reused by another
-            // process's window, fails the checks before SetForegroundWindow.
+            // process's window, fails the checks before SetForegroundWindow, as does a
+            // window DWM hides (cloaked: on another virtual desktop, or suspended).
             unsafe {
                 IsWindow(Some(hwnd)).as_bool()
                     && window_pid(hwnd) == pid
                     && IsWindowVisible(hwnd).as_bool()
                     && !IsIconic(hwnd).as_bool()
+                    && !is_cloaked(hwnd)
                     && SetForegroundWindow(hwnd).as_bool()
             }
         })
+    }
+
+    fn time_since_input(&self) -> Option<Duration> {
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        // SAFETY: `info` is a valid LASTINPUTINFO with its size set.
+        if !unsafe { GetLastInputInfo(&mut info) }.as_bool() {
+            return None;
+        }
+        // SAFETY: plain call. Both are milliseconds since boot, wrapping after 49.7 days.
+        let now = unsafe { GetTickCount() };
+        Some(Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime))))
     }
 
     fn send(&self, event: &InputEvent, gate: &Gate) -> Result<(), InputError> {

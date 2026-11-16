@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::apps::{AppInfo, Target};
 use crate::geometry::{GlobalPoint, MonitorInfo, Rect};
@@ -101,6 +101,15 @@ pub struct FakeState {
     pub focus_stays_on_minimise: bool,
     /// Windows brought to the front by [`Injector::bring_to_front`], in order.
     pub fronted: Vec<u64>,
+    /// [`Injector::bring_to_front`] fails (macOS refusing an activation, say).
+    pub bring_to_front_fails: bool,
+    /// [`Injector::time_since_input`] reports the latest input, counting the events sent
+    /// here as Windows counts injected input. Off: the platform cannot tell.
+    pub reports_input_time: bool,
+    /// The user's latest keyboard or mouse input ([`FakeDesktop::user_input`]).
+    pub physical_input: Option<Instant>,
+    /// When the latest event was sent here.
+    pub injected_input: Option<Instant>,
 }
 
 /// Shared fake desktop. Clone it freely.
@@ -146,6 +155,11 @@ impl FakeDesktop {
         if s.foreground == Some(id) && !s.focus_stays_on_minimise {
             s.foreground = s.windows.iter().find(|w| !w.minimised).map(|w| w.id);
         }
+    }
+
+    /// The user touched the keyboard or mouse `ago`.
+    pub fn user_input(&self, ago: Duration) {
+        self.state().physical_input = Instant::now().checked_sub(ago);
     }
 
     /// Restores a minimised window to the front, giving it the keyboard focus.
@@ -333,8 +347,22 @@ impl Injector for FakeInjector {
             .map(target_of))
     }
 
-    fn bring_to_front(&self, window: &WindowRef) -> Result<bool, InputError> {
+    fn bring_to_front(
+        &self,
+        window: &WindowRef,
+        me: &SelfProcess,
+        gate: &Gate,
+    ) -> Result<bool, InputError> {
         let mut s = self.0.state();
+        // Only while this app has the keyboard and Stop was not pressed, checked in the
+        // same step.
+        let mine = s
+            .foreground
+            .and_then(|id| s.windows.iter().find(|w| w.id == id))
+            .is_some_and(|w| me.owns_any(&target_of(w).pids));
+        if s.bring_to_front_fails || !mine || !gate.is_open() {
+            return Ok(false);
+        }
         let Some(i) = s
             .windows
             .iter()
@@ -403,7 +431,17 @@ impl Injector for FakeInjector {
             InputEvent::Scroll { .. } | InputEvent::Text { .. } => {}
         }
         s.events.push(event.clone());
+        s.injected_input = Some(Instant::now());
         Ok(())
+    }
+
+    fn time_since_input(&self) -> Option<Duration> {
+        let s = self.0.state();
+        if !s.reports_input_time {
+            return None;
+        }
+        let latest = s.physical_input.max(s.injected_input);
+        Some(latest.map_or(Duration::from_secs(3600), |t| t.elapsed()))
     }
 
     fn is_pressed(&self, what: Pressable) -> Option<bool> {

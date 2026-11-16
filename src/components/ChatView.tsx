@@ -1,4 +1,4 @@
-import { useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Brain, FileText, PanelRight, Settings2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { aboutWords } from "../lib/words";
@@ -211,7 +211,25 @@ export function ChatView() {
   // was cancelled, whatever runs now.
   const lastUserId = [...messages].reverse().find((m) => m.role === "user")?.id ?? -1;
   const stopped = detail ? (stoppedTurns[detail.chat.id] ?? null) : null;
-  const elsewhereTitle = elsewhere !== null ? (chats.find((c) => c.id === elsewhere)?.title ?? null) : null;
+  // [0.0.7 P6a review] The sidebar's list holds only the chats a search finds: a running chat it
+  // leaves out is looked up in the whole list, so the line still names it.
+  const listedTitle = elsewhere !== null ? (chats.find((c) => c.id === elsewhere)?.title ?? null) : null;
+  const [lookedUp, setLookedUp] = useState<{ chatId: number; title: string } | null>(null);
+  useEffect(() => {
+    if (elsewhere === null || listedTitle !== null) return;
+    let alive = true;
+    ipc
+      .listChats(null)
+      .then((all) => {
+        const found = all.find((c) => c.id === elsewhere);
+        if (alive && found) setLookedUp({ chatId: elsewhere, title: found.title });
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [elsewhere, listedTitle]);
+  const elsewhereTitle = listedTitle ?? (lookedUp?.chatId === elsewhere ? lookedUp.title : null);
   const elsewhereWaits = elsewhere !== null && approvals.some((a) => a.chatId === elsewhere);
   // What makes the chat follow its end while it is there. [0.0.6 final pass] The reply's notes
   // count too: one can arrive after an approval card is drawn and push its buttons under the
@@ -388,7 +406,10 @@ export function ChatView() {
         </div>
         {detail && (
           <div data-header-controls className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1 @md:gap-1.5">
+            {/* [0.0.7 P6a review] A panel of its own for each chat: nothing it held for the
+                previous chat (its tools, its folders, a lookup on its way) can be saved here. */}
             <ToolsPanel
+              key={detail.chat.id}
               chatId={detail.chat.id}
               nCtx={nCtx}
               workingFolder={detail.chat.workingFolder ?? null}

@@ -207,6 +207,12 @@ impl Budget {
         self.bytes = self.bytes.saturating_add(size);
         self.files += 1;
     }
+
+    /// Gives back room taken for a file that was not written after all.
+    pub fn give_back(&mut self, size: u64) {
+        self.bytes = self.bytes.saturating_sub(size);
+        self.files = self.files.saturating_sub(1);
+    }
 }
 
 /// The kind a response becomes in the copy, from the browser's resource type and the
@@ -655,7 +661,7 @@ mod tests {
 
     #[test]
     fn svg_pictures_lose_what_could_run() {
-        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script><a href="javascript:alert(3)"><circle r="4" fill="#33f" onclick="x()"/></a><foreignObject><iframe src="https://evil"></iframe></foreignObject><text>ok</text></svg>"#;
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script><a href="javascript:alert(3)"><circle r="4" fill="#33f" onclick="x()"/></a><foreignObject><iframe src="https://evil"></iframe></foreignObject><text>ok</text></svg>"##;
         let clean = neutralise_svg(svg).expect("kept");
         let lower = clean.to_ascii_lowercase();
         assert!(!lower.contains("script"), "{clean}");

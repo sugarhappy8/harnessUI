@@ -307,14 +307,26 @@ pub trait Injector: Send + Sync {
         let _ = me;
         Ok(None)
     }
-    /// Gives `window` the keyboard focus, bringing it (on macOS, its application) to the
-    /// front. Called only while this app has the keyboard focus, before keyboard input the
-    /// user approved for that window's application, so the focus goes back to where the
-    /// input was planned. Returns whether the request was made; the guard checks the focus
-    /// before every event all the same.
-    fn bring_to_front(&self, window: &WindowRef) -> Result<bool, InputError> {
-        let _ = window;
+    /// Gives `window` the keyboard focus, bringing it (on macOS, its application, whose key
+    /// window comes forward) to the front, before keyboard input the user approved for that
+    /// window's application, so the focus goes back to where the input was planned. Only
+    /// while `me` still has the keyboard and `gate` is open, both checked in the same step
+    /// that moves the focus: the keyboard is never taken from another application, nor
+    /// from this app after Stop. Returns whether the focus was moved; the guard checks the
+    /// focus before every event all the same.
+    fn bring_to_front(
+        &self,
+        window: &WindowRef,
+        me: &SelfProcess,
+        gate: &Gate,
+    ) -> Result<bool, InputError> {
+        let _ = (window, me, gate);
         Ok(false)
+    }
+    /// How long ago the last keyboard or mouse input reached the system, this app's own
+    /// injected input included. `None` when the platform cannot tell.
+    fn time_since_input(&self) -> Option<Duration> {
+        None
     }
 }
 

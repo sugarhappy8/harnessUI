@@ -107,12 +107,35 @@ async fn copied_parts(
     Ok(parts)
 }
 
+/// [0.0.7 P6a review] Edit and resend sends the edited message's attachments again and nothing
+/// new. Those come from a message that kept the limits for one message (8 images, 8 files, the
+/// mentions, and the share of the context files and mentions take together); the limits are
+/// checked on the new attachments alone, so copied and new ones together could go past them,
+/// further with each edit. The app's edit box never sends both.
+fn copied_alone(
+    copy: Option<&CopyAttachments>,
+    images: usize,
+    documents: usize,
+    mentions: usize,
+) -> AppResult<()> {
+    if copy.is_some() && images + documents + mentions > 0 {
+        return Err(AppError::new(
+            "bad_request",
+            "New attachments can't be added to an edited message.",
+            "Send the edited message, then attach the new files to a new message.",
+            String::new(),
+        ));
+    }
+    Ok(())
+}
+
 /// [0.0.7 P6] The main window's event naming the chat whose reply is being written (`null`
 /// when none): sent when a turn takes the slot and when it gives it back.
 const TURN_RUNNING: &str = "turn-running";
 
 /// [0.0.7 P6] A chat's hold on the one reply the app writes at a time. A send takes it before
-/// anything of the turn is stored, so a send refused as busy leaves no message behind; it is
+/// anything of the turn is stored, so a send refused as busy leaves no message behind, and
+/// [0.0.7 P6a review] before anything slow, so a Stop pressed meanwhile finds the turn; it is
 /// given back when dropped, also on an early error. The main window is told which chat holds
 /// it ([`TURN_RUNNING`]), and can ask after a reload ([`running_turn`]).
 struct TurnSlot<'a> {
@@ -569,6 +592,17 @@ pub async fn send_message(
     let images = images.unwrap_or_default();
     let documents = documents.unwrap_or_default();
     let mentions = mentions.unwrap_or_default();
+    copied_alone(
+        copy_attachments.as_ref(),
+        images.len(),
+        documents.len(),
+        mentions.len(),
+    )?;
+    // [0.0.7 P6] One reply at a time: a send while another runs (in any chat, also one the
+    // window does not know of after a reload) is refused before anything is stored. [0.0.7
+    // P6a review] Taken before anything slow too (below, a remote endpoint is asked about its
+    // model over the network), so a Stop pressed meanwhile finds this turn and stops it.
+    let slot = TurnSlot::take(&state.generation, chat_id, Some(&app))?;
     // [0.0.7 P6] Edit and resend: the edited message's attachments that the new one keeps.
     let copied = match &copy_attachments {
         Some(copy) => copied_parts(&state.store, chat_id, copy).await?,
@@ -599,9 +633,6 @@ pub async fn send_message(
             String::new(),
         ));
     }
-    // [0.0.7 P6] One reply at a time: a send while another runs (in any chat, also one the
-    // window does not know of after a reload) is refused before anything is stored.
-    let slot = TurnSlot::take(&state.generation, chat_id, Some(&app))?;
     // [0.0.4 mentions] The chips the user chose, read through the path sandbox first: one
     // that cannot be read fails the send before anything is stored.
     let n_ctx = target
@@ -669,6 +700,9 @@ pub async fn regenerate(
     assistant_message_id: store::MessageId,
     on_event: Channel<TurnStreamEvent>,
 ) -> AppResult<()> {
+    // [0.0.7 P6a review] The slot first, as in `send_message`: a Stop pressed while a remote
+    // endpoint is asked about its model finds this turn.
+    let slot = TurnSlot::take(&state.generation, chat_id, Some(&app))?;
     let chat = state
         .store
         .get_chat(chat_id)
@@ -689,7 +723,6 @@ pub async fn regenerate(
         .map(|m| m.id)
         .ok_or_else(|| AppError::bad_request("This message has nothing to regenerate from."))?;
     let target = resolve_target(&state, chat.model_ref.as_deref()).await?;
-    let slot = TurnSlot::take(&state.generation, chat_id, Some(&app))?;
     generate(&app, &state, &chat, parent, None, target, on_event, slot).await
 }
 
@@ -1301,7 +1334,32 @@ mod tests {
         let send = source.split_once("pub async fn send_message(").unwrap().1;
         let (before, after) = send.split_once("TurnSlot::take(").unwrap();
         assert!(before.contains("copied_alone("));
-        assert!(after.split_once("\n}\n").unwrap().0.contains("store_user_message("));
+        let send = after.split_once("\n}\n").unwrap().0;
+        assert!(send.contains("store_user_message("));
+    }
+
+    /// [0.0.7 P6a review] Edit and resend sends the edited message's attachments and nothing
+    /// new. The limits for one message (8 images, 8 files, the mentions, the share of the
+    /// context files and mentions take) were checked on new attachments only, so a send that
+    /// copied some and added new ones could go past them, further with each edit.
+    #[test]
+    fn an_edited_message_takes_no_new_attachments() {
+        let copy = CopyAttachments {
+            message_id: store::MessageId(3),
+            attachment_ids: vec![5, 6],
+        };
+        for (images, documents, mentions) in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (8, 8, 8)] {
+            let err = copied_alone(Some(&copy), images, documents, mentions).unwrap_err();
+            assert_eq!(err.code, "bad_request");
+            assert_eq!(
+                err.message,
+                "New attachments can't be added to an edited message."
+            );
+        }
+        // The copied ones alone, or new ones alone (each checked against the limits as before).
+        assert!(copied_alone(Some(&copy), 0, 0, 0).is_ok());
+        assert!(copied_alone(None, 8, 8, 8).is_ok());
+        assert!(copied_alone(None, 0, 0, 0).is_ok());
     }
 
     /// [0.0.7 P6] The Stop of a chat stops that chat's reply only, never one running in
