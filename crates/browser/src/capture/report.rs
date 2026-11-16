@@ -640,7 +640,9 @@ mod tests {
             ],
             "signIn": true,
             "stats": {"colors": [["#111111", 40, []], ["#ff0000\u{200b}", 3, []]], "sizes": [["48px / 56px / 700", 2, ["h1"]]],
-                      "spacing": [["16px", 30, []]], "viewport": [1440, 900], "scrollHeight": 4200}
+                      "spacing": [["16px", 30, []]], "viewport": [1440, 900], "scrollHeight": 4200,
+                      "shadows": [["0 1px 2px rgba(0, 0, 0, 0.1), 0 4px 8px rgba(0, 0, 0, 0.2)", 3, []]],
+                      "transitions": [["opacity 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) 0.1s", 4, ["a.cta"]], ["color 0.2s ease", 2, []]]}
         })
     }
 
@@ -769,6 +771,17 @@ mod tests {
         assert!(report.contains("assets/inter.woff2"));
         assert!(report.contains("moves things from its scripts"), "{report}");
         assert!(report.contains("hero.png (293 KB)"), "{report}");
+        // Values that are lists themselves keep their commas and are told apart by "; ".
+        assert!(
+            report.contains("Transitions set on elements (property, duration, easing, delay): opacity 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) 0.1s (4); color 0.2s ease (2)\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Shadows: 0 1px 2px rgba(0, 0, 0, 0.1), 0 4px 8px rgba(0, 0, 0, 0.2) (3)\n"
+            ),
+            "{report}"
+        );
         assert!(report.chars().count() <= MAX_REPORT_CHARS);
     }
 
