@@ -226,22 +226,8 @@ fn finish(doc: &Document, files: &HashSet<String>, mode: QuirksMode) -> Result<S
             child.remove_from_parent();
         }
     }
-    for child in head.children() {
-        let ours = child.query(|n| match &n.data {
-            NodeData::Comment { contents } => contents.as_ref() == COMMENT,
-            NodeData::Element(e) => {
-                e.name.local.as_ref() == "meta"
-                    && e.attrs.iter().any(|a| {
-                        let n = a.name.local.as_ref();
-                        n.eq_ignore_ascii_case("charset") || n.eq_ignore_ascii_case("http-equiv")
-                    })
-            }
-            _ => false,
-        });
-        if ours == Some(true) {
-            child.remove_from_parent();
-        }
-    }
+    // `clean` removed every comment and every `charset` and `http-equiv` meta, the copy's
+    // own from an earlier pass included; they are added here, first in the head, once.
     let comment = doc.tree.create_node(NodeData::Comment {
         contents: StrTendril::from(COMMENT),
     });
@@ -361,25 +347,19 @@ fn clean(doc: &Document, files: &HashSet<String>) {
         enum Kind {
             Container,
             Element(QualName, Option<NodeId>),
-            Comment(bool),
             Other,
             Text,
         }
         let kind = node.query(|n| match &n.data {
             NodeData::Document | NodeData::Fragment => Kind::Container,
             NodeData::Element(e) => Kind::Element(e.name.clone(), e.template_contents),
-            NodeData::Comment { contents } => Kind::Comment(contents.as_ref() == COMMENT),
             NodeData::Text { .. } => Kind::Text,
+            // Comments, processing instructions and doctypes.
             _ => Kind::Other,
         });
         match kind {
             None | Some(Kind::Text) => {}
             Some(Kind::Container) => stack.extend(node.children().iter().map(|c| c.id)),
-            Some(Kind::Comment(ours)) => {
-                if !ours {
-                    node.remove_from_parent();
-                }
-            }
             Some(Kind::Other) => node.remove_from_parent(),
             Some(Kind::Element(name, template)) => {
                 match rule(&node, &name, files) {
@@ -404,9 +384,7 @@ fn clean(doc: &Document, files: &HashSet<String>) {
                     Rule::Keep => {}
                 }
                 let local = name.local.as_ref().to_ascii_lowercase();
-                if !(local == "meta" && is_our_policy(&node)) {
-                    clean_attributes(&node, &name, files);
-                }
+                clean_attributes(&node, &name, files);
                 if local == "style" {
                     let text = node.text().to_string();
                     match css::confine(&text, |t| local_file(t, "index.html", files)) {
@@ -505,29 +483,12 @@ fn attrs_of(node: &NodeRef<'_>) -> Vec<(String, String)> {
     .unwrap_or_default()
 }
 
-/// The copy's own policy, exactly as [`finish`] writes it.
-fn is_our_policy(node: &NodeRef<'_>) -> bool {
-    let attrs = attrs_of(node);
-    attrs.len() == 2
-        && attrs
-            .iter()
-            .any(|(n, v)| n == "http-equiv" && v.eq_ignore_ascii_case("content-security-policy"))
-        && attrs
-            .iter()
-            .any(|(n, v)| n == "content" && v == COPY_POLICY)
-}
-
-/// `<meta>` kept: the copy's policy, `charset="utf-8"`, and a few that describe the page.
+/// `<meta>` kept: only a few that describe the page. Every `http-equiv` and `charset` meta
+/// goes, the copy's own too: [`finish`] writes those, first in the head.
 fn meta_kept(node: &NodeRef<'_>) -> bool {
     let attrs = attrs_of(node);
-    if is_our_policy(node) {
-        return true;
-    }
-    if attrs.iter().any(|(n, _)| n == "http-equiv") {
+    if attrs.iter().any(|(n, _)| n == "http-equiv" || n == "charset") {
         return false;
-    }
-    if let Some((_, v)) = attrs.iter().find(|(n, _)| n == "charset") {
-        return attrs.len() == 1 && v.eq_ignore_ascii_case("utf-8");
     }
     attrs.iter().any(|(n, v)| {
         n == "name"
@@ -639,7 +600,7 @@ fn clean_attributes(node: &NodeRef<'_>, el: &QualName, files: &HashSet<String>) 
             {
                 continue;
             }
-            if is_meta && !matches!(local.as_str(), "name" | "content" | "media" | "charset") {
+            if is_meta && !matches!(local.as_str(), "name" | "content" | "media") {
                 continue;
             }
             let Some(value) =
