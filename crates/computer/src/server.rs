@@ -15,6 +15,12 @@
 //!   the screen layout, and goes through the [`InputGuard`], which re-checks the target
 //!   application before every single event, and refuses a target that always asks unless
 //!   the user approved this action on an always-ask card.
+//! - Stepping aside ([`StepAside`], 0.0.7): screenshots leave this app's windows out, so the
+//!   model aims at what is behind them. With the app's hook, `describe` plans for the window
+//!   behind this app's own window (under the point, or in front once this app's window is
+//!   gone), and `call` has the app minimise its main window first, handing the keyboard back
+//!   to the window the input was planned for when this app has it. The guard's checks are
+//!   unchanged: input that would still reach this app is refused.
 //!
 //! Screenshots are returned as plain tool output; what they show is untrusted data and
 //! the agent loop treats it as such.
@@ -37,7 +43,9 @@ use crate::geometry::{
 use crate::guard::{Expect, Held, InputGuard, OpError, StopHandle, refuse_point, refuse_target};
 use crate::image_ops;
 use crate::keys::{Key, KeyCombo, TextPart, parse_combo, system_shortcut, text_events};
-use crate::platform::{Capture, CaptureError, Injector, InputError, MouseButton, SelfProcess};
+use crate::platform::{
+    Capture, CaptureError, Injector, InputError, MouseButton, SelfProcess, WindowRef,
+};
 use crate::profile::ModelProfile;
 
 pub const SERVER_NAME: &str = "computer";
@@ -57,10 +65,34 @@ const TYPE_CHUNK: usize = 8;
 pub const MAX_HOLD_MS: u64 = 2000;
 /// Time for the screen to settle after input, before the call returns.
 const SETTLE: Duration = Duration::from_millis(150);
+/// After the app stepped aside, how long `call` waits for its window to be gone from under
+/// the input (a hit test can lag behind the minimise while the system animates it).
+const ASIDE_WAIT: Duration = Duration::from_secs(1);
+const ASIDE_POLL: Duration = Duration::from_millis(25);
 
 /// Called before every input action. `Err(reason)` refuses the action: the overlay is not
 /// visible on the active Space, the stop hotkey is not registered, …
 pub type ReadyCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+
+/// How this app moves its main window out of the way of input (ARCHITECTURE.md 9.3,
+/// "Stepping aside").
+#[derive(Clone)]
+pub struct StepAside {
+    /// The app's name, for the card: "<name> will minimise itself while this runs."
+    pub app_name: String,
+    /// Called before every approved input action, on a blocking thread, with the chat's id:
+    /// minimises the main window when it is on screen and returns once it is gone, or after
+    /// a short wait (about a second).
+    pub minimise: Arc<dyn Fn(i64) + Send + Sync>,
+}
+
+impl std::fmt::Debug for StepAside {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepAside")
+            .field("app_name", &self.app_name)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Settings for [`ComputerServer`].
 #[derive(Clone, Default)]
@@ -68,6 +100,12 @@ pub struct ComputerConfig {
     /// Used for chats without their own profile ([`ComputerServer::set_profile`]).
     pub default_profile: ModelProfile,
     pub ready_check: Option<ReadyCheck>,
+    /// With it, an input action is planned for what is behind this app's own window (a
+    /// point the window covers goes to the window beneath it; while the window has the
+    /// keyboard, typing goes to the frontmost window of another application), and the app
+    /// steps aside before the input runs. Without it, input that would reach this app's
+    /// window is refused when it is described.
+    pub step_aside: Option<StepAside>,
 }
 
 impl std::fmt::Debug for ComputerConfig {
@@ -75,6 +113,7 @@ impl std::fmt::Debug for ComputerConfig {
         f.debug_struct("ComputerConfig")
             .field("default_profile", &self.default_profile)
             .field("ready_check", &self.ready_check.is_some())
+            .field("step_aside", &self.step_aside)
             .finish()
     }
 }
@@ -125,6 +164,12 @@ struct InputPlan {
     /// The model's own coordinates, for messages.
     shown: String,
     step: Step,
+    /// Keyboard input, and the modifier keys of a click: the window it was planned for.
+    /// When this app has the keyboard focus as the input is about to run (its window was in
+    /// front when the action was described, or the user just answered its card), the focus
+    /// is handed back to this window first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    focus: Option<WindowRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,6 +202,20 @@ enum Step {
         combo: KeyCombo,
         repeat: u32,
     },
+}
+
+impl Step {
+    /// The points pointer input will reach, as [`run_plan`] checks them (none for keyboard
+    /// input).
+    fn points(&self) -> Vec<GlobalPoint> {
+        match self {
+            Step::Click { at, .. } | Step::Move { at } | Step::Scroll { at, .. } => vec![*at],
+            Step::Drag { from, to, .. } => (0..=DRAG_CHECKS)
+                .map(|i| lerp(*from, *to, i as f64 / DRAG_CHECKS as f64))
+                .collect(),
+            Step::Type { .. } | Step::Key { .. } => Vec::new(),
+        }
+    }
 }
 
 fn s<'a>(args: &'a Map<String, Value>, k: &str) -> Option<&'a str> {
@@ -371,6 +430,58 @@ impl ComputerServer {
             .map_err(|e| input_error_text(&e))
     }
 
+    async fn target_at_behind(&self, p: GlobalPoint) -> Result<Option<Target>, String> {
+        let inj = self.guard.injector().clone();
+        let me = self.guard.self_process().clone();
+        Self::blocking(move || inj.target_at_behind(p, &me))
+            .await?
+            .map_err(|e| input_error_text(&e))
+    }
+
+    async fn keyboard_target_behind(&self) -> Result<Option<Target>, String> {
+        let inj = self.guard.injector().clone();
+        let me = self.guard.self_process().clone();
+        Self::blocking(move || inj.keyboard_target_behind(&me))
+            .await?
+            .map_err(|e| input_error_text(&e))
+    }
+
+    /// The window keyboard input would reach, and the window to hand the keyboard back to
+    /// before the input runs. When this app's own window has the keyboard and the app steps
+    /// aside before input, it is the window that will have it then: the frontmost window of
+    /// another application. Otherwise this app's window is returned, for the caller to
+    /// refuse.
+    async fn keyboard_plan(&self) -> Result<(Target, Option<WindowRef>), String> {
+        let me = self.guard.self_process();
+        let t = self.keyboard_target().await?;
+        if !me.owns_any(&t.pids) {
+            let focus = WindowRef::of(&t);
+            return Ok((t, focus));
+        }
+        if self.config.step_aside.is_some()
+            && let Some(behind) = self.keyboard_target_behind().await?
+            && !me.owns_any(&behind.pids)
+        {
+            let focus = WindowRef::of(&behind);
+            return Ok((behind, focus));
+        }
+        Ok((t, None))
+    }
+
+    /// The card's line saying that this app steps aside while the input runs.
+    fn aside_line(&self) -> String {
+        self.config
+            .step_aside
+            .as_ref()
+            .map(|a| {
+                format!(
+                    "\n{} will minimise itself while this runs.",
+                    policy::sanitize::one_line(&a.app_name, 40)
+                )
+            })
+            .unwrap_or_default()
+    }
+
     fn mac(&self) -> bool {
         self.guard.injector().mac_keys()
     }
@@ -454,11 +565,22 @@ impl ComputerServer {
     // `Described` is the host's type; the error path is the rare one.
     #[allow(clippy::result_large_err)]
     async fn pointer_target(&self, p: GlobalPoint, tool: &str) -> Result<Target, Described> {
-        if let Some(r) = refuse_point(self.guard.self_process(), p) {
+        let me = self.guard.self_process();
+        // The indicator's Stop button is never looked through.
+        if let Some(r) = refuse_point(me, p) {
             return Err(Self::hard_limit(tool, "pointer", r.to_string()));
         }
-        let t = self.target_at(p).await.map_err(Described::Invalid)?;
-        if let Some(r) = refuse_target(self.guard.self_process(), &t, false) {
+        let mut t = self.target_at(p).await.map_err(Described::Invalid)?;
+        // This app's own window covers the point. When the app steps aside before input,
+        // the input goes to the window beneath it, which is what the screenshot showed.
+        if self.config.step_aside.is_some()
+            && me.owns_any(&t.pids)
+            && let Some(behind) = self.target_at_behind(p).await.map_err(Described::Invalid)?
+            && !me.owns_any(&behind.pids)
+        {
+            t = behind;
+        }
+        if let Some(r) = refuse_target(me, &t, false) {
             return Err(Self::hard_limit(tool, "pointer", r.to_string()));
         }
         Ok(t)
@@ -563,6 +685,7 @@ impl ComputerServer {
                 };
                 let app_name = policy::sanitize::one_line(&t.app.name, 60);
                 let mut always = target_always_ask_reason(&t, false).map(str::to_string);
+                let mut focus = None;
                 let (step, summary, what) = match tool {
                     TOOL_CLICK => {
                         let button = match button_arg(args) {
@@ -597,12 +720,13 @@ impl ComputerServer {
                         }
                         if !modifiers.is_empty() {
                             // Modifier keys go to the window with the keyboard focus.
-                            match self.keyboard_target().await {
-                                Ok(k)
+                            match self.keyboard_plan().await {
+                                Ok((k, f))
                                     if refuse_target(self.guard.self_process(), &k, true)
                                         .is_none()
                                         && k.app.id == t.app.id =>
                                 {
+                                    focus = f;
                                     // The focused window may always ask where the clicked
                                     // one does not (a console window of the same program).
                                     if always.is_none()
@@ -690,8 +814,14 @@ impl ComputerServer {
                     monitor: Some(geo.monitor.clone()),
                     shown: fmt_coord(&c),
                     step,
+                    focus,
                 };
-                let preview = format!("{what} {shot}\n{}\n{}", screen(p), Self::target_lines(&t));
+                let preview = format!(
+                    "{what} {shot}\n{}\n{}{}",
+                    screen(p),
+                    Self::target_lines(&t),
+                    self.aside_line()
+                );
                 Self::input_action(
                     tool, "pointer", summary, preview, None, &t.app.id, always, false, &plan,
                 )
@@ -758,6 +888,7 @@ impl ComputerServer {
                         button,
                         duration_ms,
                     },
+                    focus: None,
                 };
                 let mut preview = format!(
                     "{what} {shot}\nFrom: {}\n{}\nTo: {}",
@@ -768,6 +899,7 @@ impl ComputerServer {
                 if end.app.id != start.app.id {
                     preview.push_str(&format!("\n{}", Self::target_lines(&end)));
                 }
+                preview.push_str(&self.aside_line());
                 let summary = format!(
                     "{what} in {}",
                     policy::sanitize::one_line(&start.app.name, 60)
@@ -832,8 +964,8 @@ impl ComputerServer {
                 (Step::Key { combo, repeat }, what, always)
             }
         };
-        let t = match self.keyboard_target().await {
-            Ok(t) => t,
+        let (t, focus) = match self.keyboard_plan().await {
+            Ok(v) => v,
             Err(e) => return Described::Invalid(e),
         };
         if let Some(r) = refuse_target(self.guard.self_process(), &t, true) {
@@ -854,8 +986,9 @@ impl ComputerServer {
         }
         let app_name = policy::sanitize::one_line(&t.app.name, 60);
         let preview = format!(
-            "{what} into the application in front\n{}",
-            Self::target_lines(&t)
+            "{what} into the application in front\n{}{}",
+            Self::target_lines(&t),
+            self.aside_line()
         );
         let tail = match &step {
             Step::Type { text } => Some(format!("\nText:\n{text}")),
@@ -873,6 +1006,7 @@ impl ComputerServer {
             monitor: None,
             shown: String::new(),
             step,
+            focus,
         };
         // Typing discloses the text to another program (9.3: "Typing itself discloses the
         // typed text"), so keyboard input counts as outbound for D9.
@@ -1063,6 +1197,19 @@ impl ComputerServer {
             l = self.op_lock.clone().lock_owned() => l,
             _ = ctx.cancel.cancelled() => return op_output(Err(OpError::Stopped)),
         };
+        // This app steps aside (under the lock: handing the keyboard over must not disturb
+        // another chat's operation). Stop does not wait for it.
+        if let Some(aside) = self.config.step_aside.clone() {
+            let inj = self.guard.injector().clone();
+            let me = self.guard.self_process().clone();
+            let chat = ctx.chat.chat_id;
+            let plan = plan.clone();
+            let cancel = ctx.cancel.clone();
+            tokio::select! {
+                _ = Self::blocking(move || step_aside(&*inj, &me, &aside, chat, &plan, &cancel)) => {}
+                _ = ctx.cancel.cancelled() => return op_output(Err(OpError::Stopped)),
+            }
+        }
         let guard = self.guard.clone();
         let cancel = ctx.cancel.clone();
         // Only an action the user approved on an always-ask card may reach a target that
@@ -1103,6 +1250,54 @@ const DRAG_CHECKS: usize = 8;
 
 fn lerp(a: GlobalPoint, b: GlobalPoint, f: f64) -> GlobalPoint {
     GlobalPoint::new(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f)
+}
+
+/// Moves this app out of the way of an approved plan. Blocking; runs on a blocking thread.
+///
+/// When this app has the keyboard and the plan names the window its keyboard input was
+/// planned for, the keyboard is handed back to that window first, while this app is still
+/// in front (Windows lets only the program in front give the focus away), and again after
+/// the minimise (macOS leaves the keyboard with this app when its window is minimised).
+/// Then the app minimises its main window, and this waits until neither the plan's points
+/// nor the keyboard are this app's, or [`ASIDE_WAIT`] passed. The guard checks every event
+/// afterwards, whatever happened here; the keyboard is never taken from another
+/// application.
+fn step_aside(
+    inj: &dyn Injector,
+    me: &SelfProcess,
+    aside: &StepAside,
+    chat: i64,
+    plan: &InputPlan,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
+    let keyboard_is_mine = || inj.keyboard_target().is_ok_and(|t| me.owns_any(&t.pids));
+    let focus = plan.focus.filter(|f| !me.owns_any(&[f.pid]));
+    let hand_back = || {
+        if let Some(f) = &focus
+            && keyboard_is_mine()
+            && let Err(e) = inj.bring_to_front(f)
+        {
+            tracing::debug!(error = %e, "could not hand the keyboard back");
+        }
+    };
+    hand_back();
+    (aside.minimise)(chat);
+    hand_back();
+    let points = plan.step.points();
+    let deadline = std::time::Instant::now() + ASIDE_WAIT;
+    loop {
+        let pointer_clear = points
+            .iter()
+            .all(|p| inj.target_at(*p).map_or(true, |t| !me.owns_any(&t.pids)));
+        let keyboard_clear = focus.is_none() || !keyboard_is_mine();
+        if (pointer_clear && keyboard_clear)
+            || cancel.is_cancelled()
+            || std::time::Instant::now() >= deadline
+        {
+            return;
+        }
+        std::thread::sleep(ASIDE_POLL);
+    }
 }
 
 /// Runs an approved plan through the guard. Blocking; runs on a blocking thread.

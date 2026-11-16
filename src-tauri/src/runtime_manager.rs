@@ -492,11 +492,19 @@ impl RuntimeManager {
     /// Loads `model` (and its projector) as `settings` resolved it, replacing any model
     /// already loaded. Returns when the model is ready or has failed on every backend it
     /// may step down to. `footprint` is what it will take, for the next Automatic.
+    ///
+    /// 0.0.7 (P2): `image_file_left_out` says that the plan left out an image file that
+    /// could not be read before (`hub::image_file`); the load lists
+    /// [`LoadStage::RetryingWithoutImageFile`] among its adjustments from the start, so the
+    /// header says why the model cannot see images. When the image file fails during this
+    /// load, the supervisor loads the model again without it: the file is remembered as
+    /// unreadable before this returns, and the loaded copy counts as loaded without one.
     pub async fn load(
         self: Arc<Self>,
         model: PathBuf,
         settings: ResolvedLoad,
         footprint: Footprint,
+        image_file_left_out: bool,
     ) -> AppResult<()> {
         if !model.is_file() {
             return Err(AppError::new(
@@ -546,6 +554,11 @@ impl RuntimeManager {
                 model_name: Some(model_name.clone()),
                 load_stage: Some(LoadStage::Starting),
                 ctx_source: Some(settings.ctx_source),
+                adjustments: if image_file_left_out {
+                    vec![LoadStage::RetryingWithoutImageFile]
+                } else {
+                    Vec::new()
+                },
                 ..Default::default()
             };
         });
@@ -561,7 +574,7 @@ impl RuntimeManager {
             &settings,
             &first,
             model.clone(),
-            mmproj,
+            mmproj.clone(),
             port,
             runtime::random_api_key(),
         );
@@ -573,14 +586,33 @@ impl RuntimeManager {
 
         // Events: progress and state for the UI; stderr kept in a small ring for details.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+        // 0.0.7 (P2): told once the events up to the first ready server are handled, so an
+        // image file that could not be read is remembered before the load reports ready.
+        let (handled_tx, handled_rx) = oneshot::channel::<()>();
         let me = Arc::clone(&self);
+        let events_model = model.clone();
         tokio::spawn(async move {
+            let mut handled_tx = Some(handled_tx);
             while let Some(event) = rx.recv().await {
                 // An older load's server is being stopped: where it went is not news.
                 if matches!(event, ServerEvent::Memory(_)) && !me.loads.is_current(seq) {
                     continue;
                 }
+                // The image file could not be read, so the model is loading again without
+                // it: remembered (on its Installed row) before anything after it is handled.
+                if matches!(
+                    event,
+                    ServerEvent::Stage(LoadStage::RetryingWithoutImageFile)
+                ) && let Some(image) = &mmproj
+                {
+                    me.remember_unreadable_image_file(&events_model, image)
+                        .await;
+                }
+                let ready = matches!(event, ServerEvent::State(ServerState::Ready));
                 me.on_event(event);
+                if ready && let Some(tx) = handled_tx.take() {
+                    let _ = tx.send(());
+                }
             }
         });
 
@@ -601,6 +633,14 @@ impl RuntimeManager {
                     let props = server.props().clone();
                     if let Some(pid) = server.pid() {
                         crate::children::track(&me2.app, pid, &running.backend.server);
+                    }
+                    // 0.0.7 (P2): loaded again without its image file, so what runs (and
+                    // what "Settings changed" compares) has none.
+                    if running.launch.mmproj.is_none()
+                        && let Ok(mut current) = me2.current.lock()
+                        && let Some(loaded) = current.as_mut()
+                    {
+                        loaded.resolved.mmproj = None;
                     }
                     if let Ok(mut e) = me2.endpoint.lock() {
                         *e = Some(Endpoint {
@@ -649,6 +689,9 @@ impl RuntimeManager {
         // Wait for the first ready server, or for the supervisor to give up.
         let outcome = ready_rx.await;
         if matches!(outcome, Ok(Ok(()))) {
+            // Its events handled first (an image file that could not be read is remembered
+            // then), so what the caller reads next agrees with it. A moment at most.
+            let _ = tokio::time::timeout(Duration::from_secs(10), handled_rx).await;
             tracing::info!(model = %model_name, "model ready");
             return Ok(());
         }
@@ -673,7 +716,9 @@ impl RuntimeManager {
             return Err(replaced_error());
         }
         let err = match exit {
-            Ok(SupervisorExit::Failed(failure)) => load_error(&failure, self.tail_text()),
+            Ok(SupervisorExit::Failed(failure)) => {
+                load_error(&failure, self.tail_text(), self.ended_on())
+            }
             // Stopped by an unload (the model or its backend was removed). The unload has
             // reset the status; there is nothing to mark as failed.
             Ok(SupervisorExit::Stopped) => return Err(cancelled_error()),
@@ -783,7 +828,7 @@ impl RuntimeManager {
                 });
             }
             ServerEvent::State(ServerState::Failed(failure)) => {
-                let err = load_error(&failure, self.tail_text());
+                let err = load_error(&failure, self.tail_text(), self.ended_on());
                 self.update(|s| mark_failed(s, err));
             }
             ServerEvent::State(_) | ServerEvent::Exited { .. } => {}
@@ -850,6 +895,21 @@ impl RuntimeManager {
         if let Ok(mut r) = self.report.lock() {
             *r = None;
         }
+    }
+
+    /// 0.0.7 (P2): the image file `image` could not be read with `model`; remembered on the
+    /// model's Installed row, so later loads leave it out until it changes.
+    async fn remember_unreadable_image_file(&self, model: &Path, image: &Path) {
+        use tauri::Manager;
+        if let Some(state) = self.app.try_state::<AppState>() {
+            crate::hub::image_file::mark_unreadable(&state.store, model, image).await;
+        }
+    }
+
+    /// The backend the current load ended on (after any step-down), for the advice of its
+    /// failure ([`LoadFailure::next_step_on`]).
+    fn ended_on(&self) -> Option<BackendKind> {
+        self.status().backend.as_deref().and_then(backend_kind)
     }
 
     /// Unloads the model outside the D3 rules: removing the model or its backend. Like any
@@ -1181,11 +1241,17 @@ fn shown_device(device: Option<&str>, hip_visible_devices: Option<&str>) -> Opti
     }
 }
 
-fn load_error(failure: &LoadFailure, tail: String) -> AppError {
+/// The error a failed load ends with. Its advice depends on where the load ended (0.0.7:
+/// an unknown failure suggests Processor only only when the load never reached the
+/// processor, [`LoadFailure::next_step_on`]).
+fn load_error(failure: &LoadFailure, tail: String, ended_on: Option<BackendKind>) -> AppError {
     AppError::new(
         "load_failed",
         failure.user_message(),
-        failure.next_step(),
+        match ended_on {
+            Some(backend) => failure.next_step_on(backend),
+            None => failure.next_step(),
+        },
         format!("{failure:?}\n\n{tail}"),
     )
 }
@@ -1683,6 +1749,53 @@ mod tests {
         );
         assert_eq!(planned_backend(&found, Some("rocm"), None), None);
         assert_eq!(planned_backend(&[], None, None), None);
+    }
+
+    /// 0.0.7: the advice of a failed load follows where it ended. An unknown failure on the
+    /// processor (the supervisor already stepped down there) names no other backend; one
+    /// that ended on a graphics backend (the processor was not reached) still suggests
+    /// Processor only. An image file that could not be read never suggests another backend.
+    #[test]
+    fn a_failed_load_suggests_the_processor_only_when_it_was_not_reached() {
+        let on_cpu = load_error(&LoadFailure::Unknown, "tail".into(), Some(BackendKind::Cpu));
+        assert_eq!(on_cpu.code, "load_failed");
+        assert_eq!(
+            on_cpu.message,
+            "The model runner stopped while loading the model."
+        );
+        assert!(
+            !on_cpu.next_step.contains("Processor only"),
+            "{}",
+            on_cpu.next_step
+        );
+        assert!(!on_cpu.next_step.contains("CPU"), "{}", on_cpu.next_step);
+        let on_card = load_error(
+            &LoadFailure::Unknown,
+            String::new(),
+            Some(BackendKind::Vulkan),
+        );
+        assert!(
+            on_card.next_step.contains("Processor only"),
+            "{}",
+            on_card.next_step
+        );
+        let unknown_place = load_error(&LoadFailure::Unknown, String::new(), None);
+        assert_eq!(unknown_place.next_step, LoadFailure::Unknown.next_step());
+        let image = load_error(
+            &LoadFailure::ImageFileInvalid,
+            String::new(),
+            Some(BackendKind::Vulkan),
+        );
+        assert_eq!(
+            image.message,
+            "The image file next to this model couldn't be read."
+        );
+        assert!(
+            image.next_step.contains("Models → Installed"),
+            "{}",
+            image.next_step
+        );
+        assert!(on_cpu.details.starts_with("Unknown\n\ntail"));
     }
 
     /// A failed load shows no stage any more (a stale "Reading the model" would look like a

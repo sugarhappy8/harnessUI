@@ -1556,3 +1556,366 @@ async fn an_input_that_allow_all_could_let_through_never_reaches_a_protected_tar
     assert!(!out.is_error, "{}", out.joined_text());
     assert_eq!(buttons(&d).len(), 2);
 }
+
+// ---- Stepping aside (0.0.7) ---------------------------------------------------------
+//
+// Screenshots leave this app's windows out, so the model aims at what is behind them. With
+// a step-aside hook the app minimises its main window before approved input, so an action
+// is planned for what is behind this app's window and the input reaches it; the guard still
+// checks every event.
+
+/// What a step-aside hook did, by chat.
+type AsideCalls = Arc<std::sync::Mutex<Vec<i64>>>;
+
+/// A step-aside hook that minimises this app's window (id 2) on the fake desktop, as the
+/// app minimises its main window, and records which chat asked.
+fn stepping_aside(d: &FakeDesktop) -> (ComputerConfig, AsideCalls) {
+    let calls: AsideCalls = Arc::default();
+    let (desk, seen) = (d.clone(), calls.clone());
+    let config = ComputerConfig {
+        step_aside: Some(StepAside {
+            app_name: "harnessUI".into(),
+            minimise: Arc::new(move |chat| {
+                seen.lock().unwrap().push(chat);
+                desk.minimise(2);
+            }),
+        }),
+        ..Default::default()
+    };
+    (config, calls)
+}
+
+fn minimised(d: &FakeDesktop, id: u64) -> bool {
+    d.state().windows.iter().any(|w| w.id == id && w.minimised)
+}
+
+fn typed(d: &FakeDesktop) -> String {
+    d.events()
+        .into_iter()
+        .filter_map(|e| match e {
+            InputEvent::Text { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+const ASIDE_LINE: &str = "harnessUI will minimise itself while this runs.";
+
+#[tokio::test]
+async fn a_click_on_this_apps_window_goes_to_the_window_behind_once_it_steps_aside() {
+    let d = desktop();
+    let (config, calls) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    // (700, 300) is under this app's window; the screenshot showed Notepad there.
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit, None);
+    assert_eq!(
+        a.scope,
+        Scope::ComputerInput {
+            kind: "pointer".into(),
+            app: app("notepad").id
+        }
+    );
+    assert!(a.summary.contains("notepad"), "{}", a.summary);
+    assert!(a.preview.contains(ASIDE_LINE), "{}", a.preview);
+    // Describing it changes nothing on the screen.
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(!minimised(&d, 2));
+    d.clear_events();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(*calls.lock().unwrap(), vec![CHAT]);
+    assert!(minimised(&d, 2));
+    let ev = d.events();
+    assert_eq!(moved_to(&ev[0]), (700, 300));
+    assert_eq!(buttons(&d).len(), 2);
+}
+
+#[tokio::test]
+async fn without_a_step_aside_hook_cards_and_limits_are_as_before() {
+    let d = desktop();
+    let s = server(&d);
+    screenshot(&s).await;
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+        .await
+        .unwrap();
+    assert!(!a.preview.contains("minimise"), "{}", a.preview);
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    assert_eq!(
+        a.hard_limit.as_deref(),
+        Some(Refusal::SelfPointer.to_string().as_str())
+    );
+}
+
+#[tokio::test]
+async fn the_stop_button_and_an_elevated_window_behind_stay_refused() {
+    let d = desktop();
+    let (config, calls) = stepping_aside(&d);
+    let me = SelfProcess::new(ME, || vec![WEBVIEW])
+        .with_protected_rects(|| vec![Rect::new(700.0, 10.0, 40.0, 20.0)]);
+    let s = ComputerServer::new(d.capture(), d.injector(), me, config);
+    s.set_profile(
+        CHAT,
+        ModelProfile {
+            convention: Convention::Pixels,
+            resize: ResizeRule::Original,
+        },
+    );
+    screenshot(&s).await;
+    // The indicator's Stop button lies over this app's window: never looked through.
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [710, 15]}))
+        .await
+        .unwrap();
+    assert_eq!(
+        a.hard_limit.as_deref(),
+        Some(Refusal::Protected.to_string().as_str())
+    );
+    // An administrator's window behind this app's window.
+    let mut admin = FakeWindow::new(5, Rect::new(650.0, 400.0, 200.0, 200.0), 70, app("taskmgr"));
+    admin.elevated = true;
+    {
+        let mut st = d.state();
+        let at = st.windows.iter().position(|w| w.id == 2).unwrap() + 1;
+        st.windows.insert(at, admin);
+    }
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 450]}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit.as_deref(), Some(ELEVATED_REFUSAL));
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn typing_while_this_app_has_the_focus_goes_to_the_window_behind() {
+    // Windows gives the keyboard to the next window when one is minimised; macOS leaves it
+    // with the application. Either way the input reaches Notepad.
+    for mac in [false, true] {
+        let d = desktop();
+        d.state().foreground = Some(2);
+        d.state().focus_stays_on_minimise = mac;
+        let (config, calls) = stepping_aside(&d);
+        let s = server_with(&d, config);
+        let a = describe(&s, TOOL_TYPE, json!({"text": "hello"}))
+            .await
+            .unwrap();
+        assert_eq!(a.hard_limit, None, "mac {mac}");
+        assert_eq!(
+            a.scope,
+            Scope::ComputerInput {
+                kind: "keyboard".into(),
+                app: app("notepad").id
+            },
+            "mac {mac}"
+        );
+        assert!(a.preview.contains(ASIDE_LINE), "{}", a.preview);
+        let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
+        assert!(!out.is_error, "mac {mac}: {}", out.joined_text());
+        assert_eq!(typed(&d), "hello", "mac {mac}");
+        assert_eq!(*calls.lock().unwrap(), vec![CHAT]);
+        // The keyboard was handed back to Notepad while this app was still in front.
+        assert_eq!(d.state().fronted, vec![1], "mac {mac}");
+        assert_eq!(d.state().foreground, Some(1), "mac {mac}");
+    }
+}
+
+#[tokio::test]
+async fn after_an_approval_card_the_keyboard_goes_back_to_the_approved_application() {
+    for mac in [false, true] {
+        let d = desktop();
+        d.state().focus_stays_on_minimise = mac;
+        let (config, _) = stepping_aside(&d);
+        let s = server_with(&d, config);
+        // Planned while Notepad has the focus.
+        let a = describe(&s, TOOL_KEY, json!({"keys": "ctrl+s"}))
+            .await
+            .unwrap();
+        assert_eq!(a.hard_limit, None);
+        // The card brought this app back and the user pressed Allow in it.
+        d.restore(2);
+        assert_eq!(d.state().foreground, Some(2));
+        d.clear_events();
+        let out = s.call(TOOL_KEY, &args(json!({})), &a, ctx()).await;
+        assert!(!out.is_error, "mac {mac}: {}", out.joined_text());
+        assert!(d.events().contains(&InputEvent::Key {
+            key: Key::Char('s'),
+            down: true
+        }));
+        assert!(d.state().keys_down.is_empty());
+        assert_eq!(d.state().fronted, vec![1], "mac {mac}");
+        assert!(minimised(&d, 2));
+    }
+}
+
+#[tokio::test]
+async fn the_keyboard_is_never_taken_from_another_application() {
+    let d = desktop();
+    let mut mail = FakeWindow::new(8, Rect::new(0.0, 500.0, 300.0, 300.0), 61, app("mail"));
+    mail.colour = [9, 9, 9];
+    d.state().windows.insert(1, mail);
+    let (config, _) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    let a = describe(&s, TOOL_TYPE, json!({"text": "hi"}))
+        .await
+        .unwrap();
+    // The user went to Mail after approving: the input is refused, Mail keeps the focus.
+    d.state().foreground = Some(8);
+    d.clear_events();
+    let out = s.call(TOOL_TYPE, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error);
+    let text = out.joined_text();
+    assert!(
+        text.contains("would now go to") && text.contains("mail"),
+        "{text}"
+    );
+    assert!(d.state().fronted.is_empty());
+    assert_eq!(d.state().foreground, Some(8));
+    assert!(d.events().is_empty());
+}
+
+#[tokio::test]
+async fn when_this_apps_window_does_not_go_the_input_is_still_refused() {
+    let d = desktop();
+    let calls: AsideCalls = Arc::default();
+    let seen = calls.clone();
+    // The app could not minimise its window (or the user brought it straight back).
+    let config = ComputerConfig {
+        step_aside: Some(StepAside {
+            app_name: "harnessUI".into(),
+            minimise: Arc::new(move |chat| seen.lock().unwrap().push(chat)),
+        }),
+        ..Default::default()
+    };
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    assert_eq!(a.hard_limit, None);
+    d.clear_events();
+    let started = std::time::Instant::now();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(out.is_error);
+    assert!(
+        out.joined_text().contains("this app's own window"),
+        "{}",
+        out.joined_text()
+    );
+    assert!(d.events().is_empty());
+    assert_eq!(*calls.lock().unwrap(), vec![CHAT]);
+    // It waited a little for the window to go, not forever.
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn screenshots_do_not_step_aside() {
+    let d = desktop();
+    let (config, calls) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(!minimised(&d, 2));
+    let a = describe(&s, TOOL_SCREENSHOT, json!({})).await.unwrap();
+    assert!(!a.preview.contains("minimise"), "{}", a.preview);
+}
+
+#[tokio::test]
+async fn a_drag_across_this_apps_window_runs_once_it_steps_aside() {
+    let d = desktop();
+    let (config, _) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let a = describe(
+        &s,
+        TOOL_DRAG,
+        json!({"from": [100, 100], "to": [900, 100], "duration_ms": 100}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(a.hard_limit, None);
+    // Both ends are Notepad's: one application, no always-ask reason.
+    assert_eq!(a.risk, Risk::Normal);
+    d.clear_events();
+    let out = s.call(TOOL_DRAG, &args(json!({})), &a, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert_eq!(buttons(&d).len(), 2);
+    assert!(d.state().buttons_down.is_empty());
+}
+
+#[tokio::test]
+async fn a_click_with_modifiers_while_this_app_has_the_focus() {
+    let d = desktop();
+    d.state().foreground = Some(2);
+    let (config, _) = stepping_aside(&d);
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let a = describe(
+        &s,
+        TOOL_CLICK,
+        json!({"coordinate": [100, 100], "modifiers": ["shift"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(a.hard_limit, None);
+    d.clear_events();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, ctx()).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    assert!(d.events().contains(&InputEvent::Key {
+        key: Key::Shift,
+        down: true
+    }));
+    assert!(d.state().keys_down.is_empty());
+    assert_eq!(d.state().fronted, vec![1]);
+}
+
+#[tokio::test]
+async fn stop_while_stepping_aside_returns_at_once() {
+    let d = desktop();
+    let config = ComputerConfig {
+        step_aside: Some(StepAside {
+            app_name: "harnessUI".into(),
+            // The app's main thread is slow to minimise the window.
+            minimise: Arc::new(|_| std::thread::sleep(Duration::from_secs(2))),
+        }),
+        ..Default::default()
+    };
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [100, 100]}))
+        .await
+        .unwrap();
+    let c = ctx();
+    let cancel = c.cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+    });
+    d.clear_events();
+    let started = std::time::Instant::now();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, c).await;
+    assert!(started.elapsed() < Duration::from_millis(1000));
+    assert!(out.is_error);
+    assert!(
+        out.joined_text().contains("Stopped"),
+        "{}",
+        out.joined_text()
+    );
+    assert!(d.events().is_empty());
+}
+
+#[test]
+fn a_plan_made_before_0_0_7_still_runs() {
+    // Plans are stored in the approved action; one without the focus window still reads.
+    let plan: InputPlan = serde_json::from_value(json!({
+        "apps": ["c:\\apps\\notepad.exe"],
+        "monitor": null,
+        "shown": "",
+        "step": {"type": "type", "text": "hi"}
+    }))
+    .unwrap();
+    assert_eq!(plan.focus, None);
+}

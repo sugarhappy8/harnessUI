@@ -20,3 +20,6 @@ pub mod layers;
 pub mod placement;
 pub use gguf::{TensorEntry, read_tensor_table};
 pub use layers::{LayerSize, LayerSizes};
+// 0.0.7 P1: the conversation memory as llama.cpp allocates it, layer by layer.
+pub mod kv;
+pub use kv::{KvLayout, KvSize};

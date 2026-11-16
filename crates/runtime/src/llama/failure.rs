@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::backend::BackendKind;
 use super::devices::{STATUS_DLL_NOT_FOUND, STATUS_INVALID_IMAGE_FORMAT};
 
 /// Why a load failed, in terms the UI can explain.
@@ -24,6 +25,12 @@ pub enum LoadFailure {
     ModelFileInvalid,
     /// The weights loaded but the context (KV cache, compute buffers) did not fit.
     ContextTooLarge,
+    /// 0.0.7: the model and its context loaded, then the image file given with `--mmproj`
+    /// (the projector) could not be read: a damaged file, one made for another model, or
+    /// one this build cannot use. JSON `{"code":"image_file_invalid"}`. It fails the same
+    /// on every backend; the supervisor loads the model again without it
+    /// ([`LoadStage::RetryingWithoutImageFile`](super::stage::LoadStage)).
+    ImageFileInvalid,
     /// None of the known signatures matched.
     Unknown,
 }
@@ -44,6 +51,7 @@ impl LoadFailure {
             Self::ContextTooLarge => {
                 "The model loaded, but there isn't enough memory left for how much it should remember."
             }
+            Self::ImageFileInvalid => "The image file next to this model couldn't be read.",
             Self::Unknown => "The model runner stopped while loading the model.",
         }
     }
@@ -70,14 +78,40 @@ impl LoadFailure {
             Self::ContextTooLarge => {
                 "In Model settings, lower How much it can remember, or turn on Save memory if it is off."
             }
-            Self::Unknown => "Copy the details and check the logs, or try the CPU backend.",
+            Self::ImageFileInvalid => {
+                "The model can load without it. To use images, download its image file again in Models → Installed."
+            }
+            // By the time an unknown failure is shown, the supervisor has already tried the
+            // next backends down to the processor (0.0.6), so another backend is no advice:
+            // see [`Self::next_step_on`] for a load that ended on a graphics card.
+            Self::Unknown => {
+                "Copy the details and check the logs. If other models load, try a different download of this model."
+            }
+        }
+    }
+
+    /// [`Self::next_step`] for a load that ended on `backend` (0.0.7). An unknown failure
+    /// that ended on a graphics backend never reached the processor (the supervisor steps
+    /// down to it whenever its build passed its check), so choosing it may still help; on
+    /// the processor no other backend would. Every other failure says the same wherever it
+    /// ended: a backend change cannot fix it, or the app already tried one.
+    pub fn next_step_on(&self, backend: BackendKind) -> &'static str {
+        match self {
+            Self::Unknown if backend != BackendKind::Cpu => {
+                "Copy the details and check the logs, or choose Processor only in Settings → Local models."
+            }
+            _ => self.next_step(),
         }
     }
 
     /// Whether trying the next backend down could help (ARCHITECTURE.md 7.4, "Stepping
-    /// down"). A broken model file or a port problem fails the same way on any backend.
+    /// down"). A broken model file, a port problem and an image file that cannot be read
+    /// fail the same way on any backend.
     pub fn may_succeed_on_another_backend(&self) -> bool {
-        !matches!(self, Self::ModelFileInvalid | Self::PortInUse)
+        !matches!(
+            self,
+            Self::ModelFileInvalid | Self::PortInUse | Self::ImageFileInvalid
+        )
     }
 
     /// Whether Save memory (flash attention with a q8_0 conversation memory) may have
@@ -144,7 +178,32 @@ const MODEL_FILE_SIGNATURES: &[&str] = &[
     "unknown model architecture",
 ];
 
+/// The image file (`--mmproj`) could not be read after the model and its context loaded
+/// (0.0.7). At the pinned build (b12110, `tools/server/server-context.cpp`,
+/// `tools/mtmd/mtmd.cpp`, `tools/mtmd/clip.cpp`) a failed `mtmd_init_from_file` prints
+/// "mtmd_init_from_file: error: …", the server then "failed to load multimodal model,
+/// '<file>'" and exits; an exception inside `clip_init` (a missing tensor, a key, a
+/// mismatch) is printed first as "clip_init: failed to load model '<file>': …" (captured in
+/// `tests/fixtures/stderr_image_file_broken.txt`; an older build printed the exception on
+/// the `mtmd_init_from_file` line itself, `stderr_image_file_owner_windows.txt`).
+///
+/// Only lines that end a load are here. "mtmd_get_memory_usage: error: …" and "Failed to
+/// load CLIP model" also appear when the server measures the file before the model loads,
+/// and the load goes on after them (the model may still fail for another reason, or the
+/// file may still load); `clip_init` is silenced while it measures.
+const IMAGE_FILE_SIGNATURES: &[&str] = &[
+    "failed to load multimodal model",
+    "mtmd_init_from_file: error",
+    "clip_init: failed to load model",
+];
+
 /// Classifies a failed load from the last lines of stderr and the exit code.
+///
+/// The order matters: a context or allocation failure comes first, also while the image
+/// file loads (less of the model on the graphics card or another backend may make room
+/// for it); then the image file, before the model file, because a damaged image file is
+/// read with the same GGUF reader whose errors name a broken model file, and the server
+/// reads the image file only after the model loaded.
 pub fn classify(stderr_tail: &[String], exit_code: Option<i32>) -> LoadFailure {
     if matches!(exit_code, Some(code) if code == STATUS_DLL_NOT_FOUND || code == STATUS_INVALID_IMAGE_FORMAT)
     {
@@ -171,6 +230,9 @@ pub fn classify(stderr_tail: &[String], exit_code: Option<i32>) -> LoadFailure {
     }
     if any(ALLOCATION_SIGNATURES) {
         return LoadFailure::OutOfMemory;
+    }
+    if any(IMAGE_FILE_SIGNATURES) {
+        return LoadFailure::ImageFileInvalid;
     }
     if any(MODEL_FILE_SIGNATURES) {
         return LoadFailure::ModelFileInvalid;
@@ -342,6 +404,215 @@ mod tests {
         }
     }
 
+    /// 0.0.7: the image file failed after the model loaded, captured from the pinned build
+    /// with an image file that misses a tensor its kind needs (`v.token_embd.img_break`,
+    /// as in the owner's report) and with one that is not a GGUF file at all. The second
+    /// log also holds the GGUF reader's "invalid magic characters", which alone names a
+    /// broken model file: here it is about the image file, and the model is not blamed.
+    #[test]
+    fn captured_broken_image_files_are_image_file_invalid() {
+        for tail in [
+            fixture(include_bytes!(
+                "../../tests/fixtures/stderr_image_file_broken.txt"
+            )),
+            fixture(include_bytes!(
+                "../../tests/fixtures/stderr_image_file_garbage.txt"
+            )),
+        ] {
+            let failure = classify(&tail, Some(1));
+            assert_eq!(failure, LoadFailure::ImageFileInvalid, "{tail:?}");
+            assert!(!failure.may_succeed_on_another_backend());
+            assert!(!failure.save_memory_may_be_the_cause());
+            assert!(!failure.is_out_of_memory());
+        }
+    }
+
+    /// The owner's log (Windows, every backend failing the same way): the exception is on
+    /// the `mtmd_init_from_file` line itself, without a `clip_init` line. The user folder is
+    /// replaced and the folder the report left out is the one downloads use.
+    #[test]
+    fn the_owners_log_is_image_file_invalid() {
+        let tail = fixture(include_bytes!(
+            "../../tests/fixtures/stderr_image_file_owner_windows.txt"
+        ));
+        assert_eq!(classify(&tail, Some(1)), LoadFailure::ImageFileInvalid);
+    }
+
+    /// The later attempt in the owner's report: `clip_init` names the missing tensor, then
+    /// `mtmd_init_from_file` says the file could not be loaded. Each line that ends a load
+    /// counts on its own.
+    #[test]
+    fn the_clip_init_variant_is_image_file_invalid() {
+        let path = r"C:\Users\me\harnessUI\models\x\M.mmproj-f16.gguf";
+        let both = lines(&format!(
+            "E clip_init: failed to load model '{path}': operator(): unable to find tensor v.token_embd.img_break\n\
+             E mtmd_init_from_file: error: Failed to load CLIP model from {path}\n\
+             E srv    load_model: failed to load multimodal model, '{path}'\n\
+             E srv  server_run_i: exiting due to model loading error"
+        ));
+        assert_eq!(classify(&both, Some(1)), LoadFailure::ImageFileInvalid);
+        for line in [
+            format!(
+                "E clip_init: failed to load model '{path}': operator(): unable to find tensor v.token_embd.img_break"
+            ),
+            format!("E mtmd_init_from_file: error: Failed to load CLIP model from {path}"),
+            format!("E srv    load_model: failed to load multimodal model, '{path}'"),
+        ] {
+            assert_eq!(
+                classify(&lines(&line), Some(1)),
+                LoadFailure::ImageFileInvalid,
+                "{line}"
+            );
+        }
+    }
+
+    /// Running out of memory while the image file loads is still running out of memory:
+    /// less of the model on the graphics card, or another backend, may make room for it.
+    #[test]
+    fn running_out_of_memory_while_the_image_file_loads_is_out_of_memory() {
+        let path = "/m/mmproj-F16.gguf";
+        let tail = |alloc: &str| {
+            lines(&format!(
+                "I srv    load_model: loading model '/m/model.gguf'\n\
+                 {alloc}\n\
+                 E clip_init: failed to load model '{path}': load_tensors: failed to allocate the weights\n\
+                 E mtmd_init_from_file: error: Failed to load CLIP model from {path}\n\
+                 E srv    load_model: failed to load multimodal model, '{path}'\n\
+                 E srv  server_run_i: exiting due to model loading error"
+            ))
+        };
+        for alloc in [
+            "E alloc_tensor_range: failed to allocate Vulkan0 buffer of size 851443712",
+            "E ggml_vulkan: Device memory allocation of size 851443712 failed.\nE vk::Device::allocateMemory: ErrorOutOfDeviceMemory",
+            "E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 812.00 MiB on device 0: cudaMalloc failed: out of memory",
+            "E ggml_metal_buffer_init: error: failed to allocate buffer, size = 812.00 MiB",
+        ] {
+            let failure = classify(&tail(alloc), Some(1));
+            assert_eq!(failure, LoadFailure::OutOfMemory, "{alloc}");
+            assert!(failure.may_succeed_on_another_backend());
+        }
+    }
+
+    /// The server measures the image file before the model loads and goes on when that
+    /// fails: such a line alone never makes the failure the image file's. What failed after
+    /// it decides.
+    #[test]
+    fn measuring_the_image_file_is_not_a_failure_of_it() {
+        let measured = "E mtmd_get_memory_usage: error: Failed to load CLIP model from /m/mmproj.gguf\n\
+                        E mtmd_get_cap_from_file: failed to get capabilities from file '/m/mmproj.gguf': clip_model_loader: failed to load CLIP model from /m/mmproj.gguf. Does this file exist?\n\
+                        E srv    load_model: [mtmd] failed to get memory usage of mmproj";
+        assert_eq!(classify(&lines(measured), Some(1)), LoadFailure::Unknown);
+        let weights = lines(&format!(
+            "{measured}\nE alloc_tensor_range: failed to allocate CUDA0 buffer of size 9437184000\n\
+             E llama_model_load_from_file_impl: failed to load model"
+        ));
+        assert_eq!(classify(&weights, Some(1)), LoadFailure::OutOfMemory);
+        let model = lines(&format!(
+            "{measured}\nE gguf_init_from_file_impl: failed to read header\n\
+             E llama_model_load_from_file_impl: failed to load model"
+        ));
+        assert_eq!(classify(&model, Some(1)), LoadFailure::ModelFileInvalid);
+        let context = lines(&format!(
+            "{measured}\nE common_init_result: failed to create context with model 'm.gguf'"
+        ));
+        assert_eq!(classify(&context, Some(1)), LoadFailure::ContextTooLarge);
+    }
+
+    /// Logs that say nothing about an image file stay as they were.
+    #[test]
+    fn logs_without_an_image_file_are_unchanged() {
+        for (name, bytes, want) in [
+            (
+                "missing model",
+                &include_bytes!("../../tests/fixtures/stderr_missing_model.txt")[..],
+                LoadFailure::ModelFileInvalid,
+            ),
+            (
+                "invalid magic",
+                &include_bytes!("../../tests/fixtures/stderr_invalid_magic.txt")[..],
+                LoadFailure::ModelFileInvalid,
+            ),
+            (
+                "context too large",
+                &include_bytes!("../../tests/fixtures/stderr_context_too_large.txt")[..],
+                LoadFailure::ContextTooLarge,
+            ),
+            (
+                "port in use",
+                &include_bytes!("../../tests/fixtures/stderr_port_in_use.txt")[..],
+                LoadFailure::PortInUse,
+            ),
+        ] {
+            assert_eq!(classify(&fixture(bytes), Some(1)), want, "{name}");
+        }
+        let unrelated = lines(
+            "I srv    load_model: loading model '/m/model.gguf'\n\
+             I srv    load_model: loaded multimodal model, '/m/mmproj.gguf'\n\
+             E llama_model_load: error loading model: vk::Queue::submit: ErrorDeviceLost",
+        );
+        assert_eq!(classify(&unrelated, Some(1)), LoadFailure::Unknown);
+    }
+
+    /// An unknown failure is shown after the supervisor tried every backend it could, down
+    /// to the processor: its advice names no other backend. Only a load that ended on a
+    /// graphics backend (the processor was not reached) still suggests Processor only, in
+    /// the words of Settings. Other failures say the same wherever they ended.
+    #[test]
+    fn the_unknown_advice_names_the_processor_only_where_it_can_help() {
+        let unknown = LoadFailure::Unknown;
+        assert_eq!(
+            unknown.next_step(),
+            "Copy the details and check the logs. If other models load, try a different download of this model."
+        );
+        assert_eq!(unknown.next_step_on(BackendKind::Cpu), unknown.next_step());
+        for backend in [
+            BackendKind::Vulkan,
+            BackendKind::Cuda,
+            BackendKind::Rocm,
+            BackendKind::Metal,
+        ] {
+            assert_eq!(
+                unknown.next_step_on(backend),
+                "Copy the details and check the logs, or choose Processor only in Settings → Local models.",
+                "{backend}"
+            );
+        }
+        for failure in [
+            LoadFailure::OutOfMemory,
+            LoadFailure::InvalidDevice("Vulkan0".into()),
+            LoadFailure::MissingRuntimeDll,
+            LoadFailure::PortInUse,
+            LoadFailure::ModelFileInvalid,
+            LoadFailure::ContextTooLarge,
+            LoadFailure::ImageFileInvalid,
+        ] {
+            for backend in [BackendKind::Cpu, BackendKind::Vulkan] {
+                assert_eq!(
+                    failure.next_step_on(backend),
+                    failure.next_step(),
+                    "{failure:?}"
+                );
+            }
+        }
+        // Plain words: no "CPU", "backend" or "mmproj" in what the user reads.
+        for failure in [LoadFailure::Unknown, LoadFailure::ImageFileInvalid] {
+            for backend in [BackendKind::Cpu, BackendKind::Vulkan] {
+                let text = format!(
+                    "{} {}",
+                    failure.user_message(),
+                    failure.next_step_on(backend)
+                );
+                for jargon in ["CPU", "backend", "mmproj", "projector", "CLIP", "!"] {
+                    assert!(!text.contains(jargon), "{jargon:?} in {text:?}");
+                }
+            }
+        }
+        assert_eq!(
+            LoadFailure::ImageFileInvalid.user_message(),
+            "The image file next to this model couldn't be read."
+        );
+    }
+
     #[test]
     fn windows_loader_exit_codes() {
         assert_eq!(
@@ -379,15 +650,18 @@ mod tests {
             LoadFailure::PortInUse,
             LoadFailure::ModelFileInvalid,
             LoadFailure::ContextTooLarge,
+            LoadFailure::ImageFileInvalid,
             LoadFailure::Unknown,
         ];
         for failure in &all {
             assert!(!failure.user_message().is_empty());
             assert!(failure.next_step().ends_with('.'));
+            assert!(failure.next_step_on(BackendKind::Vulkan).ends_with('.'));
             assert_eq!(failure.to_string(), failure.user_message());
         }
         assert!(!LoadFailure::ModelFileInvalid.may_succeed_on_another_backend());
         assert!(!LoadFailure::PortInUse.may_succeed_on_another_backend());
+        assert!(!LoadFailure::ImageFileInvalid.may_succeed_on_another_backend());
         assert!(LoadFailure::OutOfMemory.may_succeed_on_another_backend());
     }
 
@@ -405,6 +679,9 @@ mod tests {
             (LoadFailure::MissingRuntimeDll, false, false),
             (LoadFailure::PortInUse, false, false),
             (LoadFailure::ModelFileInvalid, false, false),
+            // 0.0.7: the image file fails the same however the model runs; the supervisor
+            // drops the image file instead.
+            (LoadFailure::ImageFileInvalid, false, false),
         ];
         for (failure, save_memory, memory) in table {
             assert_eq!(
@@ -487,6 +764,15 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&LoadFailure::InvalidDevice("Vulkan1".into())).expect("json"),
             r#"{"code":"invalid_device","device":"Vulkan1"}"#
+        );
+        // 0.0.7, src/lib/types.ts `LoadFailure`.
+        assert_eq!(
+            serde_json::to_string(&LoadFailure::ImageFileInvalid).expect("json"),
+            r#"{"code":"image_file_invalid"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<LoadFailure>(r#"{"code":"image_file_invalid"}"#).expect("reads"),
+            LoadFailure::ImageFileInvalid
         );
     }
 }

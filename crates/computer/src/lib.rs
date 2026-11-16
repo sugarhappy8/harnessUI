@@ -14,6 +14,8 @@
 //!   resizing each screenshot to exactly what llama.cpp would feed the model.
 //! - [`apps`] identifies applications and lists the ones that always ask; [`keys`] parses
 //!   key combinations and spots shortcuts the OS handles itself.
+//! - [`window_aside`] decides when the app's main window steps aside (is minimised) for
+//!   approved input and when it comes back.
 //!
 //! This crate starts no processes.
 
@@ -25,19 +27,21 @@ pub mod keys;
 pub mod platform;
 pub mod profile;
 mod server;
+pub mod window_aside;
 
 pub use apps::{AppInfo, Target, always_ask_reason};
 pub use geometry::{GlobalPoint, MonitorInfo, Rect, ScreenshotGeometry};
 pub use guard::{ELEVATED_REFUSAL, Held, InputGuard, StopHandle};
 pub use platform::{
     Capture, CaptureError, Captured, Injector, InputError, MainThread, MouseButton, PlatformError,
-    SelfProcess,
+    SelfProcess, WindowRef,
 };
 pub use profile::{AutoProfile, Convention, ModelProfile, ResizeRule, SmartResize, auto_profile};
 pub use server::{
     ComputerConfig, ComputerServer, MAX_HOLD_MS, MAX_TYPE_CHARS, ReadyCheck, SERVER_NAME,
-    TOOL_CLICK, TOOL_DRAG, TOOL_KEY, TOOL_MOVE, TOOL_SCREENSHOT, TOOL_SCROLL, TOOL_TYPE,
+    StepAside, TOOL_CLICK, TOOL_DRAG, TOOL_KEY, TOOL_MOVE, TOOL_SCREENSHOT, TOOL_SCROLL, TOOL_TYPE,
 };
+pub use window_aside::{AsideEvent, WindowAside, WindowNow, WindowStep};
 
 #[cfg(target_os = "macos")]
 pub use platform::macos::{

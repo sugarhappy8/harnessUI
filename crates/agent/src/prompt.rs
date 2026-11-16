@@ -1,8 +1,10 @@
 //! Prompt assembly (ARCHITECTURE.md 8.5).
 //!
 //! - **One system message**, always first: the chat's system prompt, then the user's pinned
-//!   instructions, then (when tools are on) the agent preamble, the skills index, loaded
-//!   skill text and the compaction summary, each as a marked block ([`system_message`]).
+//!   instructions, then (when tools are on) the agent preamble and (0.0.7) the list of the
+//!   tools that are on with a guide for calling them ([`tool_guide_blocks`]), the skills
+//!   index, loaded skill text and the compaction summary, each as a marked block
+//!   ([`system_message`]).
 //! - **Tool results** go back as tool-role messages wrapped in a `<tool_output>` delimiter that
 //!   carries a per-result unpredictable value, the tool's name and the source path or URL
 //!   ([`render_result`]). App notes follow the closing delimiter, outside it.
@@ -30,6 +32,14 @@ use crate::error::ProviderError;
 use crate::history::{CallStatus, HistoryMessage, Part, ResultRecord, STOPPED_TEXT};
 use crate::types::{ChatMessage, ContentPart, ImageUrl, MessageContent, Role, ToolCall};
 
+// [0.0.7] The tools that are on in the chat and how to call them (`<tool_list>` and
+// `<tool_call_guide>`, after the agent instructions).
+mod guide;
+pub use guide::{
+    GUIDE_TAG, GuideOs, LIST_TAG, ListedTool, ToolGroup, ToolGuide, tool_guide_blocks,
+    tool_guide_budget,
+};
+
 /// The character inserted after the first character of a control token to break it up. A
 /// zero-width space keeps the text readable while llama-server's tokenizer, which matches
 /// special tokens only as exact strings, no longer sees a control token.
@@ -52,6 +62,9 @@ pub const RESERVED_TAGS: &[&str] = &[
     "skills_index",
     "skill_content",
     "conversation_summary",
+    // [0.0.7]
+    LIST_TAG,
+    GUIDE_TAG,
 ];
 
 /// The longest source path or URL shown in a delimiter header, in characters.
@@ -491,6 +504,10 @@ pub struct SystemParts<'a> {
     pub pinned: &'a [String],
     /// The agent preamble, present when tools are on.
     pub preamble: Option<&'a Preamble>,
+    /// [0.0.7] The tools that are on and how to call them, present when tools are on: the
+    /// `<tool_list>` and `<tool_call_guide>` blocks right after the agent instructions
+    /// ([`tool_guide_blocks`]; names and descriptions of added servers' tools sanitised).
+    pub tool_guide: Option<&'a ToolGuide>,
     /// The skills index (untrusted: sanitised).
     pub skills_index: Option<&'a str>,
     /// Loaded skill text (untrusted: sanitised).
@@ -600,6 +617,11 @@ pub fn system_message(parts: &SystemParts, sanitizer: &Sanitizer) -> String {
             sep = sanitizer.clean_line(&preamble.path_separator, 4),
             tag = DELIMITER_TAG,
         ));
+    }
+    // [0.0.7] Before the skills, which a turn may change: the list changes only when the
+    // user changes which tools are on.
+    if let Some(guide) = parts.tool_guide {
+        blocks.extend(tool_guide_blocks(guide, sanitizer));
     }
     if let Some(index) = parts.skills_index.map(str::trim).filter(|s| !s.is_empty()) {
         blocks.push(format!(
@@ -1244,6 +1266,10 @@ fn images_message(images: Vec<ContentPart>) -> ChatMessage {
     ChatMessage::user(MessageContent::Parts(parts))
 }
 
+/// Why an image reached a model as text: it was loaded without its image file (only a
+/// local model is ever without vision here), and how the user can fix that.
+const NO_IMAGE_FILE: &str = "this model was loaded without an image file, so it cannot see images (the user can download its image file in Models → Installed, or pick a model that can see images)";
+
 /// An image part for a vision model, or the text stub otherwise (also for image data that
 /// is not a valid inline image).
 fn image_part(mime: &str, data_base64: &str, vision: bool, hint: Option<&str>) -> ContentPart {
@@ -1256,7 +1282,9 @@ fn image_part(mime: &str, data_base64: &str, vision: bool, hint: Option<&str>) -
     let reason = if vision {
         "the image data could not be read"
     } else {
-        "this model cannot see images"
+        // Only a local model can be without vision here (0.0.7: say how to fix it, for the
+        // model to pass on).
+        NO_IMAGE_FILE
     };
     match hint {
         Some(hint) => ContentPart::text(format!("[image, {size}; {reason}; {hint}]")),

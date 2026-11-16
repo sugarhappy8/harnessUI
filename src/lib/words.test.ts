@@ -16,6 +16,7 @@ import {
   gpuLabel,
   GPU_USE_WORDS,
   HELP,
+  IMAGE_FILE_WORDS,
   LOAD_FAILURE_WORDS,
   loadStageWords,
   readyLine,
@@ -77,6 +78,7 @@ const FAILURES: Record<LoadFailure["code"], LoadFailure> = {
   port_in_use: { code: "port_in_use" },
   model_file_invalid: { code: "model_file_invalid" },
   context_too_large: { code: "context_too_large" },
+  image_file_invalid: { code: "image_file_invalid" },
   unknown: { code: "unknown" },
 };
 
@@ -98,6 +100,7 @@ const STAGES: Record<LoadStage["kind"], LoadStage[]> = {
     BACKENDS.flatMap((to) => Object.values(FAILURES).map((reason) => ({ kind: "steppingDown" as const, from, to, reason }))),
   ),
   retryingWithoutFastAttention: BACKENDS.map((backend) => ({ kind: "retryingWithoutFastAttention", backend })),
+  retryingWithoutImageFile: [{ kind: "retryingWithoutImageFile" }],
 };
 
 const SOURCES: Record<ContextSource, true> = {
@@ -160,6 +163,7 @@ describe("plain words", () => {
       "steppingDown",
       "restarting",
       "retryingWithoutFastAttention",
+      "retryingWithoutImageFile",
     ] as const) {
       for (const s of STAGES[kind]) {
         const words = adjustmentWords(s);
@@ -199,6 +203,22 @@ describe("plain words", () => {
     expect(adjustmentWords({ kind: "retryingWithLessGpu", backend: "metal" })).toBe(
       "Apple graphics ran out of memory, so part of the model runs on the processor. Replies are slower.",
     );
+  });
+
+  it("says a model loaded without its image file, in the words promised to the owner, without jargon", () => {
+    expect(adjustmentWords({ kind: "retryingWithoutImageFile" })).toBe(
+      "Loaded without image input: the image file next to this model couldn't be read.",
+    );
+    expect(loadStageWords({ kind: "retryingWithoutImageFile" })).toBe("Trying again without the image file");
+    expect(LOAD_FAILURE_WORDS.image_file_invalid).toBe("could not read the image file");
+    for (const text of [
+      adjustmentWords({ kind: "retryingWithoutImageFile" }) ?? "",
+      loadStageWords({ kind: "retryingWithoutImageFile" }),
+      ...Object.values(IMAGE_FILE_WORDS),
+    ]) {
+      plain(text);
+      expect(text).not.toMatch(/mmproj|projector|CLIP|vision encoder/i);
+    }
   });
 
   it("words a step-down by its reason, with an action that can help", () => {

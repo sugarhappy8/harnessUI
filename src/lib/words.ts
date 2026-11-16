@@ -99,6 +99,8 @@ export const LOAD_FAILURE_WORDS: Record<LoadFailure["code"], string> = {
   port_in_use: "could not get the connection it needs",
   model_file_invalid: "could not load this model",
   context_too_large: "ran out of memory",
+  // [0.0.7 P2] Never a reason to step down; listed so every failure has words.
+  image_file_invalid: "could not read the image file",
   unknown: "stopped while loading",
 };
 
@@ -163,6 +165,8 @@ export function loadStageWords(stage: LoadStage): string {
       return `${capitalise(stepDownCause(stage.from, stage.reason))}, so trying ${place(stage.to)}`;
     case "retryingWithoutFastAttention":
       return "Trying again without Fast attention";
+    case "retryingWithoutImageFile":
+      return "Trying again without the image file";
   }
 }
 
@@ -208,6 +212,8 @@ export function adjustmentWords(stage: LoadStage): string | null {
       if (stage.backend === "cpu") return "Fast attention doesn't work with this model, so it was turned off for this load.";
       if (stage.backend === "metal") return "Fast attention doesn't work with Apple graphics, so it was turned off for this load.";
       return "Fast attention doesn't work with this graphics card, so it was turned off for this load.";
+    case "retryingWithoutImageFile":
+      return IMAGE_FILE_WORDS.loadedWithout;
   }
 }
 
@@ -216,6 +222,18 @@ export const SLOW_WORDS = {
   partial:
     "Part of the model runs on the processor, so replies are slower. Save memory or a smaller memory size lets more fit on the graphics card.",
   afterRestart: "The first reply after a restart takes longer while the model rereads the chat.",
+} as const;
+
+/** [0.0.7 P2] The image file a model reads pictures with (llama.cpp's projector), in plain words. */
+export const IMAGE_FILE_WORDS = {
+  /** The header's note after a load without it, word for word as the owner was promised. */
+  loadedWithout: "Loaded without image input: the image file next to this model couldn't be read.",
+  /** Models → Installed, on the model's row. */
+  unreadable: "The image file couldn't be read, so this model can't see images.",
+  download: "Download the image file",
+  downloadAnother: "Download another image file",
+  noOther: "Its repository has no other image file.",
+  done: "Image file downloaded. Reload the model to use it.",
 } as const;
 
 /** Generation speed in words per second (three quarters of the tokens). */

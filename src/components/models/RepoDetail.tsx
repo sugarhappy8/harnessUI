@@ -121,7 +121,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
           {view.projector && (
             <label className="flex items-center gap-2 text-xs">
               <input type="checkbox" checked={withProjector} onChange={(e) => setWithProjector(e.target.checked)} />
-              Also download the image projector ({formatBytes(view.projector.size)}) so the model can read images
+              Also download the image file ({formatBytes(view.projector.size)}) so the model can read images
             </label>
           )}
           <p className="text-xs text-fg-muted">

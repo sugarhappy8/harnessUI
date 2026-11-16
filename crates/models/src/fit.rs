@@ -1,8 +1,12 @@
 //! The first-tier fit check (ARCHITECTURE.md 11): will this model fit before it is
 //! downloaded? Weights + KV cache + projector + a stated compute allowance, compared
-//! with the memory the selected backend can use.
+//! with the memory the selected backend can use. The KV cache is a function of the
+//! context ([`KvSize`]): short-memory layers stop growing at their window, and their saved
+//! copies (context checkpoints) are counted in the computer's memory.
 
 use serde::Serialize;
+
+use crate::kv::KvSize;
 
 /// Headroom that a green verdict must leave free.
 pub const SPARE_BYTES: u64 = 1_000_000_000;
@@ -63,6 +67,23 @@ impl Target {
             Target::Cpu { ram_free_bytes } => ram_free_bytes,
         }
     }
+    /// The memory as [`Room`] counts it: on a graphics card its free memory and, with part
+    /// of the model on the processor, the computer's memory besides; on Apple silicon the
+    /// working set only (this target does not say how much of the rest is free).
+    fn room(&self) -> Room {
+        match *self {
+            Target::Gpu {
+                free_bytes,
+                ram_free_bytes,
+                ..
+            } => Room::graphics_card(free_bytes, ram_free_bytes),
+            Target::AppleUnified { working_set_bytes } => Room {
+                whole: working_set_bytes,
+                partial: working_set_bytes,
+            },
+            Target::Cpu { ram_free_bytes } => Room::processor(ram_free_bytes),
+        }
+    }
 }
 
 /// Where an estimate puts the model (0.0.6, compare-fit-words: the screens say it in words).
@@ -86,8 +107,9 @@ pub struct FitInput {
     pub weights_bytes: u64,
     /// The projector's size, when images will be used.
     pub projector_bytes: u64,
-    /// From [`crate::summary::ModelSummary::kv_bytes_per_token`].
-    pub kv_bytes_per_token: u64,
+    /// The conversation memory as a function of the context, from
+    /// [`crate::summary::ModelSummary::kv_size`] (0.0.7 P1; it was bytes per token).
+    pub kv: KvSize,
     pub vocab_size: u64,
     /// Context the user wants.
     pub ctx: u64,
@@ -100,11 +122,24 @@ impl FitInput {
     pub fn compute_bytes(&self) -> u64 {
         COMPUTE_BASE_BYTES.saturating_add(self.vocab_size.saturating_mul(UBATCH).saturating_mul(4))
     }
+    /// What the model needs where it runs at `ctx` tokens: weights, projector, the
+    /// conversation memory llama.cpp allocates ([`KvSize::at`]) and the working space.
     pub fn needed_at(&self, ctx: u64) -> u64 {
         self.weights_bytes
             .saturating_add(self.projector_bytes)
-            .saturating_add(self.kv_bytes_per_token.saturating_mul(ctx))
+            .saturating_add(self.kv.at(ctx))
             .saturating_add(self.compute_bytes())
+    }
+    /// What llama-server keeps besides in the computer's memory at `ctx` tokens, at most:
+    /// the saved copies of the short-memory layers ([`KvSize::checkpoints_at`]); 0 for a
+    /// model without them.
+    pub fn computer_at(&self, ctx: u64) -> u64 {
+        self.kv.checkpoints_at(ctx)
+    }
+    /// Whether `ctx` tokens fit `room` leaving `spare` free: (green, at all), as
+    /// [`Room::verdict_with`] counts it.
+    fn fits(&self, ctx: u64, room: Room, spare: u64) -> (bool, bool) {
+        room.fits(self.needed_at(ctx), self.computer_at(ctx), spare)
     }
 }
 
@@ -154,20 +189,80 @@ pub fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
-/// The largest context (a multiple of 1024, at least [`MIN_USEFUL_CTX`]) that leaves
-/// [`SPARE_BYTES`] free in `available`.
-fn largest_ctx(input: &FitInput, available: u64) -> Option<u64> {
-    let fixed = input.needed_at(0).saturating_add(SPARE_BYTES);
-    if fixed >= available || input.kv_bytes_per_token == 0 {
+/// The largest context that is green in `room` with [`SPARE_BYTES`] to spare: a multiple
+/// of 1024 from [`MIN_USEFUL_CTX`] up to the context asked for and the trained length, or
+/// the smaller of those two itself.
+fn largest_ctx(input: &FitInput, room: Room) -> Option<u64> {
+    let cap = input.max_ctx.map_or(input.ctx, |max| max.min(input.ctx));
+    if cap < MIN_USEFUL_CTX {
         return None;
     }
-    let tokens = (available - fixed) / input.kv_bytes_per_token;
-    let mut ctx = tokens / 1024 * 1024;
-    if let Some(max) = input.max_ctx {
-        ctx = ctx.min(max);
+    largest_size(MIN_USEFUL_CTX, cap, |ctx| input.fits(ctx, room, SPARE_BYTES).0)
+}
+
+/// The context sizes a search chooses from: the floor, the multiples of 1,024 between, and
+/// the cap (a floor above the cap gives the cap alone). Never built as a list: the cap may
+/// be any number.
+pub(crate) struct Sizes {
+    floor: u64,
+    cap: u64,
+    first_multiple: u64,
+    multiples: u64,
+}
+
+impl Sizes {
+    pub(crate) fn new(floor: u64, cap: u64) -> Self {
+        let floor = floor.min(cap);
+        let first_multiple = (floor / 1024)
+            .checked_add(1)
+            .and_then(|k| k.checked_mul(1024));
+        let multiples = match first_multiple {
+            Some(first) if cap > first => (cap - 1 - first) / 1024 + 1,
+            _ => 0,
+        };
+        Self {
+            floor,
+            cap,
+            first_multiple: first_multiple.unwrap_or(u64::MAX),
+            multiples,
+        }
     }
-    ctx = ctx.min(input.ctx);
-    (ctx >= MIN_USEFUL_CTX).then_some(ctx)
+
+    /// The number of sizes (at least 1, at most u64::MAX / 1024 + 2).
+    pub(crate) fn len(&self) -> u64 {
+        1 + self.multiples + u64::from(self.cap > self.floor)
+    }
+
+    /// The `index`th size, smallest first.
+    pub(crate) fn get(&self, index: u64) -> u64 {
+        if index == 0 {
+            self.floor
+        } else if index <= self.multiples {
+            self.first_multiple + (index - 1) * 1024
+        } else {
+            self.cap
+        }
+    }
+}
+
+/// The largest of [`Sizes::new`]`(floor, cap)` that `fits`, or `None` when not even the
+/// floor does. `fits` must hold for every size below one that it holds for (memory only
+/// grows with the context); a binary search, so a huge cap costs about 60 calls.
+pub(crate) fn largest_size(floor: u64, cap: u64, fits: impl Fn(u64) -> bool) -> Option<u64> {
+    let sizes = Sizes::new(floor, cap);
+    if !fits(sizes.get(0)) {
+        return None;
+    }
+    let (mut low, mut high) = (0u64, sizes.len() - 1);
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if fits(sizes.get(mid)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Some(sizes.get(low))
 }
 
 // ---- 0.0.5: Automatic sizing and fit marks per choice (D2b, WP1b) -------------------
@@ -224,20 +319,37 @@ impl Room {
     /// device with [`SPARE_BYTES`] to spare, yellow when it fits only with part of it on
     /// the processor, red otherwise.
     pub fn verdict(&self, needed: u64) -> Verdict {
-        let needed = needed.saturating_add(SPARE_BYTES);
-        if needed <= self.whole {
-            Verdict::Green
-        } else if needed <= self.partial {
-            Verdict::Yellow
-        } else {
-            Verdict::Red
+        self.verdict_with(needed, 0)
+    }
+
+    /// [`Self::verdict`] for something that also keeps `computer` bytes in the computer's
+    /// memory wherever it runs (the saved copies of short-memory layers): those count
+    /// with the rest in the partial room, for green as well. On the processor the two rooms
+    /// are the same memory; on a graphics card the partial room is its free memory and the
+    /// computer's together (the placement's verdict, `placement::judge_in`, checks the
+    /// computer's part on its own once the model's sizes are known). With `computer` 0 it is
+    /// [`Self::verdict`] as before.
+    pub fn verdict_with(&self, needed: u64, computer: u64) -> Verdict {
+        match self.fits(needed, computer, SPARE_BYTES) {
+            (true, _) => Verdict::Green,
+            (false, true) => Verdict::Yellow,
+            (false, false) => Verdict::Red,
         }
+    }
+
+    /// (green, at all) for `needed` bytes where the model runs and `computer` more in the
+    /// computer's memory, leaving `spare` free.
+    fn fits(&self, needed: u64, computer: u64, spare: u64) -> (bool, bool) {
+        let device = needed.saturating_add(spare);
+        let all = device.saturating_add(computer);
+        let green = device <= self.whole && (computer == 0 || all <= self.partial);
+        (green, green || all <= self.partial)
     }
 }
 
 /// The fit mark of `input` at a context of `ctx` tokens.
 pub fn verdict_at(input: &FitInput, ctx: u64, room: Room) -> Verdict {
-    room.verdict(input.needed_at(ctx))
+    room.verdict_with(input.needed_at(ctx), input.computer_at(ctx))
 }
 
 /// What Automatic picked.
@@ -263,28 +375,24 @@ pub fn auto_ctx(input: &FitInput, room: Room) -> Option<AutoCtx> {
 
 /// [`auto_ctx`] leaving `spare_bytes` free instead of [`SPARE_BYTES`] (0.0.6 item 6: As
 /// much as fits with "Leave free on the graphics card" set).
+///
+/// The memory is not a straight line in the context (0.0.7 P1): short-memory layers stop
+/// growing at their window and llama.cpp counts cells in steps of 256, so the largest
+/// size is searched for exactly among the sizes Automatic chooses from ([`largest_size`]),
+/// each checked with [`FitInput::needed_at`] and [`FitInput::computer_at`], which only grow
+/// with the context.
 pub fn auto_ctx_with_margin(input: &FitInput, room: Room, spare_bytes: u64) -> Option<AutoCtx> {
     let floor = input
         .max_ctx
         .map_or(AUTO_FLOOR_CTX, |m| m.min(AUTO_FLOOR_CTX));
     let cap = input.max_ctx.map_or(AUTO_CAP_CTX, |m| m.min(AUTO_CAP_CTX));
-    // The largest context that leaves the spare free in `available`, if it reaches the
-    // floor.
-    let largest = |available: u64| {
-        let fixed = input.needed_at(0).saturating_add(spare_bytes);
-        let left = available.checked_sub(fixed)?;
-        let tokens = left
-            .checked_div(input.kv_bytes_per_token)
-            .unwrap_or(u64::MAX);
-        (tokens >= floor).then(|| (tokens / 1024 * 1024).max(floor).min(cap))
-    };
-    if let Some(ctx) = largest(room.whole) {
+    if let Some(ctx) = largest_size(floor, cap, |ctx| input.fits(ctx, room, spare_bytes).0) {
         return Some(AutoCtx {
             ctx,
             verdict: Verdict::Green,
         });
     }
-    largest(room.partial).map(|ctx| AutoCtx {
+    largest_size(floor, cap, |ctx| input.fits(ctx, room, spare_bytes).1).map(|ctx| AutoCtx {
         ctx,
         verdict: Verdict::Yellow,
     })
@@ -292,7 +400,9 @@ pub fn auto_ctx_with_margin(input: &FitInput, room: Room, spare_bytes: u64) -> O
 
 pub fn check(input: &FitInput, target: &Target) -> FitResult {
     let needed = input.needed_at(input.ctx);
+    let computer = input.computer_at(input.ctx);
     let available = target.primary_bytes();
+    let room = target.room();
     let place = target.place();
     let base = |verdict, suggested_ctx, partial_offload, sentence| FitResult {
         verdict,

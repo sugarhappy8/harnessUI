@@ -273,6 +273,10 @@ pub struct ChatMessage {
     /// Optional author name (for a tool message, some templates render the tool name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// For a tool message: the call failed, was refused or did not run (0.0.7). Never part
+    /// of a Chat Completions body; Claude's Messages API sends it as `is_error`.
+    #[serde(skip)]
+    pub is_error: bool,
 }
 
 impl ChatMessage {
@@ -284,6 +288,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            is_error: false,
         }
     }
 
@@ -434,6 +439,10 @@ pub struct ChatRequest {
     pub stream: bool,
     /// Server-specific fields, flattened into the JSON object.
     pub extra: Map<String, Value>,
+    /// Whether the model should think, when the app decides (0.0.7): Claude's Messages API
+    /// turns it into its `thinking` parameter. `None` leaves it to the server. Never part of
+    /// a Chat Completions body (llama-server and Ollama are told through `extra`).
+    pub thinking: Option<bool>,
 }
 
 impl ChatRequest {
@@ -727,6 +736,21 @@ mod tests {
                 "chat_template_kwargs": {"enable_thinking": false},
                 "cache_prompt": true
             })
+        );
+    }
+
+    /// 0.0.7: what the app tells Claude's Messages API never reaches a Chat Completions body.
+    #[test]
+    fn messages_api_fields_stay_out_of_chat_completions() {
+        let mut result = ChatMessage::tool_result("c1", "failed");
+        result.is_error = true;
+        let mut request = ChatRequest::new("m", vec![ChatMessage::user("u"), result]);
+        request.thinking = Some(true);
+        let body = serde_json::to_value(&request).unwrap();
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert_eq!(
+            body["messages"][1],
+            json!({"role": "tool", "content": "failed", "tool_call_id": "c1"})
         );
     }
 

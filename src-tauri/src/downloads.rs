@@ -39,6 +39,12 @@ pub struct GroupMeta {
     /// 0.0.6: the parameter count Hugging Face gave for the repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<u64>,
+    /// 0.0.7 (P2): this group is only the image file (`projector`) of the installed model
+    /// at this path ("Download the image file" in Models → Installed; `model_files` is
+    /// empty). When it is done it is recorded on that model's row instead of adding a
+    /// model. Absent in every other group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_file_for: Option<String>,
 }
 
 fn meta_key(group: &str) -> String {
@@ -444,7 +450,10 @@ impl DownloadManager {
                 }
             }
         }
-        self.register_model(app, group, &meta).await?;
+        match meta.image_file_for.as_deref() {
+            Some(model) => self.attach_image_file(app, group, &meta, model).await?,
+            None => self.register_model(app, group, &meta).await?,
+        }
         for row in state.store.list_downloads(Some(group.to_string())).await? {
             state
                 .store
@@ -571,6 +580,30 @@ impl DownloadManager {
         Ok(())
     }
 
+    /// 0.0.7 (P2): records a finished image file on the installed model it was downloaded
+    /// for (`GroupMeta::image_file_for`).
+    async fn attach_image_file(
+        &self,
+        app: &AppHandle,
+        group: &str,
+        meta: &GroupMeta,
+        model: &str,
+    ) -> AppResult<()> {
+        let state = app.state::<AppState>();
+        let rows = state.store.list_downloads(Some(group.to_string())).await?;
+        let Some(image) = meta
+            .projector
+            .as_deref()
+            .and_then(|file| rows.iter().find(|r| r.file == file))
+            .map(|r| PathBuf::from(&r.dest_path))
+        else {
+            return Err(AppError::internal("finished download has no image file"));
+        };
+        crate::hub::image_file::attach(&state.store, model, &image).await?;
+        tracing::info!(repo = %meta.repo, "image file downloaded");
+        Ok(())
+    }
+
     pub fn pause(&self, group: &str) {
         if let Ok(mut r) = self.running.lock()
             && let Some((token, paused)) = r.get_mut(group)
@@ -693,5 +726,45 @@ mod tests {
         assert_eq!(partial.catalog_id.as_deref(), Some("sample-7b-q4km"));
         assert_eq!(partial.parameters, Some(7_000_000_000));
         assert_eq!(partial.model_files.len(), 2);
+    }
+
+    /// 0.0.7 (P2): a group that is only an installed model's image file names that model; a
+    /// group saved before (or any model download) has none, and the field stays out of its
+    /// JSON.
+    #[test]
+    fn an_image_file_group_names_its_model() {
+        let old: GroupMeta = serde_json::from_value(serde_json::json!({
+            "repo": "example-quants/Sample-7B-GGUF",
+            "commit": "4444444444444444444444444444444444444444",
+            "label": "Q4_K_M",
+            "modelFiles": ["Sample-7B-Q4_K_M.gguf"],
+            "projector": "mmproj-Sample-F16.gguf",
+            "catalogId": null
+        }))
+        .unwrap();
+        assert_eq!(old.image_file_for, None);
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("imageFileFor")
+                .is_none()
+        );
+        let image = GroupMeta {
+            label: "Image file".into(),
+            model_files: Vec::new(),
+            image_file_for: Some(
+                "/models/example-quants/Sample-7B-GGUF/Sample-7B-Q4_K_M.gguf".into(),
+            ),
+            ..old
+        };
+        let json = serde_json::to_value(&image).unwrap();
+        assert_eq!(
+            json["imageFileFor"],
+            "/models/example-quants/Sample-7B-GGUF/Sample-7B-Q4_K_M.gguf"
+        );
+        let back: GroupMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(back.image_file_for, image.image_file_for);
+        assert_eq!(back.projector.as_deref(), Some("mmproj-Sample-F16.gguf"));
+        assert!(back.model_files.is_empty());
     }
 }

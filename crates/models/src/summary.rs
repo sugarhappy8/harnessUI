@@ -4,9 +4,12 @@
 use serde::Serialize;
 
 use crate::gguf::{GgufHeader, Value};
+use crate::kv::{KvLayout, KvShape, KvSize, LayerKv};
 use crate::layers::MAX_BLOCKS;
 
-/// A model's GGUF summary. Stored in the `models` table and shown as badges.
+/// A model's GGUF summary. Shown as badges and used for the memory estimate; the badges'
+/// part is saved in the `models` table (`hub.rs`, `StoredSummary`), the memory facts never
+/// are: they are read from the header each time it is read.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSummary {
@@ -24,6 +27,23 @@ pub struct ModelSummary {
     pub head_count_kv: Vec<u64>,
     pub key_length: u64,
     pub value_length: u64,
+    // ---- 0.0.7 P1: the conversation memory as llama.cpp lays it out (`crate::kv`).
+    /// The window of the short-memory (sliding-window) layers in tokens, as llama.cpp
+    /// uses it for this architecture (`n_swa`); 0 when no layer is short-memory.
+    pub sliding_window: u64,
+    /// Which layers are short-memory, one entry per block (at most [`MAX_BLOCKS`]); empty
+    /// when none is.
+    pub swa_layers: Vec<bool>,
+    /// Head sizes of the short-memory layers (`attention.key_length_swa` /
+    /// `value_length_swa`, else the full ones).
+    pub key_length_swa: u64,
+    pub value_length_swa: u64,
+    /// Which layers keep memory of their own, one entry per block: not a layer that reads
+    /// an earlier layer's (`attention.shared_kv_layers`), a linear-attention layer or an
+    /// extra prediction layer.
+    pub kv_layers: Vec<bool>,
+    /// Value rows are stored (false for a model that keeps keys only, MLA).
+    pub kv_values: bool,
     pub expert_count: Option<u64>,
     pub expert_used_count: Option<u64>,
     pub vocab_size: Option<u64>,
@@ -87,6 +107,7 @@ impl ModelSummary {
         let value_length = h
             .arch_u64("attention.value_length")
             .unwrap_or(default_head_dim);
+        let memory = crate::kv::read_arch(h, &arch, block_count, &head_count_kv);
         let template = h.get_str("tokenizer.chat_template");
         let template_lower = template.map(str::to_ascii_lowercase).unwrap_or_default();
         let vocab_size = match h.get("tokenizer.ggml.tokens") {
@@ -110,6 +131,16 @@ impl ModelSummary {
             head_count_kv,
             key_length,
             value_length,
+            sliding_window: memory.window,
+            swa_layers: memory.swa_layers,
+            key_length_swa: h
+                .arch_u64("attention.key_length_swa")
+                .unwrap_or(key_length),
+            value_length_swa: h
+                .arch_u64("attention.value_length_swa")
+                .unwrap_or(value_length),
+            kv_layers: memory.kv_layers,
+            kv_values: memory.values,
             expert_count: h.arch_u64("expert_count").filter(|&n| n > 0),
             expert_used_count: h.arch_u64("expert_used_count").filter(|&n| n > 0),
             vocab_size,
@@ -125,33 +156,48 @@ impl ModelSummary {
         }
     }
 
-    /// KV-cache bytes per token of context, with an f16 cache:
-    /// `Σ layers (key + value length) × KV heads × 2 bytes`, as llama.cpp allocates it.
-    ///
-    /// Sliding-window layers are counted at full length, so the estimate is on the
-    /// safe side for models that use them; the bundled `llama-fit-params` gives the
-    /// exact figure once the file is local (ARCHITECTURE.md 11).
-    pub fn kv_bytes_per_token(&self) -> u64 {
-        // The same formula, saturating: header numbers may be anything (spec 2.0).
-        self.kv_bytes_per_token_as(KvCacheType::F16)
-    }
-
-    pub fn kv_bytes(&self, ctx: u64) -> u64 {
-        self.kv_bytes_per_token().saturating_mul(ctx)
-    }
-
-    /// KV-cache bytes per token of context with the cache stored as `cache`: per layer, one
-    /// key row (KV heads × key length values) and one value row, each laid out as `cache`
-    /// lays out a row. The same sliding-window caveat as [`Self::kv_bytes_per_token`].
-    pub fn kv_bytes_per_token_as(&self, cache: KvCacheType) -> u64 {
-        self.head_count_kv
-            .iter()
-            .map(|&n| {
-                cache
-                    .row_bytes(n.saturating_mul(self.key_length))
-                    .saturating_add(cache.row_bytes(n.saturating_mul(self.value_length)))
+    /// The conversation memory layer by layer, as llama.cpp lays it out (`crate::kv`):
+    /// one entry per block, at most [`MAX_BLOCKS`].
+    pub fn kv_shape(&self) -> KvShape {
+        let layers = (0..kept_layers(self.block_count))
+            .map(|il| {
+                let window = self.swa_layers.get(il).copied().unwrap_or(false);
+                LayerKv {
+                    heads: self.head_count_kv.get(il).copied().unwrap_or(0),
+                    key_length: if window {
+                        self.key_length_swa
+                    } else {
+                        self.key_length
+                    },
+                    value_length: if window {
+                        self.value_length_swa
+                    } else {
+                        self.value_length
+                    },
+                    window,
+                    own: self.kv_layers.get(il).copied().unwrap_or(true),
+                }
             })
-            .fold(0u64, u64::saturating_add)
+            .collect();
+        KvShape {
+            layers,
+            window: self.sliding_window,
+            values: self.kv_values,
+        }
+    }
+
+    /// The conversation memory as a function of the context, stored as `layout` says:
+    /// the layers that keep the whole conversation grow with it, the short-memory layers
+    /// stop at their window ([`KvSize::at`]). Every product saturates: header numbers may
+    /// be anything (spec 2.0).
+    pub fn kv_size(&self, layout: impl Into<KvLayout>) -> KvSize {
+        self.kv_shape().size(layout.into())
+    }
+
+    /// The conversation memory llama.cpp allocates at a context of `ctx` tokens, stored as
+    /// `layout` says.
+    pub fn kv_bytes(&self, ctx: u64, layout: impl Into<KvLayout>) -> u64 {
+        self.kv_size(layout).at(ctx)
     }
 
     /// Whether this is a mixture-of-experts model.

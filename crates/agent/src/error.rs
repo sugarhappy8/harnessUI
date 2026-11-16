@@ -74,6 +74,14 @@ pub enum ProviderError {
     /// example an image that is not an inline data URI, or a base URL that is not http(s)).
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    /// The company's safety filter stopped the reply (0.0.7: Anthropic's `stop_reason:
+    /// "refusal"`). What streamed before must not be used, and calls in it must not run.
+    #[error("the model declined to answer{}", explanation.as_deref().map(|e| format!(": {e}")).unwrap_or_default())]
+    Refused {
+        /// The company's explanation, when it sent one (untrusted text, cut to a bounded
+        /// length).
+        explanation: Option<String>,
+    },
 }
 
 impl ProviderError {
@@ -83,6 +91,44 @@ impl ProviderError {
         match self {
             Self::Http { status: 503, .. } => {
                 "The model server is still starting or busy. Try again in a moment.".to_owned()
+            }
+            // 0.0.7: what cloud companies answer, in plain words.
+            Self::Http {
+                status: 529,
+                message,
+            } => format!(
+                "The company's servers are overloaded right now. Try again in a moment. The \
+                 server said: {message}"
+            ),
+            Self::Http {
+                status: 429,
+                message,
+            } => format!(
+                "Too many requests, or this key's limit or credit is used up. Wait a moment and \
+                 try again; if it keeps happening, check the account on the company's website. \
+                 The server said: {message}"
+            ),
+            Self::Http {
+                status: 402,
+                message,
+            } => format!(
+                "The company says there is a problem with billing for this key's account. Check \
+                 the credit or payment details on its website. The server said: {message}"
+            ),
+            Self::Http {
+                status: 403,
+                message,
+            } => format!(
+                "This key may not use this model or feature. Check the key's permissions on the \
+                 company's website. The server said: {message}"
+            ),
+            Self::Http {
+                status: 400,
+                message,
+            } if message.contains("not scoped to a workspace") => {
+                "This Anthropic key works in more than one workspace. In the Claude Console, \
+                 create a key for one workspace and paste it in Settings → Endpoints."
+                    .to_owned()
             }
             Self::Http {
                 status: 404,
@@ -123,6 +169,16 @@ impl ProviderError {
             Self::Decode(_) => "The server sent a response this app could not read.".to_owned(),
             Self::Cancelled => "Stopped.".to_owned(),
             Self::InvalidRequest(detail) => format!("The request was not sent: {detail}"),
+            Self::Refused { explanation } => {
+                let mut text = "The model declined to answer: the company's safety filter \
+                                stopped the reply. Try asking in another way."
+                    .to_owned();
+                if let Some(explanation) = explanation.as_deref().filter(|e| !e.is_empty()) {
+                    text.push_str(" It said: ");
+                    text.push_str(explanation);
+                }
+                text
+            }
         }
     }
 }
@@ -244,16 +300,18 @@ fn classify(parts: ErrorParts) -> ProviderError {
 }
 
 /// Context-overflow wording of servers that do not send a typed error: llama-server, vLLM
-/// and OpenAI ("maximum context length"), LM Studio ("context length of only").
+/// and OpenAI ("maximum context length"), LM Studio ("context length of only"), Anthropic
+/// ("prompt is too long", 0.0.7).
 fn is_overflow_message(lower: &str) -> bool {
     lower.contains("exceeds the available context size")
         || lower.contains("maximum context length")
         || lower.contains("context length of only")
         || lower.contains("context_length_exceeded")
+        || lower.contains("prompt is too long")
 }
 
 fn prompt_tokens_in(lower: &str) -> Option<u32> {
-    ["request (", "requested ", "resulted in "]
+    ["request (", "requested ", "resulted in ", "prompt is too long: "]
         .iter()
         .find_map(|marker| number_after(lower, marker))
 }
@@ -263,6 +321,7 @@ fn context_size_in(lower: &str) -> Option<u32> {
         "available context size (",
         "maximum context length is ",
         "context length of only ",
+        "tokens > ",
     ]
     .iter()
     .find_map(|marker| number_after(lower, marker))
@@ -466,5 +525,69 @@ mod tests {
                 .contains("API key")
         );
         assert_eq!(ProviderError::Cancelled.user_message(), "Stopped.");
+    }
+
+    /// 0.0.7: Anthropic's error body and its "prompt is too long" wording.
+    #[test]
+    fn anthropic_errors() {
+        let body = br#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 215342 tokens > 200000 maximum"},"request_id":"req_1"}"#;
+        assert_eq!(
+            error_from_body(Some(400), body, "Bad Request"),
+            ProviderError::ContextOverflow {
+                n_prompt_tokens: Some(215_342),
+                n_ctx: Some(200_000)
+            }
+        );
+        let body = br#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+        assert_eq!(
+            error_from_body(Some(401), body, ""),
+            ProviderError::Unauthorized
+        );
+        let body = br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        assert_eq!(
+            error_from_body(Some(529), body, ""),
+            ProviderError::Http {
+                status: 529,
+                message: "Overloaded".into()
+            }
+        );
+    }
+
+    /// 0.0.7: cloud companies' answers in plain words; never "!".
+    #[test]
+    fn cloud_errors_in_plain_words() {
+        let http = |status: u16, message: &str| ProviderError::Http {
+            status,
+            message: message.into(),
+        };
+        let overloaded = http(529, "Overloaded").user_message();
+        assert!(overloaded.starts_with("The company's servers are overloaded"), "{overloaded}");
+        let limited = http(429, "rate_limit_error").user_message();
+        assert!(limited.starts_with("Too many requests"), "{limited}");
+        assert!(http(402, "credit").user_message().contains("billing"));
+        assert!(http(403, "no").user_message().contains("permissions"));
+        let workspace = http(
+            400,
+            "This API key is not scoped to a workspace, so this request must include the \
+             anthropic-workspace-id header",
+        )
+        .user_message();
+        assert!(workspace.contains("one workspace"), "{workspace}");
+        let refused = ProviderError::Refused {
+            explanation: Some("Benign work can trigger this.".into()),
+        };
+        assert!(
+            refused
+                .user_message()
+                .starts_with("The model declined to answer"),
+        );
+        assert!(refused.user_message().ends_with("It said: Benign work can trigger this."));
+        assert_eq!(
+            ProviderError::Refused { explanation: None }.to_string(),
+            "the model declined to answer"
+        );
+        for message in [overloaded, limited, refused.user_message(), workspace] {
+            assert!(!message.contains('!'), "{message}");
+        }
     }
 }

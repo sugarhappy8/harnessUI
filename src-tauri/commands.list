@@ -52,6 +52,8 @@ set_models_dir
 first_run_info
 complete_first_run
 refresh_catalog
+image_file_offer
+download_image_file
 list_packs
 download_pack
 cancel_pack_download

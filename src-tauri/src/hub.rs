@@ -20,6 +20,8 @@ use crate::state::AppState;
 
 mod compare;
 use compare::{Hub as _, LiveHub};
+// 0.0.7 (P2): which image file a load uses, ones that could not be read, downloading one.
+pub mod image_file;
 
 const HF_TOKEN_KEY: &str = "hf-token";
 const SETTING_MODELS_DIR: &str = "modelsDir";
@@ -530,6 +532,7 @@ async fn start_group(
         catalog_id,
         parameters: facts.as_ref().and_then(|(_, p)| *p),
         hub: facts.map(|(h, _)| h),
+        image_file_for: None,
     };
     let manager = app.state::<Arc<DownloadManager>>().inner().clone();
     manager.start(app, meta, files).await
@@ -679,6 +682,26 @@ struct StoredSummary {
         skip_serializing_if = "Option::is_none"
     )]
     hub: Option<crate::dto::HubFacts>,
+    /// 0.0.7 (P2): image files that could not be read with this model (path, size and
+    /// modification time), left out of its loads until they change or another one is
+    /// downloaded (`image_file`). Absent in rows saved before, and when there are none; a
+    /// list this version cannot read is dropped on its own, like `hub`.
+    #[serde(
+        default,
+        deserialize_with = "lenient_stamps",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    unreadable_projectors: Vec<image_file::FileStamp>,
+}
+
+/// Reads the image files remembered as unreadable leniently (see [`lenient_hub`]).
+fn lenient_stamps<'de, D>(d: D) -> Result<Vec<image_file::FileStamp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = <Option<serde_json::Value> as serde::Deserialize>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default())
 }
 
 /// Reads saved uploader facts leniently: facts this version cannot read (a field missing
@@ -761,28 +784,47 @@ async fn register_installed_in(
     let s = ModelSummary::from_header(&header);
     if s.is_projector {
         return Err(AppError::bad_request(
-            "This is an image projector (mmproj), not a model. Import the model file next to it instead.",
+            "This is the image file of a model, not a model. Import the model file next to it instead.",
         ));
     }
-    let projector = projector.or_else(|| find_projector(path));
     let path_text = path.display().to_string();
-    let saved = if saved.is_empty() {
+    // Registered again without saved facts (an import of a downloaded file) and the same
+    // size: what was saved with it stays, and so do the image files that could not be read
+    // with it (0.0.7). A download (which brings its own facts and image file) starts anew.
+    let before: Option<StoredSummary> = if saved.is_empty() {
         match store.model_by_path(&path_text).await? {
             Some(old) if old.size_bytes == size => {
-                let before: StoredSummary =
-                    serde_json::from_value(old.gguf_summary).unwrap_or_default();
-                SavedFacts {
-                    catalog_id: before.catalog_id,
-                    repo_file: before.repo_file,
-                    hub: before.hub,
-                    parameters: before.parameters,
-                }
+                Some(serde_json::from_value(old.gguf_summary).unwrap_or_default())
             }
-            _ => saved,
+            _ => None,
         }
     } else {
-        saved
+        None
     };
+    let unreadable = before
+        .as_ref()
+        .map(|b| b.unreadable_projectors.clone())
+        .unwrap_or_default();
+    let saved = match before {
+        Some(before) => SavedFacts {
+            catalog_id: before.catalog_id,
+            repo_file: before.repo_file,
+            hub: before.hub,
+            parameters: before.parameters,
+        },
+        None => saved,
+    };
+    // An image file next to the model, the best precision first (0.0.7: one that could not
+    // be read with it is skipped).
+    let projector = projector.or_else(|| {
+        image_file::choose(
+            None,
+            &image_file::beside(path),
+            &unreadable,
+            image_file::FileStamp::of,
+        )
+        .path
+    });
     let stored = StoredSummary {
         is_moe: s.is_moe(),
         architecture: Some(s.architecture),
@@ -798,6 +840,7 @@ async fn register_installed_in(
         catalog_id: saved.catalog_id,
         repo_file: saved.repo_file,
         hub: saved.hub,
+        unreadable_projectors: unreadable,
     };
     let id = store
         .upsert_model(ModelInput {
@@ -816,42 +859,13 @@ async fn register_installed_in(
     Ok(id)
 }
 
-/// An `mmproj*.gguf` beside the model, preferring F16.
-fn find_projector(model: &Path) -> Option<String> {
-    let dir = model.parent()?;
-    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
-            name.contains("mmproj") && name.ends_with(".gguf")
-        })
-        .collect();
-    found.sort_by_key(|p| {
-        let n = p.to_string_lossy().to_ascii_lowercase();
-        if n.contains("f16") && !n.contains("bf16") {
-            0
-        } else if n.contains("bf16") {
-            1
-        } else {
-            2
-        }
-    });
-    found.first().map(|p| p.display().to_string())
-}
-
-/// The projector recorded for an installed model, if any, under any spelling of its path
-/// (a link, a mapped drive: 0.0.6 item 8, `model_options::installed_row`).
+/// The image file (projector) a load of an installed model uses, under any spelling of
+/// its path (a link, a mapped drive: 0.0.6 item 8, `model_options::installed_row`). 0.0.7:
+/// the one recorded on its row while it is there and could be read, else one next to the
+/// model file, so a file put there later is used ([`image_file::choose`]). A model that is
+/// not on the Installed list has none.
 pub async fn projector_for(state: &AppState, model_path: &str) -> Option<String> {
-    let rec = crate::model_options::installed_row(&state.store, model_path)
-        .await
-        .ok()
-        .flatten()?;
-    let stored: StoredSummary = serde_json::from_value(rec.gguf_summary).ok()?;
-    stored.projector.filter(|p| Path::new(p).is_file())
+    image_file::choice_for(&state.store, model_path).await.path
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -863,6 +877,8 @@ pub struct InstalledModelDto {
     pub file_name: String,
     pub size_bytes: u64,
     pub source: String,
+    /// The image file the next load uses (0.0.7: as a load chooses it, `image_file`): the
+    /// one recorded while it is there and could be read, else one next to the model file.
     pub projector_path: Option<String>,
     pub summary: Option<serde_json::Value>,
     pub architecture_supported: Option<bool>,
@@ -871,6 +887,9 @@ pub struct InstalledModelDto {
     /// (0.0.6 item 8). Sent only then.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loaded_as: Option<String>,
+    /// 0.0.7 (P2): its image file could not be read, and no other usable one is there, so
+    /// it loads without image input (Installed says so and offers another one).
+    pub image_file_unreadable: bool,
 }
 
 #[tauri::command]
@@ -888,6 +907,12 @@ pub async fn list_installed_models(
     for m in state.store.list_models().await? {
         let stored: StoredSummary =
             serde_json::from_value(m.gguf_summary.clone()).unwrap_or_default();
+        let image = image_file::choose(
+            stored.projector.as_deref(),
+            &image_file::beside(Path::new(&m.path)),
+            &stored.unreadable_projectors,
+            image_file::FileStamp::of,
+        );
         out.push(InstalledModelDto {
             id: m.id.0,
             path: m.path.clone(),
@@ -898,7 +923,7 @@ pub async fn list_installed_models(
                 ModelSource::Download => "download".into(),
                 ModelSource::Import => "import".into(),
             },
-            projector_path: stored.projector.clone(),
+            projector_path: image.path,
             architecture_supported: stored
                 .architecture
                 .as_deref()
@@ -910,6 +935,7 @@ pub async fn list_installed_models(
             loaded_as: loaded
                 .clone()
                 .filter(|l| crate::model_options::same_file(l, &m.path)),
+            image_file_unreadable: image.left_out,
         });
     }
     Ok(out)

@@ -435,7 +435,16 @@ export interface InstalledModel {
   /** [0.0.6 item 8] The path the model loaded now was loaded with, when it is this row's file
    *  under any spelling (a link, a mapped drive). Sent only then. */
   loadedAs?: string;
+  /** [0.0.7 P2] Its image file could not be read and no other usable one is there, so it loads
+   *  without image input. */
+  imageFileUnreadable?: boolean;
 }
+
+/** [0.0.7 P2] What an installed model's Hugging Face repository offers as its image file. */
+export type ImageFileOffer =
+  | { kind: "available"; file: string; sizeBytes: number }
+  | { kind: "noOther" }
+  | { kind: "none" };
 
 export interface HardwareInfo {
   target: "gpu" | "apple" | "cpu";
@@ -762,6 +771,8 @@ export type LoadFailure =
   | { code: "port_in_use" }
   | { code: "model_file_invalid" }
   | { code: "context_too_large" }
+  // [0.0.7 P2] The model loaded, its image file could not be read.
+  | { code: "image_file_invalid" }
   | { code: "unknown" };
 
 /** One step of loading a model, or a transition between attempts. */
@@ -774,7 +785,10 @@ export type LoadStage =
   | { kind: "retryingWithoutSaveMemory"; backend: BackendKind }
   | { kind: "retryingWithLessGpu"; backend: BackendKind; custom?: boolean; chosenLayers?: number }
   | { kind: "steppingDown"; from: BackendKind; to: BackendKind; reason: LoadFailure }
-  | { kind: "retryingWithoutFastAttention"; backend: BackendKind };
+  | { kind: "retryingWithoutFastAttention"; backend: BackendKind }
+  // [0.0.7 P2] Loaded again without its image file, which could not be read (also listed when a
+  // load leaves out one remembered as unreadable).
+  | { kind: "retryingWithoutImageFile" };
 
 /** "Use the graphics card": All of it, As much as fits, Don't use it. */
 export type GpuUse = "all" | "fit" | "off";

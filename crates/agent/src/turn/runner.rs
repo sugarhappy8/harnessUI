@@ -8,9 +8,10 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Approval, ApprovalRequest, CallDecision, CompactionStage, CompactionSummary, LOOP_STOP_AT,
-    LOOP_WARNING_AT, MAX_INVALID_CALLS_PER_TOOL, MAX_MISTAKES, NO_ANSWER_MESSAGE, SUMMARISING_NOTE,
+    Approval, ApprovalRequest, CallDecision, CompactionStage, CompactionSummary,
+    MAX_INVALID_CALLS_PER_TOOL, MAX_MISTAKES, NO_ANSWER_MESSAGE, SUMMARISING_NOTE,
     SUMMARY_FAILED_NOTE, TurnDeps, TurnEvent, TurnInput, TurnOutcome, TurnStatus, UsageTotals,
+    repeat_limit, repeat_warning_at,
 };
 use crate::client::ProviderKind;
 use crate::context::{
@@ -30,7 +31,7 @@ use crate::parse::{
     strip_tool_markup,
 };
 use crate::prompt::{
-    Preamble, Projection, SystemParts, append_result_note, pinned_for_prompt, project,
+    Preamble, Projection, SystemParts, ToolGuide, append_result_note, pinned_for_prompt, project,
     sanitize_schema, schema_has_raw_control_tokens, system_message,
 };
 use crate::stream::{
@@ -50,6 +51,8 @@ const MAX_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_SUMMARY_ROUNDS: u32 = 4;
 /// Candidate summary requests counted before a round gives up on finding one that fits.
 const MAX_SUMMARY_FIT_TRIES: usize = 6;
+/// [0.0.7] The app's tool that runs a tool that is on but not in the turn's list.
+const CALL_TOOL: &str = "call_tool";
 
 /// Which summary a request writes ([`Turn::write_summary`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -456,17 +459,30 @@ impl<'a> Turn<'a> {
                 .unwrap_or_else(|| Preamble::for_this_os(Vec::new()))
         });
         let pinned: &[String] = if with_pinned { &self.input.pinned } else { &[] };
+        let tool_guide = self.tool_guide();
         system_message(
             &SystemParts {
                 chat_prompt: &self.input.system_prompt,
                 pinned,
                 preamble: preamble.as_ref(),
+                tool_guide: tool_guide.as_ref(),
                 skills_index: self.input.skills_index.as_deref(),
                 loaded_skills: &self.input.loaded_skills,
                 summary: self.summary.as_ref().map(|s| s.text.as_str()),
             },
             self.deps.sanitizer,
         )
+    }
+
+    /// [0.0.7] The tool list and guide for the system message: only when tools are on, and
+    /// without the tools that are not offered (`withheld_tools`).
+    fn tool_guide(&self) -> Option<ToolGuide> {
+        let guide = self.input.tool_guide.as_ref().filter(|_| self.tools_on)?;
+        Some(if self.withheld_tools.is_empty() {
+            guide.clone()
+        } else {
+            guide.without(&self.withheld_tools)
+        })
     }
 
     fn projection(&self) -> Projection {
@@ -1438,6 +1454,16 @@ impl<'a> Turn<'a> {
     }
 
     fn no_such_tool(&self, name: &str) -> String {
+        // [0.0.7] A tool that is on in the chat but not in this turn's list: the tool list in
+        // the system message names it, so the model is told how to run it.
+        let listed = self.tool_guide().is_some_and(|guide| guide.lists(name));
+        if listed && self.tool(CALL_TOOL).is_some() {
+            return format!(
+                "{name} is on in this chat but not in your list of callable tools this turn, so \
+                 it was not run. Run it with {CALL_TOOL}, giving \"name\": \"{name}\" and its \
+                 arguments in \"arguments\"."
+            );
+        }
         let names: Vec<&str> = self.tools.iter().map(|tool| tool.name.as_str()).collect();
         format!("No such tool: {name}; available: {}.", names.join(", "))
     }
@@ -1627,14 +1653,16 @@ impl<'a> Turn<'a> {
             return processed;
         }
 
-        // Loop detection.
+        // Loop detection, at the user's repeat limit (0.0.7), held to its range whatever was
+        // stored.
+        let stop_at = repeat_limit(self.input.repeat_limit);
         if self.last_call.as_ref() == Some(&key) {
             self.repeats += 1;
         } else {
             self.last_call = Some(key.clone());
             self.repeats = 1;
         }
-        if self.repeats >= LOOP_STOP_AT {
+        if self.repeats >= stop_at {
             return Processed::synthetic(
                 record,
                 CallStatus::NotRun,
@@ -1646,13 +1674,16 @@ impl<'a> Turn<'a> {
                 Flow::LoopDetected,
             );
         }
-        let loop_note = (self.repeats >= LOOP_WARNING_AT).then(|| {
-            format!(
-                "You have made this same call with the same arguments {} times in a row. Do \
-                 something different, or answer with what you have.",
-                self.repeats
-            )
-        });
+        let loop_note = repeat_warning_at(stop_at)
+            .filter(|warn_at| self.repeats >= *warn_at)
+            .map(|_| {
+                format!(
+                    "You have made this same call with the same arguments {} times in a row; \
+                     {stop_at} times ends the turn. Do something different, or answer with what \
+                     you have.",
+                    self.repeats
+                )
+            });
 
         // Describe.
         let described = tokio::select! {

@@ -1,0 +1,8 @@
+0.00.033.358 I srv    load_model: loading model 'C:\Users\me\harnessUI\models\mradermacher\Ministral-3-14B-Reasoning-2512-Uncensored-GGUF\Ministral-3-14B-Reasoning-2512-Uncensored.Q4_K_M.gguf'
+0.00.041.300 E mtmd_get_memory_usage: error: operator(): unable to find tensor v.token_embd.img_break
+0.03.519.807 W llama_context: setting new yarn_attn_factor = 1.0000 (mscale == 1.0, mscale_all_dim = 1.0)
+0.03.741.858 I cmn          init: llama threadpool init, n_threads = 12
+0.03.927.960 E mtmd_init_from_file: error: operator(): unable to find tensor v.token_embd.img_break
+0.03.927.966 E srv    load_model: failed to load multimodal model, 'C:\Users\me\harnessUI\models\mradermacher\Ministral-3-14B-Reasoning-2512-Uncensored-GGUF\Ministral-3-14B-Reasoning-2512-Uncensored.mmproj-f16.gguf'
+0.03.928.460 I srv    operator(): operator(): cleaning up before exit...
+0.03.929.912 E srv  server_run_i: exiting due to model loading error

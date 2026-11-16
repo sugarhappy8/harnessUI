@@ -79,6 +79,14 @@ pub enum LoadStage {
         )]
         chosen_layers: Option<u32>,
     },
+    /// 0.0.7: the model loaded but its image file could not be read
+    /// ([`LoadFailure::ImageFileInvalid`]), so it is loaded again without one, on the same
+    /// backend with the same settings; it then cannot see images. Sent by the supervisor as
+    /// [`ServerEvent::Stage`], once per load. The app also lists it among a load's
+    /// adjustments when it leaves out an image file it remembers as unreadable, so the
+    /// header says why the model cannot see images. JSON
+    /// `{"kind":"retryingWithoutImageFile"}`.
+    RetryingWithoutImageFile,
     /// Moving to the next backend down after `from` failed. Sent by the supervisor as
     /// [`ServerEvent::SteppedDown`], never as [`ServerEvent::Stage`].
     SteppingDown {
@@ -137,6 +145,7 @@ impl LoadStage {
             Self::RetryingWithoutSaveMemory { .. }
                 | Self::RetryingWithoutFastAttention { .. }
                 | Self::RetryingWithLessGpu { .. }
+                | Self::RetryingWithoutImageFile
                 | Self::SteppingDown { .. }
         )
     }
@@ -226,6 +235,7 @@ mod tests {
                 custom: true,
                 chosen_layers: Some(40),
             },
+            LoadStage::RetryingWithoutImageFile,
         ] {
             assert_eq!(
                 LoadStage::of_event(&ServerEvent::Stage(retry.clone())),
@@ -262,6 +272,7 @@ mod tests {
             LoadStage::RetryingWithoutFastAttention {
                 backend: BackendKind::Metal,
             },
+            LoadStage::RetryingWithoutImageFile,
             LoadStage::SteppingDown {
                 from: BackendKind::Vulkan,
                 to: BackendKind::Cpu,
@@ -328,6 +339,10 @@ mod tests {
                     backend: BackendKind::Vulkan,
                 },
                 r#"{"kind":"retryingWithoutFastAttention","backend":"vulkan"}"#,
+            ),
+            (
+                LoadStage::RetryingWithoutImageFile,
+                r#"{"kind":"retryingWithoutImageFile"}"#,
             ),
             (
                 LoadStage::SteppingDown {

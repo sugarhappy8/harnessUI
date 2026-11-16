@@ -79,6 +79,8 @@
     "allow-first-run-info",
     "allow-complete-first-run",
     "allow-refresh-catalog",
+    "allow-image-file-offer",
+    "allow-download-image-file",
     "allow-list-packs",
     "allow-download-pack",
     "allow-cancel-pack-download",

@@ -389,8 +389,8 @@ pub async fn send_message(
     if !images.is_empty() && target.local && !state.runtime.status().vision {
         return Err(AppError::new(
             "no_vision",
-            "This model cannot read images.",
-            "Use a model with the vision badge (it comes with an image projector), or remove the image.",
+            "This model was loaded without an image file, so it can't read images.",
+            "Download its image file in Models → Installed, pick a model with the vision badge, or remove the image.",
             String::new(),
         ));
     }

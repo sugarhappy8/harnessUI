@@ -72,11 +72,26 @@ fn existing_model(path: &str) -> AppResult<PathBuf> {
 
 /// Starts the load of `plan` and, once the model is ready, records whether it can think
 /// and starts the speed check.
+///
+/// 0.0.7 (P2): an image file the plan found next to the model is recorded on its Installed
+/// row first, and the load is told when the plan left out one that could not be read before,
+/// so the header says why the model cannot see images (`hub::image_file`).
 async fn run_load(state: &AppState, model: PathBuf, plan: &Plan) -> AppResult<()> {
+    let image_file_left_out = crate::hub::image_file::prepare_for_load(
+        &state.store,
+        &model.display().to_string(),
+        plan.resolved.mmproj.as_deref(),
+    )
+    .await;
     state
         .runtime
         .clone()
-        .load(model, plan.resolved.clone(), plan.footprint())
+        .load(
+            model,
+            plan.resolved.clone(),
+            plan.footprint(),
+            image_file_left_out,
+        )
         .await?;
     state.runtime.set_thinking(plan.thinking());
     // Settings saved while the model loaded could not mark it then (only a ready model is
@@ -657,7 +672,12 @@ pub async fn run_diagnostics(
             match state
                 .runtime
                 .clone()
-                .load(PathBuf::from(&path), settings, load::Footprint::default())
+                .load(
+                    PathBuf::from(&path),
+                    settings,
+                    load::Footprint::default(),
+                    false,
+                )
                 .await
             {
                 Ok(()) if stop.is_cancelled() => break,

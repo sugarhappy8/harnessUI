@@ -254,6 +254,11 @@ export function onDownloadProgress(handler: (g: DownloadGroup) => void): Promise
 
 export const listInstalledModels = () => invoke<InstalledModel[]>("list_installed_models");
 export const importModel = (path: string) => invoke<InstalledModel>("import_model", { path });
+// [0.0.7 P2] An installed model's image file from its Hugging Face repository: what it offers,
+// and its download (the id of the download group, followed through download-progress).
+export const imageFileOffer = (path: string) =>
+  invoke<import("./types").ImageFileOffer>("image_file_offer", { path });
+export const downloadImageFile = (path: string) => invoke<string>("download_image_file", { path });
 export const deleteModel = (id: number, deleteFiles: boolean) =>
   invoke<void>("delete_model", { id, deleteFiles });
 export const diskUsage = () => invoke<DiskUsage>("disk_usage");
