@@ -732,11 +732,15 @@ pub(crate) async fn carry_added_tools(store: &store::Store, tools: &[mcp_host::R
             }
         }
     }
-    if let Ok(Some(mut last)) = store.get_setting::<Vec<String>>(DEFAULT_TOOLS).await
-        && follow(&mut last)
-        && let Err(e) = store.set_setting(DEFAULT_TOOLS, &last).await
     {
-        tracing::warn!("could not switch on a new tool in the last choice: {e}");
+        // Read, changed and written back under the lock `set_chat_tools` writes it under.
+        let _one_at_a_time = PREFS_WRITES.lock().await;
+        if let Ok(Some(mut last)) = store.get_setting::<Vec<String>>(DEFAULT_TOOLS).await
+            && follow(&mut last)
+            && let Err(e) = store.set_setting(DEFAULT_TOOLS, &last).await
+        {
+            tracing::warn!("could not switch on a new tool in the last choice: {e}");
+        }
     }
     done.extend(pending.iter().map(|(tool, _)| (*tool).to_string()));
     if let Err(e) = store.set_setting(ADDED_TOOLS_CARRIED, &done).await {
@@ -1797,8 +1801,12 @@ pub async fn set_chat_tools(
     if state.store.get_chat(chat_id).await?.is_none() {
         return Err(AppError::not_found("chat"));
     }
-    // The last choice becomes the default for new chats (9.3).
-    state.store.set_setting(DEFAULT_TOOLS, &enabled).await?;
+    // The last choice becomes the default for new chats (9.3). Under the lock every
+    // read-change-write of the stored choices takes (`carry_added_tools` changes this one).
+    {
+        let _one_at_a_time = PREFS_WRITES.lock().await;
+        state.store.set_setting(DEFAULT_TOOLS, &enabled).await?;
+    }
     change_chat_prefs(&state, chat_id, |prefs| prefs.enabled = Some(enabled)).await
 }
 

@@ -58,11 +58,12 @@ pub(crate) struct Captured {
 }
 
 /// Puts the browser into capture mode for one tab and takes it out again: every HTTP request
-/// is checked (not only page loads) and recorded, the tab's documents and workers get a
-/// policy that blocks WebSockets, the tab's frames and workers are watched for connections
-/// the checks cannot see, and the cache and service workers are bypassed so every file is
-/// fetched under those checks. Dropped without [`Guard::finish`] (Stop), it restores the
-/// browser on a task of its own.
+/// is checked (not only page loads, workers' too) and recorded, the tab's documents and
+/// workers get a policy that blocks WebSockets, the tab's frames and workers are watched for
+/// connections the checks cannot see, shared and service workers that already run are
+/// stopped and no service worker runs, and the cache and service workers are bypassed so
+/// every file is fetched under those checks. Dropped without [`Guard::finish`] (Stop), it
+/// restores the browser on a task of its own.
 struct Guard {
     b: Arc<Browser>,
     session: String,
@@ -114,7 +115,8 @@ async fn restore(b: &Browser, session: &str, log: Option<CaptureLog>) {
             .filter(|s| !log.workers.contains(s))
             .cloned()
             .collect();
-        b.unwatch_capture(frames, log.workers, log.held_workers).await;
+        b.unwatch_capture(frames, log.workers, log.held_workers)
+            .await;
     }
     b.set_capture_checks(false).await;
     for (method, params) in [
@@ -147,10 +149,10 @@ fn connection_check(b: &Browser) -> Result<(), String> {
         ));
     }
     if let Some(kind) = c.unchecked_workers.first() {
-        let what = if kind == "shared_worker" {
-            "a shared worker"
-        } else {
-            "a service worker"
+        let what = match kind.as_str() {
+            "shared_worker" => "a shared worker",
+            "service_worker" => "a service worker",
+            _ => "a worker",
         };
         return Err(format!(
             "The page uses {what} whose requests the browser's network rules could not check, so the capture stopped and nothing was saved."
@@ -832,11 +834,18 @@ async fn work(
                 c.tried.clone(),
                 c.service_worker_held,
             ),
-            None => (Vec::new(), HashSet::new(), Vec::new(), false, Vec::new(), false),
+            None => (
+                Vec::new(),
+                HashSet::new(),
+                Vec::new(),
+                false,
+                Vec::new(),
+                false,
+            ),
         }
     };
     if service_worker_held {
-        notes.push("The page's service worker was not let run during the capture (its requests cannot be checked one by one), so anything the page shows from it is missing.".into());
+        notes.push("A service worker was not let run during the capture (its requests cannot be checked one by one), so anything the page would have shown from one is missing.".into());
     }
     let folder_name = names::capture_folder_name(&plan.url, chrono::Local::now());
     let mut w = Writer::create(&plan.folder, &folder_name)?;
@@ -1068,7 +1077,11 @@ async fn work(
         let file_name = path.trim_start_matches("styles/");
         // A UTF-8 byte order mark first: it wins over any `@charset`, so the browser reads
         // the sheet as the UTF-8 that was checked.
-        let rel = w.write("styles", file_name, &[css::BOM, rewritten.as_bytes()].concat())?;
+        let rel = w.write(
+            "styles",
+            file_name,
+            &[css::BOM, rewritten.as_bytes()].concat(),
+        )?;
         facts.push((rel.clone(), css::facts(&sheet.text, &sheet.base)));
         if let Some(i) = sheet.index {
             style_paths.insert(i, rel);

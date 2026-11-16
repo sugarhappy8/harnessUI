@@ -339,9 +339,10 @@ impl State {
 /// [0.0.7 P7] Whether a shared or service worker runs a web page's script (and not one of
 /// the browser's own, such as a built-in extension's `chrome-extension:` worker).
 fn web_worker(url: &str) -> bool {
-    ["http:", "https:", "data:", "blob:"]
-        .iter()
-        .any(|scheme| url.get(..scheme.len()).is_some_and(|u| u.eq_ignore_ascii_case(scheme)))
+    ["http:", "https:", "data:", "blob:"].iter().any(|scheme| {
+        url.get(..scheme.len())
+            .is_some_and(|u| u.eq_ignore_ascii_case(scheme))
+    })
 }
 
 /// The running browser.
@@ -1037,12 +1038,20 @@ impl Browser {
                 .call("Network.enable", json!({}), Some(&session), CMD)
                 .await;
         }
-        let Ok(targets) = self
+        let targets = match self
             .cdp
             .call("Target.getTargets", json!({}), None, CMD)
             .await
-        else {
-            return;
+        {
+            Ok(targets) => targets,
+            Err(e) => {
+                // Workers that run already could not be found to be stopped.
+                tracing::warn!(error = %e, "the browser's workers could not be listed");
+                if let Some(log) = self.lock().capture.as_mut() {
+                    log.note_unchecked_worker("worker");
+                }
+                return;
+            }
         };
         for t in targets
             .get("targetInfos")
@@ -2276,5 +2285,46 @@ mod tests {
             s.block_since(Instant::now() + Duration::from_secs(1))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_capture_holds_web_workers_only() {
+        for url in [
+            "http://site.example/sw.js",
+            "HTTPS://site.example/shared.js",
+            "data:text/javascript,fetch(1)",
+            "blob:http://site.example/1b2c",
+        ] {
+            assert!(web_worker(url), "{url}");
+        }
+        for url in [
+            "chrome-extension://nkeimhogjdpnpccoofpliimaahmaaome/thunk.js",
+            "chrome://new-tab-page/sw.js",
+            "devtools://devtools/x.js",
+            "",
+            "http",
+        ] {
+            assert!(!web_worker(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_worker_the_capture_watches_belongs_to_its_tab() {
+        let mut s = State::default();
+        s.sessions.insert(
+            "page-session".into(),
+            SessionInfo {
+                kind: TargetKind::Page,
+                tab: "tab-1".into(),
+                ready: true,
+            },
+        );
+        assert_eq!(s.tab_of("page-session").as_deref(), Some("tab-1"));
+        assert_eq!(s.tab_of("worker-session"), None, "no capture: unknown");
+        let mut log = crate::capture::netlog::CaptureLog::new("page-session", "tab-1");
+        log.workers.push("worker-session".into());
+        s.capture = Some(log);
+        assert_eq!(s.tab_of("worker-session").as_deref(), Some("tab-1"));
+        assert_eq!(s.tab_of("other-session"), None, "a session no one knows");
     }
 }

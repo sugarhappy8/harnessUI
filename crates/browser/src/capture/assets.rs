@@ -842,11 +842,24 @@ mod tests {
             ("image/png", "https://a/x.png", &b"<html><script>"[..]),
             ("image/png", "https://a/x.png", &b"wOF2...."[..]),
         ] {
-            assert_eq!(extension_for(Kind::Picture, mime, url, head), None, "{mime} {url}");
-            assert_eq!(extension_for(Kind::Icon, mime, url, head), None, "{mime} {url}");
+            assert_eq!(
+                extension_for(Kind::Picture, mime, url, head),
+                None,
+                "{mime} {url}"
+            );
+            assert_eq!(
+                extension_for(Kind::Icon, mime, url, head),
+                None,
+                "{mime} {url}"
+            );
         }
         assert_eq!(
-            extension_for(Kind::Picture, "", "https://a/x", b"BM\x46\0\0\0\0\0\0\0\x36\0"),
+            extension_for(
+                Kind::Picture,
+                "",
+                "https://a/x",
+                b"BM\x46\0\0\0\0\0\0\0\x36\0"
+            ),
             Some("bmp")
         );
         assert_eq!(

@@ -176,7 +176,17 @@ can check what a model then does with the copy.
   your sign-ins and cookies are never used. While the capture runs, every web request of
   that browser (pictures, fonts, scripts and style sheets too, not only pages) is paused and
   checked like a page load: http and https only, nothing on loopback, private, link-local
-  or other blocked addresses, judged on the address the name resolves to. Only responses to
+  or other blocked addresses, judged on the address the name resolves to. That includes
+  the requests of the page's workers: a shared worker's are paused on its own debugging
+  session before it may run, a dedicated worker's where the browser pauses them, with its
+  page's. **Service workers do not run during a capture**: the browser accepts the request
+  checks on one but does not apply them to a service worker that a site installed earlier
+  and that starts again (tried in Chrome 153), so every service worker that starts during
+  the capture is kept waiting and stopped when it ends; the report says that anything the
+  page would have had from it is missing. Shared and service workers that already run when
+  the capture starts are stopped first, because what they hold came from requests that
+  were never checked one by one. If one cannot be stopped, or a shared worker's requests
+  cannot be paused, the capture stops and saves nothing. Only responses to
   requests that passed those checks are saved, and a response that reached the browser from
   a blocked address on a direct connection is refused even if the name looked public when
   it was checked. The capture only reads: it never clicks, types or submits, so no form is
@@ -185,7 +195,8 @@ can check what a model then does with the copy.
 - **Connections those checks cannot see.** The browser's request checks see web requests,
   not WebSocket, WebTransport or WebRTC connections. During a capture the page being
   captured (its documents, including frames' documents where the browser lets the app
-  change them, and its workers' scripts) gets an extra policy that refuses WebSocket
+  change them and a redirect without a `Location` that the browser shows as a page, and its
+  workers' scripts) gets an extra policy that refuses WebSocket
   connections, so a page cannot read a device on your network through one. The tab, its
   frames and its workers, and any shared or service worker, are also watched: if a
   WebSocket, WebTransport or direct-socket connection starts anyway, the capture stops and
@@ -212,7 +223,16 @@ can check what a model then does with the copy.
   `file:` and `//host` addresses (on Windows a network share, which would send your Windows
   sign-in hash) and every web address, is removed. Links keep only `http(s)`, `mailto:` and
   `tel:` addresses. CSS in the page and in the saved style sheets is read with a real CSS
-  tokenizer (escaped names included) and held to the same rule. The result is written with a
+  tokenizer (escaped names included) and held to the same rule; inside `image-set()`,
+  `image()` and `cross-fade()` only literal addresses and plain values are allowed, so
+  anything else there (`var()`, `env()`, `attr()` or a function the list does not know)
+  makes the whole value blank. `index.html` and every saved style sheet start with a UTF-8
+  byte order mark and carry no leading `@charset` and no control characters other than tab
+  and line ends, so a browser reads them as the UTF-8 that was checked (a sheet declaring
+  ISO-2022-JP, for example, could otherwise hide an address in what the check read as a
+  comment); CSS in saved SVG pictures and in the page's own style attributes loses the same
+  characters. A file asked for as a picture or icon is kept only when its first bytes are a
+  picture format the copy keeps (PNG, JPEG, GIF, WebP, AVIF, SVG, ICO or BMP). The result is written with a
   real `<html><head>` whose first child is a policy that allows no script, loads nothing
   from the internet and sends nothing, and a last check parses the output once more: unless
   the root is `<html>`, the policy is the first thing in the head and cleaning it again
@@ -227,8 +247,11 @@ can check what a model then does with the copy.
   characters that could start a link or markup escaped. It reaches the model as untrusted
   tool output like any page.
 - **Limits.** A capture can save whatever a public page shows, including other people's
-  pictures and text; what you do with the copy is up to you. A stopped capture can leave a
-  partly saved folder.
+  pictures and text; what you do with the copy is up to you. Only what is fetched during
+  the capture is checked: what a site stored in the agent's browser on an earlier visit
+  (its storage and caches, from requests normal browsing does not check one by one) can
+  still reach the page and the copy, as it reaches the screen in normal browsing. A stopped
+  capture can leave a partly saved folder.
 
 ## The terminal is not a sandbox
 

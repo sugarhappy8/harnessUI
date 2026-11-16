@@ -269,7 +269,12 @@ fn address_function(p: &mut CssParser<'_, '_>) -> Option<String> {
 
 /// The inside of an image function: addresses go to `refs` (strings too where
 /// `strings_are_urls`); `false` as soon as anything outside the allow-list shows up.
-fn image_walk(p: &mut CssParser<'_, '_>, refs: &mut Vec<RawRef>, depth: usize, strings_are_urls: bool) -> bool {
+fn image_walk(
+    p: &mut CssParser<'_, '_>,
+    refs: &mut Vec<RawRef>,
+    depth: usize,
+    strings_are_urls: bool,
+) -> bool {
     if depth >= MAX_NESTING {
         return false;
     }
@@ -289,7 +294,7 @@ fn image_walk(p: &mut CssParser<'_, '_>, refs: &mut Vec<RawRef>, depth: usize, s
             | Token::Ident(_)
             | Token::Hash(_)
             | Token::IDHash(_) => {}
-            Token::Delim(c) if matches!(c, '/' | '+' | '-' | '*') => {}
+            Token::Delim('/' | '+' | '-' | '*') => {}
             Token::QuotedString(value) => {
                 if strings_are_urls {
                     refs.push(RawRef {
@@ -350,9 +355,15 @@ pub fn plain_text(css: &str) -> String {
     let kept: String = css
         .trim_start_matches('\u{feff}')
         .chars()
-        .filter(|c| !(c.is_control() && !matches!(c, '\t' | '\n' | '\u{c}' | '\r')) || !c.is_ascii())
+        .filter(|c| {
+            !(c.is_control() && !matches!(c, '\t' | '\n' | '\u{c}' | '\r')) || !c.is_ascii()
+        })
         .collect();
-    let lower_start: String = kept.chars().take(9).collect::<String>().to_ascii_lowercase();
+    let lower_start: String = kept
+        .chars()
+        .take(9)
+        .collect::<String>()
+        .to_ascii_lowercase();
     if lower_start.starts_with("@charset") {
         // The rule ends at its first `;` (a string with a `;` in it is not an encoding name).
         if let Some(end) = kept.find(';') {
@@ -1249,22 +1260,46 @@ mod tests {
     fn image_functions_hold_only_literal_addresses() {
         let local = |t: &str| t == "../assets/a.png";
         for (css, kept) in [
-            (":root{--u:\"//attacker.example/share/x.png\"} .a{background-image:image-set(var(--u) 1x)}", false),
-            (".h{--hh:\"http://93.184.215.14/x.png\";background-image:-webkit-image-set(var(--hh) 1x)}", false),
-            (".l{list-style-image:image-set(var(--u) 1x, \"../assets/a.png\" 2x)}", false),
+            (
+                ":root{--u:\"//attacker.example/share/x.png\"} .a{background-image:image-set(var(--u) 1x)}",
+                false,
+            ),
+            (
+                ".h{--hh:\"http://93.184.215.14/x.png\";background-image:-webkit-image-set(var(--hh) 1x)}",
+                false,
+            ),
+            (
+                ".l{list-style-image:image-set(var(--u) 1x, \"../assets/a.png\" 2x)}",
+                false,
+            ),
             (".c{content:image-set(env(safe-area-inset-top) 1x)}", false),
             (".m{mask-image:image-set(attr(data-src) 1x)}", false),
-            (".b{border-image-source:image-set(made-up(\"x\") 1x)}", false),
+            (
+                ".b{border-image-source:image-set(made-up(\"x\") 1x)}",
+                false,
+            ),
             (".n{background:image-set(image-set(var(--u) 1x) 1x)}", false),
-            (".x{background:cross-fade(var(--a), url(../assets/a.png))}", false),
+            (
+                ".x{background:cross-fade(var(--a), url(../assets/a.png))}",
+                false,
+            ),
             (".i{background:image(var(--u))}", false),
             (".s{background:src(var(--u))}", false),
-            (".k{background:image-set(linear-gradient(red, rgb(0 0 0 / 50%)) 1x, \"../assets/a.png\" 2x)}", true),
-            (".t{background:image-set(\"../assets/a.png\" type(\"image/png\") 1x)}", true),
+            (
+                ".k{background:image-set(linear-gradient(red, rgb(0 0 0 / 50%)) 1x, \"../assets/a.png\" 2x)}",
+                true,
+            ),
+            (
+                ".t{background:image-set(\"../assets/a.png\" type(\"image/png\") 1x)}",
+                true,
+            ),
         ] {
             let out = confine(css, local).unwrap();
             assert_eq!(
-                out.contains("image-set(") || out.contains("image(") || out.contains("cross-fade(") || out.contains("src("),
+                out.contains("image-set(")
+                    || out.contains("image(")
+                    || out.contains("cross-fade(")
+                    || out.contains("src("),
                 kept,
                 "{css}\n=> {out}"
             );
@@ -1276,11 +1311,18 @@ mod tests {
             for gone in ["var(", "made-up(", "attr(", "env("] {
                 assert!(!out.contains(gone), "{gone}: {out}");
             }
-            assert_eq!(confine(&out, local).unwrap(), out, "confining again changes nothing");
+            assert_eq!(
+                confine(&out, local).unwrap(),
+                out,
+                "confining again changes nothing"
+            );
         }
         // Inside an allowed image function, a string that is not the copy's own file goes too.
         let out = confine(".k{background:image-set(\"//attacker.example/a.png\" 1x, linear-gradient(red, blue) 2x)}", local).unwrap();
-        assert!(!out.contains("attacker.example") && out.contains("linear-gradient(red, blue)"), "{out}");
+        assert!(
+            !out.contains("attacker.example") && out.contains("linear-gradient(red, blue)"),
+            "{out}"
+        );
     }
 
     /// The verification of round 1 (V2): a sheet that says `@charset "ISO-2022-JP"` and hides
@@ -1292,8 +1334,17 @@ mod tests {
             "\u{feff}@charset \"ISO-2022-JP\";\n/* *{esc}(B/@import url(//attacker.example/share/x.css);/**/\n.m {{ color: red; }}\u{7f}\u{0}"
         );
         let plain = plain_text(&css);
-        assert!(!plain.contains(esc) && !plain.contains('\u{feff}') && !plain.contains('\u{0}') && !plain.contains('\u{7f}'), "{plain:?}");
-        assert!(!plain.to_ascii_lowercase().contains("@charset"), "{plain:?}");
+        assert!(
+            !plain.contains(esc)
+                && !plain.contains('\u{feff}')
+                && !plain.contains('\u{0}')
+                && !plain.contains('\u{7f}'),
+            "{plain:?}"
+        );
+        assert!(
+            !plain.to_ascii_lowercase().contains("@charset"),
+            "{plain:?}"
+        );
         assert!(plain.starts_with('\n'), "{plain:?}");
         // Read as UTF-8 (the byte order mark makes the browser do so), the import is still
         // inside the comment, as checked.
@@ -1301,7 +1352,9 @@ mod tests {
         assert_eq!(plain_text(&plain), plain);
         assert_eq!(plain_text("a{b:c}\t\u{c}\r\n"), "a{b:c}\t\u{c}\r\n");
         assert_eq!(plain_text("@CHARSET \"x\"; a{}"), " a{}");
-        assert!(confine(&css, |_| true).is_some_and(|c| !c.contains(esc) && !c.contains("@charset")));
+        assert!(
+            confine(&css, |_| true).is_some_and(|c| !c.contains(esc) && !c.contains("@charset"))
+        );
         assert_eq!(BOM, "\u{feff}".as_bytes());
     }
 

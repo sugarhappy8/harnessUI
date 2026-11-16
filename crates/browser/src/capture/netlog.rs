@@ -1,10 +1,13 @@
 //! What a capture records of its tab's network traffic (ARCHITECTURE.md 9.3, 13.6).
 //!
-//! While `browser_capture_site` runs, every HTTP request of every tab is paused and checked
-//! by the session's request enforcement (not only page loads), and the requests that passed
-//! are noted here by their network id. Only responses noted here can be saved, so every
-//! byte the copy holds came through the browser's own network rules. `Network.*` events
-//! of the capture's tab fill in what each request became.
+//! While `browser_capture_site` runs, every HTTP request of every tab and of every shared
+//! worker is paused and checked by the session's request enforcement (not only page
+//! loads; a dedicated worker's requests are paused on its page's session), and the
+//! requests that passed are noted here by their network id. Service workers do not run
+//! during a capture: the browser does not pause the requests of one installed before.
+//! Only responses noted here can be saved, so every byte the copy holds came through the
+//! browser's own network rules. `Network.*` events of the capture's tab fill in what each
+//! request became.
 //!
 //! Connections those checks never see (WebSocket, WebTransport, direct sockets) are
 //! watched on the tab, its frames and its workers: one that is blocked before it starts is
@@ -70,9 +73,10 @@ pub struct CaptureLog {
     pub sockets: Vec<String>,
     /// Connections the page asked for that were blocked before they started.
     pub tried: Vec<String>,
-    /// Shared or service workers ("shared_worker", "service_worker") whose requests could
-    /// not be held to the checks: one that ran before the capture and could not be
-    /// stopped, or one whose requests could not be paused. Any makes the capture stop.
+    /// Shared or service workers ("shared_worker", "service_worker", or "worker" when the
+    /// running ones could not be listed) whose requests could not be held to the checks:
+    /// one that ran before the capture and could not be stopped, or one whose requests
+    /// could not be paused. Any makes the capture stop.
     pub unchecked_workers: Vec<String>,
     /// A service worker was kept from running during the capture (its requests cannot be
     /// checked), so what the page would have had from it is missing.

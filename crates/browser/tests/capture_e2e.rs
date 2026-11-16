@@ -8,6 +8,14 @@
 //! the same browser: its first screen is compared with the original's at 1440 px, and its
 //! DOM after loading shows that no script ran.
 //!
+//! The independent reviews' hostile pages are captured too, and each copy is opened with
+//! every request recorded (by a proxy, and over the browser's debugging channel for `file:`
+//! addresses): disguised markup and SVG, `file:` addresses, WebSockets, addresses passed
+//! through `var()` into `image-set()`, style sheets declaring ISO-2022-JP, files that are
+//! not pictures asked for as pictures, a redirect without `Location`, and workers (shared,
+//! service, dedicated, and a service worker that ran before) asking a "device" on loopback
+//! for its data.
+//!
 //! Like `browser_e2e.rs`, it needs a browser (`HARNESS_BROWSER_PATH`, an installed
 //! Chrome/Edge/Chromium, or Playwright's Chromium under `/opt/pw-browsers`); without one it
 //! prints a note and passes. On Windows and macOS it runs only with `HARNESS_BROWSER_E2E=1`.
@@ -1084,7 +1092,9 @@ fn plain_sheets(folder: &Path) -> Vec<String> {
         let path = e.unwrap().path();
         let css = read_copy(&path);
         assert!(
-            !css.trim_start().to_ascii_lowercase().starts_with("@charset"),
+            !css.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("@charset"),
             "{}: {css}",
             path.display()
         );
@@ -1389,7 +1399,9 @@ fn trick_pages(beacon: u16, marks: &Path) -> HashMap<String, Page> {
 .k {{ width:60px; height:60px; outline: 1px solid #000; {} }}
 </style></head><body><h1>V2</h1><div class="j">j</div><div class="k">k</div><div class="m">m</div><div class="n">n</div>
 </body></html>"#,
-        hidden(format!("background-image:url(//localhost{mark}/orange.png);")),
+        hidden(format!(
+            "background-image:url(//localhost{mark}/orange.png);"
+        )),
         hidden("background-image:url(//attacker.example/share/V2-inline.png);".into()),
     );
     let v2_css = format!(
@@ -1497,14 +1509,24 @@ async fn css_tricks_and_odd_pictures_leave_a_copy_that_loads_nothing() {
     let chat = chat(&approved);
     let server = server(&[site.port], work.path());
 
-    // The instrument works: a file that loads a file outside its folder, or names another
-    // computer, shows up.
+    // The instrument works, on the very tricks below left as they are: a file outside the
+    // copy's folder named through var() in image-set(), and one hidden from a UTF-8 reading
+    // in a sheet that declares ISO-2022-JP, are loaded and show up, as does another
+    // computer's address.
     let control = work.path().join("control");
     std::fs::create_dir(&control).unwrap();
     std::fs::write(
         control.join("index.html"),
         format!(
-            "<!DOCTYPE html><div style=\"width:9px;height:9px;background-image:url(//localhost{}/red.png)\"></div><img src=\"//attacker.example/share/control.png\">",
+            "<!DOCTYPE html><link rel=\"stylesheet\" href=\"iso.css\"><style>:root {{ --l: \"//localhost{}/red.png\"; }} .v {{ width:9px; height:9px; background-image: image-set(var(--l) 1x); }}</style><div class=\"v\"></div><div class=\"m\"></div><img src=\"//attacker.example/share/control.png\">",
+            marks.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        control.join("iso.css"),
+        format!(
+            "@charset \"ISO-2022-JP\";\n.m {{ width:9px; height:9px; /* *\x1b(B/background-image:url(//localhost{}/cyan.png);/**/ }}\n",
             marks.display()
         ),
     )
@@ -1512,6 +1534,7 @@ async fn css_tricks_and_odd_pictures_leave_a_copy_that_loads_nothing() {
     let seen = requests_outside(&control.join("index.html"), work.path()).await;
     assert!(
         seen.iter().any(|u| u.ends_with("/marks/red.png"))
+            && seen.iter().any(|u| u.ends_with("/marks/cyan.png"))
             && seen.iter().any(|u| u.contains("attacker.example")),
         "the recorder saw: {seen:?}"
     );
@@ -1534,7 +1557,10 @@ async fn css_tricks_and_odd_pictures_leave_a_copy_that_loads_nothing() {
                     let inside = all_css
                         .match_indices("image-set(")
                         .any(|(i, _)| all_css[i..].split(')').next().unwrap_or("").contains(made));
-                    assert!(!inside, "{made} is left inside an image function: {all_css}");
+                    assert!(
+                        !inside,
+                        "{made} is left inside an image function: {all_css}"
+                    );
                 }
                 assert!(
                     !all_css.contains("image(var(") && !all_css.contains("cross-fade(var("),
@@ -1595,7 +1621,8 @@ async fn css_tricks_and_odd_pictures_leave_a_copy_that_loads_nothing() {
 /// (The round-1 verification's /wsh2/, /wsw/ and /wd/.)
 fn worker_pages(secret: u16) -> HashMap<String, Page> {
     let s = format!("http://127.0.0.1:{secret}");
-    let page = |title: &str, code: &str| Page {
+    let page = |title: &str, code: &str| {
+        Page {
         status: 200,
         mime: "text/html; charset=utf-8",
         body: format!(
@@ -1605,6 +1632,7 @@ function say(t) {{ document.getElementById('out').textContent += ' | ' + t; }}
 </script></body></html>"#
         )
         .into_bytes(),
+    }
     };
     let js = |code: String| Page {
         status: 200,
@@ -1658,7 +1686,10 @@ function say(t) {{ document.getElementById('out').textContent += ' | ' + t; }}
 
 async fn navigate(server: &BrowserServer, chat: &ChatContext, url: &str) {
     let a = json!({ "url": url });
-    let action = match server.describe("browser_navigate", &args(a.clone()), chat).await {
+    let action = match server
+        .describe("browser_navigate", &args(a.clone()), chat)
+        .await
+    {
         Described::Action(action) => action,
         Described::Invalid(why) => panic!("not describable: {why}"),
     };

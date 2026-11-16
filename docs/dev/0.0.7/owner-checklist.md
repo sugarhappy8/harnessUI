@@ -206,7 +206,8 @@ front only makes harnessUI the active app (expected on a Mac); click again to an
 2. Ask: "Capture https://gsap.com into my projects folder, then rebuild its hero with my own
    text." Read the card ("Save a copy of how gsap.com looks into …"), allow it.
 3. Open the saved `index.html` from disk: it looks like the site and runs no scripts;
-   compare it with the pictures in `screenshots/`.
+   compare it with the pictures in `screenshots/`. If the site uses a service worker (one
+   that works offline), `report.md` has a note that it was not let run during the capture.
 4. Ask "make a site that looks like stripe.com": the capture tool is offered.
 5. On Windows: a long folder path, and opening the copy in Edge.
 
