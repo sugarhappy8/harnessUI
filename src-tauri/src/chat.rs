@@ -143,15 +143,19 @@ struct TurnSlot<'a> {
     id: u64,
     chat_id: store::ChatId,
     cancel: CancellationToken,
-    /// Where to say so; `None` in tests.
-    app: Option<tauri::AppHandle>,
+    /// Where to say so; `None` in tests. Borrowed, never a clone: the tests drop slots, and
+    /// dropping an owned handle would link Tauri's menu code, and with it muda's About box
+    /// (`TaskDialogIndirect`, only in Common Controls 6), into the library's test program,
+    /// which has no manifest asking for Common Controls 6; on Windows it then does not start
+    /// (0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND).
+    app: Option<&'a tauri::AppHandle>,
 }
 
 impl<'a> TurnSlot<'a> {
     fn take(
         generation: &'a Generation,
         chat_id: store::ChatId,
-        app: Option<&tauri::AppHandle>,
+        app: Option<&'a tauri::AppHandle>,
     ) -> AppResult<Self> {
         let Some((id, cancel)) = generation.start(chat_id.0) else {
             return Err(AppError::new(
@@ -169,7 +173,7 @@ impl<'a> TurnSlot<'a> {
             id,
             chat_id,
             cancel,
-            app: app.cloned(),
+            app,
         })
     }
 }
@@ -177,7 +181,7 @@ impl<'a> TurnSlot<'a> {
 impl Drop for TurnSlot<'_> {
     fn drop(&mut self) {
         self.generation.finish(self.id);
-        if let Some(app) = &self.app {
+        if let Some(app) = self.app {
             // A newer turn may hold it already (one started while this one wound down).
             let _ = app.emit_to(
                 crate::MAIN_WINDOW,
