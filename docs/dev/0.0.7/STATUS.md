@@ -125,3 +125,8 @@ and `README.md`.
   (deletion safety first).
 - P2 round 1 started (findings in `review-p2-findings.md`; Hugging Face listing becomes
   user-triggered).
+- P4 round 1 done: all 10 findings fixed (the list says how tools are reached this turn from
+  the turn's own tools; `roster::fitted()` keeps the core file tools in at 4k; computer
+  keywords as phrases with bare words weak only; result-tag detection only for real
+  blocks; exact PowerShell texts; bounded scan; evals send the list; nits). agent 229,
+  tools 220, app 850, vitest 832; real model still calls read_file. Verification running.
