@@ -525,13 +525,17 @@ async fn progress() {
     let sink = ticks.clone();
     let tick: ProgressFn = Arc::new(move |line| sink.lock().unwrap().push(line));
     let begun = Instant::now();
-    // Ten notes 300 ms apart: 3 s in all, three times the 1 s limit.
+    // Five notes 600 ms apart: 3 s in all, one and a half times the 2 s limit, so only the
+    // notes keep the call alive. The margins are wide on purpose: on a busy CI Mac, ten
+    // notes 300 ms apart with a 1 s limit came in more than a second late in all, and the
+    // call hit the overall cap (4 × the limit) before its answer (run 43811806801).
+    let limit = Duration::from_secs(2);
     let out = server
         .call_outcome(
             &allow_all(),
             "progress",
-            args(json!({"steps": 10, "every_ms": 300})),
-            Duration::from_secs(1),
+            args(json!({"steps": 5, "every_ms": 600})),
+            limit,
             &CancellationToken::new(),
             Some(tick),
         )
@@ -542,12 +546,17 @@ async fn progress() {
         panic!("not kept alive: {out:?}")
     };
     assert_eq!(out.joined_text(), "progressed");
-    assert!(took >= Duration::from_millis(2500), "{took:?}");
+    // The call outlived its limit: the notes kept it alive.
+    assert!(took > limit + Duration::from_millis(500), "{took:?}");
     let ticks = ticks.lock().unwrap().clone();
     assert!(!ticks.is_empty(), "no sign of life was passed on");
     assert!(ticks.iter().all(String::is_empty), "{ticks:?}");
     // At most one a second.
-    assert!(ticks.len() <= 5, "{ticks:?}");
+    assert!(
+        ticks.len() as u64 <= took.as_secs() + 1,
+        "{} ticks in {took:?}: {ticks:?}",
+        ticks.len()
+    );
     let all = format!("{out:?} {:?}", server.stderr_tail());
     assert!(!all.contains("SECRET-PROGRESS"), "{all}");
     assert!(server.is_running());
