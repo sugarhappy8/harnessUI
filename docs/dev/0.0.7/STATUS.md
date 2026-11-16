@@ -408,3 +408,12 @@ and `README.md`.
   worklets, a service worker registered mid-capture) got nothing through. Agrees holding
   service workers is safe. Hardening nit left for later: check `waitingForDebugger` when a
   web worker attaches. P7 finished.
+- Windows test program: the missing import was `COMCTL32.dll!TaskDialogIndirect` (Common
+  Controls 6 only). P6a's `TurnSlot` kept an owned `AppHandle`; tests dropping slots made
+  the drop chain AppHandle → menu manager → muda's About box reachable, so the linker kept
+  it, and the library's test program has no manifest asking for Common Controls 6 (only bin
+  targets get tauri-build's). Fixed by borrowing the handle (f58e71e); a relink of the
+  Windows test program here shows 0.0.6's imports plus `kernel32!RemoveDirectoryW`. A
+  durable fix (the manifest for the lib test program) is left for a later version.
+- 14:15 UTC: P7 verified; fmt, workspace clippy, docs, spawn and notices checks pass. CI
+  run on everything next.
