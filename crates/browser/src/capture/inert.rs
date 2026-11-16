@@ -389,7 +389,11 @@ fn clean(doc: &Document, files: &HashSet<String>) {
                     }
                     Rule::Unwrap => {
                         let children: Vec<NodeId> = node.children().iter().map(|c| c.id).collect();
-                        node.unwrap_node();
+                        if let Some(first) = node.first_child() {
+                            // The children (the first and its siblings) move up in its place.
+                            node.insert_siblings_before(&first);
+                        }
+                        node.remove_from_parent();
                         stack.extend(children);
                         continue;
                     }
@@ -920,7 +924,7 @@ mod tests {
         );
         assert_eq!(out.matches("<img>").count(), 4, "four pictures lose their address: {out}");
         assert!(out.contains("<img src=\"data:image/png;base64,AAAA\">"), "{out}");
-        assert!(out.contains("background:url(\"about:invalid\")"), "{out}");
+        assert!(out.contains("width:10px;background:url(&quot;about:invalid&quot;)"), "{out}");
         assert!(!out.contains("u\\72l"), "{out}");
         assert!(out.contains("<video src=\"assets/hero.png\"><source><track></video>"), "{out}");
         assert!(out.contains("<a href=\"#\">x</a>"), "{out}");
@@ -955,7 +959,7 @@ mod tests {
         assert!(!out.contains("cdn.example"), "{out}");
         assert!(out.contains("<template shadowrootmode=\"open\"><style>:host{background:url(\"about:invalid\")}</style><img><slot></slot></template>"), "{out}");
         assert!(out.contains("<template><p>p</p></template>"), "{out}");
-        assert!(out.contains(".a{fill:url(#g)} .b{background:url(&quot;about:invalid&quot;)}"), "{out}");
+        assert!(out.contains(".a{fill:url(#g)} .b{background:url(\"about:invalid\")}"), "{out}");
         assert!(out.contains("<style>@import url(\"about:invalid\"); a{color:red}</style>"), "{out}");
         assert!(!out.contains("a comment"), "{out}");
         assert!(out.contains("<textarea>&lt;script&gt;</textarea>"), "{out}");
