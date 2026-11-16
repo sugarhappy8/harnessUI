@@ -477,7 +477,6 @@ async fn claude_bad_keys_and_errors_never_show_the_key() {
 #[tokio::test]
 async fn claude_refused_thinking_blocks_are_dropped_once() {
     let refusal = error(
-        400,
         "invalid_request_error",
         "messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\".",
     );

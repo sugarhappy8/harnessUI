@@ -74,6 +74,9 @@ const ASIDE_POLL: Duration = Duration::from_millis(25);
 /// visible on the active Space, the stop hotkey is not registered, …
 pub type ReadyCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
+/// The app's call that minimises its main window (see [`StepAside::minimise`]).
+pub type MinimiseFn = Arc<dyn Fn(i64, &tokio_util::sync::CancellationToken) + Send + Sync>;
+
 /// How this app moves its main window out of the way of input (ARCHITECTURE.md 9.3,
 /// "Stepping aside").
 #[derive(Clone)]
@@ -84,7 +87,7 @@ pub struct StepAside {
     /// and the call's cancellation: minimises the main window when it is on screen and
     /// returns once it is gone, or after a short wait (about a second). Once the call is
     /// stopped it must not minimise any more: nothing would bring the window back.
-    pub minimise: Arc<dyn Fn(i64, &tokio_util::sync::CancellationToken) + Send + Sync>,
+    pub minimise: MinimiseFn,
 }
 
 impl std::fmt::Debug for StepAside {

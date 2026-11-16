@@ -135,11 +135,11 @@ describe("McpSettings: listening for server changes (0.0.7 P6)", () => {
   it("stops a listener that starts after the page closed, and keeps the newest", async () => {
     const { StrictMode } = await import("react");
     ipcMock.getSetting.mockResolvedValue(null);
-    const started: { unlisten: ReturnType<typeof vi.fn>; ready: () => void }[] = [];
+    const started: { unlisten: ReturnType<typeof vi.fn<() => undefined>>; ready: () => void }[] = [];
     ipcMock.onMcpChanged.mockImplementation(
       () =>
-        new Promise<() => void>((resolve) => {
-          const unlisten = vi.fn();
+        new Promise<() => undefined>((resolve) => {
+          const unlisten = vi.fn<() => undefined>();
           started.push({ unlisten, ready: () => resolve(unlisten) });
         }),
     );

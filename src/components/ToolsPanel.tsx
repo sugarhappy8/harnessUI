@@ -207,8 +207,10 @@ export function ToolsPanel(props: {
   const usable = (t: ToolDto) => t.enabledInChat && t.available && !t.schemaError;
   const enabled = tools.filter((t) => !t.companion && usable(t));
   const companions = tools.filter((t) => t.companion && usable(t));
-  // What a request carries: the tools that are shown.
-  const cost = tools.filter((t) => t.shown).reduce((n, t) => n + t.tokenEstimate, 0);
+  // What a request carries: the tools that are shown, and [0.0.7] the list of every tool
+  // that is on with the call guide in the system message.
+  const cost =
+    tools.filter((t) => t.shown).reduce((n, t) => n + t.tokenEstimate, 0) + (tools[0]?.guideTokens ?? 0);
   const groups = useMemo(() => {
     const m = new Map<string, ToolDto[]>();
     for (const t of tools) {

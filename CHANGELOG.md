@@ -27,6 +27,12 @@ All notable changes, by milestone. Dates are UTC.
 ### P5 cloud endpoints
 
 ### P6 bug fixes
+- **Fixed: the step-limit notice and its *Continue* stay in their own chat.** When a long task stopped at the step limit and you opened another chat, the notice came along, and *Continue* sent "Continue where you left off." to the chat you were looking at, where the model could start running tools. The notice now shows only in the chat whose turn stopped, until you send there or close it, and *Continue* goes to that chat. The same holds for "The model kept repeating the same tool call." and "The model made too many invalid tool calls in a row."
+- **Fixed: *Edit and resend* keeps the message's pictures, files and @-mentions.** Before, the edited message went without them and the model answered without seeing them, and a message with only a picture could not be sent again. The edit box now shows them, each with a button to remove it; whatever is left goes with the new message, which may then have no text.
+- **Fixed: a reply in another chat no longer hides behind a misleading Stop.** A chat that is not open now shows a mark in the chat list while its reply runs, and a hand when it waits for you to allow or deny something. In other chats the message box says "A reply is running in “…”." (or that it is waiting for your approval) with *Open it*, instead of a Stop button that stopped the other chat's reply. Stop and Esc now stop only the reply of the chat on screen.
+- **Fixed: a tool call left unfinished when the app closed no longer shows "Running" while some other reply runs.** It shows as cancelled, unless it belongs to the reply running in its own chat.
+- **Fixed: sending while a reply is still running no longer leaves your message without an answer.** After the window reloaded during a reply, the app forgot that reply, so a message sent meanwhile was stored and then refused as busy. The app now refuses before storing anything, and after a reload it knows which chat's reply is still running: that chat shows Stop, and the reply appears when it is done.
+- **Fixed: the Tools panel no longer picks up another chat's tools.** After a quick chat switch (and in development, every time) a leftover listener could load the previous chat's tools into the panel, and the next switch saved them to the chat on screen. The app's listeners now stop properly, and tools read for a chat that is no longer on screen are dropped.
 
 ## 0.0.6 (2026-11-13)
 

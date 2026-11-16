@@ -47,7 +47,10 @@ pub mod types;
 pub use client::{
     ChatStream, ClientConfig, ListedModel, ModelInfo, OpenAiClient, ProviderKind, Token,
 };
-pub use cloud::{EndpointPlace, check_key_transport, default_context, endpoint_host, endpoint_place};
+pub use cloud::{
+    EndpointPlace, check_key_transport, default_context, endpoint_host, endpoint_place,
+    images_in_tool_results,
+};
 pub use context::{ContextBudget, PinnedDoNotFit, ToolsDoNotFit, truncate_head_tail};
 pub use error::ProviderError;
 pub use estimate::{TokenCalibrator, estimate_tokens};

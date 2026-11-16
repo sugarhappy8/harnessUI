@@ -1451,16 +1451,11 @@ async fn context_for_defaults(state: &AppState, chat: &store::Chat) -> KnownCont
         return KnownContext::Local { loaded, configured };
     }
     if model.starts_with("remote:") {
-        let stored: Option<Value> = state
-            .store
-            .get_setting(crate::settings::REMOTE_CONTEXT_LENGTH)
-            .await
-            .ok()
-            .flatten();
-        return KnownContext::Remote {
-            reported: remote_context(state, model).await,
-            setting: crate::settings::remote_context_length(stored.as_ref()),
-        };
+        // [0.0.7 P5] Held to the size chosen for the endpoint; a cloud company's documented
+        // size when the server reports none.
+        let (reported, setting) =
+            crate::providers::context_parts(state, model, remote_context(state, model).await).await;
+        return KnownContext::Remote { reported, setting };
     }
     KnownContext::NoModel
 }

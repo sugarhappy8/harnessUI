@@ -167,9 +167,7 @@ fn unrecognized_terms(flat: &str) -> Vec<&str> {
 fn is_assignment(term: &str) -> bool {
     term.split_once('=').is_some_and(|(name, _)| {
         !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             && name.chars().next().is_some_and(|c| !c.is_ascii_digit())
     })
 }
@@ -253,7 +251,9 @@ mod tests {
                 ),
                 "spelling of the name, or if a path was included, verify that the path is correct and try again.",
                 "At line:2 char:1",
-                &format!("    + CategoryInfo          : ObjectNotFound: ({term}:String) [], CommandNotFoundException"),
+                &format!(
+                    "    + CategoryInfo          : ObjectNotFound: ({term}:String) [], CommandNotFoundException"
+                ),
                 "    + FullyQualifiedErrorId : CommandNotFoundException",
             ])
         };
@@ -294,7 +294,8 @@ mod tests {
             [DEV_NULL]
         );
         // A missing folder of the project's own is not /dev/null.
-        let elsewhere = ps_error(&["out-file : Could not find a part of the path 'C:\\work\\out\\a.txt'."]);
+        let elsewhere =
+            ps_error(&["out-file : Could not find a part of the path 'C:\\work\\out\\a.txt'."]);
         assert!(command_hints(PS, "echo a > out/a.txt", &elsewhere).is_empty());
         let heredoc = ps_error(&[
             "At line:2 char:5",
@@ -302,7 +303,10 @@ mod tests {
             "The '<' operator is reserved for future use.",
             "    + FullyQualifiedErrorId : RedirectionNotSupported",
         ]);
-        assert_eq!(command_hints(PS, "cat <<EOF", &heredoc), [INPUT_REDIRECTION]);
+        assert_eq!(
+            command_hints(PS, "cat <<EOF", &heredoc),
+            [INPUT_REDIRECTION]
+        );
         let quoted = ps_error(&[
             "At line:2 char:36",
             "+ \"C:\\Program Files\\nodejs\\node.exe\" --version",
@@ -310,7 +314,11 @@ mod tests {
             "    + FullyQualifiedErrorId : UnexpectedToken",
         ]);
         assert_eq!(
-            command_hints(PS, "\"C:\\Program Files\\nodejs\\node.exe\" --version", &quoted),
+            command_hints(
+                PS,
+                "\"C:\\Program Files\\nodejs\\node.exe\" --version",
+                &quoted
+            ),
             [QUOTED_PROGRAM]
         );
         // The same parser error for another reason says nothing about &.
@@ -342,10 +350,17 @@ mod tests {
         // Several mistakes, several hints, in a fixed order.
         let both = format!(
             "{}\n{}",
-            ps_error(&["The term 'grep' is not recognized as the name of a cmdlet, function, script file, or operable program."]),
-            ps_error(&["The term 'export' is not recognized as the name of a cmdlet, function, script file, or operable program."]),
+            ps_error(&[
+                "The term 'grep' is not recognized as the name of a cmdlet, function, script file, or operable program."
+            ]),
+            ps_error(&[
+                "The term 'export' is not recognized as the name of a cmdlet, function, script file, or operable program."
+            ]),
         );
-        assert_eq!(command_hints(PS, "export A=1; grep x", &both), [GREP, EXPORT]);
+        assert_eq!(
+            command_hints(PS, "export A=1; grep x", &both),
+            [GREP, EXPORT]
+        );
     }
 
     #[test]
@@ -386,7 +401,10 @@ mod tests {
             CURL,
             ZSH_PATTERN,
         ] {
-            assert!(!hint.contains('\n') && !hint.contains("[App note]"), "{hint}");
+            assert!(
+                !hint.contains('\n') && !hint.contains("[App note]"),
+                "{hint}"
+            );
         }
     }
 }

@@ -1197,6 +1197,49 @@ mod tests {
         assert_eq!(window_cells(512, 300), 512);
     }
 
+    /// A real model with short-memory layers (`TEST_SWA_GGUF`; skipped when it is not
+    /// set): its header gives short-memory layers and a function of the context equal to
+    /// its layers' sum. For the pinned Gemma 3 270M file (`ggml-org/gemma-3-270m-it-GGUF`,
+    /// `gemma-3-270m-it-Q8_0.gguf`, 291,545,600 bytes), exactly what llama-server b12110
+    /// allocated for it on the processor (`llama-server -m <file> -c C -np 1 --device none
+    /// -ngl 0 --fit off -v`, "llama_kv_cache: size = ..."): 12 + 15 MiB at 4,096 tokens,
+    /// 96 + 15 at 32,768, 1.5 + 7.5 at 512, and with `-fa on -ctk q8_0 -ctv q8_0` at 4,096
+    /// 6.38 + 7.97 MiB with rotation buffers of 0.80 + 3.98 MiB; its saved copies were
+    /// logged at 7.506 MiB each, 32 kept (7,864,320 bytes of rows and 512 cells' positions).
+    #[test]
+    fn real_short_memory_model_if_available() {
+        let Ok(path) = std::env::var("TEST_SWA_GGUF") else {
+            eprintln!("TEST_SWA_GGUF not set: skipped");
+            return;
+        };
+        let path = std::path::Path::new(&path);
+        let s = ModelSummary::from_header(&crate::gguf::read_file(path).unwrap());
+        assert!(s.sliding_window > 0, "no window");
+        assert!(s.swa_layers.contains(&true), "no short-memory layers");
+        let shape = s.kv_shape();
+        for ctx in [512, 4096, 32_768] {
+            for cache in [F16, Q8] {
+                assert_eq!(shape.size(cache).at(ctx), shape.total(ctx, cache));
+            }
+        }
+        let pinned = path
+            .file_name()
+            .is_some_and(|n| n == "gemma-3-270m-it-Q8_0.gguf")
+            && std::fs::metadata(path).is_ok_and(|m| m.len() == 291_545_600);
+        if !pinned {
+            eprintln!("not the pinned Gemma 3 270M file: exact figures not checked");
+            return;
+        }
+        assert_eq!(s.kv_bytes(4096, F16), (12 + 15) * MIB);
+        assert_eq!(s.kv_bytes(32_768, F16), (96 + 15) * MIB);
+        assert_eq!(s.kv_bytes(512, F16), 9 * MIB);
+        assert_eq!(
+            s.kv_bytes(4096, Q8),
+            6_684_672 + 8_355_840 + 835_584 + 4_177_920
+        );
+        assert_eq!(s.kv_size(F16).checkpoints_at(16_384), 32 * 7_864_320);
+    }
+
     /// Hostile headers (spec 2.0): any length of pattern array, absurd windows and head
     /// sizes, more shared layers than layers, an interval of 0: no panic, no allocation
     /// by the header's word, and a sane (saturated or safe-side) figure.

@@ -390,13 +390,88 @@ fn call_tool_arguments_are_checked_against_the_tools_own_schema() {
     r.unwrap_call(&args(json!({"name": "git_status", "arguments": null})))
         .expect("null is none");
 
-    // An ordinary call is validated as it always was.
+    // An ordinary call is validated as it always was: the same problems, first and in the
+    // same words, then [0.0.7] how to call the tool (one of the app's own).
     for call in [json!({}), json!({"path": "a.txt"}), json!({"path": 3})] {
-        assert_eq!(
+        match (
             r.validate("read_file", &call),
-            turn.host.validate("read_file", &call)
-        );
+            turn.host.validate("read_file", &call),
+        ) {
+            (Ok(()), Ok(())) => {}
+            (Err(ours), Err(host)) => {
+                assert_eq!(ours[..host.len()], host[..], "{call}");
+                assert_eq!(
+                    ours[host.len()..],
+                    [
+                        "read_file takes path (string, required), limit (integer), offset (integer), for example {\"path\": \"notes.txt\"}"
+                    ],
+                    "{call}"
+                );
+            }
+            other => panic!("{call}: {other:?}"),
+        }
     }
+}
+
+/// [0.0.7] A call whose arguments do not fit one of the app's own tools says how to call it:
+/// its arguments, then an example from the catalog that fits the tool as registered. Through
+/// call_tool the same. A tool of an added server gets no such line: its schema is the
+/// server's text and the message is the app's own note.
+#[test]
+fn a_wrong_call_to_an_own_tool_says_how_to_call_it() {
+    let turn = Turn::new(
+        &["read_file", "find_tools", "call_tool"],
+        &["write_file", "git_status", "load_skill"],
+    );
+    let r = turn.routing();
+    let direct = r
+        .validate("write_file", &json!({"file": "a.txt", "text": "x"}))
+        .expect_err("does not fit")
+        .join("; ");
+    assert!(
+        direct.contains("missing required field \"path\""),
+        "{direct}"
+    );
+    assert!(
+        direct.ends_with(
+            "; write_file takes path (string, required), content (string, required), for example {\"path\": \"notes/todo.md\", \"content\": \"# To do\\n\\n- Write the report\\n\"}"
+        ),
+        "{direct}"
+    );
+    let through = r
+        .validate(
+            CALL_TOOL,
+            &json!({"name": "write_file", "arguments": {"path": "a.txt"}}),
+        )
+        .expect_err("does not fit")
+        .join("; ");
+    assert!(
+        through.starts_with("The arguments do not fit write_file: "),
+        "{through}"
+    );
+    assert!(
+        through.contains(
+            "; write_file takes path (string, required), content (string, required), for example {"
+        ),
+        "{through}"
+    );
+    // The example fits the tool: it validates.
+    let example = through.split("for example ").nth(1).expect("an example");
+    let value: Value = serde_json::from_str(example).expect("the example is JSON");
+    assert!(
+        turn.host.validate("write_file", &value).is_ok(),
+        "{example}"
+    );
+    // A skill tool: the arguments, no example naming a skill that may not exist.
+    let skill = r
+        .validate("load_skill", &json!({}))
+        .expect_err("does not fit")
+        .join("; ");
+    assert!(
+        skill.contains("load_skill takes name (string, required)"),
+        "{skill}"
+    );
+    assert!(!skill.contains("for example"), "{skill}");
 }
 
 // ---- only what is on, and never itself ------------------------------------------------------

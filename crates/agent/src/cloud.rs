@@ -151,6 +151,17 @@ pub fn default_context(kind: ProviderKind) -> Option<u32> {
     }
 }
 
+/// Whether pictures a tool returns may go inside the tool's result message on a remote
+/// endpoint of this kind. OpenAI's tool messages take text only, so there (and at OpenRouter
+/// and abliteration.ai, which pass messages on to such models) the pictures go in a user
+/// message right after the results; Claude's `tool_result` blocks take pictures.
+pub fn images_in_tool_results(kind: ProviderKind) -> bool {
+    !matches!(
+        kind,
+        ProviderKind::OpenAi | ProviderKind::OpenRouter | ProviderKind::Abliteration
+    )
+}
+
 /// The output limit sent to an OpenAI-compatible cloud server when its model list did not
 /// say: enough for long answers and for reasoning models' thinking, and below what most
 /// models accept. A server that answers "at most N" lowers it for that model
@@ -938,6 +949,11 @@ mod tests {
         assert_eq!(default_context(ProviderKind::OpenRouter), Some(32_768));
         assert_eq!(default_context(ProviderKind::Generic), None);
         assert_eq!(default_context(ProviderKind::Ollama), None);
+        assert!(images_in_tool_results(ProviderKind::Anthropic));
+        assert!(images_in_tool_results(ProviderKind::Generic));
+        assert!(!images_in_tool_results(ProviderKind::OpenAi));
+        assert!(!images_in_tool_results(ProviderKind::OpenRouter));
+        assert!(!images_in_tool_results(ProviderKind::Abliteration));
     }
 
     fn body(value: Value) -> Map<String, Value> {

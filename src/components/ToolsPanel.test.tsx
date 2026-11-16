@@ -416,6 +416,21 @@ describe("ToolsPanel: tools chosen for each task", () => {
     expect(screen.getByTitle("Context the tool descriptions take on every request").textContent).toContain("~440 tokens");
   });
 
+  it("adds the list of tools and the call guide in the system message to the estimate once", async () => {
+    // [0.0.7] The backend gives the same number on every tool of the list.
+    ipcMock.listChatTools.mockImplementation(async () =>
+      [
+        tool("files", "read_file", { enabledInChat: true, shown: true }),
+        tool("git", "git_commit", { enabledInChat: true, shown: false }),
+        ...companions,
+      ].map((t) => ({ ...t, guideTokens: 250 })),
+    );
+    await openPanel();
+    expect(screen.getByTitle("Context the tool descriptions take on every request").textContent).toContain(
+      "~690 tokens",
+    );
+  });
+
   it("lists the companions in one line, not as switches", async () => {
     ipcMock.listChatTools.mockImplementation(async () => [
       tool("files", "read_file", { enabledInChat: true, shown: true }),
@@ -903,11 +918,11 @@ describe("ToolsPanel: listening for tool changes (0.0.7 P6)", () => {
 
   it("stops every listener that starts after the panel moved on, and keeps the newest", async () => {
     const { StrictMode } = await import("react");
-    const started: { unlisten: ReturnType<typeof vi.fn>; ready: () => void }[] = [];
+    const started: { unlisten: ReturnType<typeof vi.fn<() => undefined>>; ready: () => void }[] = [];
     ipcMock.onMcpChanged.mockImplementation(
       () =>
-        new Promise<() => void>((resolve) => {
-          const unlisten = vi.fn();
+        new Promise<() => undefined>((resolve) => {
+          const unlisten = vi.fn<() => undefined>();
           started.push({ unlisten, ready: () => resolve(unlisten) });
         }),
     );

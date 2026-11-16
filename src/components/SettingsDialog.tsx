@@ -29,6 +29,7 @@ import { ModelCheck } from "./evals/ModelCheck";
 import { LocalModels } from "./settings/LocalModels";
 import { OtherApps } from "./settings/OtherApps";
 import { Reverse } from "./settings/Reverse";
+import { SameCallLimit } from "./settings/SameCallLimit";
 import type { DiagnosticsReport, ErrorInfo } from "../lib/types";
 
 const THEMES: { value: ThemeChoice; label: string }[] = [
@@ -100,6 +101,7 @@ function General() {
         </p>
       </section>
       {ipc.isTauri() && <StepsPerTurn />}
+      {ipc.isTauri() && <SameCallLimit />}
       {ipc.isTauri() && <DefaultSystemPrompt />}
       {ipc.isTauri() && <Updates />}
       {ipc.isTauri() && <ModelCatalog />}

@@ -332,7 +332,10 @@ fn the_computer_group_is_shown_whole_or_not_at_all() {
     )));
     let desktop = pick(&tools, &["open Notepad and type hello"], &[], &[]);
     assert!(all_of(&desktop), "{desktop:?}");
-    assert!(BASE.iter().all(|n| desktop.contains(&n.to_string())), "{desktop:?}");
+    assert!(
+        BASE.iter().all(|n| desktop.contains(&n.to_string())),
+        "{desktop:?}"
+    );
     assert_eq!(desktop.len(), BASE.len() + 7, "{desktop:?}");
     assert!(desktop.len() > DEFAULT_MAX);
     // One of its tools shown before, used or found: all of them, whatever is asked now.
@@ -344,7 +347,10 @@ fn the_computer_group_is_shown_whole_or_not_at_all() {
     }
     // The list still only grows: a later turn keeps all of them.
     let later = pick(&tools, &["thanks"], &desktop, &[]);
-    assert!(is_subsequence(&desktop, &later) && all_of(&later), "{later:?}");
+    assert!(
+        is_subsequence(&desktop, &later) && all_of(&later),
+        "{later:?}"
+    );
     // The browser shares the screenshot request, and the computer group still comes whole.
     let shot = pick(&tools, &["take a screenshot"], &[], &[]);
     assert!(all_of(&shot), "{shot:?}");

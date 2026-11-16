@@ -450,6 +450,7 @@ async fn a_later_image_file_is_used_and_an_unreadable_one_is_left_out() {
     assert!(choice_for(&store, &model_text).await.left_out);
     let downloaded = dir.path().join("mmproj-Model-F16.gguf");
     std::fs::write(&downloaded, vec![2u8; 70]).unwrap();
+    let before = store.model_by_path(&model_text).await.unwrap().unwrap();
     attach(&store, &model_text, &downloaded).await.unwrap();
     let saved = stored(&store, &model).await;
     assert_eq!(
@@ -459,10 +460,24 @@ async fn a_later_image_file_is_used_and_an_unreadable_one_is_left_out() {
     assert!(saved.unreadable_projectors.is_empty());
     let choice = choice_for(&store, &model_text).await;
     assert_eq!(choice.path, Some(downloaded.display().to_string()));
-    // The other facts of the row stay as they were.
+    // The rest of the row stays as it was.
     let rec = store.model_by_path(&model_text).await.unwrap().unwrap();
-    assert_eq!(rec.repo.as_deref(), Some("someone/Model-GGUF"));
-    assert_eq!(rec.source, store::ModelSource::Download);
+    assert_eq!(
+        (
+            rec.id,
+            &rec.repo,
+            &rec.file_name,
+            rec.size_bytes,
+            rec.source
+        ),
+        (
+            before.id,
+            &before.repo,
+            &before.file_name,
+            before.size_bytes,
+            before.source
+        )
+    );
     assert_eq!(saved.architecture.as_deref(), Some("sample"));
 }
 

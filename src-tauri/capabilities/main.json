@@ -37,6 +37,7 @@
     "allow-send-message",
     "allow-regenerate",
     "allow-stop-generation",
+    "allow-running-turn",
     "allow-runtime-status",
     "allow-list-backends",
     "allow-load-local-model",

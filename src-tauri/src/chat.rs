@@ -6,7 +6,7 @@
 use agent::OpenAiClient;
 use serde_json::json;
 use tauri::ipc::Channel;
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{ChatDetailDto, ChatDto, ChatSummaryDto, MessageDto};
@@ -67,7 +67,9 @@ async fn copied_parts(
         .get_message(copy.message_id)
         .await?
         .filter(|m| m.chat_id == chat_id && m.role == store::Role::User)
-        .ok_or_else(|| AppError::bad_request("That message's attachments can't be sent again here."))?;
+        .ok_or_else(|| {
+            AppError::bad_request("That message's attachments can't be sent again here.")
+        })?;
     let mut parts = Vec::new();
     let mut found = std::collections::HashSet::new();
     for part in from.content.as_array().into_iter().flatten() {
@@ -199,6 +201,9 @@ fn chat_dto(c: &store::Chat) -> ChatDto {
             .unwrap_or_default()
             .thinking_off,
         working_folder: c.working_folder.clone(),
+        // [0.0.7 P5] Filled by `get_chat`, which reads the endpoint.
+        cloud_host: None,
+        endpoint_thinking: false,
     }
 }
 
@@ -357,6 +362,9 @@ pub async fn get_chat(
     // [0.0.4 profile] Thinking as the next turn has it: the user's choice, else the
     // model's tested settings, else on.
     dto.thinking = crate::evals::profile::chat_thinking(&state, &chat).await;
+    // [0.0.7 P5] The "Cloud" mark and Claude's Thinking switch.
+    (dto.cloud_host, dto.endpoint_thinking) =
+        crate::providers::chat_marks(&state, chat.model_ref.as_deref()).await;
     Ok(ChatDetailDto {
         chat: dto,
         messages,
@@ -747,27 +755,17 @@ pub(crate) async fn target_for(
         let id: i64 = id
             .parse()
             .map_err(|_| AppError::bad_request("This chat's model reference is malformed."))?;
-        let (client, _provider) =
+        let (client, provider) =
             crate::providers::client_for(state, store::ProviderId(id)).await?;
         // A model that reports no context (or a failed check) gets the user's setting,
-        // 4,096 by default (8.4).
+        // 4,096 by default (8.4); [0.0.7 P5] a cloud company's model the size the company
+        // documents, and every endpoint at most the size chosen for it in Settings →
+        // Endpoints.
         let reported = client.context_length(model).await.ok().flatten();
         if remember {
             crate::mcp_cmd::remember_context(model_ref, reported);
         }
-        let n_ctx = match reported {
-            Some(n) => n,
-            None => {
-                let stored: Option<serde_json::Value> = state
-                    .store
-                    .get_setting(crate::settings::REMOTE_CONTEXT_LENGTH)
-                    .await
-                    .ok()
-                    .flatten();
-                crate::settings::remote_context_length(stored.as_ref())
-            }
-        };
-        let n_ctx = Some(n_ctx);
+        let n_ctx = Some(crate::providers::context_for(state, &provider, reported).await);
         return Ok(Target {
             client,
             model: model.to_string(),
@@ -822,6 +820,7 @@ pub(crate) fn turn_settings(
     target: &Target,
 ) -> (agent::ModelCaps, agent::RequestTemplate) {
     let status = state.runtime.status();
+    let kind = target.client.config().kind;
     let caps = agent::ModelCaps {
         tools: if target.local {
             status.supports_tools
@@ -833,9 +832,11 @@ pub(crate) fn turn_settings(
             .n_ctx
             .unwrap_or(crate::settings::DEFAULT_REMOTE_CONTEXT),
         local: target.local,
-        thinking: target.local && status.thinking,
+        // [0.0.7 P5] Claude's thinking is switched through its own API.
+        thinking: (target.local && status.thinking) || kind == agent::ProviderKind::Anthropic,
         preserve_reasoning: target.local && status.preserve_reasoning,
-        images_in_tool_results: !target.local,
+        // [0.0.7 P5] Not at OpenAI, whose tool messages take text only.
+        images_in_tool_results: !target.local && agent::images_in_tool_results(kind),
     };
     let mut template = agent::RequestTemplate {
         model: target.model.clone(),
@@ -1011,5 +1012,330 @@ mod tests {
             serde_json::to_value(&none).unwrap()["summary"],
             serde_json::Value::Null
         );
+    }
+
+    async fn new_chat(store: &store::Store) -> store::ChatId {
+        store
+            .create_chat(store::NewChat {
+                title: "t".into(),
+                model_ref: None,
+                system_prompt: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn attachment(store: &store::Store, chat: store::ChatId, mime: &str, name: &str) -> i64 {
+        store
+            .insert_attachment(store::NewAttachment {
+                chat_id: chat,
+                sha256: format!("{name}-sha"),
+                mime: mime.into(),
+                file_name: name.into(),
+                size_bytes: 3,
+                bytes_path: format!("/attachments/{name}"),
+                extracted_text: (mime == "text/plain").then(|| "def add(a, b):".into()),
+            })
+            .await
+            .unwrap()
+            .0
+    }
+
+    async fn insert(
+        store: &store::Store,
+        chat: store::ChatId,
+        parent: Option<store::MessageId>,
+        role: store::Role,
+        content: serde_json::Value,
+    ) -> store::MessageId {
+        store
+            .insert_message(store::NewMessage {
+                chat_id: chat,
+                parent_id: parent,
+                role,
+                content,
+                reasoning: None,
+                status: store::MessageStatus::Complete,
+                model_ref: None,
+                search_text: String::new(),
+            })
+            .await
+            .unwrap()
+    }
+
+    /// [0.0.7 P6] Edit and resend keeps the attachments left in the edit box: the new user
+    /// message carries the same image, document and mention parts as stored (the same files,
+    /// the same text the model was sent), in the message's order, and leaves out the ones
+    /// removed. Before, it carried the new text only, and the model answered without them.
+    #[tokio::test]
+    async fn an_edited_message_keeps_the_attachments_it_was_sent_with() {
+        let store = store::Store::open_in_memory().unwrap();
+        let chat = new_chat(&store).await;
+        let image = attachment(&store, chat, "image/png", "screenshot.png").await;
+        let doc = attachment(&store, chat, "text/plain", "notes.txt").await;
+        let mention = attachment(&store, chat, "text/plain", "calc.py:add").await;
+        let image_part = json!({ "type": "image", "attachment_id": image });
+        let doc_part = json!({
+            "type": "document", "attachment_id": doc, "name": "notes.txt",
+            "cut": { "kept": 10, "total": 20 },
+        });
+        let mention_part = json!({
+            "type": "document", "attachment_id": mention, "name": "calc.py:add",
+            "mention": {
+                "path": "/w/calc.py", "kind": "function", "symbol": "add", "container": null,
+                "startLine": 4, "endLine": 5, "truncated": false,
+            },
+        });
+        let hello = insert(&store, chat, None, store::Role::User, text_content("hi")).await;
+        let reply = insert(
+            &store,
+            chat,
+            Some(hello),
+            store::Role::Assistant,
+            text_content("hello"),
+        )
+        .await;
+        let original = insert(
+            &store,
+            chat,
+            Some(reply),
+            store::Role::User,
+            user_content(
+                "What's wrong here?",
+                vec![image_part.clone(), doc_part.clone(), mention_part.clone()],
+            ),
+        )
+        .await;
+
+        // The text is edited and the document removed in the edit box.
+        let copy = CopyAttachments {
+            message_id: original,
+            attachment_ids: vec![mention, image],
+        };
+        let parts = copied_parts(&store, chat, &copy).await.unwrap();
+        assert_eq!(parts, vec![image_part.clone(), mention_part.clone()]);
+        let generation = Generation::default();
+        let slot = TurnSlot::take(&generation, chat, None).unwrap();
+        let text = "What is wrong in this picture?";
+        let edited = store_user_message(
+            &store,
+            &slot,
+            Some(reply),
+            user_content(text, parts),
+            text.into(),
+        )
+        .await
+        .unwrap();
+        drop(slot);
+        let new = store.get_message(edited).await.unwrap().unwrap();
+        assert_eq!((new.chat_id, new.role), (chat, store::Role::User));
+        assert_eq!(text_of(&new.content), text);
+        assert_eq!(crate::attachments::image_ids(&new.content), vec![image]);
+        assert!(crate::attachments::document_refs(&new.content).is_empty());
+        let mentions = crate::mentions::mention_refs(&new.content);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(
+            (mentions[0].attachment_id, mentions[0].label.as_str()),
+            (mention, "calc.py:add")
+        );
+        // A new version beside the original, which keeps all of its attachments.
+        assert_eq!(
+            store.siblings(edited).await.unwrap(),
+            vec![original, edited]
+        );
+        let old = store.get_message(original).await.unwrap().unwrap();
+        assert_eq!(crate::attachments::document_refs(&old.content).len(), 1);
+
+        // A message with only an image can be sent again: the image and no text.
+        let only = CopyAttachments {
+            message_id: original,
+            attachment_ids: vec![image],
+        };
+        assert_eq!(
+            user_content("", copied_parts(&store, chat, &only).await.unwrap()),
+            json!([{ "type": "text", "text": "" }, image_part])
+        );
+    }
+
+    /// [0.0.7 P6] Only a user message of the same chat lends its attachments, and only ones it
+    /// carries and that belong to that chat; anything else is refused, never dropped silently.
+    #[tokio::test]
+    async fn attachments_are_copied_only_from_a_user_message_of_the_chat() {
+        let store = store::Store::open_in_memory().unwrap();
+        let chat = new_chat(&store).await;
+        let other = new_chat(&store).await;
+        let image = attachment(&store, chat, "image/png", "a.png").await;
+        let elsewhere = attachment(&store, other, "image/png", "b.png").await;
+        let part = |id: i64| json!({ "type": "image", "attachment_id": id });
+        let asked = insert(
+            &store,
+            chat,
+            None,
+            store::Role::User,
+            user_content("look", vec![part(image)]),
+        )
+        .await;
+        let copy = |message_id, ids: Vec<i64>| CopyAttachments {
+            message_id,
+            attachment_ids: ids,
+        };
+        assert!(
+            copied_parts(&store, chat, &copy(asked, vec![image]))
+                .await
+                .is_ok()
+        );
+        // Another chat's message.
+        assert!(
+            copied_parts(&store, other, &copy(asked, vec![image]))
+                .await
+                .is_err()
+        );
+        // A reply of the model.
+        let answer = insert(
+            &store,
+            chat,
+            Some(asked),
+            store::Role::Assistant,
+            user_content("", vec![part(image)]),
+        )
+        .await;
+        assert!(
+            copied_parts(&store, chat, &copy(answer, vec![image]))
+                .await
+                .is_err()
+        );
+        // A message that does not exist.
+        let gone = store::MessageId(asked.0 + 1000);
+        assert!(
+            copied_parts(&store, chat, &copy(gone, vec![image]))
+                .await
+                .is_err()
+        );
+        // An attachment the message does not carry.
+        let err = copied_parts(&store, chat, &copy(asked, vec![image, image + 1000]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "attachment_missing");
+        // A part that names another chat's attachment.
+        let odd = insert(
+            &store,
+            chat,
+            None,
+            store::Role::User,
+            user_content("odd", vec![part(elsewhere)]),
+        )
+        .await;
+        let err = copied_parts(&store, chat, &copy(odd, vec![elsewhere]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "attachment_missing");
+        // The text part is never copied: the new text replaces it.
+        let parts = copied_parts(&store, chat, &copy(asked, vec![image]))
+            .await
+            .unwrap();
+        assert!(parts.iter().all(|p| p["type"] != "text"));
+    }
+
+    /// [0.0.7 P6] A send while another reply runs (in any chat, also one the window does not
+    /// know of because it reloaded meanwhile) is refused as busy before anything is stored:
+    /// before, the user message was stored first and stayed without an answer. The turn's
+    /// hold on the slot ends with it.
+    #[tokio::test]
+    async fn a_send_while_a_reply_runs_stores_nothing() {
+        let store = store::Store::open_in_memory().unwrap();
+        let chat = new_chat(&store).await;
+        let generation = Generation::default();
+        let (running, _) = generation.start(chat.0 + 1).unwrap();
+        let err = TurnSlot::take(&generation, chat, None)
+            .err()
+            .expect("refused while another reply runs");
+        assert_eq!(err.code, "busy");
+        assert!(store.current_path(chat).await.unwrap().is_empty());
+        assert_eq!(generation.running_chat(), Some(chat.0 + 1));
+
+        generation.finish(running);
+        let slot = TurnSlot::take(&generation, chat, None).unwrap();
+        assert_eq!(generation.running_chat(), Some(chat.0));
+        store_user_message(
+            &store,
+            &slot,
+            None,
+            user_content("hello", Vec::new()),
+            "hello".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.current_path(chat).await.unwrap().len(), 1);
+        // A second send in the same chat while this turn runs is refused too.
+        assert_eq!(
+            TurnSlot::take(&generation, chat, None).err().unwrap().code,
+            "busy"
+        );
+        drop(slot);
+        assert_eq!(generation.running_chat(), None);
+    }
+
+    /// [0.0.7 P6] The Stop of a chat stops that chat's reply only, never one running in
+    /// another chat; Stop without a chat (the stop hotkey's path, older callers) stops
+    /// whatever runs.
+    #[test]
+    fn stop_in_a_chat_never_stops_another_chats_reply() {
+        let g = Generation::default();
+        let (_, token) = g.start(1).unwrap();
+        assert!(!stop_reply(&g, Some(store::ChatId(2))));
+        assert!(!token.is_cancelled());
+        assert!(stop_reply(&g, Some(store::ChatId(1))));
+        assert!(token.is_cancelled());
+        let g = Generation::default();
+        assert!(!stop_reply(&g, Some(store::ChatId(1))), "nothing runs");
+        let (_, token) = g.start(1).unwrap();
+        assert!(stop_reply(&g, None));
+        assert!(token.is_cancelled());
+    }
+
+    /// [0.0.7 P6] `running_turn` is the main window's alone: granted there only, registered,
+    /// and it checks the calling window first, like its neighbours.
+    #[test]
+    fn running_turn_is_for_the_main_window_only() {
+        assert!(include_str!("../capabilities/main.json").contains("\"allow-running-turn\""));
+        for other in [
+            include_str!("../capabilities/overlay.json"),
+            include_str!("../capabilities/indicator.json"),
+        ] {
+            assert!(!other.contains("running-turn"));
+        }
+        assert!(
+            include_str!("../commands.list")
+                .lines()
+                .any(|l| l.trim() == "running_turn")
+        );
+        assert!(include_str!("lib.rs").contains("chat::running_turn,"));
+        let body = include_str!("chat.rs")
+            .split_once("pub fn running_turn(")
+            .unwrap()
+            .1;
+        let body = body.split_once('{').unwrap().1;
+        let first = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap();
+        assert_eq!(first, "crate::commands::only_main_window(window.label())?;");
+    }
+
+    /// [0.0.7 P6] `copyAttachments` as the webview sends it (src/lib/ipc.ts `CopyAttachments`).
+    #[test]
+    fn copy_attachments_reads_the_webview_names() {
+        let c: CopyAttachments =
+            serde_json::from_value(json!({ "messageId": 3, "attachmentIds": [5, 7] })).unwrap();
+        assert_eq!(c.message_id, store::MessageId(3));
+        assert_eq!(c.attachment_ids, vec![5, 7]);
+    }
+
+    /// [0.0.7 P6] The webview listens for the event this file sends and calls the commands by
+    /// these names, with the arguments as Tauri names them (`chat_id` is `chatId`).
+    #[test]
+    fn the_webview_uses_these_names() {
+        let ipc = include_str!("../../src/lib/ipc.ts");
+        assert!(ipc.contains(&format!("listen<number | null>(\"{TURN_RUNNING}\"")));
+        assert!(ipc.contains("invoke<number | null>(\"running_turn\")"));
+        assert!(ipc.contains("invoke<void>(\"stop_generation\", { chatId: chatId ?? null })"));
+        assert!(ipc.contains("copyAttachments?: CopyAttachments;"));
     }
 }

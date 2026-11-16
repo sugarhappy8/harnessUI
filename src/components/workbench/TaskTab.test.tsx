@@ -125,6 +125,8 @@ describe("TaskTab", () => {
     });
     expect(apiMock.setTaskStatus).toHaveBeenCalledWith(7, "paused");
     expect(stop).toHaveBeenCalledTimes(1);
+    // [0.0.7 P6] With the chat, so the app stops that chat's reply only.
+    expect(stop).toHaveBeenCalledWith(7);
     expect(screen.getByLabelText("Status: paused")).toBeTruthy();
     expect(send).not.toHaveBeenCalled();
   });

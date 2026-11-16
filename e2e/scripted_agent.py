@@ -196,7 +196,12 @@ def run(fn, c):
 
 
 def idle(s):
-    return s.execute("return document.querySelector('button[aria-label=\"Stop\"]') === null;")
+    # [0.0.7 P6] No reply anywhere: no Stop in the open chat, and no line naming a reply that
+    # runs in another chat (Stop is in that chat only).
+    return s.execute(
+        "return document.querySelector('button[aria-label=\"Stop\"]') === null"
+        " && document.querySelector('[data-turn-elsewhere]') === null;"
+    )
 
 
 def send(s, text):

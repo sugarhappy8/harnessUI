@@ -27,6 +27,11 @@ export interface Chat {
   thinking: boolean;
   /** The folder relative file paths start from. Null: the first approved folder. */
   workingFolder: string | null;
+  /** [0.0.7 P5] The host the chat's messages go to when its model is on an endpoint on the
+   *  internet (the header's "Cloud" mark); null or absent on this computer or the local network. */
+  cloudHost?: string | null;
+  /** [0.0.7 P5] The model is on an endpoint whose thinking the app switches (Claude). */
+  endpointThinking?: boolean;
 }
 
 export type Role = "system" | "user" | "assistant" | "tool";
@@ -221,7 +226,17 @@ export interface BackendInfo {
   error: string | null;
 }
 
-export type ProviderKind = "ollama" | "lmstudio" | "vllm" | "generic";
+/** [0.0.7 P5] With the cloud AI companies: "anthropic" speaks Claude's own Messages API, the
+ *  others the OpenAI-compatible Chat Completions API. */
+export type ProviderKind =
+  | "ollama"
+  | "lmstudio"
+  | "vllm"
+  | "generic"
+  | "anthropic"
+  | "openai"
+  | "openrouter"
+  | "abliteration";
 
 export interface Provider {
   id: number;
@@ -230,6 +245,10 @@ export interface Provider {
   baseUrl: string;
   hasApiKey: boolean;
   enabled: boolean;
+  /** [0.0.7 P5] The server is on the internet, not this computer or the local network. */
+  cloud?: boolean;
+  /** [0.0.7 P5] The context size chosen for this endpoint; null or absent is Automatic. */
+  contextLength?: number | null;
 }
 
 export interface ModelOption {
@@ -599,6 +618,8 @@ export interface ToolDto {
   companion: boolean;
   /** On, and in the list the model gets whatever the next message says. On but not shown: "on request". */
   shown: boolean;
+  /** [0.0.7] Tokens the list of tools and the call guide take in the system message; the same on every tool. */
+  guideTokens?: number;
 }
 
 /** The `toolSelection` setting: choose the tools for each task, and how many a turn shows at most. */

@@ -31,6 +31,13 @@ pub struct ChatDto {
     /// The folder the user chose for relative paths; `None` means the first approved
     /// folder. A turn uses it only while it is still approved for the chat.
     pub working_folder: Option<String>,
+    /// [0.0.7 P5] Where the chat's messages go when its model is on an endpoint on the
+    /// internet (the header's "Cloud" mark): the endpoint's host. `None` for a model on this
+    /// computer or the local network.
+    pub cloud_host: Option<String>,
+    /// [0.0.7 P5] The chat's model is on an endpoint whose thinking the app switches
+    /// (Claude), so the header offers Thinking on and off for it.
+    pub endpoint_thinking: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -312,6 +319,10 @@ pub struct ProviderDto {
     pub base_url: String,
     pub has_api_key: bool,
     pub enabled: bool,
+    /// [0.0.7 P5] The server is on the internet (not this computer or the local network).
+    pub cloud: bool,
+    /// [0.0.7 P5] The context size chosen for this endpoint; `None` is Automatic.
+    pub context_length: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -323,6 +334,9 @@ pub struct SaveProvider {
     pub base_url: String,
     pub api_key: Option<String>,
     pub clear_api_key: bool,
+    /// [0.0.7 P5] The context size chosen for this endpoint; absent or `None` is Automatic.
+    #[serde(default)]
+    pub context_length: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

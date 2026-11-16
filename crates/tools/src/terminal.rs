@@ -1645,7 +1645,11 @@ mod tests {
         let s = fake_powershell(bin.path(), error, 0);
         let out = run(&s, &c, json!({"command": "cd client && npm install"})).await;
         assert!(!out.is_error);
-        assert!(!out.joined_text().contains("[Windows PowerShell 5.1"), "{}", out.joined_text());
+        assert!(
+            !out.joined_text().contains("[Windows PowerShell 5.1"),
+            "{}",
+            out.joined_text()
+        );
         // PowerShell 7 has && and gets no such hint.
         let pwsh = bin.path().join("pwsh");
         std::fs::copy(bin.path().join("powershell"), &pwsh).unwrap();
@@ -1663,7 +1667,11 @@ mod tests {
         )
         .await;
         assert!(out.is_error);
-        assert!(!out.joined_text().contains("[Windows PowerShell"), "{}", out.joined_text());
+        assert!(
+            !out.joined_text().contains("[Windows PowerShell"),
+            "{}",
+            out.joined_text()
+        );
         // A missing Unix program: the not-found note, then the hint.
         let missing = "grep : The term 'grep' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.\n    + FullyQualifiedErrorId : CommandNotFoundException";
         let s = fake_powershell(bin.path(), missing, 1);
@@ -2037,6 +2045,9 @@ mod windows_tests {
         }
         // What succeeded gets no hint.
         let text = run("Write-Output 'a && b'").await;
-        assert!(text.starts_with("Exit code 0") && !text.contains("[Windows PowerShell"), "{text}");
+        assert!(
+            text.starts_with("Exit code 0") && !text.contains("[Windows PowerShell"),
+            "{text}"
+        );
     }
 }

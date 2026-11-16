@@ -983,7 +983,10 @@ async fn the_tool_list_is_in_every_request_while_tools_are_on() {
     let system = |chat: &Value| chat["messages"][0]["content"].as_str().unwrap().to_owned();
     assert_eq!(system(&chats[0]), system(&chats[1]));
     let first = system(&chats[0]);
-    assert!(first.contains("</agent_instructions>\n\n<tool_list>\n"), "{first}");
+    assert!(
+        first.contains("</agent_instructions>\n\n<tool_list>\n"),
+        "{first}"
+    );
     assert!(first.contains("git_commit"), "{first}");
     assert!(first.contains("run it with call_tool"), "{first}");
     assert!(first.contains("<tool_call_guide>"), "{first}");
@@ -995,7 +998,10 @@ async fn the_tool_list_is_in_every_request_while_tools_are_on() {
     turn.tool_guide = Some(listed_tools());
     assert_eq!(h.run(turn).await.status, TurnStatus::Completed);
     let first = system(&h.chats()[0]);
-    assert!(!first.contains("tool_list") && !first.contains("agent_instructions"), "{first}");
+    assert!(
+        !first.contains("tool_list") && !first.contains("agent_instructions"),
+        "{first}"
+    );
 }
 
 /// A model that calls a tool the list names but the turn did not show is told to run it

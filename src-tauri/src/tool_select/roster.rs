@@ -125,7 +125,11 @@ mod tests {
 
     fn on() -> Vec<RegisteredTool> {
         vec![
-            registered("files", "read_file", "Read a text file. Long files are returned in parts."),
+            registered(
+                "files",
+                "read_file",
+                "Read a text file. Long files are returned in parts.",
+            ),
             registered("terminal", "run_command", "Run one shell command."),
             registered("subagents", "run_subagent", "Hand a task to a helper."),
             registered("toolfinder", "find_tools", "Search the tools."),
@@ -193,7 +197,11 @@ mod tests {
         assert!(empty.groups.is_empty());
         assert_eq!(tokens(&empty), 0);
         // An added server named like a built-in one is not the app's own.
-        let lookalike = vec![registered("terminal", "terminal__run_command", "Runs anything.")];
+        let lookalike = vec![registered(
+            "terminal",
+            "terminal__run_command",
+            "Runs anything.",
+        )];
         let guide = tool_guide(&lookalike, &BTreeSet::new(), 32_768);
         assert!(!guide.groups[0].own);
     }

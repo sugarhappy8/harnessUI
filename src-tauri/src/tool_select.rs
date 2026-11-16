@@ -823,8 +823,7 @@ fn select_by_size(input: &Selecting<'_>, by_count: &[String], allowance: u32) ->
             whole_tried.push(server);
             let mut members: Vec<usize> = (0..tools.len())
                 .filter(|i| {
-                    whole_group_of(&tools[*i]) == Some(server)
-                        && by_count.contains(&tools[*i].name)
+                    whole_group_of(&tools[*i]) == Some(server) && by_count.contains(&tools[*i].name)
                 })
                 .collect();
             add(&members, &mut chosen);
@@ -940,7 +939,8 @@ fn select_by_count(input: &Selecting<'_>) -> Vec<String> {
                 || input.wanted.contains(&tools[*i].name)
         };
         let refs: Vec<&Candidate> = members.iter().map(|i| &tools[*i]).collect();
-        let asked = !refs.is_empty() && group_score(server, &refs, &wording, input.skills) >= MATCH_AT;
+        let asked =
+            !refs.is_empty() && group_score(server, &refs, &wording, input.skills) >= MATCH_AT;
         if asked || members.iter().any(named) {
             for index in members {
                 picked.keep(index);

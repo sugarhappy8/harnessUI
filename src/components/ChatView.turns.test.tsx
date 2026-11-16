@@ -19,7 +19,7 @@ const ipcMock = vi.hoisted(() => ({
     const found = fixtures.events.find((e) => e.chatId === opts.chatId && e.text === opts.text);
     for (const e of found?.send ?? [{ type: "finished", status: "complete", message: null }]) onEvent(e);
   }),
-  stopGeneration: vi.fn(async (_chatId?: number | null) => undefined),
+  stopGeneration: vi.fn<(chatId?: number | null) => Promise<void>>(async () => undefined),
 }));
 vi.mock("../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));

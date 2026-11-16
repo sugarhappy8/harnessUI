@@ -10,6 +10,7 @@ switch_branch
 send_message
 regenerate
 stop_generation
+running_turn
 runtime_status
 list_backends
 load_local_model

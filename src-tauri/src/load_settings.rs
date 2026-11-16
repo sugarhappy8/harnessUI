@@ -3064,6 +3064,159 @@ mod tests {
             );
         }
     }
+
+    // ---- 0.0.7 P1: short-memory layers --------------------------------------------------
+
+    /// The header of the owner's Gemma 4 12B (48 layers: five short-memory layers of 8
+    /// KV heads of 256, then a full one of 1 KV head of 512; a window of 1,024 tokens).
+    fn gemma4_header() -> models::gguf::testing::Writer {
+        let pattern: Vec<bool> = (0..48).map(|il| il % 6 != 5).collect();
+        let heads: Vec<u32> = (0..48).map(|il| if il % 6 == 5 { 1 } else { 8 }).collect();
+        models::gguf::testing::Writer::new()
+            .str("general.architecture", "gemma4")
+            .u32("gemma4.block_count", 48)
+            .u32("gemma4.context_length", 262_144)
+            .u32("gemma4.embedding_length", 3840)
+            .u32("gemma4.attention.head_count", 16)
+            .u32_array("gemma4.attention.head_count_kv", &heads)
+            .u32("gemma4.attention.key_length", 512)
+            .u32("gemma4.attention.value_length", 512)
+            .u32("gemma4.attention.sliding_window", 1024)
+            .u32("gemma4.attention.shared_kv_layers", 0)
+            .bool_array("gemma4.attention.sliding_window_pattern", &pattern)
+            .u32("gemma4.attention.key_length_swa", 256)
+            .u32("gemma4.attention.value_length_swa", 256)
+            // Its vocabulary (the working space's output buffer grows with it).
+            .u32("gemma4.vocab_size", 262_144)
+    }
+
+    /// A Gemma 4 file on disk gives the conversation memory llama.cpp allocates: its
+    /// short-memory layers are read from the header every time it is read (nothing about
+    /// them is saved, so a model installed with 0.0.6 gets them too).
+    #[tokio::test]
+    async fn a_gemma4_file_is_read_with_its_short_memory_layers() {
+        let dir = Scratch::new();
+        let path = dir.path().join("gemma-4-12B-Q8_0.gguf");
+        std::fs::write(&path, gemma4_header().build()).unwrap();
+        let facts = read_facts(&path, None).await.unwrap();
+        let header = facts.header.expect("a header");
+        assert_eq!(header.kv.window, 1024);
+        let f16 = header.kv.size(models::summary::KvCacheType::F16);
+        // llama.cpp at 65,536 tokens: 1,024 MiB for the 8 full layers, 480 MiB for the 40
+        // short ones (not the 41 GiB of counting every layer at full length).
+        assert_eq!(f16.at(65_536), 1_577_058_304);
+        let layers = facts.layers.expect("layer facts");
+        assert_eq!(
+            layers
+                .kv_at(65_536, models::summary::KvCacheType::F16.into())
+                .iter()
+                .sum::<u64>(),
+            1_577_058_304
+        );
+    }
+
+    /// The owner's PC (RX 9070 XT, 15,000 MiB free) and Gemma 4 12B Q8_0 (12.7 GB):
+    /// Automatic takes its cap with the whole model on the card, and 65,536 tokens are not
+    /// too large (0.0.6 put part of it on the processor and called 65,536 too large).
+    #[test]
+    fn gemma4_on_the_owners_pc() {
+        let s = models::ModelSummary::from_header(
+            &models::gguf::read_prefix(&gemma4_header().build()).unwrap(),
+        );
+        let facts = ModelFacts {
+            file_name: "gemma-4-12B-coder-heretic-Q8_0.gguf".into(),
+            size_bytes: 12_669_649_120,
+            weights_bytes: 12_669_649_120,
+            projector_bytes: 0,
+            header: Some(HeaderFacts::from_summary(&s)),
+            layers: LayerFacts::from_summary(&s, None),
+        };
+        let card = Machine::from_probes(&pc(), None, None, 24 * GB, &Freed::default());
+        let auto = ModelLoadSettings::default();
+        let r = resolve(&auto, &auto_defaults(), None, Some(&facts), &card);
+        assert_eq!((r.ctx, r.ctx_choice), (32_768, ContextSize::Auto));
+        let info = build_info("/m", &facts, auto, auto_defaults(), r, &card, None);
+        assert_eq!(info.fit, Some(Verdict::Green));
+        assert!(!info.too_large);
+        let at = |n: u32| {
+            info.context_options
+                .iter()
+                .find(|o| o.choice == ContextSize::Fixed(n))
+                .map(|o| o.fit)
+        };
+        assert_eq!(at(32_768), Some(Verdict::Green));
+        // 65,536 tokens need 12.67 + 1.58 + 0.81 (working space) GB: more than the card's
+        // 15.73 GB leave with the 1 GB spare, so part of it would be on the processor,
+        // which has room; 32,768 need 12.67 + 1.04 + 0.81.
+        assert_eq!(at(65_536), Some(Verdict::Yellow));
+    }
+
+    /// The short-memory estimate against the pinned llama.cpp's own measurement: set
+    /// `LLAMA_SERVER_BIN` and `TEST_SWA_GGUF` to a model with sliding-window layers (for
+    /// example Gemma 3 270M, `ggml-org/gemma-3-270m-it-GGUF`); skipped without them. On the
+    /// processor `llama-fit-params` counts the conversation memory in whole MiB; the
+    /// estimate is within one of it at two contexts, in f16 and with Save memory.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_short_memory_estimate_matches_llama_cpp() {
+        let bin = std::env::var_os("LLAMA_SERVER_BIN").filter(|v| !v.is_empty());
+        let gguf = std::env::var_os("TEST_SWA_GGUF").filter(|v| !v.is_empty());
+        let (Some(bin), Some(gguf)) = (bin, gguf) else {
+            eprintln!("skipping: set LLAMA_SERVER_BIN and TEST_SWA_GGUF to run it");
+            return;
+        };
+        let (bin, gguf) = (
+            std::path::PathBuf::from(bin),
+            std::path::PathBuf::from(gguf),
+        );
+        let dir = bin.parent().expect("a folder").to_path_buf();
+        let layout = runtime::RuntimeLayout {
+            installed_dir: None,
+            packs_dir: dir.join("no-packs-here"),
+            dev_override: Some(dir),
+        };
+        let backend = runtime::discover(&layout)
+            .into_iter()
+            .find(|b| b.kind == runtime::BackendKind::Cpu)
+            .expect("the processor backend next to LLAMA_SERVER_BIN");
+        let header = read_facts(&gguf, None)
+            .await
+            .and_then(|f| f.header)
+            .expect("the model's header");
+        assert!(header.kv.window > 0, "TEST_SWA_GGUF has no short-memory layers");
+        for save_memory in [false, true] {
+            let kv = header.kv.size(models::KvLayout::launch(save_memory, false));
+            for ctx in [4096u32, 32_768] {
+                let cfg = runtime::MeasureConfig {
+                    model: gguf.clone(),
+                    ctx,
+                    device: None,
+                    layers: runtime::MeasureLayers::All,
+                    experts_on_cpu: ExpertsOnCpu::None,
+                    kv_in_computer_memory: false,
+                    save_memory,
+                    flash_attn: FlashAttn::Auto,
+                    hip_visible_devices: None,
+                };
+                let rows = runtime::measure(
+                    &backend,
+                    &cfg,
+                    runtime::FIT_PARAMS_TIMEOUT,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("measure {ctx} {save_memory}: {e}"));
+                let measured: u64 = rows.iter().map(|r| r.context_bytes).sum();
+                let estimated = kv.at(u64::from(ctx));
+                eprintln!(
+                    "save memory {save_memory}, {ctx} tokens: llama.cpp {measured} bytes, estimate {estimated}"
+                );
+                assert!(
+                    measured.abs_diff(estimated) < MIB,
+                    "save memory {save_memory}, {ctx} tokens: measured {measured}, estimated {estimated}"
+                );
+            }
+        }
+    }
 }
 
 /// Fine control (0.0.6 item 6, WP10d): storage, checks, the resolver and the marks.

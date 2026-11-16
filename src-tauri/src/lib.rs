@@ -118,6 +118,7 @@ pub fn run() {
             chat::send_message,
             chat::regenerate,
             chat::stop_generation,
+            chat::running_turn,
             attachments::get_attachment,
             mentions::search_mentions,
             mentions::resolve_mentions,

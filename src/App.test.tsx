@@ -36,7 +36,7 @@ const ipcMock = vi.hoisted(() => {
     getChat: vi.fn(async () => {
       throw new Error("no chat");
     }),
-    stopGeneration: vi.fn(async (_chatId?: number | null) => undefined),
+    stopGeneration: vi.fn<(chatId?: number | null) => Promise<void>>(async () => undefined),
   };
 });
 vi.mock("./lib/ipc", () => ipcMock);

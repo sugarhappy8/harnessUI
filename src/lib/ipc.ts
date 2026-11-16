@@ -229,7 +229,7 @@ export function onRuntimeStatus(handler: (s: RuntimeStatus) => void): Promise<Un
   return listen<RuntimeStatus>("runtime-status", (e) => handler(e.payload));
 }
 
-// Providers (OpenAI-compatible endpoints)
+// Providers (endpoints: servers on this computer or the network, and cloud AI companies)
 export const listProviders = () => invoke<Provider[]>("list_providers");
 export const saveProvider = (p: {
   id: number | null;
@@ -238,6 +238,8 @@ export const saveProvider = (p: {
   baseUrl: string;
   apiKey: string | null;
   clearApiKey: boolean;
+  /** [0.0.7 P5] The context size chosen for the endpoint; absent or null is Automatic. */
+  contextLength?: number | null;
 }) => invoke<Provider>("save_provider", { provider: p });
 export const deleteProvider = (id: number) => invoke<void>("delete_provider", { id });
 export const testProvider = (id: number) => invoke<ModelOption[]>("test_provider", { id });

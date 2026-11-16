@@ -145,22 +145,13 @@ async fn model_for(state: &AppState, model_ref: &str) -> AppResult<(Model, Ident
     let rest = model_ref.strip_prefix("remote:").ok_or_else(malformed)?;
     let (id, model) = rest.split_once(':').ok_or_else(malformed)?;
     let id: i64 = id.parse().map_err(|_| malformed())?;
-    let (client, _) = crate::providers::client_for(state, store::ProviderId(id)).await?;
+    let (client, provider) = crate::providers::client_for(state, store::ProviderId(id)).await?;
     let identity = profile::identity_for(state, model_ref)
         .await
         .ok_or_else(malformed)?;
-    let n_ctx = match client.context_length(model).await.ok().flatten() {
-        Some(n) => n,
-        None => {
-            let stored: Option<serde_json::Value> = state
-                .store
-                .get_setting(crate::settings::REMOTE_CONTEXT_LENGTH)
-                .await
-                .ok()
-                .flatten();
-            crate::settings::remote_context_length(stored.as_ref())
-        }
-    };
+    // [0.0.7 P5] The context a chat with this endpoint plans with.
+    let reported = client.context_length(model).await.ok().flatten();
+    let n_ctx = crate::providers::context_for(state, &provider, reported).await;
     let caps = agent::ModelCaps {
         tools: true,
         vision: true,
@@ -168,7 +159,8 @@ async fn model_for(state: &AppState, model_ref: &str) -> AppResult<(Model, Ident
         local: false,
         thinking: false,
         preserve_reasoning: false,
-        images_in_tool_results: true,
+        // [0.0.7 P5] Not at OpenAI, whose tool messages take text only.
+        images_in_tool_results: agent::images_in_tool_results(client.config().kind),
     };
     let template = agent::RequestTemplate {
         model: model.to_owned(),

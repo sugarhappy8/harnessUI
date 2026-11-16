@@ -347,8 +347,7 @@ fn list_block(finder: bool, groups: &[CleanGroup], form: ListForm) -> String {
 
 const CALLS: &str = "Tool calls: the arguments are one JSON object that fits the tool's \
                      schema, with double quotes, no comments and no trailing commas.";
-const WINDOWS_PATHS: &str =
-    "In JSON strings write each backslash twice (C:\\\\Users\\\\me), or use / instead (C:/Users/me).";
+const WINDOWS_PATHS: &str = "In JSON strings write each backslash twice (C:\\\\Users\\\\me), or use / instead (C:/Users/me).";
 const PATHS: &str = "File paths are absolute, or relative to the working folder.";
 
 const POWERSHELL: &[&str] = &[
