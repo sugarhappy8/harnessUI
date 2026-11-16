@@ -984,15 +984,33 @@ pub async fn import_model(
         .ok_or_else(|| AppError::internal("the imported model was not saved"))
 }
 
+/// Takes a model off the Installed list; for a download with `delete_files`, its files go
+/// too ([`removal_plan`]). Returns a note for the user when files were left in place.
+///
+/// 0.0.7 (P6): what goes from disk is worked out before anything is unloaded, and a model
+/// whose file is gone, or outside the models folder (a folder used before "Change folder"),
+/// still leaves the list: before, it stayed there for good.
 #[tauri::command]
 pub async fn delete_model(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
     delete_files: bool,
-) -> AppResult<()> {
+) -> AppResult<Option<String>> {
     let Some(rec) = state.store.get_model(store::ModelId(id)).await? else {
         return Err(AppError::not_found("model"));
+    };
+    let removal = if delete_files && rec.source == ModelSource::Download {
+        let others: Vec<store::ModelRecord> = state
+            .store
+            .list_models()
+            .await?
+            .into_iter()
+            .filter(|m| m.id != rec.id)
+            .collect();
+        removal_plan(&rec, &models_dir(&app).await, &others)
+    } else {
+        Removal::default()
     };
     // The same file loaded under another spelling (a link, a mapped drive) is unloaded too,
     // so its files are never deleted while llama-server has them open (0.0.6 item 8).
@@ -1000,27 +1018,89 @@ pub async fn delete_model(
     if loaded.is_some_and(|p| crate::model_options::same_file(&p, &rec.path)) {
         state.runtime.unload().await;
     }
-    if delete_files && rec.source == ModelSource::Download {
-        // Only files inside the models folder are deleted, and all shards of a split model.
-        let dir = models_dir(&app).await;
-        let path = PathBuf::from(&rec.path);
-        let inside = dunce::canonicalize(&path)
-            .ok()
-            .zip(dunce::canonicalize(&dir).ok())
-            .is_some_and(|(p, d)| p.starts_with(d));
-        if !inside {
-            return Err(AppError::bad_request(
-                "Only files inside the models folder are deleted; this one was left in place.",
-            ));
-        }
-        for f in shard_siblings(&path) {
-            let _ = std::fs::remove_file(f);
-        }
+    for f in &removal.delete {
+        let _ = std::fs::remove_file(f);
     }
     state.store.delete_model(rec.id).await?;
     crate::model_options::forget(&state.store, &rec.path).await; // [0.0.6 item 8, WP8]
     state.runtime.forget_unloaded(&rec.path);
-    Ok(())
+    Ok(kept_note(removal.outside.len()))
+}
+
+/// What Delete removes from disk for a downloaded model (0.0.7, P6).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Removal {
+    /// Files to delete.
+    delete: Vec<PathBuf>,
+    /// Files left in place because they are outside the models folder.
+    outside: Vec<PathBuf>,
+}
+
+/// The files Delete removes for the downloaded model `rec`: every shard of a split model
+/// and its image file. Only files inside the models folder are deleted (the rest is left
+/// in place and said so), and none that another installed model uses (`others`: two models
+/// of one repository can share one image file). A file already gone is left out, so the
+/// model just leaves the list.
+fn removal_plan(
+    rec: &store::ModelRecord,
+    models_dir: &Path,
+    others: &[store::ModelRecord],
+) -> Removal {
+    let stored: StoredSummary =
+        serde_json::from_value(rec.gguf_summary.clone()).unwrap_or_default();
+    let dir = dunce::canonicalize(models_dir).ok();
+    let mut files = shard_siblings(Path::new(&rec.path));
+    files.extend(stored.projector.map(PathBuf::from));
+    let mut out = Removal::default();
+    for file in files {
+        let Ok(real) = dunce::canonicalize(&file) else {
+            continue;
+        };
+        if !real.is_file() || out.delete.contains(&file) || used_by_installed(others, &file) {
+            continue;
+        }
+        if dir.as_ref().is_some_and(|d| real.starts_with(d)) {
+            out.delete.push(file);
+        } else if !out.outside.contains(&file) {
+            out.outside.push(file);
+        }
+    }
+    out
+}
+
+/// What Delete says when it left files in place because they are outside the models folder.
+fn kept_note(outside: usize) -> Option<String> {
+    match outside {
+        0 => None,
+        1 => Some(
+            "Removed from the list. Its file is outside the models folder, so it was left where it is."
+                .into(),
+        ),
+        _ => Some(
+            "Removed from the list. Its files are outside the models folder, so they were left where they are."
+                .into(),
+        ),
+    }
+}
+
+/// 0.0.7 (P6): whether `file` is a file of a model on the Installed list (any shard of it),
+/// or an image file one of them uses: the one recorded on its row, or one next to it (a load
+/// finds those, [`image_file::beside`]). Downloads can share such files: two models of one
+/// repository can share one image file.
+pub(crate) fn used_by_installed(models: &[store::ModelRecord], file: &Path) -> bool {
+    let file = file.display().to_string();
+    let same = |p: &Path| crate::model_options::same_file(&p.display().to_string(), &file);
+    models.iter().any(|m| {
+        let model = Path::new(&m.path);
+        let stored: StoredSummary =
+            serde_json::from_value(m.gguf_summary.clone()).unwrap_or_default();
+        shard_siblings(model).iter().any(|p| same(p))
+            || stored
+                .projector
+                .as_deref()
+                .is_some_and(|p| same(Path::new(p)))
+            || image_file::beside(model).iter().any(|p| same(p))
+    })
 }
 
 /// All shards of a split model (`-00001-of-00003.gguf`), or just the file.

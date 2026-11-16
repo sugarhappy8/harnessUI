@@ -233,7 +233,10 @@ async function (opts) {
 
   // ---- the inert copy -------------------------------------------------------------------
   const doc = document.implementation.createHTMLDocument('');
-  const DROP = new Set(['script', 'noscript', 'base', 'object', 'embed', 'applet', 'frame', 'frameset', 'portal', 'fencedframe', 'param']);
+  // Elements that run code or load other documents, and the legacy raw-text elements whose
+  // text the serialiser writes unescaped (`<xmp>` holding `</xmp><script>` would become a
+  // script in the copy).
+  const DROP = new Set(['script', 'noscript', 'base', 'object', 'embed', 'applet', 'frame', 'frameset', 'portal', 'fencedframe', 'param', 'xmp', 'noembed', 'noframes', 'plaintext']);
   const SKIP_ATTRS = new Set(['nonce', 'integrity', 'srcdoc', 'crossorigin', 'ping', 'http-equiv', 'formaction', 'shadowrootmode', 'shadowroot', 'shadowrootdelegatesfocus', 'shadowrootclonable', 'shadowrootserializable']);
   const URL_ATTRS = new Set(['src', 'href', 'poster', 'action', 'data', 'background', 'xlink:href', 'codebase', 'cite', 'longdesc', 'manifest', 'icon', 'lowsrc', 'dynsrc', 'to', 'from', 'values', 'by']);
 
@@ -492,10 +495,9 @@ async function (opts) {
       if (ch.localName === 'head' && !head) head = ch;
       if (ch.localName === 'body' && !body) body = ch;
     }
-    if (!head) {
-      head = doc.createElement('head');
-      rootClone.insertBefore(head, rootClone.firstChild);
-    }
+    if (!head) head = doc.createElement('head');
+    // The head comes first, so the policy below is in force for everything after it.
+    rootClone.insertBefore(head, rootClone.firstChild);
     if (!body) {
       body = doc.createElement('body');
       rootClone.appendChild(body);

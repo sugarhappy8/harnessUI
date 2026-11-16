@@ -175,9 +175,208 @@ fn download_error_to_app(e: &models::download::DownloadError) -> AppError {
     }
 }
 
+// ---- 0.0.7 (P6): what a group's rows mean -------------------------------------------
+
+/// Whether the file at `dest` is whole: `size` bytes at its final name. A download gets its
+/// final name only once it finished and was checked (`download_file` renames it then).
+fn file_whole(dest: &Path, size: u64) -> bool {
+    std::fs::metadata(dest).is_ok_and(|m| m.is_file() && m.len() == size)
+}
+
+/// Whether a row's file needs no more downloading: the group is done with it, or the file
+/// is whole and only the group's last step (adding the model) is left, or failed.
+fn file_done(status: DownloadStatus, whole: bool) -> bool {
+    match status {
+        DownloadStatus::Completed => true,
+        DownloadStatus::Verifying | DownloadStatus::Failed => whole,
+        _ => false,
+    }
+}
+
+/// What Resume makes of a row: `None` leaves it (the group is done with it); a whole file
+/// waits for the last step again (`Verifying`), so it is never downloaded again; any other
+/// file is downloaded (`Queued`), going on from its partial file.
+fn status_on_resume(status: DownloadStatus, whole: bool) -> Option<DownloadStatus> {
+    if status == DownloadStatus::Completed {
+        None
+    } else if file_done(status, whole) {
+        Some(DownloadStatus::Verifying)
+    } else {
+        Some(DownloadStatus::Queued)
+    }
+}
+
+/// The status the UI shows for a group, from its rows and whether its task runs. A finished
+/// file (`Verifying`) is progress only while the task runs: a group paused after its first
+/// file is paused, and one that stopped for any other reason can be resumed.
+fn group_status(rows: &[DownloadStatus], running: bool) -> DownloadStatus {
+    use DownloadStatus as S;
+    if rows.iter().all(|s| *s == S::Completed) {
+        S::Completed
+    } else if rows.contains(&S::Failed) {
+        S::Failed
+    } else if rows.contains(&S::Cancelled) {
+        S::Cancelled
+    } else if rows.contains(&S::Paused) || !running {
+        S::Paused
+    } else if rows
+        .iter()
+        .any(|s| matches!(s, S::Downloading | S::Verifying))
+    {
+        S::Downloading
+    } else {
+        S::Queued
+    }
+}
+
+/// Whether a group was going when the app last stopped, so it goes on by itself at the next
+/// start: a file to download or the last step left, and nothing paused, failed or cancelled.
+fn resumes_at_start(rows: &[DownloadStatus]) -> bool {
+    use DownloadStatus as S;
+    rows.iter()
+        .any(|s| matches!(s, S::Downloading | S::Queued | S::Verifying))
+        && !rows
+            .iter()
+            .any(|s| matches!(s, S::Paused | S::Failed | S::Cancelled))
+}
+
+/// What a new download makes of the downloads not finished yet that write the same files.
+#[derive(Debug, PartialEq, Eq)]
+enum Overlap {
+    /// None of its files is being downloaded: it starts.
+    None,
+    /// A download of all its files is there already (a second click on Download, the same
+    /// model picked again): that one is it.
+    Same(String),
+    /// Another download fetches some of its files (two models of one repository that share
+    /// an image file): it waits until that one is done.
+    Part,
+}
+
+/// Compares the files of a new download (`dests`) with the downloads not finished yet
+/// (anything but done or cancelled: a paused or failed one can go on), which would write
+/// the same partial files at the same time.
+fn overlap(rows: &[store::Download], dests: &[String]) -> Overlap {
+    let busy: Vec<&store::Download> = rows
+        .iter()
+        .filter(|r| {
+            !matches!(
+                r.status,
+                DownloadStatus::Completed | DownloadStatus::Cancelled
+            )
+        })
+        .filter(|r| dests.contains(&r.dest_path))
+        .collect();
+    let Some(first) = busy.first() else {
+        return Overlap::None;
+    };
+    let one_group = busy.iter().all(|r| r.group_id == first.group_id);
+    let all_there = dests
+        .iter()
+        .all(|d| busy.iter().any(|r| &r.dest_path == d));
+    if one_group && all_there {
+        Overlap::Same(first.group_id.clone())
+    } else {
+        Overlap::Part
+    }
+}
+
+/// A new download some of whose files another download fetches ([`Overlap::Part`]).
+fn already_downloading() -> AppError {
+    AppError::new(
+        "already_downloading",
+        "One of this model's files is already being downloaded.",
+        "Wait until that download is done (see Downloads), then try again.",
+        String::new(),
+    )
+}
+
+/// What a group says when its files are all there but its last step failed: adding the
+/// model to Installed, or recording the image file on its model. Resume tries that step
+/// again without downloading anything.
+fn last_step_error(image_file: bool, e: &AppError) -> AppError {
+    let what = if image_file {
+        "The image file was downloaded, but it could not be added to its model."
+    } else {
+        "The model was downloaded, but it could not be added to Installed."
+    };
+    AppError::new(
+        "download_not_added",
+        format!("{what} {}", e.message),
+        "Resume to try again. If it fails again, cancel the download.",
+        format!("{}: {}", e.code, e.details),
+    )
+}
+
+/// Readies the rows of a stopped group to go on, each as [`status_on_resume`] says, with its
+/// error cleared.
+async fn requeue(store: &store::Store, group: &str) -> AppResult<()> {
+    for row in store.list_downloads(Some(group.to_string())).await? {
+        let whole = file_whole(Path::new(&row.dest_path), row.size_bytes);
+        if let Some(status) = status_on_resume(row.status, whole) {
+            store
+                .update_download(
+                    row.id,
+                    DownloadPatch {
+                        status: Some(status),
+                        error: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Marks every row of `group` failed with `err`, for the UI ([`last_step_error`]).
+async fn mark_failed(store: &store::Store, group: &str, err: &AppError) -> AppResult<()> {
+    let text = serde_json::to_string(err).unwrap_or_default();
+    for row in store.list_downloads(Some(group.to_string())).await? {
+        store
+            .update_download(
+                row.id,
+                DownloadPatch {
+                    status: Some(DownloadStatus::Failed),
+                    error: Some(Some(text.clone())),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// The finished files Cancel deletes besides the partial ones: those the group finished
+/// (whole at their final name, never added to Installed), except a file an installed model
+/// uses (`in_use`: its own file, or its image file, which two models can share).
+fn finished_files_to_delete(
+    rows: &[store::Download],
+    in_use: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    rows.iter()
+        .filter(|r| {
+            matches!(
+                r.status,
+                DownloadStatus::Verifying | DownloadStatus::Failed
+            )
+        })
+        .filter(|r| file_whole(Path::new(&r.dest_path), r.size_bytes))
+        .map(|r| PathBuf::from(&r.dest_path))
+        .filter(|p| !in_use(p))
+        .collect()
+}
+
 impl DownloadManager {
     fn emit(&self, app: &AppHandle, dto: DownloadGroupDto) {
         let _ = app.emit_to(crate::MAIN_WINDOW, "download-progress", dto);
+    }
+
+    /// Whether the group's task runs now.
+    fn is_running(&self, group: &str) -> bool {
+        self.running
+            .lock()
+            .is_ok_and(|r| r.contains_key(group))
     }
 
     /// Builds the DTO for one group from its rows and live progress.
@@ -191,6 +390,8 @@ impl DownloadManager {
             return Ok(None);
         }
         let meta: Option<GroupMeta> = state.store.get_setting(&meta_key(group)).await?;
+        // 0.0.7 (P6): the status is worked out knowing whether the task runs.
+        let running = self.is_running(group);
         let live = self.live.lock().ok();
         let live = live.as_ref().and_then(|l| l.get(group));
         let bytes_total = rows.iter().map(|r| r.size_bytes).sum();
@@ -201,21 +402,8 @@ impl DownloadManager {
                     .unwrap_or(r.bytes_done)
             })
             .sum();
-        let status = if rows.iter().all(|r| r.status == DownloadStatus::Completed) {
-            DownloadStatus::Completed
-        } else if let Some(r) = rows.iter().find(|r| r.status == DownloadStatus::Failed) {
-            r.status
-        } else if rows.iter().any(|r| {
-            r.status == DownloadStatus::Downloading || r.status == DownloadStatus::Verifying
-        }) {
-            DownloadStatus::Downloading
-        } else if rows.iter().any(|r| r.status == DownloadStatus::Paused) {
-            DownloadStatus::Paused
-        } else if rows.iter().all(|r| r.status == DownloadStatus::Cancelled) {
-            DownloadStatus::Cancelled
-        } else {
-            DownloadStatus::Queued
-        };
+        let statuses: Vec<DownloadStatus> = rows.iter().map(|r| r.status).collect();
+        let status = group_status(&statuses, running);
         let error = rows
             .iter()
             .find_map(|r| r.error.as_ref())
@@ -258,6 +446,10 @@ impl DownloadManager {
     }
 
     /// Registers a new group and starts it.
+    ///
+    /// 0.0.7 (P6): two downloads never write one file at once. When a download not finished
+    /// yet fetches all of these files already, that one is returned (and goes on if it had
+    /// stopped); when it fetches only some of them, this one is refused until it is done.
     pub async fn start(
         self: &Arc<Self>,
         app: &AppHandle,
@@ -265,6 +457,22 @@ impl DownloadManager {
         files: Vec<(FileSpec, PathBuf)>,
     ) -> AppResult<String> {
         let state = app.state::<AppState>();
+        let dests: Vec<String> = files
+            .iter()
+            .map(|(_, dest)| dest.display().to_string())
+            .collect();
+        let starting = self.starting.lock().await;
+        match overlap(&state.store.list_downloads(None).await?, &dests) {
+            Overlap::None => {}
+            Overlap::Same(group) => {
+                drop(starting);
+                if !self.is_running(&group) {
+                    self.resume(app, &group).await?;
+                }
+                return Ok(group);
+            }
+            Overlap::Part => return Err(already_downloading()),
+        }
         let group = uuid::Uuid::new_v4().to_string();
         state.store.set_setting(&meta_key(&group), &meta).await?;
         for (spec, dest) in &files {
@@ -282,28 +490,29 @@ impl DownloadManager {
                 .await?;
         }
         self.spawn_group(app.clone(), group.clone());
+        drop(starting);
         Ok(group)
     }
 
-    /// Resumes every group that was running or queued when the app last stopped.
+    /// Resumes every group that was running or queued when the app last stopped. 0.0.7
+    /// (P6): not one the user paused, or one that failed ([`resumes_at_start`]).
     pub async fn resume_interrupted(self: &Arc<Self>, app: &AppHandle) {
         let state = app.state::<AppState>();
         let Ok(rows) = state.store.list_downloads(None).await else {
             return;
         };
-        let mut groups: Vec<String> = Vec::new();
+        let mut groups: Vec<(String, Vec<DownloadStatus>)> = Vec::new();
         for r in rows {
-            if matches!(
-                r.status,
-                DownloadStatus::Downloading | DownloadStatus::Queued | DownloadStatus::Verifying
-            ) && !groups.contains(&r.group_id)
-            {
-                groups.push(r.group_id);
+            match groups.iter_mut().find(|(g, _)| *g == r.group_id) {
+                Some((_, statuses)) => statuses.push(r.status),
+                None => groups.push((r.group_id, vec![r.status])),
             }
         }
-        for g in groups {
-            tracing::info!(group = %g, "resuming an interrupted download");
-            self.spawn_group(app.clone(), g);
+        for (g, statuses) in groups {
+            if resumes_at_start(&statuses) {
+                tracing::info!(group = %g, "resuming an interrupted download");
+                self.spawn_group(app.clone(), g);
+            }
         }
     }
 
@@ -359,12 +568,10 @@ impl DownloadManager {
         let client = crate::hub::hf_client(app).await?;
         let rows = state.store.list_downloads(Some(group.to_string())).await?;
         for row in rows {
-            let finished_file = std::fs::metadata(&row.dest_path)
-                .map(|m| m.len() == row.size_bytes)
-                .unwrap_or(false);
-            if row.status == DownloadStatus::Completed
-                || (row.status == DownloadStatus::Verifying && finished_file)
-            {
+            if file_done(
+                row.status,
+                file_whole(Path::new(&row.dest_path), row.size_bytes),
+            ) {
                 continue;
             }
             let spec = FileSpec {
@@ -453,9 +660,17 @@ impl DownloadManager {
                 }
             }
         }
-        match meta.image_file_for.as_deref() {
-            Some(model) => self.attach_image_file(app, group, &meta, model).await?,
-            None => self.register_model(app, group, &meta).await?,
+        let added = match meta.image_file_for.as_deref() {
+            Some(model) => self.attach_image_file(app, group, &meta, model).await,
+            None => self.register_model(app, group, &meta).await,
+        };
+        if let Err(e) = added {
+            // 0.0.7 (P6): the group says why it stopped instead of staying "downloading"
+            // (and starting again at every start of the app). Its files stay: Resume tries
+            // this step again without downloading them.
+            let err = last_step_error(meta.image_file_for.is_some(), &e);
+            mark_failed(&state.store, group, &err).await?;
+            return Err(err);
         }
         for row in state.store.list_downloads(Some(group.to_string())).await? {
             state
@@ -616,28 +831,17 @@ impl DownloadManager {
         }
     }
 
+    /// Goes on with a stopped group. 0.0.7 (P6): a file that finished stays as it is and is
+    /// never downloaded again ([`status_on_resume`]).
     pub async fn resume(self: &Arc<Self>, app: &AppHandle, group: &str) -> AppResult<()> {
         let state = app.state::<AppState>();
-        for row in state.store.list_downloads(Some(group.to_string())).await? {
-            if row.status != DownloadStatus::Completed {
-                state
-                    .store
-                    .update_download(
-                        row.id,
-                        DownloadPatch {
-                            status: Some(DownloadStatus::Queued),
-                            error: Some(None),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-            }
-        }
+        requeue(&state.store, group).await?;
         self.spawn_group(app.clone(), group.to_string());
         Ok(())
     }
 
-    /// Stops the group, deletes its partial files and forgets it.
+    /// Stops the group, deletes its partial files and forgets it. 0.0.7 (P6): the files it
+    /// finished go too, unless an installed model uses them ([`finished_files_to_delete`]).
     pub async fn cancel(&self, app: &AppHandle, group: &str) -> AppResult<()> {
         let token = self
             .running
@@ -656,6 +860,17 @@ impl DownloadManager {
             if row.status != DownloadStatus::Completed {
                 models::download::discard_partial(Path::new(&row.dest_path)).await;
             }
+        }
+        match state.store.list_models().await {
+            Ok(installed) => {
+                let in_use = |p: &Path| crate::hub::used_by_installed(&installed, p);
+                for path in finished_files_to_delete(&rows, in_use) {
+                    if let Err(e) = tokio::fs::remove_file(&path).await {
+                        tracing::warn!("a finished file of a cancelled download stayed: {e}");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("the finished files of a cancelled download stayed: {e}"),
         }
         state.store.delete_download_group(group.to_string()).await?;
         let _ = state.store.delete_setting(&meta_key(group)).await;

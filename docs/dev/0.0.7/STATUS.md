@@ -48,3 +48,13 @@ and `README.md`.
   Under independent review. To re-check in the integration e2e run: "stop and regenerate"
   and "regenerate after error" failed in P6a's real-app run under 100% CPU (text present in
   the rows, `innerText` caught up ~1.5 s later because of `content-visibility: auto`).
+- P6a review: nothing critical or major; five minor findings (ToolsPanel could still save the
+  previous chat's tools in a narrow window; the Task tab ignored a reply known only after a
+  reload; the edit box could send while a reply ran and blank it; a StrictMode late answer
+  could leave a reply shown as running; copied attachments skipped the per-message limits)
+  plus nits. All being fixed (P6a-r1).
+- P2 (image files), P1 (memory estimates, plus `--ctx-checkpoints 8`), P5 (cloud endpoints)
+  built. P2 and P5 under independent review; P1 finishing the checkpoint change.
+- Disk filled up once (139 MB free): a reviewer had built its own 5.7 GB target. Deleted;
+  agents told to build only in the shared target.
+
