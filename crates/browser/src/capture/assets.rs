@@ -540,6 +540,9 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
                     }
                 }
                 let local = e.local_name().into_inner().to_string();
+                if !xml_name(e.name().into_inner()) {
+                    return None;
+                }
                 if open.is_empty() && !(is_svg && local == "svg") {
                     return None;
                 }
@@ -550,6 +553,10 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
                 let mut target = String::new();
                 for a in e.attributes() {
                     let a = a.ok()?;
+                    // Not well-formed XML: a name that is not one, or a `<` in a value.
+                    if !xml_name(a.key.into_inner()) || a.value.contains(&b'<') {
+                        return None;
+                    }
                     if a.key.as_namespace_binding().is_some() {
                         continue;
                     }
@@ -663,6 +670,13 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
         }
     }
     (roots == 1 && open.is_empty() && skipping == 0).then_some(out)
+}
+
+/// An XML name (the ASCII part of the rule; other letters are allowed as they are).
+fn xml_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_' || c == ':')
+        && chars.all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '\u{B7}'))
 }
 
 /// Text of a kept element: escaped, or kept for the `<style>` being read.
@@ -870,6 +884,8 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg"/><svg xmlns="http://www.w3.org/2000/svg"/>"#,
             r#"text<svg xmlns="http://www.w3.org/2000/svg"/>"#,
             r#"<svg xmlns="http://www.w3.org/2000/svg">&nbsp;</svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><1 a="x"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g a="<img src=x onerror=y>"/></svg>"#,
         ] {
             assert!(neutralise_svg(bad).is_none(), "{bad}");
         }

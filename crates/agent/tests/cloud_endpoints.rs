@@ -1377,6 +1377,124 @@ async fn two_chats_with_the_same_replies_never_exchange_thinking() {
     assert!(!lone.contains("SIG["), "{lone}");
 }
 
+// ---- review findings (0.0.7 P5 r3) ----------------------------------------------------------
+
+#[tokio::test]
+async fn a_helpers_conversation_is_its_own_and_ends_with_it() {
+    // A helper's client is the chat's client for a conversation of its own: its steps get
+    // its thinking back, the chat's requests never do (even with the same words), and once
+    // the helper has ended nothing of it is kept.
+    let server = signing_claude().await;
+    let chat = claude(&server).for_conversation("chat 9");
+    let helper = chat.clone().for_conversation("chat 9 helper 1");
+    let task = vec![
+        ChatMessage::system("You help with files."),
+        ChatMessage::user("Helper: list the files"),
+    ];
+    let mut next = task.clone();
+    next.push(ChatMessage::assistant("Done."));
+    next.push(ChatMessage::user("Helper: and then?"));
+    send_thinking(&helper, task).await;
+    send_thinking(&helper, next.clone()).await;
+    send_thinking(&chat, next.clone()).await;
+    helper.end_conversation();
+    send_thinking(&helper, next).await;
+    let posts = messages_requests(&server);
+    assert_eq!(posts.len(), 4);
+    let step = posts[1].json().to_string();
+    assert!(step.contains("SIG[Helper: list the files]"), "{step}");
+    let in_chat = posts[2].json().to_string();
+    assert!(!in_chat.contains("SIG["), "{in_chat}");
+    let after_end = posts[3].json().to_string();
+    assert!(!after_end.contains("SIG["), "{after_end}");
+}
+
+#[tokio::test]
+async fn a_short_key_a_local_server_echoes_is_scrubbed() {
+    // A local server started with `--api-key secret7` that echoes the key it got, in a
+    // refused model list and in an error event inside an accepted stream.
+    let server = MockServer::start(|request: &Recorded| {
+        let key = request
+            .header("x-api-key")
+            .or_else(|| {
+                request
+                    .header("authorization")
+                    .and_then(|value| value.strip_prefix("Bearer "))
+            })
+            .unwrap_or_default()
+            .to_owned();
+        if request.method == "GET" {
+            return Reply::json(
+                400,
+                &error("invalid_request_error", &format!("bad key {key} sent")),
+            );
+        }
+        let event = event(
+            "error",
+            &json!({"type": "error", "error": {"type": "overloaded_error", "message": format!("upstream said {key}")}}),
+        );
+        sse(event.into_bytes())
+    })
+    .await;
+    for kind in [ProviderKind::Vllm, ProviderKind::Anthropic] {
+        let mut config = ClientConfig::new(server.url(), kind);
+        config.api_key = Some("secret7".into());
+        let client = OpenAiClient::new(config).unwrap();
+        let err = client.list_models().await.unwrap_err();
+        let shown = format!("{err} {}", err.user_message());
+        assert!(!shown.contains("secret7"), "{kind:?}: {shown}");
+        assert!(shown.contains("bad key [API key] sent"), "{kind:?}: {shown}");
+        let mut request = simple_request("claude-opus-5-5");
+        request.max_tokens = Some(100);
+        let mut stream = client
+            .stream_chat(&request, CancellationToken::new())
+            .await
+            .unwrap();
+        let mut failure = None;
+        while let Some(item) = stream.next().await {
+            if let Err(err) = item {
+                failure = Some(err);
+                break;
+            }
+        }
+        let err = failure.expect("the stream ends with the error");
+        let shown = format!("{err} {}", err.user_message());
+        assert!(!shown.contains("secret7"), "{kind:?}: {shown}");
+        assert!(
+            shown.contains("upstream said [API key]"),
+            "{kind:?}: {shown}"
+        );
+    }
+    // The key really went to the server, and came back in its words.
+    assert!(
+        server
+            .requests()
+            .iter()
+            .any(|r| r.header("authorization") == Some("Bearer secret7"))
+    );
+}
+
+#[tokio::test]
+async fn localhost_with_a_final_dot_is_reached_on_this_computer() {
+    // `localhost.` is resolved by the name server, not the hosts file (`getent hosts
+    // localhost.` finds nothing on many systems): requests go to `localhost`, so where the
+    // key goes over plain http never depends on a name server's answer.
+    let server = MockServer::start(|_| Reply::json(200, &json!({"data": [{"id": "m"}]}))).await;
+    let port = server.addr.port();
+    let mut config = ClientConfig::new(format!("http://localhost.:{port}"), ProviderKind::Vllm);
+    config.api_key = Some("secret7".into());
+    assert!(config.loopback);
+    let client = OpenAiClient::new(config).unwrap();
+    client.list_models().await.unwrap();
+    let seen = server.requests();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].header("host"),
+        Some(format!("localhost:{port}").as_str())
+    );
+    assert_eq!(seen[0].header("authorization"), Some("Bearer secret7"));
+}
+
 #[tokio::test]
 async fn a_fix_is_kept_only_once_the_retried_request_is_accepted() {
     // The server refuses `top_k`, and then refuses the fixed request for another reason: the
