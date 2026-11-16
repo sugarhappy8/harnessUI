@@ -21,7 +21,13 @@
 //!   windows ([`super::hit::hit_test_behind`], [`super::hit::front_window`]). Minimising a
 //!   window leaves macOS's keyboard with its application, so handing the keyboard back
 //!   activates the application the input was planned for (`NSRunningApplication`), while
-//!   this app is still the active one, which macOS 14 and later require.
+//!   this app is still the active one, which macOS 14 and later require: checked on the
+//!   main thread in the same step, with Stop. Activation brings that application's key
+//!   window forward, which is not always the window the input was planned for; the guard
+//!   then refuses input that would reach another application, and typing into another
+//!   window of the same application is what the card approved (the application).
+//! - **Latest input:** `CGEventSourceSecondsSinceLastEventType` for any input event in the
+//!   HID system state (the guard leaves out this app's own events, should they count).
 //!
 //! The window list cannot see `ignoresMouseEvents`, so the overlay's window number must
 //! be registered with [`SelfProcess::with_click_through_windows`] while it is
@@ -48,7 +54,8 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGDirectDisplayID, CGDisplayBounds,
     CGDisplayCopyDisplayMode, CGDisplayIsBuiltin, CGDisplayMode, CGError, CGEvent, CGEventFlags,
-    CGEventSource, CGEventSourceStateID, CGGetActiveDisplayList, CGImage, CGImageAlphaInfo,
+    CGEventSource, CGEventSourceStateID, CGEventType, CGGetActiveDisplayList, CGImage,
+    CGImageAlphaInfo,
     CGImageByteOrderInfo, CGMainDisplayID, CGMouseButton, CGPreflightScreenCaptureAccess,
     CGRectMakeWithDictionaryRepresentation, CGWindowImageOption, CGWindowListCopyWindowInfo,
     CGWindowListOption, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowName,
@@ -606,18 +613,44 @@ impl Injector for MacInjector {
         }))
     }
 
-    fn bring_to_front(&self, window: &WindowRef) -> Result<bool, InputError> {
-        if self.me.owns_any(&[window.pid]) {
+    fn bring_to_front(
+        &self,
+        window: &WindowRef,
+        me: &SelfProcess,
+        gate: &Gate,
+    ) -> Result<bool, InputError> {
+        if me.owns_any(&[window.pid]) {
             return Ok(false);
         }
         let pid = window.pid as i32;
-        // AppKit, on the main thread. Activates the application (its key and main windows
-        // come forward); a process that quit fails the lookup.
+        let mine = me.pids();
+        let gate = gate.clone();
+        // AppKit, on the main thread, where Stop also brings this app's window back: only
+        // while this app is the frontmost application and Stop was not pressed, checked in
+        // the same step. Activates the application (its key and main windows come
+        // forward); a process that quit fails the lookup.
         run_on_main(&*self.main, MAIN_THREAD_TIMEOUT, move || {
+            let front_is_mine = NSWorkspace::sharedWorkspace()
+                .frontmostApplication()
+                .is_some_and(|a| {
+                    u32::try_from(a.processIdentifier()).is_ok_and(|p| mine.contains(&p))
+                });
+            if !front_is_mine || !gate.is_open() {
+                return false;
+            }
             NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
                 .filter(|a| !a.isTerminated())
                 .is_some_and(|a| a.activateWithOptions(NSApplicationActivationOptions::empty()))
         })
+    }
+
+    fn time_since_input(&self) -> Option<Duration> {
+        // kCGAnyInputEventType is (CGEventType)~0.
+        let secs = CGEventSource::seconds_since_last_event_type(
+            CGEventSourceStateID::HIDSystemState,
+            CGEventType(u32::MAX),
+        );
+        Duration::try_from_secs_f64(secs).ok()
     }
 
     fn send(&self, event: &InputEvent, gate: &Gate) -> Result<(), InputError> {

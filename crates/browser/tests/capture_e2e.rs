@@ -525,7 +525,25 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
     .await;
     assert!(dom.contains("data-runs=\"1\""), "{dom}");
     assert!(!dom.contains("data-runs=\"2\""), "a script of the page ran in the copy:\n{dom}");
+    // To look at what was saved: CAPTURE_E2E_KEEP=<folder> keeps a copy there.
+    if let Some(keep) = std::env::var_os("CAPTURE_E2E_KEEP") {
+        let keep = PathBuf::from(keep);
+        copy_tree(&folder, &keep.join("capture"));
+        let _ = std::fs::copy(&copy_shot, keep.join("copy-opened-offline-1440.png"));
+    }
     server.shutdown().await;
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            copy_tree(&p, &to.join(e.file_name()));
+        } else {
+            std::fs::copy(&p, to.join(e.file_name())).unwrap();
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
