@@ -1078,8 +1078,14 @@ fn delete_preview(
     models_dir: &Path,
     others: &[store::ModelRecord],
 ) -> (u64, bool) {
-    let _ = (models_dir, others);
-    (rec.size_bytes, false)
+    let plan = removal_plan(rec, models_dir, others);
+    let bytes = plan
+        .delete
+        .iter()
+        .filter_map(|f| std::fs::metadata(f).ok())
+        .map(|m| m.len())
+        .sum();
+    (bytes, !plan.outside.is_empty())
 }
 
 /// 0.0.7 (P6b review m4): records that the app downloaded `image` for the installed model at

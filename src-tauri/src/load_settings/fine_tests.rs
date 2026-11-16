@@ -1049,12 +1049,17 @@ fn automatic_with_a_custom_placement_and_with_leave_free() {
         u64::from(leave.ctx),
         placer.auto(GpuUse::Fit, &leave.fine).unwrap().ctx
     );
-    let split = placer.work(u64::from(leave.ctx), GpuUse::Fit, &leave.fine).split;
+    let split = placer
+        .work(u64::from(leave.ctx), GpuUse::Fit, &leave.fine)
+        .split;
     assert_eq!(split.layers_on_gpu, split.units, "every layer on the card");
     let next = placer
         .work(u64::from(leave.ctx) + 1024, GpuUse::Fit, &leave.fine)
         .split;
-    assert!(next.layers_on_gpu < next.units, "1,024 more tokens move one");
+    assert!(
+        next.layers_on_gpu < next.units,
+        "1,024 more tokens move one"
+    );
     assert!(
         u64::from(leave.ctx)
             >= models::fit::auto_ctx_with_margin(&input, m.room(GpuUse::Fit), 512 * MIB)

@@ -1222,12 +1222,18 @@ fn copies_stay_apart_in_computer_memory() {
     let mut i = input(&s, vec![1, 2, 3, 4], 7, 3, 9);
     i.copies = 1000;
     let all = split(&i, &on_card(Layers::All, ExpertsPick::None));
-    assert_eq!((all.gpu.context, all.cpu.context, all.copies), (10, 0, 1000));
+    assert_eq!(
+        (all.gpu.context, all.cpu.context, all.copies),
+        (10, 0, 1000)
+    );
     // No work on the processor: its working space is not needed for the copies.
     assert_eq!(all.cpu.compute, 0);
     // Blocks 0 and 1 on the processor (3 of 5 units on the card).
     let part = split(&i, &on_card(Layers::Count(3), ExpertsPick::None));
-    assert_eq!((part.gpu.context, part.cpu.context, part.copies), (7, 3, 1000));
+    assert_eq!(
+        (part.gpu.context, part.cpu.context, part.copies),
+        (7, 3, 1000)
+    );
     let mut kv_in_ram = on_card(Layers::All, ExpertsPick::None);
     kv_in_ram.kv_on_gpu = false;
     assert_eq!(split(&i, &kv_in_ram).cpu.context, 10);
@@ -1236,7 +1242,10 @@ fn copies_stay_apart_in_computer_memory() {
         ..on_card(Layers::All, ExpertsPick::None)
     };
     assert_eq!(
-        (split(&i, &processor).cpu.context, split(&i, &processor).copies),
+        (
+            split(&i, &processor).cpu.context,
+            split(&i, &processor).copies
+        ),
         (10, 1000)
     );
     // A graphics card with 500 bytes of computer memory: the model fits, and the copies
@@ -1255,7 +1264,11 @@ fn copies_stay_apart_in_computer_memory() {
         total_bytes: 10_000,
         free_bytes: 5000,
     };
-    for kind in [MemoryKind::Separate, MemoryKind::Processor, MemoryKind::Unified] {
+    for kind in [
+        MemoryKind::Separate,
+        MemoryKind::Processor,
+        MemoryKind::Unified,
+    ] {
         let (graphics, computer) = bars(&all, kind, Some(free), free);
         assert_eq!(computer.copies_bytes, 1000, "{kind:?}");
         assert_eq!(

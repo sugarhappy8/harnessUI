@@ -839,7 +839,11 @@ fn recurrent_layers(r: &Reader, head_count_kv: &[u64], linear: &[bool]) -> Vec<b
 fn state_bytes(r: &Reader) -> u64 {
     let n = |suffix: &str| r.number(suffix).unwrap_or(0);
     let n_embd = n("embedding_length");
-    let n_head = r.per_block("attention.head_count").first().copied().unwrap_or(0);
+    let n_head = r
+        .per_block("attention.head_count")
+        .first()
+        .copied()
+        .unwrap_or(0);
     let d_conv = n("ssm.conv_kernel");
     let d_inner = n("ssm.inner_size");
     let d_state = n("ssm.state_size");
@@ -872,7 +876,9 @@ fn state_bytes(r: &Reader) -> u64 {
         let s_values = if kda != 0 {
             kda.saturating_mul(kda).saturating_mul(n_head)
         } else if linear_head != 0 {
-            linear_head.saturating_mul(linear_head).saturating_mul(n_head)
+            linear_head
+                .saturating_mul(linear_head)
+                .saturating_mul(n_head)
         } else {
             d_state.saturating_mul(d_inner)
         };
@@ -1531,7 +1537,10 @@ mod tests {
                 .u32("olmo2.attention.sliding_window", 4096),
         );
         assert_eq!(olmo3.kv_size(F16).copy_bytes(32_768), 1536 * MIB);
-        assert_eq!(olmo3.kv_size(F16).checkpoints_at(32_768, 8), 12 * 1024 * MIB);
+        assert_eq!(
+            olmo3.kv_size(F16).checkpoints_at(32_768, 8),
+            12 * 1024 * MIB
+        );
         let scout = summary(
             Writer::new()
                 .str("general.architecture", "llama4")

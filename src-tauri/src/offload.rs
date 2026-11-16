@@ -315,7 +315,10 @@ impl<'a> Placer<'a> {
     /// saved copy of a long chat fits what is left (`load_settings::with_copies`).
     pub fn judge_worked(&self, worked: &Worked, gpu: GpuUse, fine: &FineLaunch) -> (Verdict, Fits) {
         let (mark, fits) = self.judge_split(&worked.split, gpu, fine);
-        (crate::load_settings::with_copies(mark, &worked.copies), fits)
+        (
+            crate::load_settings::with_copies(mark, &worked.copies),
+            fits,
+        )
     }
 
     /// The one verdict at `ctx` tokens with `gpu` and `fine`.
@@ -926,7 +929,12 @@ pub async fn measured(
 /// (llama.cpp does not measure it), the layer counts of the estimate's placement. The saved
 /// copies of a long chat are made while a chat goes on, so not measured either: the caller
 /// sizes them for this split ([`Placer::copies_of`]).
-fn measured_split(rows: &[MemoryRow], estimate: &Split, facts: &ModelFacts, graphics: bool) -> Split {
+fn measured_split(
+    rows: &[MemoryRow],
+    estimate: &Split,
+    facts: &ModelFacts,
+    graphics: bool,
+) -> Split {
     let (mut gpu, mut cpu) = rows_to_parts(rows);
     if graphics {
         gpu.image_reader = facts.projector_bytes;

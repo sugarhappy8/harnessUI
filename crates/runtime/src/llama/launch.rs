@@ -863,7 +863,14 @@ mod tests {
             assert_eq!(n, 1, "{args:?}");
             args[at + 1].clone()
         };
-        for (asked, passed) in [(1, "1"), (3, "3"), (8, "8"), (0, "1"), (9, "8"), (u32::MAX, "8")] {
+        for (asked, passed) in [
+            (1, "1"),
+            (3, "3"),
+            (8, "8"),
+            (0, "1"),
+            (9, "8"),
+            (u32::MAX, "8"),
+        ] {
             let args = build_args(&LaunchConfig {
                 ctx_checkpoints: asked,
                 ..config()

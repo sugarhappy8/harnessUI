@@ -492,7 +492,9 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
     let (green, at_all) = room.fits(needed, SPARE_BYTES);
     let computer_part = match (graphics, green) {
         (true, true) => 0,
-        (true, false) => needed.saturating_add(SPARE_BYTES).saturating_sub(room.whole),
+        (true, false) => needed
+            .saturating_add(SPARE_BYTES)
+            .saturating_sub(room.whole),
         (false, _) => needed,
     };
     let known = target.computer_known();
@@ -1356,10 +1358,16 @@ mod tests {
         assert!(r.partial_offload);
         let spill = input.needed_at(32_768) + SPARE_BYTES - 12 * GB;
         let left = 30 * GB - spill;
-        assert_eq!(r.copies_bytes, (left / 2 / GEMMA4_COPY).min(8) * GEMMA4_COPY);
+        assert_eq!(
+            r.copies_bytes,
+            (left / 2 / GEMMA4_COPY).min(8) * GEMMA4_COPY
+        );
         // A model without copies takes nothing more.
         let r = check(&input_without_window(), &card(Some(0)));
-        assert_eq!((r.copies_bytes, r.copies_short, r.verdict), (0, false, Verdict::Green));
+        assert_eq!(
+            (r.copies_bytes, r.copies_short, r.verdict),
+            (0, false, Verdict::Green)
+        );
     }
 
     /// The models whose copies are largest, on a 16 GB card with 16 GB of computer memory

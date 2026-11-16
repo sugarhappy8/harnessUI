@@ -1386,8 +1386,8 @@ impl Machine {
     /// what is left of the computer's memory after the reserve and that part; unknown when
     /// the system did not say.
     pub fn copies(&self, gpu: GpuUse, copy_bytes: u64, computer_part: u64) -> models::fit::Copies {
-        let spare = (!self.ram_unknown)
-            .then(|| self.room(gpu).computer().saturating_sub(computer_part));
+        let spare =
+            (!self.ram_unknown).then(|| self.room(gpu).computer().saturating_sub(computer_part));
         models::fit::copies(copy_bytes, spare)
     }
 }
@@ -1466,9 +1466,7 @@ pub(crate) fn copies_without_sizes(
         models::placement::MemoryKind::Separate => needed
             .saturating_add(models::fit::SPARE_BYTES)
             .saturating_sub(machine.room(gpu).whole),
-        models::placement::MemoryKind::Processor | models::placement::MemoryKind::Unified => {
-            needed
-        }
+        models::placement::MemoryKind::Processor | models::placement::MemoryKind::Unified => needed,
     };
     machine.copies(gpu, input.kv.copy_bytes(ctx), part)
 }
@@ -1803,9 +1801,7 @@ impl Plan {
                 .and_then(|l| l.sizes.clone())
                 .map(std::sync::Arc::new),
             projector_bytes: input.projector_bytes,
-            copies: input
-                .kv
-                .checkpoints_at(ctx, self.resolved.ctx_checkpoints),
+            copies: input.kv.checkpoints_at(ctx, self.resolved.ctx_checkpoints),
         }
     }
 }
@@ -3364,7 +3360,15 @@ mod tests {
                     defaults: auto_defaults(),
                     saved: true,
                 };
-                let info = build_info("/m", &facts, auto.clone(), auto_defaults(), r.clone(), &machine, None);
+                let info = build_info(
+                    "/m",
+                    &facts,
+                    auto.clone(),
+                    auto_defaults(),
+                    r.clone(),
+                    &machine,
+                    None,
+                );
                 (r, plan.footprint(), info)
             };
             let (first, footprint, info) = at(ready, 0);
@@ -3450,14 +3454,34 @@ mod tests {
         assert_eq!(info.picture.computer.copies_bytes, 1536 * MIB);
         assert!(!info.picture.copies_short);
         // Automatic takes its cap.
-        let auto = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts), &machine);
+        let auto = resolve(
+            &ModelLoadSettings::default(),
+            &auto_defaults(),
+            None,
+            Some(&facts),
+            &machine,
+        );
         assert_eq!(auto.ctx, 32_768);
         // With so little memory free that not even one copy fits: yellow, and said, but the
         // same context and never red.
         let tight = Machine::from_probes(&pc(), None, None, 3 * GB, &Freed::default());
-        let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts), &tight);
+        let r = resolve(
+            &ModelLoadSettings::default(),
+            &auto_defaults(),
+            None,
+            Some(&facts),
+            &tight,
+        );
         assert_eq!((r.ctx, r.ctx_checkpoints), (32_768, 1));
-        let info = build_info("/m", &facts, ModelLoadSettings::default(), auto_defaults(), r, &tight, None);
+        let info = build_info(
+            "/m",
+            &facts,
+            ModelLoadSettings::default(),
+            auto_defaults(),
+            r,
+            &tight,
+            None,
+        );
         assert_eq!(info.fit, Some(Verdict::Yellow));
         assert!(info.picture.copies_short);
         assert_eq!(info.picture.mark, Verdict::Yellow);
@@ -3471,13 +3495,33 @@ mod tests {
         for facts in [gemma4_facts(false), gemma4_facts(true), olmo3_facts()] {
             let mut machine = Machine::from_probes(&pc(), None, None, 0, &Freed::default());
             machine.ram_unknown = true;
-            let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts), &machine);
+            let r = resolve(
+                &ModelLoadSettings::default(),
+                &auto_defaults(),
+                None,
+                Some(&facts),
+                &machine,
+            );
             assert_eq!(r.ctx_checkpoints, models::kv::MAX_CTX_CHECKPOINTS);
-            let info = build_info("/m", &facts, ModelLoadSettings::default(), auto_defaults(), r, &machine, None);
+            let info = build_info(
+                "/m",
+                &facts,
+                ModelLoadSettings::default(),
+                auto_defaults(),
+                r,
+                &machine,
+                None,
+            );
             assert!(!info.picture.copies_short);
             // Known to be 0 instead: one copy, said to be short.
             machine.ram_unknown = false;
-            let r = resolve(&ModelLoadSettings::default(), &auto_defaults(), None, Some(&facts), &machine);
+            let r = resolve(
+                &ModelLoadSettings::default(),
+                &auto_defaults(),
+                None,
+                Some(&facts),
+                &machine,
+            );
             assert_eq!(r.ctx_checkpoints, 1);
         }
     }
@@ -3495,7 +3539,15 @@ mod tests {
             let machine =
                 Machine::from_probes(&pc(), None, None, tenths * GB / 10, &Freed::default());
             let r = resolve(&auto, &auto_defaults(), None, Some(&facts), &machine);
-            let info = build_info("/m", &facts, auto.clone(), auto_defaults(), r.clone(), &machine, None);
+            let info = build_info(
+                "/m",
+                &facts,
+                auto.clone(),
+                auto_defaults(),
+                r.clone(),
+                &machine,
+                None,
+            );
             let marked = info
                 .context_options
                 .iter()

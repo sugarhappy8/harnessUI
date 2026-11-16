@@ -527,7 +527,7 @@ async fn nesting_is_refused_by_the_helpers_host_and_gate() {
     // [0.0.7] What the loop answers a call to it, and to a coding app, from this host.
     assert_eq!(host.refusal(TOOL_NAME).as_deref(), Some(NESTED_REFUSAL));
     assert_eq!(
-        host.refusal("ask_codex").as_deref(),
+        host.refusal(crate::outside_agent::CODEX_TOOL).as_deref(),
         Some(crate::outside_agent::HELPER_REFUSAL)
     );
     assert_eq!(host.refusal("read_file"), None);
