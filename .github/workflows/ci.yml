@@ -68,6 +68,9 @@ jobs:
       # Reverse engineering: the pinned downloads (reverse.lock.json) and their fixtures,
       # offline. The real rea runs in reverse.yml.
       - run: python3 -I scripts/pin_reverse.py --check && python3 -I scripts/pin_reverse_test.py
+      # In-app updates: the key-setup helper (scripts/setup_updater.py, run by the owner) and
+      # the check release.yml runs before every release, with stand-ins for npx and gh.
+      - run: python3 -I scripts/setup_updater_test.py
       # ARCHITECTURE.md's sentences about rea's tests and CI against the workflows and test
       # files they describe, and no TODO(lead) marker left in it.
       - run: python3 -I scripts/docs_test.py

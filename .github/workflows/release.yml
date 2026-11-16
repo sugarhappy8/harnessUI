@@ -1,8 +1,16 @@
 name: Release
 
-# Builds the signed (when secrets exist) Windows installer and the universal macOS disk
-# image (Apple silicon and Intel in one file) on every version tag and attaches them to a
-# draft GitHub release. With the updater key it also signs and uploads the model catalog.
+# Builds the Windows installer and the universal macOS disk image (Apple silicon and Intel
+# in one file) on every version tag and attaches them to a draft GitHub release, each one
+# twice: under its own name with the version, and as a copy under a name that never
+# changes (STABLE_WINDOWS and STABLE_MAC below). So releases/latest/download/<that name>
+# always gives the newest installer; harnessui.site's Download button links there.
+# Every release can update itself: the build signs the update files with the updater key
+# and adds latest.json, which installed copies (0.0.8 and later) read to find a newer
+# version, and the model catalog is signed and attached too. The first job stops the
+# release, before anything is built, when the key's secret or its public key in
+# src-tauri/tauri.updater.conf.json is missing (README, "In-app updates"). Apple's signing
+# secrets are used when they exist.
 # A final job checks the draft has everything and only then publishes it, so a release
 # that failed a check is never public. Pushing the tag is the decision to release; so is
 # starting this workflow by hand (Actions, Release, Run workflow) on the commit to release:
@@ -16,28 +24,44 @@ on:
 permissions:
   contents: write
 
+# The installers' names without the version. They stay the same on purpose: the website and
+# the README link to them, so a renamed app keeps these names.
+env:
+  STABLE_WINDOWS: harnessUI-setup.exe
+  STABLE_MAC: harnessUI-universal.dmg
+
 jobs:
-  # Job conditions cannot read secrets, so this job says which keys are configured.
+  # Every release must be able to update itself, so nothing is built without the updater
+  # key: its private half as a secret and its public half committed. Job conditions cannot
+  # read secrets, so this job checks them and fails.
   keys:
-    name: Signing keys
+    name: Updater key
     runs-on: ubuntu-24.04
-    permissions: {}
-    outputs:
-      updater: ${{ steps.check.outputs.updater }}
+    permissions:
+      contents: read
     steps:
-      - name: Is the updater key set?
-        id: check
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The updater key is set and its public key is committed
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
+          fail=0
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "updater=true" >> "$GITHUB_OUTPUT"
             echo "Updater key: set"
           else
-            echo "updater=false" >> "$GITHUB_OUTPUT"
-            echo "Updater key: not set"
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is not set. Every release must be able to update itself, so it needs the updater key: see README.md, \"In-app updates\", and run python3 -I scripts/setup_updater.py once on your own computer."
+            fail=1
           fi
+          if message=$(python3 -I scripts/setup_updater.py --check); then
+            echo "$message"
+          else
+            echo "::error::$message"
+            fail=1
+          fi
+          exit "$fail"
 
   # Before anything is built or published: reverse.lock.json must carry every publisher
   # check a release needs, and the digest GitHub publishes for the pinned Ghidra download
@@ -63,7 +87,7 @@ jobs:
 
   publish:
     name: Publish (${{ matrix.name }})
-    needs: reverse-pins
+    needs: [keys, reverse-pins]
     strategy:
       fail-fast: false
       matrix:
@@ -73,6 +97,9 @@ jobs:
             target: x86_64-pc-windows-msvc
             rust-targets: x86_64-pc-windows-msvc
             args: --bundles nsis
+            # Where the installer is built.
+            bundle: target/release/bundle/nsis
+            pattern: "*-setup.exe"
           # One disk image for every Mac, as in ci.yml: the app and the llama.cpp sidecars
           # are built for both processors and joined.
           - name: macOS
@@ -80,9 +107,46 @@ jobs:
             target: universal-apple-darwin
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
             args: --target universal-apple-darwin --bundles app,dmg
+            bundle: target/universal-apple-darwin/release/bundle/dmg
+            pattern: "*.dmg"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The release notes: this version's entry in CHANGELOG.md, then where to download.
+      # tauri-action puts them on the release page and into latest.json, and the app shows
+      # them under "What's new" in its update box. A missing entry stops the run here,
+      # before the build. A long entry is shortened: an action's input must fit in one
+      # environment variable, which Windows limits to 32,767 characters.
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          version = json.load(open("src-tauri/tauri.conf.json", encoding="utf-8"))["version"]
+          lines = open("CHANGELOG.md", encoding="utf-8").read().splitlines()
+          start = next((i for i, line in enumerate(lines) if line == f"## {version}" or line.startswith(f"## {version} (")), None)
+          if start is None:
+              raise SystemExit(f"::error::CHANGELOG.md has no entry for {version} (a line '## {version} (date)'). It is what the release page and the app's What's new show.")
+          end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+          notes = "\n".join(lines[start + 1 : end]).strip()
+          if len(notes) > 20000:
+              cut = notes.rfind("\n", 0, 20000)
+              notes = notes[: cut if cut > 0 else 20000].rstrip() + "\n\n(Shortened here: the whole list is in CHANGELOG.md.)"
+          download = (
+              f"Download: Windows 10 or 11 (64-bit): {os.environ['STABLE_WINDOWS']}. "
+              f"Mac with macOS 13.3 or later (Apple silicon or Intel): {os.environ['STABLE_MAC']}. "
+              "The files with the version in their names are the same installers. These builds are not "
+              "code-signed: on Windows choose More info, then Run anyway; on a Mac right-click the app and "
+              "choose Open. harnessUI 0.0.8 and later update themselves; 0.0.7 and older cannot, so install "
+              "this version once by hand. See README.md for details."
+          )
+          delim = "EOF_" + os.urandom(8).hex()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as out:
+              out.write(f"body<<{delim}\n{notes}\n\n{download}\n{delim}\n")
+          print(f"Release notes: the CHANGELOG.md entry for {version} ({len(notes)} characters) and the download paragraph.")
+          PY
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.rust-targets }}
@@ -110,9 +174,10 @@ jobs:
       - name: llama.cpp runtime (macOS, built from the pinned commit for both processors)
         if: runner.os == 'macOS'
         run: python3 scripts/fetch_llama.py macos
-      # Signing secrets are placeholders until the owner adds them (README, "Signing").
-      # An unset secret arrives as an empty string, which the Tauri CLI would treat as
-      # "set" and then fail on, so only non-empty values are exported.
+      # The updater key is always set (the keys job checked it). Apple's signing secrets
+      # are placeholders until the owner adds them (README, "Signing"). An unset secret
+      # arrives as an empty string, which the Tauri CLI would treat as "set" and then fail
+      # on, so only non-empty values are exported.
       - name: Export signing secrets that exist
         shell: bash
         env:
@@ -135,23 +200,8 @@ jobs:
               echo "$name: not set"
             fi
           done
-      # Updates: with the updater signing key set as a secret and its public key committed in
-      # src-tauri/tauri.updater.conf.json, the build also produces signed update artifacts
-      # and latest.json. A key without a committed public key stops the release.
-      - name: Updater configuration
-        id: updater
-        shell: bash
-        run: |
-          pubkey=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.updater.conf.json'))['plugins']['updater']['pubkey'])")
-          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-            if [ -z "$pubkey" ]; then
-              echo "::error::TAURI_SIGNING_PRIVATE_KEY is set but tauri.updater.conf.json has no public key"; exit 1
-            fi
-            echo "args=--config src-tauri/tauri.updater.conf.json" >> "$GITHUB_OUTPUT"
-          else
-            echo "No updater key: this release has no in-app updates."
-            echo "args=" >> "$GITHUB_OUTPUT"
-          fi
+      # tauri.updater.conf.json adds the public key and the address of latest.json, so the
+      # build also makes signed update files, and tauri-action attaches them with latest.json.
       - name: Build and upload
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -159,13 +209,41 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "v__VERSION__"
-          releaseBody: "Windows: download the file ending in -setup.exe (Windows 10 or 11, 64-bit). Mac: download the file ending in _universal.dmg (macOS 13.3 or later, Apple silicon or Intel). These builds are not code-signed: on Windows choose More info, then Run anyway; on a Mac right-click the app and choose Open. See README.md for details and CHANGELOG.md for what is in this version."
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           # When started by hand there is no tag yet: it must point at the commit built here,
           # not at the default branch.
           releaseCommitish: ${{ github.sha }}
-          args: ${{ matrix.args }} ${{ steps.updater.outputs.args }}
+          args: ${{ matrix.args }} --config src-tauri/tauri.updater.conf.json
+      # The copy under the name that never changes. The installer must be the only one in
+      # its folder and carry this version in its name, or the run stops.
+      - name: Upload the installer under its name without the version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUNDLE: ${{ matrix.bundle }}
+          PATTERN: ${{ matrix.pattern }}
+          STABLE: ${{ matrix.name == 'Windows' && env.STABLE_WINDOWS || env.STABLE_MAC }}
+        run: |
+          version=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          tag="v$version"
+          shopt -s nullglob
+          # shellcheck disable=SC2206 # PATTERN is a glob on purpose
+          found=("$BUNDLE"/$PATTERN)
+          echo "In $BUNDLE: ${found[*]:-nothing}"
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one $PATTERN in $BUNDLE, found ${#found[@]}"
+            exit 1
+          fi
+          case "$(basename "${found[0]}")" in
+            *"_${version}_"*) ;;
+            *) echo "::error::${found[0]} is not the installer of version $version"; exit 1 ;;
+          esac
+          mkdir -p release-stable
+          cp "${found[0]}" "release-stable/$STABLE"
+          gh release upload "$tag" "release-stable/$STABLE" --clobber --repo "$GITHUB_REPOSITORY"
+          echo "Uploaded $(basename "${found[0]}") as $STABLE to $tag."
       # The draft already has the disk image at this point. A bundle that is missing a
       # processor, or that loads a library from outside the system, fails the run here so
       # the draft is not published (the verify job below does not run after a failure).
@@ -179,11 +257,10 @@ jobs:
   # Catalog Refresh (src-tauri/src/hub.rs) downloads models.json and models.json.minisig
   # from the latest release and accepts them only if the signature verifies against the
   # updater public key. `tauri signer sign` writes the base64 minisign signature the app
-  # accepts.
+  # accepts. Every release has the updater key, so this runs every time.
   catalog:
     name: Sign and upload the catalog
     needs: [keys, publish]
-    if: needs.keys.outputs.updater == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -205,7 +282,7 @@ jobs:
           npx tauri signer sign release-catalog/models.json > /dev/null
           mv release-catalog/models.json.sig release-catalog/models.json.minisig
       # A key pair that does not match the committed public key would make every Refresh
-      # fail, so compare the key ids before uploading.
+      # fail, and every update too, so compare the key ids before uploading.
       - name: Signature matches the committed public key
         shell: bash
         run: |
@@ -239,9 +316,10 @@ jobs:
           tag="v$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
           gh release upload "$tag" release-catalog/models.json release-catalog/models.json.minisig --clobber --repo "$GITHUB_REPOSITORY"
 
-  # Fails the run when the draft release is incomplete: an installer missing, and with
-  # the updater key, latest.json without every platform or the catalog missing. Reading a
-  # draft release needs the workflow's write permission.
+  # Fails the run when the draft release is incomplete: an installer missing, a copy under
+  # the name without the version missing or not the same file as its twin, latest.json
+  # without every platform or pointing at a file the release does not have, or the catalog
+  # missing. Reading a draft release needs the workflow's write permission.
   #
   # The macOS build is universal, so tauri-action lists the same update archive under both
   # darwin-aarch64 and darwin-x86_64 (and darwin-universal, which no updater asks for). An
@@ -249,7 +327,6 @@ jobs:
   verify:
     name: Verify and publish the release
     needs: [keys, publish, catalog]
-    if: ${{ !cancelled() && needs.keys.result == 'success' && needs.publish.result == 'success' && needs.catalog.result != 'failure' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -257,37 +334,74 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPDATER: ${{ needs.keys.outputs.updater }}
         run: |
-          tag="v$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
-          assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          version=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          tag="v$version"
+          # One line per file: name, size, SHA-256 (when GitHub gives it), address in GitHub's API.
+          listing=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | [.name, (.size | tostring), (.digest // ""), .apiUrl] | @tsv')
+          assets=$(cut -f1 <<< "$listing")
           echo "Assets on $tag:"
           echo "$assets"
           fail=0
           has() { grep -qxF "$1" <<< "$assets"; }
-          grep -qE -- '-setup\.exe$' <<< "$assets" || { echo "::error::$tag has no Windows installer"; fail=1; }
-          grep -qE -- '\.dmg$' <<< "$assets" || { echo "::error::$tag has no macOS disk image"; fail=1; }
-          grep -qE -- '_universal\.dmg$' <<< "$assets" || { echo "::error::$tag has no universal macOS disk image (Apple silicon and Intel)"; fail=1; }
-          if [ "$UPDATER" = "true" ]; then
-            for name in latest.json models.json models.json.minisig; do
-              has "$name" || { echo "::error::$tag has no $name"; fail=1; }
-            done
-            if has latest.json; then
-              mkdir -p release-check
-              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir release-check
-              if ! jq -e '.platforms["windows-x86_64"] and .platforms["darwin-aarch64"] and .platforms["darwin-x86_64"]' release-check/latest.json > /dev/null; then
-                echo "::error::latest.json must list windows-x86_64, darwin-aarch64 and darwin-x86_64"
-                jq '.platforms | keys' release-check/latest.json || true
-                fail=1
+          field() { awk -F'\t' -v name="$1" -v col="$2" '$1 == name { print $col }' <<< "$listing"; }
+          count() { grep -c . <<< "$1"; }
+          # The installers as tauri-action named them, with the version. The copies without
+          # it (harnessUI-setup.exe also ends in -setup.exe) must not count here.
+          v=${version//./\\.}
+          windows=$(grep -E -- "_${v}_[^_]*-setup\.exe$" <<< "$assets" || true)
+          mac=$(grep -E -- "_${v}_universal\.dmg$" <<< "$assets" || true)
+          [ "$(count "$windows")" -eq 1 ] || { echo "::error::$tag must have exactly one Windows installer named ..._${version}_x64-setup.exe"; fail=1; }
+          [ "$(count "$mac")" -eq 1 ] || { echo "::error::$tag must have exactly one universal macOS disk image (Apple silicon and Intel) named ..._${version}_universal.dmg"; fail=1; }
+          # Each copy under the name without the version is the same file as its twin.
+          same() {
+            local copy=$1 twin=$2
+            if ! has "$copy"; then
+              echo "::error::$tag has no $copy (the download address without the version)"; fail=1; return 0
+            fi
+            [ "$(count "$twin")" -eq 1 ] || return 0
+            if [ "$(field "$copy" 2)" != "$(field "$twin" 2)" ]; then
+              echo "::error::$copy ($(field "$copy" 2) bytes) and $twin ($(field "$twin" 2) bytes) on $tag are not the same file"; fail=1; return 0
+            fi
+            local a b
+            a=$(field "$copy" 3); b=$(field "$twin" 3)
+            if [ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ]; then
+              echo "::error::$copy and $twin on $tag are not the same file ($a, $b)"; fail=1; return 0
+            fi
+            echo "$copy is the same file as $twin."
+          }
+          same "$STABLE_WINDOWS" "$windows"
+          same "$STABLE_MAC" "$mac"
+          for name in latest.json models.json models.json.minisig; do
+            has "$name" || { echo "::error::$tag has no $name"; fail=1; }
+          done
+          if has latest.json; then
+            mkdir -p release-check
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir release-check --clobber
+            if ! jq -e --arg v "$version" '.version == $v' release-check/latest.json > /dev/null; then
+              echo "::error::latest.json is for version $(jq -r '.version' release-check/latest.json), not $version"; fail=1
+            fi
+            # tauri-action points each entry at its file's address in GitHub's API, which
+            # ends in the file's id.
+            for platform in windows-x86_64 darwin-aarch64 darwin-x86_64; do
+              url=$(jq -r --arg p "$platform" '.platforms[$p].url // ""' release-check/latest.json)
+              signature=$(jq -r --arg p "$platform" '.platforms[$p].signature // ""' release-check/latest.json)
+              if [ -z "$url" ] || [ -z "$signature" ]; then
+                echo "::error::latest.json must list $platform with an address and a signature"; fail=1; continue
               fi
-            fi
-            if has models.json; then
-              mkdir -p release-check
-              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern models.json --dir release-check
-              cmp -s release-check/models.json catalog/models.json || { echo "::error::models.json on $tag differs from catalog/models.json"; fail=1; }
-            fi
-          else
-            echo "No updater key: skipping the latest.json and catalog checks."
+              file=$(awk -F'\t' -v id="${url##*/}" '{ n = split($4, part, "/"); if (part[n] == id) print $1 }' <<< "$listing")
+              if [ -z "$file" ]; then
+                echo "::error::latest.json's $platform entry points at $url, which is not a file of $tag"; fail=1
+              else
+                echo "latest.json: $platform -> $file"
+              fi
+            done
+            if [ "$fail" -ne 0 ]; then jq '.platforms | keys' release-check/latest.json || true; fi
+          fi
+          if has models.json; then
+            mkdir -p release-check
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern models.json --dir release-check --clobber
+            cmp -s release-check/models.json catalog/models.json || { echo "::error::models.json on $tag differs from catalog/models.json"; fail=1; }
           fi
           if [ "$fail" -ne 0 ]; then
             echo "::error::$tag stays a draft: fix the problems above, then run this workflow again."
