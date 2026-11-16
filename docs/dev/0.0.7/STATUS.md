@@ -289,3 +289,9 @@ and `README.md`.
   picture limits count only pictures really sent (oldest large ones dropped only until 20
   are left); JPEG size read from segment heads only. agent all pass (lib 241, cloud 24),
   app providers/chat/subagent 71, clippy clean. P5 finished.
+- 11:50 UTC: P3, P4, P5, P6a, P6b finished. Running: P7 round 1 (copy inertness, SVGs,
+  WebSocket, file: addresses, new-tool default), P1 and P2 verifications. Prepared for
+  integration (scratchpad): a script that merges the CHANGELOG package headings into
+  Added/Changed/Fixed/Known limits and the ARCHITECTURE "0.0.7." paragraph. Local CI
+  checks so far: docs test, spawn check, notices check pass; `cargo fmt --check` differs
+  only in P7's file being edited.
