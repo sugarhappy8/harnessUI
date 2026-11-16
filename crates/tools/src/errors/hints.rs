@@ -353,10 +353,15 @@ mod tests {
             command_hints(PS, "cat <<EOF", &heredoc),
             [INPUT_REDIRECTION]
         );
+        // What Windows PowerShell 5.1 really prints (CI's Windows runner): it reads
+        // `--version` as its `--` operator followed by the word `version`.
         let quoted = ps_error(&[
-            "At line:2 char:36",
+            "At line:2 char:38",
             "+ \"C:\\Program Files\\nodejs\\node.exe\" --version",
-            "Unexpected token '--version' in expression or statement.",
+            "Unexpected token 'version' in expression or statement.",
+            "At line:2 char:1",
+            "+ \"C:\\Program Files\\nodejs\\node.exe\" --version",
+            "The '--' operator works only on variables or on properties.",
             "    + FullyQualifiedErrorId : UnexpectedToken",
         ]);
         assert_eq!(

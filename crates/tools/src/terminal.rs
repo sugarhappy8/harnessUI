@@ -2032,8 +2032,10 @@ mod windows_tests {
                 "[PowerShell has no < input redirection",
             ),
             (
+                // Windows PowerShell 5.1 reads `--version` here as its `--` operator
+                // followed by the word `version` (as CI's Windows runner showed).
                 "\"C:\\Windows\\System32\\where.exe\" --version",
-                "Unexpected token '--version' in expression or statement",
+                "Unexpected token 'version' in expression or statement",
                 "[To run a program at a quoted path, put & in front",
             ),
         ] {
