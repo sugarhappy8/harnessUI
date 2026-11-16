@@ -353,6 +353,12 @@ fn fonts(s: &mut String, list: &[FontLine]) {
 }
 
 fn counted(v: &Value, k: &str, n: usize) -> Vec<String> {
+    counted_up_to(v, k, n, 60)
+}
+
+/// [`counted`] for values that are lists themselves (shadows, transitions): longer, and
+/// joined with "; " by the caller, since they hold commas.
+fn counted_up_to(v: &Value, k: &str, n: usize, max: usize) -> Vec<String> {
     arr(v, k)
         .iter()
         .take(n)
@@ -360,7 +366,7 @@ fn counted(v: &Value, k: &str, n: usize) -> Vec<String> {
             let a = e.as_array()?;
             let value = a.first()?.as_str()?;
             let count = a.get(1).and_then(Value::as_u64).unwrap_or(0);
-            Some(format!("{} ({count})", page_text(value, 60)))
+            Some(format!("{} ({count})", page_text(value, max)))
         })
         .collect()
 }
@@ -426,6 +432,13 @@ fn spacing(s: &mut String, page: &Value) {
         ("radii", "Corner radius", 6),
         ("shadows", "Shadows", 4),
     ] {
+        if k == "shadows" {
+            let list = counted_up_to(&stats, k, n, 120);
+            if !list.is_empty() {
+                lines.push(format!("{label}: {}", list.join("; ")));
+            }
+            continue;
+        }
         let list = counted(&stats, k, n);
         if !list.is_empty() {
             lines.push(format!("{label}: {}", list.join(", ")));
@@ -487,11 +500,11 @@ fn animations(s: &mut String, r: &ReportInput<'_>, page: &Value) {
         r.state_rules, r.transition_rules, r.scroll_driven
     ));
     let stats = page.get("stats").cloned().unwrap_or(Value::Null);
-    let trans_list = counted(&stats, "transitions", 6);
+    let trans_list = counted_up_to(&stats, "transitions", 6, 160);
     if !trans_list.is_empty() {
         s.push_str(&format!(
-            "Transitions set on elements: {}\n",
-            trans_list.join(", ")
+            "Transitions set on elements (property, duration, easing, delay): {}\n",
+            trans_list.join("; ")
         ));
     }
     if r.libraries

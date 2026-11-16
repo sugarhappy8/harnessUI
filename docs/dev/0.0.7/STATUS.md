@@ -107,3 +107,9 @@ and `README.md`.
   https; effort low where thinking can't be switched off; earlier thinking replayed when
   unchanged; 1-hour cache on system/tools; big pictures become a note for Claude).
   agent 229 lib / 19 cloud / 84 turn_loop, vitest 832. Independent verification running.
+- P6a round 1 done: all five review findings and the nits fixed test-first (per-chat Tools
+  panel; Task tab follows a reply known only after a reload; edit Send off while busy and a
+  refused send no longer blanks the running reply; StrictMode-safe follower; copied
+  attachments can't be combined with new ones; the turn slot is taken first so Stop right
+  after sending works). app 849, vitest 832, clippy clean. Its verification is folded into
+  the whole-release review (all findings were minor).

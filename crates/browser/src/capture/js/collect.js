@@ -548,6 +548,40 @@ async function (opts) {
       .slice(0, n)
       .map(([k, v]) => [k, v.n, Array.from(v.tags)]);
   }
+  // Splits a computed list at its top-level commas ("ease, cubic-bezier(0, 0, 1, 1)").
+  function splitList(s) {
+    const out = [];
+    let depth = 0, start = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c === '(') depth++;
+      else if (c === ')') depth = Math.max(0, depth - 1);
+      else if (c === ',' && depth === 0) {
+        out.push(s.slice(start, i).trim());
+        start = i + 1;
+      }
+    }
+    out.push(s.slice(start).trim());
+    return out.filter((x) => x);
+  }
+  // "opacity 0.3s ease, transform 0.3s ease 0.1s": each property with its own timing (the
+  // shorter lists repeat, as in CSS).
+  function transitionText(cs) {
+    const props = splitList(String(cs.transitionProperty || 'all'));
+    const durs = splitList(String(cs.transitionDuration || '0s'));
+    const fns = splitList(String(cs.transitionTimingFunction || 'ease'));
+    const dels = splitList(String(cs.transitionDelay || '0s'));
+    if (!props.length || !durs.length || (props.length === 1 && props[0] === 'none')) return '';
+    const parts = [];
+    for (let i = 0; i < props.length && i < 8; i++) {
+      const d = durs[i % durs.length];
+      if (!(parseFloat(d) > 0)) continue;
+      const f = fns.length ? fns[i % fns.length] : 'ease';
+      const del = dels.length ? dels[i % dels.length] : '0s';
+      parts.push(props[i] + ' ' + d + ' ' + f + (parseFloat(del) ? ' ' + del : ''));
+    }
+    return parts.join(', ');
+  }
   function stats() {
     const colors = new Map(), bgs = new Map(), borders = new Map(), fonts = new Map(), sizes = new Map();
     const spacing = new Map(), radii = new Map(), shadows = new Map(), widths = new Map(), transitions = new Map();
@@ -586,8 +620,8 @@ async function (opts) {
       if (cs.borderTopLeftRadius && cs.borderTopLeftRadius !== '0px') inc(radii, cs.borderTopLeftRadius);
       if (cs.boxShadow && cs.boxShadow !== 'none') inc(shadows, cs.boxShadow.slice(0, 120));
       if (cs.maxWidth && /px$/.test(cs.maxWidth) && parseFloat(cs.maxWidth) >= 320) inc(widths, cs.maxWidth);
-      const td = String(cs.transitionDuration || '0s');
-      if (td.split(',').some((d) => parseFloat(d) > 0)) inc(transitions, (cs.transitionProperty + ' ' + td + ' ' + cs.transitionTimingFunction).slice(0, 160), el.localName + shortName(el));
+      const tt = transitionText(cs);
+      if (tt) inc(transitions, tt.slice(0, 200), el.localName + shortName(el));
     }
     return {
       counted: counted,
