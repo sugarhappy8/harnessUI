@@ -105,7 +105,9 @@ fn thinking_param(
             let budget = (max_tokens / 2)
                 .max(MIN_THINKING_BUDGET)
                 .min(max_tokens - 1);
-            return Some(json!({"type": "enabled", "budget_tokens": budget, "display": "summarized"}));
+            return Some(
+                json!({"type": "enabled", "budget_tokens": budget, "display": "summarized"}),
+            );
         }
         return None;
     }
@@ -220,7 +222,10 @@ fn convert(chat: &[ChatMessage], with_tools: bool, replay: Option<&ThinkingRepla
         .first()
         .is_some_and(|first| first.get("role").and_then(Value::as_str) != Some("user"))
     {
-        messages.insert(0, json!({"role": "user", "content": [text_block("(continued)")]}));
+        messages.insert(
+            0,
+            json!({"role": "user", "content": [text_block("(continued)")]}),
+        );
     }
     Converted {
         messages,
@@ -232,7 +237,11 @@ fn convert(chat: &[ChatMessage], with_tools: bool, replay: Option<&ThinkingRepla
 /// and the user text after them become one user turn, results first).
 fn push(messages: &mut Vec<Value>, role: &str, mut blocks: Vec<Value>) {
     if blocks.is_empty() {
-        blocks.push(text_block(if role == "assistant" { STOPPED_TEXT } else { "." }));
+        blocks.push(text_block(if role == "assistant" {
+            STOPPED_TEXT
+        } else {
+            "."
+        }));
     }
     if let Some(last) = messages.last_mut()
         && last.get("role").and_then(Value::as_str) == Some(role)

@@ -48,8 +48,12 @@ fn dto(p: &store::Provider, has_key: bool, context_length: Option<u32>) -> Provi
 
 /// [0.0.7 P5] The context size chosen for an endpoint in Settings → Endpoints, if one was.
 async fn chosen_context(state: &AppState, id: store::ProviderId) -> Option<u32> {
-    let stored: Option<serde_json::Value> =
-        state.store.get_setting(&context_key(id)).await.ok().flatten();
+    let stored: Option<serde_json::Value> = state
+        .store
+        .get_setting(&context_key(id))
+        .await
+        .ok()
+        .flatten();
     stored
         .as_ref()
         .and_then(crate::settings::parse_remote_context)
@@ -86,7 +90,11 @@ async fn global_context_setting(state: &AppState) -> u32 {
 
 /// [0.0.7 P5] The context a turn plans with for a model on `provider` that reported
 /// `reported` ([`plan_context`]).
-pub async fn context_for(state: &AppState, provider: &store::Provider, reported: Option<u32>) -> u32 {
+pub async fn context_for(
+    state: &AppState,
+    provider: &store::Provider,
+    reported: Option<u32>,
+) -> u32 {
     plan_context(
         kind_of(&provider.kind),
         reported,
@@ -346,9 +354,18 @@ mod tests {
     #[test]
     fn context_plans() {
         use ProviderKind::{Anthropic, Generic, OpenAi};
-        assert_eq!(plan_context(Anthropic, Some(1_000_000), None, 4_096), 1_000_000);
-        assert_eq!(plan_context(Anthropic, Some(1_000_000), Some(200_000), 4_096), 200_000);
-        assert_eq!(plan_context(Anthropic, Some(100_000), Some(200_000), 4_096), 100_000);
+        assert_eq!(
+            plan_context(Anthropic, Some(1_000_000), None, 4_096),
+            1_000_000
+        );
+        assert_eq!(
+            plan_context(Anthropic, Some(1_000_000), Some(200_000), 4_096),
+            200_000
+        );
+        assert_eq!(
+            plan_context(Anthropic, Some(100_000), Some(200_000), 4_096),
+            100_000
+        );
         assert_eq!(plan_context(OpenAi, None, None, 4_096), 128_000);
         assert_eq!(plan_context(OpenAi, None, Some(65_536), 4_096), 65_536);
         assert_eq!(plan_context(Anthropic, None, None, 16_384), 200_000);
@@ -371,7 +388,11 @@ mod tests {
         assert!(dto(&provider("https://api.anthropic.com"), true, None).cloud);
         assert!(!dto(&provider("http://127.0.0.1:11434"), false, None).cloud);
         assert!(!dto(&provider("http://192.168.1.4:8000/v1"), false, None).cloud);
-        let row = dto(&provider("https://openrouter.ai/api/v1"), true, Some(65_536));
+        let row = dto(
+            &provider("https://openrouter.ai/api/v1"),
+            true,
+            Some(65_536),
+        );
         let value = serde_json::to_value(&row).unwrap();
         assert_eq!(value["cloud"], serde_json::json!(true));
         assert_eq!(value["contextLength"], serde_json::json!(65_536));

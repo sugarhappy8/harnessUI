@@ -16,6 +16,14 @@ and `README.md`.
   `progress_keeps_a_call_alive_and_its_text_stays_out` (mcp-host `managed_e2e`): ten progress
   notes 300 ms apart against a 1 s limit and a 4 s cap came more than a second late on a busy
   runner. Fixed in f65f107 (five notes 600 ms apart against a 2 s limit; same property).
+- CI on f65f107 (run 43815674194, code = 0.0.6 + that test fix): Linux, Windows (tests and
+  installer) and the Ghidra digest passed; the macOS `managed_e2e` passed too. macOS failed
+  `real_llama_server_agent_turn` (`crates/agent/tests/llama_agent.rs`): with the server's
+  default sampling the 0.6B model wrote a made-up `<tool_output>` block instead of calling
+  read_file. Fixed in aee9be3 (greedy decoding, fixed seed; passes locally with the real
+  model; to be confirmed by the next full CI run). The Intel Mac smoke test failed only
+  because the macOS job made no disk image. The made-up tool result was passed to P4 as a
+  real-model behaviour to handle.
 - Owner, after trying computer use: "the model still can't use my computer too well, they
   don't know what tools they have". Cause found: adaptive tool selection shows the Computer
   group only for words like "screen", "desktop", "mouse"; "open Notepad", "use my pc",

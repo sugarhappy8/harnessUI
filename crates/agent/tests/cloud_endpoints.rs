@@ -108,7 +108,11 @@ impl TurnSink for Events {
     }
 }
 
-async fn run(client: &OpenAiClient, caps: ModelCaps, template: RequestTemplate) -> (agent::TurnOutcome, Weather, Events) {
+async fn run(
+    client: &OpenAiClient,
+    caps: ModelCaps,
+    template: RequestTemplate,
+) -> (agent::TurnOutcome, Weather, Events) {
     let tools = Weather {
         executed: Mutex::new(Vec::new()),
     };
@@ -171,10 +175,19 @@ fn stop(reason: &str, output_tokens: u32) -> String {
 
 fn text_stream(text: &str) -> Vec<u8> {
     let mut out = start(1_200, 900);
-    out += &event("content_block_start", &json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}));
+    out += &event(
+        "content_block_start",
+        &json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+    );
     out += &event("ping", &json!({"type": "ping"}));
-    out += &event("content_block_delta", &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}));
-    out += &event("content_block_stop", &json!({"type": "content_block_stop", "index": 0}));
+    out += &event(
+        "content_block_delta",
+        &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+    );
+    out += &event(
+        "content_block_stop",
+        &json!({"type": "content_block_stop", "index": 0}),
+    );
     out += &stop("end_turn", 12);
     out.into_bytes()
 }
@@ -183,14 +196,38 @@ const SIGNATURE: &str = "EqQBCgIYAhIM1gbcDa9GJwZA2b3hGgxBdjrkzLoky3dl1pkiMOYds";
 
 fn thinking_tool_stream(id: &str) -> Vec<u8> {
     let mut out = start(1_000, 0);
-    out += &event("content_block_start", &json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}));
-    out += &event("content_block_delta", &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "I need the weather."}}));
-    out += &event("content_block_delta", &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": SIGNATURE}}));
-    out += &event("content_block_stop", &json!({"type": "content_block_stop", "index": 0}));
-    out += &event("content_block_start", &json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": id, "name": "get_weather", "input": {}}}));
-    out += &event("content_block_delta", &json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"city\": "}}));
-    out += &event("content_block_delta", &json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "\"Paris\"}"}}));
-    out += &event("content_block_stop", &json!({"type": "content_block_stop", "index": 1}));
+    out += &event(
+        "content_block_start",
+        &json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+    );
+    out += &event(
+        "content_block_delta",
+        &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "I need the weather."}}),
+    );
+    out += &event(
+        "content_block_delta",
+        &json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": SIGNATURE}}),
+    );
+    out += &event(
+        "content_block_stop",
+        &json!({"type": "content_block_stop", "index": 0}),
+    );
+    out += &event(
+        "content_block_start",
+        &json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": id, "name": "get_weather", "input": {}}}),
+    );
+    out += &event(
+        "content_block_delta",
+        &json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"city\": "}}),
+    );
+    out += &event(
+        "content_block_delta",
+        &json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "\"Paris\"}"}}),
+    );
+    out += &event(
+        "content_block_stop",
+        &json!({"type": "content_block_stop", "index": 1}),
+    );
     out += &stop("tool_use", 40);
     out.into_bytes()
 }
@@ -246,8 +283,13 @@ fn messages_requests(server: &MockServer) -> Vec<Recorded> {
         .collect()
 }
 
-async fn collect(client: &OpenAiClient, request: &ChatRequest) -> Result<Vec<StreamEvent>, ProviderError> {
-    let mut stream = client.stream_chat(request, CancellationToken::new()).await?;
+async fn collect(
+    client: &OpenAiClient,
+    request: &ChatRequest,
+) -> Result<Vec<StreamEvent>, ProviderError> {
+    let mut stream = client
+        .stream_chat(request, CancellationToken::new())
+        .await?;
     let mut events = Vec::new();
     while let Some(item) = stream.next().await {
         events.push(item?);
@@ -271,7 +313,11 @@ async fn claude_gets_its_own_headers_and_format() {
     let server = claude_server(vec![sse(text_stream("Hello."))]).await;
     let client = claude(&server);
     let mut request = simple_request("claude-opus-5-5");
-    request.tools = vec![ToolSpec::function("get_weather", "Weather", json!({"type": "object", "properties": {}}))];
+    request.tools = vec![ToolSpec::function(
+        "get_weather",
+        "Weather",
+        json!({"type": "object", "properties": {}}),
+    )];
     request.tool_choice = Some(ToolChoice::Auto);
     request.parallel_tool_calls = Some(false);
     request.temperature = Some(0.5);
@@ -282,22 +328,50 @@ async fn claude_gets_its_own_headers_and_format() {
     let sent = &messages_requests(&server)[0];
     assert_eq!(sent.header("x-api-key"), Some(KEY));
     assert_eq!(sent.header("anthropic-version"), Some("2026-10-21"));
-    assert_eq!(sent.header("authorization"), None, "the key goes in x-api-key only");
+    assert_eq!(
+        sent.header("authorization"),
+        None,
+        "the key goes in x-api-key only"
+    );
     let body = sent.json();
     assert_eq!(body["model"], json!("claude-opus-5-5"));
     assert_eq!(body["max_tokens"], json!(1_000));
     assert_eq!(body["stream"], json!(true));
     assert_eq!(body["system"][0]["text"], json!("Be brief."));
-    assert_eq!(body["system"][0]["cache_control"], json!({"type": "ephemeral"}));
-    assert_eq!(body["messages"], json!([{"role": "user", "content": [{"type": "text", "text": "Hi", "cache_control": {"type": "ephemeral"}}]}]));
-    assert_eq!(body["tools"][0]["input_schema"], json!({"type": "object", "properties": {}}));
-    assert_eq!(body["tool_choice"], json!({"type": "auto", "disable_parallel_tool_use": true}));
+    assert_eq!(
+        body["system"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        body["messages"],
+        json!([{"role": "user", "content": [{"type": "text", "text": "Hi", "cache_control": {"type": "ephemeral"}}]}])
+    );
+    assert_eq!(
+        body["tools"][0]["input_schema"],
+        json!({"type": "object", "properties": {}})
+    );
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "auto", "disable_parallel_tool_use": true})
+    );
     assert!(body.get("temperature").is_none());
     // The model was looked up once, in Anthropic's model list.
-    let lookups: Vec<String> = server.requests().iter().filter(|r| r.method == "GET").map(|r| r.path().to_owned()).collect();
+    let lookups: Vec<String> = server
+        .requests()
+        .iter()
+        .filter(|r| r.method == "GET")
+        .map(|r| r.path().to_owned())
+        .collect();
     assert_eq!(lookups, vec!["/v1/models/claude-opus-5-5".to_owned()]);
     collect(&client, &request).await.unwrap();
-    assert_eq!(server.requests().iter().filter(|r| r.method == "GET").count(), 1);
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|r| r.method == "GET")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -318,7 +392,10 @@ async fn a_tool_using_turn_against_claude() {
         outcome.messages.last().unwrap().text(),
         "It is sunny in Paris, 21 °C."
     );
-    assert_eq!(*tools.executed.lock().unwrap(), vec![json!({"city": "Paris"}).as_object().unwrap().clone()]);
+    assert_eq!(
+        *tools.executed.lock().unwrap(),
+        vec![json!({"city": "Paris"}).as_object().unwrap().clone()]
+    );
 
     // The thinking streamed into the Thinking area like a local model's.
     let reasoning: String = events
@@ -340,7 +417,10 @@ async fn a_tool_using_turn_against_claude() {
     let requests = messages_requests(&server);
     assert_eq!(requests.len(), 2);
     let first = requests[0].json();
-    assert_eq!(first["thinking"], json!({"type": "adaptive", "display": "summarized"}));
+    assert_eq!(
+        first["thinking"],
+        json!({"type": "adaptive", "display": "summarized"})
+    );
     let second = requests[1].json();
     let messages = second["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 3, "{second}");
@@ -355,12 +435,23 @@ async fn a_tool_using_turn_against_claude() {
     let result = &messages[2]["content"][0];
     assert_eq!(result["type"], json!("tool_result"));
     assert_eq!(result["tool_use_id"], json!("toolu_01A"));
-    assert!(result["content"][0]["text"].as_str().unwrap().contains("Sunny, 21 °C"));
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Sunny, 21 °C")
+    );
     assert!(result.get("is_error").is_none());
     // The newest block is the cache breakpoint; the system prompt is the other one.
     assert_eq!(result["cache_control"], json!({"type": "ephemeral"}));
-    assert_eq!(second["system"][0]["cache_control"], json!({"type": "ephemeral"}));
-    assert_eq!(first["system"], second["system"], "the cached prefix stays the same");
+    assert_eq!(
+        second["system"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        first["system"], second["system"],
+        "the cached prefix stays the same"
+    );
     assert_eq!(first["tools"], second["tools"]);
 }
 
@@ -429,49 +520,106 @@ fn with_retry_after(status: u16, body: &Value, after: &str) -> Reply {
 async fn claude_rate_limits_and_overload_are_retried_as_documented() {
     // A rate limit with retry-after, then an overload, then the answer.
     let server = claude_server(vec![
-        with_retry_after(429, &error("rate_limit_error", "Number of requests exceeded"), "0"),
+        with_retry_after(
+            429,
+            &error("rate_limit_error", "Number of requests exceeded"),
+            "0",
+        ),
         with_retry_after(529, &error("overloaded_error", "Overloaded"), "0"),
         sse(text_stream("Finally.")),
     ])
     .await;
-    let events = collect(&claude(&server), &simple_request("claude-opus-5-5")).await.unwrap();
+    let events = collect(&claude(&server), &simple_request("claude-opus-5-5"))
+        .await
+        .unwrap();
     assert_eq!(events[0], StreamEvent::Content("Finally.".into()));
     assert_eq!(messages_requests(&server).len(), 3);
 
     // Overloaded every time: two retries, then the error in plain words.
     let overloaded = || with_retry_after(529, &error("overloaded_error", "Overloaded"), "0");
     let server = claude_server(vec![overloaded(), overloaded(), overloaded(), overloaded()]).await;
-    let err = collect(&claude(&server), &simple_request("claude-opus-5-5")).await.unwrap_err();
-    assert!(matches!(err, ProviderError::Http { status: 529, .. }), "{err:?}");
-    assert!(err.user_message().starts_with("The company's servers are overloaded"));
+    let err = collect(&claude(&server), &simple_request("claude-opus-5-5"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProviderError::Http { status: 529, .. }),
+        "{err:?}"
+    );
+    assert!(
+        err.user_message()
+            .starts_with("The company's servers are overloaded")
+    );
     assert_eq!(messages_requests(&server).len(), 3);
 
     // A spending limit (no retry-after) is not retried; a long wait is said in words.
-    let server = claude_server(vec![Reply::json(429, &error("rate_limit_error", "Usage cap reached"))]).await;
-    let err = collect(&claude(&server), &simple_request("claude-opus-5-5")).await.unwrap_err();
+    let server = claude_server(vec![Reply::json(
+        429,
+        &error("rate_limit_error", "Usage cap reached"),
+    )])
+    .await;
+    let err = collect(&claude(&server), &simple_request("claude-opus-5-5"))
+        .await
+        .unwrap_err();
     assert!(matches!(err, ProviderError::Http { status: 429, .. }));
     assert_eq!(messages_requests(&server).len(), 1);
-    let server = claude_server(vec![with_retry_after(429, &error("rate_limit_error", "Slow down"), "600")]).await;
-    let err = collect(&claude(&server), &simple_request("claude-opus-5-5")).await.unwrap_err();
-    assert!(err.to_string().contains("try again in about 10 minutes"), "{err}");
+    let server = claude_server(vec![with_retry_after(
+        429,
+        &error("rate_limit_error", "Slow down"),
+        "600",
+    )])
+    .await;
+    let err = collect(&claude(&server), &simple_request("claude-opus-5-5"))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("try again in about 10 minutes"),
+        "{err}"
+    );
     assert_eq!(messages_requests(&server).len(), 1);
 }
 
 #[tokio::test]
 async fn claude_bad_keys_and_errors_never_show_the_key() {
-    let server = claude_server(vec![Reply::json(401, &error("authentication_error", &format!("invalid x-api-key {KEY}")))]).await;
-    let err = collect(&claude(&server), &simple_request("claude-opus-5-5")).await.unwrap_err();
+    let server = claude_server(vec![Reply::json(
+        401,
+        &error("authentication_error", &format!("invalid x-api-key {KEY}")),
+    )])
+    .await;
+    let err = collect(&claude(&server), &simple_request("claude-opus-5-5"))
+        .await
+        .unwrap_err();
     assert_eq!(err, ProviderError::Unauthorized);
     // A server that echoes the key in an error message: the key is removed.
-    let server = claude_server(vec![Reply::json(400, &error("invalid_request_error", &format!("bad header {KEY}")))]).await;
-    let err = collect(&claude(&server), &simple_request("claude-opus-5-5")).await.unwrap_err();
+    let server = claude_server(vec![Reply::json(
+        400,
+        &error("invalid_request_error", &format!("bad header {KEY}")),
+    )])
+    .await;
+    let err = collect(&claude(&server), &simple_request("claude-opus-5-5"))
+        .await
+        .unwrap_err();
     let text = format!("{err} {err:?} {}", err.user_message());
     assert!(!text.contains(KEY), "{text}");
     assert!(text.contains("[API key]"), "{text}");
     // Too long for the model: the app's own words, with the numbers.
-    let server = claude_server(vec![Reply::json(400, &error("invalid_request_error", "prompt is too long: 210000 tokens > 200000 maximum"))]).await;
-    let err = collect(&claude(&server), &simple_request("claude-opus-5-5")).await.unwrap_err();
-    assert_eq!(err, ProviderError::ContextOverflow { n_prompt_tokens: Some(210_000), n_ctx: Some(200_000) });
+    let server = claude_server(vec![Reply::json(
+        400,
+        &error(
+            "invalid_request_error",
+            "prompt is too long: 210000 tokens > 200000 maximum",
+        ),
+    )])
+    .await;
+    let err = collect(&claude(&server), &simple_request("claude-opus-5-5"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        ProviderError::ContextOverflow {
+            n_prompt_tokens: Some(210_000),
+            n_ctx: Some(200_000)
+        }
+    );
 }
 
 #[tokio::test]
@@ -496,7 +644,10 @@ async fn claude_refused_thinking_blocks_are_dropped_once() {
     let requests = messages_requests(&server);
     assert_eq!(requests.len(), 3);
     let replayed = requests[1].json();
-    assert_eq!(replayed["messages"][1]["content"][0]["type"], json!("thinking"));
+    assert_eq!(
+        replayed["messages"][1]["content"][0]["type"],
+        json!("thinking")
+    );
     let retried = requests[2].json();
     assert_eq!(
         retried["messages"][1]["content"],
@@ -550,13 +701,24 @@ async fn claude_model_list_with_display_names_and_sizes() {
     let client = claude(&server);
     let models = client.list_model_entries().await.unwrap();
     let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, vec!["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+    assert_eq!(
+        ids,
+        vec!["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    );
     assert_eq!(models[0].display_name.as_deref(), Some("Claude Opus 5.5"));
     assert_eq!(models[0].context_length, Some(1_000_000));
-    assert!(server.requests().iter().all(|r| r.header("x-api-key") == Some(KEY)));
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| r.header("x-api-key") == Some(KEY))
+    );
     // The size of a listed model is known without asking again.
     let asked = server.requests().len();
-    assert_eq!(client.context_length("claude-sonnet-5-5").await.unwrap(), Some(1_000_000));
+    assert_eq!(
+        client.context_length("claude-sonnet-5-5").await.unwrap(),
+        Some(1_000_000)
+    );
     assert_eq!(server.requests().len(), asked);
 }
 
@@ -564,12 +726,24 @@ async fn claude_model_list_with_display_names_and_sizes() {
 
 /// The fields OpenAI's Chat Completions API takes (a subset is enough for the app's requests).
 const STRICT_FIELDS: &[&str] = &[
-    "model", "messages", "stream", "stream_options", "max_completion_tokens", "max_tokens",
-    "temperature", "top_p", "tools", "tool_choice", "parallel_tool_calls",
+    "model",
+    "messages",
+    "stream",
+    "stream_options",
+    "max_completion_tokens",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
 ];
 
 fn openai_error(message: &str, param: Option<&str>, code: Option<&str>) -> Reply {
-    Reply::json(400, &json!({"error": {"message": message, "type": "invalid_request_error", "param": param, "code": code}}))
+    Reply::json(
+        400,
+        &json!({"error": {"message": message, "type": "invalid_request_error", "param": param, "code": code}}),
+    )
 }
 
 /// A strict OpenAI-style server: unknown fields, `max_tokens`, sampling values on its
@@ -613,7 +787,11 @@ async fn strict_openai(replies: Vec<Reply>) -> MockServer {
 #[tokio::test]
 async fn a_tool_using_turn_against_a_strict_openai_server() {
     let server = strict_openai(vec![
-        common::sse_reply(common::sse::tool_call("call_1", "get_weather", json!({"city": "Paris"}))),
+        common::sse_reply(common::sse::tool_call(
+            "call_1",
+            "get_weather",
+            json!({"city": "Paris"}),
+        )),
         common::sse_reply(common::sse::text("Sunny in Paris.")),
     ])
     .await;
@@ -627,12 +805,24 @@ async fn a_tool_using_turn_against_a_strict_openai_server() {
         ..RequestTemplate::default()
     };
     template.extra.insert("cache_prompt".into(), json!(true));
-    template.extra.insert("chat_template_kwargs".into(), json!({"enable_thinking": false}));
+    template.extra.insert(
+        "chat_template_kwargs".into(),
+        json!({"enable_thinking": false}),
+    );
     let mut caps = caps(false);
     caps.n_ctx = 128_000;
     caps.images_in_tool_results = false;
     let (outcome, tools, _) = run(&client, caps, template).await;
-    assert_eq!(outcome.status, TurnStatus::Completed, "{:?}", server.requests().iter().map(Recorded::json).collect::<Vec<_>>());
+    assert_eq!(
+        outcome.status,
+        TurnStatus::Completed,
+        "{:?}",
+        server
+            .requests()
+            .iter()
+            .map(Recorded::json)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(tools.executed.lock().unwrap().len(), 1);
     let bodies: Vec<Value> = server.requests().iter().map(Recorded::json).collect();
     // The output limit and parallel_tool_calls were refused once each, in the first step;
@@ -644,12 +834,23 @@ async fn a_tool_using_turn_against_a_strict_openai_server() {
     assert!(bodies[3].get("parallel_tool_calls").is_none());
     assert_eq!(bodies[3]["max_completion_tokens"], json!(16_384));
     for body in &bodies {
-        for gone in ["max_tokens", "top_k", "temperature", "cache_prompt", "chat_template_kwargs"] {
+        for gone in [
+            "max_tokens",
+            "top_k",
+            "temperature",
+            "cache_prompt",
+            "chat_template_kwargs",
+        ] {
             assert!(body.get(gone).is_none(), "{gone} in {body}");
         }
         assert_eq!(body["stream_options"], json!({"include_usage": true}));
     }
-    assert!(server.requests().iter().all(|r| r.header("authorization") == Some(&format!("Bearer {KEY}"))));
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| r.header("authorization") == Some(&format!("Bearer {KEY}")))
+    );
 }
 
 #[tokio::test]
@@ -667,14 +868,19 @@ async fn a_server_that_refuses_a_parameter_gets_it_no_more() {
     collect(&client, &request).await.unwrap();
     assert_eq!(server.requests().len(), 2);
     collect(&client, &request).await.unwrap();
-    assert_eq!(server.requests().len(), 3, "remembered for this endpoint and model");
+    assert_eq!(
+        server.requests().len(),
+        3,
+        "remembered for this endpoint and model"
+    );
     // Another model on the same endpoint is asked with top_k again.
     let mut other = simple_request("other-model");
     other.top_k = Some(20);
     collect(&client, &other).await.unwrap();
     assert_eq!(server.requests().len(), 5);
     // llama-server never gets a request changed.
-    let llama = OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::LlamaServer)).unwrap();
+    let llama =
+        OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::LlamaServer)).unwrap();
     let err = collect(&llama, &request).await.unwrap_err();
     assert!(matches!(err, ProviderError::Http { status: 400, .. }));
 }
@@ -682,21 +888,31 @@ async fn a_server_that_refuses_a_parameter_gets_it_no_more() {
 #[tokio::test]
 async fn openai_model_list_has_chat_models_only() {
     let server = MockServer::start(|_| {
-        Reply::json(200, &json!({"object": "list", "data": [
-            {"id": "gpt-5.5", "object": "model", "owned_by": "openai"},
-            {"id": "text-embedding-3-large", "object": "model"},
-            {"id": "whisper-1", "object": "model"},
-            {"id": "gpt-image-1", "object": "model"},
-            {"id": "omni-moderation-latest", "object": "model"},
-            {"id": "o4-mini", "object": "model"}
-        ]}))
+        Reply::json(
+            200,
+            &json!({"object": "list", "data": [
+                {"id": "gpt-5.5", "object": "model", "owned_by": "openai"},
+                {"id": "text-embedding-3-large", "object": "model"},
+                {"id": "whisper-1", "object": "model"},
+                {"id": "gpt-image-1", "object": "model"},
+                {"id": "omni-moderation-latest", "object": "model"},
+                {"id": "o4-mini", "object": "model"}
+            ]}),
+        )
     })
     .await;
     let openai = OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::OpenAi)).unwrap();
-    let ids: Vec<String> = openai.list_models().await.unwrap().into_iter().map(|m| m.id).collect();
+    let ids: Vec<String> = openai
+        .list_models()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
     assert_eq!(ids, vec!["gpt-5.5", "o4-mini"]);
     // Another kind lists everything, as before.
-    let generic = OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::Generic)).unwrap();
+    let generic =
+        OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::Generic)).unwrap();
     assert_eq!(generic.list_models().await.unwrap().len(), 6);
 }
 
@@ -706,20 +922,28 @@ async fn openrouter_and_abliteration_lists_give_names_sizes_and_limits() {
         if request.path() == "/v1/chat/completions" {
             return common::sse_reply(common::sse::text("ok"));
         }
-        Reply::json(200, &json!({"data": [
-            {"id": "qwen/qwen4-max", "name": "Qwen: Qwen4 Max", "context_length": 1_000_000,
-             "architecture": {"output_modalities": ["text"]},
-             "top_provider": {"context_length": 1_000_000, "max_completion_tokens": 8_000}},
-            {"id": "maker/image-only", "name": "Images", "context_length": 4_096,
-             "architecture": {"output_modalities": ["image"]}},
-            {"id": "abliterated-model", "display_name": "Abliterated", "context_length": 65_536,
-             "max_output_length": 4_096, "output_modalities": ["text"]}
-        ]}))
+        Reply::json(
+            200,
+            &json!({"data": [
+                {"id": "qwen/qwen4-max", "name": "Qwen: Qwen4 Max", "context_length": 1_000_000,
+                 "architecture": {"output_modalities": ["text"]},
+                 "top_provider": {"context_length": 1_000_000, "max_completion_tokens": 8_000}},
+                {"id": "maker/image-only", "name": "Images", "context_length": 4_096,
+                 "architecture": {"output_modalities": ["image"]}},
+                {"id": "abliterated-model", "display_name": "Abliterated", "context_length": 65_536,
+                 "max_output_length": 4_096, "output_modalities": ["text"]}
+            ]}),
+        )
     })
     .await;
-    let client = OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::OpenRouter)).unwrap();
+    let client =
+        OpenAiClient::new(ClientConfig::new(server.url(), ProviderKind::OpenRouter)).unwrap();
     let models = client.list_model_entries().await.unwrap();
-    assert_eq!(models.len(), 2, "a model that cannot write text is left out");
+    assert_eq!(
+        models.len(),
+        2,
+        "a model that cannot write text is left out"
+    );
     assert_eq!(models[0].display_name.as_deref(), Some("Qwen: Qwen4 Max"));
     assert_eq!(models[0].context_length, Some(1_000_000));
     assert_eq!(models[1].display_name.as_deref(), Some("Abliterated"));
@@ -739,9 +963,18 @@ fn keys_never_travel_in_clear_text_to_the_internet() {
         OpenAiClient::new(config)
     };
     let err = with_key("http://api.example.com/v1").unwrap_err();
-    assert!(matches!(err, ProviderError::InvalidRequest(ref m) if m.contains("https://")), "{err:?}");
+    assert!(
+        matches!(err, ProviderError::InvalidRequest(ref m) if m.contains("https://")),
+        "{err:?}"
+    );
     assert!(with_key("https://api.example.com/v1").is_ok());
     assert!(with_key("http://192.168.1.20:8000/v1").is_ok());
     assert!(with_key("http://127.0.0.1:11434").is_ok());
-    assert!(OpenAiClient::new(ClientConfig::new("http://api.example.com/v1", ProviderKind::Generic)).is_ok());
+    assert!(
+        OpenAiClient::new(ClientConfig::new(
+            "http://api.example.com/v1",
+            ProviderKind::Generic
+        ))
+        .is_ok()
+    );
 }

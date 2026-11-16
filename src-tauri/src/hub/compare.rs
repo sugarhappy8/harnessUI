@@ -836,8 +836,8 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
                 if held > 0 {
                     let room = machine.room(gpu);
                     computer_free_bytes = machine.ram_free_bytes;
-                    computer_short = verdict == Verdict::Red
-                        && held > room.partial.saturating_sub(room.whole);
+                    computer_short =
+                        verdict == Verdict::Red && held > room.partial.saturating_sub(room.whole);
                 }
                 (verdict, partial, needed, held)
             } else {

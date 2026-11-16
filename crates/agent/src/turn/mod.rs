@@ -41,6 +41,10 @@
 //! - an empty reply or a server parse error is retried once with thinking disabled, its
 //!   streamed output discarded ([`TurnEvent::AttemptDiscarded`]); a second failure ends the
 //!   turn with "The model returned no answer";
+//! - [0.0.7] a reply that writes a tool result itself (a result block's tag outside code,
+//!   `parse::writes_tool_result`) is discarded and asked once more with
+//!   [`WROTE_A_RESULT_NOTE`]; it counts as a mistake, and a second one is kept as the answer
+//!   with [`MADE_UP_RESULT_NOTE`] for the user;
 //! - a call found in reasoning is never run; untrusted content (a tool result, an attachment)
 //!   makes outbound actions ask (`untrusted_in_turn`); recovered calls reach the policy gate
 //!   with `recovered = true`;

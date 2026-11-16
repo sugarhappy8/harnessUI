@@ -133,9 +133,7 @@ impl ModelSummary {
             value_length,
             sliding_window: memory.window,
             swa_layers: memory.swa_layers,
-            key_length_swa: h
-                .arch_u64("attention.key_length_swa")
-                .unwrap_or(key_length),
+            key_length_swa: h.arch_u64("attention.key_length_swa").unwrap_or(key_length),
             value_length_swa: h
                 .arch_u64("attention.value_length_swa")
                 .unwrap_or(value_length),
@@ -387,10 +385,7 @@ mod tests {
                 .u32_array("lfm2.attention.head_count_kv", &[8, 0, 8, 0])
                 .build(),
         );
-        assert_eq!(
-            hybrid.kv_size(KvCacheType::Q8_0).per_cell,
-            2 * 2 * 16 * 34
-        );
+        assert_eq!(hybrid.kv_size(KvCacheType::Q8_0).per_cell, 2 * 2 * 16 * 34);
         // Rotation matrices only for the two attention layers (64-value heads).
         assert_eq!(
             hybrid.kv_size(KvCacheType::Q8_0).fixed,

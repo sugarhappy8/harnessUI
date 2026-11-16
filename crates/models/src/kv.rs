@@ -293,7 +293,9 @@ impl KvShape {
                     }
                     n_rot = next;
                 }
-                n_rot.saturating_mul(n_rot).saturating_mul(ROTATION_ENTRY_BYTES)
+                n_rot
+                    .saturating_mul(n_rot)
+                    .saturating_mul(ROTATION_ENTRY_BYTES)
             });
         // Every layer of the cache has a value tensor then (none with MLA).
         let value = common(|l| l.value_length)
@@ -352,10 +354,7 @@ impl KvShape {
             let (key, value) = self.rows(layer, layout, widest);
             let row = key.saturating_add(value);
             let (rot_key, rot_value) = rotation[usize::from(layer.window)];
-            size.fixed = size
-                .fixed
-                .saturating_add(rot_key)
-                .saturating_add(rot_value);
+            size.fixed = size.fixed.saturating_add(rot_key).saturating_add(rot_value);
             if layer.window {
                 size.window_per_cell = size.window_per_cell.saturating_add(row);
                 // A saved copy holds each layer's own rows (`state_write_data`).
@@ -479,7 +478,12 @@ fn flags(items: &[Value], n: usize) -> Vec<bool> {
 /// entries, of which the first `main_layers` follow the pattern: every `n_pattern`th layer
 /// keeps the whole conversation (the first of each group with `dense_first`, else the
 /// last); 0 makes every layer short-memory. The extra prediction layers are full.
-fn set_swa_pattern(blocks: usize, main_layers: u64, n_pattern: u64, dense_first: bool) -> Vec<bool> {
+fn set_swa_pattern(
+    blocks: usize,
+    main_layers: u64,
+    n_pattern: u64,
+    dense_first: bool,
+) -> Vec<bool> {
     (0..blocks)
         .map(|il| {
             let il = u64::try_from(il).unwrap_or(u64::MAX);
@@ -547,7 +551,9 @@ impl Reader<'_> {
     /// layer (Beam and Maion-Coder refuse anything else).
     fn pattern_array_per_block(&self) -> Option<Vec<bool>> {
         match self.get("attention.sliding_window_pattern") {
-            Some(Value::Array(items)) if u64::try_from(items.len()).ok() == Some(self.block_count) => {
+            Some(Value::Array(items))
+                if u64::try_from(items.len()).ok() == Some(self.block_count) =>
+            {
                 let layers = flags(items, self.blocks);
                 layers.contains(&true).then_some(layers)
             }
@@ -705,7 +711,8 @@ pub(crate) fn read_arch(
     // MLA keeps keys only (`has_v = !is_mla`): both MLA head sizes in the file.
     let mla = matches!(arch, "deepseek2" | "bailingmoe3")
         && r.number("attention.key_length_mla").is_some_and(|n| n > 0)
-        && r.number("attention.value_length_mla").is_some_and(|n| n > 0);
+        && r.number("attention.value_length_mla")
+            .is_some_and(|n| n > 0);
     ArchKv {
         window,
         swa_layers,
@@ -927,7 +934,8 @@ mod tests {
                 arch,
             ))
         };
-        let window = |w: Writer, arch: &str| w.u32(&format!("{arch}.attention.sliding_window"), 4096);
+        let window =
+            |w: Writer, arch: &str| w.u32(&format!("{arch}.attention.sliding_window"), 4096);
         let zero = |w: Writer, arch: &str| w.u32(&format!("{arch}.attention.sliding_window"), 0);
         let none = |w: Writer, _: &str| w;
         assert_eq!(plain("gemma3", 26, none).sliding_window, 0);
@@ -943,16 +951,27 @@ mod tests {
         // Gemma 2: a window of 4,096 by default and every other layer short-memory.
         let gemma2 = plain("gemma2", 42, none);
         assert_eq!(gemma2.sliding_window, 4096);
-        assert_eq!(gemma2.swa_layers, (0..42).map(|il| il % 2 == 0).collect::<Vec<_>>());
+        assert_eq!(
+            gemma2.swa_layers,
+            (0..42).map(|il| il % 2 == 0).collect::<Vec<_>>()
+        );
         // Llama 4: chunked attention, 3 chunked layers then a full one.
         let llama4 = plain("llama4", 48, none);
         assert_eq!(llama4.sliding_window, 8192);
-        assert_eq!(llama4.swa_layers, (0..48).map(|il| il % 4 < 3).collect::<Vec<_>>());
+        assert_eq!(
+            llama4.swa_layers,
+            (0..48).map(|il| il % 4 < 3).collect::<Vec<_>>()
+        );
         assert!(plain("llama4", 48, zero).swa_layers.is_empty());
-        let thinker = plain("smallthinker", 32, |w, a| w.u32(&format!("{a}.attention.sliding_window"), 1));
+        let thinker = plain("smallthinker", 32, |w, a| {
+            w.u32(&format!("{a}.attention.sliding_window"), 1)
+        });
         assert_eq!(thinker.sliding_window, 4096);
         // dense_first: the first of each group of four keeps the whole conversation.
-        assert_eq!(thinker.swa_layers, (0..32).map(|il| il % 4 != 0).collect::<Vec<_>>());
+        assert_eq!(
+            thinker.swa_layers,
+            (0..32).map(|il| il % 4 != 0).collect::<Vec<_>>()
+        );
         // Cohere 2: the window is required, groups of four ending with a full layer.
         assert!(plain("cohere2", 32, none).swa_layers.is_empty());
         assert_eq!(
@@ -966,7 +985,10 @@ mod tests {
             w.u32(&format!("{a}.attention.sliding_window"), 512)
                 .u32(&format!("{a}.attention.sliding_window_pattern"), 3)
         });
-        assert_eq!(numbered.swa_layers, (0..12).map(|il| il % 3 < 2).collect::<Vec<_>>());
+        assert_eq!(
+            numbered.swa_layers,
+            (0..12).map(|il| il % 3 < 2).collect::<Vec<_>>()
+        );
     }
 
     /// gpt-oss-20b (`ggml-org/gpt-oss-20b-GGUF`): every other layer looks back 128
@@ -986,7 +1008,10 @@ mod tests {
                 .u32("gpt-oss.attention.sliding_window", 128)
                 .u32("gpt-oss.expert_count", 32),
         );
-        assert_eq!(s.swa_layers, (0..24).map(|il| il % 2 == 0).collect::<Vec<_>>());
+        assert_eq!(
+            s.swa_layers,
+            (0..24).map(|il| il % 2 == 0).collect::<Vec<_>>()
+        );
         // 12 full layers × 8 × 128 × 2 = 2,048 bytes a cell; 12 short layers the same for
         // GGML_PAD(128 + 512, 256) = 768 cells (18 MiB).
         assert_eq!(s.kv_bytes(4096, F16), (96 + 18) * MIB);
@@ -1064,7 +1089,10 @@ mod tests {
                 .u32("qwen35.attention.value_length", 256)
         };
         let s = summary(qwen35().u32("qwen35.full_attention_interval", 4));
-        assert_eq!(s.kv_layers, (0..32).map(|il| il % 4 == 3).collect::<Vec<_>>());
+        assert_eq!(
+            s.kv_layers,
+            (0..32).map(|il| il % 4 == 3).collect::<Vec<_>>()
+        );
         // 8 layers × 4 heads × 512 values × 2 bytes = 32,768 bytes a cell (0.0.6 counted all
         // 32 layers, 131,072).
         assert_eq!(s.kv_size(F16), KvSize::per_token(32_768));
@@ -1161,7 +1189,10 @@ mod tests {
         let models = [
             summary(gemma4_12b()),
             summary(gemma3_270m()),
-            summary(gemma4_12b_except(&["attention.shared_kv_layers"]).u32("gemma4.attention.shared_kv_layers", 30)),
+            summary(
+                gemma4_12b_except(&["attention.shared_kv_layers"])
+                    .u32("gemma4.attention.shared_kv_layers", 30),
+            ),
         ];
         let layouts = [
             KvLayout::from(F16),
@@ -1248,11 +1279,17 @@ mod tests {
         // A pattern array longer than the layers: the extra entries are not used.
         let long: Vec<bool> = (0..3000).map(|il| il % 6 != 5).collect();
         let pattern = "attention.sliding_window_pattern";
-        let s = summary(gemma4_12b_except(&[pattern]).bool_array("gemma4.attention.sliding_window_pattern", &long));
+        let s = summary(
+            gemma4_12b_except(&[pattern])
+                .bool_array("gemma4.attention.sliding_window_pattern", &long),
+        );
         assert_eq!(s.swa_layers.len(), 48);
         assert_eq!(s.kv_bytes(65_536, F16), 1_577_058_304);
         // Shorter: the layers past its end keep the whole conversation (the safe side).
-        let short = summary(gemma4_12b_except(&[pattern]).bool_array("gemma4.attention.sliding_window_pattern", &[true; 6]));
+        let short = summary(
+            gemma4_12b_except(&[pattern])
+                .bool_array("gemma4.attention.sliding_window_pattern", &[true; 6]),
+        );
         assert_eq!(short.swa_layers.iter().filter(|&&w| w).count(), 6);
         assert!(short.kv_bytes(65_536, F16) > 1_577_058_304);
         // Windows of 0 and of u64::MAX.
@@ -1261,7 +1298,8 @@ mod tests {
         // llama.cpp still gives the short layers one batch: GGML_PAD(0 + 512, 256) cells.
         assert_eq!(zero.kv_bytes(65_536, F16), 16_384 * 65_536 + 327_680 * 512);
         assert_eq!(zero.kv_size(F16).checkpoints_at(65_536), 0);
-        let huge = summary(gemma4_12b_except(&[window]).u64("gemma4.attention.sliding_window", u64::MAX));
+        let huge =
+            summary(gemma4_12b_except(&[window]).u64("gemma4.attention.sliding_window", u64::MAX));
         assert_eq!(huge.sliding_window, u64::from(u32::MAX));
         // At full length: the safe side.
         assert_eq!(huge.kv_bytes(65_536, F16), (16_384 + 327_680) * 65_536);

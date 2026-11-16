@@ -311,9 +311,14 @@ fn is_overflow_message(lower: &str) -> bool {
 }
 
 fn prompt_tokens_in(lower: &str) -> Option<u32> {
-    ["request (", "requested ", "resulted in ", "prompt is too long: "]
-        .iter()
-        .find_map(|marker| number_after(lower, marker))
+    [
+        "request (",
+        "requested ",
+        "resulted in ",
+        "prompt is too long: ",
+    ]
+    .iter()
+    .find_map(|marker| number_after(lower, marker))
 }
 
 fn context_size_in(lower: &str) -> Option<u32> {
@@ -543,7 +548,8 @@ mod tests {
             error_from_body(Some(401), body, ""),
             ProviderError::Unauthorized
         );
-        let body = br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let body =
+            br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
         assert_eq!(
             error_from_body(Some(529), body, ""),
             ProviderError::Http {
@@ -561,7 +567,10 @@ mod tests {
             message: message.into(),
         };
         let overloaded = http(529, "Overloaded").user_message();
-        assert!(overloaded.starts_with("The company's servers are overloaded"), "{overloaded}");
+        assert!(
+            overloaded.starts_with("The company's servers are overloaded"),
+            "{overloaded}"
+        );
         let limited = http(429, "rate_limit_error").user_message();
         assert!(limited.starts_with("Too many requests"), "{limited}");
         assert!(http(402, "credit").user_message().contains("billing"));
@@ -581,7 +590,11 @@ mod tests {
                 .user_message()
                 .starts_with("The model declined to answer"),
         );
-        assert!(refused.user_message().ends_with("It said: Benign work can trigger this."));
+        assert!(
+            refused
+                .user_message()
+                .ends_with("It said: Benign work can trigger this.")
+        );
         assert_eq!(
             ProviderError::Refused { explanation: None }.to_string(),
             "the model declined to answer"

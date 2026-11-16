@@ -585,6 +585,8 @@ fn a_result_written_by_the_model_is_recognised_outside_code() {
         assert!(!writes_tool_result(fine), "{fine}");
     }
     // Not ASCII: offsets still line up.
-    assert!(writes_tool_result("Ünïcode first, then <tool_output>x</tool_output>"));
+    assert!(writes_tool_result(
+        "Ünïcode first, then <tool_output>x</tool_output>"
+    ));
     assert!(!writes_tool_result("Ünïcode `<tool_output>` in code"));
 }

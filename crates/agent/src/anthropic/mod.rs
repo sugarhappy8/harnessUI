@@ -401,7 +401,10 @@ pub(crate) async fn stream(
             let replay = replay.as_deref().filter(|_| replay_thinking);
             request::messages_body(req, &facts, replay, &fixes)
         };
-        match client.send_stream_request(url.clone(), &body, &cancel).await? {
+        match client
+            .send_stream_request(url.clone(), &body, &cancel)
+            .await?
+        {
             Sent::Accepted(response) => {
                 let decoder = MessagesDecoder::new(Some(client.replay().clone()));
                 return client

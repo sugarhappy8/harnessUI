@@ -28,10 +28,17 @@ use crate::stream::{FinishReason, StreamEvent, Usage};
 #[derive(Debug)]
 enum Block {
     Text(String),
-    Thinking { thinking: String, signature: String },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
     /// Arrives whole; sent back exactly as received.
     Redacted(Value),
-    ToolUse { id: String, name: String, input: String },
+    ToolUse {
+        id: String,
+        name: String,
+        input: String,
+    },
     /// A block type the app does not use (server tools); a response with one is not kept.
     Other,
 }
@@ -196,7 +203,11 @@ impl MessagesDecoder {
         Err(err)
     }
 
-    fn on_event(&mut self, event: &SseEvent, out: &mut Vec<StreamEvent>) -> Result<(), ProviderError> {
+    fn on_event(
+        &mut self,
+        event: &SseEvent,
+        out: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
         let named_error = event.event.as_deref() == Some("error");
         let data = event.data.trim();
         if data.is_empty() {
@@ -345,7 +356,10 @@ impl MessagesDecoder {
             return;
         };
         let text_of = |key: &str| delta.get(key).and_then(Value::as_str).unwrap_or_default();
-        match (delta.get("type").and_then(Value::as_str), self.blocks.get_mut(&index)) {
+        match (
+            delta.get("type").and_then(Value::as_str),
+            self.blocks.get_mut(&index),
+        ) {
             (Some("text_delta"), block) => {
                 let text = text_of("text");
                 if text.is_empty() {
@@ -410,7 +424,9 @@ impl MessagesDecoder {
                     signature,
                 } => {
                     thought = true;
-                    blocks.push(json!({"type": "thinking", "thinking": thinking, "signature": signature}));
+                    blocks.push(
+                        json!({"type": "thinking", "thinking": thinking, "signature": signature}),
+                    );
                 }
                 Block::Redacted(block) => {
                     thought = true;
@@ -426,7 +442,8 @@ impl MessagesDecoder {
                         }
                     };
                     call_ids.push(id.clone());
-                    blocks.push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
+                    blocks
+                        .push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
                 }
                 Block::Other => return,
             }

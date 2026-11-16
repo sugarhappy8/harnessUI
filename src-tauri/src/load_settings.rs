@@ -3182,7 +3182,10 @@ mod tests {
             .await
             .and_then(|f| f.header)
             .expect("the model's header");
-        assert!(header.kv.window > 0, "TEST_SWA_GGUF has no short-memory layers");
+        assert!(
+            header.kv.window > 0,
+            "TEST_SWA_GGUF has no short-memory layers"
+        );
         for save_memory in [false, true] {
             let kv = header.kv.size(models::KvLayout::launch(save_memory, false));
             for ctx in [4096u32, 32_768] {

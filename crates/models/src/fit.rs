@@ -197,7 +197,9 @@ fn largest_ctx(input: &FitInput, room: Room) -> Option<u64> {
     if cap < MIN_USEFUL_CTX {
         return None;
     }
-    largest_size(MIN_USEFUL_CTX, cap, |ctx| input.fits(ctx, room, SPARE_BYTES).0)
+    largest_size(MIN_USEFUL_CTX, cap, |ctx| {
+        input.fits(ctx, room, SPARE_BYTES).0
+    })
 }
 
 /// The context sizes a search chooses from: the floor, the multiples of 1,024 between, and
@@ -1096,7 +1098,12 @@ mod tests {
             fixed: 0,
             checkpoint_per_cell: 24_576,
         };
-        let kvs = [gemma4_kv(), gpt_oss, KvSize::per_token(131_072), KvSize::default()];
+        let kvs = [
+            gemma4_kv(),
+            gpt_oss,
+            KvSize::per_token(131_072),
+            KvSize::default(),
+        ];
         for kv in kvs {
             for max_ctx in [None, Some(2048), Some(20_000), Some(262_144)] {
                 let input = FitInput {

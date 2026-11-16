@@ -755,8 +755,7 @@ pub(crate) async fn target_for(
         let id: i64 = id
             .parse()
             .map_err(|_| AppError::bad_request("This chat's model reference is malformed."))?;
-        let (client, provider) =
-            crate::providers::client_for(state, store::ProviderId(id)).await?;
+        let (client, provider) = crate::providers::client_for(state, store::ProviderId(id)).await?;
         // A model that reports no context (or a failed check) gets the user's setting,
         // 4,096 by default (8.4); [0.0.7 P5] a cloud company's model the size the company
         // documents, and every endpoint at most the size chosen for it in Settings →

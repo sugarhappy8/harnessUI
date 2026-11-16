@@ -615,19 +615,17 @@ impl OpenAiClient {
                     return None;
                 }
                 let context_length = self.listed_context_length(entry);
-                let display_name = matches!(
-                    kind,
-                    ProviderKind::OpenRouter | ProviderKind::Abliteration
-                )
-                .then(|| {
-                    ["display_name", "name"]
-                        .iter()
-                        .find_map(|key| entry.get(*key).and_then(Value::as_str))
-                        .map(str::trim)
-                        .filter(|name| !name.is_empty() && *name != id)
-                        .map(str::to_owned)
-                })
-                .flatten();
+                let display_name =
+                    matches!(kind, ProviderKind::OpenRouter | ProviderKind::Abliteration)
+                        .then(|| {
+                            ["display_name", "name"]
+                                .iter()
+                                .find_map(|key| entry.get(*key).and_then(Value::as_str))
+                                .map(str::trim)
+                                .filter(|name| !name.is_empty() && *name != id)
+                                .map(str::to_owned)
+                        })
+                        .flatten();
                 if cloud::is_cloud_company(kind) {
                     let max_output = ["/top_provider/max_completion_tokens", "/max_output_length"]
                         .iter()

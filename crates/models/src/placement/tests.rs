@@ -1269,12 +1269,18 @@ fn kv_per_layer_follows_the_header() {
     // bytes a cell, 4 MiB a layer.
     let per = kv_per_layer(&llama, 1000, KvCacheType::F16);
     assert_eq!(per, vec![4096 * 1024; 32]);
-    assert_eq!(per.iter().sum::<u64>(), llama.kv_bytes(1000, KvCacheType::F16));
+    assert_eq!(
+        per.iter().sum::<u64>(),
+        llama.kv_bytes(1000, KvCacheType::F16)
+    );
     // q8_0: 1,024 values are 32 blocks of 34 bytes, 2,176 bytes a cell for key and value,
     // and the rotation matrices of a quantized cache, 128² and 64² f32 entries a layer.
     let per = kv_per_layer(&llama, 1000, KvCacheType::Q8_0);
     assert_eq!(per, vec![2176 * 1024 + 128 * 128 * 4 + 64 * 64 * 4; 32]);
-    assert_eq!(per.iter().sum::<u64>(), llama.kv_bytes(1000, KvCacheType::Q8_0));
+    assert_eq!(
+        per.iter().sum::<u64>(),
+        llama.kv_bytes(1000, KvCacheType::Q8_0)
+    );
     // One token takes one step of 256 cells.
     assert_eq!(kv_per_layer(&llama, 1, KvCacheType::F16)[0], 4096 * 256);
     let hybrid = read(

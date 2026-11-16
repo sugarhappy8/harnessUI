@@ -516,9 +516,7 @@ pub(crate) fn remember_fix(endpoint: &str, model: &str, fix: &Fix) -> bool {
     if map.len() >= MAX_REMEMBERED {
         map.clear();
     }
-    map.entry(memory_key(endpoint, model))
-        .or_default()
-        .add(fix)
+    map.entry(memory_key(endpoint, model)).or_default().add(fix)
 }
 
 /// Words with which servers say a field is not accepted.
@@ -549,8 +547,7 @@ pub(crate) fn fixes_for_error(status: u16, body: &[u8], sent: &Map<String, Value
     if status != 400 && status != 422 {
         return Vec::new();
     }
-    let value: Value =
-        serde_json::from_slice(body).unwrap_or_else(|_| Value::String(lossy(body)));
+    let value: Value = serde_json::from_slice(body).unwrap_or_else(|_| Value::String(lossy(body)));
     let error = value
         .get("error")
         .filter(|error| error.is_object())
@@ -595,7 +592,10 @@ pub(crate) fn fixes_for_error(status: u16, body: &[u8], sent: &Map<String, Value
         let refused = REFUSED_WORDS.iter().any(|w| lower.contains(w))
             || code.starts_with("unsupported")
             || code == "unknown_parameter";
-        if sent.contains_key(from) && named && refused && (mentions(&lower, to) || from != "max_tokens")
+        if sent.contains_key(from)
+            && named
+            && refused
+            && (mentions(&lower, to) || from != "max_tokens")
         {
             return vec![Fix::Rename {
                 from: from.to_owned(),
@@ -747,7 +747,11 @@ const LONGEST_WAIT: Duration = Duration::from_secs(30);
 /// header they send), overload (HTTP 529) and server errors with backoff. A rate limit
 /// without `retry-after` (a spending limit, which keeps failing until access resumes) is not
 /// retried, and neither is a wait longer than 30 seconds.
-pub(crate) fn retry_delay(status: u16, retry_after: Option<Duration>, attempt: u32) -> Option<Duration> {
+pub(crate) fn retry_delay(
+    status: u16,
+    retry_after: Option<Duration>,
+    attempt: u32,
+) -> Option<Duration> {
     if attempt >= MAX_RETRIES {
         return None;
     }
@@ -1027,19 +1031,35 @@ mod tests {
 
     #[test]
     fn llama_server_requests_are_untouched_and_others_lose_llama_fields() {
-        assert_eq!(shaped(ProviderKind::LlamaServer, llama_style()), llama_style());
+        assert_eq!(
+            shaped(ProviderKind::LlamaServer, llama_style()),
+            llama_style()
+        );
         let body = shaped(ProviderKind::OpenRouter, llama_style());
-        for gone in ["cache_prompt", "chat_template_kwargs", "reasoning_format", "samplers", "n_probs"] {
+        for gone in [
+            "cache_prompt",
+            "chat_template_kwargs",
+            "reasoning_format",
+            "samplers",
+            "n_probs",
+        ] {
             assert!(body.get(gone).is_none(), "{gone}");
         }
         assert_eq!(body["top_k"], json!(20), "OpenRouter takes top_k");
         assert_eq!(body["max_tokens"], json!(1000));
         let body = shaped(ProviderKind::Vllm, llama_style());
-        assert_eq!(body["chat_template_kwargs"], json!({"enable_thinking": false}));
+        assert_eq!(
+            body["chat_template_kwargs"],
+            json!({"enable_thinking": false})
+        );
         assert!(body.get("cache_prompt").is_none());
         let body = shaped(ProviderKind::Abliteration, llama_style());
         assert!(body.get("top_k").is_none() && body.get("cache_prompt").is_none());
-        assert_eq!(body["messages"][2]["name"], json!("f"), "abliteration.ai takes name");
+        assert_eq!(
+            body["messages"][2]["name"],
+            json!("f"),
+            "abliteration.ai takes name"
+        );
     }
 
     #[test]
@@ -1049,7 +1069,12 @@ mod tests {
         let body = shaped(ProviderKind::OpenAi, request.clone());
         assert_eq!(body["max_completion_tokens"], json!(CLOUD_OUTPUT_LIMIT));
         let mut map = self::body(request.clone());
-        shape_chat_body(ProviderKind::OpenRouter, &mut map, &ParamFixes::default(), Some(65_536));
+        shape_chat_body(
+            ProviderKind::OpenRouter,
+            &mut map,
+            &ParamFixes::default(),
+            Some(65_536),
+        );
         assert_eq!(map["max_tokens"], json!(65_536));
         // Servers that are not a cloud company's keep the app's limit.
         let body = shaped(ProviderKind::Generic, request);
@@ -1077,38 +1102,59 @@ mod tests {
     fn openai_unsupported_parameter_errors() {
         // Recorded from api.openai.com (simonw/llm issue 724).
         assert_eq!(
-            fixes(400, json!({"error": {
-                "message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
-                "type": "invalid_request_error", "param": "max_tokens", "code": "unsupported_parameter"
-            }})),
-            vec![Fix::Rename { from: "max_tokens".into(), to: "max_completion_tokens".into() }]
+            fixes(
+                400,
+                json!({"error": {
+                    "message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+                    "type": "invalid_request_error", "param": "max_tokens", "code": "unsupported_parameter"
+                }})
+            ),
+            vec![Fix::Rename {
+                from: "max_tokens".into(),
+                to: "max_completion_tokens".into()
+            }]
         );
         assert_eq!(
-            fixes(400, json!({"error": {
-                "message": "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.",
-                "type": "invalid_request_error", "param": "temperature", "code": "unsupported_value"
-            }})),
+            fixes(
+                400,
+                json!({"error": {
+                    "message": "Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.",
+                    "type": "invalid_request_error", "param": "temperature", "code": "unsupported_value"
+                }})
+            ),
             vec![Fix::Drop("temperature".into())]
         );
         assert_eq!(
-            fixes(400, json!({"error": {
-                "message": "Unknown parameter: 'parallel_tool_calls'.",
-                "type": "invalid_request_error", "param": "parallel_tool_calls", "code": "unknown_parameter"
-            }})),
+            fixes(
+                400,
+                json!({"error": {
+                    "message": "Unknown parameter: 'parallel_tool_calls'.",
+                    "type": "invalid_request_error", "param": "parallel_tool_calls", "code": "unknown_parameter"
+                }})
+            ),
             vec![Fix::Drop("parallel_tool_calls".into())]
         );
         assert_eq!(
-            fixes(400, json!({"error": {
-                "message": "Unrecognized request arguments supplied: top_k, parallel_tool_calls",
-                "type": "invalid_request_error", "param": null, "code": null
-            }})),
-            vec![Fix::Drop("top_k".into()), Fix::Drop("parallel_tool_calls".into())]
+            fixes(
+                400,
+                json!({"error": {
+                    "message": "Unrecognized request arguments supplied: top_k, parallel_tool_calls",
+                    "type": "invalid_request_error", "param": null, "code": null
+                }})
+            ),
+            vec![
+                Fix::Drop("top_k".into()),
+                Fix::Drop("parallel_tool_calls".into())
+            ]
         );
         assert_eq!(
-            fixes(400, json!({"error": {
-                "message": "max_tokens is too large: 50000. This model supports at most 16384 completion tokens, whereas you provided 50000.",
-                "type": "invalid_request_error", "param": "max_tokens", "code": "invalid_value"
-            }})),
+            fixes(
+                400,
+                json!({"error": {
+                    "message": "max_tokens is too large: 50000. This model supports at most 16384 completion tokens, whereas you provided 50000.",
+                    "type": "invalid_request_error", "param": "max_tokens", "code": "invalid_value"
+                }})
+            ),
             vec![Fix::Cap(16_384)]
         );
     }
@@ -1117,36 +1163,58 @@ mod tests {
     fn other_servers_unsupported_parameter_errors() {
         // FastAPI / Pydantic (abliteration.ai's server is FastAPI).
         assert_eq!(
-            fixes(422, json!({"detail": [{"loc": ["body", "top_k"], "msg": "Extra inputs are not permitted", "type": "extra_forbidden"}]})),
+            fixes(
+                422,
+                json!({"detail": [{"loc": ["body", "top_k"], "msg": "Extra inputs are not permitted", "type": "extra_forbidden"}]})
+            ),
             vec![Fix::Drop("top_k".into())]
         );
         // Anthropic.
         assert_eq!(
-            fixes(400, json!({"type": "error", "error": {"type": "invalid_request_error", "message": "top_k: Extra inputs are not permitted"}})),
+            fixes(
+                400,
+                json!({"type": "error", "error": {"type": "invalid_request_error", "message": "top_k: Extra inputs are not permitted"}})
+            ),
             vec![Fix::Drop("top_k".into())]
         );
         assert_eq!(
-            fixes(400, json!({"type": "error", "error": {"type": "invalid_request_error",
-                "message": "\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."}})),
+            fixes(
+                400,
+                json!({"type": "error", "error": {"type": "invalid_request_error",
+                "message": "\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."}})
+            ),
             vec![Fix::Drop("thinking".into())]
         );
         assert_eq!(
-            fixes(400, json!({"type": "error", "error": {"type": "invalid_request_error",
-                "message": "`temperature` and `top_p` cannot both be specified for this model. Please use only one."}})),
+            fixes(
+                400,
+                json!({"type": "error", "error": {"type": "invalid_request_error",
+                "message": "`temperature` and `top_p` cannot both be specified for this model. Please use only one."}})
+            ),
             vec![Fix::Drop("top_p".into())]
         );
         assert_eq!(
-            fixes(400, json!({"type": "error", "error": {"type": "invalid_request_error",
-                "message": "max_tokens: 50000 > 32000, which is the maximum allowed number of output tokens for claude-opus-4-1"}})),
+            fixes(
+                400,
+                json!({"type": "error", "error": {"type": "invalid_request_error",
+                "message": "max_tokens: 50000 > 32000, which is the maximum allowed number of output tokens for claude-opus-4-1"}})
+            ),
             vec![Fix::Cap(32_000)]
         );
         // vLLM and plain text.
         assert_eq!(
-            fixes(400, json!({"object": "error", "message": "top_k is not supported by this model", "code": 400})),
+            fixes(
+                400,
+                json!({"object": "error", "message": "top_k is not supported by this model", "code": 400})
+            ),
             vec![Fix::Drop("top_k".into())]
         );
         assert_eq!(
-            fixes_for_error(400, b"Unrecognized request argument supplied: top_k", &sent()),
+            fixes_for_error(
+                400,
+                b"Unrecognized request argument supplied: top_k",
+                &sent()
+            ),
             vec![Fix::Drop("top_k".into())]
         );
     }
@@ -1167,7 +1235,14 @@ mod tests {
         // A field that was not sent is never named.
         let mut sent = sent();
         sent.remove("top_k");
-        assert!(fixes_for_error(400, br#"{"error":{"message":"top_k is not supported"}}"#, &sent).is_empty());
+        assert!(
+            fixes_for_error(
+                400,
+                br#"{"error":{"message":"top_k is not supported"}}"#,
+                &sent
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1175,19 +1250,43 @@ mod tests {
         let endpoint = "https://fixes.example/v1";
         assert_eq!(remembered_fixes(endpoint, "a"), ParamFixes::default());
         assert!(remember_fix(endpoint, "a", &Fix::Drop("top_k".into())));
-        assert!(!remember_fix(endpoint, "a", &Fix::Drop("top_k".into())), "kept once");
+        assert!(
+            !remember_fix(endpoint, "a", &Fix::Drop("top_k".into())),
+            "kept once"
+        );
         assert!(remember_fix(endpoint, "a", &Fix::Cap(16_384)));
-        assert!(!remember_fix(endpoint, "a", &Fix::Cap(20_000)), "a higher cap changes nothing");
-        assert!(remember_fix(endpoint, "a", &Fix::Rename { from: "max_tokens".into(), to: "max_completion_tokens".into() }));
+        assert!(
+            !remember_fix(endpoint, "a", &Fix::Cap(20_000)),
+            "a higher cap changes nothing"
+        );
+        assert!(remember_fix(
+            endpoint,
+            "a",
+            &Fix::Rename {
+                from: "max_tokens".into(),
+                to: "max_completion_tokens".into()
+            }
+        ));
         let fixes = remembered_fixes(endpoint, "a");
         assert!(fixes.drops("top_k"));
         assert_eq!(fixes.output_cap(), Some(16_384));
         assert_eq!(remembered_fixes(endpoint, "b"), ParamFixes::default());
-        let mut map = body(json!({"model": "a", "max_tokens": 40_000, "top_k": 1, "temperature": 0.2}));
+        let mut map =
+            body(json!({"model": "a", "max_tokens": 40_000, "top_k": 1, "temperature": 0.2}));
         fixes.apply(&mut map);
-        assert_eq!(Value::Object(map), json!({"model": "a", "max_completion_tokens": 16_384, "temperature": 0.2}));
+        assert_eq!(
+            Value::Object(map),
+            json!({"model": "a", "max_completion_tokens": 16_384, "temperature": 0.2})
+        );
         // The reverse rename replaces the first.
-        assert!(remember_fix(endpoint, "a", &Fix::Rename { from: "max_completion_tokens".into(), to: "max_tokens".into() }));
+        assert!(remember_fix(
+            endpoint,
+            "a",
+            &Fix::Rename {
+                from: "max_completion_tokens".into(),
+                to: "max_tokens".into()
+            }
+        ));
         let mut map = body(json!({"max_completion_tokens": 10}));
         remembered_fixes(endpoint, "a").apply(&mut map);
         assert_eq!(Value::Object(map), json!({"max_tokens": 10}));
@@ -1202,7 +1301,11 @@ mod tests {
         assert_eq!(retry_delay(500, Some(secs(3)), 0), Some(secs(3)));
         assert_eq!(retry_delay(503, Some(secs(300)), 0), None);
         assert_eq!(retry_delay(429, Some(secs(5)), 0), Some(secs(5)));
-        assert_eq!(retry_delay(429, None, 0), None, "a spending limit is not retried");
+        assert_eq!(
+            retry_delay(429, None, 0),
+            None,
+            "a spending limit is not retried"
+        );
         assert_eq!(retry_delay(429, Some(secs(31)), 0), None);
         for status in [400, 401, 402, 403, 404, 413, 422] {
             assert_eq!(retry_delay(status, Some(secs(1)), 0), None, "{status}");
@@ -1235,7 +1338,13 @@ mod tests {
 
     #[test]
     fn openai_listing_keeps_chat_models_only() {
-        for id in ["gpt-4o", "gpt-5.5", "o4-mini", "gpt-4o-search-preview", "gpt-6-astra"] {
+        for id in [
+            "gpt-4o",
+            "gpt-5.5",
+            "o4-mini",
+            "gpt-4o-search-preview",
+            "gpt-6-astra",
+        ] {
             assert!(openai_can_chat(id), "{id}");
         }
         for id in [
