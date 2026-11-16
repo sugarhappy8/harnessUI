@@ -63,6 +63,8 @@ pub struct CaptureLog {
     pub watch: HashSet<String>,
     /// Worker sessions kept attached for the capture, to let go of afterwards.
     pub workers: Vec<String>,
+    /// Service workers (target ids) kept waiting during the capture, to stop afterwards.
+    pub held_workers: Vec<String>,
     /// Connections that started although the request checks cannot see them, as
     /// "a WebSocket to <address>".
     pub sockets: Vec<String>,

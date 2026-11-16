@@ -336,6 +336,14 @@ impl State {
     }
 }
 
+/// [0.0.7 P7] Whether a shared or service worker runs a web page's script (and not one of
+/// the browser's own, such as a built-in extension's `chrome-extension:` worker).
+fn web_worker(url: &str) -> bool {
+    ["http:", "https:", "data:", "blob:"]
+        .iter()
+        .any(|scheme| url.get(..scheme.len()).is_some_and(|u| u.eq_ignore_ascii_case(scheme)))
+}
+
 /// The running browser.
 pub(crate) struct Browser {
     pub cdp: Cdp,
@@ -901,7 +909,7 @@ impl Browser {
                 tokio::spawn(async move { this.setup_session(session, TargetKind::Frame).await });
             }
             "worker" | "shared_worker" | "service_worker"
-                if self.watch_worker(parent_session, kind, &session) => {}
+                if self.watch_worker(parent_session, &info, &session) => {}
             _ => self.release_other(parent_session, &session),
         }
         self.bump();
@@ -920,18 +928,25 @@ impl Browser {
     /// - a service worker is not resumed while the capture runs: the browser answers
     ///   `Fetch.enable` on one, but does not pause the requests of a service worker that
     ///   starts again (one installed before), so its requests cannot be checked. It waits
-    ///   until the capture ends ([`Self::unwatch_capture`]).
+    ///   until the capture ends and is then stopped ([`Self::unwatch_capture`]).
     ///
     /// The steps after `Fetch.enable` go together with the resume last, as in
     /// `setup_session`: a worker that waits answers some of them only once it runs.
     /// `false` when no capture wants it.
-    fn watch_worker(self: &Arc<Self>, parent_session: &str, kind: &str, session: &str) -> bool {
+    fn watch_worker(self: &Arc<Self>, parent_session: &str, info: &Value, session: &str) -> bool {
+        let text = |k: &str| info.get(k).and_then(Value::as_str).unwrap_or("");
+        let (kind, target_id) = (text("type"), text("targetId"));
         {
             let mut s = self.lock();
             let Some(log) = s.capture.as_mut() else {
                 return false;
             };
-            let wanted = kind != "worker" || log.watches(parent_session);
+            // The browser's own workers (a built-in extension's) are not the page's.
+            let wanted = if kind == "worker" {
+                log.watches(parent_session)
+            } else {
+                web_worker(text("url"))
+            };
             if !wanted {
                 return false;
             }
@@ -941,6 +956,9 @@ impl Browser {
             }
             if kind == "service_worker" {
                 log.service_worker_held = true;
+                if log.held_workers.len() < 400 {
+                    log.held_workers.push(target_id.to_string());
+                }
             }
         }
         let this = self.clone();
@@ -1033,7 +1051,9 @@ impl Browser {
             .unwrap_or_default()
         {
             let kind = t.get("type").and_then(Value::as_str).unwrap_or("");
+            let url = t.get("url").and_then(Value::as_str).unwrap_or("");
             if matches!(kind, "shared_worker" | "service_worker")
+                && web_worker(url)
                 && let Some(id) = t.get("targetId").and_then(Value::as_str)
                 && let Err(e) = self
                     .cdp
@@ -1050,23 +1070,35 @@ impl Browser {
         }
     }
 
-    /// [0.0.7 P7] Lets go of what [`Self::watch_capture`] and [`Self::watch_worker`] held:
-    /// a worker kept waiting (a service worker) goes on, as outside a capture.
-    pub(crate) async fn unwatch_capture(&self, watched: Vec<String>, workers: Vec<String>) {
+    /// [0.0.7 P7] Lets go of what [`Self::watch_capture`] and [`Self::watch_worker`] held.
+    /// A service worker kept waiting is stopped first, so nothing the page asked of it
+    /// during the capture runs afterwards without the checks; it starts anew, as outside a
+    /// capture, when it is next needed.
+    pub(crate) async fn unwatch_capture(
+        &self,
+        watched: Vec<String>,
+        workers: Vec<String>,
+        held: Vec<String>,
+    ) {
+        for target in held {
+            if let Err(e) = self
+                .cdp
+                .call("Target.closeTarget", json!({"targetId": target}), None, CMD)
+                .await
+            {
+                tracing::debug!(error = %e, "a held service worker could not be stopped");
+            }
+        }
         for session in workers {
-            let resume = self.cdp.call(
-                "Runtime.runIfWaitingForDebugger",
-                json!({}),
-                Some(&session),
-                CMD,
-            );
-            let detach = self.cdp.call(
-                "Target.detachFromTarget",
-                json!({"sessionId": session}),
-                None,
-                CMD,
-            );
-            let _ = futures_util::join!(resume, detach);
+            let _ = self
+                .cdp
+                .call(
+                    "Target.detachFromTarget",
+                    json!({"sessionId": session}),
+                    None,
+                    CMD,
+                )
+                .await;
         }
         for session in watched {
             let _ = self

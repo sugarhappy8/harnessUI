@@ -114,7 +114,7 @@ async fn restore(b: &Browser, session: &str, log: Option<CaptureLog>) {
             .filter(|s| !log.workers.contains(s))
             .cloned()
             .collect();
-        b.unwatch_capture(frames, log.workers).await;
+        b.unwatch_capture(frames, log.workers, log.held_workers).await;
     }
     b.set_capture_checks(false).await;
     for (method, params) in [
