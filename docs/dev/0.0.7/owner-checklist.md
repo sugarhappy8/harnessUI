@@ -2,6 +2,21 @@
 
 Each package adds what it could not check here (no Windows PC or Mac in the build machine).
 
+## Start here: the five checks that matter most (about 15 minutes)
+1. **Computer use:** load Qwen 3.8 27B with its image file (or any model that can see), switch
+   on *Computer* in the chat's *Tools* panel, keep harnessUI in front and ask "Open Notepad and
+   type hello". harnessUI minimises itself, the text lands in Notepad, and harnessUI comes back
+   for each card and at the end (details: *Computer use (P3)* below, item 1).
+2. **The model knows its tools:** in a new chat ask "what tools do you have?" — it names them,
+   also the ones it isn't shown this turn (details: *Tools, call guide, repeat limit (P4)*).
+3. **Memory estimates:** *Models → Browse*, `gemma-4-12B-coder…heretic` at 65,536 tokens: no
+   longer "Too large" (details: *Memory estimates (P1)*, item 1).
+4. **Broken image file:** load Ministral 3 14B Reasoning Uncensored with its image file: it
+   loads, and the header says it was loaded without image input (details: *Image files (P2)*,
+   item 1).
+5. **Cloud keys (if you have one):** *Settings → Endpoints → Anthropic*, paste the key, chat
+   with Claude; the *Cloud* mark shows in the header (details: *Cloud endpoints (P5)*, item 1).
+
 ## Memory estimates (P1)
 On the Windows PC (RX 9070 XT, 16 GB), with `gemma-4-12B-coder…heretic`:
 1. Browse at 65,536 tokens: Q8_0 says it fits (or offers a little less memory if less than
