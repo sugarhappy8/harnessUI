@@ -2,6 +2,29 @@
 
 All notable changes, by milestone. Dates are UTC.
 
+## 0.0.8 (2026-11-16)
+
+The owner asked for one installer that gets updates through the web, with that installer as the website's download link, and for every update from now on to show up as a little box in the app that says an update is ready and lets you choose whether to install it. People who have 0.0.7 or older install 0.0.8 once by hand; from then on, harnessUI updates itself.
+
+### Added
+- **A small box that says an update is ready.** When a newer version has been downloaded and checked, a box appears in the main window: "Update ready", "harnessUI <version> is ready to install.", with *Restart and update*, *Later* and *What's new* (what changed in that version). *Restart and update* closes the model and any running tools, installs the new version and opens harnessUI again. *Later* hides the box until the next time you open harnessUI; if an even newer version is ready later, the box comes back.
+- **Updates download by themselves.** Shortly after harnessUI starts, and every 6 hours while it runs, it asks github.com whether a newer version is out. A newer version is downloaded in the background and its signature is checked against the key built into the app before the box appears, so a file that was not signed for harnessUI is never offered. Nothing is installed until you click *Restart and update*.
+- **One Download button on harnessui.site.** It gives each visitor the installer for their computer from the latest release: `harnessUI-setup.exe` on Windows, `harnessUI-universal.dmg` on a Mac (Apple silicon or Intel). One file cannot install on both Windows and macOS, so the button picks the right one; the Mac file already works on every Mac.
+- **Installer names that never change.** Every release also carries `harnessUI-setup.exe` and `harnessUI-universal.dmg`, copies of its installers, so https://github.com/sugarhappy8/harnessUI/releases/latest/download/harnessUI-setup.exe (and the same address ending in `harnessUI-universal.dmg`) always gives the newest version. The website and the README link there.
+- **A helper that sets up the updater key once.** The owner runs `python3 -I scripts/setup_updater.py` on their own computer. It makes the key pair with the Tauri CLI (which asks for a password), writes the public key into `src-tauri/tauri.updater.conf.json` and, when the GitHub CLI is installed, offers to save the two repository secrets; otherwise it says where to add them. It never overwrites a key file, never prints the private key, and does nothing when a key is already set up, because a new key would leave every installed copy unable to update.
+- **Release notes in the app.** A release's page now shows that version's entry from this changelog, and *What's new* in the update box shows the same text.
+
+### Changed
+- **The automatic update check is on by default.** Before, harnessUI checked only after you turned the check on. *Settings → General → Updates* has *Check for updates automatically (contacts github.com)*; untick it and harnessUI checks only when you click *Check now*. If you turned it off in an earlier version, it stays off.
+- ***Settings → General → Updates* shows what is happening.** A line under *Check now* says whether it is checking, downloading or up to date, and when an update is ready it says so and has the same *Restart and update* button as the box.
+- **Every release now needs the updater key.** The release workflow stops before it builds anything when the `TAURI_SIGNING_PRIVATE_KEY` secret or the public key in `src-tauri/tauri.updater.conf.json` is missing, and every release is built with the update settings. The release stays a draft unless both installers, their copies without the version (the same files), `latest.json` with Windows, Apple silicon and Intel Macs, and the signed catalog are all there.
+
+### Known limits
+- **Built and tested on Linux only.** The Windows and macOS builds come from CI. The release workflow's new steps were run here against a stand-in for GitHub's command-line tool; they have not run on GitHub yet.
+- **The update flow has not been tried end to end,** because the updater key does not exist yet: the owner makes it once with `scripts/setup_updater.py` before releasing 0.0.8. The first real test is updating 0.0.8 to the next version, on Windows and on a Mac.
+- **0.0.7 and older cannot update themselves.** Install 0.0.8 once by hand. A build from source or a CI build has no updater key either, and says it cannot update itself.
+- **On a Mac, each update makes macOS forget the Screen Recording and Accessibility permissions** until the app is signed with an Apple Developer ID (ARCHITECTURE.md 16), so computer use asks for them again after an update.
+
 ## 0.0.7 (2026-11-16)
 
 A bug-fix release. After 0.0.6 the owner asked for four things: fix what they had run into (memory estimates far too high, a broken image file stopping a model from loading, an image file added later never used, computer use refused while harnessUI is in front, and API keys for cloud AI companies); models that always know which tools they have, with a guide for writing tool calls and shell commands; a setting for how many times the model may repeat the same call; and bug fixing. A tool that saves a copy of a website's look, so a model can rebuild it with your own content, was added on the way.

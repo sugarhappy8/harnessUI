@@ -2,11 +2,11 @@
 
 A local-first desktop app that gives AI models running on your own hardware the agentic features of the big desktop assistants: chat, tools, skills and MCP. Windows 10 and 11 (x64) and macOS 13.3 or later, on Apple silicon and Intel Macs.
 
-- Works offline once a model is downloaded. Network use happens only when you start it.
+- Works offline once a model is downloaded. Network use happens only when you start it, apart from the check for updates: shortly after it starts and every 6 hours, harnessUI asks github.com whether a newer version is out. *Settings → General → Updates* turns that off.
 - No account, no telemetry, no remote crash reporting. Logs stay on disk.
 - Chats, settings and the audit log are stored locally.
 
-**Status:** all milestones of ARCHITECTURE.md section 19 are implemented (M0–M8): local and OpenAI-compatible chat, the model manager, the agent loop with approvals and an audit log, MCP servers, files, terminal, git (with a built-in fallback), skills, a browser tool and computer use. It has been tested automatically on Linux and built and unit-tested on Windows and macOS in CI; testing on real Windows and Mac hardware is the next step (docs/MILESTONES.md has the checklists). macOS code signing and in-app updates wait for the signing keys; Windows code signing is not set up yet. See [CHANGELOG.md](CHANGELOG.md).
+**Status:** all milestones of ARCHITECTURE.md section 19 are implemented (M0–M8): local and OpenAI-compatible chat, the model manager, the agent loop with approvals and an audit log, MCP servers, files, terminal, git (with a built-in fallback), skills, a browser tool and computer use. It has been tested automatically on Linux and built and unit-tested on Windows and macOS in CI; testing on real Windows and Mac hardware is the next step (docs/MILESTONES.md has the checklists). From 0.0.8 harnessUI updates itself; the first release needs the owner's updater key, made once (see [Signing](#signing)). macOS code signing waits for Apple's signing keys, and Windows code signing is not set up yet. See [CHANGELOG.md](CHANGELOG.md).
 
 ## What works today
 
@@ -40,9 +40,18 @@ A local-first desktop app that gives AI models running on your own hardware the 
 
 ## Download
 
-Open the repository's **Releases** page and download the file for your computer from the latest release: the `-setup.exe` for Windows, or the `_universal.dmg` for any Mac. Versions 0.0.x are early test builds.
+Go to **[harnessui.site](https://harnessui.site)** and click **Download**. It gives you the installer for your computer from the latest release. Or pick the link for your computer; both always give the newest version:
 
-Builds of work in progress: every push also builds both installers in GitHub Actions. Open the **Actions** tab, pick the latest green **CI** run, and under **Artifacts** download `windows-installer` or `macos-dmg` (a zip that contains the `-setup.exe` or the `.dmg`).
+- **Windows:** [harnessUI-setup.exe](https://github.com/sugarhappy8/harnessUI/releases/latest/download/harnessUI-setup.exe)
+- **Mac (Apple silicon or Intel):** [harnessUI-universal.dmg](https://github.com/sugarhappy8/harnessUI/releases/latest/download/harnessUI-universal.dmg)
+
+The repository's **Releases** page has the same files, also under names with the version in them (`harnessUI_<version>_x64-setup.exe` and `harnessUI_<version>_universal.dmg`). Versions 0.0.x are early test builds.
+
+**Updates.** From 0.0.8 on, harnessUI updates itself. Shortly after it starts, and every 6 hours while it runs, it asks github.com whether a newer version is out. If there is one, it downloads it in the background and checks its signature. When it is ready, a small box appears in the window: "Update ready", with *Restart and update*, *Later* and *What's new*. *Restart and update* closes the model and any running tools, installs the new version and opens harnessUI again. *Later* hides the box until the next time you open harnessUI. Nothing is installed until you choose to. To stop the automatic check, untick *Check for updates automatically* in *Settings → General → Updates*; *Check now* there still works.
+
+**Have 0.0.7 or older?** Those versions cannot update themselves. Download 0.0.8 as above and install it once by hand. After that, updates come by themselves.
+
+Builds of work in progress: every push also builds both installers in GitHub Actions. Open the **Actions** tab, pick the latest green **CI** run, and under **Artifacts** download `windows-installer` or `macos-dmg` (a zip that contains the `-setup.exe` or the `.dmg`). These builds cannot update themselves.
 
 What you need:
 
@@ -137,21 +146,25 @@ The app's display name is `productName` in `src-tauri/tauri.conf.json`; everythi
 
 ## Signing
 
-Release builds (`.github/workflows/release.yml`, on `v*` tags) fetch the pinned llama.cpp runtime, build both installers into a draft GitHub release, and are prepared for signing. Add these repository secrets when you have them; until then builds are unsigned.
+Release builds (`.github/workflows/release.yml`, on `v*` tags) fetch the pinned llama.cpp runtime, build both installers into a draft GitHub release, and are prepared for code signing. The updater key is required for every release (see *In-app updates* below). Add the Apple secrets when you have them; until then builds are not code-signed.
 
 | Secret | For |
 |---|---|
 | `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` | macOS Developer ID signing |
 | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | macOS notarization |
-| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Update and catalog signatures (generate once with `npx tauri signer generate`, and back the key up; losing it means installed copies can never update) |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Update and catalog signatures. Required: no release is built without them. Made once with `scripts/setup_updater.py` (below); back the key up, because losing it means installed copies can never update |
 
-**In-app updates** need the updater key pair:
+**In-app updates** need the updater key pair, and every release needs it: the release workflow stops before it builds anything when the `TAURI_SIGNING_PRIVATE_KEY` secret is missing or `src-tauri/tauri.updater.conf.json` has no public key. Make the key once, on your own computer:
 
-1. On your own machine run `npx tauri signer generate -w ~/.tauri/harnessui.key`, choose a password, and keep both the key file and the password in your password manager.
-2. Add the private key's contents and its password as the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets.
-3. Commit the public key (the `.pub` file's contents) as `plugins.updater.pubkey` in `src-tauri/tauri.updater.conf.json`.
+1. In the repository folder run `npm ci`, then `python3 -I scripts/setup_updater.py` (on Windows: `python scripts\setup_updater.py`). It runs `npx tauri signer generate`, which asks you to choose a password, saves the key as `~/.tauri/harnessui.key` (`--key PATH` puts it somewhere else) and writes the public key into `src-tauri/tauri.updater.conf.json`. If the GitHub CLI (`gh`) is installed and signed in, it offers to save the two secrets for you; otherwise it says where to add them.
+2. Keep the key file and its password in your password manager. If you lose either one, installed copies can never update again.
+3. Commit `src-tauri/tauri.updater.conf.json` and push it. Then release: *Actions → Release → Run workflow* on the commit to release, or push the tag `v<version>`.
 
-Release builds then include signed update files and `latest.json`. The release workflow also signs `catalog/models.json` and attaches it with `models.json.minisig`, which *Settings → General → Model catalog → Refresh catalog* downloads. A last job fails the run if the draft release is missing an installer or, with the key set, a platform in `latest.json` or the catalog. *Settings → General → Updates* offers *Check now* and an opt-in automatic check. Builds without the key show that they cannot update themselves. The app never checks for updates unless you click *Check now* or turn the automatic check on.
+The script never overwrites a key file, never prints the private key, and does nothing when a public key is already committed, because a new key would leave every installed copy unable to update. Without the script: run `npx tauri signer generate -w ~/.tauri/harnessui.key` and choose a password; add the key file's contents and the password as the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets (*Settings → Secrets and variables → Actions* on GitHub); and put the `.pub` file's contents, unchanged, into `plugins.updater.pubkey` in `src-tauri/tauri.updater.conf.json`.
+
+Every release then includes signed update files, `latest.json`, and a copy of each installer under the name without the version (`harnessUI-setup.exe`, `harnessUI-universal.dmg`), which harnessui.site and the links under [Download](#download) use. The release page shows the version's entry from `CHANGELOG.md`, and the app's update box shows the same text under *What's new*; a version without an entry is not built. The release workflow also signs `catalog/models.json` and attaches it with `models.json.minisig`, which *Settings → General → Model catalog → Refresh catalog* downloads. A last job keeps the release a draft if an installer or its copy is missing, if a copy is not the same file as its installer, if `latest.json` lacks Windows, Apple silicon or Intel Macs, or if the catalog is missing.
+
+In the app, the automatic check is on unless you turn it off: *Settings → General → Updates* has *Check for updates automatically* (it contacts github.com), *Check now*, a line that says what the last check found, and *Restart and update* when an update is ready. A build made without the key, such as a build from source or a CI build, cannot update itself and says so.
 
 **Reverse-engineering downloads** are pinned in `reverse.lock.json`, written and checked by `scripts/pin_reverse.py`. The release workflow runs `python3 -I scripts/pin_reverse.py --check --release` and reads Ghidra's checksum on GitHub again (`github-digest --part ghidra`, with the workflow's own token) before it builds anything, and stops if either fails; CI runs `--check` and the same comparison. Ghidra's checksum was recorded from what CI run 43380365172 read: CI keeps GitHub's answer as the artifact `ghidra-release-record`, and `python3 -I scripts/pin_reverse.py github-digest --part ghidra --from-release <that file> --record` records it, with the run's address, only when the file names a CI run of this repository.
 

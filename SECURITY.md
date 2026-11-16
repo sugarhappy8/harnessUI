@@ -490,7 +490,11 @@ build machine, and its Windows and macOS jobs have not run at all.
   operating system's keychain, never in plain files. The database stores only references.
 - No telemetry, no crash upload, no account. (On Windows, a crash of a program the app
   starts is handled by Windows Error Reporting as your Windows settings say; the app itself
-  uploads nothing.) With no model downloaded and nothing clicked, the app makes no network request. Every network use is listed in
+  uploads nothing.) With no model downloaded and nothing clicked, the app makes one kind of
+  network request: from 0.0.8, the check for updates, shortly after it starts and every 6 hours,
+  to github.com (*Settings → General → Updates* turns it off). It carries nothing about you or
+  your chats. A newer version it finds is downloaded and its signature checked against the key
+  built into the app, and it is installed only when you click *Restart and update*. Every network use is listed in
   ARCHITECTURE.md 13.6. 0.0.6 adds two of its own, both only when you ask: Compare looks
   up the models you add on Hugging Face, and Settings → Reverse engineering downloads what
   you click. 0.0.7 adds one more, also only when you ask: Models → Installed offers a

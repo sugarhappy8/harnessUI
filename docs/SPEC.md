@@ -150,3 +150,9 @@ A milestone is done when:
 3. Stop after each milestone and wait for the owner to test.
 4. License: MIT.
 5. The MacBook Air M5 has 16 GB RAM.
+
+# Owner's later changes
+
+0.0.8, verbatim: "id like to make harnessUI one universal installer that gets updates through the web. also add the installer as the download link for the website." and "please start building what i told u i want. it shouldnt be a installer from 0.0.7 it should just be one installer in my opinion ngl, its fine if people need to install a brand new app as long as from now on all updates will appear as a little box in the app saying that an update is ready and if the user wants to update the app."
+
+This replaces "an opt-in update check" (Non-negotiable) and "Updates: opt-in check only" (Packaging and release): from 0.0.8 the app checks for updates on its own, shortly after it starts and every 6 hours, unless the user turns that off in Settings → General → Updates. A newer version is downloaded and its signature verified in the background, and installed only when the user clicks *Restart and update* in the box.
