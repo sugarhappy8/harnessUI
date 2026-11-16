@@ -521,12 +521,16 @@ impl RuntimeManager {
             drop(setup);
             return self.wait_for_load(seq, &model).await;
         }
+        // 0.0.7 (P6): the backend is picked before anything changes. One that cannot run
+        // here (`backend_unavailable`) leaves the loaded model as it is, and its error goes
+        // back to the caller; before, the loaded model was stopped first and the status
+        // showed no error.
+        let (first, candidates) = self.choose(&settings).await?;
         // From here this is the current load. A newer one replaces it; the ticket marks
         // it as over on every way out of this function.
         let ticket = LoadTicket::begin(&self.loads, &model, &settings);
         let seq = ticket.seq;
         self.stop_server().await;
-        let (first, candidates) = self.choose(&settings).await?;
         if let Ok(mut c) = self.current.lock() {
             *c = Some(Loaded {
                 path: model.clone(),
@@ -1873,5 +1877,32 @@ mod tests {
         assert_eq!(backend_kind("other"), None);
         // Each load starts without a placement.
         assert_eq!(RuntimeStatusDto::default().placement, None);
+    }
+
+    /// 0.0.7 (P6): the bug: a load stopped the loaded model before it picked a backend, so a
+    /// backend that cannot run here (`backend_unavailable`) left no model loaded and the
+    /// status showed no error. Now `load` picks the backend before it takes over as the
+    /// current load or stops anything, and a refused pick changes nothing.
+    #[test]
+    fn a_load_picks_its_backend_before_it_stops_the_loaded_model() {
+        let source = include_str!("runtime_manager.rs");
+        let start = source.find("    pub async fn load(\n").expect("load");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").expect("the end of load")];
+        let choose = body
+            .find("self.choose(&settings).await?;")
+            .expect("load picks a backend");
+        let ticket = body.find("LoadTicket::begin(").expect("load takes a ticket");
+        let stop = body.find("self.stop_server().await;").expect("load stops the old server");
+        assert!(choose < ticket && choose < stop, "the backend is picked first");
+
+        // The pick that is refused: a backend chosen in Settings that cannot run here.
+        let found = vec![usable(BackendKind::Cpu, Vec::new()), broken(BackendKind::Vulkan)];
+        let settings = ResolvedLoad {
+            backend: Some("vulkan".into()),
+            ..resolved(GpuUse::All, false, false)
+        };
+        let err = first_candidate(&found, &settings).unwrap_err();
+        assert_eq!(err.code, "backend_unavailable");
     }
 }

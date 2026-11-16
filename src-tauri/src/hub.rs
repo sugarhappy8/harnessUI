@@ -1596,4 +1596,132 @@ mod tests {
         assert_eq!(other.usable_bytes, 0);
         assert_eq!(serde_json::to_value(&other).unwrap()["intelMac"], false);
     }
+
+    /// A model on the Installed list at `path`, downloaded, with `projector` recorded.
+    fn downloaded(id: i64, path: &Path, projector: Option<&Path>) -> store::ModelRecord {
+        store::ModelRecord {
+            id: store::ModelId(id),
+            path: path.display().to_string(),
+            repo: Some("example-quants/Sample-7B-GGUF".into()),
+            file_name: String::new(),
+            size_bytes: 1,
+            sha256: None,
+            gguf_summary: serde_json::to_value(StoredSummary {
+                architecture: Some("sample".into()),
+                projector: projector.map(|p| p.display().to_string()),
+                ..Default::default()
+            })
+            .unwrap(),
+            added_at: 0,
+            source: ModelSource::Download,
+        }
+    }
+
+    /// A folder of its own for one test, removed when it is dropped.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch() -> Scratch {
+        let dir = std::env::temp_dir().join(format!("delete-model-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    /// 0.0.7 (P6): Delete removes a downloaded model's files inside the models folder: every
+    /// shard and, new, the image file downloaded with it, unless another installed model
+    /// uses that image file (recorded, or next to it: two models of one repository share
+    /// one). The bug: a model whose file was gone, or in a folder used before "Change folder",
+    /// could never leave the list ("Only files inside the models folder are deleted"). Now
+    /// files already gone are left out, so the model just leaves the list, and files outside
+    /// the models folder are left where they are, and the note says so.
+    #[test]
+    fn what_delete_removes_from_disk() {
+        let root = scratch();
+        let models = root.0.join("models");
+        let repo = models.join("example-quants/Sample-7B-GGUF");
+        std::fs::create_dir_all(&repo).unwrap();
+        let shard1 = repo.join("Sample-7B-Q8_0-00001-of-00002.gguf");
+        let shard2 = repo.join("Sample-7B-Q8_0-00002-of-00002.gguf");
+        let image = repo.join("mmproj-Sample-F16.gguf");
+        for f in [&shard1, &shard2, &image] {
+            std::fs::write(f, b"gguf").unwrap();
+        }
+        let q8 = downloaded(1, &shard1, Some(&image));
+        let plan = removal_plan(&q8, &models, &[]);
+        assert_eq!(
+            plan.delete,
+            vec![shard1.clone(), shard2.clone(), image.clone()]
+        );
+        assert!(plan.outside.is_empty());
+        assert_eq!(kept_note(plan.outside.len()), None);
+
+        // Another model of the repository uses the image file: recorded, or found next to it.
+        let q4 = repo.join("Sample-7B-Q4_K_M.gguf");
+        std::fs::write(&q4, b"gguf").unwrap();
+        for other in [
+            downloaded(2, &q4, Some(&image)),
+            downloaded(2, &q4, None),
+        ] {
+            assert_eq!(
+                removal_plan(&q8, &models, &[other]).delete,
+                vec![shard1.clone(), shard2.clone()]
+            );
+        }
+
+        // Its files are gone already: nothing to delete and nothing to say; it leaves the list.
+        let gone = downloaded(
+            3,
+            &repo.join("Gone-Q4_K_M.gguf"),
+            Some(&repo.join("mmproj-Gone-F16.gguf")),
+        );
+        assert_eq!(removal_plan(&gone, &models, &[]), Removal::default());
+
+        // In a folder used before "Change folder": left in place, and said so.
+        let old = root.0.join("old-models/example-quants/Old-GGUF");
+        std::fs::create_dir_all(&old).unwrap();
+        let old_model = old.join("Old-Q4_K_M.gguf");
+        let old_image = old.join("mmproj-Old-F16.gguf");
+        std::fs::write(&old_model, b"gguf").unwrap();
+        std::fs::write(&old_image, b"gguf").unwrap();
+        let plan = removal_plan(&downloaded(4, &old_model, Some(&old_image)), &models, &[]);
+        assert!(plan.delete.is_empty());
+        assert_eq!(plan.outside, vec![old_model.clone(), old_image.clone()]);
+        assert_eq!(
+            kept_note(plan.outside.len()).as_deref(),
+            Some(
+                "Removed from the list. Its files are outside the models folder, so they were left where they are."
+            )
+        );
+        assert_eq!(
+            kept_note(1).as_deref(),
+            Some(
+                "Removed from the list. Its file is outside the models folder, so it was left where it is."
+            )
+        );
+        // A models folder that is not there any more holds nothing to delete.
+        let plan = removal_plan(&q8, &root.0.join("no-such-folder"), &[]);
+        assert!(plan.delete.is_empty());
+        assert_eq!(plan.outside.len(), 3);
+    }
+
+    /// 0.0.7 (P6): `delete_model` works out what to delete before it unloads anything, and
+    /// no longer refuses (it said "Only files inside the models folder are deleted; this one
+    /// was left in place." after it had unloaded the model).
+    #[test]
+    fn delete_plans_before_it_unloads_and_never_refuses() {
+        let source = include_str!("hub.rs");
+        let start = source.find("pub async fn delete_model(").unwrap();
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let plan = body.find("removal_plan(").expect("a plan");
+        let unload = body.find("state.runtime.unload().await").expect("an unload");
+        assert!(plan < unload, "the plan comes first");
+        assert_eq!(body.matches("Err(").count(), 1, "only a missing row is refused");
+        assert!(body.contains("return Err(AppError::not_found(\"model\"));"));
+    }
 }

@@ -58,3 +58,11 @@ and `README.md`.
 - Disk filled up once (139 MB free): a reviewer had built its own 5.7 GB target. Deleted;
   agents told to build only in the shared target.
 
+- P3 review: no critical issue (the guard still checks every event against the real hit
+  test and foreground window). One major: the app now raises its own window, so an approval
+  card could already be armed when it appears (its 700 ms misclick delay ran while hidden).
+  Minor: a Stop racing the minimise could leave the window minimised; the second keyboard
+  hand-back ran after Stop; the window took the keyboard at turn end; under Allow all a
+  keyboard action could take the keyboard while the user typed in harnessUI; it minimised
+  even when not in the way; the state machine keyed on the chat, not the turn; hardening
+  (cloaked windows, ownership check on the main thread). All being fixed by P3 (round 1).

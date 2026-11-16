@@ -294,6 +294,48 @@ pub struct PendingApprovals(Mutex<HashMap<String, PendingCard>>);
 pub struct PendingCard {
     tx: tokio::sync::oneshot::Sender<Approval>,
     grantable: bool,
+    /// [0.0.7 P6] What the window was sent, so a window that reloads while the card waits
+    /// gets it again ([`pending_approvals`]); `seq` keeps the cards in the order they came.
+    dto: ApprovalDto,
+    seq: usize,
+}
+
+/// [0.0.7 P6] Numbers the cards in the order they came.
+static CARD_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+impl PendingCard {
+    fn new(tx: tokio::sync::oneshot::Sender<Approval>, dto: ApprovalDto) -> Self {
+        Self {
+            tx,
+            grantable: dto.card == policy::CardKind::Grantable,
+            dto,
+            seq: CARD_SEQ.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+}
+
+impl PendingApprovals {
+    /// [0.0.7 P6] The cards waiting for an answer, oldest first, as the window was sent them.
+    pub fn cards(&self) -> Vec<ApprovalDto> {
+        let Ok(m) = self.0.lock() else {
+            return Vec::new();
+        };
+        let mut cards: Vec<&PendingCard> = m.values().collect();
+        cards.sort_by_key(|c| c.seq);
+        cards.into_iter().map(|c| c.dto.clone()).collect()
+    }
+}
+
+/// [0.0.7 P6] The approval cards waiting for an answer, oldest first. A window that reloaded
+/// while a card waited gets it here: the card's own event went to the window before, and
+/// without it the turn waited until Stop.
+#[tauri::command]
+pub fn pending_approvals(
+    window: tauri::WebviewWindow,
+    pending: tauri::State<'_, PendingApprovals>,
+) -> AppResult<Vec<ApprovalDto>> {
+    crate::commands::only_main_window(window.label())?;
+    Ok(pending.cards())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,15 +463,6 @@ pub async fn ask_during_call(
     let helper = crate::subagent::running_in(chat_id);
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if let Ok(mut m) = app.state::<PendingApprovals>().0.lock() {
-        m.insert(
-            id.clone(),
-            PendingCard {
-                tx,
-                grantable: false,
-            },
-        );
-    }
     let dto = ApprovalDto {
         id: id.clone(),
         chat_id,
@@ -445,6 +478,9 @@ pub async fn ask_during_call(
         reason: policy::AskReason::AlwaysAsk,
         keep_asking: None,
     };
+    if let Ok(mut m) = app.state::<PendingApprovals>().0.lock() {
+        m.insert(id.clone(), PendingCard::new(tx, dto.clone()));
+    }
     // [0.0.7] A main window that stepped aside for computer use comes back for the card.
     crate::computer_cmd::approval_needed(app, chat_id);
     let _ = app.emit_to(crate::MAIN_WINDOW, "approval-request", dto);
@@ -493,15 +529,6 @@ impl Approver for AppApprover {
     async fn ask(&self, req: ApprovalRequest) -> Approval {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Ok(mut m) = self.app.state::<PendingApprovals>().0.lock() {
-            m.insert(
-                id.clone(),
-                PendingCard {
-                    tx,
-                    grantable: req.card == policy::CardKind::Grantable,
-                },
-            );
-        }
         let (call_id, summary) = match &self.helper_of {
             Some(parent_call) => (
                 parent_call.clone(),
@@ -523,6 +550,9 @@ impl Approver for AppApprover {
             reason: req.reason,
             keep_asking: req.action.keep_asking,
         };
+        if let Ok(mut m) = self.app.state::<PendingApprovals>().0.lock() {
+            m.insert(id.clone(), PendingCard::new(tx, dto.clone()));
+        }
         // [0.0.7] A main window that stepped aside for computer use comes back for the card.
         crate::computer_cmd::approval_needed(&self.app, self.chat_id);
         let _ = self
