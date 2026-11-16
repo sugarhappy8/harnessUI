@@ -1901,8 +1901,19 @@ mod tests {
 
     #[test]
     fn free_port_is_bindable() {
-        let port = free_loopback_port().expect("port");
-        assert_ne!(port, 0);
-        TcpListener::bind((Ipv4Addr::LOCALHOST, port)).expect("port is free");
+        // Another test running in parallel may be given the same port by the system in
+        // the moment between `free_loopback_port` letting it go and the bind below (seen
+        // on CI's macOS runner). That is the race every caller already handles by asking
+        // again, so a few tries are allowed; the port must still be one that can be bound.
+        let mut last = None;
+        for _ in 0..5 {
+            let port = free_loopback_port().expect("port");
+            assert_ne!(port, 0);
+            match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+                Ok(_) => return,
+                Err(e) => last = Some(e),
+            }
+        }
+        panic!("no port given was free: {last:?}");
     }
 }
