@@ -307,3 +307,13 @@ and `README.md`.
   from any opened copy or SVG. Fidelity: local site 99.94 %, gsap.com 99.97 %, stripe.com
   87.4 % (animation state only). browser 163 + capture_e2e 5 + browser_e2e 30, app 888.
   Verification running.
+- P2 round-1 verification: M1, M2 (e2e m8 offline passes), m1, m2, m6, m7, m9, m10 fixed.
+  Two majors block the release: the new width check rejected valid image files
+  (MiniCPM-V/MiniCPM-o resampler files report width 0, Ultravox another width — those
+  models lost vision and Installed kept offering the same file); and running out of
+  memory while the image file loads usually shows only `GGML_ASSERT(buffer) failed`
+  (the allocator's lines are lost when llama.cpp aborts), so the "load without it" step
+  almost never ran. Minor: newlines in a crafted file's key or projector type could still
+  steer the classification; the automatic lookup's answer could be dropped; a nameless
+  old-style image file in a shared folder marked text-only models. Round 2 running (also
+  Browse taking the model's own image file).
