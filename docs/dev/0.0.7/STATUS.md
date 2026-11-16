@@ -277,3 +277,9 @@ and `README.md`.
   download wrote and plans from the row as it is after the wait; a drop guard ends a task
   that panics; Delete question wording; long Windows paths. app 888, models 145, vitest
   121 (models), clippy clean. Its verification goes into the final review.
+- P4 round 3 done: a made-up result in the app's own format (and the other missed shapes)
+  is caught, prose still isn't, and a quote with parts left out counts as a quote; a
+  helper asking for a coding app through `call_tool` gets the plain refusal; code words
+  ("script", "python", "selenium", …) undo a computer phrase, "pc's" no longer matches,
+  and the missed desktop wordings ("close notepad", "take a screen shot") match. agent 241,
+  tools 220, app (tool selection, helpers, turns) 116, clippy clean. P4 finished.
