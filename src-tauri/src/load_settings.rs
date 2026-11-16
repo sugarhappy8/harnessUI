@@ -966,6 +966,14 @@ impl LayerFacts {
     }
 }
 
+// The estimate counts as many saved copies of short-memory layers as a launch lets
+// llama-server keep (`--ctx-checkpoints`): the two crates do not depend on each other, so
+// the app, which uses both, holds them to one number.
+const _: () = assert!(
+    runtime::llama::launch::CTX_CHECKPOINTS as u64 == models::kv::CTX_CHECKPOINTS,
+    "--ctx-checkpoints and the memory estimate's saved copies differ"
+);
+
 /// How a load stores the conversation memory (`runtime::build_args`): Save memory is q8_0
 /// with fast attention on; otherwise f16, with the values padded to the widest layer's when
 /// Fine control turns fast attention off.

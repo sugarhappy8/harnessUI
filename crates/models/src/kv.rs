@@ -919,7 +919,8 @@ mod tests {
             6_684_672 + 8_355_840 + 835_584 + 4_177_920
         );
         // A saved copy: 512 cells × 15 layers × 1,024 bytes = 7,864,320 (llama-server
-        // logged "size = 7.506 MiB" with its few bytes a cell of positions), 32 at most.
+        // logged "size = 7.506 MiB" with its few bytes a cell of positions); 8 at most with
+        // the app's `--ctx-checkpoints 8`.
         assert_eq!(s.kv_size(F16).checkpoints_at(16_384), 8 * 7_864_320);
     }
 
@@ -1241,7 +1242,8 @@ mod tests {
     /// -ngl 0 --fit off -v`, "llama_kv_cache: size = ..."): 12 + 15 MiB at 4,096 tokens,
     /// 96 + 15 at 32,768, 1.5 + 7.5 at 512, and with `-fa on -ctk q8_0 -ctv q8_0` at 4,096
     /// 6.38 + 7.97 MiB with rotation buffers of 0.80 + 3.98 MiB; its saved copies were
-    /// logged at 7.506 MiB each, 32 kept (7,864,320 bytes of rows and 512 cells' positions).
+    /// logged at 7.506 MiB each (7,864,320 bytes of rows and 512 cells' positions), and with
+    /// the app's `--ctx-checkpoints 8` at most 8 were kept.
     #[test]
     fn real_short_memory_model_if_available() {
         let Ok(path) = std::env::var("TEST_SWA_GGUF") else {
