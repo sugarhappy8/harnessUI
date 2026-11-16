@@ -6,9 +6,10 @@
 
 mod common;
 
-use agent::{ClientConfig, OpenAiClient, ProviderError, ProviderKind};
+use agent::{ChatMessage, ChatRequest, ClientConfig, OpenAiClient, ProviderError, ProviderKind};
 use common::{MockServer, Reply};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 const KEY: &str = "sk-ant-api03-redirect-test-key";
 
@@ -69,6 +70,33 @@ fn redirects_stay_with_the_endpoint() {
             assert!(!err.to_string().contains(KEY), "{err}");
         }
         assert_eq!(bouncing.requests().len(), 3);
+        // The streamed reply (POST) and Claude's model lookup (GET /v1/models/{id}) are not
+        // sent elsewhere either.
+        for kind in [ProviderKind::Anthropic, ProviderKind::Generic] {
+            let mut request =
+                ChatRequest::new("claude-opus-5-5", vec![ChatMessage::user("Hi")]);
+            request.max_tokens = Some(100);
+            let err = remote(bouncing.url(), kind)
+                .stream_chat(&request, CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ProviderError::Http { status: 307, .. }),
+                "{kind:?}: {err:?}"
+            );
+        }
+        let paths: Vec<String> = bouncing.requests()[3..]
+            .iter()
+            .map(|r| format!("{} {}", r.method, r.path()))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "GET /v1/models/claude-opus-5-5",
+                "POST /v1/messages",
+                "POST /v1/chat/completions"
+            ]
+        );
         assert!(
             elsewhere.requests().is_empty(),
             "a redirect to another origin was followed: {:?}",

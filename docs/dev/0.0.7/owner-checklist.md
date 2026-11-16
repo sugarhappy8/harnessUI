@@ -11,8 +11,8 @@ On the Windows PC (RX 9070 XT, 16 GB), with `gemma-4-12B-coder…heretic`:
 3. Load Q6_K at 65,536 tokens and look at the log: the conversation memory on the graphics
    card is about 1,024 + 480 MiB (about 820 MiB with *Save memory*).
 4. During a long chat (15 or more turns or tool calls), llama-server's memory in Task
-   Manager grows a little and then levels off (the saved conversation copies; see the
-   final figure in `STATUS.md`).
+   Manager grows by about 2.5 GB (about 1.3 GB with *Save memory*) and then levels off:
+   these are the model runner's saved copies of the conversation, now at most 8.
 5. With *Fast attention* off, the estimate rises to about 3 GB of conversation memory at
    65,536 tokens.
 

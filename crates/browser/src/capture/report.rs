@@ -494,7 +494,33 @@ fn animations(s: &mut String, r: &ReportInput<'_>, page: &Value) {
             trans_list.join(", ")
         ));
     }
+    if r.libraries
+        .iter()
+        .any(|l| SCRIPT_MOTION.iter().any(|m| l.name.starts_with(m)))
+    {
+        s.push_str("The page also moves things from its scripts (see Libraries and effects). Such motion changes styles frame by frame and does not show in the list above: compare the screenshots, look at the inline styles and classes in index.html and the scripts in scripts/ to see where it starts and ends.\n");
+    }
 }
+
+/// Libraries that animate from scripts, frame by frame, outside the Web Animations list.
+const SCRIPT_MOTION: &[&str] = &[
+    "GSAP",
+    "Anime.js",
+    "Lenis",
+    "Locomotive",
+    "Three.js",
+    "PixiJS",
+    "ScrollMagic",
+    "Lottie",
+    "Rive",
+    "Spline",
+    "WebGL",
+    "Rellax",
+    "Barba",
+    "Swiper",
+    "Splide",
+    "Webflow",
+];
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
@@ -728,6 +754,7 @@ mod tests {
             assert!(report.contains(section), "{section} missing:\n{report}");
         }
         assert!(report.contains("assets/inter.woff2"));
+        assert!(report.contains("moves things from its scripts"), "{report}");
         assert!(report.contains("hero.png (293 KB)"), "{report}");
         assert!(report.chars().count() <= MAX_REPORT_CHARS);
     }

@@ -1162,7 +1162,12 @@ async fn work(
     let doc_bytes = serde_json::to_vec_pretty(&doc).unwrap_or_default();
     w.write("", "animations.json", &doc_bytes)?;
 
-    // report.md.
+    // report.md. A file asked for several times (a video loaded in parts) is listed once,
+    // with the last reason.
+    let mut once: HashSet<String> = HashSet::new();
+    skipped.reverse();
+    skipped.retain(|(what, _)| once.insert(what.clone()));
+    skipped.reverse();
     let not_captured = not_captured_lines(&page, &blocked, log_full, &canvas_paths);
     let fonts = font_lines(&page, &facts, &saved);
     let mut all_media: Vec<String> = Vec::new();

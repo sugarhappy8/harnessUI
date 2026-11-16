@@ -91,3 +91,7 @@ and `README.md`.
   PowerShell hints misfired (`&` messages; cmdlet echoed in the output); a quadratic scan on
   big outputs; the evals harness ran without the list. Plus nits. All being fixed by P4
   (round 1).
+- P1 finished with `--ctx-checkpoints 8` (real server: at most 8 copies kept, memory grew
+  74 MB vs 275 MB with the default 32 on Gemma 3 270M). Gemma 4 12B at 65,536: 1,504 MiB on
+  the card, 2.5 GiB of saved copies in computer memory (10 GiB at the default 32). Under
+  independent review.
