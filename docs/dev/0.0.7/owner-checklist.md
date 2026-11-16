@@ -119,6 +119,9 @@ On the Windows PC:
    the processor; only if nothing else works does it load without the image file, with "Loaded
    without image input: there wasn't enough memory for the image file too." Installed then
    does not say the image file couldn't be read.
+6. **A vision model whose image file is of another kind** (for example openbmb's MiniCPM-V
+   2.6 GGUF, downloaded from Browse with its image file): it can see images, and Installed
+   offers nothing for it.
 
 ## Computer use (P3), on the Mac
 Repeat the Windows computer-use steps (first section) with TextEdit: typing reaches TextEdit

@@ -339,3 +339,10 @@ and `README.md`.
   approval) click *Resume*/*Continue* before the new 700 ms click delay arms them; the
   `subagent` card no longer showed the helper's current call — an agent is checking
   whether that's the test or the app and fixing the right one.
+- P2 round 2 done: image files whose header width llama.cpp doesn't use (MiniCPM-V,
+  MiniCPM-o, Ultravox) are used again (width only ranks); `GGML_ASSERT(buffer) failed`
+  counts as out of memory, so the load without the image file runs; an image file is
+  blamed only after the server's own stage line on stdout; the automatic lookup keeps its
+  answer; a nameless image file in a shared folder belongs to no one; Browse downloads the
+  chosen model's own image file. runtime (real server) all pass, models 147, app 160,
+  vitest 850. Quick re-verification running.
