@@ -130,3 +130,18 @@ and `README.md`.
   keywords as phrases with bare words weak only; result-tag detection only for real
   blocks; exact PowerShell texts; bounded scan; evals send the list; nits). agent 229,
   tools 220, app 850, vitest 832; real model still calls read_file. Verification running.
+- P1 review: the port is exact against the real binary for 8 more architectures. Two major:
+  (M1) the loaded model's saved copies were counted twice when planning the next load (a
+  Reload after a long chat could drop Automatic to 4,096); (M2) a fixed 8 copies made
+  long-window models (OLMo 3 7B: 12 GiB of copies) "too large" at every size. Decided: the
+  copy count per load comes from a memory budget (1–8), copies never turn a verdict red or
+  drop Automatic to the floor. Plus 7 minor (hybrid models' copies, mistral4 MLA, wording,
+  Automatic vs marks, unreadable system memory). Being fixed by P1 (round 1).
+- P7 (website capture) built: `browser_capture_site` (rendered page with scripts removed +
+  CSP, style sheets, assets, animations.json, screenshots, report.md), a site+folder grant,
+  every capture request through the network checks; copy of a local test page matches the
+  original at 99.94 %, gsap.com 99.16 %. Under independent review. Still to wire: its short
+  method into the call guide (P4's guide.rs), and new built-in tools' default state for
+  users who changed their tool choices.
+- Disk: pruned 1,693 old test-build copies under target/debug/build (older than 2 h, newest
+  kept per crate): 3.9 GB → 14 GB free.

@@ -113,3 +113,13 @@ icon bounces for a card and at the end of the turn.
 4. Delete a model's folder in Explorer, then remove it from Installed: the row goes away.
 5. With a reply waiting for your approval, reload the window (Ctrl+R): the card comes back
    and answering it works.
+
+## Website capture (P7)
+1. In a new chat open the Tools panel and check *browser_capture_site* is on (if you have
+   ever changed tools, new chats reuse that choice and a new tool may start off).
+2. Ask: "Capture https://gsap.com into my projects folder, then rebuild its hero with my own
+   text." Read the card ("Save a copy of how gsap.com looks into …"), allow it.
+3. Open the saved `index.html` from disk: it looks like the site and runs no scripts;
+   compare it with the pictures in `screenshots/`.
+4. Ask "make a site that looks like stripe.com": the capture tool is offered.
+5. On Windows: a long folder path, and opening the copy in Edge.
