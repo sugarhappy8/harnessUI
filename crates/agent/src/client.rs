@@ -358,6 +358,15 @@ impl OpenAiClient {
         self
     }
 
+    /// [0.0.7 P5] Forgets what this client's conversation kept (Claude's thinking), for a
+    /// conversation that does not go on: a helper's, once it has answered. Nothing for a
+    /// client without a conversation.
+    pub fn end_conversation(&self) {
+        if let Some(conversation) = &self.config.conversation {
+            crate::anthropic::forget_conversation(self.api.as_str(), conversation);
+        }
+    }
+
     /// The configuration this client was built from.
     pub fn config(&self) -> &ClientConfig {
         &self.config

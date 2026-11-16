@@ -447,6 +447,17 @@ fn unchanged_replies_go_back_with_their_thinking() {
     renamed.messages[0] = ChatMessage::system("You are a terse assistant.");
     let changed = body(&renamed, &adaptive_facts(), Some(&replay));
     assert!(!changed.to_string().contains("sig-"), "{changed}");
+    // Even only in white space at its ends: the API checks the text as it is sent.
+    for spaced in [
+        "You are a helpful assistant.\n",
+        " You are a helpful assistant.",
+    ] {
+        let mut respaced = request.clone();
+        respaced.messages[0] = ChatMessage::system(spaced);
+        let changed = body(&respaced, &adaptive_facts(), Some(&replay));
+        assert_eq!(changed["system"][0]["text"], json!(spaced));
+        assert!(!changed.to_string().contains("sig-"), "{changed}");
+    }
 
     // Without a replay store nothing is replayed.
     let plain = body(&request, &adaptive_facts(), None);
@@ -1315,23 +1326,26 @@ fn a_whole_message_instead_of_a_stream() {
 fn the_replay_store_is_bounded_and_exact() {
     let key = |prefix: u64, reply: u64| ReplayKey { prefix, reply };
     let mut replay = ThinkingReplay::default();
-    let last = super::MAX_REPLAY_ENTRIES + 4;
-    for n in 0..=last {
+    let limit = super::MAX_REPLAY_ENTRIES;
+    for n in 0..limit {
         replay.store(key(n as u64, 1), vec![json!({"n": n})]);
     }
-    // A safety limit far beyond a chat's replies: past it the oldest go first.
-    assert!(replay.find(&key(0, 1)).is_none(), "the oldest are dropped");
-    assert!(replay.find(&key(last as u64, 1)).is_some());
-    assert_eq!(replay.len(), super::MAX_REPLAY_ENTRIES);
+    assert_eq!(replay.len(), limit);
+    assert!(replay.find(&key(0, 1)).is_some());
     // The prefix and the reply must both match.
-    assert!(replay.find(&key(last as u64, 2)).is_none());
-    // Keeping the same key again replaces it.
-    replay.store(key(last as u64, 1), vec![json!("again")]);
-    assert_eq!(
-        replay.find(&key(last as u64, 1)),
-        Some(&vec![json!("again")])
-    );
-    assert_eq!(replay.len(), super::MAX_REPLAY_ENTRIES);
+    assert!(replay.find(&key(0, 2)).is_none());
+    // Keeping the same key again replaces it, at the limit too.
+    replay.store(key(0, 1), vec![json!("again")]);
+    assert_eq!(replay.find(&key(0, 1)), Some(&vec![json!("again")]));
+    assert_eq!(replay.len(), limit);
+    // A safety limit far beyond a chat's replies: past it the chat's kept thinking starts
+    // over. Each later key holds the blocks of the replies before it, so without the oldest
+    // none of the others would be found again anyway.
+    replay.store(key(limit as u64, 1), vec![json!("new")]);
+    assert_eq!(replay.len(), 1);
+    assert!(replay.find(&key(0, 1)).is_none());
+    assert!(replay.find(&key(limit as u64 - 1, 1)).is_none());
+    assert_eq!(replay.find(&key(limit as u64, 1)), Some(&vec![json!("new")]));
     replay.clear();
     assert_eq!(replay.len(), 0);
 }
@@ -1395,6 +1409,27 @@ fn each_chat_has_its_own_store_and_an_idle_chat_goes_whole() {
     let back = super::replay_for(endpoint, "claude-opus-5-5", "idle");
     assert!(!Arc::ptr_eq(&back, &idle));
     assert_eq!(back.lock().unwrap().len(), 0);
+    // A conversation that ended (a helper's) is forgotten with every model, and nothing else.
+    let helper = super::replay_for(endpoint, "claude-opus-5-5", "active helper 1");
+    let other_model = super::replay_for(endpoint, "claude-sonnet-5-5", "active helper 1");
+    let other_helper = super::replay_for(endpoint, "claude-opus-5-5", "active helper 10");
+    super::forget_conversation(endpoint, "active helper 1");
+    assert!(!Arc::ptr_eq(
+        &helper,
+        &super::replay_for(endpoint, "claude-opus-5-5", "active helper 1")
+    ));
+    assert!(!Arc::ptr_eq(
+        &other_model,
+        &super::replay_for(endpoint, "claude-sonnet-5-5", "active helper 1")
+    ));
+    assert!(Arc::ptr_eq(
+        &other_helper,
+        &super::replay_for(endpoint, "claude-opus-5-5", "active helper 10")
+    ));
+    assert!(Arc::ptr_eq(
+        &active,
+        &super::replay_for(endpoint, "claude-opus-5-5", "active")
+    ));
 }
 
 #[test]
@@ -1445,6 +1480,54 @@ fn many_pictures_in_one_request_follow_claudes_limits() {
     assert!(seen[0].contains("at 4000 x 500 pixels"), "{}", seen[0]);
     assert!(seen[0].contains("more than 20 pictures"), "{}", seen[0]);
     assert!(seen[1..].iter().all(|p| p == "image"));
+    // Larger pictures become notes oldest first only until 20 pictures are left: then the
+    // rest may be up to 8,000 pixels a side again.
+    let request_of = |sides: &[u32]| {
+        let mut request = simple("claude-opus-5-5");
+        request.messages = vec![ChatMessage::user(
+            sides.iter().map(|side| png(*side, 500)).collect::<Vec<_>>(),
+        )];
+        request
+    };
+    let mut sides = vec![1_000; 21];
+    sides[3] = 4_000;
+    sides[9] = 3_500;
+    let seen = pictures(&body(&request_of(&sides), &adaptive_facts(), None));
+    assert!(seen[3].contains("at 4000 x 500 pixels"), "{seen:?}");
+    assert_eq!(seen[9], "image", "{seen:?}");
+    assert_eq!(seen.iter().filter(|p| *p == "image").count(), 20);
+    sides = vec![1_000; 22];
+    sides[0] = 3_001;
+    sides[4] = 6_000;
+    sides[7] = 7_999;
+    let seen = pictures(&body(&request_of(&sides), &adaptive_facts(), None));
+    assert!(seen[0].contains("at 3001 x 500"), "{seen:?}");
+    assert!(seen[4].contains("at 6000 x 500"), "{seen:?}");
+    assert_eq!(seen[7], "image", "{seen:?}");
+    // A picture left out for its own reasons counts no more: 21 pictures, one over 8,000.
+    sides = vec![1_000; 21];
+    sides[0] = 9_000;
+    sides[1] = 4_000;
+    let seen = pictures(&body(&request_of(&sides), &adaptive_facts(), None));
+    assert!(seen[0].contains("8,000 pixels a side that Claude takes."), "{seen:?}");
+    assert_eq!(seen[1], "image", "{seen:?}");
+    // Only as many as needed: of 25 larger pictures, the oldest 5 go.
+    sides = vec![4_000; 25];
+    sides[24] = 2_000;
+    let seen = pictures(&body(&request_of(&sides), &adaptive_facts(), None));
+    assert!(seen[..5].iter().all(|p| p.contains("more than 20")), "{seen:?}");
+    assert!(seen[5..].iter().all(|p| p == "image"), "{seen:?}");
+    // When even that leaves more than 20, every larger one goes and the smaller ones stay.
+    sides = vec![1_000; 30];
+    for at in [2, 11, 29] {
+        sides[at] = 4_000;
+    }
+    let seen = pictures(&body(&request_of(&sides), &adaptive_facts(), None));
+    assert!(
+        [2, 11, 29].iter().all(|at| seen[*at].contains("more than 20")),
+        "{seen:?}"
+    );
+    assert_eq!(seen.iter().filter(|p| *p == "image").count(), 27);
     // A model with a window of 200,000 tokens or less (or one not known) takes at most 100
     // pictures: the oldest become notes, the newest stay.
     let small = ModelFacts {
@@ -1464,9 +1547,51 @@ fn many_pictures_in_one_request_follow_claudes_limits() {
         ..adaptive_facts()
     };
     assert!(pictures(&body(&request_with(101), &unknown, None))[0].contains("at most 100"));
+    // Counted after the notes: 101 pictures of which one is too large anyway are 100.
+    let mut sides = vec![1_000; 101];
+    sides[50] = 9_000;
+    let seen = pictures(&body(&request_of(&sides), &unknown, None));
+    assert_eq!(seen.iter().filter(|p| *p == "image").count(), 100, "{seen:?}");
+    assert!(!seen.iter().any(|p| p.contains("at most 100")), "{seen:?}");
     // A larger window takes 600.
     let sent = body(&request_with(103), &adaptive_facts(), None);
     assert!(pictures(&sent)[1..].iter().all(|p| p == "image"));
+}
+
+#[test]
+fn a_jpegs_size_is_read_from_the_heads_of_its_segments_alone() {
+    use base64::Engine as _;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    // SOI and the head of an Exif segment of 64,998 bytes, whose content is not even valid
+    // base64 here (each part is a multiple of 3 bytes, so the parts encode alone), then a
+    // start of frame of 9,000 x 100. Only the heads are decoded on the way to the size, so
+    // the work stays small however large or broken the segments between them are.
+    let mut data = encode(&[0xFF, 0xD8, 0xFF, 0xE1, 0xFD, 0xE8]);
+    data.push_str(&"*".repeat(64_998 / 3 * 4));
+    data.push_str(&encode(&[
+        0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x64, 0x23, 0x28, 0x03, 0xFF, 0xD9,
+    ]));
+    let mut request = simple("claude-opus-5-5");
+    request.messages = vec![ChatMessage::user(vec![ContentPart::image(ImageUrl {
+        url: format!("data:image/jpeg;base64,{data}"),
+    })])];
+    let block = body(&request, &adaptive_facts(), None)["messages"][0]["content"][0].clone();
+    assert!(
+        block["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at 9000 x 100 pixels"),
+        "{}",
+        block["type"]
+    );
+    // A JPEG whose markers lead nowhere (no size before its end) is measured as unknown,
+    // and goes as it is.
+    let broken = encode(&[0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x02, 0xFF, 0xFF, 0xFF]);
+    request.messages = vec![ChatMessage::user(vec![ContentPart::image(ImageUrl {
+        url: format!("data:image/jpeg;base64,{broken}"),
+    })])];
+    let block = body(&request, &adaptive_facts(), None)["messages"][0]["content"][0].clone();
+    assert_eq!(block["type"], json!("image"));
 }
 
 #[test]

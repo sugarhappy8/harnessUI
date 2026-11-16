@@ -933,36 +933,76 @@ fn without_policy(text: &str) -> String {
     text.replace(browser::capture::html::COPY_POLICY, "")
 }
 
-/// Nothing in a saved copy points anywhere but at its own files.
+/// Nothing in a saved copy can run, and nothing points anywhere but at its own files: the
+/// copy is parsed as a browser parses it and every element and attribute is looked at
+/// (page text may well quote markup; it is only text).
 fn assert_inert_files(folder: &Path, beacon: u16, site: u16) {
     let index = std::fs::read_to_string(folder.join("index.html")).unwrap();
     assert!(
         index.contains("<html") && index.contains("<head><meta http-equiv=\"Content-Security-Policy\""),
         "the policy comes first: {index}"
     );
-    let text = without_policy(&index).to_ascii_lowercase();
-    for bad in [
-        "<script",
-        "<embed",
-        "<object",
-        "<iframe",
-        "<frame",
-        "<base",
-        "<noscript",
-        "<foreignobject",
-        "javascript:",
-        "onerror",
-        "onload",
-        "refresh",
-        "file:",
-        "attacker.example",
-        "beacon",
-        "data:image/svg+xml",
-        "127.0.0.1",
-    ] {
-        assert!(!text.contains(bad), "{bad} in {}:\n{index}", folder.display());
+    let outside = |v: &str| {
+        let l = v.trim().to_ascii_lowercase();
+        l.contains("file:")
+            || l.contains("javascript:")
+            || l.contains("attacker.example")
+            || l.contains("127.0.0.1")
+            || l.contains(&format!(":{beacon}"))
+            || l.contains(&format!(":{site}"))
+            || l.contains("data:image/svg+xml")
+            || l.starts_with("//")
+            || l.starts_with("http:")
+            || l.starts_with("https:")
+    };
+    let (doc, whole) = browser::capture::inert::parse(&index);
+    assert!(whole);
+    let mut problems: Vec<String> = Vec::new();
+    for node in doc.root().descendants() {
+        node.query(|n| {
+            let dom_query::NodeData::Element(e) = &n.data else {
+                return;
+            };
+            let name = e.name.local.as_ref().to_ascii_lowercase();
+            if [
+                "script", "noscript", "embed", "object", "applet", "iframe", "frame", "frameset",
+                "base", "portal", "fencedframe", "foreignobject", "xmp", "plaintext",
+            ]
+            .contains(&name.as_str())
+            {
+                problems.push(format!("<{name}>"));
+            }
+            for a in &e.attrs {
+                let an = a.name.local.as_ref().to_ascii_lowercase();
+                let v = a.value.as_ref();
+                if an.starts_with("on") {
+                    problems.push(format!("<{name} {an}>"));
+                }
+                if name == "meta" && an == "content" && v == browser::capture::html::COPY_POLICY {
+                    continue;
+                }
+                if name == "meta" && an == "http-equiv" && v != "Content-Security-Policy" {
+                    problems.push(format!("<meta http-equiv={v}>"));
+                }
+                let link = (name == "a" || name == "area") && an == "href";
+                if link {
+                    if !(v.starts_with('#') || v.starts_with("https://example.com")) && outside(v) {
+                        problems.push(format!("<{name} href={v}>"));
+                    }
+                } else if outside(v) {
+                    problems.push(format!("<{name} {an}={v}>"));
+                }
+            }
+        });
+        // Style text: every address is the copy's own, a fragment, data: or about:invalid.
+        if node.has_name("style") {
+            let css = node.text().to_string();
+            if outside(&css.replace("about:invalid", "")) {
+                problems.push(format!("<style>{css}</style>"));
+            }
+        }
     }
-    let _ = (beacon, site);
+    assert!(problems.is_empty(), "{}: {problems:?}\n{index}", folder.display());
     if let Ok(dir) = std::fs::read_dir(folder.join("styles")) {
         for e in dir {
             let css = std::fs::read_to_string(e.unwrap().path()).unwrap();
@@ -1013,6 +1053,21 @@ async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
     let chat = chat(&approved);
     let server = server(&[site.port], work.path());
 
+    // The instrument works: a file that does load something shows up in the recording.
+    let control = work.path().join("control.html");
+    std::fs::write(
+        &control,
+        format!("<!DOCTYPE html><img src=\"http://attacker.example/control.png\"><img src=\"http://127.0.0.1:{}/BEACON-control\">", beacon.port),
+    )
+    .unwrap();
+    let (_, seen) = open_recorded(&control, work.path(), &beacon).await;
+    assert!(
+        seen.iter().any(|r| r.contains("attacker.example/control.png"))
+            && seen.iter().any(|r| r.contains("BEACON-control")),
+        "the recording proxy saw: {seen:?}"
+    );
+    beacon.log.lock().unwrap().clear();
+
     for page in ["a", "b", "c", "f", "e"] {
         let into = approved.join(page);
         let (failed, text) = capture_into(&server, &chat, &site.url(&format!("/{page}/")), &into).await;
@@ -1026,9 +1081,10 @@ async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
         match page {
             "a" => assert!(index.contains("Copy of the page"), "{index}"),
             "b" => {
-                assert!(index.contains("<html lang=\"en\">"), "{index}");
+                assert!(index.starts_with("<!DOCTYPE html>\n<html lang=\"en\"><head>"), "{index}");
                 assert!(index.contains("<symbol id=\"dot2\""), "the clean shapes are copied in: {index}");
-                assert!(!index.contains("<symbol id=\"dot\""), "a malformed picture is left out: {index}");
+                assert!(!index.contains("<symbol id=\"dot\""), "a picture that is not well-formed XML is left out: {index}");
+                assert!(!index.contains("<img"), "{index}");
             }
             "c" => {
                 let svgs: Vec<PathBuf> = std::fs::read_dir(folder.join("assets"))

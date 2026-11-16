@@ -56,7 +56,9 @@ pub const UNREADABLE_ADDRESS: &str = "The address could not be read, so the API 
 /// The URL the client sends requests to for the address `raw` (the parse
 /// [`crate::OpenAiClient`] uses, so the key check, the "Cloud" mark and the requests agree):
 /// an `http://` or `https://` URL as the URL standard reads it (`http:/host` and
-/// `http:host` are `http://host`), or a bare `host:port` taken as `http://`.
+/// `http:host` are `http://host`), or a bare `host:port` taken as `http://`. `localhost.`
+/// becomes `localhost`: written with the final dot, the system asks the name server for it
+/// instead of reading the hosts file.
 ///
 /// # Errors
 /// What is wrong with the address, for an empty one, one with another scheme, or one
@@ -66,7 +68,7 @@ pub(crate) fn endpoint_url(raw: &str) -> Result<Url, String> {
     if trimmed.is_empty() {
         return Err("the base URL is empty".to_owned());
     }
-    let url = match Url::parse(trimmed) {
+    let mut url = match Url::parse(trimmed) {
         Ok(url) if url.scheme() == "http" || url.scheme() == "https" => url,
         Ok(_) | Err(_) if !trimmed.contains("://") => Url::parse(&format!("http://{trimmed}"))
             .map_err(|err| format!("'{trimmed}' is not a valid URL ({err})"))?,
@@ -80,6 +82,13 @@ pub(crate) fn endpoint_url(raw: &str) -> Result<Url, String> {
     };
     if url.host().is_none() {
         return Err(format!("'{trimmed}' has no host"));
+    }
+    let dotted_localhost = url.domain().is_some_and(|domain| {
+        domain.ends_with('.') && domain.trim_end_matches('.') == "localhost"
+    });
+    if dotted_localhost {
+        url.set_host(Some("localhost"))
+            .map_err(|err| format!("'{trimmed}' is not a valid URL ({err})"))?;
     }
     Ok(url)
 }
@@ -100,12 +109,12 @@ pub(crate) fn url_place(url: &Url) -> EndpointPlace {
     }
 }
 
-/// Only `localhost` is known without asking a name server (the hosts file answers it). Any
-/// other name, `.local`, `.lan` and one-word names included, can lead to the internet: a
-/// search domain, a misconfigured or hostile name server, or DNS rebinding decide.
+/// Only `localhost` is known without asking a name server (the hosts file answers it; the
+/// client's parse turns `localhost.` into it). Any other name, `.local`, `.lan` and one-word
+/// names included, can lead to the internet: a search domain, a misconfigured or hostile
+/// name server, or DNS rebinding decide.
 fn domain_place(domain: &str) -> EndpointPlace {
-    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-    if domain == "localhost" {
+    if domain.eq_ignore_ascii_case("localhost") {
         EndpointPlace::ThisComputer
     } else {
         EndpointPlace::Internet
@@ -822,6 +831,9 @@ pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
         .map(Duration::from_secs_f64)
 }
 
+/// The shortest key whose copies are removed from error texts: a local server's key can be
+/// short (`--api-key secret7`), and shorter text is too common to replace.
+const SHORTEST_KEY: usize = 4;
 /// The shortest piece of a key that counts as a secret where a text was cut.
 const KEY_PIECE: usize = 12;
 /// Beginnings that every key of a company shares: a piece no longer than these is not
@@ -867,9 +879,13 @@ fn without_key(text: &str, key: &str) -> String {
     text
 }
 
-/// Removes the API key from an error's text, in case a server or a proxy echoed it.
+/// Removes the API key from an error's text, in case a server or a proxy echoed it: every
+/// whole copy of a key of 4 characters or more, and a cut piece as [`without_key`] says.
 pub(crate) fn scrub_key(err: ProviderError, key: Option<&str>) -> ProviderError {
-    let Some(key) = key.map(str::trim).filter(|key| key.len() >= 8) else {
+    let Some(key) = key
+        .map(str::trim)
+        .filter(|key| key.chars().count() >= SHORTEST_KEY)
+    else {
         return err;
     };
     let clean = |text: String| without_key(&text, key);

@@ -248,3 +248,13 @@ and `README.md`.
   a downloaded image file behind; the end of a timed-out cancel never showed; two windows
   where a cut-short cancel wasn't finished at start-up. Nits: lock handling, a drop guard,
   wording, long Windows paths. Round 2 running.
+- P2 round 1 done (all of `review-p2-findings.md` except m5, which P6b fixed): device
+  errors and backends that won't start are no longer taken for a broken image file;
+  *Try it again* and *Download the image file again*; no automatic Hugging Face requests
+  (a download saves the repository's image files; older downloads get *Look for an image
+  file*; e2e m8 offline passes); log matching hardened against names from downloaded files;
+  image files of other models never used; writing an `mmproj` file always asks; Windows
+  device names rejected; running out of memory while the image file loads keeps the image
+  file through the normal memory retries and drops it only as the last step. runtime
+  (real server) all pass, app 877, vitest 844. Not done: Browse's own model + image
+  download still takes the repository's first image file. Verification running.

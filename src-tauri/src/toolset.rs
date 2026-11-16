@@ -424,6 +424,8 @@ pub async fn start_saved_servers(app: &AppHandle) {
     // starts under its new name instead of being skipped.
     let builtin = crate::tool_catalog::builtin_servers(&state.host);
     crate::mcp_cmd::rename_clashing_servers(&state.store, state.secrets.as_ref(), &builtin).await;
+    // [0.0.7 P7] A built-in tool added in this version follows its group in saved choices.
+    crate::mcp_cmd::carry_added_tools(&state.store, &state.host.tools()).await;
     let servers = match state.store.list_mcp_servers().await {
         Ok(s) => s,
         Err(e) => {

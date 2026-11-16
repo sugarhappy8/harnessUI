@@ -47,7 +47,7 @@ mod stream;
 mod tests;
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -66,8 +66,10 @@ pub(crate) use stream::{MessagesDecoder, events_from_message};
 /// `temperature`, `top_p` and `top_k`, which the app never sends to Claude.
 pub(crate) const API_VERSION: &str = "2026-10-21";
 
-/// Responses kept for one conversation: a safety limit far beyond a long chat's replies;
-/// past it the oldest go first.
+/// Responses kept for one conversation: a safety limit far beyond a long chat's replies.
+/// Past it the conversation's kept responses start over: each one is found by everything
+/// before it, the thinking of the replies before it included, so once the oldest went none
+/// of the others would be found again anyway.
 const MAX_REPLAY_ENTRIES: usize = 4_096;
 /// Conversations (chats with one endpoint and model) whose responses are kept; the one used
 /// least recently is forgotten whole.
@@ -118,22 +120,16 @@ pub(crate) fn reply_hash<'a>(
 #[derive(Debug, Default)]
 pub(crate) struct ThinkingReplay {
     entries: HashMap<ReplayKey, Vec<Value>>,
-    /// Keys in the order they were kept, for the safety limit.
-    order: VecDeque<ReplayKey>,
 }
 
 impl ThinkingReplay {
-    /// Keeps the blocks of a response.
+    /// Keeps the blocks of a response; past [`MAX_REPLAY_ENTRIES`], after forgetting all the
+    /// others.
     pub(crate) fn store(&mut self, key: ReplayKey, blocks: Vec<Value>) {
-        if self.entries.insert(key, blocks).is_some() {
-            self.order.retain(|kept| *kept != key);
-        } else if self.order.len() >= MAX_REPLAY_ENTRIES
-            && let Some(oldest) = self.order.pop_front()
-        {
-            // A safety limit far beyond a long chat's replies.
-            self.entries.remove(&oldest);
+        if self.entries.len() >= MAX_REPLAY_ENTRIES && !self.entries.contains_key(&key) {
+            self.clear();
         }
-        self.order.push_back(key);
+        self.entries.insert(key, blocks);
     }
 
     /// The blocks of the response with this key.
@@ -150,7 +146,6 @@ impl ThinkingReplay {
     /// Forgets everything (after the API refused a replayed block of this conversation).
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
-        self.order.clear();
     }
 }
 
@@ -192,6 +187,20 @@ pub(crate) fn replay_for(
     let entry = kept.stores.entry(key).or_default();
     entry.1 = now;
     entry.0.clone()
+}
+
+/// Forgets what `conversation` kept at `endpoint`, with every model: a conversation that
+/// does not go on (a helper that has answered).
+pub(crate) fn forget_conversation(endpoint: &str, conversation: &str) {
+    let Ok(mut kept) = REPLAYS.lock() else {
+        return;
+    };
+    let (start, end) = (format!("{endpoint}\n"), format!("\n{conversation}"));
+    kept.stores.retain(|key, _| {
+        key.strip_prefix(&start)
+            .and_then(|rest| rest.strip_suffix(&end))
+            .is_none_or(|model| model.contains('\n'))
+    });
 }
 
 /// A Claude model's family, from its name.

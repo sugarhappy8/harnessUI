@@ -1444,3 +1444,21 @@ async fn a_helper_never_gets_the_coding_apps() {
     assert!(!offered_to_helper(&registered(SERVER_NAME, TOOL_NAME)));
     assert!(offered_to_helper(&registered("files", "read_file")));
 }
+
+#[test]
+fn each_helper_has_a_conversation_of_its_own() {
+    // [0.0.7 P5] Claude's thinking a helper keeps, and a thinking block the API refuses in
+    // it, belong to that helper alone: never to the chat's conversation or another helper's.
+    let chat = OpenAiClient::new(ClientConfig::new(
+        "https://api.anthropic.com",
+        ProviderKind::Anthropic,
+    ))
+    .expect("client")
+    .for_conversation("chat 7");
+    let first = helper_client(chat.clone(), 7);
+    let second = helper_client(chat.clone(), 7);
+    let name = |client: &OpenAiClient| client.config().conversation.clone().unwrap_or_default();
+    assert!(name(&first).starts_with("chat 7 helper "), "{}", name(&first));
+    assert_ne!(name(&first), name(&second));
+    assert_eq!(name(&chat), "chat 7");
+}

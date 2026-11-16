@@ -554,7 +554,7 @@ pub fn neutralise_svg(text: &str) -> Option<String> {
                 for a in e.attributes() {
                     let a = a.ok()?;
                     // Not well-formed XML: a name that is not one, or a `<` in a value.
-                    if !xml_name(a.key.into_inner()) || a.value.contains(&b'<') {
+                    if !xml_name(a.key.into_inner()) || a.value.contains('<') {
                         return None;
                     }
                     if a.key.as_namespace_binding().is_some() {

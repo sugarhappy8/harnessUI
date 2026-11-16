@@ -93,7 +93,7 @@ pub(crate) fn messages_body(
     let mut body = Map::new();
     body.insert("model".into(), Value::String(req.model.clone()));
     body.insert("max_tokens".into(), Value::from(max_tokens));
-    if !system.trim().is_empty() {
+    if !system.is_empty() {
         // The one-hour lifetime: the tools and the system prompt stay cached while a chat
         // waits for an approval or a reply (Anthropic: for gaps of 5 to 60 minutes). Longer
         // lifetimes come first, as required: the newest message's marker is five minutes.
@@ -159,10 +159,11 @@ pub(crate) fn messages_body(
 pub(crate) struct PrefixHasher(DefaultHasher);
 
 impl PrefixHasher {
-    /// Starts with the request's system prompt and tool list.
+    /// Starts with the request's system prompt (exactly as sent: the API checks it so, white
+    /// space included) and tool list.
     fn new(system: &str, tools: Option<&Value>) -> Self {
         let mut hasher = DefaultHasher::new();
-        system.trim().hash(&mut hasher);
+        system.hash(&mut hasher);
         tools.map(Value::to_string).hash(&mut hasher);
         Self(hasher)
     }
@@ -214,7 +215,8 @@ pub(crate) fn reply_prefix(body: &Value) -> u64 {
     hasher.finish()
 }
 
-/// The text of every system message, joined.
+/// The text of every system message, joined, as the `system` field sends it: empty when
+/// there is none (blank system messages are left out).
 fn system_text(messages: &[ChatMessage]) -> String {
     messages
         .iter()
@@ -402,6 +404,7 @@ fn convert(
                     .cloned();
                 let blocks = match kept {
                     Some(blocks) => {
+                        pictures.pass(message);
                         replayed_thinking |= blocks.iter().any(|block| {
                             matches!(
                                 block.get("type").and_then(Value::as_str),
@@ -458,63 +461,93 @@ fn text_block(text: &str) -> Value {
     json!({"type": "text", "text": text})
 }
 
-/// The pictures of one request, and what Anthropic's vision limits allow for each: the most
-/// pictures one request may hold (the newest stay), and above 20 pictures a smaller size.
+/// The pictures of one request as Claude takes them, decided before the request is built
+/// because the limits count the pictures that are really sent: a picture Claude never takes
+/// (over 10 MB, over 8,000 pixels a side, a type it does not read) becomes a note; beyond
+/// the most one request may hold, the oldest pictures become notes; and while more than 20
+/// are left, the oldest larger than 3,000 pixels a side become notes, only until 20 are left.
 pub(crate) struct Pictures {
-    /// Pictures in the request.
-    total: usize,
-    /// The most one request may hold.
-    most: usize,
-    /// Pictures converted so far, oldest first.
+    /// The block of each picture, oldest first, taken as the request is built.
+    blocks: Vec<Value>,
+    /// Pictures handed out so far.
     seen: usize,
 }
 
 impl Pictures {
-    /// Counts the pictures of `messages`; `window` is the model's context window when the
-    /// model list said.
+    /// Reads the pictures of `messages`, in the order [`convert`] meets them; `window` is the
+    /// model's context window when the model list said.
     fn new(messages: &[ChatMessage], window: Option<u32>) -> Self {
-        let total = messages
+        let mut read: Vec<Result<(Value, Option<(u32, u32)>), Value>> = messages
             .iter()
             .filter(|message| message.role != Role::System)
-            .filter_map(|message| match &message.content {
-                Some(MessageContent::Parts(parts)) => Some(parts),
-                _ => None,
-            })
-            .flatten()
-            .filter(|part| matches!(part, ContentPart::ImageUrl { .. }))
-            .count();
+            .flat_map(picture_urls)
+            .map(read_picture)
+            .collect();
+        let sent = |read: &[Result<_, _>]| read.iter().filter(|picture| picture.is_ok()).count();
         let most = match window {
             Some(window) if window > 200_000 => MOST_IMAGES,
             _ => MOST_IMAGES_SMALL_WINDOW,
         };
+        let mut over = sent(&read).saturating_sub(most);
+        for picture in &mut read {
+            if over == 0 {
+                break;
+            }
+            if picture.is_ok() {
+                *picture = Err(text_block(&format!(
+                    "[An older picture was left out here: Claude takes at most {most} \
+                     pictures in one request.]"
+                )));
+                over -= 1;
+            }
+        }
+        let mut over = sent(&read).saturating_sub(MANY_IMAGES);
+        for picture in &mut read {
+            if over == 0 {
+                break;
+            }
+            if let Ok((_, Some((width, height)))) = picture
+                && (*width).max(*height) > MANY_IMAGES_SIDE
+            {
+                *picture = Err(too_large(*width, *height, MANY_IMAGES_SIDE));
+                over -= 1;
+            }
+        }
         Self {
-            total,
-            most,
+            blocks: read
+                .into_iter()
+                .map(|picture| picture.map_or_else(|note| note, |(block, _)| block))
+                .collect(),
             seen: 0,
         }
     }
 
-    /// The block of the next picture: the picture, or a note where Claude would refuse it.
-    fn next(&mut self, url: &str) -> Value {
-        let index = self.seen;
+    /// The block of the next picture: the picture, or the note in its place.
+    fn next(&mut self) -> Value {
+        let block = self
+            .blocks
+            .get_mut(self.seen)
+            .map_or_else(|| text_block("[image: could not be read]"), std::mem::take);
         self.seen += 1;
-        if index + self.most < self.total {
-            return text_block(&format!(
-                "[An older picture was left out here: Claude takes at most {} pictures in one \
-                 request.]",
-                self.most
-            ));
-        }
-        let many = self.total.min(self.most) > MANY_IMAGES;
-        image_block(
-            url,
-            if many {
-                MANY_IMAGES_SIDE
-            } else {
-                MAX_IMAGE_SIDE
-            },
-        )
+        block
     }
+
+    /// Passes over the pictures of a message that goes as it was kept.
+    fn pass(&mut self, message: &ChatMessage) {
+        self.seen += picture_urls(message).count();
+    }
+}
+
+/// The image addresses in a message's content, in order.
+fn picture_urls(message: &ChatMessage) -> impl Iterator<Item = &str> {
+    let parts = match &message.content {
+        Some(MessageContent::Parts(parts)) => parts.as_slice(),
+        _ => &[],
+    };
+    parts.iter().filter_map(|part| match part {
+        ContentPart::ImageUrl { image_url } => Some(image_url.url.as_str()),
+        ContentPart::Text { .. } => None,
+    })
 }
 
 /// Text and image blocks of a message's content; empty text is left out (the API refuses
@@ -529,23 +562,24 @@ fn content_blocks(content: Option<&MessageContent>, pictures: &mut Pictures) -> 
             .filter_map(|part| match part {
                 ContentPart::Text { text } if text.is_empty() => None,
                 ContentPart::Text { text } => Some(text_block(text)),
-                ContentPart::ImageUrl { image_url } => Some(pictures.next(&image_url.url)),
+                ContentPart::ImageUrl { .. } => Some(pictures.next()),
             })
             .collect(),
     }
 }
 
-/// An image as a base64 `source`, from the inline data URI the app sends. A type the API
-/// does not read, or a picture larger than Claude takes (10 MB of base64, or more than
-/// `max_side` pixels a side), becomes a note instead: a picture Claude refuses would fail
-/// every later request of the chat (the app accepts attachments up to 20 MB).
-fn image_block(url: &str, max_side: u32) -> Value {
+/// An image as a base64 `source`, from the inline data URI the app sends, with its width
+/// and height when its header says. A type the API does not read, or a picture larger than
+/// Claude ever takes (10 MB of base64, or more than 8,000 pixels a side), is a note instead
+/// (`Err`): a picture Claude refuses would fail every later request of the chat (the app
+/// accepts attachments up to 20 MB).
+fn read_picture(url: &str) -> Result<(Value, Option<(u32, u32)>), Value> {
     let parsed = url
         .strip_prefix("data:")
         .and_then(|rest| rest.split_once(','))
         .and_then(|(header, data)| Some((header.strip_suffix(";base64")?, data)));
     let Some((mime, data)) = parsed else {
-        return text_block("[image: could not be read]");
+        return Err(text_block("[image: could not be read]"));
     };
     let mime = mime.to_ascii_lowercase();
     let mime = if mime == "image/jpg" {
@@ -554,36 +588,45 @@ fn image_block(url: &str, max_side: u32) -> Value {
         mime
     };
     if !IMAGE_TYPES.contains(&mime.as_str()) {
-        return text_block(&format!(
+        return Err(text_block(&format!(
             "[image of type {mime}: Claude reads only JPEG, PNG, GIF and WebP images]"
-        ));
+        )));
     }
     if data.len() > MAX_IMAGE_BASE64 {
-        return text_block(
+        return Err(text_block(
             "[A picture was left out here: it is larger than the 10 MB that Claude takes.]",
-        );
-    }
-    if let Some((width, height)) = picture_size_of(data)
-        && width.max(height) > max_side
-    {
-        let rule = if max_side < MAX_IMAGE_SIDE {
-            format!(
-                "the {} pixels a side that Claude takes when a request has more than \
-                 {MANY_IMAGES} pictures",
-                group_digits(max_side)
-            )
-        } else {
-            format!(
-                "the {} pixels a side that Claude takes",
-                group_digits(max_side)
-            )
-        };
-        return text_block(&format!(
-            "[A picture was left out here: at {width} x {height} pixels it is larger than \
-             {rule}.]"
         ));
     }
-    json!({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}})
+    let size = picture_size_of(data);
+    if let Some((width, height)) = size
+        && width.max(height) > MAX_IMAGE_SIDE
+    {
+        return Err(too_large(width, height, MAX_IMAGE_SIDE));
+    }
+    Ok((
+        json!({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}}),
+        size,
+    ))
+}
+
+/// The note for a picture larger than `max_side` pixels a side.
+fn too_large(width: u32, height: u32, max_side: u32) -> Value {
+    let rule = if max_side < MAX_IMAGE_SIDE {
+        format!(
+            "the {} pixels a side that Claude takes when a request has more than \
+             {MANY_IMAGES} pictures",
+            group_digits(max_side)
+        )
+    } else {
+        format!(
+            "the {} pixels a side that Claude takes",
+            group_digits(max_side)
+        )
+    };
+    text_block(&format!(
+        "[A picture was left out here: at {width} x {height} pixels it is larger than \
+         {rule}.]"
+    ))
 }
 
 /// `8000` → `8,000`.
@@ -599,37 +642,76 @@ fn group_digits(n: u32) -> String {
     out
 }
 
-/// The width and height of the picture in base64 `data`, decoding only as far as its header
-/// needs: the first 64 KiB, and for a JPEG whose size comes after large Exif or colour data,
-/// more until it is found (the picture is in memory already).
+/// Markers a JPEG's walk to its size passes at most (a file has a few dozen).
+const MAX_JPEG_MARKERS: usize = 1_024;
+
+/// The width and height of the picture in base64 `data`. Only what the header needs is
+/// decoded: the first bytes, and for a JPEG the head of each segment on its way to the size,
+/// so large Exif or colour data, or a broken file, costs no more than a few bytes each.
 fn picture_size_of(data: &str) -> Option<(u32, u32)> {
-    use base64::Engine as _;
-    let mut take = 87_380;
-    loop {
-        let end = data.len().min(take) / 4 * 4;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data.get(..end)?)
-            .ok()?;
-        if let Some(size) = picture_size(&bytes) {
-            return Some(size);
-        }
-        let jpeg = bytes.starts_with(&[0xFF, 0xD8]);
-        if !jpeg || end >= data.len() / 4 * 4 {
-            return None;
-        }
-        take = take.saturating_mul(4);
+    let head = base64_bytes(data, 0, 32)?;
+    if head.starts_with(&[0xFF, 0xD8]) {
+        jpeg_size(data)
+    } else {
+        picture_size(&head)
     }
 }
 
-/// The width and height a picture's header gives (PNG, GIF, WebP, JPEG); `None` when the
-/// header is not in `bytes` or cannot be read.
+/// Up to `len` bytes of base64 `data` from byte `at`, decoding only the groups of four
+/// characters that hold them; `None` past the end, or where the text is not base64.
+fn base64_bytes(data: &str, at: usize, len: usize) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let first = at / 3 * 4;
+    let end = at
+        .checked_add(len)?
+        .div_ceil(3)
+        .saturating_mul(4)
+        .min(data.len());
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.get(first..end)?)
+        .ok()?;
+    let skip = at % 3;
+    (skip < bytes.len()).then(|| bytes[skip..bytes.len().min(skip + len)].to_vec())
+}
+
+/// A JPEG's width and height from its start of frame, found by walking the segments from
+/// marker to marker.
+fn jpeg_size(data: &str) -> Option<(u32, u32)> {
+    let mut at = 2usize;
+    for _ in 0..MAX_JPEG_MARKERS {
+        let head = base64_bytes(data, at, 9)?;
+        let be16 = |i: usize| {
+            Some(u32::from(u16::from_be_bytes([
+                *head.get(i)?,
+                *head.get(i + 1)?,
+            ])))
+        };
+        if *head.first()? != 0xFF {
+            return None;
+        }
+        match *head.get(1)? {
+            // Fill bytes, and markers without a length.
+            0xFF => at += 1,
+            0x01 | 0xD0..=0xD8 => at += 2,
+            // A start of frame: precision, then height and width.
+            0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
+                return Some((be16(7)?, be16(5)?));
+            }
+            _ => {
+                let length = usize::try_from(be16(2)?).ok()?;
+                if length < 2 {
+                    return None;
+                }
+                at += 2 + length;
+            }
+        }
+    }
+    None
+}
+
+/// The width and height a picture's header gives (PNG, GIF, WebP); `None` when the header
+/// is not in `bytes` or cannot be read.
 fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    let be16 = |at: usize| {
-        Some(u32::from(u16::from_be_bytes([
-            *bytes.get(at)?,
-            *bytes.get(at + 1)?,
-        ])))
-    };
     let le16 = |at: usize| {
         Some(u32::from(u16::from_le_bytes([
             *bytes.get(at)?,
@@ -665,31 +747,6 @@ fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
             b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
             _ => None,
         };
-    }
-    if bytes.starts_with(&[0xFF, 0xD8]) {
-        let mut at = 2;
-        loop {
-            if *bytes.get(at)? != 0xFF {
-                return None;
-            }
-            let marker = *bytes.get(at + 1)?;
-            match marker {
-                // Fill bytes, and markers without a length.
-                0xFF => at += 1,
-                0x01 | 0xD0..=0xD8 => at += 2,
-                // A start of frame: precision, then height and width.
-                0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
-                    return Some((be16(at + 7)?, be16(at + 5)?));
-                }
-                _ => {
-                    let length = usize::try_from(be16(at + 2)?).ok()?;
-                    if length < 2 {
-                        return None;
-                    }
-                    at += 2 + length;
-                }
-            }
-        }
     }
     None
 }

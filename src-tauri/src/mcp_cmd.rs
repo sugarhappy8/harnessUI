@@ -39,6 +39,15 @@ use crate::toolset::mcp_secret_key;
 /// longer read. A chat with its own saved choice keeps it: its new groups start off.
 const DEFAULT_TOOLS: &str = "defaultChatTools3";
 
+/// [0.0.7 P7] Built-in tools added to a group after the group first shipped: the tool,
+/// its group (server) and the version that added it. Later versions add a row.
+const ADDED_TOOLS: &[(&str, &str, &str)] = &[("browser_capture_site", "browser", "0.0.7")];
+
+/// [0.0.7 P7] Setting: the [`ADDED_TOOLS`] already carried into the saved tool choices
+/// ([`carry_added_tools`]); each is carried once, so a tool the user switches off later
+/// stays off.
+const ADDED_TOOLS_CARRIED: &str = "addedToolsCarried";
+
 /// The names the last choice was saved under before the defaults changed.
 #[cfg(test)]
 const EARLIER_DEFAULT_TOOLS: &[&str] = &["defaultChatTools", "defaultChatTools2"];
@@ -633,6 +642,104 @@ fn rename_tools_in_chat(
         });
     }
     changed
+}
+
+/// [0.0.7 P7] A built-in tool added in a later version follows its group: in a saved choice
+/// (the last choice new chats start with, [`DEFAULT_TOOLS`], and each chat's own choice)
+/// where every other tool of the group is on, the new tool is switched on too; otherwise it
+/// stays off. Done once per tool, at start-up, after the built-in servers are registered
+/// (`tools` are the host's tools then); a tool whose group is not registered waits for a
+/// start where it is. Switching a tool on decides nothing: it still asks before it acts
+/// as it always does (`browser_capture_site` before saving anything, in Ask first).
+pub(crate) async fn carry_added_tools(store: &store::Store, tools: &[mcp_host::RegisteredTool]) {
+    let mut done: Vec<String> = store
+        .get_setting(ADDED_TOOLS_CARRIED)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    // Each pending tool with the other tools of its group.
+    let pending: Vec<(&str, Vec<String>)> = ADDED_TOOLS
+        .iter()
+        .filter(|(tool, _, _)| !done.iter().any(|d| d == tool))
+        .filter_map(|(tool, group, _)| {
+            let registered = tools.iter().any(|t| t.server == *group && t.exposed == *tool);
+            let others: Vec<String> = tools
+                .iter()
+                .filter(|t| t.server == *group && t.exposed != *tool)
+                .map(|t| t.exposed.clone())
+                .collect();
+            (registered && !others.is_empty()).then_some((*tool, others))
+        })
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let follow = |list: &mut Vec<String>| -> bool {
+        let mut changed = false;
+        for (tool, others) in &pending {
+            if !list.iter().any(|t| t == tool) && others.iter().all(|o| list.contains(o)) {
+                list.push((*tool).to_string());
+                changed = true;
+            }
+        }
+        changed
+    };
+    let chats = match store
+        .list_chats(store::ListChats {
+            limit: 0,
+            include_archived: true,
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(chats) => chats,
+        Err(e) => {
+            // Tried again at the next start.
+            tracing::warn!("could not read chats to switch on a new tool: {e}");
+            return;
+        }
+    };
+    for summary in chats {
+        let _one_at_a_time = PREFS_WRITES.lock().await;
+        let Ok(Some(chat)) = store.get_chat(summary.id).await else {
+            continue;
+        };
+        let mut prefs = chat.tool_prefs;
+        let Some(Value::Array(items)) = prefs.get_mut("enabled") else {
+            // No choice of its own: the chat follows the last choice or the defaults.
+            continue;
+        };
+        let mut list: Vec<String> = items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if follow(&mut list) {
+            *items = list.into_iter().map(Value::String).collect();
+            if let Err(e) = store
+                .update_chat(
+                    summary.id,
+                    store::ChatPatch {
+                        tool_prefs: Some(prefs),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                tracing::warn!(chat = summary.id.0, "could not switch on a new tool: {e}");
+            }
+        }
+    }
+    if let Ok(Some(mut last)) = store.get_setting::<Vec<String>>(DEFAULT_TOOLS).await
+        && follow(&mut last)
+        && let Err(e) = store.set_setting(DEFAULT_TOOLS, &last).await
+    {
+        tracing::warn!("could not switch on a new tool in the last choice: {e}");
+    }
+    done.extend(pending.iter().map(|(tool, _)| (*tool).to_string()));
+    if let Err(e) = store.set_setting(ADDED_TOOLS_CARRIED, &done).await {
+        tracing::warn!("could not note that a new tool was switched on: {e}");
+    }
 }
 
 /// [0.0.6] Keeps the renamed servers' tools on where they were on. A chat's choice and the
@@ -3428,5 +3535,88 @@ mod tests {
                     .all(|r| r.name == "fetch")
             );
         }
+    }
+
+    /// [0.0.7 P7] `browser_capture_site` follows the Browser group in saved choices, once.
+    #[tokio::test]
+    async fn a_new_built_in_tool_follows_its_group_once() {
+        let store = store::Store::open_in_memory().expect("store");
+        let host = crate::tool_catalog::tests::builtin_host();
+        let tools = host.tools();
+        let browser: Vec<String> = tools
+            .iter()
+            .filter(|t| t.server == "browser" && t.exposed != "browser_capture_site")
+            .map(|t| t.exposed.clone())
+            .collect();
+        assert_eq!(browser.len(), 10, "{browser:?}");
+        let mut whole = browser.clone();
+        whole.push("read_file".into());
+        let part: Vec<String> = vec!["read_file".into(), browser[0].clone()];
+        let new_chat = |title: &'static str, enabled: Option<Vec<String>>| {
+            let store = &store;
+            async move {
+                let id = store
+                    .create_chat(store::NewChat {
+                        title: title.into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                if let Some(list) = enabled {
+                    store
+                        .update_chat(
+                            id,
+                            store::ChatPatch {
+                                tool_prefs: Some(json!({"enabled": list, "thinkingOff": true})),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+                id
+            }
+        };
+        let all_on = new_chat("whole group", Some(whole.clone())).await;
+        let some_on = new_chat("part of it", Some(part.clone())).await;
+        let defaults = new_chat("no choice", None).await;
+        store.set_setting(DEFAULT_TOOLS, &whole).await.unwrap();
+
+        carry_added_tools(&store, &tools).await;
+        let enabled = |prefs: &Value| -> Vec<String> {
+            serde_json::from_value(prefs.get("enabled").cloned().unwrap_or(Value::Null))
+                .unwrap_or_default()
+        };
+        let prefs = store.get_chat(all_on).await.unwrap().unwrap().tool_prefs;
+        assert!(enabled(&prefs).contains(&"browser_capture_site".to_string()));
+        assert_eq!(prefs.get("thinkingOff"), Some(&json!(true)), "the rest of the choice stays");
+        let prefs = store.get_chat(some_on).await.unwrap().unwrap().tool_prefs;
+        assert_eq!(enabled(&prefs), part, "part of the group on: the new tool stays off");
+        let prefs = store.get_chat(defaults).await.unwrap().unwrap().tool_prefs;
+        assert!(prefs.get("enabled").is_none(), "no saved choice: the defaults decide");
+        let last: Vec<String> = store.get_setting(DEFAULT_TOOLS).await.unwrap().unwrap();
+        assert!(last.contains(&"browser_capture_site".to_string()));
+        let carried: Vec<String> = store.get_setting(ADDED_TOOLS_CARRIED).await.unwrap().unwrap();
+        assert_eq!(carried, ["browser_capture_site"]);
+
+        // Once only: switched off later, it stays off at the next start.
+        store
+            .update_chat(
+                all_on,
+                store::ChatPatch {
+                    tool_prefs: Some(json!({"enabled": whole})),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        carry_added_tools(&store, &tools).await;
+        let prefs = store.get_chat(all_on).await.unwrap().unwrap().tool_prefs;
+        assert!(!enabled(&prefs).contains(&"browser_capture_site".to_string()));
+
+        // No saved last choice at all: nothing is written for it.
+        let fresh = store::Store::open_in_memory().expect("store");
+        carry_added_tools(&fresh, &tools).await;
+        assert!(fresh.get_setting::<Vec<String>>(DEFAULT_TOOLS).await.unwrap().is_none());
     }
 }
