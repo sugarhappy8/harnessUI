@@ -241,6 +241,8 @@ export function Composer(props: {
 
   return (
     <div
+      // The update box under the header ends above this (UpdateBox.tsx).
+      data-composer
       className="px-4 pt-1 pb-3"
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("Files")) e.preventDefault();

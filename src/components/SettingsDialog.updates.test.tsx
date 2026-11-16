@@ -70,6 +70,10 @@ describe("Settings → General → Updates", () => {
     statusNow = status();
     vi.mocked(ipc.setUpdateAutoCheck).mockClear();
     vi.mocked(ipc.installUpdate).mockClear();
+    vi.mocked(ipc.updateStatus).mockReset();
+    vi.mocked(ipc.updateStatus).mockImplementation(async () => statusNow);
+    vi.mocked(ipc.checkForUpdate).mockReset();
+    vi.mocked(ipc.checkForUpdate).mockImplementation(async () => null);
   });
   afterEach(cleanup);
 
@@ -120,5 +124,56 @@ describe("Settings → General → Updates", () => {
     statusNow = status({ error: "Could not check for updates." });
     await show();
     expect(screen.getByText("Could not check for updates. The app tries again at the next check.")).toBeTruthy();
+  });
+
+  it("does not promise another check when the automatic check is off", async () => {
+    statusNow = status({ autoCheck: false, error: "Could not check for updates." });
+    await show();
+    expect(screen.getByText("Could not check for updates. Click Check now to try again.")).toBeTruthy();
+    expect(screen.queryByText(/tries again/)).toBeNull();
+  });
+
+  it("says once that Check now did not work", async () => {
+    await show();
+    vi.mocked(ipc.checkForUpdate).mockImplementation(async () => {
+      statusNow = status({ checked: false, error: "Could not check for updates." });
+      throw {
+        code: "update_check",
+        message: "Could not check for updates.",
+        nextStep: "Check your internet connection and try again.",
+        details: "offline",
+      };
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check now" }));
+    });
+    expect(screen.getAllByText(/Could not check for updates/)).toHaveLength(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("Could not check for updates. The app tries again at the next check.")).toBeTruthy();
+  });
+
+  it("still shows other errors from Check now", async () => {
+    await show();
+    vi.mocked(ipc.checkForUpdate).mockImplementation(async () => {
+      throw { code: "internal", message: "Something went wrong.", nextStep: "Try again.", details: "x" };
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check now" }));
+    });
+    expect(screen.getByRole("alert").textContent).toMatch(/Something went wrong/);
+  });
+
+  it("reads the status again when a change arrived before it", async () => {
+    let answer: (s: UpdateStatus) => void = () => undefined;
+    vi.mocked(ipc.updateStatus).mockImplementationOnce(() => new Promise<UpdateStatus>((resolve) => (answer = resolve)));
+    await show();
+    // The status was read while checking; the end of the check arrives first and is missed.
+    const done = status({ checked: true });
+    statusNow = done;
+    act(() => onState(state(done)));
+    await act(async () => answer(status({ checking: true })));
+    expect(ipc.updateStatus).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("You have the latest version (0.0.8).")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Check now" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

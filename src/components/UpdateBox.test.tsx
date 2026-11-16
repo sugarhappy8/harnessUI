@@ -47,7 +47,15 @@ async function show(placement: "sidebar" | "below-header" | "corner" = "sidebar"
   });
 }
 
-const box = () => screen.queryByRole("status", { name: "Update ready" });
+const box = () => screen.queryByRole("region", { name: "Update ready" });
+
+/** Gives elements the page positions a real window would (jsdom lays nothing out). */
+function placeOnPage(rects: { match: (el: HTMLElement) => boolean; rect: Partial<DOMRect> }[]) {
+  return vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    const found = rects.find((r) => r.match(this));
+    return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0, ...found?.rect } as DOMRect;
+  });
+}
 
 describe("the Update ready box", () => {
   beforeEach(() => {
@@ -188,6 +196,102 @@ describe("the Update ready box", () => {
       expect(b.className.split(/\s+/)).not.toContain("bottom-4");
     } finally {
       main.remove();
+    }
+  });
+
+  it("is a region named by its heading, and a separate status says a version is ready", async () => {
+    await show();
+    const status = screen.getByRole("status");
+    expect(status.textContent).toBe("");
+    act(() => onReady(info("0.0.9")));
+    const b = box() as HTMLElement;
+    expect(b.getAttribute("role")).toBe("region");
+    expect(b.getAttribute("aria-live")).toBeNull();
+    expect(b.contains(status)).toBe(false);
+    expect(status.textContent).toBe("Update ready. harnessUI 0.0.9 is ready to install.");
+    // What changes inside the box later is not inside a live region.
+    act(() => useApp.setState({ runningTurn: 3 }));
+    expect(status.contains(screen.getByText("Updating stops the current reply."))).toBe(false);
+  });
+
+  it("puts the caret back in the message box after Later", async () => {
+    const focus = vi.fn();
+    window.addEventListener("app:focus-input", focus);
+    try {
+      statusNow = status({ ready: info("0.0.9") });
+      await show();
+      fireEvent.click(screen.getByRole("button", { name: "Later" }));
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("status").textContent).toBe("");
+    } finally {
+      window.removeEventListener("app:focus-input", focus);
+    }
+  });
+
+  it("over the sidebar, grows no higher than the chat list and leaves room at the list's end", async () => {
+    const nav = document.createElement("nav");
+    nav.setAttribute("aria-label", "Chat history");
+    document.body.appendChild(nav);
+    const rects = placeOnPage([
+      { match: (el) => el === nav, rect: { top: 136, bottom: 724 } },
+      { match: (el) => el.hasAttribute("data-update-box"), rect: { top: 562, bottom: 724 } },
+    ]);
+    try {
+      statusNow = status({ ready: info("0.0.9") });
+      await show("sidebar");
+      // From the box's bottom edge up to 8px under the top of the chat list.
+      expect((box() as HTMLElement).style.maxHeight).toBe("580px");
+      // The list's end is covered from the box's top: that much room, plus the gap.
+      const root = document.documentElement;
+      expect(root.style.getPropertyValue("--update-box-space")).toBe("170px");
+      fireEvent.click(screen.getByRole("button", { name: "Later" }));
+      expect(root.style.getPropertyValue("--update-box-space")).toBe("");
+    } finally {
+      rects.mockRestore();
+      nav.remove();
+    }
+  });
+
+  it("under the header, ends above the message box", async () => {
+    const main = document.createElement("main");
+    const header = document.createElement("header");
+    main.appendChild(header);
+    const composer = document.createElement("div");
+    composer.setAttribute("data-composer", "");
+    main.appendChild(composer);
+    document.body.appendChild(main);
+    const rects = placeOnPage([
+      { match: (el) => el === header, rect: { bottom: 66 } },
+      { match: (el) => el === composer, rect: { top: 395 } },
+    ]);
+    try {
+      statusNow = status({ ready: info("0.0.9") });
+      await show("below-header");
+      const b = box() as HTMLElement;
+      expect(b.style.top).toBe("74px");
+      expect(b.style.maxHeight).toBe(`${395 - 8 - 74}px`);
+      // The release notes give way first; the heading and the buttons keep their size.
+      expect(b.className.split(/\s+/)).toEqual(expect.arrayContaining(["flex", "flex-col", "overflow-y-auto"]));
+      fireEvent.click(screen.getByRole("button", { name: "What's new" }));
+      const notes = screen.getByRole("region", { name: "Release notes" });
+      expect(notes.className.split(/\s+/)).toContain("min-h-12");
+      expect(screen.getByRole("button", { name: "Later" }).parentElement?.className.split(/\s+/)).toContain("shrink-0");
+      expect(document.documentElement.style.getPropertyValue("--update-box-space")).toBe("0px");
+    } finally {
+      rects.mockRestore();
+      main.remove();
+    }
+  });
+
+  it("in the corner of the first-run screen, leaves room at the screen's end", async () => {
+    const rects = placeOnPage([{ match: (el) => el.hasAttribute("data-update-box"), rect: { top: window.innerHeight - 146 } }]);
+    try {
+      statusNow = status({ ready: info("0.0.9") });
+      await show("corner");
+      expect((box() as HTMLElement).style.maxHeight).toBe("");
+      expect(document.documentElement.style.getPropertyValue("--update-box-space")).toBe("154px");
+    } finally {
+      rects.mockRestore();
     }
   });
 });

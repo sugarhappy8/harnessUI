@@ -80,7 +80,7 @@ describe("AppNotices", () => {
   it("shows nothing about updates until a version is ready to install", async () => {
     updateNow = { ...updateNow, available: { version: "0.0.9", date: null, notes: null }, downloading: "0.0.9" };
     await show();
-    expect(screen.queryByRole("status", { name: "Update ready" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Update ready" })).toBeNull();
     expect(screen.queryByText(/0\.0\.9/)).toBeNull();
   });
 
@@ -88,14 +88,14 @@ describe("AppNotices", () => {
     hotkeyNow = { accelerator: "Control+Alt+Backspace", registered: false, error: "taken" };
     const open = await show();
     act(() => onReady({ version: "0.0.9", date: null, notes: null }));
-    expect(screen.getByRole("status", { name: "Update ready" }).textContent).toMatch(
+    expect(screen.getByRole("region", { name: "Update ready" }).textContent).toMatch(
       /harnessUI 0\.0\.9 is ready to install\./,
     );
     expect(screen.getByRole("alert").textContent).toMatch(HOTKEY_TEXT);
     fireEvent.click(screen.getByText("Open Permissions"));
     expect(open).toHaveBeenCalledWith("permissions");
     fireEvent.click(screen.getByRole("button", { name: "Later" }));
-    expect(screen.queryByRole("status", { name: "Update ready" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Update ready" })).toBeNull();
     expect(screen.getByRole("alert").textContent).toMatch(HOTKEY_TEXT);
   });
 });

@@ -10,6 +10,7 @@ import { switchModel } from "../store/modelChange";
 import { ErrorBanner } from "./ErrorBanner";
 import { BrandMark } from "./Brand";
 import { QuestionHost } from "./ModelSettings";
+import { UPDATE_BOX_SPACE } from "./UpdateBox";
 
 function hardwareLine(info: FirstRunInfo): string {
   const h = info.hardware;
@@ -93,7 +94,12 @@ export function FirstRun(props: { onDone: () => void; onOpenEndpoints: () => voi
   const chosen = info?.suggestions.find((s) => s.id === selected) ?? null;
 
   return (
-    <div className="app-backdrop flex h-full items-center justify-center overflow-y-auto p-6">
+    <div
+      className="app-backdrop flex h-full items-center justify-center overflow-y-auto p-6"
+      // Room at the end for the update box in the bottom left corner, so the buttons can be
+      // scrolled above it (UpdateBox.tsx).
+      style={{ paddingBottom: `calc(1.5rem + var(${UPDATE_BOX_SPACE}, 0px))` }}
+    >
       <div className="enter w-full max-w-2xl space-y-5 rounded-2xl border border-border bg-surface p-7 shadow-float">
         <div>
           <BrandMark size={44} glow />

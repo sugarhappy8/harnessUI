@@ -564,6 +564,35 @@ impl Host {
         }
     }
 
+    /// Undoes [`shutdown`](Self::shutdown) when the app goes on after all (an update that
+    /// could not be installed): new servers are accepted again, and the external servers it
+    /// stopped are forgotten, with their tools, so the caller can add them again by name.
+    pub fn resume(&self) {
+        let forgotten: Vec<String> = {
+            let mut reg = self.inner.registry();
+            let stopped: Vec<String> = reg
+                .servers
+                .iter()
+                .filter_map(|(name, slot)| match slot {
+                    ServerSlot::External(ext) if ext.stop.is_cancelled() => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            for name in &stopped {
+                reg.servers.remove(name);
+                reg.tools.retain(|_, t| &t.server != name);
+            }
+            stopped
+        };
+        self.inner.shutting_down.store(false, Ordering::SeqCst);
+        for server in forgotten {
+            self.inner.emit(HostEvent::StatusChanged {
+                server: server.clone(),
+            });
+            self.inner.emit(HostEvent::ToolsChanged { server });
+        }
+    }
+
     /// Every server, built-in ones first, in the order they were added.
     pub fn servers(&self) -> Vec<ServerStatus> {
         let reg = self.inner.registry();
@@ -1849,6 +1878,35 @@ mod tests {
             host.add_external("late", cfg).await,
             Err(HostError::ShuttingDown)
         );
+    }
+
+    /// [0.0.8] An update that could not be installed: the app goes on after `shutdown`, and
+    /// `resume` lets the saved servers be added again under their names.
+    #[tokio::test]
+    async fn resume_after_shutdown_lets_servers_be_added_again() {
+        let host = Host::new(HostOptions::default());
+        let cfg = ServerConfig::Stdio {
+            command: "definitely-not-a-real-program-xyz".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+            cwd: None,
+        };
+        assert!(host.add_external("saved", cfg.clone()).await.is_err());
+        host.shutdown().await;
+        assert!(matches!(host.servers()[0].state, ServerState::Stopped));
+        assert_eq!(
+            host.add_external("other", cfg.clone()).await,
+            Err(HostError::ShuttingDown)
+        );
+        host.resume();
+        assert!(host.servers().is_empty());
+        let err = host.add_external("saved", cfg).await.unwrap_err();
+        assert!(matches!(err, HostError::CommandNotFound { .. }), "{err:?}");
+        assert_eq!(host.servers().len(), 1);
+        assert!(matches!(
+            &host.servers()[0].state,
+            ServerState::Failed { .. }
+        ));
     }
 
     #[tokio::test]

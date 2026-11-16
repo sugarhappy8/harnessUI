@@ -7,6 +7,7 @@ import { dayGroup } from "../lib/format";
 import { backendWords } from "../lib/words";
 import { BrandMark } from "./Brand";
 import { visiblePath } from "./FolderChip";
+import { UPDATE_BOX_SPACE } from "./UpdateBox";
 
 /** What is loaded right now, at the bottom of the list. Opens the model manager. */
 function RuntimeChip(props: { onOpenModels: () => void }) {
@@ -152,7 +153,10 @@ export function Sidebar(props: {
         </label>
       </div>
       <nav
-        className="mt-2 flex-1 overflow-y-auto px-2 pb-3"
+        className="mt-2 flex-1 overflow-y-auto px-2"
+        // Room at the end for the update box that floats over the foot of the list, so the
+        // last chats can be scrolled above it (UpdateBox.tsx).
+        style={{ paddingBottom: `calc(0.75rem + var(${UPDATE_BOX_SPACE}, 0px))` }}
         aria-label="Chat history"
       >
         {chats.length === 0 && (

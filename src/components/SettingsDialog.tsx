@@ -291,7 +291,8 @@ function updateLine(s: UpdateStatus): string | null {
   if (s.ready) return `Version ${s.ready.version} is ready to install.`;
   if (s.downloading) return `Downloading version ${s.downloading}…`;
   if (s.checking) return "Checking for updates…";
-  if (s.error) return `${s.error} The app tries again at the next check.`;
+  // Only the automatic check tries again on its own.
+  if (s.error) return `${s.error} ${s.autoCheck ? "The app tries again at the next check." : "Click Check now to try again."}`;
   if (s.available) return `Version ${s.available.version} is available.`;
   if (s.checked) return `You have the latest version (${s.currentVersion}).`;
   return null;
@@ -311,14 +312,34 @@ export function Updates() {
   const replying = useApp((s) => turnChatId(s) !== null);
   useEffect(() => {
     let alive = true;
-    ipc
-      .updateStatus()
-      .then((s) => alive && setStatus(s))
-      .catch(() => alive && setStatus(null));
+    let loaded = false;
+    // A change that arrives before the status does cannot be applied yet, and the status may
+    // have been read just before it: then read the status again, after the change.
+    let missed = false;
+    const read = () =>
+      ipc
+        .updateStatus()
+        .then((s) => {
+          if (!alive) return;
+          loaded = true;
+          setStatus(s);
+          if (missed) {
+            missed = false;
+            void read();
+          }
+        })
+        .catch(() => {
+          if (alive && !loaded) setStatus(null);
+        });
     // Checking, downloading, ready or failed, also when the automatic check does it.
     const stop = listenInEffect(() =>
-      ipc.onUpdateState((state) => alive && setStatus((cur) => (cur ? { ...cur, ...state } : cur))),
+      ipc.onUpdateState((state) => {
+        if (!alive) return;
+        if (!loaded) missed = true;
+        else setStatus((cur) => (cur ? { ...cur, ...state } : cur));
+      }),
     );
+    void read();
     return () => {
       alive = false;
       stop();
@@ -338,7 +359,12 @@ export function Updates() {
   }
   async function checkNow() {
     await run(async () => {
-      await ipc.checkForUpdate();
+      try {
+        await ipc.checkForUpdate();
+      } catch (e) {
+        // A check that did not work is in the status line below; say it only once.
+        if (toErrorInfo(e).code !== "update_check") throw e;
+      }
       // What the check found, and whether a download started (it may already be running).
       const s = await ipc.updateStatus();
       setStatus(s);

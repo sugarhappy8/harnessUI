@@ -44,6 +44,9 @@ tauri = { version = "2.12", features = [] }
 tauri-build = { version = "2.7", features = [] }
 tauri-plugin-global-shortcut = "2.4"
 tauri-plugin-updater = "2.14"
+# Compares versions the way the updater plugin does (src-tauri/src/updates.rs); already in
+# the lock through Tauri and the plugin.
+semver = "1"
 tauri-plugin-dialog = "2.8"
 tauri-plugin-opener = "2.7"
 tauri-plugin-single-instance = "2.5"

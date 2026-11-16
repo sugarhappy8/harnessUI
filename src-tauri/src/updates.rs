@@ -7,23 +7,34 @@
 //!   reports "not available".
 //! - The automatic check is on unless the user turned it off in Settings (setting
 //!   `updateAutoCheck`; never set means on). It runs once at start, after the skills and
-//!   saved servers, and then every six hours while the app is open. Each check asks
-//!   github.com for the latest release's `latest.json`.
+//!   saved servers, and then every six hours while the app is open, counted on the wall
+//!   clock so the hours a computer sleeps count too. A check that did not work (no network
+//!   yet just after login, say) is tried again after 30 minutes; a download that did not
+//!   work waits the whole round, so a release that never verifies is not fetched again and
+//!   again. Each check asks github.com for the latest release's `latest.json`.
 //! - A newer version is downloaded and its signature verified in the background, without
 //!   asking. The verified package waits in memory until the user clicks *Restart and
 //!   update*: nothing is ever installed on its own. The window hears about it from the
 //!   `update-ready` event, and reads it from `update_status` too, because events are not
 //!   replayed and the window may start listening after the check at start.
-//! - Only one check or download runs at a time ([`Updates::busy`]).
+//! - Only one check or download runs at a time ([`Updates::busy`]). No request waits forever
+//!   on a connection that went quiet: connecting, each read and the whole check have time
+//!   limits, so a stalled check or download fails and the next round can run.
 //! - The check, download and signature verification run in Rust; the webview has no
-//!   updater permission. The plugin refuses an update that is not newer than this
-//!   version, so an old signed installer cannot be passed off as an update.
-//! - Before installing, the reply, llama-server and every tool child are stopped: on
-//!   Windows the installer cannot replace files a running process holds open.
+//!   updater permission. The plugin installs only a file signed with the updater key whose
+//!   advertised version is newer than this one. `latest.json` is not signed, but `tauri build`
+//!   writes the version into each update file's signature, and with `requireSignedVersion`
+//!   on (tauri.updater.conf.json) the plugin refuses a signature whose version differs from
+//!   the announced one or that has none, so an older signed build cannot be passed off as a
+//!   newer one (ARCHITECTURE.md 16, SECURITY.md).
+//! - On Windows the reply, llama-server and every tool child are stopped before the installer
+//!   runs, because it cannot replace files a running process holds open. On macOS the new
+//!   app is put in place first and the restart stops them, so an install that fails there
+//!   has stopped nothing ([`STOP_BEFORE_INSTALL`]).
 
 use std::cmp::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -36,8 +47,33 @@ use crate::state::AppState;
 /// Setting: check for updates on its own. On when the user never chose.
 const AUTO_CHECK: &str = "updateAutoCheck";
 
-/// How long the automatic check waits before it looks again.
+/// How long the automatic check waits before it looks again, on the wall clock.
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// How long the automatic check waits after a check that did not work.
+const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
+
+/// How often the automatic check wakes to see whether a round is due. The rounds are timed
+/// on the wall clock, because the timer that sleeps here stops while the computer sleeps:
+/// six hours of it can take days on a laptop that is mostly closed.
+const WAKE_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// How long an updater request may take to connect.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long an updater request may wait for the next bytes. It starts again after every
+/// read, so a slow download that keeps moving is never cut off; one that stops is.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a whole check may take: one small `latest.json`.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
+/// Whether the reply and every child process are stopped before the installer runs: only on
+/// Windows, where the installer cannot replace files a running process holds open. On macOS
+/// the new app is put in place while they run (a running program keeps its files until it
+/// ends), and the restart after it stops them the way quitting does (lib.rs,
+/// `RunEvent::Exit`), so an install that fails there leaves everything running.
+const STOP_BEFORE_INSTALL: bool = cfg!(windows);
 
 /// Sent to the main window whenever what the updater is doing changes ([`UpdateState`]).
 const STATE_EVENT: &str = "update-state";
@@ -256,50 +292,13 @@ impl Updates {
     }
 }
 
-/// Orders two versions the way semver does ("1.2.10" after "1.2.9", "1.0.0-beta" before
-/// "1.0.0"; build metadata after "+" does not count). `None` when either is not a version.
+/// Orders two versions the way the updater plugin does, with `semver::Version` ("1.2.10"
+/// after "1.2.9", "1.0.0-beta" before "1.0.0", and build metadata after "+" counts too: the
+/// plugin offers "0.0.8+2" to 0.0.8, so it is downloaded too). `None` when either is not a
+/// version.
 fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
-    fn parse(v: &str) -> Option<([u64; 3], Vec<&str>)> {
-        let v = v.trim();
-        let v = v.split_once('+').map_or(v, |(v, _)| v);
-        let (core, pre) = v.split_once('-').unwrap_or((v, ""));
-        let mut numbers = core.split('.').map(|n| n.parse::<u64>().ok());
-        let core = [numbers.next()??, numbers.next()??, numbers.next()??];
-        if numbers.next().is_some() {
-            return None;
-        }
-        let pre = if pre.is_empty() {
-            Vec::new()
-        } else {
-            pre.split('.').collect()
-        };
-        Some((core, pre))
-    }
-    let (a_core, a_pre) = parse(a)?;
-    let (b_core, b_pre) = parse(b)?;
-    let by_core = a_core.cmp(&b_core);
-    if by_core != Ordering::Equal {
-        return Some(by_core);
-    }
-    // A version without a pre-release part comes after the same version with one.
-    match (a_pre.is_empty(), b_pre.is_empty()) {
-        (true, true) => return Some(Ordering::Equal),
-        (true, false) => return Some(Ordering::Greater),
-        (false, true) => return Some(Ordering::Less),
-        (false, false) => {}
-    }
-    for (x, y) in a_pre.iter().zip(&b_pre) {
-        let order = match (x.parse::<u64>(), y.parse::<u64>()) {
-            (Ok(x), Ok(y)) => x.cmp(&y),
-            (Ok(_), Err(_)) => Ordering::Less,
-            (Err(_), Ok(_)) => Ordering::Greater,
-            (Err(_), Err(_)) => x.cmp(y),
-        };
-        if order != Ordering::Equal {
-            return Some(order);
-        }
-    }
-    Some(a_pre.len().cmp(&b_pre.len()))
+    let parse = |v: &str| semver::Version::parse(v.trim()).ok();
+    Some(parse(a)?.cmp(&parse(b)?))
 }
 
 /// Whether a version a check found should be downloaded: only when it is newer than this
@@ -351,26 +350,46 @@ pub async fn set_update_auto_check(
     state.store.set_setting(AUTO_CHECK, &on).await?;
     if on {
         // Look now rather than at the next round, hours away.
-        tauri::async_runtime::spawn(async move { automatic_check(&app).await });
+        tauri::async_runtime::spawn(async move {
+            automatic_check(&app).await;
+        });
     }
     Ok(())
+}
+
+fn check_failed(details: String) -> AppError {
+    AppError::new(
+        "update_check",
+        "Could not check for updates.",
+        "Check your internet connection and try again.",
+        details,
+    )
 }
 
 async fn find(app: &AppHandle) -> AppResult<Option<Update>> {
     if !configured(app.config()) {
         return Err(not_configured());
     }
+    // Without limits a connection that goes quiet (a proxy that stalls, a network that
+    // changed while the laptop slept) would hold the check, or the download, for good, and
+    // with it [`Updates::busy`]. The plugin keeps this client setting in the `Update` it
+    // returns, so the download gets the same limits.
     let updater = app
-        .updater()
+        .updater_builder()
+        .configure_client(|client| {
+            client
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
+        })
+        .build()
         .map_err(|e| AppError::internal(e.to_string()))?;
-    updater.check().await.map_err(|e| {
-        AppError::new(
-            "update_check",
-            "Could not check for updates.",
-            "Check your internet connection and try again.",
-            e.to_string(),
-        )
-    })
+    match tokio::time::timeout(CHECK_TIMEOUT, updater.check()).await {
+        Ok(result) => result.map_err(|e| check_failed(e.to_string())),
+        Err(_) => Err(check_failed(format!(
+            "the check took longer than {} seconds",
+            CHECK_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 /// Asks for the latest release and records what it found, or why it failed. The caller holds
@@ -427,32 +446,59 @@ async fn fetch(app: &AppHandle, update: Update, _busy: OwnedMutexGuard<()>) -> A
 /// One round of the automatic check. Skipped when the user turned it off, when this build
 /// cannot update itself, and while a check or download is already running. A failure is
 /// written to the log once and the next round tries again; nothing is shown for it but the
-/// status line in Settings.
-async fn automatic_check(app: &AppHandle) {
+/// status line in Settings. Says whether the check worked. A skipped round counts as
+/// working, since there is nothing to try again, and so does a failed download: trying it
+/// again soon would fetch the whole package again each time, also when its signature never
+/// verifies.
+async fn automatic_check(app: &AppHandle) -> bool {
     if !configured(app.config()) || !auto_check_setting(&app.state::<AppState>()).await {
-        return;
+        return true;
     }
     let updates = app.state::<Updates>();
     let Some(busy) = updates.try_start() else {
-        return;
+        return true;
     };
     match check(app, &updates).await {
         Ok(Some(update)) => {
             if let Err(e) = fetch(app, update, busy).await {
                 tracing::warn!("update download failed: {} ({})", e.message, e.details);
             }
+            true
         }
-        Ok(None) => {}
-        Err(e) => tracing::info!("update check failed: {} ({})", e.message, e.details),
+        Ok(None) => true,
+        Err(e) => {
+            tracing::info!("update check failed: {} ({})", e.message, e.details);
+            false
+        }
+    }
+}
+
+/// Whether the next automatic round is due, given when the last one ended and whether its
+/// check worked: six hours after one that worked, 30 minutes after one that did not, on the
+/// wall clock. The first round is due at once, and so is the next one when the clock was set
+/// back past the last.
+fn round_due(last: Option<(SystemTime, bool)>, now: SystemTime) -> bool {
+    let Some((ended, worked)) = last else {
+        return true;
+    };
+    let wait = if worked { CHECK_EVERY } else { RETRY_AFTER };
+    match now.duration_since(ended) {
+        Ok(gone) => gone >= wait,
+        Err(_) => true,
     }
 }
 
 /// The automatic check: once now (lib.rs starts this after the skills and saved servers),
-/// then every six hours while the app is open. Each round reads the setting again.
+/// then every six hours while the app is open, or 30 minutes after a check that did not
+/// work. Each round reads the setting again.
 pub async fn check_regularly(app: AppHandle) {
+    let mut last = None;
     loop {
-        automatic_check(&app).await;
-        tokio::time::sleep(CHECK_EVERY).await;
+        if round_due(last, SystemTime::now()) {
+            let worked = automatic_check(&app).await;
+            last = Some((SystemTime::now(), worked));
+        }
+        tokio::time::sleep(WAKE_EVERY).await;
     }
 }
 
@@ -521,6 +567,12 @@ fn install_error(os: &str, error: &str, exe: &str) -> AppError {
             "If harnessUI is not in the Applications folder, move it there, open it from there, \
              and try again. Otherwise download the new version from GitHub."
         }
+        // Everything was stopped for the installer, and the updater let go of what the window
+        // had open just before it started the installer.
+        "windows" => {
+            "Restart harnessUI, then try again. If it still does not work, download the new \
+             version from GitHub."
+        }
         _ => "Download the new version from GitHub.",
     };
     AppError::new(
@@ -531,7 +583,7 @@ fn install_error(os: &str, error: &str, exe: &str) -> AppError {
     )
 }
 
-/// On a Mac, refuses to start an install that cannot work, before anything is stopped: when
+/// On a Mac, refuses to start an install that cannot work, with the hint that fits: when
 /// macOS runs the app from a read-only copy (App Translocation) or the folder that holds the
 /// app cannot be written to at all (the disk image it came on).
 #[cfg(target_os = "macos")]
@@ -576,17 +628,10 @@ fn refuse_read_only_place() -> AppResult<()> {
     Ok(())
 }
 
-/// *Restart and update*: installs the downloaded update (or downloads it first when none
-/// waits), then restarts the app.
-#[tauri::command]
-pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
-    if !configured(app.config()) {
-        return Err(not_configured());
-    }
-    refuse_read_only_place()?;
-    let updates = app.state::<Updates>();
-    let package = package_to_install(&app, &updates).await?;
-    // Stop every child before the installer runs.
+/// Before the Windows installer runs: stops the reply, the browser, the keys computer use
+/// holds, every tool server and llama-server. The model is unloaded the way removing it
+/// does, so if the install fails the header does not go on showing a model that is gone.
+async fn stop_for_install(app: &AppHandle, state: &AppState) {
     state.generation.cancel();
     if let Some(browser) = app.try_state::<crate::browser_cmd::BrowserHandle>() {
         browser.0.shutdown().await;
@@ -597,19 +642,53 @@ pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppRe
         server.release_all();
     }
     state.host.shutdown().await;
-    state.runtime.shutdown().await;
+    state.runtime.unload().await;
+}
+
+/// After a Windows install that failed once everything was stopped: shows the window again
+/// (the updater hides it just before it starts the installer) and starts the saved tool
+/// servers again. The browser starts again when a tool needs it, and the model when the user
+/// picks it. The error still says to restart harnessUI ([`install_error`]).
+async fn start_again_after_failed_install(app: &AppHandle, state: &AppState) {
+    if let Some(window) = app.get_webview_window(crate::MAIN_WINDOW) {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    state.host.resume();
+    crate::toolset::start_saved_servers(app).await;
+}
+
+/// *Restart and update*: installs the downloaded update (or downloads it first when none
+/// waits), then restarts the app.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    if !configured(app.config()) {
+        return Err(not_configured());
+    }
+    refuse_read_only_place()?;
+    let updates = app.state::<Updates>();
+    let package = package_to_install(&app, &updates).await?;
+    if STOP_BEFORE_INSTALL {
+        stop_for_install(&app, &state).await;
+    }
     // `install` checks the signature again first. On Windows it starts the installer, which
     // opens the new version when it is done, and ends this process itself: nothing after
     // this line runs there. On macOS it puts the new app in place of this one and returns.
-    // The package stays waiting if this fails, so the user can try again.
     if let Err(e) = package.update.install(&package.bytes) {
         let exe = std::env::current_exe()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         let err = install_error(std::env::consts::OS, &e.to_string(), &exe);
         tracing::warn!("update install failed: {}", err.details);
+        if STOP_BEFORE_INSTALL {
+            start_again_after_failed_install(&app, &state).await;
+        }
+        // The package stays waiting, so the user can try again.
         return Err(err);
     }
+    // macOS: the reply ends here, and the restart stops everything else the way quitting
+    // does (lib.rs, `RunEvent::Exit`).
+    state.generation.cancel();
     app.restart();
 }
 
@@ -640,7 +719,9 @@ mod tests {
         assert_eq!(compare_versions("0.0.10", "0.0.9"), Some(Greater));
         assert_eq!(compare_versions("0.1.0", "0.0.99"), Some(Greater));
         assert_eq!(compare_versions("1.0.0", "1.0.0"), Some(Equal));
-        assert_eq!(compare_versions("1.0.0+build.5", "1.0.0"), Some(Equal));
+        // Build metadata counts, as in the plugin's own comparison.
+        assert_eq!(compare_versions("1.0.0+build.5", "1.0.0"), Some(Greater));
+        assert_eq!(compare_versions("1.0.0+2", "1.0.0+2"), Some(Equal));
         assert_eq!(compare_versions("1.0.0-beta", "1.0.0"), Some(Less));
         assert_eq!(
             compare_versions("1.0.0-beta.2", "1.0.0-beta.10"),
@@ -665,6 +746,26 @@ mod tests {
         assert!(!should_download("0.0.8", Some("0.0.9"), "0.0.9"));
         assert!(!should_download("0.0.8", Some("0.0.10"), "0.0.9"));
         assert!(!should_download("0.0.8", None, "not a version"));
+        // The plugin offers a rebuild with build metadata as an update; it is downloaded.
+        assert!(should_download("0.0.8", None, "0.0.8+2"));
+    }
+
+    /// The automatic rounds: the first at once, then six hours after one whose check worked
+    /// and 30 minutes after one whose check did not, on the wall clock.
+    #[test]
+    fn rounds_are_timed_on_the_wall_clock_and_a_failure_is_retried_sooner() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let minutes = |m: u64| Duration::from_secs(m * 60);
+        assert!(round_due(None, t));
+        assert!(!round_due(Some((t, true)), t + minutes(30)));
+        assert!(!round_due(Some((t, true)), t + minutes(6 * 60 - 1)));
+        assert!(round_due(Some((t, true)), t + minutes(6 * 60)));
+        assert!(!round_due(Some((t, false)), t + minutes(29)));
+        assert!(round_due(Some((t, false)), t + minutes(30)));
+        // A clock set back past the last round.
+        assert!(round_due(Some((t, true)), t - minutes(1)));
+        // The loop wakes often enough to notice a round that came due while asleep.
+        assert!(WAKE_EVERY < RETRY_AFTER);
     }
 
     /// The state the window reads as it moves from a check to a package that waits.
@@ -793,8 +894,15 @@ mod tests {
             "{}",
             e.next_step
         );
-        // Windows: never about the Applications folder.
+        // Windows: never about the Applications folder. Everything was stopped for the
+        // installer, so it says to restart first.
         let e = install_error("windows", ro, r"C:\Users\a\AppData\Local\harnessUI\app.exe");
-        assert_eq!(e.next_step, "Download the new version from GitHub.");
+        assert!(!e.next_step.contains("Applications"), "{}", e.next_step);
+        assert!(
+            e.next_step.starts_with("Restart harnessUI"),
+            "{}",
+            e.next_step
+        );
+        assert!(e.next_step.contains("download the new version from GitHub"));
     }
 }
