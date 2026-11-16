@@ -610,7 +610,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: needed + SPARE_BYTES,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         assert_eq!(r.verdict, Verdict::Green);
@@ -621,7 +621,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: needed + SPARE_BYTES - 1,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         assert_ne!(r.verdict, Verdict::Green);
@@ -636,7 +636,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: 12 * GB,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         assert_eq!(r.verdict, Verdict::Yellow);
@@ -654,7 +654,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: 8 * GB,
-                ram_free_bytes: 32 * GB,
+                ram_free_bytes: Some(32 * GB),
             },
         );
         assert_eq!(r.verdict, Verdict::Yellow);
@@ -710,7 +710,7 @@ mod tests {
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: 6 * GB,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         // 65,536 tokens need ~8.6 GB of KV; the suggestion is capped by memory, not above training.
@@ -980,7 +980,7 @@ mod tests {
             &Target::Gpu {
                 name: "RX".into(),
                 free_bytes: 15_200_000_000,
-                ram_free_bytes: 0,
+                ram_free_bytes: Some(0),
             },
         );
         assert_eq!(
@@ -1000,7 +1000,7 @@ mod tests {
             &Target::Gpu {
                 name: "RX".into(),
                 free_bytes: 15 * GB,
-                ram_free_bytes: 30 * GB,
+                ram_free_bytes: Some(30 * GB),
             },
         );
         assert_eq!(
@@ -1056,8 +1056,12 @@ mod tests {
             window: 1024,
             fixed: 0,
             checkpoint_per_cell: 327_680,
+            copy_fixed: 0,
         }
     }
+
+    /// One saved copy of Gemma 4 12B in f16: 1,024 cells of 327,680 bytes (320 MiB).
+    const GEMMA4_COPY: u64 = 335_544_320;
 
     /// What 0.0.6 counted for the same header: every layer at full length with the full
     /// layers' head size, 328 heads × (512 + 512) × 2 bytes a token.
@@ -1089,7 +1093,7 @@ mod tests {
         let card = Target::Gpu {
             name: "AMD Radeon RX 9070 XT".into(),
             free_bytes: 15 * GIB + GIB / 10,
-            ram_free_bytes: 24 * GB,
+            ram_free_bytes: Some(24 * GB),
         };
         // 0.0.6's numbers, reproduced: 57.6 GB (53.7 binary GB), too large; Q6_K up to
         // 6,144 tokens.
@@ -1106,14 +1110,16 @@ mod tests {
         );
         // Now: Q8_0 needs 12,669,649,120 + 122,031,232 + 1,577,058,304 (the memory llama.cpp
         // allocates at 65,536 tokens) + 805,306,368 (working space) = 15,174,045,024 bytes,
-        // which fits the card with the 1 GB spare; the saved copies, 8 of 1,024 cells of
-        // 327,680 bytes (2.5 GiB) at most, are the computer's part.
+        // which fits the card with the 1 GB spare. With 22 GB of the computer's memory left
+        // after the reserve, a long chat may keep the most saved copies, 8 of 320 MiB
+        // (2.5 GiB), besides.
         let q8 = check(&gemma4(Q8_0, gemma4_kv()), &card);
         assert_eq!(q8.verdict, Verdict::Green);
         assert_eq!(q8.needed_bytes, 15_174_045_024);
-        assert_eq!(q8.computer_bytes, 5 * GIB / 2);
-        assert_eq!(q8.computer_free_bytes, 24 * GB);
-        assert!(!q8.computer_short);
+        assert_eq!(q8.copies_bytes, 8 * GEMMA4_COPY);
+        assert_eq!(q8.copies_bytes, 5 * GIB / 2);
+        assert!(!q8.copies_short && !q8.computer_unknown && !q8.computer_short);
+        assert_eq!(q8.computer_bytes, 0);
         let q6 = check(&gemma4(Q6_K, gemma4_kv()), &card);
         assert_eq!(q6.verdict, Verdict::Green);
         // With 15.05 GB free Q8_0 only just misses the spare at 65,536 tokens: a shorter
@@ -1121,7 +1127,7 @@ mod tests {
         let tighter = Target::Gpu {
             name: "AMD Radeon RX 9070 XT".into(),
             free_bytes: 15 * GIB + GIB / 20,
-            ram_free_bytes: 24 * GB,
+            ram_free_bytes: Some(24 * GB),
         };
         let q8 = check(&gemma4(Q8_0, gemma4_kv()), &tighter);
         assert_eq!(
@@ -1186,6 +1192,7 @@ mod tests {
             window: 128,
             fixed: 0,
             checkpoint_per_cell: 24_576,
+            copy_fixed: 0,
         };
         let kvs = [
             gemma4_kv(),
@@ -1236,91 +1243,179 @@ mod tests {
         }
     }
 
-    /// The saved copies of short-memory layers count in the computer's memory: on a
-    /// graphics card on their own (as `placement::judge_in` counts the computer's part), on
-    /// the processor with the rest.
+    /// How many saved copies a load keeps: as many as fit half of what the computer has
+    /// left after the reserve and the model's own part there, from 1 to 8; the most when
+    /// that is unknown or the model keeps none.
     #[test]
-    fn checkpoints_count_in_the_computers_memory() {
-        // Room: the card's 16 GB, 6 GB of computer memory besides.
-        let room = Room::graphics_card(16 * GB, 8 * GB);
-        assert!(room.separate);
-        assert_eq!(room.verdict_with(10 * GB, 0), Verdict::Green);
-        assert_eq!(room.verdict_with(10 * GB, 6 * GB), Verdict::Green);
-        // The card's free memory does not hold copies that stay in the computer's memory.
-        assert_eq!(room.verdict_with(10 * GB, 6 * GB + 1), Verdict::Red);
-        assert_eq!(room.verdict_with(16 * GB, 5 * GB), Verdict::Yellow);
-        assert_eq!(room.verdict_with(16 * GB, 5 * GB + 1), Verdict::Red);
-        // Without them, the 0.0.6 verdict.
-        for room in [
-            room,
-            Room::processor(12 * GB),
-            Room::apple(11 * GB, 15 * GB),
-        ] {
-            for needed in [0, 10 * GB, 15 * GB, 21 * GB, u64::MAX] {
-                assert_eq!(room.verdict_with(needed, 0), room.verdict(needed));
+    fn copies_take_half_of_what_is_left() {
+        let copy = GB;
+        let at = |spare: u64| copies(copy, Some(spare));
+        assert_eq!(
+            at(0),
+            Copies {
+                count: 1,
+                bytes: GB,
+                short: true
             }
+        );
+        // One copy fits but takes more than half: still one, never none.
+        assert_eq!((at(GB).count, at(GB).short), (1, false));
+        assert_eq!(at(3 * GB).count, 1);
+        assert_eq!(at(4 * GB).count, 2);
+        assert_eq!((at(17 * GB).count, at(17 * GB).bytes), (8, 8 * GB));
+        assert_eq!(at(1000 * GB).count, MAX_CTX_CHECKPOINTS);
+        assert_eq!(at(u64::MAX).count, MAX_CTX_CHECKPOINTS);
+        // The computer's memory unknown: the most, and never short.
+        assert_eq!(
+            copies(copy, None),
+            Copies {
+                count: 8,
+                bytes: 8 * GB,
+                short: false
+            }
+        );
+        // A model without copies.
+        for spare in [None, Some(0), Some(GB)] {
+            assert_eq!(
+                copies(0, spare),
+                Copies {
+                    count: 8,
+                    bytes: 0,
+                    short: false
+                }
+            );
         }
-        // On the processor they are in the same memory.
-        let cpu = Room::processor(12 * GB);
-        assert_eq!(cpu.verdict_with(5 * GB, 4 * GB), Verdict::Green);
-        assert_eq!(cpu.verdict_with(5 * GB, 4 * GB + 1), Verdict::Red);
-        // Gemma 4 Q8_0 at 32,768 tokens on a 15 GB card with 4 GB of computer memory free:
-        // the card holds the model (15,515,142,880 bytes with the spare), but 8 saved copies
-        // of 1,024 cells of 327,680 bytes (2,684,354,560 bytes, 2.5 GiB) do not fit the 2 GB
-        // left after the reserve, whatever the context (the copies stop at the window).
+        // Hostile sizes saturate.
+        assert_eq!(copies(u64::MAX, Some(u64::MAX)).count, 1);
+        assert_eq!(copies(u64::MAX, None).bytes, u64::MAX);
+    }
+
+    /// The saved copies never turn a verdict red or change the context (review M2): when
+    /// not even one fits what is left, the verdict is yellow at most. The room they get:
+    /// the computer's memory less the reserve, and less the model where it is there.
+    #[test]
+    fn copies_never_make_a_model_too_large() {
         let input = FitInput {
             ctx: 32_768,
             projector_bytes: 0,
             ..gemma4(Q8_0, gemma4_kv())
         };
-        assert_eq!(input.computer_at(32_768), 2_684_354_560);
-        let r = check(
-            &input,
-            &Target::Gpu {
-                name: "GPU".into(),
-                free_bytes: 15 * GIB,
-                ram_free_bytes: 4 * GB,
-            },
-        );
-        assert_eq!(r.verdict, Verdict::Red);
-        assert!(r.computer_short);
-        assert_eq!(
-            (r.computer_bytes, r.computer_free_bytes),
-            (5 * GIB / 2, 4 * GB)
-        );
+        let card = |ram: Option<u64>| Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: 15 * GIB,
+            ram_free_bytes: ram,
+        };
+        // Gemma 4 Q8_0 at 32,768 tokens fits a 15 GB card (15,515,142,880 bytes with the
+        // spare). 0.0.7 before the review: red with 4 GB of the computer's memory free,
+        // because 8 copies (2.5 GiB) did not fit the 2 GB left; now 2 GB / 2 = 1 GB holds 2.
+        let r = check(&input, &card(Some(4 * GB)));
+        assert_eq!(r.verdict, Verdict::Green);
+        assert_eq!((r.copies_bytes, r.copies_short), (2 * GEMMA4_COPY, false));
         assert_eq!(
             auto_ctx(&input, Room::graphics_card(15 * GIB, 4 * GB)),
-            None
+            Some(AutoCtx {
+                ctx: 32_768,
+                verdict: Verdict::Green
+            })
         );
-        // With 5 GB free it fits.
-        let r = check(
-            &input,
-            &Target::Gpu {
-                name: "GPU".into(),
-                free_bytes: 15 * GIB,
-                ram_free_bytes: 5 * GB,
-            },
-        );
+        // 2.2 GB free: one copy (320 MiB) does not fit the 200 MB left: yellow, not red.
+        let r = check(&input, &card(Some(2_200_000_000)));
+        assert_eq!(r.verdict, Verdict::Yellow);
+        assert_eq!((r.copies_bytes, r.copies_short), (GEMMA4_COPY, true));
+        assert_eq!((r.suggested_ctx, r.partial_offload), (None, false));
+        // Nothing free at all: the same.
+        assert_eq!(check(&input, &card(Some(0))).verdict, Verdict::Yellow);
+        // The computer's memory unknown (review m5): not checked, and said so.
+        let r = check(&input, &card(None));
         assert_eq!(r.verdict, Verdict::Green);
-        // On the processor the copies are part of what it needs.
+        assert_eq!((r.copies_bytes, r.copies_short), (8 * GEMMA4_COPY, false));
+        assert!(r.computer_unknown);
+        assert!(!check(&input, &card(Some(0))).computer_unknown);
+        // On the processor the model is in the same memory: what it needs, 14,515,142,880
+        // bytes, is not counted twice; the copies get half of the rest.
         let r = check(
             &input,
             &Target::Cpu {
-                ram_free_bytes: 64 * GB,
+                ram_free_bytes: 20 * GB,
             },
         );
-        assert_eq!(r.needed_bytes, input.needed_at(32_768) + 5 * GIB / 2);
-        assert_eq!(r.computer_bytes, 0);
-        // A model without short-memory layers has no computer part.
+        assert_eq!(r.needed_bytes, input.needed_at(32_768));
+        let rest = 18 * GB - input.needed_at(32_768);
+        assert_eq!(r.copies_bytes, (rest / 2 / GEMMA4_COPY) * GEMMA4_COPY);
+        assert_eq!((r.verdict, r.computer_bytes), (Verdict::Green, 0));
+        // With part of the model on the processor (a 12 GB card), the part that does not
+        // fit the card is the computer's too.
         let r = check(
-            &input_without_window(),
+            &input,
             &Target::Gpu {
                 name: "GPU".into(),
-                free_bytes: 15 * GIB,
-                ram_free_bytes: 0,
+                free_bytes: 12 * GB,
+                ram_free_bytes: Some(32 * GB),
             },
         );
-        assert_eq!((r.computer_bytes, r.verdict), (0, Verdict::Green));
+        assert!(r.partial_offload);
+        let spill = input.needed_at(32_768) + SPARE_BYTES - 12 * GB;
+        let left = 30 * GB - spill;
+        assert_eq!(r.copies_bytes, (left / 2 / GEMMA4_COPY).min(8) * GEMMA4_COPY);
+        // A model without copies takes nothing more.
+        let r = check(&input_without_window(), &card(Some(0)));
+        assert_eq!((r.copies_bytes, r.copies_short, r.verdict), (0, false, Verdict::Green));
+    }
+
+    /// The models whose copies are largest, on a 16 GB card with 16 GB of computer memory
+    /// of which 8 GB is free (review M2): never too large because of the copies. Their
+    /// conversation memory as `crate::kv` reads their headers (see its tests): OLMo 3 7B
+    /// (24 short-memory layers of 32 heads of 128 values, a window of 4,096: a copy of 1.5
+    /// GiB, 12 GiB for 8), Llama 4 Scout (36 chunked layers of 8 heads, 8,192 tokens: 1.125
+    /// GiB) and Gemma 3 27B (52 short-memory layers of 16 heads, 1,024 tokens: 416 MiB).
+    #[test]
+    fn long_window_models_on_a_16_gb_card() {
+        let olmo3 = KvSize {
+            per_cell: 8 * 16_384,
+            window_per_cell: 24 * 16_384,
+            window: 4096,
+            fixed: 0,
+            checkpoint_per_cell: 24 * 16_384,
+            copy_fixed: 0,
+        };
+        assert_eq!(olmo3.copy_bytes(32_768), 3 * GIB / 2);
+        let input = FitInput {
+            weights_bytes: 4_470_000_000,
+            kv: olmo3,
+            vocab_size: 100_278,
+            ctx: 32_768,
+            max_ctx: Some(65_536),
+            ..Default::default()
+        };
+        let card = Target::Gpu {
+            name: "GPU".into(),
+            free_bytes: 15 * GIB,
+            ram_free_bytes: Some(8 * GB),
+        };
+        // About 11 GB on the card; 6 GB left in the computer's memory: one copy (1.5 GiB),
+        // where 0.0.7 before the review said red (12 GiB of copies, "not enough").
+        let r = check(&input, &card);
+        assert!(input.needed_at(32_768) < 11_100_000_000);
+        assert_eq!(r.verdict, Verdict::Green);
+        assert_eq!((r.copies_bytes, r.copies_short), (3 * GIB / 2, false));
+        assert_eq!(auto_ctx(&input, card.room()).map(|a| a.ctx), Some(32_768));
+        // Llama 4 Scout's and Gemma 3 27B's copies, at the same computer's 6 GB left.
+        for (copy, count) in [(9 * GIB / 8, 2), (416 * 1024 * 1024, 6)] {
+            let c = copies(copy, Some(6 * GB));
+            assert_eq!((c.count, c.short), (count, false), "{copy}");
+        }
+        // Every amount free: never red, and Automatic never gives up, because of copies.
+        for ram in (0..=16).map(|g| g * GB) {
+            let card = Target::Gpu {
+                name: "GPU".into(),
+                free_bytes: 15 * GIB,
+                ram_free_bytes: Some(ram),
+            };
+            let r = check(&input, &card);
+            assert_ne!(r.verdict, Verdict::Red, "{ram}");
+            assert_eq!(r.copies_short, ram < 2 * GB + 3 * GIB / 2, "{ram}");
+            assert!(auto_ctx(&input, card.room()).is_some(), "{ram}");
+        }
     }
 
     fn input_without_window() -> FitInput {

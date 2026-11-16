@@ -151,3 +151,11 @@ and `README.md`.
   reacting a little after the window shows; Stop racing turn end could restore without the
   keyboard; the ±100 ms own-input window; docs; Windows quiet restores could still activate
   the window). All being fixed by P3 (round 2), plus nine owner-checklist items.
+- P5 verification: all original findings fixed. New major from the m5 fix: the store of
+  Claude replies to send back was shared by every chat on an endpoint and keyed by the
+  reply's text, so a "Done." in one chat could carry another chat's thinking. Minor: some
+  this-computer addresses (`0.0.0.0`, `[::]`, `localhost.`) still went through the system
+  proxy; the host-change guard trusted a failing keychain; early turns of long chats
+  evicted; more than 20 pictures in one request (stricter size rule) not handled. Nits:
+  scrubbing too eager, one refusal cleared every chat, `drop_block` always on, picture size
+  read from 64 KiB. All being fixed by P5 (round 2).

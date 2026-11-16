@@ -78,8 +78,10 @@ impl LoadFailure {
             Self::ContextTooLarge => {
                 "In Model settings, lower How much it can remember, or turn on Save memory if it is off."
             }
+            // Shown only when loading without it failed as well (the supervisor drops it
+            // first); Models → Installed offers both (0.0.7).
             Self::ImageFileInvalid => {
-                "The model can load without it. To use images, download its image file again in Models → Installed."
+                "The model can load without it. In Models → Installed, try the image file again or download it again."
             }
             // By the time an unknown failure is shown, the supervisor has already tried the
             // next backends down to the processor (0.0.6), so another backend is no advice:
@@ -141,28 +143,31 @@ impl std::fmt::Display for LoadFailure {
 }
 
 /// Lines that only appear when creating the context (KV cache, compute buffers) failed,
-/// after the weights loaded.
+/// after the weights loaded. Like every signature here, each must start a clause of what
+/// a line says ([`Line::says`]).
 const CONTEXT_SIGNATURES: &[&str] = &[
     "failed to create context",
     "failed to create_context",
     "failed to initialize the context",
-    "buffer for kv cache",
-    "compute pp buffers",
+    "failed to allocate buffer for kv cache",
+    "failed to allocate compute pp buffers",
 ];
 
 /// Allocation failures on any backend.
 const ALLOCATION_SIGNATURES: &[&str] = &[
     "cudamalloc failed",
     "out of memory",
-    "outofdevicememory",
+    "erroroutofdevicememory",
+    "erroroutofhostmemory",
     "failed to allocate",
     "unable to allocate",
     "insufficient memory",
 ];
 
 /// The model file itself could not be opened or parsed, which fails the same way on every
-/// backend. Every GGUF parse error is printed by a `gguf_init_from_*` function; the others
-/// come from llama.cpp's model loader (all present as strings in the pinned build).
+/// backend. Every GGUF parse error is printed by a `gguf_init_from_*` function
+/// ([`GGUF_READER`]); the others come from llama.cpp's model loader (all present as
+/// strings in the pinned build).
 ///
 /// The generic wrappers `error loading model: ...` and `failed to load model` are **not**
 /// here: llama.cpp prints them for any exception thrown while loading, including a GPU
@@ -172,72 +177,331 @@ const ALLOCATION_SIGNATURES: &[&str] = &[
 const MODEL_FILE_SIGNATURES: &[&str] = &[
     "failed to open gguf file",
     "invalid magic characters",
-    "gguf_init_from",
-    "not within the file bounds",
     "model is corrupted or incomplete",
     "unknown model architecture",
 ];
 
-/// The image file (`--mmproj`) could not be read after the model and its context loaded
-/// (0.0.7). At the pinned build (b12110, `tools/server/server-context.cpp`,
-/// `tools/mtmd/mtmd.cpp`, `tools/mtmd/clip.cpp`) a failed `mtmd_init_from_file` prints
-/// "mtmd_init_from_file: error: …", the server then "failed to load multimodal model,
-/// '<file>'" and exits; an exception inside `clip_init` (a missing tensor, a key, a
-/// mismatch) is printed first as "clip_init: failed to load model '<file>': …" (captured in
-/// `tests/fixtures/stderr_image_file_broken.txt`; an older build printed the exception on
-/// the `mtmd_init_from_file` line itself, `stderr_image_file_owner_windows.txt`).
-///
-/// Only lines that end a load are here. "mtmd_get_memory_usage: error: …" and "Failed to
-/// load CLIP model" also appear when the server measures the file before the model loads,
-/// and the load goes on after them (the model may still fail for another reason, or the
-/// file may still load); `clip_init` is silenced while it measures.
-const IMAGE_FILE_SIGNATURES: &[&str] = &[
-    "failed to load multimodal model",
-    "mtmd_init_from_file: error",
-    "clip_init: failed to load model",
-];
+/// The functions of ggml's GGUF reader, whose every line is about a file it could not
+/// read: the model's, or the image file's while the server measures it (0.0.7).
+const GGUF_READER: &str = "gguf_init_from";
 
-/// Classifies a failed load from the last lines of stderr and the exit code.
-///
-/// The order matters: a context or allocation failure comes first, also while the image
-/// file loads (less of the model on the graphics card or another backend may make room
-/// for it); then the image file, before the model file, because a damaged image file is
-/// read with the same GGUF reader whose errors name a broken model file, and the server
-/// reads the image file only after the model loaded.
+/// The port was taken.
+const PORT_SIGNATURES: &[&str] = &["couldn't bind http server socket"];
+
+/// Classifies a failed load from the last lines of stderr and the exit code, for a load
+/// given no image file. See [`classify_load`].
 pub fn classify(stderr_tail: &[String], exit_code: Option<i32>) -> LoadFailure {
+    classify_load(stderr_tail, exit_code, None)
+}
+
+/// Classifies a failed load from the last lines of stderr, the exit code and the image
+/// file the load was given (`--mmproj`, 0.0.7), as the server was given its path.
+///
+/// What the server and llama.cpp print about the image file (lines from `clip_*` and
+/// `mtmd_*` functions, and the server's own about it) is partly the file's own text (a
+/// kind, a tensor name), so it never counts as one of the other failures; names and paths
+/// llama.cpp puts in quotes are left out of every line, and a signature must start a
+/// clause ([`Line::says`]). Then the order matters: a context or allocation failure comes
+/// first, also while the image file loads (less of the model on the graphics card or
+/// another backend may make room for it); then the image file, which failed only when the
+/// server says so for the very file it was given ([`image_file_failure`]); then the model
+/// file, from what the GGUF reader and the model loader printed after the server last
+/// measured the image file, because it reads the image file with the same reader before
+/// the model loads and goes on when that fails.
+pub fn classify_load(
+    stderr_tail: &[String],
+    exit_code: Option<i32>,
+    image: Option<&str>,
+) -> LoadFailure {
     if matches!(exit_code, Some(code) if code == STATUS_DLL_NOT_FOUND || code == STATUS_INVALID_IMAGE_FORMAT)
     {
         return LoadFailure::MissingRuntimeDll;
     }
-    let lower: Vec<String> = stderr_tail
-        .iter()
-        .map(|line| line.to_ascii_lowercase())
-        .collect();
-    let any = |needles: &[&str]| {
-        lower
-            .iter()
-            .any(|line| needles.iter().any(|needle| line.contains(needle)))
-    };
+    let lines: Vec<Line<'_>> = stderr_tail.iter().map(|line| Line::new(line)).collect();
+    let others = || lines.iter().filter(|line| !line.is_about_image_file());
 
-    if any(&["couldn't bind http server socket"]) {
+    if others().any(|line| line.says(PORT_SIGNATURES)) {
         return LoadFailure::PortInUse;
     }
-    if let Some(device) = stderr_tail.iter().find_map(|line| invalid_device(line)) {
+    if let Some(device) = others().find_map(Line::invalid_device) {
         return LoadFailure::InvalidDevice(device);
     }
-    if any(CONTEXT_SIGNATURES) {
+    if others().any(|line| line.says(CONTEXT_SIGNATURES)) {
         return LoadFailure::ContextTooLarge;
     }
-    if any(ALLOCATION_SIGNATURES) {
+    if others().any(|line| line.says(ALLOCATION_SIGNATURES)) {
         return LoadFailure::OutOfMemory;
     }
-    if any(IMAGE_FILE_SIGNATURES) {
-        return LoadFailure::ImageFileInvalid;
+    if let Some(failure) = image.and_then(|image| image_file_failure(&lines, image)) {
+        return failure;
     }
-    if any(MODEL_FILE_SIGNATURES) {
+    let after_measuring = lines
+        .iter()
+        .rposition(Line::is_measuring)
+        .map_or(0, |at| at + 1);
+    if lines[after_measuring..]
+        .iter()
+        .filter(|line| !line.is_about_image_file())
+        .any(|line| line.func.starts_with(GGUF_READER) || line.says(MODEL_FILE_SIGNATURES))
+    {
         return LoadFailure::ModelFileInvalid;
     }
     LoadFailure::Unknown
+}
+
+/// Whether the load failed because of `image`, the image file it was given (0.0.7), and
+/// how to treat it.
+///
+/// At the pinned build (b12110, `tools/server/server-context.cpp`, `tools/mtmd/mtmd.cpp`,
+/// `tools/mtmd/clip.cpp`) a failed `mtmd_init_from_file` prints "mtmd_init_from_file:
+/// error: …", the server then "failed to load multimodal model, '<file>'" and exits; an
+/// exception inside `clip_init` (a missing tensor, a key, a mismatch) is printed first as
+/// "clip_init: failed to load model '<file>': …" (captured in
+/// `tests/fixtures/stderr_image_file_broken.txt`; an older build printed the exception on
+/// the `mtmd_init_from_file` line itself, `stderr_image_file_owner_windows.txt`).
+///
+/// Only the server's line decides that the image file failed, and only for the file it
+/// was given: a line that is exactly that, after the timestamp and the level. The lines
+/// before it say why. `clip_init` prints every exception it catches, so a graphics card's
+/// own error while the image file loads (a Vulkan exception, a backend that would not
+/// start) is not the file's fault: it is [`LoadFailure::Unknown`], which another backend
+/// may load, and running out of memory there is [`LoadFailure::OutOfMemory`]. Only the
+/// start of a reason is looked at, where llama.cpp names what failed; a kind or a name
+/// from the file comes after it. "mtmd_get_memory_usage: error: …" and "Failed to load
+/// CLIP model" also appear when the server measures the file before the model loads, and
+/// the load goes on after them; `clip_init` is silenced while it measures.
+fn image_file_failure(lines: &[Line<'_>], image: &str) -> Option<LoadFailure> {
+    let failed = lines.iter().any(|line| {
+        line.func == "load_model"
+            && line
+                .text
+                .trim_end()
+                .strip_prefix("failed to load multimodal model, '")
+                .and_then(|rest| rest.strip_suffix('\''))
+                .is_some_and(|printed| same_file(printed, image))
+    });
+    if !failed {
+        return None;
+    }
+    let mut why = Why::File;
+    for line in lines {
+        let reason = match line.func {
+            "clip_init" => line
+                .text
+                .strip_prefix("failed to load model '")
+                .and_then(|rest| clip_init_reason(rest, image)),
+            "mtmd_init_from_file" => line.text.strip_prefix("error: "),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            why = why.max(Why::of(reason));
+        }
+    }
+    Some(match why {
+        Why::File => LoadFailure::ImageFileInvalid,
+        Why::Device => LoadFailure::Unknown,
+        Why::Memory => LoadFailure::OutOfMemory,
+    })
+}
+
+/// The reason in `clip_init: failed to load model '<file>': <reason>`, from the part after
+/// the opening quote, when the file is `image`.
+fn clip_init_reason<'a>(rest: &'a str, image: &str) -> Option<&'a str> {
+    if let Some(reason) = rest
+        .strip_prefix(image)
+        .and_then(|after| after.strip_prefix("': "))
+    {
+        return Some(reason);
+    }
+    let (printed, reason) = rest.split_once("': ")?;
+    same_file(printed, image).then_some(reason)
+}
+
+/// Whether the server printed `given`: the same path, or, where the log lost characters of
+/// a folder name to another code page (they read as U+FFFD), the same file name.
+fn same_file(printed: &str, given: &str) -> bool {
+    if printed == given {
+        return true;
+    }
+    let name = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or_default().to_owned();
+    printed.contains('\u{FFFD}') && !name(given).is_empty() && name(printed) == name(given)
+}
+
+/// Why the image file failed to load, from the start of a reason `clip_init` or
+/// `mtmd_init_from_file` printed. Ordered: memory over a device's error over the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Why {
+    /// The file itself: a missing tensor or key, a kind this build cannot use, a mismatch
+    /// with the model, a file that is not GGUF or cannot be opened.
+    File,
+    /// The graphics card or its driver: a Vulkan exception, a backend that would not start.
+    Device,
+    /// The card or the computer ran out of memory.
+    Memory,
+}
+
+impl Why {
+    fn of(reason: &str) -> Self {
+        let reason = reason.trim().to_ascii_lowercase();
+        // Vulkan-Hpp's exceptions read "vk::<call>: <result>", all of it the driver's.
+        if reason.starts_with("vk::") {
+            let memory = ["erroroutofdevicememory", "erroroutofhostmemory"]
+                .iter()
+                .any(|result| reason.ends_with(result));
+            return if memory { Self::Memory } else { Self::Device };
+        }
+        if matches!(
+            reason.as_str(),
+            "std::bad_alloc" | "bad allocation" | "bad_alloc"
+        ) {
+            return Self::Memory;
+        }
+        // clip.cpp: "failed to initialize CPU backend" and "clip_ctx: failed to initialize
+        // \"<device>\" backend"; CUDA, HIP and Vulkan's C names, should one reach here.
+        let after_function = match reason.split_once(": ") {
+            Some((function, rest)) if is_function(function) => rest,
+            _ => reason.as_str(),
+        };
+        let backend = after_function.starts_with("failed to initialize ")
+            && after_function.ends_with(" backend");
+        let device = ["cuda error", "hip error", "vk_error_"]
+            .iter()
+            .any(|start| reason.starts_with(start));
+        if backend || device {
+            return Self::Device;
+        }
+        Self::File
+    }
+}
+
+/// One line of llama-server's log, taken apart for matching (0.0.7).
+///
+/// The pinned build starts a line with a timestamp and a level letter ("0.03.927.960 E "),
+/// then, for the server's and the common code's own lines, a three-letter tag ("srv  ",
+/// "cmn  "), then the function that printed it and what it said ("load_model: failed …").
+/// Names llama.cpp echoes from files (an architecture, a key, a token, a path) are in
+/// quotes; they are left out of [`Line::lower`], so a name in a file or a folder can't pass
+/// for one of the build's own messages.
+struct Line<'a> {
+    /// The function that printed it, or empty for a line without one (an argument error,
+    /// a continuation, an assertion).
+    func: &'a str,
+    /// What it said, as printed: the whole message for a line without a function.
+    text: &'a str,
+    /// [`Line::text`] without its quoted parts, ASCII-lowercased (so offsets match).
+    lower: String,
+}
+
+impl<'a> Line<'a> {
+    fn new(line: &'a str) -> Self {
+        let message = message(line);
+        let (func, text) = match message.split_once(": ") {
+            Some((func, text)) if is_function(func) => (func, text),
+            _ => ("", message),
+        };
+        Self {
+            func,
+            text,
+            lower: without_quotes(text).to_ascii_lowercase(),
+        }
+    }
+
+    /// Whether a clause of what the line said (its start, or what follows ": " or ", ")
+    /// starts with one of `signatures`.
+    fn says(&self, signatures: &[&str]) -> bool {
+        clause_starts(&self.lower)
+            .any(|clause| signatures.iter().any(|signature| clause.starts_with(signature)))
+    }
+
+    /// The device of "invalid device: X", printed when the backend has no such device.
+    fn invalid_device(&self) -> Option<String> {
+        if !self.says(&["invalid device: "]) {
+            return None;
+        }
+        invalid_device(self.text)
+    }
+
+    /// Whether the line is about the image file: printed by `clip_*` or `mtmd_*` code, or
+    /// the server's own words about it.
+    fn is_about_image_file(&self) -> bool {
+        self.func.starts_with("clip_")
+            || self.func.starts_with("mtmd_")
+            || self.func == "load_model"
+                && (self.text.starts_with("failed to load multimodal model")
+                    || self.text.starts_with("[mtmd] "))
+    }
+
+    /// Whether the line is one the server prints when it measures the image file before
+    /// the model loads (and goes on after).
+    fn is_measuring(&self) -> bool {
+        matches!(self.func, "mtmd_get_memory_usage" | "mtmd_get_cap_from_file")
+            || self.func == "load_model" && self.text.starts_with("[mtmd] failed to get memory usage")
+    }
+}
+
+/// What a line says after the timestamp, the level letter and the module tag the pinned
+/// build puts first, where it has them.
+fn message(line: &str) -> &str {
+    let mut rest = line.trim();
+    if let Some((stamp, after)) = rest.split_once(' ')
+        && stamp.contains('.')
+        && stamp.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        rest = after;
+    }
+    if let [level, b' ', ..] = rest.as_bytes()
+        && level.is_ascii_uppercase()
+    {
+        rest = &rest[2..];
+    }
+    if let [a, b, c, b' ', ..] = rest.as_bytes()
+        && [a, b, c].iter().all(|byte| byte.is_ascii_lowercase())
+    {
+        rest = rest[4..].trim_start();
+    }
+    rest
+}
+
+/// Whether `word` reads as the name of the function that printed a line.
+fn is_function(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '(' | ')'))
+}
+
+/// Where the clauses of `text` start: its start, and after each ": " or ", ".
+fn clause_starts(text: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(text).chain(text.match_indices([':', ',']).filter_map(|(at, _)| {
+        let rest = &text[at + 1..];
+        rest.starts_with(' ').then(|| rest.trim_start())
+    }))
+}
+
+/// `text` without the parts llama.cpp puts in quotes (names and paths it echoes): from the
+/// first quote to the last one of the same kind, so a quote inside a name cannot end it
+/// early, or to the end of the line when it is not closed. An apostrophe between two
+/// letters or digits ("couldn't") is not a quote.
+fn without_quotes(text: &str) -> String {
+    let mut out = text.to_owned();
+    for quote in ['\'', '"'] {
+        let chars: Vec<(usize, char)> = out.char_indices().collect();
+        let is_quote = |at: usize| {
+            let inside_word = at > 0
+                && chars[at - 1].1.is_alphanumeric()
+                && chars.get(at + 1).is_some_and(|(_, next)| next.is_alphanumeric());
+            chars[at].1 == quote && !inside_word
+        };
+        let Some(first) = (0..chars.len()).find(|&at| is_quote(at)) else {
+            continue;
+        };
+        let end = (first + 1..chars.len())
+            .rev()
+            .find(|&at| is_quote(at))
+            .map_or(out.len(), |last| chars[last].0 + quote.len_utf8());
+        out.replace_range(chars[first].0..end, "");
+    }
+    out
 }
 
 /// Lines the pinned build logs when the **model** cannot take Save memory's settings
@@ -696,6 +960,13 @@ mod tests {
              0.03.927.966 E srv    load_model: failed to load multimodal model, '/m/mmproj.gguf'",
         );
         assert_eq!(with_image(&crafted, "/m/mmproj.gguf"), LoadFailure::ImageFileInvalid);
+        // A path the model loader prints without quotes, in a folder named like an error.
+        let unquoted = lines(
+            "0.00.015.353 E gguf_init_from_file: failed to open GGUF file '/home/u/Out of memory tests/model.gguf' (No such file or directory)\n\
+             0.00.015.734 E llama_model_load: error loading model: llama_model_loader: failed to load model from /home/u/Out of memory tests/model.gguf\n\
+             0.00.015.748 E llama_model_load_from_file_impl: failed to load model",
+        );
+        assert_eq!(classify(&unquoted, Some(1)), LoadFailure::ModelFileInvalid);
         // An apostrophe in a word is not a quote ("couldn't").
         assert_eq!(
             classify(&lines("0.00.011.000 E srv  init_listene: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080"), Some(1)),

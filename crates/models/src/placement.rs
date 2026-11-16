@@ -24,10 +24,11 @@ pub struct PlacementInput<'a> {
     /// Conversation memory per block, in bytes, at the context and cache type chosen
     /// ([`kv_per_layer`]); a missing entry counts as 0.
     pub kv_per_layer: Vec<u64>,
-    /// The saved copies of the short-memory layers llama-server keeps in the computer's
-    /// memory wherever the blocks are (`crate::kv::KvSize::checkpoints_at`; 0 for a model
-    /// without short-memory layers). Counted with the computer's conversation memory.
-    pub checkpoints: u64,
+    /// What the saved copies of a long chat take at most, in the computer's memory wherever
+    /// the blocks are (`crate::fit::Copies::bytes`; 0 for a model without them). Kept apart
+    /// from what the model needs ([`Split::copies`]): they build up during a chat, and the
+    /// verdict never counts them.
+    pub copies: u64,
     /// The working space of the device that holds the output unit (fit.rs's allowance,
     /// [`crate::fit::FitInput::compute_bytes`]).
     pub compute_gpu: u64,
@@ -111,6 +112,9 @@ pub struct Split {
     pub units: u32,
     /// Blocks on the graphics card whose expert parts are on the processor.
     pub expert_layers_on_cpu: u32,
+    /// The saved copies of a long chat, in the computer's memory besides [`Self::cpu`]
+    /// (`PlacementInput::copies`).
+    pub copies: u64,
 }
 
 impl ExpertsPick {
@@ -153,8 +157,8 @@ fn add(to: &mut u64, bytes: u64) {
 ///   processor needs `compute_cpu` besides whenever it still does some of the work (a
 ///   block, an expert part or the conversation memory is there).
 /// - The image reader is on the graphics card whenever one is used.
-/// - The saved copies of the short-memory layers (`checkpoints`) are in computer memory,
-///   whatever the placement (0.0.7 P1).
+/// - The saved copies of a long chat (`copies`) are in computer memory whatever the
+///   placement, kept apart in [`Split::copies`] (0.0.7).
 /// - Without a graphics device everything is in computer memory, with the whole working
 ///   space.
 /// - A tied output (embeddings shared with the input) is counted twice wherever the output
