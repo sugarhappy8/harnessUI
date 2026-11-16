@@ -1148,10 +1148,12 @@ fn auto_ctx_placed_never_panics_or_hangs() {
     let any = Room {
         whole: u64::MAX,
         partial: u64::MAX,
+        separate: false,
     };
     let big = Room {
         whole: 1000 * GB,
         partial: 1000 * GB,
+        separate: false,
     };
     for kind in [
         MemoryKind::Processor,
@@ -1233,6 +1235,7 @@ fn checkpoints_stay_in_computer_memory() {
     let room = Room {
         whole: 2 * GB,
         partial: 2 * GB + 500,
+        separate: true,
     };
     assert_eq!(
         judge_in(&all, room, false, MemoryKind::Separate),

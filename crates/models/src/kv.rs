@@ -1,6 +1,6 @@
 //! The conversation memory (llama.cpp's KV cache) a model gets, layer by layer, as the
-//! pinned llama.cpp build allocates it with the app's launch words: `-c C -np 1`, no `-b`,
-//! `-ub`, `--swa-full` or `--ctx-checkpoints`, flash attention `auto` unless Fine control
+//! pinned llama.cpp build allocates it with the app's launch words: `-c C -np 1
+//! --ctx-checkpoints 8`, no `-b`, `-ub` or `--swa-full`, flash attention `auto` unless Fine control
 //! turns it off, and Save memory's `-fa on -ctk q8_0 -ctv q8_0`
 //! (`crates/runtime/src/llama/launch.rs`).
 //!
@@ -43,10 +43,11 @@
 //! - A quantized (q8_0) cache also gets small rotation matrices for each layer, in the
 //!   same buffer as its memory (`llama_kv_cache::init_rotation`).
 //!
-//! llama-server also keeps up to 32 saved copies ("context checkpoints") of the
-//! short-memory layers in computer memory while a chat goes on, so a cut-off answer can be
-//! taken back (`tools/server/server-context.cpp`, `create_checkpoint`;
-//! `common/common.h`: `n_ctx_checkpoints = 32`). Each holds the cells of the last `n_swa`
+//! llama-server also keeps saved copies ("context checkpoints") of the short-memory layers
+//! in computer memory while a chat goes on, so it can go back to an earlier point of the
+//! conversation (`tools/server/server-context.cpp`, `create_checkpoint`): at most
+//! `--ctx-checkpoints`, 8 with the app's launch (llama.cpp's default is 32,
+//! `common/common.h`: `n_ctx_checkpoints`). Each holds the cells of the last `n_swa`
 //! positions (`llama_kv_cache::state_write` skips cells the window masks), so they are
 //! counted as [`KvSize::checkpoints_at`].
 //!
@@ -73,9 +74,11 @@ pub const CELL_PAD: u64 = 256;
 /// llama-server's batch sizes when no `-b` / `-ub` is given (`common/common.h`).
 pub const BATCH: u64 = 2048;
 pub const UBATCH: u64 = 512;
-/// Saved copies of the short-memory layers llama-server keeps at most per chat
-/// (`common/common.h`: `n_ctx_checkpoints = 32`; the app passes no `--ctx-checkpoints`).
-pub const CTX_CHECKPOINTS: u64 = 32;
+/// Saved copies of the short-memory layers llama-server keeps at most per chat: the app
+/// launches it with `--ctx-checkpoints 8` (`runtime::llama::launch::CTX_CHECKPOINTS`; the
+/// app checks the two are equal), where llama.cpp's own default is 32
+/// (`common/common.h`: `n_ctx_checkpoints`).
+pub const CTX_CHECKPOINTS: u64 = 8;
 /// llama.cpp keeps the window in 32 bits (`uint32_t n_swa`).
 const MAX_WINDOW: u64 = u32::MAX as u64;
 /// Bytes of one entry of a rotation matrix (f32).
@@ -849,18 +852,20 @@ mod tests {
         assert_eq!(KvLayout::launch(false, false), KvLayout::from(F16));
     }
 
-    /// The saved copies llama-server keeps of the short-memory layers: 32 of 1,024 cells
-    /// of 327,680 bytes, 10,737,418,240 bytes (10 GiB) at most in a long chat.
+    /// The saved copies llama-server keeps of the short-memory layers: with the app's
+    /// `--ctx-checkpoints 8`, 8 of 1,024 cells of 327,680 bytes, 2,684,354,560 bytes (2.5
+    /// GiB) at most in a long chat (llama.cpp's default of 32 would be 10 GiB).
     #[test]
     fn gemma4_12b_checkpoints() {
         let size = summary(gemma4_12b()).kv_size(F16);
-        assert_eq!(size.checkpoints_at(65_536), 32 * 1024 * 327_680);
-        assert_eq!(size.checkpoints_at(65_536), 10 * 1024 * MIB);
+        assert_eq!(CTX_CHECKPOINTS, 8);
+        assert_eq!(size.checkpoints_at(65_536), 8 * 1024 * 327_680);
+        assert_eq!(size.checkpoints_at(65_536), 2560 * MIB);
         // A context shorter than the window holds fewer cells.
-        assert_eq!(size.checkpoints_at(512), 32 * 512 * 327_680);
+        assert_eq!(size.checkpoints_at(512), 8 * 512 * 327_680);
         // q8_0 copies are q8_0 rows: 40 × 2 × 2,176 bytes a cell.
         let q8 = summary(gemma4_12b()).kv_size(Q8);
-        assert_eq!(q8.checkpoints_at(65_536), 32 * 1024 * 40 * 2 * 2176);
+        assert_eq!(q8.checkpoints_at(65_536), 8 * 1024 * 40 * 2 * 2176);
         // A model without short-memory layers keeps none.
         assert_eq!(KvSize::per_token(131_072).checkpoints_at(65_536), 0);
     }
@@ -915,7 +920,7 @@ mod tests {
         );
         // A saved copy: 512 cells × 15 layers × 1,024 bytes = 7,864,320 (llama-server
         // logged "size = 7.506 MiB" with its few bytes a cell of positions), 32 at most.
-        assert_eq!(s.kv_size(F16).checkpoints_at(16_384), 32 * 7_864_320);
+        assert_eq!(s.kv_size(F16).checkpoints_at(16_384), 8 * 7_864_320);
     }
 
     /// Without the window llama.cpp's Gemma 3 has no short-memory layers; Phi-3 reads the
@@ -1268,7 +1273,7 @@ mod tests {
             s.kv_bytes(4096, Q8),
             6_684_672 + 8_355_840 + 835_584 + 4_177_920
         );
-        assert_eq!(s.kv_size(F16).checkpoints_at(16_384), 32 * 7_864_320);
+        assert_eq!(s.kv_size(F16).checkpoints_at(16_384), 8 * 7_864_320);
     }
 
     /// Hostile headers (spec 2.0): any length of pattern array, absurd windows and head

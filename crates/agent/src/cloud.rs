@@ -1063,6 +1063,79 @@ mod tests {
     }
 
     #[test]
+    fn every_chat_completions_kind_gets_its_own_request() {
+        // Golden requests: the same request as the turn builds it, shaped for each kind.
+        let messages = llama_style()["messages"].clone();
+        let without_name = json!([
+            messages[0], messages[1],
+            {"role": "tool", "content": "ok", "tool_call_id": "c1"}
+        ]);
+        let common = json!({
+            "model": "gpt-4.1",
+            "max_tokens": 1000,
+            "temperature": 0.5,
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        });
+        let with = |extra: Value| {
+            let mut body = common.clone();
+            for (key, value) in extra.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            body
+        };
+        let golden = [
+            (ProviderKind::LlamaServer, llama_style()),
+            (
+                ProviderKind::OpenAi,
+                json!({
+                    "model": "gpt-4.1",
+                    "messages": without_name,
+                    "max_completion_tokens": 1000,
+                    "temperature": 0.5,
+                    "stream": true,
+                    "stream_options": {"include_usage": true}
+                }),
+            ),
+            (
+                ProviderKind::OpenRouter,
+                with(json!({"messages": messages, "top_k": 20})),
+            ),
+            (
+                ProviderKind::Abliteration,
+                with(json!({"messages": messages})),
+            ),
+            (
+                ProviderKind::Ollama,
+                with(json!({"messages": messages, "top_k": 20})),
+            ),
+            (
+                ProviderKind::LmStudio,
+                with(json!({"messages": messages, "top_k": 20})),
+            ),
+            (
+                ProviderKind::Vllm,
+                with(json!({
+                    "messages": messages,
+                    "top_k": 20,
+                    "chat_template_kwargs": {"enable_thinking": false}
+                })),
+            ),
+            (
+                ProviderKind::Generic,
+                with(json!({
+                    "messages": messages,
+                    "top_k": 20,
+                    "chat_template_kwargs": {"enable_thinking": false}
+                })),
+            ),
+        ];
+        for (kind, expected) in golden {
+            assert_eq!(shaped(kind, llama_style()), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
     fn cloud_output_limits_are_capped() {
         let mut request = llama_style();
         request["max_tokens"] = json!(120_000);

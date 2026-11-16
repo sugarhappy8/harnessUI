@@ -80,6 +80,7 @@ impl Target {
             Target::AppleUnified { working_set_bytes } => Room {
                 whole: working_set_bytes,
                 partial: working_set_bytes,
+                separate: false,
             },
             Target::Cpu { ram_free_bytes } => Room::processor(ram_free_bytes),
         }
@@ -287,6 +288,10 @@ pub struct Room {
     /// after a graphics-card memory failure also reaches): `whole` plus system memory less
     /// the reserve. The same as `whole` when the model runs on the processor.
     pub partial: u64,
+    /// The main device has memory of its own (a graphics card), so what always stays in
+    /// the computer's memory must fit `partial − whole` on its own (0.0.7). False on the
+    /// processor and on Apple silicon, where it is all one memory.
+    pub separate: bool,
 }
 
 impl Room {
@@ -296,6 +301,7 @@ impl Room {
         Self {
             whole,
             partial: whole,
+            separate: false,
         }
     }
 
@@ -305,6 +311,7 @@ impl Room {
         Self {
             whole: free_bytes,
             partial: free_bytes.saturating_add(ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES)),
+            separate: true,
         }
     }
 
@@ -315,6 +322,7 @@ impl Room {
         Self {
             whole: working_set_bytes,
             partial: working_set_bytes.max(ram_free_bytes.saturating_sub(RAM_RESERVE_BYTES)),
+            separate: false,
         }
     }
 
@@ -326,12 +334,11 @@ impl Room {
     }
 
     /// [`Self::verdict`] for something that also keeps `computer` bytes in the computer's
-    /// memory wherever it runs (the saved copies of short-memory layers): those count
-    /// with the rest in the partial room, for green as well. On the processor the two rooms
-    /// are the same memory; on a graphics card the partial room is its free memory and the
-    /// computer's together (the placement's verdict, `placement::judge_in`, checks the
-    /// computer's part on its own once the model's sizes are known). With `computer` 0 it is
-    /// [`Self::verdict`] as before.
+    /// memory wherever it runs (the saved copies of short-memory layers). On a graphics card
+    /// (`separate`) they must fit the computer's memory on its own (`partial − whole`), for
+    /// green as for yellow, as the placement's verdict (`placement::judge_in`) checks the
+    /// computer's part; on the processor and Apple silicon they count with the rest in the
+    /// same memory. With `computer` 0 it is [`Self::verdict`] as before.
     pub fn verdict_with(&self, needed: u64, computer: u64) -> Verdict {
         match self.fits(needed, computer, SPARE_BYTES) {
             (true, _) => Verdict::Green,
@@ -345,8 +352,13 @@ impl Room {
     fn fits(&self, needed: u64, computer: u64, spare: u64) -> (bool, bool) {
         let device = needed.saturating_add(spare);
         let all = device.saturating_add(computer);
-        let green = device <= self.whole && (computer == 0 || all <= self.partial);
-        (green, green || all <= self.partial)
+        if self.separate {
+            let held = computer <= self.partial.saturating_sub(self.whole);
+            (held && device <= self.whole, held && all <= self.partial)
+        } else {
+            let green = device <= self.whole && (computer == 0 || all <= self.partial);
+            (green, green || all <= self.partial)
+        }
     }
 }
 
@@ -793,11 +805,13 @@ mod tests {
         let tight = Room {
             whole: fixed + F16 * 4_500,
             partial: fixed + F16 * 4_500,
+            separate: false,
         };
         assert_eq!(auto_ctx(&eight_b(F16), tight).map(|a| a.ctx), Some(4096));
         let too_tight = Room {
             whole: fixed + F16 * 4_095,
             partial: fixed + F16 * 4_095,
+            separate: false,
         };
         assert_eq!(auto_ctx(&eight_b(F16), too_tight), None);
         assert_eq!(verdict_at(&eight_b(F16), 4096, too_tight), Verdict::Red);
@@ -821,6 +835,7 @@ mod tests {
             Room {
                 whole: u64::MAX,
                 partial: u64::MAX,
+                separate: false,
             },
         ];
         let inputs = [
@@ -1018,12 +1033,12 @@ mod tests {
         );
         // Now: Q8_0 needs 12,669,649,120 + 122,031,232 + 1,577,058,304 (the memory llama.cpp
         // allocates at 65,536 tokens) + 805,306,368 (working space) = 15,174,045,024 bytes,
-        // which fits the card with the 1 GB spare; the saved copies, 10 GiB at most, are the
-        // computer's part.
+        // which fits the card with the 1 GB spare; the saved copies, 8 of 1,024 cells of
+        // 327,680 bytes (2.5 GiB) at most, are the computer's part.
         let q8 = check(&gemma4(Q8_0, gemma4_kv()), &card);
         assert_eq!(q8.verdict, Verdict::Green);
         assert_eq!(q8.needed_bytes, 15_174_045_024);
-        assert_eq!(q8.computer_bytes, 10 * GIB);
+        assert_eq!(q8.computer_bytes, 5 * GIB / 2);
         assert_eq!(q8.computer_free_bytes, 24 * GB);
         assert!(!q8.computer_short);
         let q6 = check(&gemma4(Q6_K, gemma4_kv()), &card);
@@ -1148,31 +1163,40 @@ mod tests {
         }
     }
 
-    /// The saved copies of short-memory layers count in the computer's memory: with the
-    /// card's share alone, and on the processor with the rest.
+    /// The saved copies of short-memory layers count in the computer's memory: on a
+    /// graphics card on their own (as `placement::judge_in` counts the computer's part), on
+    /// the processor with the rest.
     #[test]
     fn checkpoints_count_in_the_computers_memory() {
         // Room: the card's 16 GB, 6 GB of computer memory besides.
         let room = Room::graphics_card(16 * GB, 8 * GB);
+        assert!(room.separate);
         assert_eq!(room.verdict_with(10 * GB, 0), Verdict::Green);
-        assert_eq!(room.verdict_with(10 * GB, 11 * GB), Verdict::Green);
-        assert_eq!(room.verdict_with(10 * GB, 11 * GB + 1), Verdict::Red);
+        assert_eq!(room.verdict_with(10 * GB, 6 * GB), Verdict::Green);
+        // The card's free memory does not hold copies that stay in the computer's memory.
+        assert_eq!(room.verdict_with(10 * GB, 6 * GB + 1), Verdict::Red);
         assert_eq!(room.verdict_with(16 * GB, 5 * GB), Verdict::Yellow);
+        assert_eq!(room.verdict_with(16 * GB, 5 * GB + 1), Verdict::Red);
         // Without them, the 0.0.6 verdict.
-        for needed in [0, 10 * GB, 15 * GB, 21 * GB, u64::MAX] {
-            assert_eq!(room.verdict_with(needed, 0), room.verdict(needed));
+        for room in [room, Room::processor(12 * GB), Room::apple(11 * GB, 15 * GB)] {
+            for needed in [0, 10 * GB, 15 * GB, 21 * GB, u64::MAX] {
+                assert_eq!(room.verdict_with(needed, 0), room.verdict(needed));
+            }
         }
         // On the processor they are in the same memory.
         let cpu = Room::processor(12 * GB);
         assert_eq!(cpu.verdict_with(5 * GB, 4 * GB), Verdict::Green);
         assert_eq!(cpu.verdict_with(5 * GB, 4 * GB + 1), Verdict::Red);
-        // Gemma 4 Q4_K_M on a card with 4 GB of computer memory free: the card holds the
-        // model, but 10 GiB of saved copies do not fit the 2 GB left after the reserve.
+        // Gemma 4 Q8_0 at 32,768 tokens on a 15 GB card with 4 GB of computer memory free:
+        // the card holds the model (15,515,142,880 bytes with the spare), but 8 saved copies
+        // of 1,024 cells of 327,680 bytes (2,684,354,560 bytes, 2.5 GiB) do not fit the 2 GB
+        // left after the reserve, whatever the context (the copies stop at the window).
         let input = FitInput {
             ctx: 32_768,
             projector_bytes: 0,
-            ..gemma4(Q4_K_M, gemma4_kv())
+            ..gemma4(Q8_0, gemma4_kv())
         };
+        assert_eq!(input.computer_at(32_768), 2_684_354_560);
         let r = check(
             &input,
             &Target::Gpu {
@@ -1185,15 +1209,16 @@ mod tests {
         assert!(r.computer_short);
         assert_eq!(
             (r.computer_bytes, r.computer_free_bytes),
-            (10 * GIB, 4 * GB)
+            (5 * GIB / 2, 4 * GB)
         );
-        // With 16 GB free it fits.
+        assert_eq!(auto_ctx(&input, Room::graphics_card(15 * GIB, 4 * GB)), None);
+        // With 5 GB free it fits.
         let r = check(
             &input,
             &Target::Gpu {
                 name: "GPU".into(),
                 free_bytes: 15 * GIB,
-                ram_free_bytes: 16 * GB,
+                ram_free_bytes: 5 * GB,
             },
         );
         assert_eq!(r.verdict, Verdict::Green);
@@ -1204,7 +1229,7 @@ mod tests {
                 ram_free_bytes: 64 * GB,
             },
         );
-        assert_eq!(r.needed_bytes, input.needed_at(32_768) + 10 * GIB);
+        assert_eq!(r.needed_bytes, input.needed_at(32_768) + 5 * GIB / 2);
         assert_eq!(r.computer_bytes, 0);
         // A model without short-memory layers has no computer part.
         let r = check(
