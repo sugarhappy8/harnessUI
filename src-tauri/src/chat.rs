@@ -1238,7 +1238,8 @@ mod tests {
     /// [0.0.7 P6] A send while another reply runs (in any chat, also one the window does not
     /// know of because it reloaded meanwhile) is refused as busy before anything is stored:
     /// before, the user message was stored first and stayed without an answer. The turn's
-    /// hold on the slot ends with it.
+    /// hold on the slot ends with it. That the commands take the slot before anything else is
+    /// pinned by `a_turn_takes_its_slot_before_anything_slow_or_stored`.
     #[tokio::test]
     async fn a_send_while_a_reply_runs_stores_nothing() {
         let store = store::Store::open_in_memory().unwrap();
@@ -1272,6 +1273,35 @@ mod tests {
         );
         drop(slot);
         assert_eq!(generation.running_chat(), None);
+    }
+
+    /// [0.0.7 P6a review] `send_message` and `regenerate` take the turn's slot first, before
+    /// anything slow (reading the store, asking a remote endpoint about its model over the
+    /// network) and before anything is stored. A Stop pressed meanwhile finds the turn and
+    /// stops it: before, it found nothing, and the turn then ran. And a send refused as busy
+    /// leaves nothing behind (`a_send_while_a_reply_runs_stores_nothing` checks the slot; this
+    /// checks the commands really take it first). Every slow step and every write is awaited,
+    /// so nothing before the slot may be. Edit and resend's check that no new attachments come
+    /// with the copied ones is made before the slot too (it waits for nothing).
+    #[test]
+    fn a_turn_takes_its_slot_before_anything_slow_or_stored() {
+        let source = include_str!("chat.rs");
+        for command in ["pub async fn send_message(", "pub async fn regenerate("] {
+            let body = source.split_once(command).unwrap().1;
+            let body = body.split_once("\n}\n").unwrap().0;
+            let (before, after) = body
+                .split_once("TurnSlot::take(")
+                .unwrap_or_else(|| panic!("{command} takes the slot"));
+            assert!(
+                !before.contains(".await"),
+                "{command} waits for something before it takes the slot"
+            );
+            assert!(after.contains("generate("), "{command} runs the turn");
+        }
+        let send = source.split_once("pub async fn send_message(").unwrap().1;
+        let (before, after) = send.split_once("TurnSlot::take(").unwrap();
+        assert!(before.contains("copied_alone("));
+        assert!(after.split_once("\n}\n").unwrap().0.contains("store_user_message("));
     }
 
     /// [0.0.7 P6] The Stop of a chat stops that chat's reply only, never one running in
