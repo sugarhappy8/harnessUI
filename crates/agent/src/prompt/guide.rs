@@ -347,6 +347,11 @@ fn list_block(finder: bool, groups: &[CleanGroup], form: ListForm) -> String {
 
 const CALLS: &str = "Tool calls: the arguments are one JSON object that fits the tool's \
                      schema, with double quotes, no comments and no trailing commas.";
+/// A small model told that results arrive in `<tool_output>` blocks sometimes writes one
+/// itself instead of calling the tool (seen with the test model on macOS); the loop then
+/// asks again (`turn::WROTE_A_RESULT_NOTE`).
+const RESULTS: &str = "Only the app writes tool results: call the tool and wait for its \
+                       result, never write a <tool_output> block yourself.";
 const WINDOWS_PATHS: &str = "In JSON strings write each backslash twice (C:\\\\Users\\\\me), or use / instead (C:/Users/me).";
 const PATHS: &str = "File paths are absolute, or relative to the working folder.";
 
@@ -391,6 +396,7 @@ const COMPUTER_OPEN_MAC: &str = "- To open an app: computer_key \"cmd+space\" (t
 
 const CALLS_SHORT: &str =
     "Tool arguments: one JSON object, double quotes, no comments or trailing commas.";
+const RESULTS_SHORT: &str = "Only the app writes tool results: call the tool and wait.";
 const WINDOWS_PATHS_SHORT: &str = "Write each backslash twice in JSON strings, or use /.";
 const POWERSHELL_SHORT: &str = "run_command: Windows PowerShell 5.1, a new one each call: no && \
                                 (use ;), no rm -rf, ls -la or grep (use Remove-Item -Recurse \
@@ -412,6 +418,7 @@ fn guide_block(guide: &ToolGuide, form: GuideForm) -> Option<String> {
         GuideForm::Without => return None,
         GuideForm::Full => {
             lines.push(CALLS.to_owned());
+            lines.push(RESULTS.to_owned());
             if windows {
                 lines.push(WINDOWS_PATHS.to_owned());
             }
@@ -443,9 +450,9 @@ fn guide_block(guide: &ToolGuide, form: GuideForm) -> Option<String> {
         }
         GuideForm::Short => {
             lines.push(if windows {
-                format!("{CALLS_SHORT} {WINDOWS_PATHS_SHORT}")
+                format!("{CALLS_SHORT} {WINDOWS_PATHS_SHORT} {RESULTS_SHORT}")
             } else {
-                CALLS_SHORT.to_owned()
+                format!("{CALLS_SHORT} {RESULTS_SHORT}")
             });
             if commands {
                 lines.push(
