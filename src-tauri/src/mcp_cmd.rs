@@ -62,7 +62,8 @@ const BROWSER_SERVER: &str = "browser";
 /// The Browser group is also on in a new chat when a browser is available and the chat
 /// model's context is at least this many tokens (D10 as the owner changed it on
 /// 2026-11-11). Its ten tools cost about 1,400 tokens on every request, which a 4,096
-/// window has no room for.
+/// window has no room for ([0.0.7 P7] eleven since `browser_capture_site`, about 330 more
+/// when it is offered).
 pub const BROWSER_DEFAULT_MIN_CONTEXT: u32 = 8192;
 
 /// What is known about the chat model's context when a new chat's tools are decided.

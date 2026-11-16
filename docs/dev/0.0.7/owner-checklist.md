@@ -100,3 +100,16 @@ icon bounces for a card and at the end of the turn.
    shows no *Cloud* mark, while the same server by name (`http://desktop.local:11434`) shows
    the mark and needs https for a key. Edit the OpenAI endpoint and switch it to
    OpenRouter: Save asks for the OpenRouter key instead of sending the OpenAI one.
+
+## Downloads and Installed (P6b)
+1. Download a vision model (model + image file). Pause it while the image file downloads:
+   the row says paused and offers *Resume*; *Resume* continues only the image file (the
+   finished model file is not downloaded again). Close and reopen harnessUI while paused:
+   it stays paused.
+2. Press *Download* twice quickly on Browse: only one download starts. Start the same model
+   again from Browse while it downloads: it follows the running one.
+3. Cancel a download after its first file finished: the finished file is deleted (unless
+   an installed model uses it).
+4. Delete a model's folder in Explorer, then remove it from Installed: the row goes away.
+5. With a reply waiting for your approval, reload the window (Ctrl+R): the card comes back
+   and answering it works.

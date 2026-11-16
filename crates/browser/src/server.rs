@@ -1187,11 +1187,11 @@ fn tool_defs() -> Vec<ToolDef> {
             capture::TOOL,
             "Save a web page's front end (page with scripts off, styles, pictures, fonts, animations, screenshots, report.md) into a new folder in an approved folder. For studying a design and rebuilding it with the user's own content; never copy other people's logos, brand names or sign-in pages.",
             json!({
-                "url": {"type": "string", "description": "The page (http or https). Leave out to capture the page open in the agent's browser."},
-                "folder": {"type": "string", "description": "An approved folder; the copy goes into a new folder inside it named after the site and the time. Default: the working folder."},
-                "widths": {"type": "array", "items": {"type": "integer", "minimum": capture::describe::MIN_WIDTH, "maximum": capture::describe::MAX_WIDTH}, "minItems": 1, "maxItems": capture::describe::MAX_WIDTHS, "description": "Screen widths in pixels; the first is used for the copy. Default [1440, 390]."},
-                "scroll": {"type": "boolean", "description": "Scroll through the page first so late pictures and scroll effects load. Default true."},
-                "max_total_mb": {"type": "integer", "minimum": 1, "maximum": capture::assets::MAX_TOTAL_MB, "description": "Size limit for the whole copy. Default 300."},
+                "url": {"type": "string", "description": "http or https address. Leave out for the page open now."},
+                "folder": {"type": "string", "description": "Approved folder; the copy goes into a new folder in it. Default: the working folder."},
+                "widths": {"type": "array", "items": {"type": "integer", "minimum": capture::describe::MIN_WIDTH, "maximum": capture::describe::MAX_WIDTH}, "minItems": 1, "maxItems": capture::describe::MAX_WIDTHS, "description": "Screen widths in pixels. Default [1440, 390]."},
+                "scroll": {"type": "boolean", "description": "Scroll through first so late pictures and effects load. Default true."},
+                "max_total_mb": {"type": "integer", "minimum": 1, "maximum": capture::assets::MAX_TOTAL_MB, "description": "Size limit of the copy. Default 300."},
                 "max_files": {"type": "integer", "minimum": 1, "maximum": capture::assets::MAX_FILES, "description": "File limit. Default 2000."}
             }),
             vec![],

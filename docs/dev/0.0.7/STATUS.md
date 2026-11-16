@@ -113,3 +113,15 @@ and `README.md`.
   attachments can't be combined with new ones; the turn slot is taken first so Stop right
   after sending works). app 849, vitest 832, clippy clean. Its verification is folded into
   the whole-release review (all findings were minor).
+- P6b done: all nine bugs fixed test-first (resume keeps finished files and verifies instead
+  of refetching; paused groups show as paused and don't auto-resume; one atomic duplicate
+  check in `DownloadManager::start`, incl. the P2 review's m5; Cancel deletes finished files
+  no installed model uses; a failed last step shows and retries alone; Installed rows can
+  always be removed; `load()` picks the backend before stopping anything; Delete takes the
+  image file too unless shared; approval cards survive a window reload via
+  `pending_approvals`). app 849, models 137, vitest 832. NOTE: WIP commit 933c56a briefly
+  contains old-behaviour copies of downloads.rs/hub.rs/runtime_manager.rs/turns.rs (P6b
+  showing tests fail first); later commits have the real code. Under independent review
+  (deletion safety first).
+- P2 round 1 started (findings in `review-p2-findings.md`; Hugging Face listing becomes
+  user-triggered).

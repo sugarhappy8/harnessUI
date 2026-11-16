@@ -412,9 +412,8 @@ const POWERSHELL_FILES: &str = "- > writes UTF-16 here, and there is no <<EOF.";
 const ZSH: &[&str] = &[
     "run_command uses zsh (macOS), a new one for each call:",
     "- cd does not carry over to the next call: pass the folder as cwd.",
-    "- Quote a URL, or a pattern meant for a program such as grep or find, when it holds ? * or \
-     [ ]: otherwise zsh stops with \"no matches found\". A file pattern for zsh itself, like \
-     *.txt, stays unquoted.",
+    "- Quote URLs and patterns for grep or find that hold ? * or [ ], or zsh stops with \"no \
+     matches found\"; leave file patterns like *.txt unquoted.",
 ];
 
 const SH: &[&str] = &[

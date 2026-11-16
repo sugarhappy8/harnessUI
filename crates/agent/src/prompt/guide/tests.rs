@@ -549,7 +549,7 @@ fn the_macos_guide_speaks_of_zsh_and_other_systems_of_bin_sh() {
     assert!(mac.contains("- cd does not carry over to the next call: pass the folder as cwd."));
     // [0.0.7 review] Only what is meant for a program is quoted: `ls '*.txt'` finds nothing.
     assert!(mac.contains(
-        "- Quote a URL, or a pattern meant for a program such as grep or find, when it holds ? * or [ ]: otherwise zsh stops with \"no matches found\". A file pattern for zsh itself, like *.txt, stays unquoted."
+        "- Quote URLs and patterns for grep or find that hold ? * or [ ], or zsh stops with \"no matches found\"; leave file patterns like *.txt unquoted."
     ));
     for windows_only in ["PowerShell", "backslash", "&&", "UTF-16"] {
         assert!(!mac.contains(windows_only), "{windows_only} in {mac}");
