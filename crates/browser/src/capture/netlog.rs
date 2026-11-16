@@ -68,6 +68,13 @@ pub struct CaptureLog {
     pub sockets: Vec<String>,
     /// Connections the page asked for that were blocked before they started.
     pub tried: Vec<String>,
+    /// Shared or service workers ("shared_worker", "service_worker") whose requests could
+    /// not be held to the checks: one that ran before the capture and could not be
+    /// stopped, or one whose requests could not be paused. Any makes the capture stop.
+    pub unchecked_workers: Vec<String>,
+    /// A service worker was kept from running during the capture (its requests cannot be
+    /// checked), so what the page would have had from it is missing.
+    pub service_worker_held: bool,
     /// WebSocket and WebTransport ids and their addresses.
     socket_urls: HashMap<String, String>,
     pub entries: HashMap<String, NetEntry>,
@@ -142,6 +149,12 @@ impl CaptureLog {
             }
             _ => {}
         }
+    }
+
+    /// A shared or service worker whose requests the checks could not hold (see
+    /// [`Self::unchecked_workers`]).
+    pub fn note_unchecked_worker(&mut self, kind: &str) {
+        push_once(&mut self.unchecked_workers, kind.to_string());
     }
 
     /// A request the checks let through.

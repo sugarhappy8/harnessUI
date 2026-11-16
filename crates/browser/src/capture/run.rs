@@ -132,17 +132,31 @@ async fn restore(b: &Browser, session: &str, log: Option<CaptureLog>) {
 }
 
 /// Stops the capture when the page opened a connection the request checks cannot see
-/// (a WebSocket, WebTransport or direct socket that started): what came over it could be
-/// from the user's own network, so nothing of this page is kept.
+/// (a WebSocket, WebTransport or direct socket that started), or when a shared or service
+/// worker's requests could not be held to them: what came that way could be from the
+/// user's own network, so nothing of this page is kept.
 fn connection_check(b: &Browser) -> Result<(), String> {
     let s = b.lock();
-    match s.capture.as_ref().and_then(|c| c.sockets.first()) {
-        Some(what) => Err(format!(
+    let Some(c) = s.capture.as_ref() else {
+        return Ok(());
+    };
+    if let Some(what) = c.sockets.first() {
+        return Err(format!(
             "The page opened {}, a connection the browser's network rules cannot check, so the capture stopped and nothing was saved (what it received could have come from your own network).",
             page_text(what, 200)
-        )),
-        None => Ok(()),
+        ));
     }
+    if let Some(kind) = c.unchecked_workers.first() {
+        let what = if kind == "shared_worker" {
+            "a shared worker"
+        } else {
+            "a service worker"
+        };
+        return Err(format!(
+            "The page uses {what} whose requests the browser's network rules could not check, so the capture stopped and nothing was saved."
+        ));
+    }
+    Ok(())
 }
 
 fn cdp_text(e: crate::cdp::CdpError) -> String {
@@ -803,7 +817,7 @@ async fn work(
     // any point up to here means nothing is saved.
     connection_check(b)?;
     progress("Saving the copy".into());
-    let (entries, checked, blocked, log_full, tried) = {
+    let (entries, checked, blocked, log_full, tried, service_worker_held) = {
         let s = b.lock();
         match s.capture.as_ref() {
             Some(c) => (
@@ -816,10 +830,14 @@ async fn work(
                 c.blocked.clone(),
                 c.full,
                 c.tried.clone(),
+                c.service_worker_held,
             ),
-            None => (Vec::new(), HashSet::new(), Vec::new(), false, Vec::new()),
+            None => (Vec::new(), HashSet::new(), Vec::new(), false, Vec::new(), false),
         }
     };
+    if service_worker_held {
+        notes.push("The page's service worker was not let run during the capture (its requests cannot be checked one by one), so anything the page shows from it is missing.".into());
+    }
     let folder_name = names::capture_folder_name(&plan.url, chrono::Local::now());
     let mut w = Writer::create(&plan.folder, &folder_name)?;
     let mut budget = Budget::new(plan.caps);
@@ -920,8 +938,12 @@ async fn work(
             skipped.push((label, why.words(&plan.caps)));
             continue;
         }
-        let head = &bytes[..bytes.len().min(64)];
-        let ext = assets::extension_for(kind, &e.mime, e.final_url(), head);
+        let head = &bytes[..bytes.len().min(1024)];
+        let Some(ext) = assets::extension_for(kind, &e.mime, e.final_url(), head) else {
+            budget.give_back(bytes.len() as u64);
+            skipped.push((label, SkipReason::UnknownPicture.words(&plan.caps)));
+            continue;
+        };
         if kind == Kind::Animation {
             if ext != "json" || !assets::is_lottie(&bytes) {
                 // Data the page fetched, not part of its look: not kept, not listed.
@@ -999,8 +1021,11 @@ async fn work(
         };
         // Every address the sheet names becomes the saved file, or `about:invalid`;
         // fragments and data: stay. Then the same rule the page gets checks the result.
-        let refs = css::find_raw_urls(&sheet.text).refs;
-        let rewritten = css::rewrite_raw(&sheet.text, &refs, |r| {
+        // The text as it is written (no `@charset`, no control bytes), so the addresses
+        // checked are the ones a browser reads.
+        let text = css::plain_text(&sheet.text);
+        let refs = css::find_raw_urls(&text).refs;
+        let rewritten = css::rewrite_raw(&text, &refs, |r| {
             let raw = css::url_text(&r.raw);
             let lower = raw.to_ascii_lowercase();
             if !r.bad && !r.import && (raw.starts_with('#') || lower.starts_with("data:")) {
@@ -1041,7 +1066,9 @@ async fn work(
             continue;
         };
         let file_name = path.trim_start_matches("styles/");
-        let rel = w.write("styles", file_name, rewritten.as_bytes())?;
+        // A UTF-8 byte order mark first: it wins over any `@charset`, so the browser reads
+        // the sheet as the UTF-8 that was checked.
+        let rel = w.write("styles", file_name, &[css::BOM, rewritten.as_bytes()].concat())?;
         facts.push((rel.clone(), css::facts(&sheet.text, &sheet.base)));
         if let Some(i) = sheet.index {
             style_paths.insert(i, rel);
@@ -1203,7 +1230,9 @@ async fn work(
                 .into(),
         );
     }
-    w.write("", "index.html", copy.html.as_bytes())?;
+    // A byte order mark too: the page's own attributes on <html> come before the charset
+    // meta, and must not push it beyond what a browser looks at to choose the encoding.
+    w.write("", "index.html", &[css::BOM, copy.html.as_bytes()].concat())?;
 
     // animations.json.
     let script_refs: Vec<anim::ScriptSample<'_>> = samples

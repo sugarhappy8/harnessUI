@@ -69,9 +69,59 @@ enum Pending {
     Namespace,
 }
 
+/// Functions that make a picture out of what they hold. Inside them a string is an address
+/// (`image-set("a.png" 1x)`), and a `var()`, `env()` or `attr()` could put any string there
+/// at the time the page is shown, out of sight of anything reading the text; so their
+/// contents are held to [`INSIDE_IMAGES`].
+const IMAGE_FUNCTIONS: &[&str] = &[
+    "image-set",
+    "-webkit-image-set",
+    "image",
+    "cross-fade",
+    "-webkit-cross-fade",
+];
+
+/// The only functions an image function may hold besides addresses (`url()`, `src()`) and
+/// other image functions: the type of an `image-set()` option, gradients and what their
+/// colours and positions are written with. Anything else in an image function (`var()`,
+/// `env()`, `attr()`, any other name) makes the whole function `url("about:invalid")`.
+const INSIDE_IMAGES: &[&str] = &[
+    "type",
+    "linear-gradient",
+    "radial-gradient",
+    "conic-gradient",
+    "repeating-linear-gradient",
+    "repeating-radial-gradient",
+    "repeating-conic-gradient",
+    "-webkit-linear-gradient",
+    "-webkit-radial-gradient",
+    "-webkit-repeating-linear-gradient",
+    "-webkit-repeating-radial-gradient",
+    "-webkit-gradient",
+    "from",
+    "to",
+    "color-stop",
+    "rgb",
+    "rgba",
+    "hsl",
+    "hsla",
+    "hwb",
+    "lab",
+    "lch",
+    "oklab",
+    "oklch",
+    "color",
+    "color-mix",
+    "calc",
+    "min",
+    "max",
+    "clamp",
+];
+
 /// Every token of `css` that names an address: `url(…)` in either form (and malformed
-/// ones), `src(…)`, the string or `url(…)` after `@import`, and the strings inside
-/// `image-set(…)`, `-webkit-image-set(…)` and `image(…)`. The address of `@namespace` is
+/// ones), `src(…)`, the string or `url(…)` after `@import`, and the strings inside image
+/// functions ([`IMAGE_FUNCTIONS`]). An image function holding anything outside
+/// [`INSIDE_IMAGES`] is listed whole, as a malformed token. The address of `@namespace` is
 /// not one (nothing is fetched) and is left out.
 pub fn find_raw_urls(css: &str) -> RawUrls {
     let mut input = ParserInput::new(css);
@@ -80,11 +130,11 @@ pub fn find_raw_urls(css: &str) -> RawUrls {
         refs: Vec::new(),
         complete: true,
     };
-    walk(&mut parser, &mut out, 0, false);
+    walk(&mut parser, &mut out, 0);
     out
 }
 
-fn walk<'i>(p: &mut CssParser<'i, '_>, out: &mut RawUrls, depth: usize, strings_are_urls: bool) {
+fn walk<'i>(p: &mut CssParser<'i, '_>, out: &mut RawUrls, depth: usize) {
     let mut pending = Pending::None;
     loop {
         let start = p.position().byte_index();
@@ -117,12 +167,12 @@ fn walk<'i>(p: &mut CssParser<'i, '_>, out: &mut RawUrls, depth: usize, strings_
                 pending = Pending::None;
             }
             Token::QuotedString(value) => {
-                if pending == Pending::Import || (strings_are_urls && pending == Pending::None) {
+                if pending == Pending::Import {
                     out.refs.push(RawRef {
                         start,
                         end: p.position().byte_index(),
                         raw: value.to_string(),
-                        import: pending == Pending::Import,
+                        import: true,
                         bad: false,
                     });
                 }
@@ -131,35 +181,41 @@ fn walk<'i>(p: &mut CssParser<'i, '_>, out: &mut RawUrls, depth: usize, strings_
             Token::Function(name) => {
                 let lname = name.to_ascii_lowercase();
                 if lname == "url" || lname == "src" {
-                    // `url("…")`: the first string inside is the address.
-                    let mut raw: Option<String> = None;
-                    let _ = p.parse_nested_block(|q| -> Result<(), ParseError<'i, ()>> {
-                        while let Ok(t) = q.next_including_whitespace_and_comments() {
-                            if let Token::QuotedString(s) = t
-                                && raw.is_none()
-                            {
-                                raw = Some(s.to_string());
-                            }
-                        }
-                        Ok(())
-                    });
+                    let raw = address_function(p);
                     if pending != Pending::Namespace {
                         out.refs.push(RawRef {
                             start,
                             end: p.position().byte_index(),
+                            bad: raw.is_none(),
                             raw: raw.unwrap_or_default(),
                             import: pending == Pending::Import,
-                            bad: false,
+                        });
+                    }
+                } else if IMAGE_FUNCTIONS.contains(&lname.as_str()) {
+                    let mut inner: Vec<RawRef> = Vec::new();
+                    let ok = p
+                        .parse_nested_block(|q| -> Result<bool, ParseError<'i, ()>> {
+                            Ok(image_walk(q, &mut inner, depth + 1, true))
+                        })
+                        .unwrap_or(false);
+                    if ok {
+                        out.refs.extend(inner);
+                    } else {
+                        // Held to nothing: the whole function becomes `about:invalid`.
+                        out.refs.push(RawRef {
+                            start,
+                            end: p.position().byte_index(),
+                            raw: String::new(),
+                            import: false,
+                            bad: true,
                         });
                     }
                 } else if depth >= MAX_NESTING {
                     // The block is skipped by the next token read; what it holds is unknown.
                     out.complete = false;
                 } else {
-                    let urls =
-                        matches!(lname.as_str(), "image-set" | "-webkit-image-set" | "image");
                     let _ = p.parse_nested_block(|q| -> Result<(), ParseError<'i, ()>> {
-                        walk(q, out, depth + 1, urls);
+                        walk(q, out, depth + 1);
                         Ok(())
                     });
                 }
@@ -170,7 +226,7 @@ fn walk<'i>(p: &mut CssParser<'i, '_>, out: &mut RawUrls, depth: usize, strings_
                     out.complete = false;
                 } else {
                     let _ = p.parse_nested_block(|q| -> Result<(), ParseError<'i, ()>> {
-                        walk(q, out, depth + 1, false);
+                        walk(q, out, depth + 1);
                         Ok(())
                     });
                 }
@@ -191,6 +247,124 @@ fn walk<'i>(p: &mut CssParser<'i, '_>, out: &mut RawUrls, depth: usize, strings_
         }
     }
 }
+
+/// The address in `url("…")` or `src("…")`, the parser just past the function's name: one
+/// string and nothing else (spaces and comments aside). `None` for anything more or less
+/// (`src(var(--a))`), which is then treated as malformed.
+fn address_function(p: &mut CssParser<'_, '_>) -> Option<String> {
+    p.parse_nested_block(|q| -> Result<Option<String>, ParseError<'_, ()>> {
+        let mut raw: Option<String> = None;
+        while let Ok(t) = q.next_including_whitespace_and_comments() {
+            match t {
+                Token::WhiteSpace(_) | Token::Comment(_) => {}
+                Token::QuotedString(s) if raw.is_none() => raw = Some(s.to_string()),
+                _ => return Ok(None),
+            }
+        }
+        Ok(raw)
+    })
+    .ok()
+    .flatten()
+}
+
+/// The inside of an image function: addresses go to `refs` (strings too where
+/// `strings_are_urls`); `false` as soon as anything outside the allow-list shows up.
+fn image_walk(p: &mut CssParser<'_, '_>, refs: &mut Vec<RawRef>, depth: usize, strings_are_urls: bool) -> bool {
+    if depth >= MAX_NESTING {
+        return false;
+    }
+    loop {
+        let start = p.position().byte_index();
+        let token = match p.next_including_whitespace_and_comments() {
+            Ok(t) => t.clone(),
+            Err(_) => return true,
+        };
+        match token {
+            Token::WhiteSpace(_)
+            | Token::Comment(_)
+            | Token::Comma
+            | Token::Number { .. }
+            | Token::Percentage { .. }
+            | Token::Dimension { .. }
+            | Token::Ident(_)
+            | Token::Hash(_)
+            | Token::IDHash(_) => {}
+            Token::Delim(c) if matches!(c, '/' | '+' | '-' | '*') => {}
+            Token::QuotedString(value) => {
+                if strings_are_urls {
+                    refs.push(RawRef {
+                        start,
+                        end: p.position().byte_index(),
+                        raw: value.to_string(),
+                        import: false,
+                        bad: false,
+                    });
+                }
+            }
+            Token::UnquotedUrl(value) => refs.push(RawRef {
+                start,
+                end: p.position().byte_index(),
+                raw: value.to_string(),
+                import: false,
+                bad: false,
+            }),
+            Token::Function(name) => {
+                let lname = name.to_ascii_lowercase();
+                if lname == "url" || lname == "src" {
+                    let Some(raw) = address_function(p) else {
+                        return false;
+                    };
+                    refs.push(RawRef {
+                        start,
+                        end: p.position().byte_index(),
+                        raw,
+                        import: false,
+                        bad: false,
+                    });
+                } else {
+                    let image = IMAGE_FUNCTIONS.contains(&lname.as_str());
+                    if !image && !INSIDE_IMAGES.contains(&lname.as_str()) {
+                        return false;
+                    }
+                    let ok = p
+                        .parse_nested_block(|q| -> Result<bool, ParseError<'_, ()>> {
+                            Ok(image_walk(q, refs, depth + 1, image))
+                        })
+                        .unwrap_or(false);
+                    if !ok {
+                        return false;
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// CSS text as the copy writes it, so a browser reads it exactly as it was checked: no byte
+/// order mark or leading `@charset` rule (a saved sheet starts with a UTF-8 byte order
+/// mark instead, which wins over any `@charset`), and no control characters but tab, line
+/// feed, form feed and carriage return (an escape byte can change how a legacy encoding
+/// reads what follows).
+pub fn plain_text(css: &str) -> String {
+    let kept: String = css
+        .trim_start_matches('\u{feff}')
+        .chars()
+        .filter(|c| !(c.is_control() && !matches!(c, '\t' | '\n' | '\u{c}' | '\r')) || !c.is_ascii())
+        .collect();
+    let lower_start: String = kept.chars().take(9).collect::<String>().to_ascii_lowercase();
+    if lower_start.starts_with("@charset") {
+        // The rule ends at its first `;` (a string with a `;` in it is not an encoding name).
+        if let Some(end) = kept.find(';') {
+            return kept[end + 1..].to_string();
+        }
+        return String::new();
+    }
+    kept
+}
+
+/// A UTF-8 byte order mark, written first in every saved sheet.
+pub const BOM: &[u8] = b"\xEF\xBB\xBF";
 
 /// Every address a sheet names, made absolute (only `http` and `https` ones), in order.
 /// `data:` addresses, fragment-only ones (`url(#gradient)`) and malformed tokens are left
@@ -260,16 +434,19 @@ pub fn url_text(raw: &str) -> String {
     kept.trim_matches(|c: char| c <= ' ').to_string()
 }
 
-/// `css` with every address the copy may not keep replaced by [`INERT_URL`]: kept are
-/// fragments (`url(#clip)`), `data:` addresses and addresses for which `is_local` says the
-/// text names one of the copy's own files; an `@import` is kept only when it names one of
-/// those. `None` when the text is nested too deeply to be read whole.
+/// `css` as [`plain_text`], with every address the copy may not keep replaced by
+/// [`INERT_URL`]: kept are fragments (`url(#clip)`), `data:` addresses and addresses for
+/// which `is_local` says the text names one of the copy's own files; an `@import` is kept
+/// only when it names one of those, and an image function holding anything but literal
+/// addresses, gradients and their arguments becomes [`INERT_URL`] whole. `None` when the
+/// text is nested too deeply to be read whole.
 pub fn confine(css: &str, is_local: impl Fn(&str) -> bool) -> Option<String> {
-    let found = find_raw_urls(css);
+    let css = plain_text(css);
+    let found = find_raw_urls(&css);
     if !found.complete {
         return None;
     }
-    Some(rewrite_raw(css, &found.refs, |r| {
+    Some(rewrite_raw(&css, &found.refs, |r| {
         let t = url_text(&r.raw);
         let lower = t.to_ascii_lowercase();
         let keep = !r.bad
@@ -1064,6 +1241,68 @@ mod tests {
         );
         assert!(confine(&deep, local).is_none());
         assert_eq!(url_text(" \tda\nta:image/png,x "), "data:image/png,x");
+    }
+
+    /// The verification of round 1 (V1): a string reaches an image function through a
+    /// custom property, out of sight of the text.
+    #[test]
+    fn image_functions_hold_only_literal_addresses() {
+        let local = |t: &str| t == "../assets/a.png";
+        for (css, kept) in [
+            (":root{--u:\"//attacker.example/share/x.png\"} .a{background-image:image-set(var(--u) 1x)}", false),
+            (".h{--hh:\"http://93.184.215.14/x.png\";background-image:-webkit-image-set(var(--hh) 1x)}", false),
+            (".l{list-style-image:image-set(var(--u) 1x, \"../assets/a.png\" 2x)}", false),
+            (".c{content:image-set(env(safe-area-inset-top) 1x)}", false),
+            (".m{mask-image:image-set(attr(data-src) 1x)}", false),
+            (".b{border-image-source:image-set(made-up(\"x\") 1x)}", false),
+            (".n{background:image-set(image-set(var(--u) 1x) 1x)}", false),
+            (".x{background:cross-fade(var(--a), url(../assets/a.png))}", false),
+            (".i{background:image(var(--u))}", false),
+            (".s{background:src(var(--u))}", false),
+            (".k{background:image-set(linear-gradient(red, rgb(0 0 0 / 50%)) 1x, \"../assets/a.png\" 2x)}", true),
+            (".t{background:image-set(\"../assets/a.png\" type(\"image/png\") 1x)}", true),
+        ] {
+            let out = confine(css, local).unwrap();
+            assert_eq!(
+                out.contains("image-set(") || out.contains("image(") || out.contains("cross-fade(") || out.contains("src("),
+                kept,
+                "{css}\n=> {out}"
+            );
+            if !kept {
+                assert!(out.contains("url(\"about:invalid\")"), "{out}");
+            }
+            // What went is the function that made a picture; a string left in a custom
+            // property is only text without it.
+            for gone in ["var(", "made-up(", "attr(", "env("] {
+                assert!(!out.contains(gone), "{gone}: {out}");
+            }
+            assert_eq!(confine(&out, local).unwrap(), out, "confining again changes nothing");
+        }
+        // Inside an allowed image function, a string that is not the copy's own file goes too.
+        let out = confine(".k{background:image-set(\"//attacker.example/a.png\" 1x, linear-gradient(red, blue) 2x)}", local).unwrap();
+        assert!(!out.contains("attacker.example") && out.contains("linear-gradient(red, blue)"), "{out}");
+    }
+
+    /// The verification of round 1 (V2): a sheet that says `@charset "ISO-2022-JP"` and hides
+    /// an `@import` behind an escape byte, which that encoding reads as nothing.
+    #[test]
+    fn a_saved_sheet_is_read_as_utf_8_like_it_was_checked() {
+        let esc = '\u{1b}';
+        let css = format!(
+            "\u{feff}@charset \"ISO-2022-JP\";\n/* *{esc}(B/@import url(//attacker.example/share/x.css);/**/\n.m {{ color: red; }}\u{7f}\u{0}"
+        );
+        let plain = plain_text(&css);
+        assert!(!plain.contains(esc) && !plain.contains('\u{feff}') && !plain.contains('\u{0}') && !plain.contains('\u{7f}'), "{plain:?}");
+        assert!(!plain.to_ascii_lowercase().contains("@charset"), "{plain:?}");
+        assert!(plain.starts_with('\n'), "{plain:?}");
+        // Read as UTF-8 (the byte order mark makes the browser do so), the import is still
+        // inside the comment, as checked.
+        assert!(find_raw_urls(&plain).refs.is_empty(), "{plain:?}");
+        assert_eq!(plain_text(&plain), plain);
+        assert_eq!(plain_text("a{b:c}\t\u{c}\r\n"), "a{b:c}\t\u{c}\r\n");
+        assert_eq!(plain_text("@CHARSET \"x\"; a{}"), " a{}");
+        assert!(confine(&css, |_| true).is_some_and(|c| !c.contains(esc) && !c.contains("@charset")));
+        assert_eq!(BOM, "\u{feff}".as_bytes());
     }
 
     #[test]

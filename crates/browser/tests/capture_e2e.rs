@@ -27,6 +27,8 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 struct Page {
+    /// 200, or 302 (a redirect without a `Location`, which the browser shows as a page).
+    status: u16,
     mime: &'static str,
     body: Vec<u8>,
 }
@@ -83,11 +85,14 @@ async fn serve(pages: HashMap<String, Page>) -> Site {
                 log.lock().unwrap().push(path.clone());
                 let key = path.split('?').next().unwrap_or("/").to_string();
                 let (status, mime, body) = match pages.get(&key) {
+                    Some(p) if p.status == 302 => ("302 Found", p.mime, p.body.clone()),
                     Some(p) => ("200 OK", p.mime, p.body.clone()),
                     None => ("404 Not Found", "text/plain", b"not found".to_vec()),
                 };
+                // Any page may read every answer (as a device on the network may allow), so
+                // whatever a request that got through brought back could reach the copy.
                 let head = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+                    "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
                     body.len()
                 );
                 let _ = sock.write_all(head.as_bytes()).await;
@@ -163,7 +168,14 @@ var s = document.createElement('style'); document.head.appendChild(s); s.sheet.i
     let sprite = r##"<svg xmlns="http://www.w3.org/2000/svg"><symbol id="dot" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="#33f"/></symbol><script>alert(3)</script></svg>"##;
     let mut pages = HashMap::new();
     let mut add = |path: &str, mime: &'static str, body: Vec<u8>| {
-        pages.insert(path.to_string(), Page { mime, body });
+        pages.insert(
+            path.to_string(),
+            Page {
+                status: 200,
+                mime,
+                body,
+            },
+        );
     };
     add("/", "text/html; charset=utf-8", html.into_bytes());
     add("/css/site.css", "text/css", css.as_bytes().to_vec());
@@ -346,6 +358,7 @@ async fn a_capture_saves_the_page_styles_files_animations_and_screenshots() {
     let secret = serve(HashMap::from([(
         "/secret.png".to_string(),
         Page {
+            status: 200,
             mime: "image/png",
             body: png(10, 10, [255, 0, 0]),
         },
@@ -823,10 +836,12 @@ fn hostile_pages(beacon: u16, ws: u16) -> HashMap<String, Page> {
     );
     let svg64 = base64::engine::general_purpose::STANDARD.encode(svg_doc);
     let html = |s: String| Page {
+        status: 200,
         mime: "text/html; charset=utf-8",
         body: s.into_bytes(),
     };
     let svg = |s: String| Page {
+        status: 200,
         mime: "image/svg+xml",
         body: s.into_bytes(),
     };
@@ -889,6 +904,11 @@ fn hostile_pages(beacon: u16, ws: u16) -> HashMap<String, Page> {
         r#"<!DOCTYPE html><html><head><title>Sockets</title></head><body><h1>Sockets</h1><p id="out">waiting</p>
 <script>try {{ var ws = new WebSocket('ws://127.0.0.1:{ws}/ws-secret'); ws.onmessage = function(m){{ document.getElementById('out').textContent = 'LAN data: ' + m.data; }}; }} catch (e) {{}}</script></body></html>"#
     );
+    // A redirect without a `Location` is shown as a page, so it gets the capture's policy.
+    let page_g = format!(
+        r#"<!DOCTYPE html><html><head><title>No location</title></head><body><h1>A redirect without a Location</h1><p id="out">waiting</p>
+<script>try {{ var ws = new WebSocket('ws://127.0.0.1:{ws}/ws-302'); ws.onmessage = function(m){{ document.getElementById('out').textContent = 'LAN data: ' + m.data; }}; }} catch (e) {{}}</script></body></html>"#
+    );
     HashMap::from([
         ("/a/".to_string(), html(page_a)),
         ("/b/".to_string(), html(page_b)),
@@ -903,11 +923,19 @@ fn hostile_pages(beacon: u16, ws: u16) -> HashMap<String, Page> {
         (
             "/f/site.css".to_string(),
             Page {
+                status: 200,
                 mime: "text/css",
                 body: css_f.as_bytes().to_vec(),
             },
         ),
         ("/e/".to_string(), html(page_e)),
+        (
+            "/g/".to_string(),
+            Page {
+                status: 302,
+                ..html(page_g)
+            },
+        ),
     ])
 }
 
@@ -940,7 +968,7 @@ async fn capture_into(
 /// copy is parsed as a browser parses it and every element and attribute is looked at
 /// (page text may well quote markup; it is only text).
 fn assert_inert_files(folder: &Path, beacon: u16, site: u16) {
-    let index = std::fs::read_to_string(folder.join("index.html")).unwrap();
+    let index = read_copy(&folder.join("index.html"));
     assert!(
         index.contains("<html")
             && index.contains("<head><meta http-equiv=\"Content-Security-Policy\""),
@@ -1023,14 +1051,126 @@ fn assert_inert_files(folder: &Path, beacon: u16, site: u16) {
         "{}: {problems:?}\n{index}",
         folder.display()
     );
-    if let Ok(dir) = std::fs::read_dir(folder.join("styles")) {
-        for e in dir {
-            let css = std::fs::read_to_string(e.unwrap().path()).unwrap();
-            for bad in ["file:", "attacker.example", "u\\72l", "127.0.0.1"] {
-                assert!(!css.contains(bad), "{bad} in a saved style sheet: {css}");
-            }
+    for css in plain_sheets(folder) {
+        for bad in ["file:", "attacker.example", "u\\72l", "127.0.0.1"] {
+            assert!(!css.contains(bad), "{bad} in a saved style sheet: {css}");
         }
     }
+}
+
+const BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// A text file of the copy, which starts with a UTF-8 byte order mark (so a browser reads
+/// it as UTF-8 whatever it declares), without the mark.
+fn read_copy(path: &Path) -> String {
+    let bytes = std::fs::read(path).unwrap();
+    assert!(
+        bytes.starts_with(BOM),
+        "{} starts with a UTF-8 byte order mark",
+        path.display()
+    );
+    String::from_utf8(bytes[BOM.len()..].to_vec()).unwrap()
+}
+
+/// The saved style sheets: each read as UTF-8 by a browser too (a byte order mark, no
+/// `@charset`, no control characters but tab and line ends), so what the capture checked is
+/// what a browser reads.
+fn plain_sheets(folder: &Path) -> Vec<String> {
+    let Ok(dir) = std::fs::read_dir(folder.join("styles")) else {
+        return Vec::new();
+    };
+    let mut sheets = Vec::new();
+    for e in dir {
+        let path = e.unwrap().path();
+        let css = read_copy(&path);
+        assert!(
+            !css.trim_start().to_ascii_lowercase().starts_with("@charset"),
+            "{}: {css}",
+            path.display()
+        );
+        assert!(
+            !css.chars()
+                .any(|c| c.is_ascii_control() && !matches!(c, '\t' | '\n' | '\r' | '\x0c')),
+            "{}: a control character: {css:?}",
+            path.display()
+        );
+        sheets.push(css);
+    }
+    sheets
+}
+
+/// Opens `file` from disk in a separate headless browser driven over its debugging channel,
+/// and returns every address it asked for outside the file's own folder (`file:` ones too,
+/// which no proxy sees), besides `data:` and `about:` ones, and every WebSocket it opened.
+async fn requests_outside(file: &Path, work: &Path) -> Vec<String> {
+    let exe = browser::find_browser(None, None).unwrap().path;
+    let profile = tempfile::tempdir_in(work).unwrap();
+    let mut config = BrowserConfig::new(profile.path().join("profile"));
+    config.headless = true;
+    config.no_sandbox = true;
+    config.connection = ConnectionMode::Pipe;
+    let launched = browser::launch::launch(&exe, &config)
+        .await
+        .expect("start the browser");
+    let (cdp, mut events) = browser::cdp::Cdp::start(launched.transport);
+    let wait = Duration::from_secs(20);
+    let target = cdp
+        .call(
+            "Target.createTarget",
+            json!({"url": "about:blank"}),
+            None,
+            wait,
+        )
+        .await
+        .unwrap();
+    let attached = cdp
+        .call(
+            "Target.attachToTarget",
+            json!({"targetId": target["targetId"], "flatten": true}),
+            None,
+            wait,
+        )
+        .await
+        .unwrap();
+    let session = attached["sessionId"].as_str().unwrap().to_string();
+    cdp.call("Network.enable", json!({}), Some(&session), wait)
+        .await
+        .unwrap();
+    let url = url::Url::from_file_path(file).unwrap().to_string();
+    cdp.call("Page.navigate", json!({"url": url}), Some(&session), wait)
+        .await
+        .unwrap();
+    let mut seen: Vec<String> = Vec::new();
+    let until = tokio::time::Instant::now() + Duration::from_secs(4);
+    while let Ok(Some(event)) = tokio::time::timeout_at(until, events.recv()).await {
+        if event.session_id.as_deref() != Some(session.as_str()) {
+            continue;
+        }
+        let text = |p: &str| {
+            event
+                .params
+                .pointer(p)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        match event.method.as_str() {
+            "Network.requestWillBeSent" => seen.push(text("/request/url")),
+            "Network.webSocketCreated" => seen.push(format!("WebSocket {}", text("/url"))),
+            _ => {}
+        }
+    }
+    drop(cdp);
+    drop(launched.child);
+    assert!(
+        seen.contains(&url),
+        "the recorder saw the file itself load: {seen:?}"
+    );
+    let own = url::Url::from_directory_path(file.parent().unwrap())
+        .unwrap()
+        .to_string();
+    seen.retain(|u| !u.starts_with(&own) && !u.starts_with("data:") && !u.starts_with("about:"));
+    seen
 }
 
 /// Opens `file` from disk in a separate browser run with every request sent to a
@@ -1089,7 +1229,7 @@ async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
     );
     beacon.log.lock().unwrap().clear();
 
-    for page in ["a", "b", "c", "f", "e"] {
+    for page in ["a", "b", "c", "f", "e", "g"] {
         let into = approved.join(page);
         let (failed, text) =
             capture_into(&server, &chat, &site.url(&format!("/{page}/")), &into).await;
@@ -1102,7 +1242,9 @@ async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
             "/{page}/: the copy made requests: {seen:?}"
         );
         assert!(!dom.contains("data-pwned"), "/{page}/: {dom}");
-        let index = std::fs::read_to_string(folder.join("index.html")).unwrap();
+        let seen = requests_outside(&folder.join("index.html"), work.path()).await;
+        assert!(seen.is_empty(), "/{page}/: the copy asked for {seen:?}");
+        let index = read_copy(&folder.join("index.html"));
         match page {
             "a" => assert!(index.contains("Copy of the page"), "{index}"),
             "b" => {
@@ -1140,9 +1282,11 @@ async fn hostile_pages_leave_an_inert_copy_that_loads_nothing() {
                     let (dom, seen) = open_recorded(&svg, work.path(), &beacon).await;
                     assert!(seen.is_empty(), "{}: requests {seen:?}", svg.display());
                     assert!(!dom.contains("data-pwned"), "{}: {dom}", svg.display());
+                    let seen = requests_outside(&svg, work.path()).await;
+                    assert!(seen.is_empty(), "{}: asked for {seen:?}", svg.display());
                 }
             }
-            "e" => {
+            "e" | "g" => {
                 assert!(index.contains("<p id=\"out\">waiting</p>"), "{index}");
                 assert!(!index.contains("LAN data"), "{index}");
             }
@@ -1188,4 +1332,472 @@ async fn a_websocket_that_starts_stops_the_capture_and_nothing_is_saved() {
     );
     let left = std::fs::read_dir(&into).map(|d| d.count()).unwrap_or(0);
     assert_eq!(left, 0, "no capture folder is left");
+}
+
+/// Pages whose CSS hides addresses from a check that reads it differently than a browser
+/// does, and responses asked for as pictures that are not pictures (the round-1
+/// verification's V1, V2, U and U2). `marks` is a folder outside every copy: a copy that
+/// names a file there would load it when opened (`//localhost/...` is a `file:` address).
+fn trick_pages(beacon: u16, marks: &Path) -> HashMap<String, Page> {
+    let b = format!("http://127.0.0.1:{beacon}");
+    let mark = marks.display();
+    let page = |mime: &'static str, body: String| Page {
+        status: 200,
+        mime,
+        body: body.into_bytes(),
+    };
+    // V1: an address reached through var() (or env(), or a function made up) inside
+    // image-set() and its relatives, in the page, an element's style, a saved sheet, an SVG
+    // style element and an SVG picture.
+    let v1 = format!(
+        r#"<!DOCTYPE html><html lang="en"><head><title>V1 var image-set</title>
+<link rel="stylesheet" href="/v1/site.css">
+<style>
+:root {{ --u1: "//attacker.example/share/V1-inline.png"; --l1: "//localhost{mark}/red.png"; }}
+.a {{ width: 60px; height: 60px; background-image: image-set(var(--u1) 1x); }}
+.l {{ width: 60px; height: 60px; background-image: image-set(var(--l1) 1x); }}
+.h {{ width: 60px; height: 60px; --hh: "{b}/BEACON-V1-http.png"; background-image: -webkit-image-set(var(--hh) 1x); }}
+.e {{ width: 60px; height: 60px; background-image: image-set(env(--nothing, "//localhost{mark}/red.png") 1x); }}
+.x {{ width: 60px; height: 60px; background-image: cross-fade(var(--l1) 50%, url(/v1/ok.png)); }}
+.ok {{ width: 60px; height: 60px; background-image: image-set(url(/v1/ok.png) 1x, "/v1/ok.png" 2x); }}
+</style></head><body><h1>V1</h1>
+<div class="a">a</div><div class="l">l</div><div class="h">h</div><div class="e">e</div><div class="x">x</div><div class="ok">ok</div>
+<div style="--u3: '//attacker.example/share/V1-attr.png'; width:60px;height:60px;background-image:image-set(var(--u3) 1x)">attr</div>
+<div style="--l3: '//localhost{mark}/green.png'; width:60px;height:60px;background-image:image-set(var(--l3) 1x)">attr-l</div>
+<div class="d">d</div><div class="dl">dl</div>
+<svg width="70" height="70"><style>.sv {{ --sv: "//localhost{mark}/magenta.png"; background-image: image-set(var(--sv) 1x); }}</style><rect class="sv" width="10" height="10"/></svg>
+<img src="/v1/pic.svg" width="40" height="40">
+</body></html>"#
+    );
+    let v1_css = format!(
+        r#":root {{ --u4: "//attacker.example/share/V1-sheet.png"; --l4: "//localhost{mark}/blue.png"; }}
+.d {{ width:60px; height:60px; background-image: image-set(var(--u4) 1x); }}
+.dl {{ width:60px; height:60px; background-image: image(var(--l4)); }}
+"#
+    );
+    let v1_svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" style="--u:'//localhost{mark}/yellow.png';background-image:image-set(var(--u) 1x)"><style>svg {{ --v: "//localhost{mark}/yellow.png"; }} rect {{ mask-image: image-set(var(--v) 1x); cursor: image-set(made-up(--v) 1x), auto; }}</style><rect width="100" height="100" fill="green"/></svg>"#
+    );
+    // V2: a sheet that declares ISO-2022-JP, where ESC ( B is invisible: read as UTF-8 the
+    // address is inside a comment, read as ISO-2022-JP the comment ends before it.
+    let hidden = |decl: String| format!("/* *\x1b(B/{decl}/**/");
+    let v2 = format!(
+        r#"<!DOCTYPE html><html lang="en"><head><title>V2 charset</title>
+<link rel="stylesheet" href="/v2/site.css">
+<style>@charset "ISO-2022-JP";
+.j {{ width:60px; height:60px; outline: 1px solid #000; {} }}
+.k {{ width:60px; height:60px; outline: 1px solid #000; {} }}
+</style></head><body><h1>V2</h1><div class="j">j</div><div class="k">k</div><div class="m">m</div><div class="n">n</div>
+</body></html>"#,
+        hidden(format!("background-image:url(//localhost{mark}/orange.png);")),
+        hidden("background-image:url(//attacker.example/share/V2-inline.png);".into()),
+    );
+    let v2_css = format!(
+        "@charset \"ISO-2022-JP\";\n{}\n.m {{ width:60px; height:60px; outline: 1px solid #000; {} }}\n.n {{ width:60px; height:60px; {} }}\n",
+        hidden("@import url(//attacker.example/share/V2-import.css);".into()),
+        hidden(format!("background-image:url(//localhost{mark}/cyan.png);")),
+        hidden("background-image:url(//attacker.example/share/V2-sheet.png);".into()),
+    );
+    // U: a disk image and a page asked for as pictures; U2: a disk image fetched by a script
+    // and served as image/x-cd-image.
+    let mut iso = vec![0u8; 64 * 1024];
+    iso[0x8000..0x8006].copy_from_slice(b"\x01CD001");
+    iso[0x8028..0x8028 + 11].copy_from_slice(b"HARNESSTEST");
+    let u = r#"<!DOCTYPE html><html><head><title>U</title></head><body><h1>U</h1><img src="/u/disk" width="10" height="10"><img src="/u/page" width="10" height="10"></body></html>"#;
+    let u2 = r#"<!DOCTYPE html><html><head><title>U2</title></head><body><h1>U2</h1><script>fetch("/u/installer").then(r => r.arrayBuffer()).then(b => { document.body.dataset.got = b.byteLength; });</script></body></html>"#;
+    HashMap::from([
+        ("/v1/".into(), page("text/html; charset=utf-8", v1)),
+        ("/v1/site.css".into(), page("text/css", v1_css)),
+        ("/v1/pic.svg".into(), page("image/svg+xml", v1_svg)),
+        (
+            "/v1/ok.png".into(),
+            Page {
+                status: 200,
+                mime: "image/png",
+                body: png(8, 8, [20, 160, 60]),
+            },
+        ),
+        ("/v2/".into(), page("text/html; charset=utf-8", v2)),
+        ("/v2/site.css".into(), page("text/css", v2_css)),
+        ("/u/".into(), page("text/html; charset=utf-8", u.into())),
+        (
+            "/u/disk".into(),
+            Page {
+                status: 200,
+                mime: "application/octet-stream",
+                body: iso.clone(),
+            },
+        ),
+        (
+            "/u/page".into(),
+            page(
+                "text/html",
+                "<!DOCTYPE html><html><body><script>document.title='ran'</script>a page served for a picture</body></html>".into(),
+            ),
+        ),
+        ("/u2/".into(), page("text/html; charset=utf-8", u2.into())),
+        (
+            "/u/installer".into(),
+            Page {
+                status: 200,
+                mime: "image/x-cd-image",
+                body: iso,
+            },
+        ),
+    ])
+}
+
+/// Every file of a capture folder, below it.
+fn files_below(folder: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut todo = vec![folder.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let path = e.unwrap().path();
+            if path.is_dir() {
+                todo.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+fn holds(path: &Path, needle: &[u8]) -> bool {
+    std::fs::read(path)
+        .unwrap()
+        .windows(needle.len())
+        .any(|w| w == needle)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn css_tricks_and_odd_pictures_leave_a_copy_that_loads_nothing() {
+    if !have_browser() {
+        return;
+    }
+    let beacon = serve(HashMap::new()).await;
+    let work = tempfile::tempdir().unwrap();
+    let marks = work.path().join("marks");
+    std::fs::create_dir(&marks).unwrap();
+    for (name, rgb) in [
+        ("red", [255, 0, 0]),
+        ("green", [0, 255, 0]),
+        ("blue", [0, 0, 255]),
+        ("magenta", [255, 0, 255]),
+        ("yellow", [255, 255, 0]),
+        ("orange", [255, 160, 0]),
+        ("cyan", [0, 255, 255]),
+    ] {
+        std::fs::write(marks.join(format!("{name}.png")), png(8, 8, rgb)).unwrap();
+    }
+    let site = serve(trick_pages(beacon.port, &marks)).await;
+    let approved = work.path().join("approved");
+    std::fs::create_dir(&approved).unwrap();
+    let chat = chat(&approved);
+    let server = server(&[site.port], work.path());
+
+    // The instrument works: a file that loads a file outside its folder, or names another
+    // computer, shows up.
+    let control = work.path().join("control");
+    std::fs::create_dir(&control).unwrap();
+    std::fs::write(
+        control.join("index.html"),
+        format!(
+            "<!DOCTYPE html><div style=\"width:9px;height:9px;background-image:url(//localhost{}/red.png)\"></div><img src=\"//attacker.example/share/control.png\">",
+            marks.display()
+        ),
+    )
+    .unwrap();
+    let seen = requests_outside(&control.join("index.html"), work.path()).await;
+    assert!(
+        seen.iter().any(|u| u.ends_with("/marks/red.png"))
+            && seen.iter().any(|u| u.contains("attacker.example")),
+        "the recorder saw: {seen:?}"
+    );
+
+    for page in ["v1", "v2", "u", "u2"] {
+        let into = approved.join(page);
+        let (failed, text) =
+            capture_into(&server, &chat, &site.url(&format!("/{page}/")), &into).await;
+        assert!(!failed, "/{page}/: {text}");
+        let folder = only_dir(&dunce::canonicalize(&into).unwrap());
+        let sheets = plain_sheets(&folder);
+        let seen = requests_outside(&folder.join("index.html"), work.path()).await;
+        assert!(seen.is_empty(), "/{page}/: the copy asked for {seen:?}");
+        let index = read_copy(&folder.join("index.html"));
+        let report = std::fs::read_to_string(folder.join("report.md")).unwrap();
+        let all_css = format!("{index}\n{}", sheets.join("\n"));
+        match page {
+            "v1" => {
+                for made in ["var(", "env(", "made-up(", "image(", "cross-fade("] {
+                    let inside = all_css
+                        .match_indices("image-set(")
+                        .any(|(i, _)| all_css[i..].split(')').next().unwrap_or("").contains(made));
+                    assert!(!inside, "{made} is left inside an image function: {all_css}");
+                }
+                assert!(
+                    !all_css.contains("image(var(") && !all_css.contains("cross-fade(var("),
+                    "{all_css}"
+                );
+                assert!(
+                    all_css.contains("assets/ok.png"),
+                    "a literal address in image-set() is kept: {all_css}"
+                );
+                let svgs: Vec<PathBuf> = files_below(&folder)
+                    .into_iter()
+                    .filter(|p| p.extension().is_some_and(|x| x == "svg"))
+                    .collect();
+                assert!(!svgs.is_empty(), "the SVG picture is saved");
+                for svg in svgs {
+                    let seen = requests_outside(&svg, work.path()).await;
+                    assert!(seen.is_empty(), "{}: asked for {seen:?}", svg.display());
+                    let text = std::fs::read_to_string(&svg).unwrap();
+                    assert!(
+                        !text.contains("var(--u)") && !text.contains("made-up("),
+                        "{text}"
+                    );
+                }
+            }
+            "v2" => {
+                assert!(!all_css.contains('\x1b'), "{all_css:?}");
+                assert!(
+                    !all_css.to_ascii_lowercase().contains("@charset"),
+                    "{all_css}"
+                );
+            }
+            _ => {
+                for file in files_below(&folder) {
+                    assert!(
+                        !holds(&file, b"HARNESSTEST") && !holds(&file, b"a page served for"),
+                        "{} holds what was asked for as a picture but is none",
+                        file.display()
+                    );
+                    assert!(
+                        file.extension().is_none_or(|x| x != "img"),
+                        "{}",
+                        file.display()
+                    );
+                }
+                assert!(
+                    report.contains("not a picture format the copy keeps"),
+                    "/{page}/: {report}"
+                );
+            }
+        }
+    }
+    assert!(beacon.requests().is_empty(), "{:?}", beacon.requests());
+}
+
+/// Pages whose workers ask a device on the network for its data and hand it to the page: a
+/// shared worker (fetch and XHR), a service worker (when it installs and when the page
+/// writes to it; it also remembers what it fetched), and a dedicated worker.
+/// (The round-1 verification's /wsh2/, /wsw/ and /wd/.)
+fn worker_pages(secret: u16) -> HashMap<String, Page> {
+    let s = format!("http://127.0.0.1:{secret}");
+    let page = |title: &str, code: &str| Page {
+        status: 200,
+        mime: "text/html; charset=utf-8",
+        body: format!(
+            r#"<!DOCTYPE html><html lang="en"><head><title>{title}</title></head><body><h1>{title}</h1><p id="out">waiting</p><script>
+function say(t) {{ document.getElementById('out').textContent += ' | ' + t; }}
+{code}
+</script></body></html>"#
+        )
+        .into_bytes(),
+    };
+    let js = |code: String| Page {
+        status: 200,
+        mime: "application/javascript",
+        body: code.into_bytes(),
+    };
+    let then = |what: &str, tell: &str| {
+        format!(
+            "fetch('{s}/LAN-{what}').then(function (r) {{ return r.text(); }}).then(function (t) {{ {tell}('{what}: ' + t); }}, function () {{ {tell}('{what} failed'); }});"
+        )
+    };
+    let shared = format!(
+        "var ports = [], got = []; onconnect = function (e) {{ var p = e.ports[0]; ports.push(p); p.start(); got.forEach(function (g) {{ p.postMessage(g); }}); }}; function send(t) {{ got.push(t); ports.forEach(function (p) {{ p.postMessage(t); }}); }} {} var x = new XMLHttpRequest(); x.open('GET', '{s}/LAN-shared-xhr'); x.onload = function () {{ send('shared-xhr: ' + x.responseText); }}; x.onloadend = function () {{ if (!x.status) send('shared-xhr failed'); }}; x.send();",
+        then("shared-fetch", "send")
+    );
+    let service = format!(
+        "function tell(t) {{ self.clients.matchAll({{includeUncontrolled: true}}).then(function (cs) {{ cs.forEach(function (c) {{ c.postMessage(t); }}); }}); }} self.addEventListener('install', function (e) {{ self.skipWaiting(); e.waitUntil(fetch('{s}/LAN-sw-install').then(function (r) {{ return r.text(); }}).then(function (t) {{ self.lan = t; tell('sw-install: ' + t); }}, function () {{ tell('sw-install failed'); }})); }}); self.addEventListener('activate', function (e) {{ e.waitUntil(self.clients.claim()); }}); self.addEventListener('message', function (e) {{ var reply = function (t) {{ e.source.postMessage(t); }}; if (self.lan) reply('remembered: ' + self.lan); {} }});",
+        then("sw-message", "reply")
+    );
+    let register = |dir: &str| {
+        format!(
+            "navigator.serviceWorker.onmessage = function (m) {{ say(m.data); }}; navigator.serviceWorker.register('/{dir}/sw.js').then(function () {{ return navigator.serviceWorker.ready; }}).then(function (r) {{ r.active.postMessage('hello'); }}, function (e) {{ say('no service worker: ' + e); }});"
+        )
+    };
+    HashMap::from([
+        (
+            "/wsh/".into(),
+            page(
+                "Shared",
+                "var w = new SharedWorker('/wsh/shared.js'); w.port.onmessage = function (m) { say(m.data); }; w.port.start();",
+            ),
+        ),
+        ("/wsh/shared.js".into(), js(shared)),
+        ("/wsw/".into(), page("Service", &register("wsw"))),
+        ("/wsw/sw.js".into(), js(service.clone())),
+        ("/wsp/".into(), page("Service before", &register("wsp"))),
+        ("/wsp/sw.js".into(), js(service)),
+        (
+            "/wd/".into(),
+            page(
+                "Dedicated",
+                "var w = new Worker('/wd/worker.js'); w.onmessage = function (m) { say(m.data); };",
+            ),
+        ),
+        (
+            "/wd/worker.js".into(),
+            js(then("dedicated-fetch", "postMessage")),
+        ),
+    ])
+}
+
+async fn navigate(server: &BrowserServer, chat: &ChatContext, url: &str) {
+    let a = json!({ "url": url });
+    let action = match server.describe("browser_navigate", &args(a.clone()), chat).await {
+        Described::Action(action) => action,
+        Described::Invalid(why) => panic!("not describable: {why}"),
+    };
+    let out = server
+        .call(
+            "browser_navigate",
+            &args(a),
+            &action,
+            CallContext {
+                chat: chat.clone(),
+                cancel: CancellationToken::new(),
+                progress: None,
+            },
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.joined_text());
+}
+
+/// Nothing a capture saved or said holds the device's data.
+fn assert_no_secret(folder: &Path, text: &str) {
+    assert!(!text.contains("LAN-SECRET"), "{text}");
+    for file in files_below(folder) {
+        assert!(
+            !holds(&file, b"LAN-SECRET"),
+            "{} holds the device's data: {}",
+            file.display(),
+            String::from_utf8_lossy(&std::fs::read(&file).unwrap())
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_of_workers_are_checked_and_workers_that_ran_before_are_stopped() {
+    if !have_browser() {
+        return;
+    }
+    // A "device on the network": loopback, on a port the browser's rules do not allow.
+    let secret = serve(
+        [
+            "shared-fetch",
+            "shared-xhr",
+            "sw-install",
+            "sw-message",
+            "dedicated-fetch",
+        ]
+        .into_iter()
+        .map(|what| {
+            (
+                format!("/LAN-{what}"),
+                Page {
+                    status: 200,
+                    mime: "text/plain",
+                    body: format!("LAN-SECRET-{what}").into_bytes(),
+                },
+            )
+        })
+        .collect(),
+    )
+    .await;
+    let site = serve(worker_pages(secret.port)).await;
+    let work = tempfile::tempdir().unwrap();
+    let approved = work.path().join("approved");
+    std::fs::create_dir(&approved).unwrap();
+    let chat = chat(&approved);
+    let server = server(&[site.port], work.path());
+
+    // A service worker does not run during a capture: the browser cannot be made to pause
+    // the requests of one installed before, so none is let run. The others run, checked.
+    for (page, refused) in [
+        ("wsh", &["shared-fetch failed", "shared-xhr failed"][..]),
+        ("wsw", &[][..]),
+        ("wd", &["dedicated-fetch failed"][..]),
+    ] {
+        let into = approved.join(page);
+        let (failed, text) =
+            capture_into(&server, &chat, &site.url(&format!("/{page}/")), &into).await;
+        assert!(!failed, "/{page}/: {text}");
+        let folder = only_dir(&dunce::canonicalize(&into).unwrap());
+        assert_no_secret(&folder, &text);
+        assert_inert_files(&folder, secret.port, site.port);
+        let index = read_copy(&folder.join("index.html"));
+        let report = std::fs::read_to_string(folder.join("report.md")).unwrap();
+        for what in refused {
+            // The worker ran (it was not held), and its request was refused by the checks.
+            assert!(index.contains(what), "/{page}/: {what}: {index}");
+            let name = what.trim_end_matches(" failed");
+            assert!(
+                report.contains(&format!("LAN-{name}")),
+                "/{page}/: the report lists the refused request: {report}"
+            );
+        }
+        if page == "wsw" {
+            assert!(index.contains("<p id=\"out\">waiting</p>"), "{index}");
+            assert!(
+                report.contains("service worker was not let run"),
+                "{report}"
+            );
+        } else {
+            assert!(!report.contains("service worker"), "{report}");
+        }
+    }
+    assert!(
+        secret.requests().is_empty(),
+        "a worker's request got past the checks: {:?}",
+        secret.requests()
+    );
+
+    // Outside a capture a worker's requests are not checked one by one, so a service worker
+    // that ran before may hold what it fetched then (and one installed before would not
+    // have its requests paused); the capture stops it first and does not let it run again.
+    navigate(&server, &chat, &site.url("/wsp/")).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !secret.requests().iter().any(|r| r == "/LAN-sw-message") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the service worker did not run before the capture: {:?}",
+            secret.requests()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before = secret.requests().len();
+    let into = approved.join("wsp");
+    let (failed, text) = capture_into(&server, &chat, &site.url("/wsp/"), &into).await;
+    assert!(!failed, "/wsp/: {text}");
+    let folder = only_dir(&dunce::canonicalize(&into).unwrap());
+    assert_no_secret(&folder, &text);
+    let index = read_copy(&folder.join("index.html"));
+    assert!(index.contains("<p id=\"out\">waiting</p>"), "{index}");
+    let report = std::fs::read_to_string(folder.join("report.md")).unwrap();
+    assert!(
+        report.contains("service worker was not let run"),
+        "{report}"
+    );
+    assert_eq!(
+        secret.requests().len(),
+        before,
+        "a request got past the checks during the capture: {:?}",
+        secret.requests()
+    );
+    server.shutdown().await;
 }

@@ -114,6 +114,8 @@ pub enum SkipReason {
     Partial,
     Gone,
     UnsafePicture,
+    /// A picture or icon whose first bytes are not a picture format the copy keeps.
+    UnknownPicture,
     Failed(String),
 }
 
@@ -143,7 +145,10 @@ impl SkipReason {
             }
             SkipReason::Gone => "the browser no longer held it".into(),
             SkipReason::UnsafePicture => {
-                "an SVG picture with scripts in it that could not be removed safely".into()
+                "an SVG picture that could not be read as plain SVG (not well-formed, or with a document type), so it could hold something that runs".into()
+            }
+            SkipReason::UnknownPicture => {
+                "its bytes are not a picture format the copy keeps (PNG, JPEG, GIF, WebP, AVIF, SVG, ICO or BMP)".into()
             }
             SkipReason::Failed(why) => format!("it failed to load ({why})"),
         }
@@ -291,16 +296,22 @@ fn is_font_ext(ext: &str) -> bool {
 /// The extension a kept file gets: from its first bytes when they say what it is, else
 /// from its media type, else from the address when that is one the kind allows, else a
 /// plain fallback. Always one of the app's own extensions.
-pub fn extension_for(kind: Kind, mime: &str, url: &str, head: &[u8]) -> &'static str {
+pub fn extension_for(kind: Kind, mime: &str, url: &str, head: &[u8]) -> Option<&'static str> {
     if kind == Kind::StyleSheet {
-        return "css";
+        return Some("css");
     }
     if kind == Kind::Script {
-        return "js.txt";
+        return Some("js.txt");
+    }
+    if matches!(kind, Kind::Picture | Kind::Icon) {
+        // A picture is kept only when its first bytes say which picture format it is. Its
+        // name and type never give the extension, and bytes nobody recognises are not kept
+        // (a disk image saved as `.img` would be opened by a double-click).
+        return sniff(head).filter(|e| PICTURE_FORMATS.contains(e));
     }
     if let Some(e) = sniff(head) {
-        // A picture's bytes decide; a font that sniffs as a picture is still a picture.
-        return e;
+        // The bytes decide; a font that sniffs as a picture is still a picture.
+        return Some(e);
     }
     let mime = mime
         .split(';')
@@ -334,28 +345,27 @@ pub fn extension_for(kind: Kind, mime: &str, url: &str, head: &[u8]) -> &'static
         _ => None,
     };
     if let Some(e) = by_mime {
-        return e;
+        return Some(e);
     }
     let allowed: &[&'static str] = match kind {
         Kind::Font => &["woff2", "woff", "ttf", "otf", "eot"],
-        Kind::Picture | Kind::Icon => &[
-            "png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "ico", "bmp",
-        ],
         Kind::Animation => &["json", "lottie"],
         Kind::Video => &["mp4", "webm", "ogv", "mp3", "ogg", "wav"],
-        Kind::StyleSheet | Kind::Script => &[],
+        Kind::Picture | Kind::Icon | Kind::StyleSheet | Kind::Script => &[],
     };
     let from_url = crate::capture::names::extension_of_url(url).unwrap_or_default();
     if let Some(e) = allowed.iter().find(|e| **e == from_url) {
-        return if *e == "jpeg" { "jpg" } else { e };
+        return Some(e);
     }
-    match kind {
+    Some(match kind {
         Kind::Font => "font",
         Kind::Animation => "json",
-        Kind::Video => "media",
-        _ => "img",
-    }
+        _ => "media",
+    })
 }
+
+/// Picture formats a capture keeps, each told by its first bytes ([`sniff`]).
+const PICTURE_FORMATS: &[&str] = &["png", "jpg", "gif", "webp", "avif", "svg", "ico", "bmp"];
 
 /// What a file's first bytes say it is.
 pub fn sniff(head: &[u8]) -> Option<&'static str> {
@@ -383,6 +393,8 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
         Some("ttf")
     } else if starts(&[0x00, 0x00, 0x01, 0x00]) {
         Some("ico")
+    } else if head.len() >= 10 && starts(b"BM") && head[6..10] == [0, 0, 0, 0] {
+        Some("bmp")
     } else if starts(&[0x1A, 0x45, 0xDF, 0xA3]) {
         Some("webm")
     } else if head.len() >= 8 && &head[4..8] == b"ftyp" {
@@ -395,7 +407,7 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
 }
 
 fn looks_like_svg(head: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(&head[..head.len().min(512)]).to_ascii_lowercase();
+    let text = String::from_utf8_lossy(&head[..head.len().min(1024)]).to_ascii_lowercase();
     let t = text.trim_start_matches('\u{feff}').trim_start();
     (t.starts_with("<svg") || (t.starts_with("<?xml") && t.contains("<svg")))
         || (t.starts_with("<!--") && t.contains("<svg"))
@@ -818,36 +830,40 @@ mod tests {
         let png = b"\x89PNG\r\n\x1a\n0000";
         assert_eq!(
             extension_for(Kind::Picture, "text/html", "https://a/x.exe", png),
-            "png"
+            Some("png")
         );
+        // Bytes that are no picture format the copy knows are not kept as a picture at all,
+        // whatever the name and the type say (an ISO image served as `image/x-cd-image`).
+        let iso = [&[0u8; 8][..], b"CD001"].concat();
+        for (mime, url, head) in [
+            ("application/octet-stream", "https://a/x.exe", &b"??"[..]),
+            ("", "https://a/x.JPEG", &b"??"[..]),
+            ("image/x-cd-image", "https://a/installer", &iso[..]),
+            ("image/png", "https://a/x.png", &b"<html><script>"[..]),
+            ("image/png", "https://a/x.png", &b"wOF2...."[..]),
+        ] {
+            assert_eq!(extension_for(Kind::Picture, mime, url, head), None, "{mime} {url}");
+            assert_eq!(extension_for(Kind::Icon, mime, url, head), None, "{mime} {url}");
+        }
         assert_eq!(
-            extension_for(
-                Kind::Picture,
-                "application/octet-stream",
-                "https://a/x.exe",
-                b"??"
-            ),
-            "img"
-        );
-        assert_eq!(
-            extension_for(Kind::Picture, "", "https://a/x.JPEG", b"??"),
-            "jpg"
+            extension_for(Kind::Picture, "", "https://a/x", b"BM\x46\0\0\0\0\0\0\0\x36\0"),
+            Some("bmp")
         );
         assert_eq!(
             extension_for(Kind::Font, "", "https://a/f.woff2?v=1", b"wOF2..."),
-            "woff2"
+            Some("woff2")
         );
         assert_eq!(
             extension_for(Kind::Script, "text/javascript", "https://a/app.js", b""),
-            "js.txt"
+            Some("js.txt")
         );
         assert_eq!(
             extension_for(Kind::StyleSheet, "text/css", "https://a/x.css", b""),
-            "css"
+            Some("css")
         );
         assert_eq!(
             extension_for(Kind::Video, "", "https://a/x.html", b"??"),
-            "media"
+            Some("media")
         );
         assert_eq!(sniff(b"<?xml version=\"1.0\"?><svg"), Some("svg"));
         assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));

@@ -215,6 +215,18 @@ impl State {
         self.tabs.iter().find(|t| t.target_id == id)
     }
 
+    /// The tab whose requests come from `session`: its own, or, for a worker a capture
+    /// watches (its requests are paused on its own session), the capture's tab.
+    pub(crate) fn tab_of(&self, session: &str) -> Option<String> {
+        if let Some(info) = self.sessions.get(session) {
+            return Some(info.tab.clone());
+        }
+        self.capture
+            .as_ref()
+            .filter(|c| c.workers.iter().any(|w| w == session))
+            .map(|c| c.tab.clone())
+    }
+
     pub fn tab_mut(&mut self, id: &str) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|t| t.target_id == id)
     }
@@ -897,8 +909,23 @@ impl Browser {
 
     /// [0.0.7 P7] While a capture runs, a worker of its tab (and any shared or service
     /// worker, which may talk to the tab) stays attached with its network events on, so a
-    /// connection it opens is seen. `false` when no capture wants it.
-    fn watch_worker(&self, parent_session: &str, kind: &str, session: &str) -> bool {
+    /// connection it opens is seen, and its requests are checked like the page's or it does
+    /// not run:
+    ///
+    /// - a dedicated worker's requests are paused on its page's session (the browser has no
+    ///   Fetch domain on a dedicated worker; it is asked anyway, in case a later one has);
+    /// - a shared worker's are paused on its own session (`Fetch.enable` with the capture's
+    ///   patterns, answered before it may run; when that fails it is never resumed and the
+    ///   capture stops);
+    /// - a service worker is not resumed while the capture runs: the browser answers
+    ///   `Fetch.enable` on one, but does not pause the requests of a service worker that
+    ///   starts again (one installed before), so its requests cannot be checked. It waits
+    ///   until the capture ends ([`Self::unwatch_capture`]).
+    ///
+    /// The steps after `Fetch.enable` go together with the resume last, as in
+    /// `setup_session`: a worker that waits answers some of them only once it runs.
+    /// `false` when no capture wants it.
+    fn watch_worker(self: &Arc<Self>, parent_session: &str, kind: &str, session: &str) -> bool {
         {
             let mut s = self.lock();
             let Some(log) = s.capture.as_mut() else {
@@ -912,19 +939,53 @@ impl Browser {
             if log.workers.len() < 400 {
                 log.workers.push(session.to_string());
             }
+            if kind == "service_worker" {
+                log.service_worker_held = true;
+            }
         }
-        let cdp = self.cdp.clone();
+        let this = self.clone();
         let session = session.to_string();
+        let kind = kind.to_string();
         tokio::spawn(async move {
-            for (method, params) in [
+            let s = Some(session.as_str());
+            let checked = this
+                .cdp
+                .call(
+                    "Fetch.enable",
+                    json!({"patterns": Self::capture_patterns()}),
+                    s,
+                    CMD,
+                )
+                .await;
+            if kind == "service_worker" {
+                if let Err(e) = this.cdp.call("Network.enable", json!({}), s, CMD).await {
+                    tracing::debug!(error = %e, "a held service worker's network events are off");
+                }
+                return;
+            }
+            if let Err(e) = checked
+                && kind == "shared_worker"
+            {
+                tracing::warn!(error = %e, "a shared worker's requests cannot be checked; it is not let run");
+                if let Some(log) = this.lock().capture.as_mut() {
+                    log.note_unchecked_worker(&kind);
+                }
+                return;
+            }
+            let steps = [
                 ("Network.enable", json!({})),
                 (
                     "Target.setAutoAttach",
                     json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}),
                 ),
                 ("Runtime.runIfWaitingForDebugger", json!({})),
-            ] {
-                if let Err(e) = cdp.call(method, params, Some(&session), CMD).await {
+            ];
+            let calls = steps
+                .iter()
+                .map(|(method, params)| this.cdp.call(method, params.clone(), s, CMD));
+            let results = futures_util::future::join_all(calls).await;
+            for ((method, _), result) in steps.iter().zip(results) {
+                if let Err(e) = result {
                     tracing::debug!(%method, error = %e, "worker set-up step failed");
                 }
             }
@@ -932,8 +993,12 @@ impl Browser {
         true
     }
 
-    /// [0.0.7 P7] Starts watching the capture's tab: network events on its frames, and
-    /// shared and service workers that already run attached (new ones attach by themselves).
+    /// [0.0.7 P7] Starts watching the capture's tab: network events on its frames. Shared
+    /// and service workers that already run are stopped: they started before the capture,
+    /// their requests were not checked one by one, and they may hold what those brought
+    /// back. One the page asks for again starts anew, waiting, and [`Self::watch_worker`]
+    /// checks its requests (a shared worker) or keeps it waiting (a service worker). One
+    /// that cannot be stopped makes the capture stop.
     pub(crate) async fn watch_capture(&self, tab: &str) {
         let frames: Vec<String> = {
             let mut s = self.lock();
@@ -968,36 +1033,40 @@ impl Browser {
             .unwrap_or_default()
         {
             let kind = t.get("type").and_then(Value::as_str).unwrap_or("");
-            let attached = t.get("attached").and_then(Value::as_bool) == Some(true);
             if matches!(kind, "shared_worker" | "service_worker")
-                && !attached
                 && let Some(id) = t.get("targetId").and_then(Value::as_str)
-            {
-                let _ = self
+                && let Err(e) = self
                     .cdp
-                    .call(
-                        "Target.attachToTarget",
-                        json!({"targetId": id, "flatten": true}),
-                        None,
-                        CMD,
-                    )
-                    .await;
+                    .call("Target.closeTarget", json!({"targetId": id}), None, CMD)
+                    .await
+                // One that ended meanwhile holds nothing any more.
+                && !e.to_string().contains("No target with given id")
+            {
+                tracing::warn!(error = %e, %kind, "a worker that ran before the capture could not be stopped");
+                if let Some(log) = self.lock().capture.as_mut() {
+                    log.note_unchecked_worker(kind);
+                }
             }
         }
     }
 
-    /// [0.0.7 P7] Lets go of what [`Self::watch_capture`] and [`Self::watch_worker`] held.
+    /// [0.0.7 P7] Lets go of what [`Self::watch_capture`] and [`Self::watch_worker`] held:
+    /// a worker kept waiting (a service worker) goes on, as outside a capture.
     pub(crate) async fn unwatch_capture(&self, watched: Vec<String>, workers: Vec<String>) {
         for session in workers {
-            let _ = self
-                .cdp
-                .call(
-                    "Target.detachFromTarget",
-                    json!({"sessionId": session}),
-                    None,
-                    CMD,
-                )
-                .await;
+            let resume = self.cdp.call(
+                "Runtime.runIfWaitingForDebugger",
+                json!({}),
+                Some(&session),
+                CMD,
+            );
+            let detach = self.cdp.call(
+                "Target.detachFromTarget",
+                json!({"sessionId": session}),
+                None,
+                CMD,
+            );
+            let _ = futures_util::join!(resume, detach);
         }
         for session in watched {
             let _ = self
@@ -1036,6 +1105,18 @@ impl Browser {
         });
     }
 
+    /// [0.0.7 P7] What a capture pauses: every request, and the responses of documents and
+    /// scripts, so the capture's tab gets a policy that blocks WebSockets
+    /// (`on_response_paused`).
+    fn capture_patterns() -> Value {
+        json!([
+            {"urlPattern": "*", "requestStage": "Request"},
+            {"urlPattern": "*", "resourceType": "Document", "requestStage": "Response"},
+            {"urlPattern": "*", "resourceType": "Script", "requestStage": "Response"},
+            {"urlPattern": "*", "resourceType": "Other", "requestStage": "Response"}
+        ])
+    }
+
     fn fetch_patterns(&self) -> Value {
         // [0.0.7 P7] While a capture runs, every request is checked (pictures, fonts, style
         // sheets, scripts…), not only page loads.
@@ -1043,14 +1124,7 @@ impl Browser {
             .capture_checks
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            // Responses of documents and scripts are paused too, so the capture's tab gets
-            // a policy that blocks WebSockets (`on_response_paused`).
-            return json!([
-                {"urlPattern": "*", "requestStage": "Request"},
-                {"urlPattern": "*", "resourceType": "Document", "requestStage": "Response"},
-                {"urlPattern": "*", "resourceType": "Script", "requestStage": "Response"},
-                {"urlPattern": "*", "resourceType": "Other", "requestStage": "Response"}
-            ]);
+            return Self::capture_patterns();
         }
         let mut patterns =
             vec![json!({"urlPattern": "*", "resourceType": "Document", "requestStage": "Request"})];
@@ -1508,7 +1582,7 @@ impl Browser {
             log.note_checked(network_id);
         }
         let origin = netpolicy::origin_of(&url).unwrap_or_else(|| "null".into());
-        let tab = self.lock().sessions.get(&session).map(|i| i.tab.clone());
+        let tab = self.lock().tab_of(&session);
         let Some(tab) = tab else {
             // A session that is gone (or never set up) gets nothing through.
             self.block(
@@ -1620,16 +1694,29 @@ impl Browser {
             .unwrap_or(0);
         let ours = {
             let s = self.lock();
-            match (s.capture.as_ref(), s.sessions.get(&session)) {
-                (Some(c), Some(info)) => info.tab == c.tab,
+            match (s.capture.as_ref(), s.tab_of(&session)) {
+                (Some(c), Some(tab)) => tab == c.tab,
                 _ => false,
             }
         };
         let failed = params.get("responseErrorReason").is_some();
         #[cfg(feature = "test-hooks")]
         let ours = ours && !self.config.test_no_capture_policy;
-        // A redirect has no page of its own; a response without a body has nothing to run.
-        let bodiless = (300..400).contains(&status) || matches!(status, 204 | 205) || status < 100;
+        // A redirect has no page of its own (a 3xx without a `Location` is shown as a page,
+        // so it gets the policy); a response without a body has nothing to run.
+        let location = params
+            .get("responseHeaders")
+            .and_then(Value::as_array)
+            .is_some_and(|headers| {
+                headers.iter().any(|h| {
+                    h.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| n.eq_ignore_ascii_case("location"))
+                })
+            });
+        let bodiless = ((300..400).contains(&status) && location)
+            || matches!(status, 204 | 205)
+            || status < 100;
         if failed || !ours || bodiless {
             self.continue_response(&session, &request_id, None).await;
             return;
