@@ -55,31 +55,33 @@ On the Windows PC:
 6. Typing into Start's search box always asks, and answering that card moves the focus to
    harnessUI, which closes the Start menu (as before 0.0.7). If a model gets stuck there,
    suggest Win+R or a shortcut instead.
-7. Choose *Allow for this chat* for clicks in Notepad, then keep moving the mouse over
-   harnessUI's window while the model clicks where harnessUI covers Notepad: the click is
-   refused ("covered by this app's own window") and harnessUI stays. Let go of the mouse
-   for two seconds: the next such click minimises harnessUI and lands in Notepad. Do the
-   same with Allow all and with typing while harnessUI has the keyboard. Once harnessUI is
-   back (you brought it back), it is minimised again only after 1.5 s without input.
-8. Run two chats. While harnessUI is minimised for one of them, let a card of the other
-   chat wait for more than a second; when harnessUI comes back, a click right away on
-   *Allow* does nothing, and a moment later it works.
-9. Open the Allow all or Full access confirmation (header menu or Settings → Permissions)
-   and leave it open, with a chat running under *Allow for this chat* or Allow all that
-   minimises harnessUI. When a card brings harnessUI back under your pointer, a click right
-   away on the confirm button does nothing.
-10. After a card, click Notepad: harnessUI goes behind it (it is not left always on top),
-    and the Stop bar stays above harnessUI.
-11. While the agent has minimised harnessUI, close the app the model used (so Windows hands
+7. Choose *Allow for this chat* for clicks in Notepad. That click itself steps aside as
+   usual (you just answered its card), so harnessUI stays minimised: bring it back by hand,
+   or send a new message once the turn has ended and harnessUI has come back. Then keep
+   moving the mouse over harnessUI's window while the model clicks where harnessUI covers
+   Notepad: the click is refused ("covered by this app's own window") and harnessUI stays.
+   Let go of the mouse for two seconds: the next such click minimises harnessUI and lands in
+   Notepad. Do the same with Allow all, and with typing while harnessUI has the keyboard
+   (refused with "this app's own window has the keyboard focus").
+8. Open the Allow all or Full access confirmation (header menu or Settings → Permissions)
+   and leave it open while a chat runs under *Allow for this chat* or Allow all and
+   minimises harnessUI. When a later card of that chat (an action that still asks) brings
+   harnessUI back under your pointer, a click right away on the confirm button does nothing.
+9. After a card, click Notepad: harnessUI goes behind it (it is not left always on top),
+   and the Stop bar stays above harnessUI.
+10. While the agent has minimised harnessUI, close the app the model used (so Windows hands
     the focus to another window), and another time change the display scale: harnessUI
     still comes back for the next card, at the end of the turn and on Stop.
-12. Press Stop several times during the minimise animation: harnessUI always comes back,
+11. Press Stop several times during the minimise animation: harnessUI always comes back,
     with the keyboard.
-13. Answer a card and touch nothing until the next card or the end of the turn, and once
+12. Answer a card and touch nothing until the next card or the end of the turn, and once
     after the model pressed Alt (for example `alt` or `alt+f`): harnessUI still comes back
     without the keyboard (type something: it goes to Notepad). Try it with harnessUI
     maximised too: it comes back maximised.
-14. With the red border on screen, cards still take clicks after the short delay.
+13. With the red border on screen, cards still take clicks after the short delay.
+14. Let a task run into the step limit while harnessUI is minimised by the agent: when it
+    comes back at the end of the turn, *Continue* under the chat and *Resume* in the Task tab
+    do nothing for a moment, then work.
 
 ## Image files (P2)
 On the Windows PC:
@@ -176,8 +178,10 @@ front only makes harnessUI the active app (expected on a Mac); click again to an
    and answering it works.
 
 ## Website capture (P7)
-1. In a new chat open the Tools panel and check *browser_capture_site* is on (if you have
-   ever changed tools, new chats reuse that choice and a new tool may start off).
+1. In a new chat open the Tools panel and check *browser_capture_site* is on. If you had
+   changed tools before, the update switched it on once in each saved choice where every
+   other Browser tool was on; where you had switched some Browser tools off it starts off
+   (switch it on there). Switch it off in a chat and restart: it stays off.
 2. Ask: "Capture https://gsap.com into my projects folder, then rebuild its hero with my own
    text." Read the card ("Save a copy of how gsap.com looks into …"), allow it.
 3. Open the saved `index.html` from disk: it looks like the site and runs no scripts;
@@ -197,7 +201,8 @@ On the Windows PC, with a local model and the terminal on:
    definitions change).
 3. With Computer use on, ask "open Notepad and type hello" (or "open Google Chrome", "open
    Microsoft Excel"): after the reply the Tools panel marks all seven Computer tools as shown
-   in that chat. Ask "how do I open excel files in python" in a new chat: they are not.
+   in that chat. In a new chat, also with Computer use on, ask "how do I open excel files in
+   python": they are not shown.
 4. *Settings → General → Same call in a row*: set 3, then ask a model to read the same file
    over and over: it is warned on the second identical call and the turn stops at the third.
 5. With *Subagents* on, ask for a helper: the helper's first request is quick to start (the

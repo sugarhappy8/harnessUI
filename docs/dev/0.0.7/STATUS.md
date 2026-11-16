@@ -267,3 +267,6 @@ and `README.md`.
   selenium") and missed some desktop ones ("close notepad"); a checklist step that can't be
   done. Nits: a race that could leave the window minimised after a turn; *Continue* and
   *Resume* without a click delay. Small last rounds for P4 and P3 running.
+- P3 round 3 done: "Minimise this window" pressed as a turn ends can't keep the window
+  down; *Continue* and the Task tab's *Resume* ignore clicks for a moment when the window
+  comes back; checklist items fixed. computer 153, vitest 847. P3 finished.

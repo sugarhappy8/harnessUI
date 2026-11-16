@@ -8,6 +8,7 @@ import { ChangedFiles, Checks } from "../task/TaskFacts";
 import { ByYou, LinkButton, Section, STEP_LABEL, STEP_MARK, StatusChip, when } from "../task/TaskParts";
 import { toProblem, useTasks } from "../task/state";
 import type { Task, TaskEdit, TaskStatus } from "../task/types";
+import { INPUT_DELAY_MS, useInputDelay } from "../../lib/useInputDelay";
 
 /** The message Resume sends: an ordinary message, through the ordinary send path. */
 export const RESUME_MESSAGE = "Continue the task. Start with the next action.";
@@ -18,6 +19,25 @@ function headerButton(tone: "plain" | "accent" = "plain"): string {
   return (
     "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs disabled:opacity-50 " +
     (tone === "accent" ? "border-accent/60 bg-accent/10 text-accent hover:bg-accent/20" : "border-border hover:bg-bg-muted")
+  );
+}
+
+/** Resume. [0.0.7] It becomes usable as a reply ends, when the app may also bring its window
+ *  back after stepping aside for computer use: clicks are ignored for a moment after it
+ *  appears or becomes usable, and after the window comes back (`useInputDelay`). */
+function ResumeButton(props: { disabled: boolean; title: string | undefined; onResume: () => void }) {
+  const { armed, armedRef } = useInputDelay(INPUT_DELAY_MS);
+  return (
+    <button
+      type="button"
+      className={headerButton("accent") + " aria-disabled:opacity-50"}
+      disabled={props.disabled}
+      aria-disabled={!armed}
+      title={props.title}
+      onClick={() => armedRef.current && props.onResume()}
+    >
+      <Play size={12} aria-hidden /> Resume
+    </button>
   );
 }
 
@@ -147,15 +167,13 @@ export function TaskTab(props: { chatId: number }) {
             </button>
           )}
           {task.status !== "done" && canResume && (
-            <button
-              type="button"
-              className={headerButton("accent")}
+            // A new delay when the reply ends and Resume can be used.
+            <ResumeButton
+              key={anyRunning ? "waiting" : "ready"}
               disabled={busy || anyRunning || activeChatId !== chatId}
               title={anyRunning ? "Wait until the current reply ends." : undefined}
-              onClick={() => void resume()}
-            >
-              <Play size={12} aria-hidden /> Resume
-            </button>
+              onResume={() => void resume()}
+            />
           )}
           {task.status !== "done" ? (
             <button type="button" className={headerButton()} disabled={busy} onClick={() => void setStatus("done")}>

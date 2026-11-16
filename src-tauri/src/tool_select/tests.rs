@@ -411,6 +411,25 @@ fn the_computer_group_needs_a_desktop_request() {
         "detect when the user presses a key on the keyboard",
         "write a script that changes the desktop wallpaper",
         "open the terminal in vs code",
+        // [0.0.7 review] Code around a desktop phrase, and phrases that are names.
+        "write code to take a screenshot in selenium",
+        "write a function to take a screenshot of a web page with playwright",
+        "how do I take a screenshot in Unity",
+        "write a python script to move the mouse",
+        "open microsoft word documents with python-docx",
+        "use my pc's GPU for the model",
+        "add a button to open notepad from my electron app",
+        "the screenshot of my screen is attached, what is wrong with the CSS?",
+        "write a script that opens notepad",
+        "build a screenshot tool in rust",
+        "write a powershell script that minimizes all windows",
+        "the open notepad button does nothing",
+        "open the calculator component and fix the bug",
+        "open file explorer integration in my tauri app is broken",
+        "open task manager equivalent in linux?",
+        "create a calculator app in react",
+        "my pc has 16 GB of RAM, which model fits?",
+        "on my laptop the tests fail with a timeout",
     ] {
         assert!(!computer(message), "{message}");
     }
@@ -458,6 +477,18 @@ fn the_computer_group_needs_a_desktop_request() {
         "on my laptop, set the volume to 50%",
         "click the start button on my screen",
         "double-click the icon on the desktop",
+        // [0.0.7 review] More of the owner's ways to ask.
+        "take a screen shot",
+        "use the computer to open chrome",
+        "open the settings on my pc",
+        "press the windows key",
+        "close notepad",
+        "screenshot my desktop",
+        "can you see my screen?",
+        "Use my PC: open Chrome.",
+        "open my downloads folder in file explorer",
+        "open the terminal app on my mac",
+        "launch vs code and open my project",
     ] {
         assert!(computer(message), "{message}");
     }

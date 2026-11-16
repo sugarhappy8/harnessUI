@@ -253,7 +253,7 @@ impl ToolHost for NoNesting {
             .or_else(|| self.0.refusal(name))
     }
     fn validate(&self, name: &str, args: &Value) -> Result<(), Vec<String>> {
-        if let Some(refusal) = not_for_helpers(name) {
+        if let Some(refusal) = refused_for_helpers(name, args.get("name")) {
             return Err(vec![refusal.to_owned()]);
         }
         self.0.validate(name, args)
@@ -265,7 +265,7 @@ impl ToolHost for NoNesting {
         self.0.llama_schema(name)
     }
     async fn describe(&self, name: &str, args: &Map<String, Value>) -> Described {
-        if let Some(refusal) = not_for_helpers(name) {
+        if let Some(refusal) = refused_for_helpers(name, args.get("name")) {
             return Described::Invalid(refusal.to_owned());
         }
         self.0.describe(name, args).await
@@ -286,6 +286,18 @@ impl ToolHost for NoNesting {
         }
         self.0.execute(name, args, action, cancel).await
     }
+}
+
+/// [0.0.7] Why a helper may not make this call, if it may not: a tool it is not offered, also
+/// when `call_tool` names it (`target`, its "name"). The chat's own host would answer such a
+/// `call_tool` with what is true for the chat ("switched off in this chat…"), not for a helper.
+fn refused_for_helpers(name: &str, target: Option<&Value>) -> Option<&'static str> {
+    not_for_helpers(name).or_else(|| {
+        (name == crate::tool_select::finder::CALL_TOOL)
+            .then(|| target.and_then(Value::as_str))
+            .flatten()
+            .and_then(not_for_helpers)
+    })
 }
 
 /// What a helper inherits from the turn that starts it, for the policy engine.

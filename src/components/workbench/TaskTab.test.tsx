@@ -11,7 +11,25 @@ const apiMock = vi.hoisted(() => ({
 }));
 vi.mock("../task/api", () => apiMock);
 
+// [0.0.7] The app's "main window shown" event, sent by hand here.
+const shown = vi.hoisted(() => ({ handlers: new Set<() => void>() }));
+vi.mock("../../lib/windowShown", () => ({
+  MAIN_WINDOW_SHOWN: "main-window-shown",
+  onMainWindowShown: (handler: () => void) => {
+    shown.handlers.add(handler);
+    return () => shown.handlers.delete(handler);
+  },
+}));
+
 const { TaskTab, RESUME_MESSAGE } = await import("./TaskTab");
+const { INPUT_DELAY_MS } = await import("../../lib/useInputDelay");
+
+/** Lets Resume's input delay pass. */
+async function settle() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, INPUT_DELAY_MS + 50));
+  });
+}
 const { resetTasks } = await import("../task/state");
 const { useApp } = await import("../../store/app");
 
@@ -144,6 +162,7 @@ describe("TaskTab", () => {
   it("resumes with an ordinary message, and not while a reply runs", async () => {
     await show(task({ status: "paused" }));
     apiMock.setTaskStatus.mockResolvedValue(task({ status: "active" }));
+    await settle();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Resume" }));
     });
@@ -156,6 +175,41 @@ describe("TaskTab", () => {
     useApp.setState({ generation: { chatId: 99 } as never });
     await show(task({ status: "paused" }));
     expect((screen.getByRole("button", { name: "Resume" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // [0.0.7] Resume becomes usable as a reply ends, when the app may also bring its window back
+  // after stepping aside for computer use: a stray click must not set the agent going.
+  it("ignores Resume for a moment after it appears, when the reply ends and when the window comes back", async () => {
+    await show(task({ status: "paused" }));
+    apiMock.setTaskStatus.mockResolvedValue(task({ status: "active" }));
+    const resume = () => screen.getByRole("button", { name: "Resume" });
+    await act(async () => {
+      fireEvent.click(resume());
+    });
+    expect(apiMock.setTaskStatus).not.toHaveBeenCalled();
+    await settle();
+    // The window comes back: at once, and a moment later, a click does nothing.
+    await act(async () => {
+      for (const h of [...shown.handlers]) h();
+      resume().click();
+    });
+    expect(apiMock.setTaskStatus).not.toHaveBeenCalled();
+    expect(resume().getAttribute("aria-disabled")).toBe("true");
+    await settle();
+    // A reply runs in another chat, then ends: Resume starts its delay again.
+    act(() => useApp.setState({ generation: { chatId: 99 } as never }));
+    expect((resume() as HTMLButtonElement).disabled).toBe(true);
+    act(() => useApp.setState({ generation: null }));
+    await act(async () => {
+      fireEvent.click(resume());
+    });
+    expect(apiMock.setTaskStatus).not.toHaveBeenCalled();
+    await settle();
+    await act(async () => {
+      fireEvent.click(resume());
+    });
+    expect(apiMock.setTaskStatus).toHaveBeenCalledWith(7, "active");
+    expect(send).toHaveBeenCalledWith(RESUME_MESSAGE);
   });
 
   // [0.0.7 P6a review] After the window reloads while a reply runs, the window knows that reply

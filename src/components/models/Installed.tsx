@@ -34,7 +34,16 @@ function deleteQuestion(m: InstalledModel, shown: string): string {
     return `Remove ${shown} from the list? Its files are outside the models folder, so they stay where they are.`;
   }
   if (outside === 1) {
-    return `Remove ${shown} from the list? Its file is outside the models folder, so it stays where it is.`;
+    const what = m.onlyImageOutside ? "Its image file" : "Its file";
+    return `Remove ${shown} from the list? ${what} is outside the models folder, so it stays where it is.`;
+  }
+  // Round 2: a file another model on the list uses is on disk, and stays.
+  const inUse = m.keptInUse ?? 0;
+  if (inUse > 1) {
+    return `Remove ${shown} from the list? Another model on the list uses its files, so they stay where they are.`;
+  }
+  if (inUse === 1) {
+    return `Remove ${shown} from the list? Another model on the list uses its file, so it stays where it is.`;
   }
   return `Remove ${shown} from the list? Its file is no longer on disk.`;
 }

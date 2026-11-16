@@ -461,6 +461,10 @@ fn text_block(text: &str) -> Value {
     json!({"type": "text", "text": text})
 }
 
+/// One picture of a request: its image block with its width and height when its header
+/// says, or the note that takes its place.
+type Picture = Result<(Value, Option<(u32, u32)>), Value>;
+
 /// The pictures of one request as Claude takes them, decided before the request is built
 /// because the limits count the pictures that are really sent: a picture Claude never takes
 /// (over 10 MB, over 8,000 pixels a side, a type it does not read) becomes a note; beyond
@@ -477,13 +481,13 @@ impl Pictures {
     /// Reads the pictures of `messages`, in the order [`convert`] meets them; `window` is the
     /// model's context window when the model list said.
     fn new(messages: &[ChatMessage], window: Option<u32>) -> Self {
-        let mut read: Vec<Result<(Value, Option<(u32, u32)>), Value>> = messages
+        let mut read: Vec<Picture> = messages
             .iter()
             .filter(|message| message.role != Role::System)
             .flat_map(picture_urls)
             .map(read_picture)
             .collect();
-        let sent = |read: &[Result<_, _>]| read.iter().filter(|picture| picture.is_ok()).count();
+        let sent = |read: &[Picture]| read.iter().filter(|picture| picture.is_ok()).count();
         let most = match window {
             Some(window) if window > 200_000 => MOST_IMAGES,
             _ => MOST_IMAGES_SMALL_WINDOW,
@@ -573,7 +577,7 @@ fn content_blocks(content: Option<&MessageContent>, pictures: &mut Pictures) -> 
 /// Claude ever takes (10 MB of base64, or more than 8,000 pixels a side), is a note instead
 /// (`Err`): a picture Claude refuses would fail every later request of the chat (the app
 /// accepts attachments up to 20 MB).
-fn read_picture(url: &str) -> Result<(Value, Option<(u32, u32)>), Value> {
+fn read_picture(url: &str) -> Picture {
     let parsed = url
         .strip_prefix("data:")
         .and_then(|rest| rest.split_once(','))

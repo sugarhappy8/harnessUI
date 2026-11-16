@@ -259,8 +259,10 @@ impl Aside {
         turn
     }
 
-    fn current_turn(&self, chat: i64) -> u64 {
-        lock(&self.turns).get(&chat).copied().unwrap_or(0)
+    /// The running turn of this chat, between [`Self::turn_started`] and
+    /// [`Self::turn_ended`].
+    fn current_turn(&self, chat: i64) -> Option<u64> {
+        lock(&self.turns).get(&chat).copied()
     }
 
     /// The user approved computer input of this chat on its card just now.
@@ -288,28 +290,33 @@ impl Aside {
     /// minimises the window when it is on screen and waits until it is gone, at most about
     /// a second. A call stopped meanwhile does not minimise it: its turn is ending, and
     /// Stop's restore may already have looked and found nothing to bring back.
-    pub fn before_input(&self, w: &dyn MainWindow, chat: i64, cancel: &CancellationToken) {
+    ///
+    /// Returns false, having done nothing, when no turn of this chat is running (it ended,
+    /// or never started): nothing would bring the window back.
+    pub fn before_input(&self, w: &dyn MainWindow, chat: i64, cancel: &CancellationToken) -> bool {
         let _one = lock(&self.ops);
         if cancel.is_cancelled() {
-            return;
+            return true;
         }
         let seen = w.now();
         // Reading the window waits for the main thread; Stop may have come meanwhile.
         if cancel.is_cancelled() {
-            return;
+            return true;
         }
-        let event = AsideEvent::InputApproved {
-            chat,
-            turn: self.current_turn(chat),
+        // Read under the operation lock: a turn that ends after this brings the window back.
+        let Some(turn) = self.current_turn(chat) else {
+            return false;
         };
+        let event = AsideEvent::InputApproved { chat, turn };
         if lock(&self.state).decide(event, seen) != WindowStep::Minimise {
-            return;
+            return true;
         }
         w.minimise();
         if self.wait_until(w, true) {
             std::thread::sleep(MINIMISE_SETTLE);
         }
         lock(&self.state).minimise_finished();
+        true
     }
 
     /// An approval card of this chat waits for the user (blocking).
@@ -1044,5 +1051,38 @@ mod tests {
         assert!(aside.take_card_approval_at(CHAT, at + Duration::from_millis(9_900)));
         aside.card_approved_at(CHAT, at);
         assert!(!aside.take_card_approval_at(CHAT, at + Duration::from_millis(10_100)));
+    }
+
+    /// "Minimise this window" pressed just as the chat's turn ends: the turn is gone, so
+    /// nothing is minimised for it (the app minimises such a window plainly and never
+    /// brings it back), and the next turn's end still brings the window back.
+    #[test]
+    fn a_minimise_asked_for_as_the_turn_ends_does_not_keep_the_window_down() {
+        let aside = Aside::new();
+        let w = FakeWindow::default();
+        let go = CancellationToken::new();
+        let first = aside.turn_started(CHAT);
+        aside.turn_ended(&w, CHAT, first);
+        assert!(!aside.before_input(&w, CHAT, &go));
+        assert_eq!(w.shown().minimise_calls, 0);
+        assert!(!aside.minimised_for(CHAT));
+        // A chat that never had a turn, the same.
+        assert!(!aside.before_input(&w, OTHER, &go));
+        assert_eq!(w.shown().minimise_calls, 0);
+        // The window, minimised by hand meanwhile, is the user's; the next turn's input
+        // finds it out of the way, and its end leaves it so.
+        w.shown().minimised = true;
+        let next = aside.turn_started(CHAT);
+        assert!(aside.before_input(&w, CHAT, &go));
+        aside.turn_ended(&w, CHAT, next);
+        assert!(w.shown().minimised);
+        // On screen, the next turn minimises it and its end brings it back.
+        w.shown().minimised = false;
+        let last = aside.turn_started(CHAT);
+        assert!(aside.before_input(&w, CHAT, &go));
+        assert!(w.shown().minimised);
+        aside.turn_ended(&w, CHAT, last);
+        assert!(!w.shown().minimised);
+        assert_eq!(w.shown().presented, vec![Comeback::Quietly]);
     }
 }

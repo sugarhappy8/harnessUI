@@ -20,6 +20,7 @@ import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
 import { EmptyChat, Welcome } from "./Welcome";
 import { formatCount } from "../lib/format";
+import { INPUT_DELAY_MS } from "../lib/useInputDelay";
 import type { MessageDto, ToolResultDto } from "../lib/types";
 
 /** The reply being written. Text arrives many times a second; when rendering it cannot
@@ -594,11 +595,21 @@ export function ChatView() {
         <div className="mx-auto w-full max-w-3xl px-4 pb-2">
           {stopped.code === "stepCap" ? (
             // Not a failure: the turn stopped at the step limit, and the model can go on.
+            // [0.0.7] Continue appears as the turn ends, when the app may also bring its window
+            // back after stepping aside for computer use: it ignores clicks for a moment.
             <ErrorBanner
               error={stopped}
               tone="notice"
               onDismiss={() => dismissStoppedTurn(detail.chat.id)}
-              action={busy ? undefined : { label: "Continue", onClick: () => void continueTurn(detail.chat.id) }}
+              action={
+                busy
+                  ? undefined
+                  : {
+                      label: "Continue",
+                      onClick: () => void continueTurn(detail.chat.id),
+                      delayMs: INPUT_DELAY_MS,
+                    }
+              }
             />
           ) : (
             <ErrorBanner error={stopped} onDismiss={() => dismissStoppedTurn(detail.chat.id)} />

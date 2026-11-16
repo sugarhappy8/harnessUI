@@ -319,63 +319,139 @@ const RESULT_TAGS: &[&str] = &["tool_output", "tool_response"];
 const REASONING_TAGS: &[&str] = &["think", "thinking", "reasoning", "thought", "reflection"];
 
 /// [0.0.7] Whether a reply holds a tool result the model wrote itself: a tool-result block
-/// ([`RESULT_TAGS`], any ASCII letter case) written as a block of its own, outside code
-/// blocks, inline code and reasoning written as text ([`REASONING_TAGS`]). A block of its own
-/// is an opening tag alone on its line, content, and a closing tag that ends a line; or one
-/// whole line made of an opening tag, content and its closing tag. Only the app writes
-/// results; a small model that was told results arrive in such blocks sometimes writes one
-/// instead of calling the tool, and makes the result up.
+/// ([`RESULT_TAGS`], any ASCII letter case, with or without attributes such as the app's own
+/// `<tool_output id="…" tool="…">…</tool_output id="…">`) written as a block of its own,
+/// outside code blocks, inline code and reasoning written as text ([`REASONING_TAGS`]). Only the
+/// app writes results; a small model that was told results arrive in such blocks sometimes
+/// writes one instead of calling the tool, and makes the result up.
+///
+/// A block of its own starts with its opening tag at the start of a line and has real content
+/// (a letter or a digit). Then one of:
+/// - the opening tag alone on its line, and a closing tag that starts or ends a later line
+///   (an answer may follow it on that line);
+/// - content on the opening tag's line, and a closing tag alone on a later line;
+/// - one whole line: opening tag, content and its closing tag;
+/// - the opening tag alone on its line and data (`{…}` or `[…]`) to the end of the reply, the
+///   block cut off before its closing tag.
 ///
 /// Not counted, so such an answer stands: a tag named in a sentence or a list item ("results
 /// arrive between <tool_output> and </tool_output> tags", "- Results: <tool_output>…"), a tag
 /// that starts a wrapped line of a sentence, a quoted line ("> <tool_output>…"), an example in
 /// code, reasoning about one, and a block whose content is part of a result the app returned
-/// in this turn (`returned`): the model quoting what it got.
+/// in this turn (`returned`), also with parts left out ("…"): the model quoting what it got.
 pub fn writes_tool_result(text: &str, returned: &[&str]) -> bool {
     // ASCII lower case keeps every byte offset, and so does blanking the reasoning out.
     let visible = without_reasoning(&text.to_ascii_lowercase());
     let code = CodeMap::new(&visible);
-    let quoted = |content: &str| {
-        let content = squeezed(content);
-        returned
-            .iter()
-            .any(|result| squeezed(&result.to_ascii_lowercase()).contains(&content))
-    };
+    let returned: Vec<String> = returned
+        .iter()
+        .map(|result| squeezed(&result.to_ascii_lowercase()))
+        .collect();
     RESULT_TAGS.iter().any(|name| {
+        let closings = closing_tags(&visible, name, &code);
         let opening = format!("<{name}");
-        let closing = format!("</{name}>");
-        let closings: Vec<usize> = find_outside_code(&visible, &closing, &code).collect();
-        find_outside_code(&visible, &opening, &code).any(|open| {
-            if !tag_ends(&visible[open + opening.len()..]) {
-                return false;
-            }
-            let line_start = visible[..open].rfind('\n').map_or(0, |at| at + 1);
-            let line_end = visible[open..]
-                .find('\n')
-                .map_or(visible.len(), |at| open + at);
-            // Nothing before it on its line, and the tag itself on that line.
-            let Some(after_tag) = visible[open..line_end].find('>').map(|at| open + at + 1) else {
-                return false;
-            };
-            if !visible[line_start..open].trim().is_empty() {
-                return false;
-            }
-            let Some(&close) = closings.iter().find(|close| **close >= after_tag) else {
-                return false;
-            };
-            let after_close = close + closing.len();
-            let close_line_end = visible[after_close..]
-                .find('\n')
-                .map_or(visible.len(), |at| after_close + at);
-            let alone = visible[after_tag..line_end].trim().is_empty();
-            let one_line = close < line_end;
-            let content = &visible[after_tag..close];
-            visible[after_close..close_line_end].trim().is_empty()
-                && (alone || one_line)
-                && !content.trim().is_empty()
-                && !quoted(content)
-        })
+        find_outside_code(&visible, &opening, &code)
+            .any(|open| made_up_block(&visible, open, open + opening.len(), &closings, &returned))
     })
+}
+
+/// Whether the opening tag at `open` (its name ending at `name_end`) starts a made-up block
+/// ([`writes_tool_result`]); `closings` are the closing tags of that name, `returned` the
+/// results of the turn, made ready for [`quotes`].
+fn made_up_block(
+    visible: &str,
+    open: usize,
+    name_end: usize,
+    closings: &[(usize, usize)],
+    returned: &[String],
+) -> bool {
+    if !tag_ends(&visible[name_end..]) {
+        return false;
+    }
+    let (line_start, line_end) = line_around(visible, open);
+    if !visible[line_start..open].trim().is_empty() {
+        return false;
+    }
+    let Some(after_tag) = visible[name_end..line_end]
+        .find('>')
+        .map(|at| name_end + at + 1)
+    else {
+        return false;
+    };
+    let alone = visible[after_tag..line_end].trim().is_empty();
+    let Some(&(close, after_close)) = closings.iter().find(|(close, _)| *close >= after_tag) else {
+        // Cut off before its closing tag: only data to the end of the reply counts.
+        let content = visible[after_tag..].trim_start();
+        return alone
+            && (content.starts_with('{') || content.starts_with('['))
+            && is_real(content)
+            && !quotes(content, returned);
+    };
+    let (close_line_start, close_line_end) = line_around(visible, close);
+    let starts_line = visible[close_line_start..close].trim().is_empty();
+    let ends_line = visible[after_close..close_line_end].trim().is_empty();
+    let shape = if close < line_end {
+        ends_line
+    } else if alone {
+        starts_line || ends_line
+    } else {
+        starts_line && ends_line
+    };
+    let content = &visible[after_tag..close];
+    shape && is_real(content) && !quotes(content, returned)
+}
+
+/// The closing tags of a result block outside code: `</name>` or `</name …>` (the app's own
+/// carry the result's id) with its `>` on the same line, as (start, the end of the tag).
+fn closing_tags(visible: &str, name: &str, code: &CodeMap) -> Vec<(usize, usize)> {
+    let closing = format!("</{name}");
+    find_outside_code(visible, &closing, code)
+        .filter_map(|at| {
+            let name_end = at + closing.len();
+            if !tag_ends(&visible[name_end..]) {
+                return None;
+            }
+            let (_, line_end) = line_around(visible, at);
+            visible[name_end..line_end]
+                .find('>')
+                .map(|gt| (at, name_end + gt + 1))
+        })
+        .collect()
+}
+
+/// The start and the end of the line `at` is on.
+fn line_around(text: &str, at: usize) -> (usize, usize) {
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    (start, end)
+}
+
+/// Whether a block holds something: a letter or a digit, not only "…" or white space.
+fn is_real(content: &str) -> bool {
+    content.chars().any(char::is_alphanumeric)
+}
+
+/// Whether a block's content quotes a result of the turn (`returned`, made ready by
+/// [`squeezed`]): each of its pieces between left-out parts ("…" or "...") is in one result,
+/// in order.
+fn quotes(content: &str, returned: &[String]) -> bool {
+    let content = squeezed(content).replace('…', "...");
+    let pieces: Vec<&str> = content
+        .split("...")
+        .map(str::trim)
+        .filter(|piece| !piece.is_empty())
+        .collect();
+    !pieces.is_empty()
+        && returned.iter().any(|result| {
+            let mut from = 0;
+            pieces.iter().all(|piece| match result[from..].find(piece) {
+                Some(at) => {
+                    from += at + piece.len();
+                    true
+                }
+                None => false,
+            })
+        })
 }
 
 /// A text with every run of white space made one space, without white space at either end.

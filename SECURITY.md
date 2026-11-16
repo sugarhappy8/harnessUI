@@ -173,24 +173,55 @@ can check what a model then does with the copy.
   the app (lower-case letters, digits, `-`, `_`, `.`; no Windows device names; at most 80
   bytes), never from the website.
 - **Network rules.** The page opens in the agent's own browser with its own profile, so
-  your sign-ins and cookies are never used. While the capture runs, every request of that
-  browser (pictures, fonts, scripts and style sheets too, not only pages) is paused and
+  your sign-ins and cookies are never used. While the capture runs, every web request of
+  that browser (pictures, fonts, scripts and style sheets too, not only pages) is paused and
   checked like a page load: http and https only, nothing on loopback, private, link-local
   or other blocked addresses, judged on the address the name resolves to. Only responses to
   requests that passed those checks are saved, and a response that reached the browser from
   a blocked address on a direct connection is refused even if the name looked public when
   it was checked. The capture only reads: it never clicks, types or submits, so no form is
   sent; the site's own scripts run in the agent's browser while the page is open, as on any
-  visit, and background requests they make are held only for a site in strict mode, as in
-  normal browsing.
-- **The copy runs nothing.** `index.html` is built from an inert copy of the page: scripts,
-  `noscript`, frames' contents, `object` and `embed`, event handler attributes and
-  `javascript:` addresses are removed, and the page's first element is a policy that allows
-  no script and loads nothing from the internet (only files next to the copy), sends
-  nothing and submits no form. Pictures and files that were not saved keep their original
-  address, which that policy keeps from loading, so opening the copy contacts no one. SVG
-  pictures lose any scripts and event handlers or are left out; scripts are saved as
-  `.js.txt`, because a `.js` file runs when double-clicked on Windows.
+  visit.
+- **Connections those checks cannot see.** The browser's request checks see web requests,
+  not WebSocket, WebTransport or WebRTC connections. During a capture the page being
+  captured (its documents, including frames' documents where the browser lets the app
+  change them, and its workers' scripts) gets an extra policy that refuses WebSocket
+  connections, so a page cannot read a device on your network through one. The tab, its
+  frames and its workers, and any shared or service worker, are also watched: if a
+  WebSocket, WebTransport or direct-socket connection starts anyway, the capture stops and
+  saves nothing, because what came over it could be from your own network. **WebRTC cannot
+  be blocked or watched this way**: a page can still use it while it is open (in the
+  capture as in normal browsing), for example to probe addresses on your network; nothing
+  received over it is told apart in the copy. A WebTransport connection to a public address
+  is not refused by that policy (it is stopped by the watch above). Current Chrome and Edge
+  also refuse, by themselves, a public page's connections to private and local addresses
+  (their Local Network Access check, with permission prompts denied in the agent's browser);
+  older browsers do not.
+- **The copy runs nothing and loads nothing from elsewhere.** `index.html` is built in two
+  steps. The page script copies the page into an inert document, without scripts, frames'
+  contents, embedded objects, event handlers and `javascript:`/`file:` addresses. Then the
+  app parses that HTML again exactly as a browser opening the file would (so elements a
+  page disguised, a replaced root or an attribute named like a tag become the real thing)
+  and cleans the tree: no `script`, `noscript`, `iframe` (kept as an empty box), `embed`,
+  `object`, `frame`, `base`, SVG `foreignObject` or animations that set an address, no
+  `<meta>` but the copy's own policy, character set and description, no `<link>` but style
+  sheets and icons saved in the copy, no event handler or made-up attribute, no attribute
+  that sends something. Every address of a picture, style sheet, font or video must name a
+  file saved in the copy's own `assets/` or `styles/` folder, by a relative address that stays
+  in the folder (a picture may also be a `data:image/` address); anything else, including
+  `file:` and `//host` addresses (on Windows a network share, which would send your Windows
+  sign-in hash) and every web address, is removed. Links keep only `http(s)`, `mailto:` and
+  `tel:` addresses. CSS in the page and in the saved style sheets is read with a real CSS
+  tokenizer (escaped names included) and held to the same rule. The result is written with a
+  real `<html><head>` whose first child is a policy that allows no script, loads nothing
+  from the internet and sends nothing, and a last check parses the output once more: unless
+  the root is `<html>`, the policy is the first thing in the head and cleaning it again
+  changes nothing, the copy is not saved (the capture's folder is removed again). SVG
+  pictures are parsed as XML and written again with only drawing elements from a fixed list,
+  without handlers and with only fragment or `data:` picture addresses; a picture that is
+  not well-formed or declares a document type (whose entities could hold markup) is left
+  out. Scripts are saved as `.js.txt`, because a `.js` file runs when double-clicked on
+  Windows.
 - **What the model reads.** The report quotes page text (titles, headings, labels) as data:
   one line, quoted, invisible and direction-changing characters shown as escapes, and the
   characters that could start a link or markup escaped. It reaches the model as untrusted

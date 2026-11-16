@@ -7,6 +7,14 @@ import { toErrorInfo } from "../../store/app";
 import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
 
+/** What a row says it is doing. [0.0.7 P6b] Checking a file already there, or stopping and
+ *  deleting its files after Cancel, each take a while. */
+function statusText(g: DownloadGroup, checking: boolean): string {
+  if (checking) return "checking the file…";
+  if (g.status === "cancelling") return "cancelling…";
+  return g.status;
+}
+
 /** Models → Downloads: progress, pause, resume and cancel. */
 export function Downloads() {
   const [groups, setGroups] = useState<DownloadGroup[]>([]);
@@ -69,7 +77,7 @@ export function Downloads() {
                     </bdi>
                   </p>
                   <p className="text-xs text-fg-muted">
-                    {formatBytes(g.bytesDone)} of {formatBytes(g.bytesTotal)} · {checking ? "checking the file…" : g.status}
+                    {formatBytes(g.bytesDone)} of {formatBytes(g.bytesTotal)} · {statusText(g, checking)}
                     {eta ? ` · ${eta}` : ""}
                     {g.unverified ? " · no published checksum" : ""}
                   </p>

@@ -191,13 +191,14 @@ impl Wording {
             spaced.push(' ');
             words.extend(forms(word));
         }
-        // [0.0.7] A word that only ever comes as the start of a program's name is not the word
-        // by itself: "open google chrome" is not a web search.
+        // [0.0.7] A word that only ever comes inside a program's name is not the word by
+        // itself: "open google chrome" is not a web search, "launch vs code" is not about code.
         for name in PROGRAM_NAMES {
-            if let Some((first, _)) = name.split_once(' ') {
-                let alone = spaced.matches(&format!(" {first} ")).count();
-                if alone > 0 && alone == spaced.matches(&format!(" {name} ")).count() {
-                    words.remove(first);
+            let within = spaced.matches(&format!(" {name} ")).count();
+            for word in name.split(' ') {
+                let alone = spaced.matches(&format!(" {word} ")).count();
+                if alone > 0 && alone == within * name.split(' ').filter(|w| w == &word).count() {
+                    words.remove(word);
                 }
             }
         }
@@ -224,6 +225,28 @@ impl Wording {
     fn count(&self, keywords: &[&str]) -> u32 {
         keywords.iter().filter(|k| self.has(k)).count() as u32
     }
+
+    /// [0.0.7] Whether the text has this keyword where the word right after it is none of
+    /// `ends`: "open notepad" in "the open notepad button" names a button, "use my pc" in "use
+    /// my pc's GPU" is about the GPU (a phrase only; a word is [`Wording::has`]).
+    fn has_before(&self, keyword: &str, ends: &[&str]) -> bool {
+        if ends.is_empty() || !keyword.contains(' ') {
+            return self.has(keyword);
+        }
+        let needle = format!(" {keyword} ");
+        self.spaced.match_indices(&needle).any(|(at, _)| {
+            let next = self.spaced[at + needle.len()..]
+                .split(' ')
+                .next()
+                .unwrap_or("");
+            !ends.contains(&next)
+        })
+    }
+
+    /// How many of these keywords the text has, each as [`Wording::has_before`] finds it.
+    fn count_before(&self, keywords: &[&str], ends: &[&str]) -> u32 {
+        keywords.iter().filter(|k| self.has_before(k, ends)).count() as u32
+    }
 }
 
 /// The words of a lower-case text: runs of letters and digits.
@@ -233,9 +256,9 @@ fn split_words(lower: &str) -> impl Iterator<Item = &str> {
         .filter(|word| !word.is_empty())
 }
 
-/// [0.0.7] Programs whose name starts with a word that means something else by itself
+/// [0.0.7] Programs whose name holds a word that means something else by itself
 /// ([`Wording::of`]).
-const PROGRAM_NAMES: &[&str] = &["google chrome"];
+const PROGRAM_NAMES: &[&str] = &["google chrome", "vs code"];
 
 /// [0.0.7] Whether a text right after a word makes that word part of a file name: a dot and an
 /// extension (`.json`, `.py`), not a full stop before a space and not a program (`.exe`,
@@ -671,11 +694,20 @@ fn group_score(
 /// [0.0.7] Phrases that need a context (`tool_catalog::WITH_CONTEXT`) count as strong words
 /// only when the text has one of their context phrases.
 fn listed_words(group: &tool_catalog::Group, wording: &Wording) -> (u32, u32) {
-    let mut strong = wording.count(group.strong);
+    // [0.0.7] A word that says the request is about code undoes the match
+    // (`tool_catalog::CANCELLED_BY`); a phrase followed by a word that makes it a name does
+    // not count (`tool_catalog::PHRASE_ENDS`).
+    if group.cancelled_by().iter().any(|word| wording.has(word)) {
+        return (0, 0);
+    }
+    let ends = group.phrase_ends();
+    let mut strong = wording.count_before(group.strong, ends);
     if let Some((phrases, context)) = group.with_context()
-        && context.iter().any(|phrase| wording.has(phrase))
+        && context
+            .iter()
+            .any(|phrase| wording.has_before(phrase, ends))
     {
-        strong += wording.count(phrases);
+        strong += wording.count_before(phrases, ends);
     }
     let weak = if strong == 0 && group.needs_strong_word() {
         0

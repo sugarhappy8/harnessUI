@@ -967,6 +967,10 @@ pub struct InstalledModelDto {
     /// it. Zero for an imported model (Delete only takes it off the list).
     pub delete_bytes: u64,
     pub kept_outside: usize,
+    /// 0.0.7 (P6b round 2): the one file Delete leaves outside the models folder is the image
+    /// file, and how many files it leaves because another installed model uses them.
+    pub only_image_outside: bool,
+    pub kept_in_use: usize,
 }
 
 #[tauri::command]
@@ -988,11 +992,11 @@ pub async fn list_installed_models(
     for m in all {
         let stored: StoredSummary =
             serde_json::from_value(m.gguf_summary.clone()).unwrap_or_default();
-        let (delete_bytes, kept_outside) = match m.source {
+        let preview = match m.source {
             ModelSource::Download => {
                 delete_preview(&m, &models_dir, |f| in_use.by_other_than(m.id, f))
             }
-            ModelSource::Import => (0, 0),
+            ModelSource::Import => DeletePreview::default(),
         };
         let image = image_file::choice_of_row(&m.path, &stored);
         out.push(InstalledModelDto {
@@ -1019,8 +1023,10 @@ pub async fn list_installed_models(
                 .filter(|l| crate::model_options::same_file(l, &m.path)),
             image_file_unreadable: image.left_out,
             image_file_offer: image_file::saved_offer(m.repo.as_deref(), &m.path, &stored),
-            delete_bytes,
-            kept_outside,
+            delete_bytes: preview.bytes,
+            kept_outside: preview.outside,
+            only_image_outside: preview.only_image_outside,
+            kept_in_use: preview.in_use,
         });
     }
     Ok(out)
@@ -1087,36 +1093,64 @@ pub async fn delete_model(
     // P6b review m1: an image file still downloading for it is cancelled first, and that
     // download has stopped before anything goes, so its file is not left behind.
     let downloads = app.state::<Arc<DownloadManager>>().inner().clone();
-    if let Err(e) = downloads.cancel_image_files_for(&app, &rec.path).await {
-        return Err(if e.code == "download_stopping" {
-            AppError::new(
-                "download_stopping",
-                "This model's image file download is still stopping.",
-                "Wait a moment, then delete it again.",
-                String::new(),
-            )
-        } else {
-            e
-        });
-    }
-    // The same file loaded under another spelling (a link, a mapped drive) is unloaded too,
-    // so its files are never deleted while llama-server has them open (0.0.6 item 8).
-    let loaded = state
-        .runtime
-        .status()
-        .model_path
-        .is_some_and(|p| crate::model_options::same_file(&p, &rec.path));
-    let unload = loaded.then(|| state.runtime.unload());
-    let note = remove_installed(
+    let cancel = async {
+        downloads
+            .cancel_image_files_for(&app, &rec.path)
+            .await
+            .map_err(|e| {
+                if e.code == "download_stopping" {
+                    AppError::new(
+                        "download_stopping",
+                        "This model's image file download is still stopping.",
+                        "Wait a moment, then delete it again.",
+                        String::new(),
+                    )
+                } else {
+                    e
+                }
+            })
+    };
+    let runtime = &state.runtime;
+    let note = delete_installed(
         &state.store,
-        &rec,
+        rec.id,
         delete_files,
         &models_dir(&app).await,
-        unload,
+        cancel,
+        // The same file loaded under another spelling (a link, a mapped drive) is unloaded
+        // too, so its files are never deleted while llama-server has them open (0.0.6 item 8).
+        |now: &store::ModelRecord| {
+            runtime
+                .status()
+                .model_path
+                .is_some_and(|p| crate::model_options::same_file(&p, &now.path))
+                .then(|| runtime.unload())
+        },
     )
     .await?;
     state.runtime.forget_unloaded(&rec.path);
     Ok(note)
+}
+
+/// What [`delete_model`] does with the model `id` (0.0.7, P6b round 2): cancels an image file
+/// still downloading for it and waits for that download to stop (`cancel_downloads`), then
+/// takes the row as it is now and removes it ([`remove_installed`]), unloading the model
+/// first when `unload` gives a way to.
+async fn delete_installed<F: std::future::Future<Output = ()>>(
+    store: &store::Store,
+    id: store::ModelId,
+    delete_files: bool,
+    models_dir: &Path,
+    cancel_downloads: impl std::future::Future<Output = AppResult<()>>,
+    unload: impl FnOnce(&store::ModelRecord) -> Option<F>,
+) -> AppResult<Option<String>> {
+    cancel_downloads.await?;
+    // Read after the wait: the image file's download may have recorded its file on the row
+    // meanwhile (P6b round 2), and then that file goes too.
+    let Some(rec) = store.get_model(id).await? else {
+        return Ok(None);
+    };
+    remove_installed(store, &rec, delete_files, models_dir, unload(&rec)).await
 }
 
 /// What [`delete_model`] does with the row `rec` (0.0.7, P6): works out what goes from disk
@@ -1160,6 +1194,21 @@ struct Removal {
     outside: Vec<PathBuf>,
     /// The image file the plan looked at, if any.
     image: Option<PathBuf>,
+    /// 0.0.7 (P6b round 2): files left in place because another installed model uses them.
+    in_use: Vec<PathBuf>,
+}
+
+/// What Delete with files would do for a downloaded model, for its question (0.0.7, P6b).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DeletePreview {
+    /// The bytes it removes from disk.
+    bytes: u64,
+    /// How many files it leaves because they are outside the models folder.
+    outside: usize,
+    /// The one file it leaves outside the models folder is the image file.
+    only_image_outside: bool,
+    /// How many files it leaves because another installed model uses them.
+    in_use: usize,
 }
 
 /// What Delete with files would remove for the downloaded model `rec` ([`removal_plan`]),
@@ -1169,7 +1218,7 @@ fn delete_preview(
     rec: &store::ModelRecord,
     models_dir: &Path,
     in_use: impl Fn(&Path) -> bool,
-) -> (u64, usize) {
+) -> DeletePreview {
     let plan = removal_plan_with(rec, models_dir, in_use);
     let bytes = plan
         .delete
@@ -1177,7 +1226,17 @@ fn delete_preview(
         .filter_map(|f| std::fs::metadata(f).ok())
         .map(|m| m.len())
         .sum();
-    (bytes, plan.outside.len())
+    DeletePreview {
+        bytes,
+        outside: plan.outside.len(),
+        only_image_outside: only_image_outside(&plan),
+        in_use: plan.in_use.len(),
+    }
+}
+
+/// Whether the one file Delete leaves outside the models folder is the image file.
+fn only_image_outside(removal: &Removal) -> bool {
+    removal.outside.len() == 1 && removal.outside.first() == removal.image.as_ref()
 }
 
 /// 0.0.7 (P6b review): the files the installed models use, as [`used_by_installed`] finds
@@ -1275,10 +1334,17 @@ fn removal_plan_with(
         let Ok(real) = dunce::canonicalize(&file) else {
             continue;
         };
-        if !real.is_file() || out.delete.contains(&file) || in_use(&file) {
+        if !real.is_file() || out.delete.contains(&file) {
             continue;
         }
-        if dir.as_ref().is_some_and(|d| real.starts_with(d)) {
+        if in_use(&file) {
+            if !out.in_use.contains(&file) {
+                out.in_use.push(file);
+            }
+        } else if dir
+            .as_ref()
+            .is_some_and(|d| crate::downloads::inside_folder(&real, d))
+        {
             out.delete.push(file);
         } else if !out.outside.contains(&file) {
             out.outside.push(file);
@@ -1290,11 +1356,9 @@ fn removal_plan_with(
 /// What Delete says when it left files in place because they are outside the models folder:
 /// the model's file or files, or only its image file.
 fn kept_note(removal: &Removal) -> Option<String> {
-    let only_image =
-        removal.outside.len() == 1 && removal.outside.first() == removal.image.as_ref();
     let note = match removal.outside.len() {
         0 => return None,
-        1 if only_image => {
+        1 if only_image_outside(removal) => {
             "Removed from the list. Its image file is outside the models folder, so it was left where it is."
         }
         1 => {
@@ -2032,7 +2096,9 @@ mod tests {
 
     /// P6b review nit: Delete's question counts what really goes: every part and the image
     /// file the app downloaded, inside the models folder, unless another installed model uses
-    /// it, and how many files stay because they are outside it.
+    /// it, and how many files stay because they are outside it. P6b round 2: and whether the
+    /// one file left outside is the image file, and how many stay because another model on
+    /// the list uses them (so the question never says "no longer on disk" for those).
     #[test]
     fn the_delete_question_counts_what_goes() {
         let root = scratch();
@@ -2048,7 +2114,17 @@ mod tests {
         let preview = |rec: &store::ModelRecord, in_use: &InUse| {
             delete_preview(rec, &models, |f| in_use.by_other_than(rec.id, f))
         };
-        assert_eq!(preview(&rec, &alone), (1300, 0));
+        let goes = |bytes: u64| DeletePreview {
+            bytes,
+            ..DeletePreview::default()
+        };
+        let stays = |outside: usize, only_image_outside: bool, in_use: usize| DeletePreview {
+            bytes: 0,
+            outside,
+            only_image_outside,
+            in_use,
+        };
+        assert_eq!(preview(&rec, &alone), goes(1300));
 
         // Another model of the repository uses the image file (found next to it): it stays,
         // as Delete leaves it (`used_by_installed`).
@@ -2057,7 +2133,13 @@ mod tests {
         let other = downloaded(2, &q8, None);
         let both = InUse::of(&[rec.clone(), other.clone()]);
         assert!(used_by_installed(std::slice::from_ref(&other), &image));
-        assert_eq!(preview(&rec, &both), (1000, 0));
+        assert_eq!(
+            preview(&rec, &both),
+            DeletePreview {
+                in_use: 1,
+                ..goes(1000)
+            }
+        );
         assert_eq!(
             removal_plan(&rec, &models, std::slice::from_ref(&other)).delete,
             vec![model.clone()]
@@ -2070,15 +2152,65 @@ mod tests {
         std::fs::write(&away, vec![0u8; 500]).unwrap();
         std::fs::write(&away_image, vec![0u8; 50]).unwrap();
         let none = InUse::of(&[]);
-        assert_eq!(preview(&downloaded(3, &away, None), &none), (0, 1));
+        assert_eq!(
+            preview(&downloaded(3, &away, None), &none),
+            stays(1, false, 0)
+        );
         assert_eq!(
             preview(&downloaded(3, &away, Some(away_image.as_path())), &none),
-            (0, 2)
+            stays(2, false, 0)
         );
+        let gone = repo.join("Gone-Q4_K_M.gguf");
         assert_eq!(
-            preview(&downloaded(4, &repo.join("Gone-Q4_K_M.gguf"), None), &none),
-            (0, 0)
+            preview(&downloaded(4, &gone, None), &none),
+            stays(0, false, 0)
         );
+        // Its file is gone and its image file is outside: the question says the image file,
+        // as the note after Delete does.
+        assert_eq!(
+            preview(&downloaded(4, &gone, Some(away_image.as_path())), &none),
+            stays(1, true, 0)
+        );
+        // Another entry of the list is a part of the same split model: its files stay.
+        let first = repo.join("Big-Q2_K-00001-of-00002.gguf");
+        let second = repo.join("Big-Q2_K-00002-of-00002.gguf");
+        std::fs::write(&first, vec![0u8; 10]).unwrap();
+        std::fs::write(&second, vec![0u8; 10]).unwrap();
+        let split = downloaded(5, &first, None);
+        let part = downloaded(6, &second, None);
+        let listed = InUse::of(&[split.clone(), part]);
+        assert_eq!(preview(&split, &listed), stays(0, false, 2));
+    }
+
+    /// P6b round 2 (verification K2): Delete waits for the image file's download to stop, and
+    /// that download can record its image file on the model's row meanwhile; Delete then plans
+    /// with the row as it is now, so the image file goes with the model. Before, it planned
+    /// with the row it read before the wait, and the image file stayed behind.
+    #[tokio::test]
+    async fn delete_takes_the_row_as_it_is_after_waiting_for_the_image_download() {
+        let root = scratch();
+        let models = root.0.join("models");
+        let folder = models.join("k/K-GGUF");
+        std::fs::create_dir_all(&folder).unwrap();
+        let model = folder.join("K-Q4.gguf");
+        let image = folder.join("mmproj-K-F16.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
+        std::fs::write(&image, b"gguf").unwrap();
+        let store = store::Store::open_in_memory().unwrap();
+        let rec = on_the_list(&store, &downloaded(0, &model, None)).await;
+        let finished_meanwhile = async { note_downloaded_image(&store, &rec.path, &image).await };
+        let note = delete_installed(&store, rec.id, true, &models, finished_meanwhile, |_| {
+            None::<std::future::Ready<()>>
+        })
+        .await
+        .unwrap();
+        assert_eq!(note, None);
+        assert!(!model.exists());
+        assert!(
+            !image.exists(),
+            "the image file recorded meanwhile goes too"
+        );
+        assert!(store.get_model(rec.id).await.unwrap().is_none());
     }
 
     async fn on_the_list(store: &store::Store, rec: &store::ModelRecord) -> store::ModelRecord {

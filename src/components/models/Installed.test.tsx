@@ -302,6 +302,9 @@ describe("Models → Installed", () => {
       { ...model(3, "away.gguf"), deleteBytes: 0, keptOutside: 2 },
       { ...model(4, "gone.gguf"), deleteBytes: 0, keptOutside: 0 },
       { ...model(5, "far.gguf"), deleteBytes: 0, keptOutside: 1 },
+      { ...model(6, "lone.gguf"), deleteBytes: 0, keptOutside: 1, onlyImageOutside: true },
+      { ...model(7, "twin.gguf"), deleteBytes: 0, keptOutside: 0, keptInUse: 1 },
+      { ...model(8, "parts.gguf"), deleteBytes: 0, keptOutside: 0, keptInUse: 2 },
     ]);
     await show();
     await click(screen.getByRole("button", { name: "Delete small.gguf" }));
@@ -319,6 +322,20 @@ describe("Models → Installed", () => {
     await click(screen.getByRole("button", { name: "Delete far.gguf" }));
     expect(confirm).toHaveBeenLastCalledWith(
       "Remove far.gguf from the list? Its file is outside the models folder, so it stays where it is.",
+    );
+    // Round 2: as the note after Delete says it, and never "no longer on disk" for a file
+    // another model on the list uses.
+    await click(screen.getByRole("button", { name: "Delete lone.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove lone.gguf from the list? Its image file is outside the models folder, so it stays where it is.",
+    );
+    await click(screen.getByRole("button", { name: "Delete twin.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove twin.gguf from the list? Another model on the list uses its file, so it stays where it is.",
+    );
+    await click(screen.getByRole("button", { name: "Delete parts.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove parts.gguf from the list? Another model on the list uses its files, so they stay where they are.",
     );
     expect(ipcMock.deleteModel).not.toHaveBeenCalled();
     confirm.mockRestore();

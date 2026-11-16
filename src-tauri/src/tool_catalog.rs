@@ -104,6 +104,8 @@ pub const WITH_CONTEXT: &[(&str, &[&str], &[&str])] = &[(
         "with the keyboard",
         "the taskbar",
         "the wallpaper",
+        "open the settings",
+        "open the terminal app",
     ],
     &[
         "my computer",
@@ -117,6 +119,66 @@ pub const WITH_CONTEXT: &[(&str, &[&str], &[&str])] = &[(
         "my screen",
         "my desktop",
         "on the desktop",
+        "my downloads",
+        "my documents",
+    ],
+)];
+
+/// [0.0.7] Words that undo a group's match: with one of them a request is about code, not the
+/// desktop, however desktop-like its phrases ("write code to take a screenshot in selenium",
+/// "add a button to open notepad from my electron app", "the screenshot of my screen is
+/// attached, what is wrong with the CSS?"). (server, words)
+pub const CANCELLED_BY: &[(&str, &[&str])] = &[(
+    computer::SERVER_NAME,
+    &[
+        "code",
+        "coding",
+        "script",
+        "function",
+        "python",
+        "javascript",
+        "typescript",
+        "java",
+        "rust",
+        "react",
+        "node",
+        "html",
+        "css",
+        "api",
+        "sdk",
+        "library",
+        "selenium",
+        "playwright",
+        "puppeteer",
+        "electron",
+        "tauri",
+        "unity",
+        "component",
+        "bug",
+        "debug",
+        "compile",
+        "programmatically",
+        "attached",
+    ],
+)];
+
+/// [0.0.7] Words right after one of a group's phrases that make the phrase a name, not a
+/// request: "the open notepad button", "the calculator component", "file explorer
+/// integration", "my pc's GPU" (`'s` is read as the word "s"). (server, words)
+pub const PHRASE_ENDS: &[(&str, &[&str])] = &[(
+    computer::SERVER_NAME,
+    &[
+        "s",
+        "button",
+        "buttons",
+        "component",
+        "integration",
+        "feature",
+        "equivalent",
+        "function",
+        "method",
+        "api",
+        "dialog",
     ],
 )];
 
@@ -139,6 +201,22 @@ impl Group {
             .iter()
             .find(|(server, _, _)| *server == self.server)
             .map(|(_, phrases, context)| (*phrases, *context))
+    }
+
+    /// [0.0.7] Its words that undo a match ([`CANCELLED_BY`]).
+    pub fn cancelled_by(&self) -> &'static [&'static str] {
+        CANCELLED_BY
+            .iter()
+            .find(|(server, _)| *server == self.server)
+            .map_or(&[], |(_, words)| words)
+    }
+
+    /// [0.0.7] Words after one of its phrases that make the phrase a name ([`PHRASE_ENDS`]).
+    pub fn phrase_ends(&self) -> &'static [&'static str] {
+        PHRASE_ENDS
+            .iter()
+            .find(|(server, _)| *server == self.server)
+            .map_or(&[], |(_, words)| words)
     }
 }
 
@@ -273,12 +351,16 @@ pub const GROUPS: &[Group] = &[
             "use my pc",
             "use my laptop",
             "use my mac",
+            "use the computer to",
             "control my computer",
             "control my pc",
             "control my laptop",
             "control my mac",
             "take a screenshot",
+            "take a screen shot",
             "make a screenshot",
+            "screenshot my screen",
+            "screenshot my desktop",
             "screenshot of my screen",
             "screenshot of my desktop",
             "look at my screen",
@@ -289,6 +371,8 @@ pub const GROUPS: &[Group] = &[
             "move my mouse",
             "open the start menu",
             "open start menu",
+            "press the windows key",
+            "windows key",
             "start menu button",
             "open spotlight",
             "open launchpad",
@@ -316,6 +400,12 @@ pub const GROUPS: &[Group] = &[
             "launch notepad",
             "start notepad",
             "into notepad",
+            "close notepad",
+            "close the calculator",
+            "close calculator",
+            "close paint",
+            "close spotify",
+            "close google chrome",
             "type this into word",
             "type it into word",
             "paste this into word",
@@ -1908,16 +1998,20 @@ pub(crate) mod tests {
                 assert_eq!(*k, k.to_lowercase(), "{}: keyword {k}", g.server);
             }
             // [0.0.7] Phrases with a context: written as the matcher reads them.
-            if let Some((phrases, context)) = g.with_context() {
-                for k in phrases.iter().chain(context) {
-                    assert_eq!(*k, k.to_lowercase(), "{}: keyword {k}", g.server);
-                    assert!(
-                        k.split(' ')
-                            .all(|w| !w.is_empty() && w.chars().all(char::is_alphanumeric)),
-                        "{}: keyword {k}",
-                        g.server
-                    );
-                }
+            let (phrases, context) = g.with_context().unwrap_or((&[], &[]));
+            for k in phrases
+                .iter()
+                .chain(context)
+                .chain(g.cancelled_by())
+                .chain(g.phrase_ends())
+            {
+                assert_eq!(*k, k.to_lowercase(), "{}: keyword {k}", g.server);
+                assert!(
+                    k.split(' ')
+                        .all(|w| !w.is_empty() && w.chars().all(char::is_alphanumeric)),
+                    "{}: keyword {k}",
+                    g.server
+                );
             }
             assert!(
                 ENTRIES.iter().any(|e| e.group == g.server),

@@ -639,4 +639,75 @@ fn a_quoted_result_is_not_a_made_up_one() {
     assert!(writes_tool_result(quote, &[]));
     let other = "<tool_output>\nThe secret word is: pear.\n</tool_output>";
     assert!(writes_tool_result(other, &returned));
+    // [0.0.7 review] Parts left out: still a quote when each piece is in the result, in order.
+    let real = [
+        "{\"path\": \"/w/notes.txt\", \"content\": \"line one\\nline two\\nline three\\nsecret: plum\"}",
+    ];
+    for elided in [
+        "It said:\n<tool_output>\nline one ... secret: plum\n</tool_output>",
+        "It said:\n<tool_output>\nline one … secret: plum\n</tool_output>",
+        "It said:\n<tool_output>\nsecret: plum\n</tool_output>",
+    ] {
+        assert!(!writes_tool_result(elided, &real), "{elided}");
+    }
+    let out_of_order = "It said:\n<tool_output>\nsecret: plum ... line one\n</tool_output>";
+    assert!(writes_tool_result(out_of_order, &real));
+    let invented = "It said:\n<tool_output>\nline one ... secret: banana\n</tool_output>";
+    assert!(writes_tool_result(invented, &real));
+}
+
+/// [0.0.7 review] The shapes a made-up block takes, the app's own format among them, and the
+/// prose that must not count (the cross-package review's cases).
+#[test]
+fn made_up_blocks_in_every_shape_are_caught_and_prose_is_not() {
+    let none: &[&str] = &[];
+    for made_up in [
+        "<tool_output>{\"content\": \"banana\"}\n</tool_output>",
+        "<tool_output>{\"path\":\"a.txt\",\n\"content\":\"banana\"}\n</tool_output>",
+        "<tool_output>\nbanana\n</tool_output> So the word is banana.",
+        "<tool_output>\n{\"content\": \"banana\"}",
+        "<tool_output>\n[\"banana\"]\n",
+        "<tool_output id=\"9f3a1c\" tool=\"read_file\" source=\"notes.txt\">\nThe secret word is: banana.\n</tool_output id=\"9f3a1c\">\nThe secret word is banana.",
+        "<tool_response>\n<tool_output id=\"9f3a1c\" tool=\"read_file\">\nbanana\n</tool_output id=\"9f3a1c\">\n</tool_response>",
+        "<TOOL_OUTPUT>\nbanana\n</TOOL_OUTPUT>",
+    ] {
+        assert!(writes_tool_result(made_up, none), "{made_up}");
+    }
+    for fine in [
+        "Results arrive between <tool_output> and </tool_output> tags, so I wait for the app.",
+        "The app sends each result back in a\n<tool_output> block, so I cannot write one.",
+        "The app sends each result back in a\n<tool_output>\nblock, so I cannot write one.",
+        "<tool_output> blocks hold the results.\nThe </tool_output> tag closes them.",
+        "- Results: <tool_output>…</tool_output>",
+        "> <tool_output>plum</tool_output>",
+        "The result ended with\n</tool_output> and nothing else.",
+        "Like this:\n```\n<tool_output>\nplum\n</tool_output>\n```",
+        "<tool_output>\n…\n</tool_output>",
+    ] {
+        assert!(!writes_tool_result(fine, none), "{fine}");
+    }
+}
+
+/// [0.0.7 review] A block written in the app's own format, as every real result is wrapped
+/// (`prompt::wrap_untrusted`), with content the app never returned, is caught; the same block
+/// with what the app returned is a quote.
+#[test]
+fn a_made_up_block_in_the_apps_own_format_is_caught() {
+    let sanitizer = crate::prompt::Sanitizer::generic();
+    for (tool, source, status) in [
+        ("read_file", Some("notes.txt"), None),
+        ("run_command", None, Some("error")),
+        ("web_search", Some("https://example.com/a?b=1"), None),
+    ] {
+        let made_up =
+            crate::prompt::wrap_untrusted("call-7", tool, source, status, "banana", &sanitizer);
+        assert!(made_up.contains("</tool_output id=\""), "{made_up}");
+        assert!(writes_tool_result(&made_up, &[]), "{made_up}");
+        let answer = format!("{made_up}\nThe secret word is banana.");
+        assert!(writes_tool_result(&answer, &["pear"]), "{answer}");
+        assert!(
+            !writes_tool_result(&answer, &["The secret word is banana"]),
+            "{answer}"
+        );
+    }
 }

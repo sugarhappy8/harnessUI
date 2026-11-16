@@ -73,6 +73,7 @@ Element.prototype.scrollTo = () => undefined;
 
 const { useApp, CONTINUE_MESSAGE } = await import("../store/app");
 const { ChatView } = await import("./ChatView");
+const { INPUT_DELAY_MS } = await import("../lib/useInputDelay");
 
 const STEP_LIMIT = "The model reached the step limit for one turn.";
 
@@ -203,6 +204,13 @@ describe("a turn that stopped before it was done", () => {
       await useApp.getState().openChat(1);
     });
     expect(screen.getByText(STEP_LIMIT)).toBeTruthy();
+    // [0.0.7] Not at once: Continue ignores clicks for a moment after it appears.
+    const sent = ipcMock.sendMessage.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(ipcMock.sendMessage.mock.calls.length).toBe(sent);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, INPUT_DELAY_MS + 50));
+    });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     });

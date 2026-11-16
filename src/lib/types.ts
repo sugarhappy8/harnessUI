@@ -426,7 +426,9 @@ export type DownloadStatus =
   | "verifying"
   | "done"
   | "error"
-  | "cancelled";
+  | "cancelled"
+  /** [0.0.7 P6b] Cancel is stopping it and deleting its files. */
+  | "cancelling";
 
 export interface DownloadGroup {
   id: string;
@@ -479,6 +481,10 @@ export interface InstalledModel {
    *  stay because they are outside the models folder. */
   deleteBytes?: number;
   keptOutside?: number;
+  /** [0.0.7 P6b] The one file Delete would leave outside the models folder is the image file. */
+  onlyImageOutside?: boolean;
+  /** [0.0.7 P6b] How many of its files Delete would leave because another model on the list uses them. */
+  keptInUse?: number;
 }
 
 /** [0.0.7 P2] What an installed model's Hugging Face repository offers as its image file.

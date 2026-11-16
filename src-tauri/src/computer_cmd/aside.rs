@@ -210,11 +210,17 @@ fn follow_window_events(w: &WebviewWindow) {
 /// computer server's hook): minimises the window when it is on screen and waits until it
 /// is gone, at most about a second.
 pub(super) fn before_input(app: &AppHandle, chat_id: i64, cancel: &CancellationToken) {
+    step_aside(app, chat_id, cancel);
+}
+
+/// Steps aside for the chat's running turn (blocking). False when no turn of the chat is
+/// running as far as the window is concerned (it just ended): then nothing was done.
+fn step_aside(app: &AppHandle, chat_id: i64, cancel: &CancellationToken) -> bool {
     let Some(w) = TauriWindow::get(app) else {
-        return;
+        return true;
     };
     follow_window_events(&w.w);
-    ASIDE.before_input(&w, chat_id, cancel);
+    ASIDE.before_input(&w, chat_id, cancel)
 }
 
 /// Whether the user approved this chat's computer input on its card just now (the computer
@@ -277,8 +283,8 @@ pub fn stopped(app: &AppHandle) {
 
 /// The "Minimise this window while the agent works" button of a tool card. For a chat
 /// whose turn is running it is the same step aside as before input, so the window comes
-/// back with that chat's next card, the end of its turn or Stop; otherwise a plain
-/// minimise, which the app never undoes.
+/// back with that chat's next card, the end of its turn or Stop; otherwise, also when the
+/// turn ends just as the button is pressed, a plain minimise, which the app never undoes.
 pub fn minimise_on_request(app: &AppHandle, chat_id: Option<i64>) {
     let running = chat_id.filter(|&chat| {
         app.try_state::<AppState>()
@@ -288,14 +294,18 @@ pub fn minimise_on_request(app: &AppHandle, chat_id: Option<i64>) {
         Some(chat) => {
             let app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                before_input(&app, chat, &CancellationToken::new())
+                if !step_aside(&app, chat, &CancellationToken::new()) {
+                    minimise_plainly(&app);
+                }
             });
         }
-        None => {
-            if let Some(w) = app.get_webview_window(crate::MAIN_WINDOW) {
-                let _ = w.minimize();
-            }
-        }
+        None => minimise_plainly(app),
+    }
+}
+
+fn minimise_plainly(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(crate::MAIN_WINDOW) {
+        let _ = w.minimize();
     }
 }
 

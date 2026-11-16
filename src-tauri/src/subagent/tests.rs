@@ -535,6 +535,33 @@ async fn nesting_is_refused_by_the_helpers_host_and_gate() {
         host.describe(TOOL_NAME, &task).await,
         Described::Invalid(reason) if reason == NESTED_REFUSAL
     ));
+    // [0.0.7 review] Named through call_tool, they get the same plain answer from validate and
+    // describe, never the chat host's ("switched off in this chat…").
+    for (target, refusal) in [
+        (TOOL_NAME, NESTED_REFUSAL),
+        (
+            crate::outside_agent::CODEX_TOOL,
+            crate::outside_agent::HELPER_REFUSAL,
+        ),
+        (
+            crate::outside_agent::CLAUDE_TOOL,
+            crate::outside_agent::HELPER_REFUSAL,
+        ),
+    ] {
+        let through = json!({"name": target, "arguments": {"task": "x"}});
+        assert_eq!(
+            host.validate(crate::tool_select::finder::CALL_TOOL, &through),
+            Err(vec![refusal.to_owned()]),
+            "{target}"
+        );
+        assert!(
+            matches!(
+                host.describe(crate::tool_select::finder::CALL_TOOL, &args(through)).await,
+                Described::Invalid(reason) if reason == refusal
+            ),
+            "{target}"
+        );
+    }
     let Described::Action(action) = SubagentsServer
         .describe(TOOL_NAME, &task, &ChatContext::default())
         .await
