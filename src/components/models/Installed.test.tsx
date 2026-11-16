@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { InstalledModel, ModelBusy, ModelLoadInfo, RuntimeStatus } from "../../lib/types";
+import type { DownloadGroup, ImageFileOffer, InstalledModel, ModelBusy, ModelLoadInfo, RuntimeStatus } from "../../lib/types";
 import { FINE_LAUNCH_NONE, fineFacts, processorPicture } from "../fine.fixtures";
 
 const ipcMock = vi.hoisted(() => ({
@@ -18,6 +18,10 @@ const ipcMock = vi.hoisted(() => ({
   setChatModel: vi.fn(async () => undefined),
   getChat: vi.fn(async (id: number) => ({ chat: { id, modelRef: null }, messages: [] })),
   listModelOptions: vi.fn(async () => []),
+  // [0.0.7 P2] The image file line of a row with a repository and no image file.
+  imageFileOffer: vi.fn<(path: string) => Promise<ImageFileOffer>>(async () => ({ kind: "none" })),
+  downloadImageFile: vi.fn<(path: string) => Promise<string>>(async () => "group"),
+  onDownloadProgress: vi.fn<(h: (g: DownloadGroup) => void) => Promise<() => void>>(async () => () => undefined),
 }));
 vi.mock("../../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -290,6 +294,48 @@ describe("Models → Installed", () => {
     expect(screen.getByText("remembers up to 40,960 tokens, about 30,000 words")).toBeTruthy();
     expect(screen.getByText("uses part of itself at a time")).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/\bcontext\b|MoE|40k/);
+  });
+
+  it("[0.0.7] marks vision only for an image file the model can read, and says when it couldn't be read", async () => {
+    const seeing = { ...model(3, "seeing.gguf"), projectorPath: "/models/mmproj-seeing-F16.gguf" };
+    const broken = { ...model(4, "broken.gguf"), projectorPath: null, imageFileUnreadable: true };
+    ipcMock.listInstalledModels.mockResolvedValue([seeing, broken]);
+    await show();
+    expect(screen.getAllByText("vision")).toHaveLength(1);
+    expect(screen.getByText("The image file couldn't be read, so this model can't see images.")).toBeTruthy();
+    // No repository: nothing to ask Hugging Face.
+    expect(ipcMock.imageFileOffer).not.toHaveBeenCalled();
+  });
+
+  it("[0.0.7] downloads the image file from the row and reads the list again when it is done", async () => {
+    const fromHub = { ...model(5, "hub.gguf"), repo: "someone/Hub-GGUF" };
+    ipcMock.listInstalledModels.mockResolvedValue([fromHub]);
+    ipcMock.imageFileOffer.mockResolvedValueOnce({ kind: "available", file: "mmproj-F16.gguf", sizeBytes: 800_000_000 });
+    const listener: { progress: ((g: DownloadGroup) => void) | null } = { progress: null };
+    ipcMock.onDownloadProgress.mockImplementation(async (h) => {
+      listener.progress = h;
+      return () => undefined;
+    });
+    await show();
+    await click(screen.getByRole("button", { name: "Download the image file (800 MB)" }));
+    expect(ipcMock.downloadImageFile).toHaveBeenCalledWith("/models/hub.gguf");
+    const reads = ipcMock.listInstalledModels.mock.calls.length;
+    await act(async () => {
+      listener.progress?.({
+        id: "group",
+        repo: "someone/Hub-GGUF",
+        label: "Image file",
+        fileCount: 1,
+        status: "done",
+        bytesDone: 800_000_000,
+        bytesTotal: 800_000_000,
+        error: null,
+        bytesPerSecond: null,
+        unverified: false,
+      });
+    });
+    expect(ipcMock.listInstalledModels.mock.calls.length).toBe(reads + 1);
+    expect(screen.getByText("Image file downloaded. Reload the model to use it.")).toBeTruthy();
   });
 
   it("opens the model's settings from its gear", async () => {

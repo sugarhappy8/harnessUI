@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import { AlertTriangle, FolderPlus, Trash2, Wrench } from "lucide-react";
 import * as ipc from "../lib/ipc";
+import { listenInEffect } from "../lib/listen";
 import type { ApprovedFolder, CodingAppsStatus, ToolDto } from "../lib/types";
 import { useApp, toErrorInfo } from "../store/app";
 import { useChatMode } from "../lib/approvalMode";
@@ -148,10 +149,20 @@ export function ToolsPanel(props: {
   // folders' line follow it.
   const mode = useChatMode(props.chatId);
 
+  // [0.0.7 P6] The chat the panel shows now. Tools read for another chat (an answer that
+  // arrives after a switch) are dropped: a switch would save them to this chat.
+  const shownChat = useRef(props.chatId);
+  useEffect(() => {
+    shownChat.current = props.chatId;
+  }, [props.chatId]);
+
   const refresh = useCallback(() => {
+    const chatId = props.chatId;
     ipc
-      .listChatTools(props.chatId)
-      .then(setTools)
+      .listChatTools(chatId)
+      .then((list) => {
+        if (shownChat.current === chatId) setTools(list);
+      })
       .catch((e) => showError(toErrorInfo(e)));
   }, [props.chatId, showError]);
 
@@ -187,9 +198,8 @@ export function ToolsPanel(props: {
   // group is on in a new chat depends on it.
   useEffect(() => {
     refresh();
-    let un: (() => void) | undefined;
-    void ipc.onMcpChanged(refresh).then((u) => (un = u));
-    return () => un?.();
+    // [0.0.7 P6] Stopped even when it starts after this cleanup ran.
+    return listenInEffect(() => ipc.onMcpChanged(refresh));
   }, [refresh, props.nCtx]);
 
   // The companions (find_tools, call_tool, read_output, update_task) come along with any

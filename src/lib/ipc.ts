@@ -100,6 +100,15 @@ export interface SendOptions {
   documents?: DocumentInput[];
   /** Mentions chosen in the picker. */
   mentions?: MentionInput[];
+  /** [0.0.7 P6] Edit and resend: the attachments of the edited message the new one keeps. */
+  copyAttachments?: CopyAttachments;
+}
+
+/** [0.0.7 P6] The user message being edited and the attachments of it (images, files and
+ *  mentions, by attachment id) that the new message keeps. */
+export interface CopyAttachments {
+  messageId: number;
+  attachmentIds: number[];
 }
 
 export function sendMessage(opts: SendOptions, onEvent: (e: TurnStreamEvent) => void) {
@@ -118,7 +127,15 @@ export function regenerate(
   return invoke<void>("regenerate", { chatId, assistantMessageId, onEvent: channel });
 }
 
-export const stopGeneration = () => invoke<void>("stop_generation");
+/** Stops the reply being written. [0.0.7 P6] With a chat, only when the reply is that chat's. */
+export const stopGeneration = (chatId?: number | null) => invoke<void>("stop_generation", { chatId: chatId ?? null });
+/** [0.0.7 P6] The chat whose reply the app is writing now (null: none). */
+export const runningTurn = () => invoke<number | null>("running_turn");
+/** [0.0.7 P6] Sent when a reply starts and when it ends: the chat whose reply is being
+ *  written now (null: none). */
+export function onTurnRunning(handler: (chatId: number | null) => void): Promise<UnlistenFn> {
+  return listen<number | null>("turn-running", (e) => handler(e.payload));
+}
 
 // Mentions
 export const searchMentions = (chatId: number | null, query: string, limit?: number) =>
@@ -438,7 +455,9 @@ export const gitInfo = () => invoke<GitInfo>("git_info");
 export const setGitToken = (host: string, token: string) => invoke<string[]>("set_git_token", { host, token });
 export const removeGitToken = (host: string) => invoke<string[]>("remove_git_token", { host });
 export const setGitIdentity = (identity: GitIdentity) => invoke<void>("set_git_identity", { identity });
-export const minimizeMainWindow = () => invoke<void>("minimize_main_window");
+/** With the chat of a running turn, the window comes back at its next card, the end of the turn or Stop. */
+export const minimizeMainWindow = (chatId?: number | null) =>
+  invoke<void>("minimize_main_window", { chatId: chatId ?? null });
 
 // Saved tool output (0.0.4): the whole text of a result the model saw shortened.
 export interface SavedToolOutput {

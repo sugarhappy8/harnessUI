@@ -15,8 +15,12 @@
 //!   (ARCHITECTURE.md 8.5).
 //! - A tool that is on but not shown stays reachable: [`finder`] has `find_tools` and
 //!   `call_tool`, and the rules that make `call_tool` exactly as safe as a direct call.
+//! - [0.0.7] The system message lists every tool that is on ([`roster`]), so the model
+//!   knows what it can reach; what that list takes is left out of the definitions' room.
+//!   The computer group is shown whole or not at all ([`WHOLE_GROUPS`]).
 
 pub mod finder;
+pub mod roster;
 
 use std::collections::BTreeSet;
 
@@ -66,6 +70,12 @@ const CORE_FILE_TOOLS: &[&str] = &[
     "edit_file",
     "write_file",
 ];
+
+/// [0.0.7] Built-in groups whose tools are only of use together: a model that can take a
+/// screenshot but not click or type is stuck. When the request is about such a group, or
+/// the chat was shown, used or found one of its tools, the turn shows all of its tools that
+/// are on, past the cap if need be ([`select`]).
+pub const WHOLE_GROUPS: &[&str] = &[computer::SERVER_NAME];
 
 /// The `toolSelection` setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -799,10 +809,34 @@ fn select_by_size(input: &Selecting<'_>, by_count: &[String], allowance: u32) ->
     if finder.iter().all(|i| by_count.contains(&tools[*i].name)) {
         add(&finder, &mut chosen);
     }
+    let mut whole_tried: Vec<&str> = Vec::new();
     for (index, tool) in tools.iter().enumerate() {
-        if by_count.contains(&tool.name) && !is_finder(tool) {
-            add(&[index], &mut chosen);
+        if !by_count.contains(&tool.name) || is_finder(tool) {
+            continue;
         }
+        // [0.0.7] A group whose tools only work together goes in whole when it fits, else
+        // the tools it needs most first (WHOLE_GROUPS).
+        if let Some(server) = whole_group_of(tool) {
+            if whole_tried.contains(&server) {
+                continue;
+            }
+            whole_tried.push(server);
+            let mut members: Vec<usize> = (0..tools.len())
+                .filter(|i| {
+                    whole_group_of(&tools[*i]) == Some(server)
+                        && by_count.contains(&tools[*i].name)
+                })
+                .collect();
+            add(&members, &mut chosen);
+            if members.iter().any(|i| !chosen[*i]) {
+                members.sort_by_key(|i| (rank_of(&tools[*i]), *i));
+                for i in members {
+                    add(&[i], &mut chosen);
+                }
+            }
+            continue;
+        }
+        add(&[index], &mut chosen);
     }
     tools
         .iter()
@@ -892,12 +926,41 @@ fn select_by_count(input: &Selecting<'_>) -> Vec<String> {
             }
         }
     }
+    // [0.0.7] A group whose tools only work together comes whole, past the cap if need be:
+    // when the request is about it, or the chat was shown, used or found one of its tools.
+    // What was shown is kept from then on, so the list still only grows.
+    let wording = Wording::of(&input.messages.join("\n"));
+    for server in WHOLE_GROUPS {
+        let members: Vec<usize> = (0..tools.len())
+            .filter(|i| whole_group_of(&tools[*i]) == Some(*server))
+            .collect();
+        let named = |i: &usize| {
+            picked.chosen[*i]
+                || input.shown.contains(&tools[*i].name)
+                || input.wanted.contains(&tools[*i].name)
+        };
+        let refs: Vec<&Candidate> = members.iter().map(|i| &tools[*i]).collect();
+        let asked = !refs.is_empty() && group_score(server, &refs, &wording, input.skills) >= MATCH_AT;
+        if asked || members.iter().any(named) {
+            for index in members {
+                picked.keep(index);
+            }
+        }
+    }
     tools
         .iter()
         .zip(&picked.chosen)
         .filter(|(_, chosen)| **chosen)
         .map(|(tool, _)| tool.name.clone())
         .collect()
+}
+
+/// [0.0.7] The group of [`WHOLE_GROUPS`] a tool belongs to, if it is one of the app's own.
+fn whole_group_of(tool: &Candidate) -> Option<&'static str> {
+    WHOLE_GROUPS
+        .iter()
+        .copied()
+        .find(|server| tool.builtin && tool.server == *server)
 }
 
 /// What to remember for the chat after a turn showed `shown`: everything remembered so
@@ -1094,9 +1157,12 @@ async fn choose(
     if !setting.auto || enabled.is_empty() {
         return (enabled, Vec::new());
     }
-    // What the definitions may take of this model's context.
-    let room = allowance(n_ctx, other_fixed_for_turn(state, chat, history).await);
+    // What the definitions may take of this model's context: [0.0.7] less the tool list and
+    // guide in the system message, made from the same tools as `turns::assemble` makes it.
     let builtin = tool_catalog::builtin_servers(&state.host);
+    let guide = roster::tokens(&roster::tool_guide(&enabled, &builtin, n_ctx));
+    let other = other_fixed_for_turn(state, chat, history).await;
+    let room = allowance(n_ctx, other.tokens_in(n_ctx).saturating_add(guide));
     let candidates: Vec<Candidate> = enabled
         .iter()
         .map(|tool| Candidate::of(tool, builtin.contains(&tool.server)))

@@ -38,8 +38,8 @@ fn model(blocks: u32, dense: u64, expert: u64, edge: u64) -> ModelFacts {
         projector_bytes: 0,
         header: Some(HeaderFacts {
             trained_ctx: Some(40_960),
-            kv_f16: u64::from(blocks) * 2048,
-            kv_q8: u64::from(blocks) * 1088,
+            // 2,048 bytes a block and token in f16, 1,088 in q8_0 (16 heads of 32 values).
+            kv: models::kv::KvShape::plain(blocks as usize, 16, 32),
             vocab: 32_000,
             thinking: false,
         }),
@@ -47,8 +47,7 @@ fn model(blocks: u32, dense: u64, expert: u64, edge: u64) -> ModelFacts {
             blocks,
             experts: expert > 0,
             sizes: Some(sizes),
-            kv_f16: vec![2048; blocks as usize],
-            kv_q8: vec![1088; blocks as usize],
+            kv: models::kv::KvShape::plain(blocks as usize, 16, 32),
         }),
     }
 }
@@ -431,7 +430,7 @@ fn unreadable_tables_give_the_estimate_from_the_file_sizes() {
     assert_eq!(need.model, 4_400_000_000);
     assert_eq!(need.context, 40 * 2048 * 8192);
     assert_eq!(need.image_reader, 100);
-    let input = d.fit_input(false).unwrap();
+    let input = d.fit_input(models::summary::KvCacheType::F16).unwrap();
     assert_eq!(
         p.mark,
         models::fit::verdict_at(&input, 8192, card(15 * GB).room(GpuUse::All))
@@ -1039,6 +1038,7 @@ fn model_on_card(sizes: &LayerSizes, layers: Layers, experts: ExpertsPick) -> u6
         &PlacementInput {
             sizes,
             kv_per_layer: Vec::new(),
+            checkpoints: 0,
             compute_gpu: 0,
             compute_cpu: 0,
             projector: 0,

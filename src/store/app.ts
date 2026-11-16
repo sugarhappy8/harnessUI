@@ -1,6 +1,7 @@
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
+import { listenInEffect } from "../lib/listen";
 import { askBeforeChange, backendWhenIdle, isLoadedNow, runChange, useWaiting } from "./modelChange";
 import type {
   ApprovalRequest,
@@ -73,6 +74,13 @@ interface AppState {
   /** The notes of the last finished turn, shown until the next message is sent: a note
    * that arrives as a turn ends would otherwise vanish before it can be read. */
   turnNotes: { chatId: number; notes: string[] } | null;
+  /** [0.0.7 P6] Why a chat's last turn stopped before it was done (the step limit, a tool
+   *  call repeated, too many invalid calls), by chat: shown in that chat only, until its
+   *  next message or Dismiss. */
+  stoppedTurns: Record<number, ErrorInfo>;
+  /** [0.0.7 P6] The chat whose reply the app is writing, as the app reports it: also a reply
+   *  this window did not start (one that went on while the window reloaded). Null: none. */
+  runningTurn: number | null;
   error: ErrorInfo | null;
   /** The panel beside the chat (artifacts, task, sources, context). */
   workbench: { open: boolean; tab: WorkbenchTab };
@@ -93,9 +101,17 @@ interface AppState {
     images?: ImageInput[],
     documents?: DocumentInput[],
     mentions?: MentionInput[],
+    /** [0.0.7 P6] Edit and resend: the attachments of the edited message the new one keeps. */
+    copyAttachments?: ipc.CopyAttachments,
   ) => Promise<void>;
   regenerate: (assistantMessageId: number) => Promise<void>;
-  stop: () => Promise<void>;
+  /** [0.0.7 P6] Continue after a stop at the step limit: only in that chat, while it is open. */
+  continueTurn: (chatId: number) => Promise<void>;
+  dismissStoppedTurn: (chatId: number) => void;
+  /** Stops the reply being written. [0.0.7 P6] With a chat, only that chat's reply. */
+  stop: (chatId?: number | null) => Promise<void>;
+  /** [0.0.7 P6] What the app says about which chat's reply it is writing. */
+  setRunningTurn: (chatId: number | null) => void;
   switchBranch: (messageId: number) => Promise<void>;
   setRuntime: (s: RuntimeStatus) => void;
   refreshModelOptions: () => Promise<void>;
@@ -160,6 +176,23 @@ export function toErrorInfo(err: unknown): ErrorInfo {
 function lastMessageId(detail: ChatDetail | null): number | null {
   const last = detail?.messages[detail.messages.length - 1];
   return last ? last.id : null;
+}
+
+/** [0.0.7 P6] What Continue sends after a turn stopped at the step limit. */
+export const CONTINUE_MESSAGE = "Continue where you left off.";
+
+/** [0.0.7 P6] The chat whose reply is being written: this window's own turn, else one the app
+ *  reports (null: none). The app writes one reply at a time. */
+export function turnChatId(s: { generation: Generation | null; runningTurn: number | null }): number | null {
+  return s.generation?.chatId ?? s.runningTurn;
+}
+
+/** [0.0.7 P6] `notices` without chat `chatId`'s. */
+function withoutChat(notices: Record<number, ErrorInfo>, chatId: number): Record<number, ErrorInfo> {
+  if (!(chatId in notices)) return notices;
+  const rest = { ...notices };
+  delete rest[chatId];
+  return rest;
 }
 
 /** The tabs of the panel beside the chat. */
@@ -301,21 +334,27 @@ export const useApp = create<AppState>((set, get) => {
       }
       case "finished":
         if (e.message && e.status !== "error") {
+          // [0.0.7 P6] Kept with its chat: shown there only, and Continue goes there.
           set({
-            error: {
-              code: e.status,
-              message: e.message,
-              nextStep:
-                e.status === "stepCap"
-                  ? "Choose Continue to let it carry on. The limit can be raised in Settings → General."
-                  : "Ask the model to continue, or rephrase the request.",
-              details: "",
+            stoppedTurns: {
+              ...get().stoppedTurns,
+              [chatId]: {
+                code: e.status,
+                message: e.message,
+                nextStep:
+                  e.status === "stepCap"
+                    ? "Choose Continue to let it carry on. The limit can be raised in Settings → General."
+                    : "Ask the model to continue, or rephrase the request.",
+                details: "",
+              },
             },
           });
         }
         {
           const g = get().generation;
           const notes = g && g.chatId === chatId ? g.notes : [];
+          // [0.0.7 P6] The app also says the turn ended (`turn-running`), maybe after this.
+          if (get().runningTurn === chatId) set({ runningTurn: null });
           void reload(chatId).then(() => {
             if (get().generation?.chatId === chatId) {
               set({ generation: null, turnNotes: notes.length > 0 ? { chatId, notes } : null });
@@ -391,6 +430,8 @@ export const useApp = create<AppState>((set, get) => {
     modelOptions: [],
     generation: null,
     turnNotes: null,
+    stoppedTurns: {},
+    runningTurn: null,
     error: null,
     workbench: { open: false, tab: "artifacts" },
     openWorkbench: (tab) => set({ workbench: { open: true, tab: tab ?? get().workbench.tab } }),
@@ -439,11 +480,12 @@ export const useApp = create<AppState>((set, get) => {
       await ipc.deleteChat(chatId);
       newestPick.delete(chatId);
       beforeSwitch.delete(chatId);
+      set({ stoppedTurns: withoutChat(get().stoppedTurns, chatId) });
       if (get().activeChatId === chatId) set({ activeChatId: null, detail: null });
       await get().refreshChats();
     },
 
-    send: async (text, parentId, images, documents, mentions) => {
+    send: async (text, parentId, images, documents, mentions, copyAttachments) => {
       let chatId = get().activeChatId;
       if (chatId === null) {
         await get().newChat();
@@ -451,11 +493,17 @@ export const useApp = create<AppState>((set, get) => {
       }
       if (chatId === null) return;
       const parent = parentId === undefined ? lastMessageId(get().detail) : parentId;
-      set({ generation: newGeneration(chatId), turnNotes: null, error: null });
+      set({
+        generation: newGeneration(chatId),
+        turnNotes: null,
+        stoppedTurns: withoutChat(get().stoppedTurns, chatId),
+        error: null,
+      });
       const id = chatId;
       try {
-        await ipc.sendMessage({ chatId: id, text, parentId: parent, images, documents, mentions }, (e) =>
-          onStreamEvent(id, e),
+        await ipc.sendMessage(
+          { chatId: id, text, parentId: parent, images, documents, mentions, copyAttachments },
+          (e) => onStreamEvent(id, e),
         );
       } catch (err) {
         set({ generation: null, error: toErrorInfo(err) });
@@ -465,7 +513,12 @@ export const useApp = create<AppState>((set, get) => {
     regenerate: async (assistantMessageId) => {
       const chatId = get().activeChatId;
       if (chatId === null) return;
-      set({ generation: newGeneration(chatId), turnNotes: null, error: null });
+      set({
+        generation: newGeneration(chatId),
+        turnNotes: null,
+        stoppedTurns: withoutChat(get().stoppedTurns, chatId),
+        error: null,
+      });
       try {
         await ipc.regenerate(chatId, assistantMessageId, (e) => onStreamEvent(chatId, e));
       } catch (err) {
@@ -473,8 +526,29 @@ export const useApp = create<AppState>((set, get) => {
       }
     },
 
-    stop: async () => {
-      await ipc.stopGeneration();
+    continueTurn: async (chatId) => {
+      // The notice is shown in its own chat only; never send the message to another one.
+      if (get().activeChatId !== chatId || get().detail?.chat.id !== chatId) return;
+      await get().send(CONTINUE_MESSAGE);
+    },
+
+    dismissStoppedTurn: (chatId) => set({ stoppedTurns: withoutChat(get().stoppedTurns, chatId) }),
+
+    stop: async (chatId) => {
+      await ipc.stopGeneration(chatId ?? null);
+    },
+
+    setRunningTurn: (chatId) => {
+      const before = get().runningTurn;
+      set({ runningTurn: chatId });
+      // A reply this window did not start (it went on while the window reloaded) sends this
+      // window no events: its chat is read again when it ends.
+      if (before !== null && before !== chatId && get().generation?.chatId !== before) {
+        void reload(before);
+        get()
+          .refreshChats()
+          .catch(() => undefined);
+      }
     },
 
     switchBranch: async (messageId) => {
@@ -619,5 +693,29 @@ export function refreshModelsAfterDownloads(): Promise<() => void> {
   if (!ipc.isTauri()) return Promise.resolve(() => undefined);
   return ipc.onDownloadProgress((g) => {
     if (g.status === "done") useApp.getState().refreshModelOptions().catch(() => undefined);
+  });
+}
+
+/** [0.0.7 P6] Follows which chat's reply the app is writing: its `turn-running` event, and
+ *  once, what it is writing now (a window that reloaded while a reply ran hears nothing more
+ *  from that reply). Returns the function that stops following; outside the app it follows
+ *  nothing. */
+export function followRunningTurn(): () => void {
+  if (!ipc.isTauri()) return () => undefined;
+  let heard = false;
+  return listenInEffect(async () => {
+    const unlisten = await ipc.onTurnRunning((chatId) => {
+      heard = true;
+      useApp.getState().setRunningTurn(chatId);
+    });
+    // Asked once listening has started, so nothing said in between is missed; what is heard
+    // while the answer is on its way is newer than it.
+    ipc
+      .runningTurn()
+      .then((chatId) => {
+        if (!heard) useApp.getState().setRunningTurn(chatId);
+      })
+      .catch(() => undefined);
+    return unlisten;
   });
 }

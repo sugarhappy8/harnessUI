@@ -1575,7 +1575,7 @@ fn stepping_aside(d: &FakeDesktop) -> (ComputerConfig, AsideCalls) {
     let config = ComputerConfig {
         step_aside: Some(StepAside {
             app_name: "harnessUI".into(),
-            minimise: Arc::new(move |chat| {
+            minimise: Arc::new(move |chat, _| {
                 seen.lock().unwrap().push(chat);
                 desk.minimise(2);
             }),
@@ -1786,7 +1786,7 @@ async fn when_this_apps_window_does_not_go_the_input_is_still_refused() {
     let config = ComputerConfig {
         step_aside: Some(StepAside {
             app_name: "harnessUI".into(),
-            minimise: Arc::new(move |chat| seen.lock().unwrap().push(chat)),
+            minimise: Arc::new(move |chat, _| seen.lock().unwrap().push(chat)),
         }),
         ..Default::default()
     };
@@ -1879,7 +1879,7 @@ async fn stop_while_stepping_aside_returns_at_once() {
         step_aside: Some(StepAside {
             app_name: "harnessUI".into(),
             // The app's main thread is slow to minimise the window.
-            minimise: Arc::new(|_| std::thread::sleep(Duration::from_secs(2))),
+            minimise: Arc::new(|_, _| std::thread::sleep(Duration::from_secs(2))),
         }),
         ..Default::default()
     };
@@ -1918,4 +1918,36 @@ fn a_plan_made_before_0_0_7_still_runs() {
     }))
     .unwrap();
     assert_eq!(plan.focus, None);
+}
+
+#[tokio::test]
+async fn the_step_aside_hook_gets_the_calls_stop() {
+    let d = desktop();
+    let seen: Arc<std::sync::Mutex<Option<CancellationToken>>> = Arc::default();
+    let keep = seen.clone();
+    let desk = d.clone();
+    let config = ComputerConfig {
+        step_aside: Some(StepAside {
+            app_name: "harnessUI".into(),
+            minimise: Arc::new(move |_, cancel| {
+                *keep.lock().unwrap() = Some(cancel.clone());
+                desk.minimise(2);
+            }),
+        }),
+        ..Default::default()
+    };
+    let s = server_with(&d, config);
+    screenshot(&s).await;
+    let a = describe(&s, TOOL_CLICK, json!({"coordinate": [700, 300]}))
+        .await
+        .unwrap();
+    let c = ctx();
+    let stop = c.cancel.clone();
+    let out = s.call(TOOL_CLICK, &args(json!({})), &a, c).await;
+    assert!(!out.is_error, "{}", out.joined_text());
+    // The app can tell a call that was stopped while it waited, and not minimise for it.
+    let token = seen.lock().unwrap().clone().unwrap();
+    assert!(!token.is_cancelled());
+    stop.cancel();
+    assert!(token.is_cancelled());
 }

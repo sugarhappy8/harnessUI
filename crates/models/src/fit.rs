@@ -950,4 +950,267 @@ mod tests {
             serde_json::json!("processor")
         );
     }
+
+    // ---- 0.0.7 P1: short-memory layers (Gemma 4) ---------------------------------------
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// Gemma 4 12B's conversation memory in f16, as `ModelSummary::kv_size` reads its
+    /// header (`crate::kv` tests): 8 full layers of 16,384 bytes a cell, 40 short-memory
+    /// layers of 327,680 bytes for at most 1,536 cells, saved copies of 1,024 cells.
+    fn gemma4_kv() -> KvSize {
+        KvSize {
+            per_cell: 16_384,
+            window_per_cell: 327_680,
+            window: 1024,
+            fixed: 0,
+            checkpoint_per_cell: 327_680,
+        }
+    }
+
+    /// What 0.0.6 counted for the same header: every layer at full length with the full
+    /// layers' head size, 328 heads × (512 + 512) × 2 bytes a token.
+    fn gemma4_kv_0_0_6() -> KvSize {
+        KvSize::per_token(671_744)
+    }
+
+    /// The files of `gemma-4-12B-coder-fable5-composer2.5-v1-uncensored-heretic-GGUF`, with
+    /// its image file (122,031,232 bytes) as the repository page counts it.
+    fn gemma4(weights: u64, kv: KvSize) -> FitInput {
+        FitInput {
+            weights_bytes: weights,
+            projector_bytes: 122_031_232,
+            kv,
+            vocab_size: 262_144,
+            ctx: 65_536,
+            max_ctx: Some(262_144),
+        }
+    }
+    const Q8_0: u64 = 12_669_649_120;
+    const Q6_K: u64 = 9_786_024_160;
+    const Q4_K_M: u64 = 7_381_385_440;
+
+    /// The owner's screen: a 16 GB graphics card with 15.1 GB free (the app shows binary
+    /// gigabytes) and 65,536 tokens. 0.0.6 said Q8_0 was too large ("needs about 53.7
+    /// GB") and Q6_K fitted only up to 6,144 tokens; both fit.
+    #[test]
+    fn the_owners_gemma4_screen() {
+        let card = Target::Gpu {
+            name: "AMD Radeon RX 9070 XT".into(),
+            free_bytes: 15 * GIB + GIB / 10,
+            ram_free_bytes: 24 * GB,
+        };
+        // 0.0.6's numbers, reproduced: 57.6 GB (53.7 binary GB), too large; Q6_K up to
+        // 6,144 tokens.
+        let old = check(&gemma4(Q8_0, gemma4_kv_0_0_6()), &card);
+        assert_eq!(old.verdict, Verdict::Red);
+        assert_eq!(
+            (old.needed_bytes as f64 / GIB as f64 * 10.0).round() / 10.0,
+            53.7
+        );
+        let old = check(&gemma4(Q6_K, gemma4_kv_0_0_6()), &card);
+        assert_eq!(
+            (old.verdict, old.suggested_ctx),
+            (Verdict::Yellow, Some(6144))
+        );
+        // Now: Q8_0 needs 12,669,649,120 + 122,031,232 + 1,577,058,304 (the memory llama.cpp
+        // allocates at 65,536 tokens) + 805,306,368 (working space) = 15,174,045,024 bytes,
+        // which fits the card with the 1 GB spare; the saved copies, 10 GiB at most, are the
+        // computer's part.
+        let q8 = check(&gemma4(Q8_0, gemma4_kv()), &card);
+        assert_eq!(q8.verdict, Verdict::Green);
+        assert_eq!(q8.needed_bytes, 15_174_045_024);
+        assert_eq!(q8.computer_bytes, 10 * GIB);
+        assert_eq!(q8.computer_free_bytes, 24 * GB);
+        assert!(!q8.computer_short);
+        let q6 = check(&gemma4(Q6_K, gemma4_kv()), &card);
+        assert_eq!(q6.verdict, Verdict::Green);
+        // With 15.05 GB free Q8_0 only just misses the spare at 65,536 tokens: a shorter
+        // memory fits (KV ≤ free − spare − the rest: 64,512 tokens), never "too large".
+        let tighter = Target::Gpu {
+            name: "AMD Radeon RX 9070 XT".into(),
+            free_bytes: 15 * GIB + GIB / 20,
+            ram_free_bytes: 24 * GB,
+        };
+        let q8 = check(&gemma4(Q8_0, gemma4_kv()), &tighter);
+        assert_eq!(
+            (q8.verdict, q8.suggested_ctx),
+            (Verdict::Yellow, Some(64_512))
+        );
+        // At the trained 262,144 tokens Q4_K_M still fits whole; Q8_0 up to 67,584 tokens:
+        // 16,213,501,542 free − 1,000,000,000 spare − 13,596,986,720 for the rest leave
+        // 1,616,514,822 bytes, of which the short layers take 503,316,480 and the full ones
+        // 16,384 a token (67,944 tokens, 66 × 1,024).
+        let mut long = gemma4(Q4_K_M, gemma4_kv());
+        long.ctx = 262_144;
+        assert_eq!(check(&long, &card).verdict, Verdict::Green);
+        let mut long = gemma4(Q8_0, gemma4_kv());
+        long.ctx = 262_144;
+        assert_eq!(check(&long, &card).suggested_ctx, Some(67_584));
+    }
+
+    /// Automatic on the same card reaches its cap instead of a few thousand tokens.
+    #[test]
+    fn gemma4_automatic_on_a_16_gb_card() {
+        let room = Room::graphics_card(15 * GIB + GIB / 10, 24 * GB);
+        // 0.0.6: (free − weights − working space − spare) / 671,744 = 10,460 tokens.
+        let mut old = gemma4(Q4_K_M, gemma4_kv_0_0_6());
+        old.projector_bytes = 0;
+        assert_eq!(auto_ctx(&old, room).map(|a| a.ctx), Some(10_240));
+        let mut q4 = gemma4(Q4_K_M, gemma4_kv());
+        q4.projector_bytes = 0;
+        assert_eq!(
+            auto_ctx(&q4, room),
+            Some(AutoCtx {
+                ctx: AUTO_CAP_CTX,
+                verdict: Verdict::Green
+            })
+        );
+        // Q8_0: 0.0.6 had to put part of it on the processor; now all of it fits the card.
+        let mut old = gemma4(Q8_0, gemma4_kv_0_0_6());
+        old.projector_bytes = 0;
+        assert_eq!(
+            auto_ctx(&old, room).map(|a| a.verdict),
+            Some(Verdict::Yellow)
+        );
+        let mut q8 = gemma4(Q8_0, gemma4_kv());
+        q8.projector_bytes = 0;
+        assert_eq!(
+            auto_ctx(&q8, room),
+            Some(AutoCtx {
+                ctx: AUTO_CAP_CTX,
+                verdict: Verdict::Green
+            })
+        );
+    }
+
+    /// Automatic's answer is the largest size it chooses from that fits, found exactly for
+    /// memory that is not a straight line (short-memory layers, 256-cell steps): the same as
+    /// trying every size.
+    #[test]
+    fn automatic_is_exact_for_short_memory_layers() {
+        let gpt_oss = KvSize {
+            per_cell: 24_576,
+            window_per_cell: 24_576,
+            window: 128,
+            fixed: 0,
+            checkpoint_per_cell: 24_576,
+        };
+        let kvs = [gemma4_kv(), gpt_oss, KvSize::per_token(131_072), KvSize::default()];
+        for kv in kvs {
+            for max_ctx in [None, Some(2048), Some(20_000), Some(262_144)] {
+                let input = FitInput {
+                    weights_bytes: 7 * GB,
+                    kv,
+                    vocab_size: 262_144,
+                    max_ctx,
+                    ..Default::default()
+                };
+                for free in (8..18).map(|g| g * GB / 2 + 123_456_789) {
+                    for ram in [0, 3 * GB, 40 * GB] {
+                        let room = Room::graphics_card(free, ram);
+                        for spare in [0, SPARE_BYTES, 3 * GB] {
+                            let got = auto_ctx_with_margin(&input, room, spare);
+                            let floor = max_ctx.map_or(AUTO_FLOOR_CTX, |m| m.min(AUTO_FLOOR_CTX));
+                            let cap = max_ctx.map_or(AUTO_CAP_CTX, |m| m.min(AUTO_CAP_CTX));
+                            let sizes = Sizes::new(floor, cap);
+                            let all: Vec<u64> = (0..sizes.len()).map(|i| sizes.get(i)).collect();
+                            let best = |which: fn((bool, bool)) -> bool| {
+                                all.iter()
+                                    .copied()
+                                    .take_while(|&c| which(input.fits(c, room, spare)))
+                                    .last()
+                            };
+                            let want = best(|f| f.0)
+                                .map(|ctx| AutoCtx {
+                                    ctx,
+                                    verdict: Verdict::Green,
+                                })
+                                .or_else(|| {
+                                    best(|f| f.1).map(|ctx| AutoCtx {
+                                        ctx,
+                                        verdict: Verdict::Yellow,
+                                    })
+                                });
+                            assert_eq!(got, want, "{kv:?} {max_ctx:?} {free} {ram} {spare}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The saved copies of short-memory layers count in the computer's memory: with the
+    /// card's share alone, and on the processor with the rest.
+    #[test]
+    fn checkpoints_count_in_the_computers_memory() {
+        // Room: the card's 16 GB, 6 GB of computer memory besides.
+        let room = Room::graphics_card(16 * GB, 8 * GB);
+        assert_eq!(room.verdict_with(10 * GB, 0), Verdict::Green);
+        assert_eq!(room.verdict_with(10 * GB, 11 * GB), Verdict::Green);
+        assert_eq!(room.verdict_with(10 * GB, 11 * GB + 1), Verdict::Red);
+        assert_eq!(room.verdict_with(16 * GB, 5 * GB), Verdict::Yellow);
+        // Without them, the 0.0.6 verdict.
+        for needed in [0, 10 * GB, 15 * GB, 21 * GB, u64::MAX] {
+            assert_eq!(room.verdict_with(needed, 0), room.verdict(needed));
+        }
+        // On the processor they are in the same memory.
+        let cpu = Room::processor(12 * GB);
+        assert_eq!(cpu.verdict_with(5 * GB, 4 * GB), Verdict::Green);
+        assert_eq!(cpu.verdict_with(5 * GB, 4 * GB + 1), Verdict::Red);
+        // Gemma 4 Q4_K_M on a card with 4 GB of computer memory free: the card holds the
+        // model, but 10 GiB of saved copies do not fit the 2 GB left after the reserve.
+        let input = FitInput {
+            ctx: 32_768,
+            projector_bytes: 0,
+            ..gemma4(Q4_K_M, gemma4_kv())
+        };
+        let r = check(
+            &input,
+            &Target::Gpu {
+                name: "GPU".into(),
+                free_bytes: 15 * GIB,
+                ram_free_bytes: 4 * GB,
+            },
+        );
+        assert_eq!(r.verdict, Verdict::Red);
+        assert!(r.computer_short);
+        assert_eq!(
+            (r.computer_bytes, r.computer_free_bytes),
+            (10 * GIB, 4 * GB)
+        );
+        // With 16 GB free it fits.
+        let r = check(
+            &input,
+            &Target::Gpu {
+                name: "GPU".into(),
+                free_bytes: 15 * GIB,
+                ram_free_bytes: 16 * GB,
+            },
+        );
+        assert_eq!(r.verdict, Verdict::Green);
+        // On the processor the copies are part of what it needs.
+        let r = check(
+            &input,
+            &Target::Cpu {
+                ram_free_bytes: 64 * GB,
+            },
+        );
+        assert_eq!(r.needed_bytes, input.needed_at(32_768) + 10 * GIB);
+        assert_eq!(r.computer_bytes, 0);
+        // A model without short-memory layers has no computer part.
+        let r = check(
+            &input_without_window(),
+            &Target::Gpu {
+                name: "GPU".into(),
+                free_bytes: 15 * GIB,
+                ram_free_bytes: 0,
+            },
+        );
+        assert_eq!((r.computer_bytes, r.verdict), (0, Verdict::Green));
+    }
+
+    fn input_without_window() -> FitInput {
+        input(4 * GB, 8192)
+    }
 }

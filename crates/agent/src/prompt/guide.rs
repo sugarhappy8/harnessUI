@@ -33,10 +33,13 @@ pub const GUIDE_TAG: &str = "tool_call_guide";
 
 /// The longest group label shown, in characters.
 pub const MAX_LABEL_CHARS: usize = 60;
-/// The longest purpose shown, in characters.
+/// The longest purpose shown for a tool of an added server, in characters.
 pub const MAX_PURPOSE_CHARS: usize = 100;
+/// The longest purpose shown for one of the app's own tools: the tool catalog's own limit,
+/// so none of its sentences is cut.
+pub const MAX_OWN_PURPOSE_CHARS: usize = 130;
 /// The share of the model's context both blocks may take together, in percent.
-pub const BUDGET_PERCENT: u32 = 6;
+pub const BUDGET_PERCENT: u32 = 5;
 /// The most tokens both blocks may take together, whatever the context.
 pub const MAX_BUDGET_TOKENS: u32 = 2_400;
 
@@ -139,7 +142,9 @@ impl ToolGuide {
 
 /// The most tokens the tool list and the guide may take together in a context of `n_ctx`
 /// tokens: [`BUDGET_PERCENT`] of it, at most [`MAX_BUDGET_TOKENS`]. A 4,096-token context
-/// gets 245 tokens: group sizes and the shortest guide.
+/// gets 204 tokens (the names or the group sizes, and the short guide when it fits), 16,384
+/// gets 819 (about twenty tools by name and the whole guide), 32,768 gets 1,638 (about
+/// twenty tools with their purposes and the whole guide take under 1,000).
 pub fn tool_guide_budget(n_ctx: u32) -> u32 {
     let share = u64::from(n_ctx) * u64::from(BUDGET_PERCENT) / 100;
     u32::try_from(share)
@@ -225,17 +230,18 @@ fn clean_groups(guide: &ToolGuide, sanitizer: &Sanitizer) -> Vec<CleanGroup> {
         .groups
         .iter()
         .filter_map(|group| {
+            let purpose_chars = if group.own {
+                MAX_OWN_PURPOSE_CHARS
+            } else {
+                MAX_PURPOSE_CHARS
+            };
             let tools: Vec<(String, String)> = group
                 .tools
                 .iter()
                 .filter_map(|tool| {
                     let name = safe_line(&tool.name, MAX_TOOL_NAME_CHARS, sanitizer);
-                    (!name.is_empty()).then(|| {
-                        (
-                            name,
-                            safe_line(&tool.purpose, MAX_PURPOSE_CHARS, sanitizer),
-                        )
-                    })
+                    (!name.is_empty())
+                        .then(|| (name, safe_line(&tool.purpose, purpose_chars, sanitizer)))
                 })
                 .collect();
             if tools.is_empty() {

@@ -256,6 +256,11 @@ pub struct ToolDto {
     /// model finds it with `find_tools` and runs it with `call_tool`, or gets it in its
     /// list when a message is about its group. Always false for a tool that is not offered.
     pub shown: bool,
+    /// [0.0.7] About how many tokens the tool list and call guide in the system message
+    /// take in this chat (`tool_select::roster`), for the Tools panel's estimate of what
+    /// tools take on every request. The same on every tool of the list; 0 when the
+    /// model's context is not known or no tool is on.
+    pub guide_tokens: u32,
 }
 
 /// What the Tools panel says about a folder tool in a chat that is not in Full access.
@@ -1390,16 +1395,31 @@ async fn chat_tool_list(
         .filter(|(_, dto)| dto.offered())
         .map(|(tool, dto)| crate::tool_select::Candidate::of(tool, dto.builtin))
         .collect();
-    // With the model's context known, the list is also held to what fits in it.
+    // With the model's context known, the list is also held to what fits in it: [0.0.7] less
+    // the tool list and guide in the system message, made from the tools that are on as
+    // `turns::assemble` makes it.
     let known_context = match turn_context {
         Some(n) => Some(n),
         None => context_for_defaults(state, chat).await.tokens(),
     };
+    let mut guide_tokens = 0;
     let room = match known_context {
-        Some(n) => Some(crate::tool_select::allowance(
-            n,
-            crate::tool_select::other_fixed(state, chat).await,
-        )),
+        Some(n) => {
+            let on: Vec<mcp_host::RegisteredTool> = list
+                .iter()
+                .filter(|(_, dto)| dto.offered())
+                .map(|(tool, _)| tool.clone())
+                .collect();
+            let builtin = crate::tool_catalog::builtin_servers(&state.host);
+            guide_tokens = crate::tool_select::roster::tokens(
+                &crate::tool_select::roster::tool_guide(&on, &builtin, n),
+            );
+            let other = crate::tool_select::other_fixed(state, chat).await;
+            Some(crate::tool_select::allowance(
+                n,
+                crate::tool_select::FixedPart::tokens_in(&other, n).saturating_add(guide_tokens),
+            ))
+        }
         None => None,
     };
     let shown = crate::tool_select::shown_before_a_message(
@@ -1412,6 +1432,7 @@ async fn chat_tool_list(
     );
     for (_, dto) in &mut list {
         dto.shown = dto.offered() && shown.contains(&dto.exposed);
+        dto.guide_tokens = guide_tokens;
     }
     list
 }
@@ -1603,6 +1624,7 @@ async fn tool_list(
                 && crate::tool_select::COMPANION_SERVERS.contains(&t.server.as_str()),
             // Decided per chat, in `chat_tool_list`.
             shown: false,
+            guide_tokens: 0,
         };
         out.push((t, dto));
     }
@@ -2001,6 +2023,7 @@ mod tests {
             token_estimate: 100,
             companion: false,
             shown: false,
+            guide_tokens: 0,
         }
     }
 

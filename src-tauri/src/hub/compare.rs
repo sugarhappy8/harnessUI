@@ -785,7 +785,7 @@ fn stored_file_facts(st: &StoredSummary, vision: bool) -> Option<FileFacts> {
 pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
     let facts = plan.facts.as_ref()?;
     let (r, machine) = (&plan.resolved, &plan.machine);
-    let input = facts.fit_input(r.save_memory)?;
+    let input = facts.fit_input(crate::load_settings::kv_layout(r.save_memory, &r.fine))?;
     let (gpu, fine) = (r.gpu, &r.fine);
     let kind = machine.memory_kind(gpu);
     let placer = crate::offload::Placer::new(facts, machine, r.save_memory);
@@ -829,7 +829,20 @@ pub fn installed_fit(plan: &Plan, ctx: u32) -> Option<models::FitResult> {
             let fit_choice = gpu == runtime::GpuUse::Fit && !fine.custom_placement();
             let partial =
                 verdict == Verdict::Yellow && (fit_choice || needed > machine.room(gpu).whole);
-            (verdict, partial, needed, 0)
+            // The saved copies of short-memory layers stay in computer memory (0.0.7 P1): on
+            // a graphics card they are the computer's part, elsewhere part of the whole.
+            let held = input.computer_at(tokens);
+            if kind == MemoryKind::Separate {
+                if held > 0 {
+                    let room = machine.room(gpu);
+                    computer_free_bytes = machine.ram_free_bytes;
+                    computer_short = verdict == Verdict::Red
+                        && held > room.partial.saturating_sub(room.whole);
+                }
+                (verdict, partial, needed, held)
+            } else {
+                (verdict, partial, needed.saturating_add(held), 0)
+            }
         }
     };
     let suggested_ctx = if verdict == Verdict::Green {
@@ -873,7 +886,7 @@ fn fit_for(
     let input = FitInput {
         weights_bytes,
         projector_bytes,
-        kv_bytes_per_token: s.kv_bytes_per_token(),
+        kv: s.kv_size(models::summary::KvCacheType::F16),
         vocab_size: s.vocab_size.unwrap_or(0),
         ctx: u64::from(ctx),
         max_ctx: s.context_length,

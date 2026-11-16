@@ -158,13 +158,18 @@ pub const GROUPS: &[Group] = &[
             "website", "url", "http", "https", "www", "browser", "browse", "click", "log in",
             "sign in", "login", "navigate", "visit", "webpage", "web page", "site",
         ],
+        // [0.0.7] "com", "org" and "go to" add to a match: "go to youtube.com".
         weak: &[
-            "page", "open", "form", "submit", "web", "online", "link", "tab",
+            "page", "open", "form", "submit", "web", "online", "link", "tab", "com", "org", "go to",
         ],
     },
     Group {
         server: "computer",
         label: "Computer",
+        // [0.0.7] Everyday ways to ask for the desktop: the machine ("pc", "laptop"), a
+        // screenshot, and the apps people name. Words that also mean something in code are
+        // only phrases ("in word", "open settings"), and "open", "type" and "click" only add
+        // to a match ("open notepad" is about the desktop, "open the file" is not).
         strong: &[
             "screen",
             "desktop",
@@ -173,8 +178,48 @@ pub const GROUPS: &[Group] = &[
             "keyboard",
             "cursor",
             "my computer",
+            "computer",
+            "pc",
+            "laptop",
+            "screenshot",
+            "type into",
+            "double click",
+            "right click",
+            "taskbar",
+            "start menu",
+            "spotlight",
+            "launchpad",
+            "notepad",
+            "wordpad",
+            "excel",
+            "powerpoint",
+            "outlook",
+            "spotify",
+            "discord",
+            "photoshop",
+            "chrome",
+            "firefox",
+            "safari",
+            "microsoft edge",
+            "microsoft word",
+            "ms word",
+            "in word",
+            "into word",
+            "open word",
+            "file explorer",
+            "windows explorer",
+            "open finder",
+            "in finder",
+            "control panel",
+            "task manager",
+            "open settings",
+            "system settings",
+            "system preferences",
         ],
-        weak: &["window", "app", "application", "program", "pointer"],
+        weak: &[
+            "window", "app", "application", "program", "pointer", "open", "type", "click", "icon",
+            "press",
+        ],
     },
     Group {
         server: "subagents",
@@ -242,10 +287,12 @@ pub const GROUPS: &[Group] = &[
             "internet",
             "research",
             "up to date",
+            // [0.0.7]
+            "weather",
         ],
         weak: &[
             "web", "online", "current", "recent", "release", "version", "source", "cite",
-            "official",
+            "official", "today", "price",
         ],
     },
     Group {

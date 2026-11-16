@@ -130,8 +130,8 @@ fn model(blocks: u32, dense: u64, expert: u64, edge: u64) -> ModelFacts {
         projector_bytes: 0,
         header: Some(HeaderFacts {
             trained_ctx: Some(40_960),
-            kv_f16: u64::from(blocks) * 2048,
-            kv_q8: u64::from(blocks) * 1088,
+            // 2,048 bytes a block and token in f16, 1,088 in q8_0 (16 heads of 32 values).
+            kv: models::kv::KvShape::plain(blocks as usize, 16, 32),
             vocab: 32_000,
             thinking: false,
         }),
@@ -139,8 +139,7 @@ fn model(blocks: u32, dense: u64, expert: u64, edge: u64) -> ModelFacts {
             blocks,
             experts: expert > 0,
             sizes: Some(sizes),
-            kv_f16: vec![2048; blocks as usize],
-            kv_q8: vec![1088; blocks as usize],
+            kv: models::kv::KvShape::plain(blocks as usize, 16, 32),
         }),
     }
 }
@@ -1001,7 +1000,7 @@ fn automatic_with_a_custom_placement_and_with_leave_free() {
     };
     let plain = auto(ModelLoadSettings::default());
     assert_eq!(plain.ctx_choice, ContextSize::Auto);
-    let input = d.fit_input(false).unwrap();
+    let input = d.fit_input(models::summary::KvCacheType::F16).unwrap();
     assert_eq!(
         u64::from(plain.ctx),
         models::fit::auto_ctx(&input, m.room(GpuUse::All))
@@ -1164,7 +1163,7 @@ fn facts_without_a_tensor_table_keep_wp1b_marks() {
             &m,
             None,
         );
-        let input = f.fit_input(false).unwrap();
+        let input = f.fit_input(models::summary::KvCacheType::F16).unwrap();
         let room = m.room(GpuUse::All);
         for o in &info.context_options[1..] {
             assert_eq!(

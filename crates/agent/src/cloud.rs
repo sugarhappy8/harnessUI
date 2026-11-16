@@ -594,7 +594,7 @@ pub(crate) fn fixes_for_error(status: u16, body: &[u8], sent: &Map<String, Value
     }
     let droppable = |key: &str| sent.contains_key(key) && !ESSENTIAL.contains(&key);
     let mut fixes = Vec::new();
-    let mut drop = |key: String, fixes: &mut Vec<Fix>| {
+    let push_drop = |key: String, fixes: &mut Vec<Fix>| {
         if droppable(&key) && !fixes.contains(&Fix::Drop(key.clone())) {
             fixes.push(Fix::Drop(key));
         }
@@ -613,7 +613,7 @@ pub(crate) fn fixes_for_error(status: u16, body: &[u8], sent: &Map<String, Value
                 .map(|loc| loc.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
             if extra && loc.len() == 2 && loc[0] == "body" {
-                drop(loc[1].to_owned(), &mut fixes);
+                push_drop(loc[1].to_owned(), &mut fixes);
             }
         }
     }
@@ -625,7 +625,7 @@ pub(crate) fn fixes_for_error(status: u16, body: &[u8], sent: &Map<String, Value
                 let name = name
                     .trim()
                     .trim_matches(|c: char| c == '\'' || c == '"' || c == '`' || c == '.');
-                drop(name.to_owned(), &mut fixes);
+                push_drop(name.to_owned(), &mut fixes);
             }
         }
     }
@@ -635,7 +635,7 @@ pub(crate) fn fixes_for_error(status: u16, body: &[u8], sent: &Map<String, Value
             || code == "unknown_parameter"
             || REFUSED_WORDS.iter().any(|w| lower.contains(w));
         if refused {
-            drop(param, &mut fixes);
+            push_drop(param, &mut fixes);
         }
     }
     // A message that names a field it does not accept.
@@ -653,7 +653,7 @@ pub(crate) fn fixes_for_error(status: u16, body: &[u8], sent: &Map<String, Value
             named.first()
         };
         if let Some((_, key)) = pick {
-            drop((*key).clone(), &mut fixes);
+            push_drop((*key).clone(), &mut fixes);
         }
     }
     fixes

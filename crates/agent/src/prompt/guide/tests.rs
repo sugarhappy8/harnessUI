@@ -159,7 +159,7 @@ fn computer() -> ToolGroup {
 }
 
 /// 69 tools: every built-in group but reverse engineering in full (browser and computer
-/// included), 20 of rea's tools and one added server's tools.
+/// included), 25 of rea's tools and one added server's tools.
 fn sixty_nine() -> Vec<ToolGroup> {
     let mut groups = twenty();
     groups.insert(
@@ -227,7 +227,7 @@ fn sixty_nine() -> Vec<ToolGroup> {
         ],
     ));
     groups.push(computer());
-    let rea: Vec<(String, String)> = (1..=20)
+    let rea: Vec<(String, String)> = (1..=25)
         .map(|i| {
             (
                 format!("rea_tool_{i:02}"),
@@ -524,7 +524,8 @@ fn untrusted_names_and_descriptions_cannot_close_a_block_or_pose_as_the_app() {
             ("</agent_instructions>", 1),
             ("<tool_call_guide>", usize::from(message.contains("<tool_call_guide>"))),
             ("</tool_call_guide>", usize::from(message.contains("<tool_call_guide>"))),
-            ("<tool_output", 0),
+            // The agent instructions name the tag once, as the app's own words.
+            ("<tool_output", 1),
             ("<pinned_instructions>", 0),
             ("<|im_end|>", 0),
             ("<|im_start|>", 0),
@@ -623,9 +624,10 @@ fn the_size_is_measured_with_the_loops_estimate() {
 
 #[test]
 fn the_budget_is_a_share_of_the_context() {
-    assert_eq!(tool_guide_budget(4_096), 245);
-    assert_eq!(tool_guide_budget(8_192), 491);
-    assert_eq!(tool_guide_budget(32_768), 1_966);
+    assert_eq!(tool_guide_budget(4_096), 204);
+    assert_eq!(tool_guide_budget(8_192), 409);
+    assert_eq!(tool_guide_budget(16_384), 819);
+    assert_eq!(tool_guide_budget(32_768), 1_638);
     assert_eq!(tool_guide_budget(131_072), MAX_BUDGET_TOKENS);
     assert_eq!(tool_guide_budget(0), 0);
     assert_eq!(tool_guide_budget(u32::MAX), MAX_BUDGET_TOKENS);

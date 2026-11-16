@@ -129,6 +129,18 @@ impl WindowAside {
     pub fn minimised_for(&self, chat: i64) -> bool {
         self.chats.contains(&chat)
     }
+
+    /// Whether `event` can lead to a step at all, so the app can skip reading the window
+    /// for the others (an approval card of a chat that minimised nothing, say).
+    pub fn concerns(&self, event: AsideEvent) -> bool {
+        match event {
+            AsideEvent::InputApproved(_) => true,
+            AsideEvent::ApprovalNeeded(chat) | AsideEvent::TurnEnded(chat) => {
+                self.chats.contains(&chat)
+            }
+            AsideEvent::Stopped => !self.chats.is_empty(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +294,34 @@ mod tests {
         assert_eq!(a.decide(InputApproved(CHAT), shown()), Minimise);
         assert_eq!(a.decide(TurnEnded(OTHER), shown()), Leave);
         assert!(a.minimised_for(CHAT));
+    }
+
+    #[test]
+    fn only_events_that_can_move_the_window_concern_it() {
+        let a = WindowAside::new();
+        assert!(a.concerns(InputApproved(CHAT)));
+        assert!(!a.concerns(ApprovalNeeded(CHAT)));
+        assert!(!a.concerns(TurnEnded(CHAT)));
+        assert!(!a.concerns(Stopped));
+        let a = minimised_for(CHAT);
+        assert!(a.concerns(ApprovalNeeded(CHAT)));
+        assert!(a.concerns(TurnEnded(CHAT)));
+        assert!(a.concerns(Stopped));
+        assert!(!a.concerns(ApprovalNeeded(OTHER)));
+        assert!(!a.concerns(TurnEnded(OTHER)));
+        // Whatever `concerns` skips, `decide` would have left alone.
+        for event in [ApprovalNeeded(OTHER), TurnEnded(OTHER)] {
+            for now in [shown(), down(), down_mac(), hidden()] {
+                let mut b = minimised_for(CHAT);
+                assert_eq!(b.decide(event, now), Leave, "{event:?} {now:?}");
+            }
+        }
+        for event in [ApprovalNeeded(CHAT), TurnEnded(CHAT), Stopped] {
+            for now in [shown(), down(), down_mac(), hidden()] {
+                let mut b = WindowAside::new();
+                assert_eq!(b.decide(event, now), Leave, "{event:?} {now:?}");
+            }
+        }
     }
 
     #[test]

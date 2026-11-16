@@ -327,7 +327,9 @@ pub async fn hub_repo(
             let input = FitInput {
                 weights_bytes: v.total_size,
                 projector_bytes: projector.as_ref().map_or(0, |p| p.size),
-                kv_bytes_per_token: s.kv_bytes_per_token(),
+                // f16, as a load with the default settings stores it (0.0.7 P1: short-
+                // memory layers counted at their window).
+                kv: s.kv_size(models::summary::KvCacheType::F16),
                 vocab_size: s.vocab_size.unwrap_or(0),
                 ctx: fit_context,
                 max_ctx: s

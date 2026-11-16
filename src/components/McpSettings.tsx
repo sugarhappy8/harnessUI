@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronRight, Plus, RotateCw, Trash2 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../lib/ipc";
+import { listenInEffect } from "../lib/listen";
 import type { McpImportPreview, McpServerDto, ToolDto } from "../lib/types";
 import { toErrorInfo } from "../store/app";
 import { ErrorBanner } from "./ErrorBanner";
@@ -378,9 +379,8 @@ export function McpSettings() {
 
   useEffect(() => {
     refresh();
-    let un: (() => void) | undefined;
-    void ipc.onMcpChanged(refresh).then((u) => (un = u));
-    return () => un?.();
+    // [0.0.7 P6] Stopped even when it starts after this cleanup ran.
+    return listenInEffect(() => ipc.onMcpChanged(refresh));
   }, [refresh]);
 
   return (

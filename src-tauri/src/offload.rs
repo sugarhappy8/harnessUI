@@ -184,10 +184,14 @@ impl<'a> Placer<'a> {
         })
     }
 
-    fn input(&self, ctx: u64) -> PlacementInput<'a> {
+    /// The facts of a split at `ctx` tokens with Fine control `fine` (whose fast attention
+    /// changes the conversation memory's layout, `load_settings::kv_layout`).
+    fn input(&self, ctx: u64, fine: &FineLaunch) -> PlacementInput<'a> {
+        let layout = crate::load_settings::kv_layout(self.save_memory, fine);
         PlacementInput {
             sizes: self.sizes,
-            kv_per_layer: self.layers.kv_at(ctx, self.save_memory),
+            kv_per_layer: self.layers.kv_at(ctx, layout),
+            checkpoints: self.checkpoints(ctx, fine),
             compute_gpu: self.compute_gpu,
             compute_cpu: models::fit::COMPUTE_BASE_BYTES,
             projector: self.facts.projector_bytes,
@@ -201,13 +205,21 @@ impl<'a> Placer<'a> {
     /// (`placement::fit_layers_where`) into the free graphics memory less the margin
     /// (Leave free, else llama.cpp's 1,024 MiB), "About".
     pub fn work(&self, ctx: u64, gpu: GpuUse, fine: &FineLaunch) -> Worked {
-        let input = self.input(ctx);
+        let input = self.input(ctx, fine);
         let (place, about) = self.place(&input, gpu, fine);
         Worked {
             split: placement::split(&input, &place),
             place,
             about,
         }
+    }
+
+    /// The saved copies of the model's short-memory layers llama-server keeps in computer
+    /// memory at `ctx` tokens at most (0.0.7 P1, `models::KvSize::checkpoints_at`); 0 for a
+    /// model without such layers.
+    pub fn checkpoints(&self, ctx: u64, fine: &FineLaunch) -> u64 {
+        let layout = crate::load_settings::kv_layout(self.save_memory, fine);
+        self.layers.kv.size(layout).checkpoints_at(ctx)
     }
 
     fn place(&self, input: &PlacementInput, gpu: GpuUse, fine: &FineLaunch) -> (Where, bool) {
@@ -441,15 +453,21 @@ fn not_readable(
     let graphics = machine.graphics(gpu);
     let room = machine.room(gpu);
     let ctx = u64::from(resolved.ctx);
-    let (need, verdict) = match facts.fit_input(resolved.save_memory) {
+    let layout = crate::load_settings::kv_layout(resolved.save_memory, &resolved.fine);
+    // `held`: the saved copies of short-memory layers, in computer memory either way.
+    let (need, held, verdict) = match facts.fit_input(layout) {
         Some(input) => (
             Parts {
                 model: input.weights_bytes,
-                context: input.kv_bytes_per_token.saturating_mul(ctx),
+                context: input.kv.at(ctx),
                 compute: input.compute_bytes(),
                 image_reader: input.projector_bytes,
             },
-            Some(room.verdict(input.needed_at(ctx))),
+            Parts {
+                context: input.computer_at(ctx),
+                ..Parts::default()
+            },
+            Some(room.verdict_with(input.needed_at(ctx), input.computer_at(ctx))),
         ),
         None => (
             Parts {
@@ -457,6 +475,7 @@ fn not_readable(
                 image_reader: facts.projector_bytes,
                 ..Parts::default()
             },
+            Parts::default(),
             None,
         ),
     };
@@ -472,7 +491,7 @@ fn not_readable(
     };
     let split = Split {
         gpu: if graphics { need } else { Parts::default() },
-        cpu: if graphics { Parts::default() } else { need },
+        cpu: if graphics { held } else { need.plus(&held) },
         layers_on_gpu: 0,
         units: 0,
         expert_layers_on_cpu: 0,
@@ -809,7 +828,14 @@ pub async fn measured(
         .await
     {
         Outcome::Rows(rows) => {
-            let split = measured_split(&rows, &worked.split, facts, machine.graphics(gpu));
+            let checkpoints = placer.checkpoints(u64::from(resolved.ctx), fine);
+            let split = measured_split(
+                &rows,
+                &worked.split,
+                facts,
+                machine.graphics(gpu),
+                checkpoints,
+            );
             let verdict = placer.judge_split(&split, gpu, fine);
             let worked = Worked { split, ..worked };
             preview(
@@ -835,14 +861,18 @@ pub async fn measured(
 
 /// The split llama.cpp measured: device rows on the graphics side, the host and every
 /// buffer type in computer memory, the projector's file size as the estimate places it
-/// (llama.cpp does not measure it), the layer counts of the estimate's placement.
+/// (llama.cpp does not measure it), the saved copies of short-memory layers in computer
+/// memory as the estimate counts them (`checkpoints`; made while a chat goes on, so not
+/// measured either), the layer counts of the estimate's placement.
 fn measured_split(
     rows: &[MemoryRow],
     estimate: &Split,
     facts: &ModelFacts,
     graphics: bool,
+    checkpoints: u64,
 ) -> Split {
     let (mut gpu, mut cpu) = rows_to_parts(rows);
+    cpu.context = cpu.context.saturating_add(checkpoints);
     if graphics {
         gpu.image_reader = facts.projector_bytes;
     } else {
@@ -970,6 +1000,7 @@ fn expert_layers_moved(sizes: &models::LayerSizes, layers: Layers, pick: Experts
     let input = PlacementInput {
         sizes,
         kv_per_layer: Vec::new(),
+        checkpoints: 0,
         compute_gpu: 0,
         compute_cpu: 0,
         projector: 0,

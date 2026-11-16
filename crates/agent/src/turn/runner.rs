@@ -545,10 +545,38 @@ impl<'a> Turn<'a> {
             request.tool_choice = Some(choice);
             request.parallel_tool_calls = Some(false);
         }
-        if self.input.caps.thinking && (thinking_off || !self.input.thinking) {
-            disable_thinking(&mut request, self.deps.client.config().kind);
+        if self.input.caps.thinking {
+            // [0.0.7 P5] Claude's Messages API is told whether to think either way.
+            let off = thinking_off || !self.input.thinking;
+            request.thinking = Some(!off);
+            if off {
+                disable_thinking(&mut request, self.deps.client.config().kind);
+            }
         }
+        self.mark_failed_results(&mut request.messages);
         request
+    }
+
+    /// [0.0.7 P5] Marks the tool results of calls that failed, were refused or did not run,
+    /// for servers that carry that apart from the text (Claude's `is_error`).
+    fn mark_failed_results(&self, messages: &mut [ChatMessage]) {
+        let failed: HashSet<&str> = self
+            .earlier
+            .iter()
+            .chain(self.turn.iter())
+            .flat_map(HistoryMessage::tool_results)
+            .filter(|result| result.status != CallStatus::Ok)
+            .map(|result| result.call_id.as_str())
+            .collect();
+        if failed.is_empty() {
+            return;
+        }
+        for message in messages.iter_mut().filter(|m| m.role == Role::Tool) {
+            message.is_error = message
+                .tool_call_id
+                .as_deref()
+                .is_some_and(|id| failed.contains(id));
+        }
     }
 
     fn request_for_view(
@@ -1953,6 +1981,7 @@ fn provider_failure(err: &ProviderError) -> TurnStatus {
         ProviderError::Decode(_) => "decode",
         ProviderError::Cancelled => "cancelled",
         ProviderError::InvalidRequest(_) => "invalid_request",
+        ProviderError::Refused { .. } => "refused",
     };
     failed(code, err.user_message())
 }
@@ -1967,8 +1996,15 @@ fn disable_thinking(request: &mut ChatRequest, kind: ProviderKind) {
         ProviderKind::Ollama => {
             request.set_extra("reasoning_effort", Value::String("none".to_owned()));
         }
-        // Elsewhere a plain retry.
-        ProviderKind::LmStudio | ProviderKind::Vllm | ProviderKind::Generic => {}
+        // [0.0.7 P5] Claude: `request.thinking` (set by `build_request`) becomes the Messages
+        // API's `thinking` parameter. Elsewhere a plain retry.
+        ProviderKind::Anthropic
+        | ProviderKind::LmStudio
+        | ProviderKind::Vllm
+        | ProviderKind::Generic
+        | ProviderKind::OpenAi
+        | ProviderKind::OpenRouter
+        | ProviderKind::Abliteration => {}
     }
 }
 

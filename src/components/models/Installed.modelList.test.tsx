@@ -15,6 +15,10 @@ const ipcMock = vi.hoisted(() => ({
   importModel: vi.fn(async () => undefined),
   deleteModel: vi.fn(async () => undefined),
   listModelOptions: vi.fn(async () => []),
+  // [0.0.7 P2] The image file line of a row with a repository and no image file.
+  imageFileOffer: vi.fn(async () => ({ kind: "none" as const })),
+  downloadImageFile: vi.fn(async () => "group"),
+  onDownloadProgress: vi.fn(async () => () => undefined),
   modelBusy: vi.fn(async () => ({ chatTurns: 0, modelChecks: 0, otherApps: 0 })),
   unloadModel: vi.fn(async () => true),
 }));

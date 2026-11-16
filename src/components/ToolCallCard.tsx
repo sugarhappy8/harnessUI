@@ -198,6 +198,7 @@ function lastLine(progress: string): string {
  */
 export function ToolCallCard(props: { call: ToolCallView }) {
   const c = props.call;
+  const chatId = useApp((s) => s.activeChatId);
   const [open, setOpen] = useState(false);
   const [all, setAll] = useState(false);
   const result = c.text || c.progress || "";
@@ -259,10 +260,12 @@ export function ToolCallCard(props: { call: ToolCallView }) {
               )}
             </div>
           )}
+          {/* harnessUI minimises itself before computer input (0.0.7); this is for a window
+              the user brought back while the agent works. */}
           {c.name.startsWith("computer_") && result.includes("this app's own window") && (
             <button
               type="button"
-              onClick={() => void minimizeMainWindow()}
+              onClick={() => void minimizeMainWindow(chatId)}
               className="rounded-md border border-border px-2 py-1 text-xs"
             >
               Minimise this window while the agent works

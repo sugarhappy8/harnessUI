@@ -297,9 +297,13 @@ mod tests {
         assert_eq!(s.quantization.as_deref(), Some("Q4_K_M"));
         assert_eq!(s.key_length, 128);
         // 32 layers × (128 + 128) × 8 heads × 2 bytes = 131072 bytes per token.
-        assert_eq!(s.kv_bytes_per_token(), 131_072);
+        assert_eq!(s.kv_size(KvCacheType::F16), KvSize::per_token(131_072));
         // 8192 tokens → 1 GiB.
-        assert_eq!(s.kv_bytes(8192), 1 << 30);
+        assert_eq!(s.kv_bytes(8192, KvCacheType::F16), 1 << 30);
+        // No short-memory layer, every layer its own memory.
+        assert_eq!(s.sliding_window, 0);
+        assert!(s.swa_layers.is_empty());
+        assert_eq!(s.kv_layers, vec![true; 32]);
         assert!(!s.template_tools);
         assert!(s.has_chat_template);
         assert!(!s.is_moe());
@@ -323,7 +327,7 @@ mod tests {
                 )
                 .build(),
         );
-        assert_eq!(s.kv_bytes_per_token(), 28 * 256 * 8 * 2);
+        assert_eq!(s.kv_size(KvCacheType::F16).per_cell, 28 * 256 * 8 * 2);
         assert!(s.template_tools);
         assert!(s.template_thinking);
         assert_eq!(s.expert_count, None);
@@ -341,7 +345,12 @@ mod tests {
                 .u32_array("lfm2.attention.head_count_kv", &[8, 0, 8, 0])
                 .build(),
         );
-        assert_eq!(s.kv_bytes_per_token(), 2 * (64 + 64) * 8 * 2);
+        assert_eq!(
+            s.kv_size(KvCacheType::F16),
+            KvSize::per_token(2 * (64 + 64) * 8 * 2)
+        );
+        // The recurrent layers keep no memory of their own.
+        assert_eq!(s.kv_layers, vec![true, false, true, false]);
     }
 
     /// Save memory stores the cache as q8_0: 34 bytes per 32 values instead of 64.
@@ -358,13 +367,16 @@ mod tests {
                 .u32("llama.attention.head_count_kv", 8)
                 .build(),
         );
-        assert_eq!(s.kv_bytes_per_token_as(KvCacheType::F16), 131_072);
-        assert_eq!(
-            s.kv_bytes_per_token_as(KvCacheType::F16),
-            s.kv_bytes_per_token()
-        );
+        assert_eq!(s.kv_size(KvCacheType::F16).per_cell, 131_072);
+        assert_eq!(s.kv_size(KvCacheType::F16).fixed, 0);
         // 32 layers × 2 rows × 1,024 / 32 blocks × 34 bytes.
-        assert_eq!(s.kv_bytes_per_token_as(KvCacheType::Q8_0), 69_632);
+        assert_eq!(s.kv_size(KvCacheType::Q8_0).per_cell, 69_632);
+        // A quantized cache also gets rotation matrices: per layer 128² f32 entries for
+        // keys (128-value heads) and 64² for values (llama_kv_cache::init_rotation).
+        assert_eq!(
+            s.kv_size(KvCacheType::Q8_0).fixed,
+            32 * (128 * 128 * 4 + 64 * 64 * 4)
+        );
         // A hybrid model: the recurrent layers have no cache in either type.
         let hybrid = summary(
             Writer::new()
@@ -376,8 +388,13 @@ mod tests {
                 .build(),
         );
         assert_eq!(
-            hybrid.kv_bytes_per_token_as(KvCacheType::Q8_0),
+            hybrid.kv_size(KvCacheType::Q8_0).per_cell,
             2 * 2 * 16 * 34
+        );
+        // Rotation matrices only for the two attention layers (64-value heads).
+        assert_eq!(
+            hybrid.kv_size(KvCacheType::Q8_0).fixed,
+            2 * (64 * 64 * 4 + 64 * 64 * 4)
         );
         // A row that is not a whole number of blocks is rounded up to one more block.
         assert_eq!(KvCacheType::Q8_0.row_bytes(33), 68);
@@ -394,7 +411,7 @@ mod tests {
                 .build(),
         );
         assert!(s.is_projector);
-        assert_eq!(s.kv_bytes_per_token(), 0);
+        assert_eq!(s.kv_bytes(4096, KvCacheType::F16), 0);
     }
 
     /// A crafted header (0.0.6 item 6, spec 2.0): huge per-layer numbers never panic
@@ -415,15 +432,17 @@ mod tests {
         };
         // A key length near u64::MAX: the per-token figure saturates.
         let s = hostile(32, u64::MAX);
-        assert_eq!(s.kv_bytes_per_token(), u64::MAX);
-        assert_eq!(s.kv_bytes(4096), u64::MAX);
+        assert_eq!(s.kv_size(KvCacheType::F16).per_cell, u64::MAX);
+        assert_eq!(s.kv_bytes(4096, KvCacheType::F16), u64::MAX);
+        assert_eq!(s.kv_bytes(4096, KvCacheType::Q8_0), u64::MAX);
         // 2^61 blocks (a capacity overflow) and 2^40 blocks (an 8 TiB allocation): at most
         // MAX_BLOCKS entries, the header's number itself kept for display.
         for block_count in [1u64 << 61, 1 << 40, u64::MAX] {
             let s = hostile(block_count, 128);
             assert_eq!(s.block_count, block_count);
             assert_eq!(s.head_count_kv.len() as u64, crate::layers::MAX_BLOCKS);
-            assert!(s.kv_bytes_per_token() > 0);
+            assert_eq!(s.kv_layers.len() as u64, crate::layers::MAX_BLOCKS);
+            assert!(s.kv_size(KvCacheType::F16).per_cell > 0);
         }
         // Without head_count_kv the head count is used per layer, with the same cap.
         let s = summary(
@@ -444,7 +463,7 @@ mod tests {
         };
         let h = crate::gguf::read_file(std::path::Path::new(&path)).unwrap();
         let s = ModelSummary::from_header(&h);
-        assert!(s.kv_bytes_per_token() > 0);
+        assert!(s.kv_bytes(4096, KvCacheType::F16) > 0);
         assert!(s.vocab_size.unwrap_or(0) > 1000);
         assert!(s.has_chat_template);
     }

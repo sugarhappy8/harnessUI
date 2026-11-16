@@ -80,10 +80,11 @@ pub type ReadyCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 pub struct StepAside {
     /// The app's name, for the card: "<name> will minimise itself while this runs."
     pub app_name: String,
-    /// Called before every approved input action, on a blocking thread, with the chat's id:
-    /// minimises the main window when it is on screen and returns once it is gone, or after
-    /// a short wait (about a second).
-    pub minimise: Arc<dyn Fn(i64) + Send + Sync>,
+    /// Called before every approved input action, on a blocking thread, with the chat's id
+    /// and the call's cancellation: minimises the main window when it is on screen and
+    /// returns once it is gone, or after a short wait (about a second). Once the call is
+    /// stopped it must not minimise any more: nothing would bring the window back.
+    pub minimise: Arc<dyn Fn(i64, &tokio_util::sync::CancellationToken) + Send + Sync>,
 }
 
 impl std::fmt::Debug for StepAside {
@@ -1280,8 +1281,11 @@ fn step_aside(
             tracing::debug!(error = %e, "could not hand the keyboard back");
         }
     };
+    if cancel.is_cancelled() {
+        return;
+    }
     hand_back();
-    (aside.minimise)(chat);
+    (aside.minimise)(chat, cancel);
     hand_back();
     let points = plan.step.points();
     let deadline = std::time::Instant::now() + ASIDE_WAIT;

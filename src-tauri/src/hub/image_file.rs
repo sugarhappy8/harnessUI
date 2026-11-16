@@ -184,8 +184,10 @@ pub enum Offer {
     Available { file: String, size_bytes: u64 },
     /// The repository's image files are all ones that could not be read here.
     NoOther,
-    /// The repository has no image file (or the model has no repository).
-    None,
+    /// The repository has no image file (or the model has no repository). JSON
+    /// `{"kind":"none"}`.
+    #[serde(rename = "none")]
+    NoImageFile,
 }
 
 /// The last part of a repository path.
@@ -199,7 +201,7 @@ fn last_part(path: &str) -> &str {
 pub fn pick(files: &[RepoFile], unreadable: &[FileStamp]) -> (Offer, Option<RepoFile>) {
     let projectors = models::classify(files).projectors;
     if projectors.is_empty() {
-        return (Offer::None, None);
+        return (Offer::NoImageFile, None);
     }
     let known_bad = |f: &RepoFile| {
         unreadable
@@ -355,7 +357,7 @@ pub async fn image_file_offer(
         .await
         .ok_or_else(|| AppError::not_found("model"))?;
     let Some(repo) = rec.repo else {
-        return Ok(Offer::None);
+        return Ok(Offer::NoImageFile);
     };
     let hub = LiveHub::new(Some(super::hf_client(&app).await?));
     let listing = hub.listing(&repo, None).await.map_err(super::hf_error)?;

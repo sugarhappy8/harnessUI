@@ -478,6 +478,8 @@ const ALLOWED: &[&str] = &[
     settings::STEPS_PER_TURN,
     // [0.0.6] Closing the note about renamed MCP servers (only ever cleared this way).
     crate::mcp_cmd::RENAMED_SERVERS,
+    // [0.0.7] How many identical calls in a row end a turn (2 to 100).
+    settings::SAME_CALL_LIMIT,
 ];
 
 #[tauri::command]
@@ -499,6 +501,11 @@ pub async fn set_setting(
     if key == settings::STEPS_PER_TURN && settings::parse_steps_per_turn(&value).is_none() {
         return Err(AppError::bad_request(
             "The step limit must be a whole number from 5 to 500.",
+        ));
+    }
+    if key == settings::SAME_CALL_LIMIT && settings::parse_same_call_limit(&value).is_none() {
+        return Err(AppError::bad_request(
+            "The number of identical calls in a row must be a whole number from 2 to 100.",
         ));
     }
     if key == settings::REMOTE_CONTEXT_LENGTH && settings::parse_remote_context(&value).is_none() {
@@ -803,6 +810,7 @@ mod tests {
                 crate::settings::REMOTE_CONTEXT_LENGTH,
                 crate::settings::STEPS_PER_TURN,
                 crate::mcp_cmd::RENAMED_SERVERS,
+                crate::settings::SAME_CALL_LIMIT,
             ],
             "the list changed: model settings must stay off it"
         );

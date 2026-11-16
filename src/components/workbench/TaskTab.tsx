@@ -69,7 +69,7 @@ export function TaskTab(props: { chatId: number }) {
     if (!(await setStatus("paused"))) return;
     // The same stop as the Stop button, only for a turn of this chat.
     const g = useApp.getState().generation;
-    if (g && g.chatId === chatId) await useApp.getState().stop();
+    if (g && g.chatId === chatId) await useApp.getState().stop(chatId);
   }
 
   async function resume() {

@@ -884,3 +884,68 @@ describe("ToolsPanel: the header button (header-layout r2)", () => {
     expect(button.querySelector("[data-tools-label]")).toBeNull();
   });
 });
+
+// [0.0.7 P6] Listening for tool changes starts asynchronously. A listener that started after
+// the panel had moved on (React's development mode mounts every effect twice; a quick chat
+// switch) stayed behind and later read the previous chat's tools into the panel, which the
+// next switch then saved to the chat on screen.
+describe("ToolsPanel: listening for tool changes (0.0.7 P6)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ipcMock.listApprovedFolders.mockImplementation(async () => []);
+    ipcMock.loadedSkills.mockImplementation(async () => []);
+  });
+  afterEach(() => {
+    cleanup();
+    ipcMock.onMcpChanged.mockImplementation(async () => () => undefined);
+    ipcMock.listChatTools.mockImplementation(async () => []);
+  });
+
+  it("stops every listener that starts after the panel moved on, and keeps the newest", async () => {
+    const { StrictMode } = await import("react");
+    const started: { unlisten: ReturnType<typeof vi.fn>; ready: () => void }[] = [];
+    ipcMock.onMcpChanged.mockImplementation(
+      () =>
+        new Promise<() => void>((resolve) => {
+          const unlisten = vi.fn();
+          started.push({ unlisten, ready: () => resolve(unlisten) });
+        }),
+    );
+    const { rerender } = render(
+      <StrictMode>
+        <ToolsPanel chatId={CHAT} nCtx={8192} />
+      </StrictMode>,
+    );
+    // Another chat is opened before any listener has started.
+    rerender(
+      <StrictMode>
+        <ToolsPanel chatId={CHAT + 1} nCtx={8192} />
+      </StrictMode>,
+    );
+    expect(started.length).toBeGreaterThan(1);
+    await act(async () => {
+      for (const s of started) s.ready();
+    });
+    const left = started.filter((s) => s.unlisten.mock.calls.length === 0);
+    expect(left).toEqual([started[started.length - 1]]);
+    cleanup();
+    expect(started[started.length - 1]!.unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops tools read for a chat it no longer shows, so a switch never saves them to this chat", async () => {
+    const answers = new Map<number, (t: ToolDto[]) => void>();
+    ipcMock.listChatTools.mockImplementation((chatId) => new Promise((resolve) => answers.set(chatId, resolve)));
+    const { rerender } = render(<ToolsPanel chatId={CHAT} nCtx={8192} />);
+    rerender(<ToolsPanel chatId={CHAT + 1} nCtx={8192} />);
+    // The new chat's answer comes first, the old chat's after it.
+    await act(async () => answers.get(CHAT + 1)!([tool("files", "read_file", { enabledInChat: true })]));
+    await act(async () =>
+      answers.get(CHAT)!([
+        tool("files", "read_file", { enabledInChat: true }),
+        tool("files", "write_file", { enabledInChat: true }),
+        tool("terminal", "run_command", { enabledInChat: true }),
+      ]),
+    );
+    expect(screen.getByTitle("Tools for this chat").textContent).toBe(" Tools (1)");
+  });
+});

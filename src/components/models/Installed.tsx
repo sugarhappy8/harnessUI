@@ -12,6 +12,7 @@ import { ErrorBanner } from "../ErrorBanner";
 import { visiblePath } from "../FolderChip";
 import { ModelSettings } from "../ModelSettings";
 import { Badge } from "./Badge";
+import { ImageFileLine, seesImages } from "./ImageFile";
 
 const DOT: Record<Verdict, string> = { green: "bg-success", yellow: "bg-warning", red: "bg-danger" };
 
@@ -168,6 +169,7 @@ export function Installed(props: { onClose: () => void }) {
             onUse={() => void use(m)}
             onSettings={() => setSettingsFor(m.path)}
             onRemove={() => void remove(m)}
+            onChanged={load}
           />
         ))}
         {models?.length === 0 && (
@@ -194,6 +196,8 @@ function Row(props: {
   onUse: () => void;
   onSettings: () => void;
   onRemove: () => void;
+  /** [0.0.7 P2] The row changed (its image file was downloaded): read the list again. */
+  onChanged: () => void;
 }) {
   const { model: m, info } = props;
   const compare = useAddToComparison({ installedPath: m.path });
@@ -216,7 +220,7 @@ function Row(props: {
           )}
           {m.summary?.templateTools && <Badge>tools</Badge>}
           {m.summary?.templateThinking && <Badge>thinking</Badge>}
-          {m.projectorPath && <Badge>vision</Badge>}
+          {seesImages(m) && <Badge>vision</Badge>}
           {m.summary?.isMoe && (
             <Badge title="It uses only part of itself at a time, so it runs faster than its size suggests.">
               uses part of itself at a time
@@ -229,6 +233,7 @@ function Row(props: {
             </span>
           )}
         </div>
+        <ImageFileLine model={m} onChanged={props.onChanged} />
         <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-fg-muted">
           {info && verdict && (
             <span

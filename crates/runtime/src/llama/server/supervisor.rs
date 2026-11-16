@@ -6,12 +6,6 @@
 //!   crash limit is reached, before any step-down, each at most once per load (a process
 //!   that could not be created, a load timeout or an unusable `/props` reply changes no
 //!   setting):
-//!   0. **Without the image file** ([`LoadStage::RetryingWithoutImageFile`], 0.0.7) when
-//!      the model loaded but its image file (`--mmproj`) could not be read
-//!      ([`LoadFailure::ImageFileInvalid`]). Everything else stays as it was, and the image
-//!      file stays out for the rest of the load; the model then cannot see images. Such a
-//!      failure never steps down or retries anything else: it fails the same everywhere.
-//!      Running out of memory while the image file loads is a memory failure (step 3).
 //!   1. **Save memory off** ([`LoadStage::RetryingWithoutSaveMemory`]) when it was on and
 //!      either the log shows the model refusing it ([`save_memory_refused`]: a q8_0 block
 //!      that does not divide the head size, a model without flash attention; on any
@@ -32,6 +26,13 @@
 //!      As much as fits leaves free and where the conversation memory lives are kept. A
 //!      placement of 0 layers puts none of the model on the card, so As much as fits would
 //!      put more there than chosen: such a load steps down instead.
+//! - **Without the image file (0.0.7)** ([`LoadStage::RetryingWithoutImageFile`]), before
+//!   the retries above: the model loaded but its image file (`--mmproj`) could not be read
+//!   ([`LoadFailure::ImageFileInvalid`]). The load is tried again once with everything else
+//!   as it was, and the image file stays out for the rest of the load; the model then
+//!   cannot see images. Such a failure never steps down or retries anything else: it fails
+//!   the same everywhere. Running out of memory while the image file loads is a memory
+//!   failure (retry 3).
 //! - **Stepping down:** when a GPU backend still fails, and a lower backend passed its
 //!   probe, try the next one down (ROCm or CUDA → Vulkan → CPU) and report
 //!   [`ServerEvent::SteppedDown`]. The processor runs with [`GpuUse::Off`]; another

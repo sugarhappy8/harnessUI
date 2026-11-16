@@ -160,3 +160,33 @@ describe("ToolCallCard: a shortened result", () => {
     expect(ipcMock.toolOutputForCall).not.toHaveBeenCalled();
   });
 });
+
+describe("ToolCallCard: a computer tool refused because this window was in the way", () => {
+  afterEach(() => {
+    cleanup();
+    ipcMock.minimizeMainWindow.mockClear();
+  });
+
+  it("offers to minimise the window for the chat on screen, so it comes back when the turn ends", () => {
+    useApp.setState({ activeChatId: 7 });
+    render(
+      <ToolCallCard
+        call={call({
+          name: "computer_click",
+          arguments: { coordinate: [700, 300] },
+          status: "error",
+          text: "That point is covered by this app's own window. Computer use never sends input to this app.",
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(screen.getByRole("button", { name: "Minimise this window while the agent works" }));
+    expect(ipcMock.minimizeMainWindow).toHaveBeenCalledWith(7);
+  });
+
+  it("offers nothing for other results", () => {
+    render(<ToolCallCard call={call({ name: "computer_click", status: "ok", text: "Clicked the left button." })} />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.queryByRole("button", { name: "Minimise this window while the agent works" })).toBeNull();
+  });
+});

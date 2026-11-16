@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Download } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import type { DownloadGroup, ImageFileOffer, InstalledModel } from "../../lib/types";
@@ -91,7 +91,7 @@ export function ImageFileLine(props: { model: InstalledModel; onChanged: () => v
 
   const reload = () => void reloadModel(useApp.getState().runtime, true).catch((err) => setError(toErrorInfo(err).message));
 
-  const lines: React.ReactNode[] = [];
+  const lines: ReactNode[] = [];
   if (unreadable && !finished) {
     lines.push(
       <span key="unreadable" className="text-warning">

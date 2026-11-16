@@ -445,6 +445,8 @@ pub async fn ask_during_call(
         reason: policy::AskReason::AlwaysAsk,
         keep_asking: None,
     };
+    // [0.0.7] A main window that stepped aside for computer use comes back for the card.
+    crate::computer_cmd::approval_needed(app, chat_id);
     let _ = app.emit_to(crate::MAIN_WINDOW, "approval-request", dto);
     let guard = CardGuard {
         app: app.clone(),
@@ -521,6 +523,8 @@ impl Approver for AppApprover {
             reason: req.reason,
             keep_asking: req.action.keep_asking,
         };
+        // [0.0.7] A main window that stepped aside for computer use comes back for the card.
+        crate::computer_cmd::approval_needed(&self.app, self.chat_id);
         let _ = self
             .app
             .emit_to(crate::MAIN_WINDOW, "approval-request", dto);
@@ -1676,6 +1680,13 @@ pub(crate) async fn assemble(
     if !full_access {
         enabled.retain(|t| !crate::approvals::only_in_full_access(t));
     }
+    // [0.0.7] Every tool that is on, shown this turn or not, for the tool list in the system
+    // message: made before the split, so it does not change with what a turn shows.
+    let tool_guide = crate::tool_select::roster::tool_guide(
+        &enabled,
+        &crate::tool_catalog::builtin_servers(&state.host),
+        req.caps.n_ctx,
+    );
     // [0.0.4 tool selection] Of the tools that are on in the chat, the ones shown to the
     // model this turn. The rest stay reachable through `find_tools` and `call_tool`.
     let (mut enabled, hidden) = if turn {
@@ -1721,6 +1732,16 @@ pub(crate) async fn assemble(
         .ok()
         .flatten();
     input.step_cap = crate::settings::steps_per_turn(stored_steps.as_ref());
+    // [0.0.7] How many identical calls in a row end the turn: read for every turn, held to
+    // 2..=100 whatever is stored.
+    let stored_limit: Option<serde_json::Value> = state
+        .store
+        .get_setting(crate::settings::SAME_CALL_LIMIT)
+        .await
+        .ok()
+        .flatten();
+    input.repeat_limit = crate::settings::same_call_limit(stored_limit.as_ref());
+    input.tool_guide = Some(tool_guide); // [0.0.7] used only when tools are on
     let chat_prefs: ChatTools =
         serde_json::from_value(req.chat.tool_prefs.clone()).unwrap_or_default();
     input.thinking = !chat_prefs.thinking_off;
@@ -1933,6 +1954,11 @@ pub async fn run(
         helper_input.history = Vec::new();
         helper_input.summary = None;
         helper_input.app_notes.clear();
+        // [0.0.7] Its tool list leaves out what a helper is not offered.
+        helper_input.tool_guide = helper_input
+            .tool_guide
+            .as_ref()
+            .map(crate::tool_select::roster::for_helper);
         tools.helper = Some(HelperSetup {
             app: app.clone(),
             client: req.client.clone(),
@@ -2001,6 +2027,8 @@ pub async fn run(
     }
     sink.flush_deltas();
     crate::computer_cmd::end_turn(app);
+    // [0.0.7] A main window that stepped aside for this chat's computer use comes back.
+    crate::computer_cmd::turn_ended(app, chat_id.0);
     // The persister ends when every sender is gone: the sink's and the one kept for helpers.
     drop(tools);
     drop(sink);

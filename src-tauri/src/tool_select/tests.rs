@@ -238,6 +238,154 @@ fn requests_match_the_groups_they_are_about() {
     }
 }
 
+/// [0.0.7] The owner: "the model still can't use my computer too well, they don't know
+/// what tools they have". Everyday ways to ask for the desktop find the computer group, and
+/// the browser does not take them ("open notepad" is not a website); a website still goes to
+/// the browser. Every built-in group takes part, as in the table above.
+#[test]
+fn everyday_desktop_requests_find_the_computer_group() {
+    let all: Vec<Candidate> = on(&[
+        "files",
+        "terminal",
+        "git",
+        "skills",
+        "browser",
+        "computer",
+        "artifacts",
+        "search",
+    ])
+    .into_iter()
+    .filter(|t| !is_always_shown(t) && !is_core(t))
+    .collect();
+    let table: &[(&str, &[&str])] = &[
+        ("open Notepad and type hello", &["computer"]),
+        ("use my pc to open Chrome", &["computer"]),
+        ("on my laptop, open settings", &["computer"]),
+        ("type this into Word", &["computer"]),
+        ("open the app", &["computer"]),
+        ("open File Explorer and show me my downloads", &["computer"]),
+        // "click" means the browser by itself (a page has buttons too); the desktop's own
+        // words bring the computer group in beside it.
+        (
+            "double-click the icon on the desktop",
+            &["browser", "computer"],
+        ),
+        ("press the Start menu button", &["computer"]),
+        ("put these numbers in Excel", &["computer"]),
+        ("can you use my computer?", &["computer"]),
+        // A screenshot may be of the agent's browser page or of the screen: both groups.
+        (
+            "take a screenshot and tell me what you see",
+            &["browser", "computer"],
+        ),
+        // A website is still the browser's.
+        ("open youtube.com", &["browser"]),
+        ("go to example.org and read it", &["browser"]),
+        // Other gaps of the same kind.
+        ("what's the weather in Paris", &["search"]),
+        ("bitcoin price today", &["search"]),
+        // Words that mean something in code bring in nothing alone.
+        ("open the file notes.txt", &[]),
+        ("what type is this variable?", &[]),
+        ("count the words in this file", &[]),
+        ("fix the edge case in the parser", &[]),
+    ];
+    for (message, expected) in table {
+        let got: BTreeSet<String> = matching_groups(&all, &Wording::of(message), &[])
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect();
+        let want: BTreeSet<String> = expected.iter().map(|g| g.to_string()).collect();
+        assert_eq!(got, want, "{message}");
+    }
+}
+
+/// [0.0.7] The computer group comes whole: a model that can take a screenshot but not click
+/// or type is stuck. Whole when a message is about it or the chat was shown, used or found
+/// one of its tools, past the cap if need be; not at all when nothing points at it; and in
+/// a small context the tools it needs most come first.
+#[test]
+fn the_computer_group_is_shown_whole_or_not_at_all() {
+    let tools = on(&[
+        "files",
+        "browser",
+        "computer",
+        "artifacts",
+        "search",
+        "toolfinder",
+        "outputs",
+        "task",
+    ]);
+    let computer: Vec<String> = tools
+        .iter()
+        .filter(|t| t.server == "computer")
+        .map(|t| t.name.clone())
+        .collect();
+    assert_eq!(computer.len(), 7);
+    let all_of = |shown: &[String]| computer.iter().all(|n| shown.contains(n));
+    let none_of = |shown: &[String]| computer.iter().all(|n| !shown.contains(n));
+    assert!(none_of(&pick(
+        &tools,
+        &["Please read notes.txt and tell me what it says"],
+        &[],
+        &[]
+    )));
+    let desktop = pick(&tools, &["open Notepad and type hello"], &[], &[]);
+    assert!(all_of(&desktop), "{desktop:?}");
+    assert!(BASE.iter().all(|n| desktop.contains(&n.to_string())), "{desktop:?}");
+    assert_eq!(desktop.len(), BASE.len() + 7, "{desktop:?}");
+    assert!(desktop.len() > DEFAULT_MAX);
+    // One of its tools shown before, used or found: all of them, whatever is asked now.
+    let before = names(&["computer_screenshot"]);
+    let used = names(&["computer_click"]);
+    for (shown, wanted) in [(&before, &Vec::new()), (&Vec::new(), &used)] {
+        let list = pick(&tools, &["carry on"], shown, wanted);
+        assert!(all_of(&list), "{list:?}");
+    }
+    // The list still only grows: a later turn keeps all of them.
+    let later = pick(&tools, &["thanks"], &desktop, &[]);
+    assert!(is_subsequence(&desktop, &later) && all_of(&later), "{later:?}");
+    // The browser shares the screenshot request, and the computer group still comes whole.
+    let shot = pick(&tools, &["take a screenshot"], &[], &[]);
+    assert!(all_of(&shot), "{shot:?}");
+    assert!(shot.contains(&"browser_screenshot".to_string()), "{shot:?}");
+
+    // A small context: whole when it fits, else screenshot, click, type and key first.
+    let messages = texts(&["open Notepad and type hello"]);
+    let within = |allowance: u32| {
+        select(&Selecting {
+            tools: &tools,
+            messages: &messages,
+            shown: &[],
+            wanted: &[],
+            skills: &[],
+            skill_loaded: false,
+            max: DEFAULT_MAX,
+            allowance: Some(allowance),
+        })
+    };
+    // Every tool costs 100 here: the core five and the finder pair take 700.
+    let roomy = within(1_400);
+    assert!(all_of(&roomy), "{roomy:?}");
+    let tight = within(1_100);
+    let shown_computer: Vec<&str> = tight
+        .iter()
+        .map(String::as_str)
+        .filter(|n| n.starts_with("computer_"))
+        .collect();
+    assert_eq!(
+        shown_computer,
+        [
+            "computer_screenshot",
+            "computer_click",
+            "computer_type",
+            "computer_key"
+        ],
+        "{tight:?}"
+    );
+    assert!(cost_of(&tools, &tight) <= 1_100);
+}
+
 /// An external server has no catalog entry: its name, its tools' names and their
 /// descriptions are what a request is matched against.
 #[test]

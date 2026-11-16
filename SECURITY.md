@@ -36,7 +36,10 @@ built, not by the model's good behaviour:
 - An approval is resolved by a random request id created in Rust and delivered only to
   the main window.
 - Computer-use input is refused on the app's own windows, so a model cannot click
-  *Allow* on its own approval card.
+  *Allow* on its own approval card. Since 0.0.7 the app minimises its window before
+  approved computer input and brings it back for every approval card of that chat; the
+  check before every input event is unchanged, so input that would still reach the app's
+  window (it did not go, or you brought it back) is refused.
 
 **It can use permissions you already granted.** If you allowed reads in a folder and also
 allowed an action that sends data out, data can leave without a new card. To close the
@@ -382,7 +385,11 @@ build machine, and its Windows and macOS jobs have not run at all.
   uploads nothing.) With no model downloaded and nothing clicked, the app makes no network request. Every network use is listed in
   ARCHITECTURE.md 13.6. 0.0.6 adds two of its own, both only when you ask: Compare looks
   up the models you add on Hugging Face, and Settings → Reverse engineering downloads what
-  you click. A task you let the model hand to Claude Code or Codex also leaves this
+  you click. 0.0.7 adds one more: Models → Installed asks Hugging Face for the file list of
+  a model you downloaded from there when it has no image file it can read, to offer one, and
+  *Download the image file* downloads it like any model file (checked against its published
+  size and checksum, saved only in the model's own folder). A task you let the model hand to
+  Claude Code or Codex also leaves this
   computer: that program sends the task and the files it reads to its company (Anthropic or
   OpenAI) with your account, unless it is set up to use the model in harnessUI.
 - The usage line under the model name (0.0.6) is read from this computer's own counters,

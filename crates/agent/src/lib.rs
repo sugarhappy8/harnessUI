@@ -10,7 +10,10 @@
 //! - [`client`]: [`OpenAiClient`], a streaming client for llama-server and other
 //!   OpenAI-compatible servers (Ollama, LM Studio, vLLM), with context-length discovery and
 //!   llama-server's exact token counter;
-//! - [`estimate`]: character-based token estimates for servers that cannot count.
+//! - [`estimate`]: character-based token estimates for servers that cannot count;
+//! - [`cloud`] (0.0.7): where an endpoint is, when a key may be sent to it, and the request
+//!   rules of cloud companies; Claude's own Messages API is a second wire protocol behind
+//!   the same client (`ProviderKind::Anthropic`).
 //!
 //! On top of it, the agent loop (ARCHITECTURE.md 8):
 //!
@@ -26,7 +29,9 @@
 
 #![warn(missing_docs)]
 
+mod anthropic;
 pub mod client;
+pub mod cloud;
 pub mod context;
 pub mod error;
 pub mod estimate;
@@ -39,7 +44,10 @@ pub mod thinking;
 pub mod turn;
 pub mod types;
 
-pub use client::{ChatStream, ClientConfig, ModelInfo, OpenAiClient, ProviderKind, Token};
+pub use client::{
+    ChatStream, ClientConfig, ListedModel, ModelInfo, OpenAiClient, ProviderKind, Token,
+};
+pub use cloud::{EndpointPlace, check_key_transport, default_context, endpoint_host, endpoint_place};
 pub use context::{ContextBudget, PinnedDoNotFit, ToolsDoNotFit, truncate_head_tail};
 pub use error::ProviderError;
 pub use estimate::{TokenCalibrator, estimate_tokens};

@@ -70,6 +70,8 @@ pub fn stop_now(app: &AppHandle) {
         state.generation.cancel();
     }
     crate::computer_cmd::release_all(app);
+    // [0.0.7] A main window that stepped aside for computer use comes back.
+    crate::computer_cmd::stopped(app);
     crate::turns::cancel_all_pending(app);
     let _ = app.emit_to(crate::MAIN_WINDOW, "stop-requested", ());
     tracing::info!("stop hotkey pressed");

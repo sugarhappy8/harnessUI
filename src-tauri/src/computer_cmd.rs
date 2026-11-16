@@ -9,6 +9,8 @@
 //! unchanged and is not here: the tools are off in a chat until the user switches them on,
 //! every kind of input asks per application, and the indicator and the stop hotkey must
 //! be working before any input is sent.
+//!
+//! While computer use acts, the main window steps aside (0.0.7, [`aside`]).
 
 use std::sync::Arc;
 
@@ -17,6 +19,9 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+
+mod aside;
+pub use aside::{approval_needed, minimise_on_request, stopped, turn_ended};
 
 /// The computer server, when this OS has one.
 #[derive(Default)]
@@ -252,6 +257,7 @@ pub fn build(app: &AppHandle) -> Option<Arc<computer::ComputerServer>> {
         let config = computer::ComputerConfig {
             default_profile: unprepared_profile(),
             ready_check: Some(Arc::new(move || ready(&ready_app))),
+            step_aside: Some(step_aside(app)),
         };
         match computer::ComputerServer::native(Arc::new(TauriMainThread(app.clone())), me, config) {
             Ok(server) => Some(Arc::new(server)),
@@ -265,6 +271,21 @@ pub fn build(app: &AppHandle) -> Option<Arc<computer::ComputerServer>> {
     {
         let _ = (app, indicator_rects, child_pids);
         None
+    }
+}
+
+/// How the main window steps aside before approved input (9.3, "Stepping aside"): it
+/// minimises itself; [`aside`] brings it back.
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+fn step_aside(app: &AppHandle) -> computer::StepAside {
+    let aside_app = app.clone();
+    computer::StepAside {
+        app_name: app
+            .config()
+            .product_name
+            .clone()
+            .unwrap_or_else(|| "harnessUI".into()),
+        minimise: Arc::new(move |chat, cancel| aside::before_input(&aside_app, chat, cancel)),
     }
 }
 

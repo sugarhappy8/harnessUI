@@ -867,9 +867,10 @@ async fn thinking_with(store: &store::Store, path: &str) -> ThinkingLimit {
 pub struct HeaderFacts {
     /// The context the model was trained for.
     pub trained_ctx: Option<u32>,
-    /// Conversation memory per token: f16, and q8_0 (Save memory).
-    pub kv_f16: u64,
-    pub kv_q8: u64,
+    /// The conversation memory layer by layer, as llama.cpp lays it out (0.0.7 P1: short-
+    /// memory layers stop at their window, so it is no longer bytes per token). Read from
+    /// the header each time it is read, never saved.
+    pub kv: models::kv::KvShape,
     pub vocab: u64,
     /// The chat template can think.
     pub thinking: bool,
@@ -880,14 +881,12 @@ impl HeaderFacts {
     /// believed and reads as unknown: capped to it, a load would ask for `-c 0` (the whole
     /// trained length) or a size the commands refuse.
     pub fn from_summary(s: &models::ModelSummary) -> Self {
-        use models::summary::KvCacheType;
         Self {
             trained_ctx: s
                 .context_length
                 .map(|t| u32::try_from(t).unwrap_or(u32::MAX))
                 .filter(|t| *t >= *CTX_RANGE.start()),
-            kv_f16: s.kv_bytes_per_token_as(KvCacheType::F16),
-            kv_q8: s.kv_bytes_per_token_as(KvCacheType::Q8_0),
+            kv: s.kv_shape(),
             vocab: s.vocab_size.unwrap_or(0),
             thinking: s.template_thinking,
         }
@@ -924,9 +923,8 @@ pub struct LayerFacts {
     /// when a table or a split part cannot be read (the picture is then the estimate from
     /// the file sizes, `notReadable`, and the marks are fit.rs's).
     pub sizes: Option<models::LayerSizes>,
-    /// Conversation memory of each block for one token: f16, and q8_0 (Save memory).
-    pub kv_f16: Vec<u64>,
-    pub kv_q8: Vec<u64>,
+    /// The conversation memory of each block as llama.cpp lays it out (0.0.7 P1).
+    pub kv: models::kv::KvShape,
 }
 
 impl LayerFacts {
@@ -936,7 +934,6 @@ impl LayerFacts {
         s: &models::ModelSummary,
         sizes: Option<models::LayerSizes>,
     ) -> Option<Self> {
-        use models::summary::KvCacheType;
         let blocks = u32::try_from(s.block_count.min(models::layers::MAX_BLOCKS)).ok()?;
         if blocks == 0 {
             return None;
@@ -945,8 +942,7 @@ impl LayerFacts {
             blocks,
             experts: s.expert_count.is_some()
                 || sizes.as_ref().is_some_and(models::LayerSizes::has_experts),
-            kv_f16: models::placement::kv_per_layer(s, 1, KvCacheType::F16),
-            kv_q8: models::placement::kv_per_layer(s, 1, KvCacheType::Q8_0),
+            kv: s.kv_shape(),
             sizes,
         })
     }
@@ -963,26 +959,30 @@ impl LayerFacts {
         self.experts.then_some(self.blocks)
     }
 
-    /// The conversation memory of each block at `ctx` tokens, as Save memory stores it.
-    pub fn kv_at(&self, ctx: u64, save_memory: bool) -> Vec<u64> {
-        let per_token = if save_memory {
-            &self.kv_q8
-        } else {
-            &self.kv_f16
-        };
-        per_token.iter().map(|b| b.saturating_mul(ctx)).collect()
+    /// The conversation memory of each block at `ctx` tokens, stored as `layout` says
+    /// ([`kv_layout`]), as llama.cpp allocates it.
+    pub fn kv_at(&self, ctx: u64, layout: models::KvLayout) -> Vec<u64> {
+        self.kv.per_layer(ctx, layout)
     }
 }
 
+/// How a load stores the conversation memory (`runtime::build_args`): Save memory is q8_0
+/// with fast attention on; otherwise f16, with the values padded to the widest layer's when
+/// Fine control turns fast attention off.
+pub fn kv_layout(save_memory: bool, fine: &FineLaunch) -> models::KvLayout {
+    models::KvLayout::launch(save_memory, fine.flash_attn == runtime::FlashAttn::Off)
+}
+
 impl ModelFacts {
-    /// The memory estimate's input, with the conversation memory as Save memory stores
-    /// it. `None` without a header.
-    pub fn fit_input(&self, save_memory: bool) -> Option<models::FitInput> {
+    /// The memory estimate's input, with the conversation memory stored as `layout` says
+    /// ([`kv_layout`]: Save memory and Fine control's fast attention). `None` without a
+    /// header.
+    pub fn fit_input(&self, layout: impl Into<models::KvLayout>) -> Option<models::FitInput> {
         let h = self.header.as_ref()?;
         Some(models::FitInput {
             weights_bytes: self.weights_bytes,
             projector_bytes: self.projector_bytes,
-            kv_bytes_per_token: if save_memory { h.kv_q8 } else { h.kv_f16 },
+            kv: h.kv.size(layout),
             vocab_size: h.vocab,
             ctx: 0,
             max_ctx: h.trained_ctx.map(u64::from),
@@ -1370,7 +1370,7 @@ pub(crate) fn automatic(
     {
         return placer.auto(gpu, fine);
     }
-    let input = facts.fit_input(save_memory)?;
+    let input = facts.fit_input(kv_layout(save_memory, fine))?;
     let room = machine.room(gpu);
     match fine.fit_margin_mib {
         Some(mib) if gpu == GpuUse::Fit && machine.graphics(gpu) => {
@@ -1526,7 +1526,7 @@ pub fn build_info(
 ) -> ModelLoadInfo {
     let save = resolved.save_memory;
     let trained = facts.trained_ctx();
-    let input = facts.fit_input(save);
+    let input = facts.fit_input(kv_layout(save, &resolved.fine));
     let placer = crate::offload::Placer::new(facts, machine, save);
     let marks = Marks {
         machine,
@@ -1666,20 +1666,14 @@ impl Plan {
 
     /// What the model will take once loaded, for [`Freed`].
     pub fn footprint(&self) -> Footprint {
-        let Some(input) = self
-            .facts
-            .as_ref()
-            .and_then(|f| f.fit_input(self.resolved.save_memory))
-        else {
+        let layout = kv_layout(self.resolved.save_memory, &self.resolved.fine);
+        let Some(input) = self.facts.as_ref().and_then(|f| f.fit_input(layout)) else {
             return Footprint::default();
         };
         let ctx = u64::from(self.resolved.ctx);
         Footprint {
             needed: input.needed_at(ctx),
-            anon: input
-                .kv_bytes_per_token
-                .saturating_mul(ctx)
-                .saturating_add(input.compute_bytes()),
+            anon: input.kv.at(ctx).saturating_add(input.compute_bytes()),
             layers: self
                 .facts
                 .as_ref()
@@ -1957,8 +1951,9 @@ mod tests {
             projector_bytes: 0,
             header: Some(HeaderFacts {
                 trained_ctx: Some(40_960),
-                kv_f16: 131_072,
-                kv_q8: 69_632,
+                // 131,072 bytes a token in f16 and 69,632 in q8_0 (32 layers of 32 heads of
+                // 32 values: an 8B model's figures, without q8_0 rotation matrices).
+                kv: models::kv::KvShape::plain(32, 32, 32),
                 vocab: 128_256,
                 thinking: true,
             }),
@@ -2913,8 +2908,9 @@ mod tests {
             .expect("read again");
         assert_eq!(header.trained_ctx, Some(8192));
         // 2 layers × 2 rows × 2 heads × 64 values: 2 bytes each, or 4 blocks of 34 bytes.
-        assert_eq!(header.kv_f16, 1024);
-        assert_eq!(header.kv_q8, 2 * 2 * 4 * 34);
+        use models::summary::KvCacheType;
+        assert_eq!(header.kv.size(KvCacheType::F16).per_cell, 1024);
+        assert_eq!(header.kv.size(KvCacheType::Q8_0).per_cell, 2 * 2 * 4 * 34);
     }
 
     /// A header whose trained length is under 512 tokens (0 in a damaged file) is not
@@ -3008,7 +3004,12 @@ mod tests {
             .await
             .and_then(|f| f.header)
             .expect("the model's header");
-        assert!(header.kv_f16 > 0 && header.kv_q8 > 0);
+        use models::summary::KvCacheType;
+        let (f16, q8) = (
+            header.kv.size(KvCacheType::F16),
+            header.kv.size(KvCacheType::Q8_0),
+        );
+        assert!(f16.per_cell > 0 && q8.per_cell > 0);
         // The resident memory of a server started with `ctx` tokens, once it is ready.
         let rss_at = |ctx: u32, save_memory: bool| {
             let (backend, gguf) = (backend.clone(), gguf.clone());
@@ -3047,11 +3048,11 @@ mod tests {
             }
         };
         const MORE: u32 = 8192;
-        for (save_memory, per_token) in [(false, header.kv_f16), (true, header.kv_q8)] {
+        for (save_memory, kv) in [(false, f16), (true, q8)] {
             let short = rss_at(4096, save_memory).await;
             let long = rss_at(4096 + MORE, save_memory).await;
             let measured = long.saturating_sub(short) as f64;
-            let estimated = (per_token * u64::from(MORE)) as f64;
+            let estimated = (kv.at(u64::from(4096 + MORE)) - kv.at(4096)) as f64;
             eprintln!(
                 "save memory {save_memory}: {MORE} more tokens took {:.1} MiB; the estimate is {:.1} MiB",
                 measured / MIB as f64,

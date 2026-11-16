@@ -25,8 +25,29 @@ fn repo_file(path: &str, size: u64) -> RepoFile {
 }
 
 /// A folder with the model and the given image files (each `size` bytes).
-fn folder(images: &[(&str, usize)]) -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
+/// A folder of its own for one test, removed when it is dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("image-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn folder(images: &[(&str, usize)]) -> (Scratch, PathBuf) {
+    let dir = Scratch::new();
     let model = dir.path().join("Model-Q4_K_M.gguf");
     std::fs::write(&model, model_bytes()).unwrap();
     for (name, size) in images {
@@ -142,6 +163,11 @@ fn image_files_beside_the_model_best_precision_first() {
     assert!(beside(Path::new("/no/such/folder/model.gguf")).is_empty());
 }
 
+/// What `choose` reads from disk in a test: the stamps of the files that are there.
+fn on_disk(present: Vec<FileStamp>) -> impl Fn(&Path) -> Option<FileStamp> {
+    move |p: &Path| present.iter().find(|s| Path::new(&s.path) == p).cloned()
+}
+
 /// Which image file a load uses (1c): the recorded one while it is there and readable;
 /// else one next to the model, so a file put there later is used; one remembered as
 /// unreadable (1b) is skipped, and when nothing else is there the load says why.
@@ -155,15 +181,7 @@ fn the_choice_for_a_load() {
         stamp(&near, 20, 2),
         stamp(&other, 30, 3),
     ];
-    let on_disk = |present: Vec<&FileStamp>| {
-        move |p: &Path| {
-            present
-                .iter()
-                .find(|s| Path::new(&s.path) == p)
-                .map(|s| (*s).clone())
-        }
-    };
-    let all = || on_disk(files.iter().collect());
+    let all = || on_disk(files.to_vec());
     let recorded_text = recorded.display().to_string();
 
     // Recorded and readable: that one, even with others beside it.
@@ -187,7 +205,7 @@ fn the_choice_for_a_load() {
         }
     );
     // The recorded one is gone: beside it.
-    let gone = on_disk(vec![&files[1]]);
+    let gone = on_disk(vec![files[1].clone()]);
     let c = choose(Some(&recorded_text), &[near.clone()], &[], gone);
     assert_eq!(c.path, Some(near.display().to_string()));
     assert!(c.found && !c.left_out);
@@ -280,8 +298,8 @@ fn the_image_file_a_repository_offers() {
         repo_file("Model.mmproj-f16.gguf", 300),
     ];
     assert_eq!(pick(&only, &[bad_f16]), (Offer::NoOther, None));
-    assert_eq!(pick(&only[..1], &[]), (Offer::None, None));
-    assert_eq!(pick(&[], &[]), (Offer::None, None));
+    assert_eq!(pick(&only[..1], &[]), (Offer::NoImageFile, None));
+    assert_eq!(pick(&[], &[]), (Offer::NoImageFile, None));
 }
 
 /// The webview reads these shapes (src/lib/types.ts `ImageFileOffer`).
@@ -300,7 +318,7 @@ fn offers_serialise_with_a_kind() {
         serde_json::json!({"kind": "noOther"})
     );
     assert_eq!(
-        serde_json::to_value(Offer::None).unwrap(),
+        serde_json::to_value(Offer::NoImageFile).unwrap(),
         serde_json::json!({"kind": "none"})
     );
 }

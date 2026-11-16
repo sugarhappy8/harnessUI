@@ -765,8 +765,10 @@ fn examples_for(
 }
 
 /// The first sentence of a description, on one line. External descriptions are a server's
-/// text: they were made safe when the tool was registered, and are cut short here.
-fn first_sentence(text: &str) -> String {
+/// text: they were made safe when the tool was registered, and are cut short here. Also the
+/// purpose the system message's tool list gives a tool of an added server (0.0.7,
+/// `roster::tool_guide`).
+pub(crate) fn first_sentence(text: &str) -> String {
     let trimmed = text.trim();
     let end = trimmed
         .char_indices()

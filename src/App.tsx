@@ -8,8 +8,9 @@ import { FirstRun } from "./components/FirstRun";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { AppNotices } from "./components/AppNotices";
 import { FullAccessStartCheck } from "./components/AllowAllButton";
-import { useApp, toErrorInfo } from "./store/app";
+import { followRunningTurn, turnChatId, useApp, toErrorInfo } from "./store/app";
 import * as ipc from "./lib/ipc";
+import { listenInEffect } from "./lib/listen";
 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -23,18 +24,26 @@ export default function App() {
     useApp();
 
   // Approval cards: Rust sends each request only to this window with a random id.
+  // [0.0.7 P6] Each listener is stopped even when it starts after the cleanup ran.
   useEffect(() => {
     if (!ipc.isTauri()) return;
-    const offs: (() => void)[] = [];
-    void ipc.onApprovalRequest(addApproval).then((u) => offs.push(u));
-    void ipc.onApprovalClosed(removeApproval).then((u) => offs.push(u));
+    const offs = [
+      listenInEffect(() => ipc.onApprovalRequest(addApproval)),
+      listenInEffect(() => ipc.onApprovalClosed(removeApproval)),
+    ];
     return () => offs.forEach((f) => f());
   }, [addApproval, removeApproval]);
 
+  // [0.0.7 P6] Which chat's reply the app is writing, also one that went on while this
+  // window reloaded.
   useEffect(() => {
     if (!ipc.isTauri()) return;
-    let unlisten: (() => void) | undefined;
-    void ipc.onRuntimeStatus(setRuntime).then((u) => (unlisten = u));
+    return followRunningTurn();
+  }, []);
+
+  useEffect(() => {
+    if (!ipc.isTauri()) return;
+    const unlisten = listenInEffect(() => ipc.onRuntimeStatus(setRuntime));
     Promise.all([refreshChats(), refreshModelOptions(), ipc.runtimeStatus().then(setRuntime)]).catch(
       (err) => showError(toErrorInfo(err)),
     );
@@ -42,7 +51,7 @@ export default function App() {
       .firstRunInfo()
       .then((i) => setFirstRunDone(i.done))
       .catch(() => setFirstRunDone(true));
-    return () => unlisten?.();
+    return unlisten;
   }, [refreshChats, refreshModelOptions, setRuntime, showError]);
 
   useEffect(() => {
@@ -86,8 +95,11 @@ export default function App() {
       } else if (mod && event.key.toLowerCase() === "l") {
         event.preventDefault();
         window.dispatchEvent(new Event("app:focus-input"));
-      } else if (event.key === "Escape" && useApp.getState().generation) {
-        void stop();
+      } else if (event.key === "Escape") {
+        // [0.0.7 P6] The open chat's reply only: never one running in another chat.
+        const s = useApp.getState();
+        const turn = turnChatId(s);
+        if (turn !== null && turn === s.activeChatId) void stop(turn);
       }
     }
     window.addEventListener("keydown", onKey);

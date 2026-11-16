@@ -1,6 +1,8 @@
 use super::*;
 use crate::fit::{self, COMPUTE_BASE_BYTES, FitInput};
+use crate::kv::KvSize;
 use crate::layers::LayerSize;
+use crate::summary::KvCacheType;
 
 const GB: u64 = 1_000_000_000;
 
@@ -44,6 +46,7 @@ fn input(
     PlacementInput {
         sizes,
         kv_per_layer: kv,
+        checkpoints: 0,
         compute_gpu,
         compute_cpu,
         projector,
@@ -992,7 +995,7 @@ fn eight_b_fit(max_ctx: Option<u64>, projector: u64) -> FitInput {
     FitInput {
         weights_bytes: 4_900_000_000,
         projector_bytes: projector,
-        kv_bytes_per_token: 131_072,
+        kv: KvSize::per_token(131_072),
         vocab_size: 128_256,
         max_ctx,
         ..Default::default()
@@ -1202,6 +1205,47 @@ fn auto_ctx_placed_never_panics_or_hangs() {
     assert_eq!(unified(up_to(4000), big, 4096, 32_768), None);
 }
 
+// ---- 0.0.7 P1: saved copies of short-memory layers -------------------------------------
+
+/// The saved copies llama-server keeps of short-memory layers (context checkpoints) are in
+/// computer memory whatever the placement, and the verdict counts them there.
+#[test]
+fn checkpoints_stay_in_computer_memory() {
+    let s = dense();
+    let mut i = input(&s, vec![1, 2, 3, 4], 7, 3, 9);
+    i.checkpoints = 1000;
+    let all = split(&i, &on_card(Layers::All, ExpertsPick::None));
+    assert_eq!((all.gpu.context, all.cpu.context), (10, 1000));
+    // No work on the processor: its working space is not needed for the copies.
+    assert_eq!(all.cpu.compute, 0);
+    // Blocks 0 and 1 on the processor (3 of 5 units on the card).
+    let part = split(&i, &on_card(Layers::Count(3), ExpertsPick::None));
+    assert_eq!((part.gpu.context, part.cpu.context), (7, 1 + 2 + 1000));
+    let mut kv_in_ram = on_card(Layers::All, ExpertsPick::None);
+    kv_in_ram.kv_on_gpu = false;
+    assert_eq!(split(&i, &kv_in_ram).cpu.context, 1010);
+    let processor = Where {
+        graphics: false,
+        ..on_card(Layers::All, ExpertsPick::None)
+    };
+    assert_eq!(split(&i, &processor).cpu.context, 1010);
+    // A graphics card with 500 bytes of computer memory: the model fits, the copies do not.
+    let room = Room {
+        whole: 2 * GB,
+        partial: 2 * GB + 500,
+    };
+    assert_eq!(
+        judge_in(&all, room, false, MemoryKind::Separate),
+        (Verdict::Red, Fits::WontFitAtAll)
+    );
+    i.checkpoints = 0;
+    let all = split(&i, &on_card(Layers::All, ExpertsPick::None));
+    assert_eq!(
+        judge_in(&all, room, false, MemoryKind::Separate),
+        (Verdict::Green, Fits::Fits)
+    );
+}
+
 // ---- conversation memory per block ------------------------------------------------------
 
 #[test]
@@ -1220,15 +1264,19 @@ fn kv_per_layer_follows_the_header() {
             .u32("llama.attention.head_count_kv", 8)
             .build(),
     );
-    for cache in [KvCacheType::F16, KvCacheType::Q8_0] {
-        let per = kv_per_layer(&llama, 1000, cache);
-        assert_eq!(per.len(), 32);
-        assert_eq!(
-            per.iter().sum::<u64>(),
-            llama.kv_bytes_per_token_as(cache) * 1000
-        );
-    }
-    assert_eq!(kv_per_layer(&llama, 1, KvCacheType::F16)[0], 4096);
+    // 0.0.7 P1: as llama.cpp allocates it, every layer holds GGML_PAD(ctx, 256) cells:
+    // 1,000 tokens take 1,024 cells. f16: 8 heads × (128 + 128) values × 2 bytes = 4,096
+    // bytes a cell, 4 MiB a layer.
+    let per = kv_per_layer(&llama, 1000, KvCacheType::F16);
+    assert_eq!(per, vec![4096 * 1024; 32]);
+    assert_eq!(per.iter().sum::<u64>(), llama.kv_bytes(1000, KvCacheType::F16));
+    // q8_0: 1,024 values are 32 blocks of 34 bytes, 2,176 bytes a cell for key and value,
+    // and the rotation matrices of a quantized cache, 128² and 64² f32 entries a layer.
+    let per = kv_per_layer(&llama, 1000, KvCacheType::Q8_0);
+    assert_eq!(per, vec![2176 * 1024 + 128 * 128 * 4 + 64 * 64 * 4; 32]);
+    assert_eq!(per.iter().sum::<u64>(), llama.kv_bytes(1000, KvCacheType::Q8_0));
+    // One token takes one step of 256 cells.
+    assert_eq!(kv_per_layer(&llama, 1, KvCacheType::F16)[0], 4096 * 256);
     let hybrid = read(
         Writer::new()
             .str("general.architecture", "lfm2")
@@ -1238,9 +1286,10 @@ fn kv_per_layer_follows_the_header() {
             .u32_array("lfm2.attention.head_count_kv", &[8, 0, 8, 0])
             .build(),
     );
+    // Heads of 1,024 / 16 = 64 values: 8 × 128 × 2 = 2,048 bytes a cell, 256 cells.
     assert_eq!(
         kv_per_layer(&hybrid, 10, KvCacheType::F16),
-        vec![20_480, 0, 20_480, 0]
+        vec![2048 * 256, 0, 2048 * 256, 0]
     );
     assert_eq!(
         kv_per_layer(&llama, u64::MAX, KvCacheType::F16)[0],

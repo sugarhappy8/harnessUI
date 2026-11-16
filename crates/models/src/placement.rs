@@ -12,9 +12,10 @@
 
 use serde::Serialize;
 
-use crate::fit::{AutoCtx, Room, SPARE_BYTES, Verdict};
-use crate::layers::{LayerSizes, MAX_BLOCKS};
-use crate::summary::{KvCacheType, ModelSummary};
+use crate::fit::{AutoCtx, Room, SPARE_BYTES, Sizes, Verdict};
+use crate::kv::KvLayout;
+use crate::layers::LayerSizes;
+use crate::summary::ModelSummary;
 
 /// The facts a placement is worked out from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +24,10 @@ pub struct PlacementInput<'a> {
     /// Conversation memory per block, in bytes, at the context and cache type chosen
     /// ([`kv_per_layer`]); a missing entry counts as 0.
     pub kv_per_layer: Vec<u64>,
+    /// The saved copies of the short-memory layers llama-server keeps in the computer's
+    /// memory wherever the blocks are (`crate::kv::KvSize::checkpoints_at`; 0 for a model
+    /// without short-memory layers). Counted with the computer's conversation memory.
+    pub checkpoints: u64,
     /// The working space of the device that holds the output unit (fit.rs's allowance,
     /// [`crate::fit::FitInput::compute_bytes`]).
     pub compute_gpu: u64,
@@ -148,6 +153,8 @@ fn add(to: &mut u64, bytes: u64) {
 ///   processor needs `compute_cpu` besides whenever it still does some of the work (a
 ///   block, an expert part or the conversation memory is there).
 /// - The image reader is on the graphics card whenever one is used.
+/// - The saved copies of the short-memory layers (`checkpoints`) are in computer memory,
+///   whatever the placement (0.0.7 P1).
 /// - Without a graphics device everything is in computer memory, with the whole working
 ///   space.
 /// - A tied output (embeddings shared with the input) is counted twice wherever the output
@@ -164,7 +171,9 @@ pub fn split(input: &PlacementInput, place: &Where) -> Split {
             gpu: Parts::default(),
             cpu: Parts {
                 model: sizes.total(),
-                context: (0..blocks).map(kv).fold(0, u64::saturating_add),
+                context: (0..blocks)
+                    .map(kv)
+                    .fold(input.checkpoints, u64::saturating_add),
                 compute: input.compute_gpu,
                 image_reader: input.projector,
             },
@@ -186,6 +195,7 @@ pub fn split(input: &PlacementInput, place: &Where) -> Split {
     let mut gpu = Parts::default();
     let mut cpu = Parts {
         model: sizes.input_bytes,
+        context: input.checkpoints,
         ..Parts::default()
     };
     let output = sizes.output_bytes.saturating_add(sizes.other_bytes);
@@ -382,6 +392,7 @@ pub fn explain(sizes: &LayerSizes, gpu_model_bytes: u64) -> Option<(Layers, Expe
     let model_only = PlacementInput {
         sizes,
         kv_per_layer: Vec::new(),
+        checkpoints: 0,
         compute_gpu: 0,
         compute_cpu: 0,
         projector: 0,
@@ -441,24 +452,14 @@ pub fn effective_expert_layers(units: u32, layers: Layers, k: u32) -> u32 {
     k.min(blocks).saturating_sub(on_processor)
 }
 
-/// The conversation memory of each block, in bytes, for `ctx` tokens stored as `cache`:
-/// a key row and a value row per token, as [`ModelSummary::kv_bytes_per_token_as`] counts
-/// them (recurrent layers, with no key/value heads, hold none). One entry per block, at
-/// most [`MAX_BLOCKS`]; the same sliding-window caveat as the summary's (counted at full
-/// length, the safe side).
-pub fn kv_per_layer(summary: &ModelSummary, ctx: u64, cache: KvCacheType) -> Vec<u64> {
-    let blocks = usize::try_from(summary.block_count.min(MAX_BLOCKS)).unwrap_or(0);
-    summary
-        .head_count_kv
-        .iter()
-        .take(blocks)
-        .map(|&heads| {
-            cache
-                .row_bytes(heads.saturating_mul(summary.key_length))
-                .saturating_add(cache.row_bytes(heads.saturating_mul(summary.value_length)))
-                .saturating_mul(ctx)
-        })
-        .collect()
+/// The conversation memory of each block, in bytes, at a context of `ctx` tokens stored
+/// as `layout` says, as llama.cpp allocates it (`crate::kv`): a layer that keeps the whole
+/// conversation holds `GGML_PAD(ctx, 256)` cells, a short-memory layer only its window's
+/// cells, with its own head sizes; a layer that reads an earlier layer's memory, a
+/// linear-attention layer and an extra prediction layer hold none. One entry per block, at
+/// most [`crate::layers::MAX_BLOCKS`]; their sum is [`ModelSummary::kv_bytes`].
+pub fn kv_per_layer(summary: &ModelSummary, ctx: u64, layout: impl Into<KvLayout>) -> Vec<u64> {
+    summary.kv_shape().per_layer(ctx, layout.into())
 }
 
 /// The detail of the one verdict (section 4.1).
@@ -582,54 +583,10 @@ pub fn judge_in(
     }
 }
 
-/// The context sizes Automatic chooses from, as `fit::auto_ctx` does: the floor, the
-/// multiples of 1,024 between, and the cap (a floor above the cap gives the cap alone).
-/// Never built as a list: the cap may be any number.
-struct Sizes {
-    floor: u64,
-    cap: u64,
-    first_multiple: u64,
-    multiples: u64,
-}
-
-impl Sizes {
-    fn new(floor: u64, cap: u64) -> Self {
-        let floor = floor.min(cap);
-        let first_multiple = (floor / 1024)
-            .checked_add(1)
-            .and_then(|k| k.checked_mul(1024));
-        let multiples = match first_multiple {
-            Some(first) if cap > first => (cap - 1 - first) / 1024 + 1,
-            _ => 0,
-        };
-        Self {
-            floor,
-            cap,
-            first_multiple: first_multiple.unwrap_or(u64::MAX),
-            multiples,
-        }
-    }
-
-    /// The number of sizes (at least 1, at most u64::MAX / 1024 + 2).
-    fn len(&self) -> u64 {
-        1 + self.multiples + u64::from(self.cap > self.floor)
-    }
-
-    /// The `index`th size, smallest first.
-    fn get(&self, index: u64) -> u64 {
-        if index == 0 {
-            self.floor
-        } else if index <= self.multiples {
-            self.first_multiple + (index - 1) * 1024
-        } else {
-            self.cap
-        }
-    }
-}
-
 /// The largest size whose verdict is Green, else the largest that is Yellow, else `None`
-/// (the floor is Red). Assumes the verdict only gets worse as the size grows; a binary
-/// search, so a huge cap costs about 60 verdicts.
+/// (the floor is Red), among the sizes Automatic chooses from (`fit::Sizes`: the floor,
+/// the multiples of 1,024 between, and the cap). Assumes the verdict only gets worse as the
+/// size grows; a binary search, so a huge cap costs about 60 verdicts.
 fn auto_by(verdict: impl Fn(u64) -> Verdict, floor: u64, cap: u64) -> Option<AutoCtx> {
     let sizes = Sizes::new(floor, cap);
     let wanted = verdict(sizes.get(0));
