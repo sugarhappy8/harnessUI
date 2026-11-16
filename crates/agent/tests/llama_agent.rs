@@ -311,8 +311,8 @@ async fn real_llama_server_agent_turn() {
         images_in_tool_results: true,
     };
     // Greedy decoding: with the server's default sampling the small model sometimes wrote a
-    // made-up tool result as text instead of calling the tool (a macOS CI run on 0.0.7's
-    // first commit, 43815674194), so whether this test passed was down to chance.
+    // made-up tool result as text instead of calling the tool (macOS CI run 43815674194),
+    // so whether this test passed was down to chance.
     let mut template = RequestTemplate {
         model: "x".into(),
         temperature: Some(0.0),
