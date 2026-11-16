@@ -169,6 +169,7 @@ pub fn run() {
             // [0.0.7 P2] An installed model's image file from its Hugging Face repository.
             hub::image_file::image_file_offer,
             hub::image_file::download_image_file,
+            hub::image_file::forget_unreadable_image_file,
             packs_cmd::list_packs,
             packs_cmd::download_pack,
             packs_cmd::cancel_pack_download,

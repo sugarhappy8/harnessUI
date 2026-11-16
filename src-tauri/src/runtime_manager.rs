@@ -492,6 +492,13 @@ impl RuntimeManager {
         first_candidate(&found, settings)
     }
 
+    /// 0.0.7 (P6b review m6): whether a load with `settings` could start: the backend it
+    /// would pick can run on this computer ([`Self::choose`]). A load checks this before it
+    /// stops a reply or a model check (`models_cmd::after_backend_check`).
+    pub async fn check_backend(&self, settings: &ResolvedLoad) -> AppResult<()> {
+        self.choose(settings).await.map(|_| ())
+    }
+
     fn tail_text(&self) -> String {
         self.tail
             .lock()

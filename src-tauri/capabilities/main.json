@@ -82,6 +82,7 @@
     "allow-refresh-catalog",
     "allow-image-file-offer",
     "allow-download-image-file",
+    "allow-forget-unreadable-image-file",
     "allow-list-packs",
     "allow-download-pack",
     "allow-cancel-pack-download",

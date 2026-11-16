@@ -2,18 +2,24 @@
 //! llama.cpp loads with `--mmproj` (a "projector"; what the user reads is "image file").
 //!
 //! - **Which one a load uses** ([`choose`]): the one recorded on the model's Installed row,
-//!   else one next to the model file (`*mmproj*.gguf`, the best precision first by
-//!   [`models::files::projector_rank`]), so an image file put there after the model was
-//!   downloaded or imported is used. A load records what it found ([`prepare_for_load`]).
+//!   else one next to the model file that is its own ([`candidates`]: a plain
+//!   `*mmproj*.gguf` file whose width matches the model's, or named after it or after no
+//!   model; the best precision first by [`models::files::projector_rank`]), so an image
+//!   file put there after the model was downloaded or imported is used, and another model's
+//!   in a shared folder is not. A load records what it found ([`prepare_for_load`]).
 //! - **One that could not be read** ([`mark_unreadable`]): when llama-server fails on it
 //!   and the supervisor loads the model again without it, the app remembers the file on the
 //!   model's row by path, size and modification time ([`FileStamp`]). Later loads go
-//!   straight to the model without it, and say so, until the file changes or another image
-//!   file is downloaded ([`attach`]).
+//!   straight to the model without it, and say so, until the file changes, another image
+//!   file is downloaded ([`attach`]) or the user tries it again ([`forget_unreadable`]).
 //! - **Downloading one** ([`pick`], [`download_image_file`]): for a model with a Hugging
-//!   Face repository, the best image file of the repository's listing that is not one
-//!   remembered as unreadable, saved in the model's folder through the resumable, checked
-//!   downloads (`downloads.rs`), then recorded on the row.
+//!   Face repository, the best image file of the repository that is not one remembered as
+//!   unreadable (or the same one again when its copy here may differ), saved in the
+//!   model's folder through the resumable, checked downloads (`downloads.rs`), then
+//!   recorded on the row. The repository's image files are saved on the row when the model
+//!   is downloaded, so Installed offers one without asking Hugging Face ([`saved_offer`]);
+//!   it asks only when the user looks for one ([`image_file_offer`], a model downloaded
+//!   before 0.0.7) or downloads it.
 //!
 //! Only models on the Installed list are looked after: a model file loaded from anywhere
 //! else loads without an image file, as before 0.0.7. File names and listings are
@@ -43,6 +49,10 @@ pub struct FileStamp {
     /// Milliseconds since 1970; absent where the system does not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_ms: Option<u64>,
+    /// The SHA-256 its repository published, for a file the app downloaded (0.0.7 review
+    /// M1): whether downloading it again could bring other bytes. Absent for any other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 impl FileStamp {
@@ -57,6 +67,7 @@ impl FileStamp {
                 .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .and_then(|d| u64::try_from(d.as_millis()).ok()),
+            sha256: None,
         })
     }
 
@@ -98,7 +109,8 @@ pub fn is_unreadable(list: &[FileStamp], stamp: &FileStamp) -> bool {
 }
 
 /// Image files next to the model file (a name with `mmproj` that ends in `.gguf`, as
-/// downloads and other tools name them), the best precision first, then by name.
+/// downloads and other tools name them), the best precision first, then by name. Only
+/// plain files: never a link, which could point anywhere (0.0.7 review m9).
 pub fn beside(model: &Path) -> Vec<PathBuf> {
     let Some(dir) = model.parent() else {
         return Vec::new();
@@ -111,12 +123,125 @@ pub fn beside(model: &Path) -> Vec<PathBuf> {
         .filter_map(|path| {
             let name = path.file_name()?.to_string_lossy().into_owned();
             let lower = name.to_ascii_lowercase();
-            (lower.contains("mmproj") && lower.ends_with(".gguf") && path.is_file())
+            let plain = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+            (lower.contains("mmproj") && lower.ends_with(".gguf") && plain)
                 .then(|| (models::files::projector_rank(&name), lower, path))
         })
         .collect();
     found.sort();
     found.into_iter().map(|(_, _, path)| path).collect()
+}
+
+/// Words of a file name that say nothing about which model it is for: its extension and
+/// kind, and the words of precisions and quantizations (`Q4_K_M` reads as "q4", "k", "m").
+const NAMELESS_WORDS: &[&str] = &[
+    "gguf",
+    "mmproj",
+    "model",
+    "models",
+    "vision",
+    "projector",
+    "proj",
+    "clip",
+    "encoder",
+    "image",
+    "ud",
+    "i1",
+    "imatrix",
+    "k",
+    "m",
+    "s",
+    "l",
+    "xs",
+    "xxs",
+    "xl",
+    "nl",
+];
+
+/// The words of a file name that name a model (0.0.7 review m4): its runs of letters and
+/// digits, lowercased, without [`NAMELESS_WORDS`], single digits and precision labels
+/// (`f16`, `bf16`, `q8`, `iq4` and the like).
+pub(crate) fn name_words(name: &str) -> Vec<String> {
+    let label = |w: &str| {
+        let digits = w.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+        let letters = &w[..w.len() - digits.len()];
+        !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && matches!(letters, "f" | "bf" | "fp" | "q" | "iq" | "tq")
+    };
+    name.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .filter(|w| !NAMELESS_WORDS.contains(w))
+        .filter(|w| !(w.len() == 1 && w.as_bytes()[0].is_ascii_digit()))
+        .filter(|w| !label(w))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// What an image file's header says about whether it is the image file of a model whose
+/// embedding length is `embedding_length` (0.0.7 review m4): `Some(true)` when the width of
+/// what it makes (`clip.vision.projection_dim`, or the audio one) equals it, which llama.cpp
+/// requires; `Some(false)` when it differs, or when the file is not an image file at all;
+/// `None` when that cannot be told (a header that cannot be read, which a load then finds
+/// out about; no embedding length known; the old LLaVA kinds, whose header holds the
+/// encoder's own width there and llama.cpp reads theirs from the weights).
+fn width_fits(image: &Path, embedding_length: Option<u64>) -> Option<bool> {
+    let header = models::read_file(image).ok()?;
+    let image_file = header.architecture() == Some("clip")
+        || header.get_str("general.type") == Some("mmproj");
+    if !image_file {
+        return Some(false);
+    }
+    let wanted = embedding_length?;
+    let kind = header.get_str("clip.projector_type").unwrap_or("mlp");
+    if matches!(kind, "mlp" | "mlp_norm" | "ldp" | "ldpv2") {
+        return None;
+    }
+    let width = header
+        .get_u64("clip.vision.projection_dim")
+        .or_else(|| header.get_u64("clip.audio.projection_dim"))?;
+    Some(width == wanted)
+}
+
+/// The image files next to `model` that may be its own, in the order a load tries them
+/// (0.0.7 review m4): first those made for it (the width matches its embedding length) or,
+/// where that cannot be told, named after it; then those whose name names no model
+/// (`mmproj-F16.gguf`). Never one whose width differs, one that is not an image file, or,
+/// where the width cannot be told, one named after another model; when the model's own name
+/// names nothing, no name counts against a file. `embedding_length` is the model's, when
+/// known.
+pub fn candidates(model: &Path, embedding_length: Option<u64>) -> Vec<PathBuf> {
+    let model_words = model
+        .file_name()
+        .map(|n| name_words(&n.to_string_lossy()))
+        .unwrap_or_default();
+    let mut tiered: Vec<(u8, PathBuf)> = beside(model)
+        .into_iter()
+        .filter_map(|path| {
+            let tier = match width_fits(&path, embedding_length) {
+                Some(true) => 0,
+                Some(false) => return None,
+                None => {
+                    let words = path
+                        .file_name()
+                        .map(|n| name_words(&n.to_string_lossy()))
+                        .unwrap_or_default();
+                    if words.is_empty() || model_words.is_empty() {
+                        1
+                    } else if words.iter().all(|w| model_words.contains(w)) {
+                        0
+                    } else {
+                        return None;
+                    }
+                }
+            };
+            Some((tier, path))
+        })
+        .collect();
+    // Stable: the best precision first within each tier, as `beside` gave them.
+    tiered.sort_by_key(|(tier, _)| *tier);
+    tiered.into_iter().map(|(_, path)| path).collect()
 }
 
 /// The image file a load of a model uses ([`choose`]).
@@ -182,7 +307,14 @@ pub enum Offer {
     /// An image file to download: its name in the repository and its size.
     #[serde(rename_all = "camelCase")]
     Available { file: String, size_bytes: u64 },
-    /// The repository's image files are all ones that could not be read here.
+    /// The repository's image files are all ones that could not be read here, but the
+    /// copy here of this one may differ from what the repository holds under its name (it
+    /// was not downloaded by the app, or the repository published other bytes since): it
+    /// can be downloaded again (0.0.7 review M1).
+    #[serde(rename_all = "camelCase")]
+    Again { file: String, size_bytes: u64 },
+    /// The repository's image files are all ones that could not be read here, downloaded
+    /// from what it holds now.
     NoOther,
     /// The repository has no image file (or the model has no repository). JSON
     /// `{"kind":"none"}`.
@@ -197,27 +329,52 @@ fn last_part(path: &str) -> &str {
 
 /// The image file to download from a repository listing: the best by the ranking Browse
 /// uses ([`models::classify`], F16 first), skipping one remembered as unreadable (the same
-/// name and size). Returns what to offer and the file.
+/// name and size). When those are all there is, one whose copy here may differ from the
+/// repository's (its SHA-256 unknown here or published anew) is offered again. Returns what
+/// to offer and the file.
 pub fn pick(files: &[RepoFile], unreadable: &[FileStamp]) -> (Offer, Option<RepoFile>) {
     let projectors = models::classify(files).projectors;
     if projectors.is_empty() {
         return (Offer::NoImageFile, None);
     }
-    let known_bad = |f: &RepoFile| {
+    let remembered = |f: &RepoFile| {
         unreadable
             .iter()
-            .any(|s| s.size == f.size && s.file_name() == Some(last_part(&f.path)))
+            .find(|s| s.size == f.size && s.file_name() == Some(last_part(&f.path)))
     };
-    match projectors.into_iter().find(|f| !known_bad(f)) {
+    if let Some(file) = projectors.iter().find(|f| remembered(f).is_none()) {
+        let offer = Offer::Available {
+            file: last_part(&file.path).to_owned(),
+            size_bytes: file.size,
+        };
+        return (offer, Some(file.clone()));
+    }
+    let may_differ = |f: &&RepoFile| {
+        remembered(f).is_some_and(|s| match (&s.sha256, &f.sha256) {
+            (Some(here), Some(there)) => here != there,
+            _ => true,
+        })
+    };
+    match projectors.iter().find(may_differ) {
         Some(file) => (
-            Offer::Available {
+            Offer::Again {
                 file: last_part(&file.path).to_owned(),
                 size_bytes: file.size,
             },
-            Some(file),
+            Some(file.clone()),
         ),
         None => (Offer::NoOther, None),
     }
+}
+
+/// What Installed offers for a model's image file from what is saved on its row (0.0.7
+/// review M2), without asking Hugging Face. `None` when the model has no repository, or
+/// the app never saw its repository's image files (a model downloaded before 0.0.7):
+/// Installed then offers to look ([`image_file_offer`]).
+pub(super) fn saved_offer(repo: Option<&str>, stored: &StoredSummary) -> Option<Offer> {
+    repo?;
+    let files = stored.repo_image_files.as_deref()?;
+    Some(pick(files, &stored.unreadable_projectors).0)
 }
 
 /// Where a downloaded image file goes: the model's own folder, under the last part of its
@@ -264,23 +421,47 @@ async fn save(
     Ok(())
 }
 
-/// The choice for a row as it is saved.
-fn choice_of(rec: &store::ModelRecord, stored: &StoredSummary) -> Choice {
+/// The choice for the row of the model at `path` as it is saved ([`choose`] among
+/// [`candidates`]). A recorded image file whose width differs from the model's is not its
+/// own (one a 0.0.7 build before this recorded from a shared folder).
+pub(super) fn choice_of_row(path: &str, stored: &StoredSummary) -> Choice {
+    let width = stored.embedding_length;
+    let recorded = stored
+        .projector
+        .as_deref()
+        .filter(|p| width_fits(Path::new(p), width) != Some(false));
     choose(
-        stored.projector.as_deref(),
-        &beside(Path::new(&rec.path)),
+        recorded,
+        &candidates(Path::new(path), width),
         &stored.unreadable_projectors,
         FileStamp::of,
     )
 }
 
+/// The embedding length in the header of the model at `path`, when it can be read.
+pub(super) fn embedding_length_of(path: &Path) -> Option<u64> {
+    models::read_file(path)
+        .ok()?
+        .arch_u64("embedding_length")
+        .filter(|&n| n > 0)
+}
+
 /// The image file the next load of `model_path` uses ([`choose`]); a model that is not on
-/// the Installed list has none.
+/// the Installed list has none. A row saved without the model's embedding length gets it
+/// first, so the width check applies (0.0.7 review m4).
 pub async fn choice_for(store: &store::Store, model_path: &str) -> Choice {
-    match row(store, model_path).await {
-        Some((rec, stored)) => choice_of(&rec, &stored),
-        None => Choice::default(),
+    let Some((rec, mut stored)) = row(store, model_path).await else {
+        return Choice::default();
+    };
+    if stored.embedding_length.is_none()
+        && let Some(n) = embedding_length_of(Path::new(&rec.path))
+    {
+        stored.embedding_length = Some(n);
+        if let Err(e) = save(store, &rec, &stored).await {
+            tracing::warn!("could not save the model's embedding length: {e}");
+        }
     }
+    choice_of_row(&rec.path, &stored)
 }
 
 /// Right before a load of `model_path` that uses the image file `planned` (what the plan
@@ -295,9 +476,11 @@ pub async fn prepare_for_load(
     let Some((rec, mut stored)) = row(store, model_path).await else {
         return false;
     };
-    let choice = choice_of(&rec, &stored);
+    let choice = choice_of_row(&rec.path, &stored);
     if choice.found && planned.is_some() && choice.path.as_deref() == planned {
         stored.projector = choice.path.clone();
+        // Found, not downloaded: what its repository published is not known for it.
+        stored.projector_sha256 = None;
         if let Err(e) = save(store, &rec, &stored).await {
             tracing::warn!("could not record the image file found next to the model: {e}");
         }
@@ -309,12 +492,16 @@ pub async fn prepare_for_load(
 /// loaded the model again without it), on the model's Installed row. Nothing happens for a
 /// model that is not on the list, or a file that is gone.
 pub async fn mark_unreadable(store: &store::Store, model_path: &Path, image: &Path) {
-    let Some(stamp) = FileStamp::of(image) else {
+    let Some(mut stamp) = FileStamp::of(image) else {
         return;
     };
     let Some((rec, mut stored)) = row(store, &model_path.display().to_string()).await else {
         return;
     };
+    // The image file the app downloaded for it: what its repository published goes along.
+    if stored.projector.as_deref() == Some(stamp.path.as_str()) {
+        stamp.sha256.clone_from(&stored.projector_sha256);
+    }
     if is_unreadable(&stored.unreadable_projectors, &stamp) {
         return;
     }
@@ -328,23 +515,67 @@ pub async fn mark_unreadable(store: &store::Store, model_path: &Path, image: &Pa
     }
 }
 
-/// A downloaded image file for the model registered at `model_path`: recorded on its row,
-/// and the files remembered as unreadable are forgotten (another image file was
-/// downloaded). Nothing happens when the model was removed meanwhile.
-pub async fn attach(store: &store::Store, model_path: &str, image: &Path) -> AppResult<()> {
+/// "Try it again" in Models → Installed (0.0.7 review M1): forgets the image files
+/// remembered as unreadable with the model at `model_path`, so its next load tries them
+/// again (an image file can fail for a reason that was not its own). Returns whether
+/// there was anything to forget; nothing happens for a model that is not on the list.
+pub async fn forget_unreadable(store: &store::Store, model_path: &str) -> AppResult<bool> {
+    let Some((rec, mut stored)) = row(store, model_path).await else {
+        return Ok(false);
+    };
+    if stored.unreadable_projectors.is_empty() {
+        return Ok(false);
+    }
+    stored.unreadable_projectors.clear();
+    save(store, &rec, &stored).await?;
+    Ok(true)
+}
+
+/// Saves the image files of `listing` (a listing of the model's repository) on the row of
+/// the model at `model_path`, best first, and returns what Installed offers from them
+/// (0.0.7 review M2); `None` for a model that is not on the list.
+pub async fn save_repo_image_files(
+    store: &store::Store,
+    model_path: &str,
+    listing: &[RepoFile],
+) -> AppResult<Option<Offer>> {
+    let Some((rec, mut stored)) = row(store, model_path).await else {
+        return Ok(None);
+    };
+    let files = models::classify(listing).projectors;
+    let offer = pick(&files, &stored.unreadable_projectors).0;
+    stored.repo_image_files = Some(files);
+    save(store, &rec, &stored).await?;
+    Ok(Some(offer))
+}
+
+/// A downloaded image file for the model registered at `model_path`: recorded on its row
+/// with the SHA-256 its repository published (`sha256`, when it did), and the files
+/// remembered as unreadable are forgotten (another image file was downloaded). Nothing
+/// happens when the model was removed meanwhile.
+pub async fn attach(
+    store: &store::Store,
+    model_path: &str,
+    image: &Path,
+    sha256: Option<String>,
+) -> AppResult<()> {
     let Some(rec) = store.model_by_path(model_path).await? else {
         return Ok(());
     };
     let mut stored: StoredSummary =
         serde_json::from_value(rec.gguf_summary.clone()).unwrap_or_default();
     stored.projector = Some(image.display().to_string());
+    stored.projector_sha256 = sha256;
     stored.unreadable_projectors.clear();
     save(store, &rec, &stored).await
 }
 
-/// What the model's Hugging Face repository offers as its image file (Models →
-/// Installed, for a model without a usable one). Asks Hugging Face for the repository's
-/// listing, reused for ten minutes like Browse's; a model without a repository has none.
+/// "Look for an image file" in Models → Installed, for a model whose repository's image
+/// files the app has not seen (downloaded before 0.0.7), and right after its image file
+/// could not be read (0.0.7 review M2: never by itself otherwise). Asks Hugging Face for
+/// the repository's listing (reused for ten minutes like Browse's), saves its image files on
+/// the model's row, and returns what Installed offers; a model without a repository has
+/// none.
 #[tauri::command]
 pub async fn image_file_offer(
     window: tauri::WebviewWindow,
@@ -353,7 +584,7 @@ pub async fn image_file_offer(
     path: String,
 ) -> AppResult<Offer> {
     crate::commands::only_main_window(window.label())?;
-    let (rec, stored) = row(&state.store, &path)
+    let (rec, _) = row(&state.store, &path)
         .await
         .ok_or_else(|| AppError::not_found("model"))?;
     let Some(repo) = rec.repo else {
@@ -361,7 +592,21 @@ pub async fn image_file_offer(
     };
     let hub = LiveHub::new(Some(super::hf_client(&app).await?));
     let listing = hub.listing(&repo, None).await.map_err(super::hf_error)?;
-    Ok(pick(&listing.files, &stored.unreadable_projectors).0)
+    save_repo_image_files(&state.store, &rec.path, &listing.files)
+        .await?
+        .ok_or_else(|| AppError::not_found("model"))
+}
+
+/// "Try it again" in Models → Installed (0.0.7 review M1, [`forget_unreadable`]). Returns
+/// whether there was an image file to try again.
+#[tauri::command]
+pub async fn forget_unreadable_image_file(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<bool> {
+    crate::commands::only_main_window(window.label())?;
+    forget_unreadable(&state.store, &path).await
 }
 
 /// "Download the image file" in Models → Installed: the image file [`pick`] chooses from
@@ -393,6 +638,10 @@ pub async fn download_image_file(
     let client = super::hf_client(&app).await?;
     let detail = client.repo(&repo, None).await.map_err(super::hf_error)?;
     LiveHub::new(Some(client)).remember_listing(None, Arc::new(detail.clone()));
+    // What the repository has now, for what Installed offers next (0.0.7 review M2).
+    if let Err(e) = save_repo_image_files(&state.store, &rec.path, &detail.files).await {
+        tracing::warn!("could not save the repository's image files: {e}");
+    }
     let file = match pick(&detail.files, &stored.unreadable_projectors) {
         (_, Some(file)) => file,
         (Offer::NoOther, None) => {
@@ -418,6 +667,7 @@ pub async fn download_image_file(
         hub: None,
         parameters: None,
         image_file_for: Some(rec.path.clone()),
+        image_files: None,
     };
     manager
         .start(

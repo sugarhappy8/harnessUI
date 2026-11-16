@@ -111,9 +111,8 @@ async fn after_backend_check<T>(
     check: impl std::future::Future<Output = AppResult<()>>,
     change: impl std::future::Future<Output = AppResult<T>>,
 ) -> AppResult<T> {
-    let changed = change.await?;
     check.await?;
-    Ok(changed)
+    change.await
 }
 
 /// After any settings change: whether the loaded model runs with older settings than the
@@ -164,10 +163,13 @@ pub async fn load_local_model(
         state.runtime.cancel_waiting();
         return result;
     }
-    let waited = state
-        .runtime
-        .before_change(&state.model_busy, when_idle.unwrap_or(false))
-        .await?;
+    let waited = after_backend_check(
+        state.runtime.check_backend(&plan.resolved),
+        state
+            .runtime
+            .before_change(&state.model_busy, when_idle.unwrap_or(false)),
+    )
+    .await?;
     // After a wait the settings may have changed meanwhile: use them as they are now.
     let plan = if waited {
         load::plan(&state, &path, settings).await
@@ -355,10 +357,11 @@ pub async fn reload_local_model(
         state.runtime.cancel_waiting();
         return Ok(());
     }
-    let waited = state
-        .runtime
-        .before_change(&state.model_busy, when_idle)
-        .await?;
+    let waited = after_backend_check(
+        state.runtime.check_backend(&plan.resolved),
+        state.runtime.before_change(&state.model_busy, when_idle),
+    )
+    .await?;
     let plan = if waited {
         load::plan(&state, &path, None).await
     } else {

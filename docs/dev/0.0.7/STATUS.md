@@ -196,3 +196,12 @@ and `README.md`.
   computer 152 pass, clippy clean on Linux/Windows/macOS targets; app and vitest failures
   only in other packages' files being edited. Its verification is folded into the
   whole-release review.
+- P5 round 2 done: one store of Claude's thinking per chat (32 chats, least recently used
+  dropped whole), each reply keyed by everything sent before it plus what it showed;
+  this-computer addresses get a loopback client (no proxy); keychain failures can't let a
+  key follow a moved endpoint; many-picture rule (over 20: none above 3,000 px; at most 100
+  or 600); scrubbing only of long key pieces; `drop_block` only to recover. agent all pass
+  (lib 237, cloud 21, turn_loop 88), app providers/chat 49, clippy clean. A short
+  independent verification of round 2 is running.
+- Disk: 3.9 GB free at 10:26 UTC; removed build copies of the project's own crates idle
+  for an hour and 14 old test binaries: 6.4 GB free.

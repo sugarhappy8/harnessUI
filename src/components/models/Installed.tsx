@@ -21,6 +21,24 @@ function markedTooLarge(info: ModelLoadInfo | undefined): boolean {
   return !!info && (info.tooLarge || info.fit === "red");
 }
 
+/** [0.0.7 P6b] Delete's question for a download: what really goes from disk (every part and the
+ *  image file the app downloaded, inside the models folder), and what stays outside it. */
+function deleteQuestion(m: InstalledModel, shown: string): string {
+  const bytes = m.deleteBytes ?? m.sizeBytes;
+  const outside = m.keptOutside ?? 0;
+  if (bytes > 0) {
+    const kept = outside > 0 ? " Files outside the models folder stay where they are." : "";
+    return `Delete ${shown}? This removes ${formatBytes(bytes)} from disk.${kept}`;
+  }
+  if (outside > 1) {
+    return `Remove ${shown} from the list? Its files are outside the models folder, so they stay where they are.`;
+  }
+  if (outside === 1) {
+    return `Remove ${shown} from the list? Its file is outside the models folder, so it stays where it is.`;
+  }
+  return `Remove ${shown} from the list? Its file is no longer on disk.`;
+}
+
 /** Models → Installed: the models on this computer, with Use, their settings, Add to comparison and Delete. */
 export function Installed(props: { onClose: () => void }) {
   const [models, setModels] = useState<InstalledModel[] | null>(null);
@@ -111,9 +129,7 @@ export function Installed(props: { onClose: () => void }) {
   async function remove(m: InstalledModel) {
     const files = m.source === "download";
     const shown = visiblePath(m.fileName);
-    const question = files
-      ? `Delete ${shown}? This removes ${formatBytes(m.sizeBytes)} from disk.`
-      : `Remove ${shown} from the list? The file itself stays where it is.`;
+    const question = files ? deleteQuestion(m, shown) : `Remove ${shown} from the list? The file itself stays where it is.`;
     if (!window.confirm(question)) return;
     setNote(null);
     try {

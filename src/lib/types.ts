@@ -471,10 +471,10 @@ export interface InstalledModel {
    *  without image input. */
   imageFileUnreadable?: boolean;
   /** [0.0.7 P6b] For a download: what Delete would remove from disk (its parts and the image
-   *  file the app downloaded, inside the models folder), and whether some of its files would
+   *  file the app downloaded, inside the models folder), and how many of its files would
    *  stay because they are outside the models folder. */
   deleteBytes?: number;
-  keptOutside?: boolean;
+  keptOutside?: number;
 }
 
 /** [0.0.7 P2] What an installed model's Hugging Face repository offers as its image file. */

@@ -461,7 +461,8 @@ fn the_blocks_never_take_more_than_their_budget() {
                         budget,
                         sections: vec![capture_section()],
                     };
-                    g.groups.push(group("Browser", &[("browser_capture_site", "Capture.")]));
+                    g.groups
+                        .push(group("Browser", &[("browser_capture_site", "Capture.")]));
                     let size = tokens(&g);
                     assert!(size <= budget, "{size} > {budget} ({os:?}, {reach:?})");
                 }
@@ -492,7 +493,10 @@ fn with_capture() -> Vec<ToolGroup> {
     groups.push(group(
         "Browser",
         &[
-            ("browser_navigate", "Open a web page in the agent's browser."),
+            (
+                "browser_navigate",
+                "Open a web page in the agent's browser.",
+            ),
             (
                 "browser_capture_site",
                 "Save a web page's look to rebuild its design with the user's own content.",
@@ -507,7 +511,8 @@ fn with_capture() -> Vec<ToolGroup> {
 #[test]
 fn the_app_writes_parts_of_the_guide_about_its_own_tools() {
     let full_line = "- Capture the page, read report.md and plan the page as sections.";
-    let short_line = "Website capture: capture, read report.md, rebuild with the user's own content.";
+    let short_line =
+        "Website capture: capture, read report.md, rebuild with the user's own content.";
     let mut large = guide(with_capture(), GuideOs::Windows, 32_768);
     large.sections.push(capture_section());
     let text_large = text(&large);
@@ -568,7 +573,10 @@ fn the_call_tool_rule_says_what_it_cannot_run() {
     );
     // The group sizes say it too; without call_tool there is nothing to say.
     let counts = text(&guide(groups.clone(), GuideOs::MacOs, 8_192));
-    assert!(counts.contains("call_tool cannot run run_subagent."), "{counts}");
+    assert!(
+        counts.contains("call_tool cannot run run_subagent."),
+        "{counts}"
+    );
     let mut all = guide(groups, GuideOs::MacOs, 131_072);
     all.reach = Reach::All;
     assert!(!text(&all).contains("cannot run"));

@@ -93,8 +93,9 @@ pub async fn profile_for(state: &AppState, model_ref: &str) -> ChosenProfile {
 }
 
 /// Shown on the Computer group in the Tools panel for a model without vision. A local model
-/// sees images only through its image file (0.0.7: say how to get one).
-pub const NO_VISION: &str = "This model was loaded without an image file, so it can't see the screen. Download its image file in Models → Installed, or pick a model that can see images.";
+/// sees images only through its image file (0.0.7: say how to get one, for a model that has
+/// one; most models have none, P2 review m7).
+pub const NO_VISION: &str = "This model was loaded without an image file, so it can't see the screen. If it has one, download it in Models → Installed; otherwise pick a model with the vision badge.";
 
 /// Why the computer tools cannot be offered for a chat's model, if they cannot.
 ///
@@ -584,7 +585,7 @@ mod tests {
         assert_eq!(unavailable_reason("remote:3:some-model", None, false), None);
         assert_eq!(
             NO_VISION,
-            "This model was loaded without an image file, so it can't see the screen. Download its image file in Models → Installed, or pick a model that can see images."
+            "This model was loaded without an image file, so it can't see the screen. If it has one, download it in Models → Installed; otherwise pick a model with the vision badge."
         );
     }
 }

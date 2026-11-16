@@ -54,7 +54,11 @@ export function Downloads() {
       <ul className="space-y-2">
         {groups.map((g) => {
           const pct = g.bytesTotal > 0 ? Math.min(100, (g.bytesDone / g.bytesTotal) * 100) : 0;
-          const eta = g.status === "downloading" ? formatEta(g.bytesTotal - g.bytesDone, g.bytesPerSecond) : null;
+          // 0.0.7 (P6b review m5): a file already there is checked first, which takes a while
+          // for a big one; no time left is shown for it.
+          const checking = g.status === "downloading" && g.checking === true;
+          const eta =
+            g.status === "downloading" && !checking ? formatEta(g.bytesTotal - g.bytesDone, g.bytesPerSecond) : null;
           return (
             <li key={g.id} className="rounded-md border border-border px-3 py-2 text-sm">
               <div className="flex items-center gap-2">
@@ -65,7 +69,7 @@ export function Downloads() {
                     </bdi>
                   </p>
                   <p className="text-xs text-fg-muted">
-                    {formatBytes(g.bytesDone)} of {formatBytes(g.bytesTotal)} · {g.status}
+                    {formatBytes(g.bytesDone)} of {formatBytes(g.bytesTotal)} · {checking ? "checking the file…" : g.status}
                     {eta ? ` · ${eta}` : ""}
                     {g.unverified ? " · no published checksum" : ""}
                   </p>

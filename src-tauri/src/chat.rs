@@ -632,7 +632,7 @@ pub async fn send_message(
         return Err(AppError::new(
             "no_vision",
             "This model was loaded without an image file, so it can't read images.",
-            "Download its image file in Models → Installed, pick a model with the vision badge, or remove the image.",
+            "If it has one, download it in Models → Installed; otherwise pick a model with the vision badge, or remove the image.",
             String::new(),
         ));
     }

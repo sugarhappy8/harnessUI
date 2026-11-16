@@ -1912,7 +1912,8 @@ pub(crate) mod tests {
                 for k in phrases.iter().chain(context) {
                     assert_eq!(*k, k.to_lowercase(), "{}: keyword {k}", g.server);
                     assert!(
-                        k.split(' ').all(|w| !w.is_empty() && w.chars().all(char::is_alphanumeric)),
+                        k.split(' ')
+                            .all(|w| !w.is_empty() && w.chars().all(char::is_alphanumeric)),
                         "{}: keyword {k}",
                         g.server
                     );

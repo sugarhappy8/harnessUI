@@ -468,7 +468,10 @@ fn the_computer_group_needs_a_desktop_request() {
             .map(|(group, _)| group)
             .collect()
     };
-    assert_eq!(groups("open Google Chrome"), names(&["computer"]).into_iter().collect());
+    assert_eq!(
+        groups("open Google Chrome"),
+        names(&["computer"]).into_iter().collect()
+    );
     assert!(groups("google the latest tokio release").contains("search"));
     assert!(groups("open google chrome and google the weather").contains("search"));
 }

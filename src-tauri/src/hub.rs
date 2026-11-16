@@ -510,6 +510,7 @@ async fn start_group(
     projector: Option<&models::RepoFile>,
     catalog_id: Option<String>,
     facts: Option<(crate::dto::HubFacts, Option<u64>)>,
+    image_files: Option<Vec<models::RepoFile>>,
 ) -> AppResult<String> {
     let dir = models_dir(app).await;
     std::fs::create_dir_all(&dir).map_err(|e| {
@@ -535,6 +536,7 @@ async fn start_group(
         parameters: facts.as_ref().and_then(|(_, p)| *p),
         hub: facts.map(|(h, _)| h),
         image_file_for: None,
+        image_files,
     };
     let manager = app.state::<Arc<DownloadManager>>().inner().clone();
     manager.start(app, meta, files).await
@@ -575,6 +577,9 @@ pub async fn download_start(
         ),
         detail.gguf.as_ref().and_then(|g| g.parameters),
     );
+    // 0.0.7 (P2 review M2): the repository's image files, saved with the model so Installed
+    // can offer one later without asking Hugging Face.
+    let image_files = Some(classified.projectors.clone());
     start_group(
         &app,
         &detail.id,
@@ -584,6 +589,7 @@ pub async fn download_start(
         projector,
         None,
         Some(facts),
+        image_files,
     )
     .await
 }
@@ -600,6 +606,8 @@ pub async fn download_catalog_entry(app: AppHandle, entry_id: String) -> AppResu
     // goes ahead without them when that fails; the catalog id is saved either way.
     let live = LiveHub::new(hf_client(&app).await.ok());
     let facts = compare::catalog_download_facts(&live, entry).await;
+    // 0.0.7 (P2 review M2): the catalog names the image file that goes with the model.
+    let image_files = Some(entry.mmproj.iter().cloned().collect());
     start_group(
         &app,
         &entry.repo,
@@ -609,6 +617,7 @@ pub async fn download_catalog_entry(app: AppHandle, entry_id: String) -> AppResu
         entry.mmproj.as_ref(),
         Some(entry_id),
         facts,
+        image_files,
     )
     .await
 }
@@ -699,6 +708,35 @@ struct StoredSummary {
     /// found next to the model, in rows saved before, and for imports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     downloaded_projector: Option<String>,
+    /// 0.0.7 (P2 review m4): the model's embedding length from its header, which an image
+    /// file next to it must match to be its own (`image_file::candidates`). Absent in rows
+    /// saved before; filled in when a load asks which image file to use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    embedding_length: Option<u64>,
+    /// 0.0.7 (P2 review M2): the image files of its Hugging Face repository as the app last
+    /// saw them (when it was downloaded, or when Installed looked), best first: what
+    /// "Download the image file" offers without asking Hugging Face. Absent when the app
+    /// never saw them (downloaded before 0.0.7, an import); empty when there were none.
+    #[serde(
+        default,
+        deserialize_with = "lenient_files",
+        skip_serializing_if = "Option::is_none"
+    )]
+    repo_image_files: Option<Vec<models::RepoFile>>,
+    /// 0.0.7 (P2 review M1): the SHA-256 its repository published for the image file in
+    /// `projector`, when the app downloaded that one, so Installed can tell whether
+    /// downloading it again could help when it cannot be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    projector_sha256: Option<String>,
+}
+
+/// Reads the saved image files of a repository leniently (see [`lenient_hub`]).
+fn lenient_files<'de, D>(d: D) -> Result<Option<Vec<models::RepoFile>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = <Option<serde_json::Value> as serde::Deserialize>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// Reads the image files remembered as unreadable leniently (see [`lenient_hub`]).
@@ -730,6 +768,10 @@ pub struct SavedFacts {
     pub repo_file: Option<String>,
     pub hub: Option<crate::dto::HubFacts>,
     pub parameters: Option<u64>,
+    /// 0.0.7 (P2 review M2): the repository's image files when it was downloaded.
+    pub image_files: Option<Vec<models::RepoFile>>,
+    /// 0.0.7 (P2 review M1): the SHA-256 published for the image file downloaded with it.
+    pub projector_sha256: Option<String>,
 }
 
 impl SavedFacts {
@@ -738,6 +780,8 @@ impl SavedFacts {
             && self.repo_file.is_none()
             && self.hub.is_none()
             && self.parameters.is_none()
+            && self.image_files.is_none()
+            && self.projector_sha256.is_none()
     }
 }
 
@@ -812,26 +856,37 @@ async fn register_installed_in(
         .as_ref()
         .map(|b| b.unreadable_projectors.clone())
         .unwrap_or_default();
+    let before_projector = before.as_ref().and_then(|b| b.projector.clone());
     let saved = match before {
         Some(before) => SavedFacts {
             catalog_id: before.catalog_id,
             repo_file: before.repo_file,
             hub: before.hub,
             parameters: before.parameters,
+            image_files: before.repo_image_files,
+            projector_sha256: before.projector_sha256,
         },
         None => saved,
     };
-    // An image file next to the model, the best precision first (0.0.7: one that could not
-    // be read with it is skipped).
+    let embedding_length = (s.embedding_length > 0).then_some(s.embedding_length);
+    // An image file next to the model that is its own, the best precision first (0.0.7: one
+    // that could not be read with it is skipped).
+    let found = projector.is_none();
     let projector = projector.or_else(|| {
         image_file::choose(
             None,
-            &image_file::beside(path),
+            &image_file::candidates(path, embedding_length),
             &unreadable,
             image_file::FileStamp::of,
         )
         .path
     });
+    // What the repository published goes with the image file it was for only.
+    let projector_sha256 = if found && projector != before_projector {
+        None
+    } else {
+        saved.projector_sha256
+    };
     let stored = StoredSummary {
         is_moe: s.is_moe(),
         architecture: Some(s.architecture),
@@ -850,6 +905,9 @@ async fn register_installed_in(
         unreadable_projectors: unreadable,
         // Set by the download that brought the image file (`note_downloaded_image`).
         downloaded_projector: None,
+        embedding_length,
+        repo_image_files: saved.image_files,
+        projector_sha256,
     };
     let id = store
         .upsert_model(ModelInput {
@@ -899,10 +957,21 @@ pub struct InstalledModelDto {
     /// 0.0.7 (P2): its image file could not be read, and no other usable one is there, so
     /// it loads without image input (Installed says so and offers another one).
     pub image_file_unreadable: bool,
+    /// 0.0.7 (P2 review M2): what its repository offers as its image file, from what was
+    /// saved when it was downloaded; `None` when not known (no repository, or downloaded
+    /// before 0.0.7: Installed offers to look). No request is made for it.
+    pub image_file_offer: Option<image_file::Offer>,
+    /// 0.0.7 (P6b review): for a download, what Delete with files removes from disk: the
+    /// bytes of its files and of the image file the app downloaded for it, inside the models
+    /// folder ([`removal_plan`]), and how many of its files stay because they are outside
+    /// it. Zero for an imported model (Delete only takes it off the list).
+    pub delete_bytes: u64,
+    pub kept_outside: usize,
 }
 
 #[tauri::command]
 pub async fn list_installed_models(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<Vec<InstalledModelDto>> {
     let status = state.runtime.status();
@@ -912,16 +981,20 @@ pub async fn list_installed_models(
     )
     .then_some(status.model_path)
     .flatten();
+    let all = state.store.list_models().await?;
+    let models_dir = models_dir(&app).await;
+    let in_use = InUse::of(&all);
     let mut out = Vec::new();
-    for m in state.store.list_models().await? {
+    for m in all {
         let stored: StoredSummary =
             serde_json::from_value(m.gguf_summary.clone()).unwrap_or_default();
-        let image = image_file::choose(
-            stored.projector.as_deref(),
-            &image_file::beside(Path::new(&m.path)),
-            &stored.unreadable_projectors,
-            image_file::FileStamp::of,
-        );
+        let (delete_bytes, kept_outside) = match m.source {
+            ModelSource::Download => {
+                delete_preview(&m, &models_dir, |f| in_use.by_other_than(m.id, f))
+            }
+            ModelSource::Import => (0, 0),
+        };
+        let image = image_file::choice_of_row(&m.path, &stored);
         out.push(InstalledModelDto {
             id: m.id.0,
             path: m.path.clone(),
@@ -945,6 +1018,9 @@ pub async fn list_installed_models(
                 .clone()
                 .filter(|l| crate::model_options::same_file(l, &m.path)),
             image_file_unreadable: image.left_out,
+            image_file_offer: image_file::saved_offer(m.repo.as_deref(), &stored),
+            delete_bytes,
+            kept_outside,
         });
     }
     Ok(out)
@@ -952,6 +1028,7 @@ pub async fn list_installed_models(
 
 #[tauri::command]
 pub async fn import_model(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> AppResult<InstalledModelDto> {
@@ -984,7 +1061,7 @@ pub async fn import_model(
     )
     .await?;
     crate::settings::remember_local_model(&state, &path).await;
-    list_installed_models(state)
+    list_installed_models(app, state)
         .await?
         .into_iter()
         .find(|m| m.path == path)
@@ -1007,6 +1084,21 @@ pub async fn delete_model(
     let Some(rec) = state.store.get_model(store::ModelId(id)).await? else {
         return Err(AppError::not_found("model"));
     };
+    // P6b review m1: an image file still downloading for it is cancelled first, and that
+    // download has stopped before anything goes, so its file is not left behind.
+    let downloads = app.state::<Arc<DownloadManager>>().inner().clone();
+    if let Err(e) = downloads.cancel_image_files_for(&app, &rec.path).await {
+        return Err(if e.code == "download_stopping" {
+            AppError::new(
+                "download_stopping",
+                "This model's image file download is still stopping.",
+                "Wait a moment, then delete it again.",
+                String::new(),
+            )
+        } else {
+            e
+        });
+    }
     // The same file loaded under another spelling (a link, a mapped drive) is unloaded too,
     // so its files are never deleted while llama-server has them open (0.0.6 item 8).
     let loaded = state
@@ -1071,21 +1163,55 @@ struct Removal {
 }
 
 /// What Delete with files would remove for the downloaded model `rec` ([`removal_plan`]),
-/// for its question: the bytes, and whether some files would stay because they are outside
-/// the models folder.
+/// for its question: the bytes, and how many files would stay because they are outside the
+/// models folder. `in_use` tells a file another installed model uses ([`InUse`]).
 fn delete_preview(
     rec: &store::ModelRecord,
     models_dir: &Path,
-    others: &[store::ModelRecord],
-) -> (u64, bool) {
-    let plan = removal_plan(rec, models_dir, others);
+    in_use: impl Fn(&Path) -> bool,
+) -> (u64, usize) {
+    let plan = removal_plan_with(rec, models_dir, in_use);
     let bytes = plan
         .delete
         .iter()
         .filter_map(|f| std::fs::metadata(f).ok())
         .map(|m| m.len())
         .sum();
-    (bytes, !plan.outside.is_empty())
+    (bytes, plan.outside.len())
+}
+
+/// 0.0.7 (P6b review): the files the installed models use, as [`used_by_installed`] finds
+/// them, looked up once for the whole list, so the list can say what Delete would remove
+/// for each model without reading every other model's folder again.
+struct InUse(std::collections::HashMap<String, Vec<store::ModelId>>);
+
+impl InUse {
+    fn of(models: &[store::ModelRecord]) -> Self {
+        let mut map: std::collections::HashMap<String, Vec<store::ModelId>> =
+            std::collections::HashMap::new();
+        for m in models {
+            for f in files_used(m) {
+                if let Some(key) = file_key(&f) {
+                    map.entry(key).or_default().push(m.id);
+                }
+            }
+        }
+        Self(map)
+    }
+
+    /// Whether a model other than `id` uses `file`.
+    fn by_other_than(&self, id: store::ModelId, file: &Path) -> bool {
+        file_key(file)
+            .and_then(|key| self.0.get(&key))
+            .is_some_and(|ids| ids.iter().any(|i| *i != id))
+    }
+}
+
+/// How this system tells a file that is there: its real path, spelled as
+/// [`crate::model_options::same_file`] compares them (case ignored on Windows and macOS).
+fn file_key(file: &Path) -> Option<String> {
+    crate::model_options::locate(&file.display().to_string())
+        .map(|real| crate::model_options::PathRule::this_system().key(&real))
 }
 
 /// 0.0.7 (P6b review m4): records that the app downloaded `image` for the installed model at
@@ -1117,21 +1243,31 @@ pub(crate) async fn note_downloaded_image(
 }
 
 /// The files Delete removes for the downloaded model `rec`: every shard of a split model
-/// and its image file. Only files inside the models folder are deleted (the rest is left
-/// in place and said so), and none that another installed model uses (`others`: two models
-/// of one repository can share one image file). A file already gone is left out, so the
-/// model just leaves the list.
+/// and the image file the app downloaded for it (P6b review m4: never one only found next
+/// to it, `StoredSummary::downloaded_projector`). Only files inside the models folder are
+/// deleted (the rest is left in place and said so), and none that another installed model
+/// uses (`others`: two models of one repository can share one image file). A file already
+/// gone is left out, so the model just leaves the list.
 fn removal_plan(
     rec: &store::ModelRecord,
     models_dir: &Path,
     others: &[store::ModelRecord],
+) -> Removal {
+    removal_plan_with(rec, models_dir, |f| used_by_installed(others, f))
+}
+
+/// [`removal_plan`], with `in_use` telling a file another installed model uses.
+fn removal_plan_with(
+    rec: &store::ModelRecord,
+    models_dir: &Path,
+    in_use: impl Fn(&Path) -> bool,
 ) -> Removal {
     let stored: StoredSummary =
         serde_json::from_value(rec.gguf_summary.clone()).unwrap_or_default();
     let dir = dunce::canonicalize(models_dir).ok();
     let mut files = shard_siblings(Path::new(&rec.path));
     let mut out = Removal {
-        image: stored.projector.map(PathBuf::from),
+        image: stored.downloaded_projector.map(PathBuf::from),
         ..Removal::default()
     };
     files.extend(out.image.clone());
@@ -1139,7 +1275,7 @@ fn removal_plan(
         let Ok(real) = dunce::canonicalize(&file) else {
             continue;
         };
-        if !real.is_file() || out.delete.contains(&file) || used_by_installed(others, &file) {
+        if !real.is_file() || out.delete.contains(&file) || in_use(&file) {
             continue;
         }
         if dir.as_ref().is_some_and(|d| real.starts_with(d)) {
@@ -1151,19 +1287,24 @@ fn removal_plan(
     out
 }
 
-/// What Delete says when it left files in place because they are outside the models folder.
+/// What Delete says when it left files in place because they are outside the models folder:
+/// the model's file or files, or only its image file.
 fn kept_note(removal: &Removal) -> Option<String> {
-    match removal.outside.len() {
-        0 => None,
-        1 => Some(
+    let only_image =
+        removal.outside.len() == 1 && removal.outside.first() == removal.image.as_ref();
+    let note = match removal.outside.len() {
+        0 => return None,
+        1 if only_image => {
+            "Removed from the list. Its image file is outside the models folder, so it was left where it is."
+        }
+        1 => {
             "Removed from the list. Its file is outside the models folder, so it was left where it is."
-                .into(),
-        ),
-        _ => Some(
+        }
+        _ => {
             "Removed from the list. Its files are outside the models folder, so they were left where they are."
-                .into(),
-        ),
-    }
+        }
+    };
+    Some(note.into())
 }
 
 /// 0.0.7 (P6): whether `file` is a file of a model on the Installed list (any shard of it),
@@ -1172,35 +1313,42 @@ fn kept_note(removal: &Removal) -> Option<String> {
 /// repository can share one image file.
 pub(crate) fn used_by_installed(models: &[store::ModelRecord], file: &Path) -> bool {
     let file = file.display().to_string();
-    let same = |p: &Path| crate::model_options::same_file(&p.display().to_string(), &file);
     models.iter().any(|m| {
-        let model = Path::new(&m.path);
-        let stored: StoredSummary =
-            serde_json::from_value(m.gguf_summary.clone()).unwrap_or_default();
-        shard_siblings(model).iter().any(|p| same(p.as_path()))
-            || stored
-                .projector
-                .as_deref()
-                .is_some_and(|p| same(Path::new(p)))
-            || image_file::beside(model).iter().any(|p| same(p.as_path()))
+        files_used(m)
+            .iter()
+            .any(|p| crate::model_options::same_file(&p.display().to_string(), &file))
     })
 }
 
-/// All shards of a split model (`-00001-of-00003.gguf`), or just the file.
+/// The files the installed model `m` uses ([`used_by_installed`]): every shard, the image
+/// file recorded on its row and the ones next to it.
+fn files_used(m: &store::ModelRecord) -> Vec<PathBuf> {
+    let model = Path::new(&m.path);
+    let stored: StoredSummary = serde_json::from_value(m.gguf_summary.clone()).unwrap_or_default();
+    let mut files = shard_siblings(model);
+    files.extend(stored.projector.map(PathBuf::from));
+    files.extend(image_file::beside(model));
+    files
+}
+
+/// All shards of a split model (`-00001-of-00003.gguf`), or just the file. 0.0.7 (P6b
+/// review): spelled as the file is (`-OF-`, `.GGUF`), so on a system whose names keep case
+/// every part is found; comparing paths ([`crate::model_options::same_file`]) ignores case
+/// only where the system does.
 fn shard_siblings(path: &Path) -> Vec<PathBuf> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let re = regex::Regex::new(r"(?i)^(.+)-(\d{5})-of-(\d{5})\.gguf$").expect("valid regex");
+    let re = regex::Regex::new(r"(?i)^(.+)-(\d{5})(-of-)(\d{5})(\.gguf)$").expect("valid regex");
     let Some(c) = re.captures(&name) else {
         return vec![path.to_path_buf()];
     };
-    let total: u32 = c[3].parse().unwrap_or(1);
-    let base = c[1].to_string();
+    let total: u32 = c[4].parse().unwrap_or(1);
+    let (base, of, ext) = (&c[1], &c[3], &c[5]);
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
     (1..=total)
-        .map(|n| dir.join(format!("{base}-{n:05}-of-{total:05}.gguf")))
+        .map(|n| dir.join(format!("{base}-{n:05}{of}{total:05}{ext}")))
         .collect()
 }
 
@@ -1787,7 +1935,9 @@ mod tests {
             &repo.join("Gone-Q4_K_M.gguf"),
             Some(gone_image.as_path()),
         );
-        assert_eq!(removal_plan(&gone, &models, &[]), Removal::default());
+        let plan = removal_plan(&gone, &models, &[]);
+        assert_eq!((plan.delete.len(), plan.outside.len()), (0, 0));
+        assert_eq!(kept_note(&plan), None);
 
         // In a folder used before "Change folder": left in place, and said so.
         let old = root.0.join("old-models/example-quants/Old-GGUF");
@@ -1845,7 +1995,11 @@ mod tests {
         std::fs::create_dir_all(&elsewhere).unwrap();
         let far_image = elsewhere.join("mmproj-Sample-F16.gguf");
         std::fs::write(&far_image, b"gguf").unwrap();
-        let plan = removal_plan(&downloaded(1, &model, Some(far_image.as_path())), &models, &[]);
+        let plan = removal_plan(
+            &downloaded(1, &model, Some(far_image.as_path())),
+            &models,
+            &[],
+        );
         assert_eq!(plan.delete, vec![model.clone()]);
         assert_eq!(
             kept_note(&plan).as_deref(),
@@ -1877,7 +2031,8 @@ mod tests {
     }
 
     /// P6b review nit: Delete's question counts what really goes: every part and the image
-    /// file the app downloaded, inside the models folder, and says when files stay outside.
+    /// file the app downloaded, inside the models folder, unless another installed model uses
+    /// it, and how many files stay because they are outside it.
     #[test]
     fn the_delete_question_counts_what_goes() {
         let root = scratch();
@@ -1889,22 +2044,40 @@ mod tests {
         std::fs::write(&model, vec![0u8; 1000]).unwrap();
         std::fs::write(&image, vec![0u8; 300]).unwrap();
         let rec = downloaded(1, &model, Some(image.as_path()));
-        assert_eq!(delete_preview(&rec, &models, &[]), (1300, false));
+        let alone = InUse::of(std::slice::from_ref(&rec));
+        let preview = |rec: &store::ModelRecord, in_use: &InUse| {
+            delete_preview(rec, &models, |f| in_use.by_other_than(rec.id, f))
+        };
+        assert_eq!(preview(&rec, &alone), (1300, 0));
+
+        // Another model of the repository uses the image file (found next to it): it stays,
+        // as Delete leaves it (`used_by_installed`).
+        let q8 = repo.join("Sample-7B-Q8_0.gguf");
+        std::fs::write(&q8, vec![0u8; 2000]).unwrap();
+        let other = downloaded(2, &q8, None);
+        let both = InUse::of(&[rec.clone(), other.clone()]);
+        assert!(used_by_installed(std::slice::from_ref(&other), &image));
+        assert_eq!(preview(&rec, &both), (1000, 0));
+        assert_eq!(
+            removal_plan(&rec, &models, std::slice::from_ref(&other)).delete,
+            vec![model.clone()]
+        );
+
         let old = root.0.join("old-models");
         std::fs::create_dir_all(&old).unwrap();
         let away = old.join("Old-Q4_K_M.gguf");
+        let away_image = old.join("mmproj-Old-F16.gguf");
         std::fs::write(&away, vec![0u8; 500]).unwrap();
+        std::fs::write(&away_image, vec![0u8; 50]).unwrap();
+        let none = InUse::of(&[]);
+        assert_eq!(preview(&downloaded(3, &away, None), &none), (0, 1));
         assert_eq!(
-            delete_preview(&downloaded(2, &away, None), &models, &[]),
-            (0, true)
+            preview(&downloaded(3, &away, Some(away_image.as_path())), &none),
+            (0, 2)
         );
         assert_eq!(
-            delete_preview(
-                &downloaded(3, &repo.join("Gone-Q4_K_M.gguf"), None),
-                &models,
-                &[]
-            ),
-            (0, false)
+            preview(&downloaded(4, &repo.join("Gone-Q4_K_M.gguf"), None), &none),
+            (0, 0)
         );
     }
 

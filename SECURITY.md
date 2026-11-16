@@ -450,7 +450,8 @@ build machine, and its Windows and macOS jobs have not run at all.
   as Anthropic, OpenAI, OpenRouter or abliteration.ai, sends that company everything the
   model reads: your messages, the system prompt and pinned instructions, the files and
   pictures you attach, the tools' descriptions and what the tools return (file contents,
-  command output, web pages, screenshots), and with Claude its own earlier thinking. The
+  command output, web pages, screenshots), and with Claude its own earlier thinking (kept in
+  memory for each chat and sent back only in that chat). The
   company's own terms say what it keeps and for how long; OpenRouter passes the chat on to
   the company that runs the model you picked. The chat header shows a *Cloud* mark for such
   a chat, with the host in its tooltip. Only `localhost` and local network IP addresses
@@ -462,15 +463,19 @@ build machine, and its Windows and macOS jobs have not run at all.
 - An endpoint's API key goes only to that endpoint's own address, in the header its API
   uses (`x-api-key` for Anthropic, `Authorization` for the others). A redirect to another
   address is not followed, and a saved key does not follow an edited endpoint to a new
-  scheme, host or port: the new address needs its own key. The address is read the same way
+  scheme, host or port: the new address needs its own key, and the old key is removed
+  before the endpoint is saved. A keychain that cannot be read counts as holding a key, so
+  these rules never pass by default, and a save whose key removal the keychain refuses
+  saves nothing. The address is read the same way
   for this check, the *Cloud* mark and the requests, and an address that cannot be read gets
   no key. The key is never written to the database or the logs, and it is removed from every
   error text before the error is shown or stored, also from errors inside a reply and from a
   server message cut short across the key. It is never sent over plain http:// except to
   this computer or a local network IP address: the app refuses to save another such endpoint
-  with a key and does not use a key saved earlier for one. Over http:// to a local network
-  address a key is still sent (servers there rarely have https), directly and not through a
-  system proxy; anyone who can watch that network can read it.
+  with a key and does not use a key saved earlier for one. Over http:// to this computer or
+  a local network address a key is still sent (servers there rarely have https), directly
+  and never through a system proxy (also for `0.0.0.0`, `[::]` and `localhost.`); anyone
+  who can watch that network can read it.
 - The usage line under the model name (0.0.6) is read from this computer's own counters,
   only while the window is visible. Nothing is sent anywhere, and the model is never told
   the figures.

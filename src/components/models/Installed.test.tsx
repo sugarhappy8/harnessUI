@@ -297,10 +297,11 @@ describe("Models → Installed", () => {
   it("[0.0.7 P6b] asks about what Delete really removes: its image file too, and not files outside the folder", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     ipcMock.listInstalledModels.mockResolvedValue([
-      { ...SMALL, deleteBytes: 1_300_000_000, keptOutside: false },
-      { ...BIG, deleteBytes: 1_000_000_000, keptOutside: true },
-      { ...model(3, "away.gguf"), deleteBytes: 0, keptOutside: true },
-      { ...model(4, "gone.gguf"), deleteBytes: 0, keptOutside: false },
+      { ...SMALL, deleteBytes: 1_300_000_000, keptOutside: 0 },
+      { ...BIG, deleteBytes: 1_000_000_000, keptOutside: 1 },
+      { ...model(3, "away.gguf"), deleteBytes: 0, keptOutside: 2 },
+      { ...model(4, "gone.gguf"), deleteBytes: 0, keptOutside: 0 },
+      { ...model(5, "far.gguf"), deleteBytes: 0, keptOutside: 1 },
     ]);
     await show();
     await click(screen.getByRole("button", { name: "Delete small.gguf" }));
@@ -315,6 +316,10 @@ describe("Models → Installed", () => {
     );
     await click(screen.getByRole("button", { name: "Delete gone.gguf" }));
     expect(confirm).toHaveBeenLastCalledWith("Remove gone.gguf from the list? Its file is no longer on disk.");
+    await click(screen.getByRole("button", { name: "Delete far.gguf" }));
+    expect(confirm).toHaveBeenLastCalledWith(
+      "Remove far.gguf from the list? Its file is outside the models folder, so it stays where it is.",
+    );
     expect(ipcMock.deleteModel).not.toHaveBeenCalled();
     confirm.mockRestore();
   });

@@ -1287,7 +1287,10 @@ async fn run_subagent_without_room_is_not_sent_to_call_tool() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(system.contains("call_tool cannot run run_subagent."), "{system}");
+    assert!(
+        system.contains("call_tool cannot run run_subagent."),
+        "{system}"
+    );
 }
 
 /// A tool the loop does not offer (chat markup in its settings) is not in the list either.

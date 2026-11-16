@@ -308,7 +308,7 @@ describe("ToolsPanel: the Browser group", () => {
 
   it("keeps another group's per-tool reason on the tool", async () => {
     const why =
-      "This model was loaded without an image file, so it can't see the screen. Download its image file in Models → Installed, or pick a model that can see images.";
+      "This model was loaded without an image file, so it can't see the screen. If it has one, download it in Models → Installed; otherwise pick a model with the vision badge.";
     ipcMock.listChatTools.mockImplementation(async () => [
       tool("computer", "computer_screenshot", { available: false, schemaError: why }),
       tool("computer", "computer_click", { available: false, schemaError: why }),

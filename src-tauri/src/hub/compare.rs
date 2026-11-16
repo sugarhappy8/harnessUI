@@ -921,11 +921,12 @@ fn local_header(rec: &Installed) -> Option<Arc<ModelSummary>> {
     Some(summary)
 }
 
-/// The size of the projector beside an installed model; 0 when there is none.
+/// The size of the image file a load of an installed model uses; 0 when there is none.
+/// 0.0.7 (P2 review m6): as a load chooses it (`image_file::choose`), so a file put next
+/// to the model later counts, and one that could not be read does not.
 fn installed_projector_bytes(rec: &Installed) -> u64 {
-    rec.stored
-        .projector
-        .as_deref()
+    super::image_file::choice_of_row(&rec.path, &rec.stored)
+        .path
         .and_then(|p| std::fs::metadata(p).ok())
         .map_or(0, |m| m.len())
 }

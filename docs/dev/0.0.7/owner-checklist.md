@@ -10,10 +10,21 @@ On the Windows PC (RX 9070 XT, 16 GB), with `gemma-4-12B-coder…heretic`:
    Q8_0 and green for Q6_K and Q4_K_M.
 3. Load Q6_K at 65,536 tokens and look at the log: the conversation memory on the graphics
    card is about 1,024 + 480 MiB (about 820 MiB with *Save memory*).
-4. During a long chat (15 or more turns or tool calls), llama-server's memory in Task
-   Manager grows by about 2.5 GB (about 1.3 GB with *Save memory*) and then levels off:
-   these are the model runner's saved copies of the conversation, now at most 8.
-5. With *Fast attention* off, the estimate rises to about 3 GB of conversation memory at
+4. *Settings for this model*: the computer's bar shows "Saved copies of long chats (up to
+   … GB)". With 7 GB or more of the computer's memory free that is about 2.5 GB (8 copies;
+   about 1.3 GB with *Save memory*); with less free it is fewer copies (at least one, 320
+   MB), never a red mark.
+5. During a long chat (15 or more turns or tool calls), llama-server's memory in Task
+   Manager grows and then levels off at no more than that figure: these are the model
+   runner's saved copies of the conversation.
+6. After that long chat, *Reload*: the model comes back with the same memory size (the
+   ready line still says about 24,000 words with Automatic), not 4,096 tokens.
+7. If you can get the computer to about 3.2 GB free (open other programs), *Settings for
+   this model* shows yellow with "Long chats will use about 0.3 GB more of the computer's
+   memory, which may not have that much free.", and Automatic still picks 32,768 tokens.
+   (Below about 3 GB it is red, because the model's own part in the computer's memory, the
+   1 GB input layer, does not fit; that was so before.)
+8. With *Fast attention* off, the estimate rises to about 3 GB of conversation memory at
    65,536 tokens.
 
 ## Computer use (P3)
@@ -109,7 +120,11 @@ front only makes harnessUI the active app (expected on a Mac); click again to an
    1,000,000 and see the note about credit.
 2. **Claude Opus 5.5:** the header's switch says *On*/*Low*; with *Low* a short question is
    answered quickly, and a long chat's automatic summary still works (not "Could not
-   summarise").
+   summarise"). Run two chats with the same model side by side, each with tools and
+   thinking on: each keeps working turn after turn (no error about thinking or signatures).
+   In one chat attach more than 20 pictures over several messages, one of them larger than
+   3,000 pixels a side: the chat keeps answering, and Claude mentions that a picture was
+   left out instead of the request failing.
 3. **OpenAI:** only chat models are listed (no *-pro*, Codex or deep research models). A tool
    turn on a GPT-5-family model and on a 4.1-type model works (no error about `max_tokens` or
    temperature). Try a tool that returns a screenshot.
@@ -144,3 +159,22 @@ front only makes harnessUI the active app (expected on a Mac); click again to an
    compare it with the pictures in `screenshots/`.
 4. Ask "make a site that looks like stripe.com": the capture tool is offered.
 5. On Windows: a long folder path, and opening the copy in Edge.
+
+## Tools, call guide, repeat limit (P4)
+On the Windows PC, with a local model and the terminal on:
+1. Ask "run `cd client && npm install`" (any folder): the failed result ends with one line
+   saying Windows PowerShell 5.1 has no `&&` and to use `;` or
+   `if ($LASTEXITCODE -eq 0) { … }`. Try `rm -rf build` and `curl https://example.com/?a=1&b=2`
+   too: each ends with its own one-line hint, and the exit code shown is the command's own.
+2. *Context* tab: the system message has a `<tool_list>` of every tool that is on and a
+   `<tool_call_guide>` that says Windows PowerShell 5.1 (on the Mac: zsh). Send two more
+   messages that bring in different tools: both blocks stay the same (only the tool
+   definitions change).
+3. With Computer use on, ask "open Notepad and type hello" (or "open Google Chrome", "open
+   Microsoft Excel"): after the reply the Tools panel marks all seven Computer tools as shown
+   in that chat. Ask "how do I open excel files in python" in a new chat: they are not.
+4. *Settings → General → Same call in a row*: set 3, then ask a model to read the same file
+   over and over: it is warned on the second identical call and the turn stops at the third.
+5. With *Subagents* on, ask for a helper: the helper's first request is quick to start (the
+   model server reuses the chat's prompt; llama-server's log shows most of the prompt
+   cached).

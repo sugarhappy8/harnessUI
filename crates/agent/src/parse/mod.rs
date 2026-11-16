@@ -350,7 +350,9 @@ pub fn writes_tool_result(text: &str, returned: &[&str]) -> bool {
                 return false;
             }
             let line_start = visible[..open].rfind('\n').map_or(0, |at| at + 1);
-            let line_end = visible[open..].find('\n').map_or(visible.len(), |at| open + at);
+            let line_end = visible[open..]
+                .find('\n')
+                .map_or(visible.len(), |at| open + at);
             // Nothing before it on its line, and the tag itself on that line.
             let Some(after_tag) = visible[open..line_end].find('>').map(|at| open + at + 1) else {
                 return false;

@@ -1267,8 +1267,9 @@ fn images_message(images: Vec<ContentPart>) -> ChatMessage {
 }
 
 /// Why an image reached a model as text: it was loaded without its image file (only a
-/// local model is ever without vision here), and how the user can fix that.
-const NO_IMAGE_FILE: &str = "this model was loaded without an image file, so it cannot see images (the user can download its image file in Models → Installed, or pick a model that can see images)";
+/// local model is ever without vision here), and how the user can fix that (0.0.7: most
+/// models have no image file, P2 review m7).
+const NO_IMAGE_FILE: &str = "this model was loaded without an image file, so it cannot see images (if it has one, the user can download it in Models → Installed; otherwise they can pick a model with the vision badge)";
 
 /// An image part for a vision model, or the text stub otherwise (also for image data that
 /// is not a valid inline image).

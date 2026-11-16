@@ -60,7 +60,13 @@ pub fn same_call_limit(stored: Option<&serde_json::Value>) -> u32 {
             value
                 .as_f64()
                 .filter(|n| n.is_finite() && n.fract() == 0.0 && *n >= 0.0)
-                .map(|n| if n >= f64::from(u32::MAX) { u64::from(u32::MAX) } else { n as u64 })
+                .map(|n| {
+                    if n >= f64::from(u32::MAX) {
+                        u64::from(u32::MAX)
+                    } else {
+                        n as u64
+                    }
+                })
         })
     });
     match whole {
