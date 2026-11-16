@@ -295,3 +295,15 @@ and `README.md`.
   Added/Changed/Fixed/Known limits and the ARCHITECTURE "0.0.7." paragraph. Local CI
   checks so far: docs test, spawn check, notices check pass; `cargo fmt --check` differs
   only in P7's file being edited.
+- P7 round 1 done: the copy is re-read in Rust with html5ever as a browser would and
+  cleaned as a tree with allow-lists (resources only as saved files or `data:image/`;
+  links only #, http(s), mailto, tel), written as a real `<html><head>` with the no-script
+  policy first, then checked again (else the capture fails and its folder is removed);
+  saved SVGs rebuilt from a namespace-aware XML parse (any DOCTYPE/ENTITY → left out);
+  WebSockets blocked at the source with a `connect-src` policy added to the tab's
+  documents and workers, and a WebSocket/WebTransport/direct socket that starts anyway
+  stops the capture with nothing saved; WebRTC can't be blocked (documented); a new
+  built-in tool follows its group once at start-up. Hostile pages A–F replayed: no request
+  from any opened copy or SVG. Fidelity: local site 99.94 %, gsap.com 99.97 %, stripe.com
+  87.4 % (animation state only). browser 163 + capture_e2e 5 + browser_e2e 30, app 888.
+  Verification running.
