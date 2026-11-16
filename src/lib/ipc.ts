@@ -27,6 +27,7 @@ import type {
   Convention,
   BrowserStatus,
   UpdateInfo,
+  UpdateState,
   UpdateStatus,
   ChatSummary,
   DiagnosticsReport,
@@ -433,10 +434,15 @@ export const shareSetup = (app: ShareApp) => invoke<ShareSetup>("share_setup", {
 export const updateStatus = () => invoke<UpdateStatus>("update_status");
 export const setUpdateAutoCheck = (on: boolean) => invoke<void>("set_update_auto_check", { on });
 export const checkForUpdate = () => invoke<UpdateInfo | null>("check_for_update");
+/** Installs the downloaded update and restarts the app (on success it does not return). */
 export const installUpdate = () => invoke<void>("install_update");
-/** Sent by the automatic check at start when a newer version exists. */
-export function onUpdateAvailable(handler: (u: UpdateInfo) => void): Promise<UnlistenFn> {
-  return listen<UpdateInfo>("update-available", (e) => handler(e.payload));
+/** Every change in what the updater is doing: checking, downloading, ready, failed. */
+export function onUpdateState(handler: (s: UpdateState) => void): Promise<UnlistenFn> {
+  return listen<UpdateState>("update-state", (e) => handler(e.payload));
+}
+/** A newer version was downloaded and its signature verified: it can be installed. */
+export function onUpdateReady(handler: (u: UpdateInfo) => void): Promise<UnlistenFn> {
+  return listen<UpdateInfo>("update-ready", (e) => handler(e.payload));
 }
 
 // Terminal

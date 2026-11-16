@@ -1,17 +1,17 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Download, X } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import * as ipc from "../lib/ipc";
-import type { HotkeyStatus, UpdateInfo } from "../lib/types";
+import type { HotkeyStatus } from "../lib/types";
+import { UpdateBox, type UpdatePlacement } from "./UpdateBox";
 
 /**
- * Bars at the top of the main window: a stop hotkey that could not be registered
- * (ARCHITECTURE.md 4.2; stays until a later status says it works) and an update found
- * by the check at start (can be dismissed).
+ * Notices for the whole main window: a bar at the top when the stop hotkey could not be
+ * registered (ARCHITECTURE.md 4.2; stays until a later status says it works), and the small
+ * floating box that says a new version is ready to install (`UpdateBox`; `updatePlacement`
+ * says where it floats).
  */
-export function AppNotices(props: { onOpenSettings: (tab: string) => void }) {
+export function AppNotices(props: { onOpenSettings: (tab: string) => void; updatePlacement: UpdatePlacement }) {
   const [hotkey, setHotkey] = useState<HotkeyStatus | null>(null);
-  const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const [dismissed, setDismissed] = useState<string | null>(null);
 
   useEffect(() => {
     if (!ipc.isTauri()) return;
@@ -22,20 +22,12 @@ export function AppNotices(props: { onOpenSettings: (tab: string) => void }) {
       else off();
     };
     void ipc.onStopHotkeyStatus(setHotkey).then(keep);
-    void ipc.onUpdateAvailable(setUpdate).then(keep);
     // Events are not replayed, so also read what happened before this window listened.
     // Before the hotkey is first registered the status has no accelerator; skip that one.
     ipc
       .stopHotkeyStatus()
       .then((s) => {
         if (alive && s.accelerator) setHotkey((cur) => cur ?? s);
-      })
-      .catch(() => undefined);
-    ipc
-      .updateStatus()
-      .then((s) => {
-        const found = s.available;
-        if (alive && found) setUpdate((cur) => cur ?? found);
       })
       .catch(() => undefined);
     return () => {
@@ -45,41 +37,26 @@ export function AppNotices(props: { onOpenSettings: (tab: string) => void }) {
   }, []);
 
   const hotkeyFailed = hotkey !== null && hotkey.accelerator !== "" && !hotkey.registered;
-  const showUpdate = update !== null && update.version !== dismissed;
-  if (!hotkeyFailed && !showUpdate) return null;
   return (
-    <div className="shrink-0">
+    <>
       {hotkeyFailed && (
-        <div
-          role="alert"
-          className="flex items-center gap-2 border-b border-warning/60 bg-warning/10 px-4 py-1.5 text-sm"
-        >
-          <AlertTriangle size={14} className="shrink-0 text-warning" aria-hidden />
-          <span className="min-w-0 flex-1">
-            The stop hotkey could not be registered. Choose another one in Settings → Permissions.
-          </span>
-          <button type="button" className="text-xs underline" onClick={() => props.onOpenSettings("permissions")}>
-            Open Permissions
-          </button>
-        </div>
-      )}
-      {showUpdate && update && (
-        <div role="status" className="flex items-center gap-2 border-b border-border bg-bg-subtle px-4 py-1.5 text-sm">
-          <Download size={14} className="shrink-0 text-fg-muted" aria-hidden />
-          <span className="min-w-0 flex-1">Version {update.version} is available.</span>
-          <button type="button" className="text-xs underline" onClick={() => props.onOpenSettings("general")}>
-            Open Updates
-          </button>
-          <button
-            type="button"
-            aria-label="Dismiss update notice"
-            onClick={() => setDismissed(update.version)}
-            className="text-fg-muted hover:text-fg"
+        <div className="shrink-0">
+          <div
+            role="alert"
+            className="flex items-center gap-2 border-b border-warning/60 bg-warning/10 px-4 py-1.5 text-sm"
           >
-            <X size={14} aria-hidden />
-          </button>
+            <AlertTriangle size={14} className="shrink-0 text-warning" aria-hidden />
+            <span className="min-w-0 flex-1">
+              The stop hotkey could not be registered. Choose another one in Settings → Permissions.
+            </span>
+            <button type="button" className="text-xs underline" onClick={() => props.onOpenSettings("permissions")}>
+              Open Permissions
+            </button>
+          </div>
         </div>
       )}
-    </div>
+      {/* Floats above the page (fixed), so it takes no room in the column. */}
+      <UpdateBox placement={props.updatePlacement} />
+    </>
   );
 }

@@ -712,12 +712,27 @@ export interface SkillList {
 
 // ---- Updates (M8) ----------------------------------------------------------------
 
-export interface UpdateStatus {
-  configured: boolean;
-  autoCheck: boolean;
-  currentVersion: string;
+/** What the updater is doing (sent as `update-state`; also part of `update_status`). */
+export interface UpdateState {
+  /** A check is running. */
+  checking: boolean;
+  /** A check finished since the app started, whether it found a newer version or not. */
+  checked: boolean;
+  /** The version being downloaded and verified. */
+  downloading: string | null;
   /** An update found by the automatic or manual check since the app started. */
   available: UpdateInfo | null;
+  /** Downloaded and verified: "Restart and update" installs it. */
+  ready: UpdateInfo | null;
+  /** Why the last check or download did not work. The next one tries again. */
+  error: string | null;
+}
+
+export interface UpdateStatus extends UpdateState {
+  configured: boolean;
+  /** The automatic check (on unless the user turned it off). */
+  autoCheck: boolean;
+  currentVersion: string;
 }
 
 export interface UpdateInfo {
