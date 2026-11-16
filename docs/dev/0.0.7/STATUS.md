@@ -239,3 +239,12 @@ and `README.md`.
   Measured: with 1 copy, editing the last message re-reads the whole chat (9,618 tokens
   vs 787 with 8); kept the minimum at 1 so a computer short of memory is never pushed
   further. models 145, runtime 208+contract, app 876, vitest 844. Verification running.
+- P6b round-1 verification: the critical is fixed — in every attack (files found in place,
+  failed rows' old files, linked folders, a changed or missing folder, missing or corrupt
+  records, a crash before recording, shards, links to installed files) Cancel deleted only
+  files the group itself wrote. New major with a rare trigger: after a Cancel that timed
+  out, the leftover cancelled row let a second download of the same file start, and the old
+  group's clean-up could then delete the new one's partial file. Minor: Delete could leave
+  a downloaded image file behind; the end of a timed-out cancel never showed; two windows
+  where a cut-short cancel wasn't finished at start-up. Nits: lock handling, a drop guard,
+  wording, long Windows paths. Round 2 running.

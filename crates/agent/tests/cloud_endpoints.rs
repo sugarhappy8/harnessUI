@@ -1247,11 +1247,10 @@ async fn a_thinking_binding_the_api_refuses_is_left_out_and_remembered() {
     );
 }
 
-#[tokio::test]
-async fn two_chats_with_the_same_replies_never_exchange_thinking() {
-    // The verifier's probe: two chats on one endpoint and model, both answered "Done.".
-    // Chat A's next request must carry chat A's thinking, not chat B's.
-    let server = MockServer::start(|request: &Recorded| {
+/// A fake Messages API whose every reply is "Done." after a thought signed with the request's
+/// last user text (`SIG[<text>]`), so a later request shows whose thinking it carries.
+async fn signing_claude() -> MockServer {
+    MockServer::start(|request: &Recorded| {
         let path = request.path();
         if let Some(id) = path.strip_prefix("/v1/models/") {
             return Reply::json(200, &model_entry(id));
@@ -1299,7 +1298,22 @@ async fn two_chats_with_the_same_replies_never_exchange_thinking() {
         out += &stop("end_turn", 5);
         sse(out.into_bytes())
     })
-    .await;
+    .await
+}
+
+/// Sends `messages` to claude-opus-5-5 with thinking on and reads the reply.
+async fn send_thinking(client: &OpenAiClient, messages: Vec<ChatMessage>) {
+    let mut request = ChatRequest::new("claude-opus-5-5", messages);
+    request.thinking = Some(true);
+    request.max_tokens = Some(1_000);
+    collect(client, &request).await.unwrap();
+}
+
+#[tokio::test]
+async fn two_chats_with_the_same_replies_never_exchange_thinking() {
+    // The verifier's probe: two chats on one endpoint and model, both answered "Done.".
+    // Chat A's next request must carry chat A's thinking, not chat B's.
+    let server = signing_claude().await;
     let chat = |name: &str| claude(&server).for_conversation(name);
     let send = |client: OpenAiClient, messages: Vec<ChatMessage>| async move {
         let mut request = ChatRequest::new("claude-opus-5-5", messages);

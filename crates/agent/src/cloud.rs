@@ -1120,6 +1120,44 @@ mod tests {
     }
 
     #[test]
+    fn localhost_with_a_final_dot_is_reached_as_localhost() {
+        // `localhost.` is answered by the name server, not the hosts file: the requests go
+        // to `localhost` itself, which is this computer.
+        for raw in [
+            "http://localhost.:8080/v1",
+            "http://LOCALHOST.:8080",
+            "localhost.:8080",
+        ] {
+            assert_eq!(endpoint_host(raw).as_deref(), Some("localhost"), "{raw}");
+            assert_eq!(
+                endpoint_origin(raw).as_deref(),
+                Some("http://localhost:8080"),
+                "{raw}"
+            );
+            assert_eq!(place(raw), EndpointPlace::ThisComputer, "{raw}");
+            assert!(check_key_transport(raw).is_ok(), "{raw}");
+            let mut config = crate::ClientConfig::new(raw, ProviderKind::Vllm);
+            config.api_key = Some("secret7".into());
+            assert!(config.loopback, "{raw}");
+            let client = crate::OpenAiClient::new(config).unwrap();
+            assert_eq!(
+                client.chat_completions_url().as_str(),
+                "http://localhost:8080/v1/chat/completions",
+                "{raw}"
+            );
+        }
+        // Any other name keeps its spelling, and is the internet.
+        assert_eq!(
+            endpoint_host("https://api.anthropic.com.").as_deref(),
+            Some("api.anthropic.com.")
+        );
+        for raw in ["http://localhost.example.", "http://my.localhost."] {
+            assert_eq!(place(raw), EndpointPlace::Internet, "{raw}");
+            assert_eq!(check_key_transport(raw), Err(KEY_OVER_HTTP.to_owned()));
+        }
+    }
+
+    #[test]
     fn hosts_for_the_cloud_mark() {
         assert_eq!(
             endpoint_host("https://api.anthropic.com").as_deref(),
