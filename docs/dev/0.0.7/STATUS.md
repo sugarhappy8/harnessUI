@@ -270,3 +270,10 @@ and `README.md`.
 - P3 round 3 done: "Minimise this window" pressed as a turn ends can't keep the window
   down; *Continue* and the Task tab's *Resume* ignore clicks for a moment when the window
   comes back; checklist items fixed. computer 153, vitest 847. P3 finished.
+- P6b round 2 done: cancelled rows count as busy (the same download resumes the old group,
+  anything else is refused); a "cancelling" marker saved before Cancel waits, finished at
+  start-up, with "cancelling…" on the row; Cancel releases the start lock while it waits;
+  clean-up deletes only its own partial files; Delete removes the image file its cancelled
+  download wrote and plans from the row as it is after the wait; a drop guard ends a task
+  that panics; Delete question wording; long Windows paths. app 888, models 145, vitest
+  121 (models), clippy clean. Its verification goes into the final review.

@@ -10,10 +10,10 @@
 //!   `input_schema`; `tool_choice` is `auto`, `none` or `any` with
 //!   `disable_parallel_tool_use`; `max_tokens` is always sent, at most what the model
 //!   accepts. Sampling values are never sent (API version 2026-10-21 removed them). A
-//!   picture Claude would refuse becomes a note: over 10 MB or 8,000 pixels a side; in a
-//!   request with more than 20 pictures, over 3,000 pixels; beyond the most pictures one
-//!   request may hold (100, or 600 for a model with a window over 200,000 tokens), the
-//!   oldest.
+//!   picture Claude would refuse becomes a note, counting only the pictures really sent:
+//!   over 10 MB or 8,000 pixels a side; beyond the most pictures one request may hold (100,
+//!   or 600 for a model with a window over 200,000 tokens), the oldest; and while more than
+//!   20 are left, the oldest over 3,000 pixels a side, until 20 are left.
 //! - **Thinking:** with the chat's thinking on, the model's own form (`adaptive`, or
 //!   `enabled` with a budget on models before 4.6), with `display: "summarized"` so the
 //!   Thinking area shows it; off, `disabled` or `between_tools` where the model accepts one,
@@ -22,9 +22,10 @@
 //!   Anthropic's model list (`capabilities.thinking.types`), else from its name ([`guess`]).
 //! - **Thinking blocks are sent back unchanged**, as the documentation requires within a
 //!   tool-use loop and recommends across turns (models that keep earlier thinking read it,
-//!   and an unchanged history keeps the prompt cache). Each conversation (a chat, named by
-//!   [`crate::ClientConfig::conversation`]) has its own [`ThinkingReplay`] while the app
-//!   runs; no other chat ever sees it, and the chat used least recently is forgotten whole.
+//!   and an unchanged history keeps the prompt cache). Each conversation (a chat or a
+//!   helper, named by [`crate::ClientConfig::conversation`]) has its own [`ThinkingReplay`]
+//!   while the app runs or until it ends ([`OpenAiClient::end_conversation`]); no other
+//!   conversation ever sees it, and the one used least recently is forgotten whole.
 //!   A response that thought is kept under everything its request sent before it and what
 //!   it showed ([`ReplayKey`]), so a later request of the chat replays it block for block
 //!   exactly where it was written, after the same history; an edited history replays

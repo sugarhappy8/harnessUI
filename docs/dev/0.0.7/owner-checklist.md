@@ -143,7 +143,10 @@ front only makes harnessUI the active app (expected on a Mac); click again to an
    thinking on: each keeps working turn after turn (no error about thinking or signatures).
    In one chat attach more than 20 pictures over several messages, one of them larger than
    3,000 pixels a side: the chat keeps answering, and Claude mentions that a picture was
-   left out instead of the request failing.
+   left out instead of the request failing. With exactly 21 pictures, two of them larger than
+   3,000 pixels a side, only the older of the two is left out. With *Subagents* on, ask for
+   a task the model hands to a helper: the helper and the chat both keep working with
+   thinking on (no error about thinking or signatures).
 3. **OpenAI:** only chat models are listed (no *-pro*, Codex or deep research models). A tool
    turn on a GPT-5-family model and on a 4.1-type model works (no error about `max_tokens` or
    temperature). Try a tool that returns a screenshot.
@@ -163,8 +166,8 @@ front only makes harnessUI the active app (expected on a Mac); click again to an
    it stays paused.
 2. Press *Download* twice quickly on Browse: only one download starts. Start the same model
    again from Browse while it downloads: it follows the running one.
-3. Cancel a download after its first file finished: the finished file is deleted (unless
-   an installed model uses it).
+3. Cancel a download after its first file finished: the row says "cancelling…" for a moment,
+   then the finished file is deleted (unless an installed model uses it).
 4. Copy a model file you have into the models folder at the place its download would use
    (`<models folder>\<owner>\<repo>\<file>`), then download that model from Browse: the
    row says "checking the file…" while its bar fills (no time left is shown), and the file
