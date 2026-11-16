@@ -542,7 +542,8 @@ pub fn validate_repo_id(id: &str) -> Result<(&str, &str), HfError> {
 /// Checks a file path inside a repository and returns its segments. Rejects
 /// anything that could escape the destination folder on Windows or macOS, a Windows
 /// device name, and characters that hide what a name says (invisible, bidirectional or
-/// control characters, [`is_invisible_or_control`]).
+/// control characters, [`is_invisible_or_control`], and the line and paragraph
+/// separators).
 pub fn validate_repo_path(path: &str) -> Result<Vec<&str>, HfError> {
     let bad = || HfError::InvalidName(path.to_string());
     if path.is_empty() || path.len() > 512 || path.starts_with('/') {
@@ -558,7 +559,10 @@ pub fn validate_repo_path(path: &str) -> Result<Vec<&str>, HfError> {
             || is_device_name(s)
             || s.chars().any(|c| {
                 is_invisible_or_control(c)
-                    || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                    || matches!(
+                        c,
+                        '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\u{2028}' | '\u{2029}'
+                    )
             })
         {
             return Err(bad());
@@ -1217,6 +1221,8 @@ mod tests {
             "mmproj\u{200b}-F16.gguf",
             "\u{feff}mmproj.gguf",
             "a\u{2066}b/c.gguf",
+            "mmproj\u{2028}x.gguf",
+            "mmproj\u{2029}x.gguf",
         ] {
             assert!(validate_repo_path(bad).is_err(), "{bad:?}");
         }

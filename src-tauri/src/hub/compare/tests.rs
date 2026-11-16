@@ -2117,3 +2117,27 @@ async fn forty_installed_models_plan_only_what_is_shown() {
     assert_eq!(hub.requests(), 1, "only the installed 7B's own listing");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// 0.0.7 round 2: when the computer does not say how much of its memory is free, an
+/// installed answer is never red or "not enough" for the part in the computer's memory
+/// (unknown is not 0), and says the memory couldn't be read.
+#[test]
+fn an_installed_answer_with_the_computers_memory_unknown() {
+    let unknown = Machine {
+        ram_free_bytes: 0,
+        ram_unknown: true,
+        ..card(2 * GB)
+    };
+    let fit = installed_fit(&plan_for(sized_facts(), unknown), CTX).unwrap();
+    assert!(fit.computer_unknown);
+    assert!(!fit.computer_short && !fit.copies_short, "{fit:?}");
+    assert_ne!(fit.verdict, Verdict::Red);
+    // Known to have nothing free: too large, and the computer's part is what is short.
+    let nothing = Machine {
+        ram_free_bytes: 0,
+        ..card(2 * GB)
+    };
+    let fit = installed_fit(&plan_for(sized_facts(), nothing), CTX).unwrap();
+    assert_eq!(fit.verdict, Verdict::Red);
+    assert!(fit.computer_short && !fit.computer_unknown, "{fit:?}");
+}

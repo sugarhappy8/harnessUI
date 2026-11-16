@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Download } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import type { DownloadGroup, ImageFileOffer, InstalledModel } from "../../lib/types";
@@ -57,21 +57,28 @@ export function ImageFileLine(props: { model: InstalledModel; onChanged: () => v
     }
   }
 
-  // Right after its image file couldn't be read, another one is looked for once by itself
-  // (offline, nothing is said: the link stays).
-  const askNow = wanted && unreadable && m.imageFileOffer == null && !askedOnce.has(m.path);
+  // After its image file couldn't be read, another one is looked for once by itself, decided
+  // when the row first shows; its answer is kept however often the row is drawn again until
+  // it comes (offline, nothing is said: the link stays). P2 verification N4.
+  const shown = useRef(true);
   useEffect(() => {
-    if (!askNow) return;
+    shown.current = true;
+    return () => {
+      shown.current = false;
+    };
+  }, []);
+  const askOnce = useRef(wanted && unreadable && m.imageFileOffer == null && !askedOnce.has(m.path));
+  useEffect(() => {
+    if (!askOnce.current) return;
+    askOnce.current = false;
     askedOnce.add(m.path);
-    let alive = true;
     ipc
       .imageFileOffer(m.path)
-      .then((o) => alive && setLooked(o))
+      .then((o) => {
+        if (shown.current) setLooked(o);
+      })
       .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, [askNow, m.path]);
+  }, [m.path]);
 
   // The download's progress, until it is done or stops.
   const downloadId = download?.id ?? null;

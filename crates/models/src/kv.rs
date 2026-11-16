@@ -62,10 +62,12 @@
 //!
 //! Not ported (the estimate stays the plain sum over layers, as in 0.0.6): the
 //! architectures with an extra indexer or compressed cache (DeepSeek V3.2 and V4,
-//! GLM-DSA and GLM-5 Next, Mistral Large 4, MiniMax M3, HY-V4, dots3note, Qwen4-Exp's
-//! indexer cache, the speculative drafts DFlash and Gemma 4 assistant), Kimi K3 and Kimi
-//! Linear's own head sizes, Nanbeige's looped layers, and the extra history row some
-//! hyper-connection models keep beside their recurrent state (`ple_conv_state`).
+//! GLM-DSA and GLM-5 Next, Mistral Large 4, MiniMax M3, HY-V4, dots3note, the speculative
+//! drafts DFlash and Gemma 4 assistant), Kimi K3 and Kimi Linear's own head sizes,
+//! Nanbeige's looped layers, and the extra history row some hyper-connection models keep
+//! beside their recurrent state (`ple_conv_state`). Qwen4-Exp's indexer cache
+//! (`llama_memory_hybrid_idx`: a pooled key row on each attention layer) is left out
+//! altogether, a slight under-count; its attention and recurrent layers are counted.
 //!
 //! Every number from the header is untrusted: products and sums saturate, a window is cut
 //! to llama.cpp's 32 bits, at most [`MAX_BLOCKS`] layers are built and nothing is

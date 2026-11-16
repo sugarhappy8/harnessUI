@@ -592,6 +592,24 @@ describe("0.0.6 item 6: plain words for Fine control, the picture and the usage 
     }
   });
 
+  // Round 2: the computer's memory could not be read: no size, no free figure, no "other
+  // programs", and the needs line says so instead of "of the 0 GB free".
+  it("says when the computer's memory couldn't be read", () => {
+    const unknown = computerBar({ totalBytes: 0, freeBytes: 0, otherBytes: 0, copiesBytes: gb(2.5) });
+    expect(barTitle(unknown, "computer", true)).toBe("Computer memory");
+    expect(barTitle(unknown, "shared", true)).toBe("Memory · shared by the processor and Apple graphics");
+    expect(barLegend(unknown, true).map(legendWords)).toEqual([
+      "Model 4.1 GB",
+      "Conversation memory 0.4 GB",
+      "Working space 0.3 GB",
+      "Saved copies of long chats (up to 2.5 GB)",
+    ]);
+    expect(needsWords(unknown, true)).toBe("Needs about 4.8 GB. The computer's memory couldn't be read.");
+    // Known: as before.
+    expect(barTitle(computerBar(), "computer", false)).toBe("Computer memory · 32 GB");
+    expect(needsWords(computerBar(), false)).toBe(needsWords(computerBar()));
+  });
+
   it("warns once, with the figures, and with Mac words", () => {
     const opts = { apple: false, saveMemory: false };
     expect(pictureWarning(picture({ fits: "fits" }), opts)).toBeNull();

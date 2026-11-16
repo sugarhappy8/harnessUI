@@ -247,6 +247,31 @@ describe("Models → Installed: the image file", () => {
     expect(screen.getByRole("button", { name: "Look for an image file" })).toBeTruthy();
   });
 
+  it("keeps the answer of the automatic lookup when the row is drawn again before it arrives (P2 verification N4)", async () => {
+    let answer: ((o: ImageFileOffer) => void) | null = null;
+    ipcMock.imageFileOffer.mockImplementationOnce(
+      () =>
+        new Promise<ImageFileOffer>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const m = model({ path: "/models/someone/Model-GGUF/Redrawn-Q4_K_M.gguf", imageFileUnreadable: true });
+    let view: ReturnType<typeof render> | null = null;
+    await act(async () => {
+      view = render(<ImageFileLine model={m} onChanged={vi.fn()} />);
+    });
+    expect(ipcMock.imageFileOffer).toHaveBeenCalledTimes(1);
+    // The list is read again meanwhile: a new object for the same row.
+    await act(async () => {
+      view?.rerender(<ImageFileLine model={{ ...m }} onChanged={vi.fn()} />);
+    });
+    await act(async () => {
+      answer?.(AVAILABLE);
+    });
+    expect(ipcMock.imageFileOffer).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Download another image file (850 MB)" })).toBeTruthy();
+  });
+
   it("shows nothing for a model that sees images, or whose repository is known to have none", async () => {
     const seeing = model({ projectorPath: "/models/someone/Model-GGUF/mmproj-Model-F16.gguf", imageFileOffer: null });
     expect(seesImages(seeing)).toBe(true);

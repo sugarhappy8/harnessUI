@@ -3538,17 +3538,6 @@ mod tests {
             assert_eq!(info.resolved.ctx, 32_768);
             assert!(info.picture.computer_unknown);
             assert!(info.context_options.iter().all(|o| o.fit != Verdict::Red));
-            let plan = Plan {
-                resolved: info.resolved.clone(),
-                facts: Some(facts.clone()),
-                machine: machine.clone(),
-                overrides: ModelLoadSettings::default(),
-                defaults: auto_defaults(),
-                saved: true,
-            };
-            let fit = crate::hub::compare::installed_fit(&plan, 65_536).expect("a header");
-            assert!(fit.computer_unknown && !fit.computer_short && !fit.copies_short);
-            assert_ne!(fit.verdict, Verdict::Red);
             // Known to be 0 instead: one copy, said to be short (and red where the model's
             // own part does not fit).
             machine.ram_unknown = false;
