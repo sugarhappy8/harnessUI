@@ -92,6 +92,9 @@ fn saved_facts(meta: &GroupMeta) -> crate::hub::SavedFacts {
 pub struct DownloadManager {
     running: StdMutex<HashMap<String, (CancellationToken, bool)>>,
     live: StdMutex<HashMap<String, Live>>,
+    /// 0.0.7 (P6): held while a new download is checked against the others and recorded,
+    /// so two starts at once (a double click) cannot both find nothing.
+    starting: tokio::sync::Mutex<()>,
 }
 
 /// The unsigned resolve URL stored with each row (the signed CDN URL is never stored).

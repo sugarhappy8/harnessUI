@@ -640,4 +640,64 @@ mod tests {
         .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b);
     }
+
+    /// 0.0.7 (P6): a file already at its final name with its published size and checksum
+    /// (it finished before: a download resumed after its file was done, or a second download
+    /// of the same file) is checked, never fetched again from zero, and a partial file left
+    /// beside it goes. Other bytes of the same size are downloaded and replaced; without a
+    /// published checksum nothing can tell, so the file is downloaded again, as before.
+    #[tokio::test]
+    async fn a_finished_file_is_not_downloaded_again() {
+        let b = body(300_000);
+        let sha = sha_of(&b);
+        let (url, hits) = server(b.clone(), sha.clone(), None).await;
+        let client = HfClient::for_test(&url);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("m.gguf");
+        let s = spec(&b, Some(sha.clone()));
+        download_file(&client, &s, &dest, &CancellationToken::new(), &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // Run again, as a resumed download did: nothing is fetched, the file is whole.
+        std::fs::write(part_paths(&dest).0, b"left over").unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let got = download_file(&client, &s, &dest, &CancellationToken::new(), &move |n| {
+            seen2.lock().unwrap().push(n)
+        })
+        .await
+        .unwrap();
+        assert_eq!(got, sha);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a finished file was downloaded again"
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![b.len() as u64]);
+        assert_eq!(std::fs::read(&dest).unwrap(), b);
+        assert!(!part_paths(&dest).0.exists());
+
+        // The same size, other bytes: downloaded and replaced.
+        std::fs::write(&dest, vec![0u8; b.len()]).unwrap();
+        download_file(&client, &s, &dest, &CancellationToken::new(), &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(std::fs::read(&dest).unwrap(), b);
+
+        // No published checksum: downloaded again.
+        download_file(
+            &client,
+            &spec(&b, None),
+            &dest,
+            &CancellationToken::new(),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert_eq!(std::fs::read(&dest).unwrap(), b);
+    }
 }
