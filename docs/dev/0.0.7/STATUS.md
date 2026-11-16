@@ -377,3 +377,10 @@ and `README.md`.
   during a capture (a LAN device's answer reached the copy, the report and the model).
   Minor: unrecognised pictures saved as `.img`; a service worker held 15 s; 3xx pages
   without Location. P7 round 2 running; CI run 43872030368 continues for everything else.
+- CI run 43872030368 (d0aea01), Windows: everything passed except (1) the tools test
+  `common_unix_habits_fail_with_a_hint` — Windows PowerShell 5.1 reads `--version` after a
+  quoted program as its `--` operator plus `version`, so the expected error text was
+  wrong (the hint itself was right); fixed in 8fe6ce4 with the real text; and (2) the app
+  crate's library test program would not start (STATUS_ENTRYPOINT_NOT_FOUND) — every other
+  test program, and the same one on 0.0.6, starts; an agent is finding the import by
+  cross-compiling for Windows here and comparing with 0.0.6.
