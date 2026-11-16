@@ -168,3 +168,10 @@ and `README.md`.
   didn't download; no progress while a file is checked in place; replies stopped before the
   backend was refused. All being fixed by P6b (round 1); Cancel now deletes only files the
   download itself wrote, inside the models folder.
+- P4 verification: 7 of 10 fixed; the computer phrases and made-up-result detection only
+  partly. New: helpers no longer shared the main turn's cached prompt (the helper's list
+  left out `run_subagent`); the computer phrases still matched coding requests ("the project
+  folder is on my desktop", "open excel files in python") and missed "open Google Chrome";
+  `fitted()` reserved more room than the sent form needs; mixed instructions for
+  `run_subagent` at 6–8k. All being fixed by P4 (round 2), which also wires P7's capture
+  method into the call guide.

@@ -1301,6 +1301,262 @@ mod tests {
         assert_eq!(summary(glm()).kv_size(F16).per_cell, 47 * (576 + 512) * 2);
     }
 
+    /// Mistral 4 reads DeepSeek 2's settings, MLA included (review m2): keys only. A header
+    /// of Mistral Small 4's shape (36 layers, one KV head of 320 key and 256 value values)
+    /// gives the reviewer's llama.cpp figure at 32,768 tokens, 720 MiB, where counting the
+    /// values too gave 1,296.
+    #[test]
+    fn mistral4_keeps_keys_only() {
+        let mistral4 = || {
+            Writer::new()
+                .str("general.architecture", "mistral4")
+                .u32("mistral4.block_count", 36)
+                .u32("mistral4.embedding_length", 4096)
+                .u32("mistral4.attention.head_count", 32)
+                .u32("mistral4.attention.head_count_kv", 1)
+                .u32("mistral4.attention.key_length", 320)
+                .u32("mistral4.attention.value_length", 256)
+        };
+        let s = summary(
+            mistral4()
+                .u32("mistral4.attention.key_length_mla", 192)
+                .u32("mistral4.attention.value_length_mla", 128),
+        );
+        assert!(!s.kv_values);
+        assert_eq!(s.kv_bytes(32_768, F16), 720 * MIB);
+        assert_eq!(summary(mistral4()).kv_bytes(32_768, F16), 1296 * MIB);
+    }
+
+    /// A Qwen3-Next / Qwen 3.5 header with its linear-attention state: `ssm.conv_kernel` 4,
+    /// `ssm.inner_size` 4,096, `ssm.state_size` 128, `ssm.group_count` 16 (Qwen 3.5 9B's and
+    /// Qwen3-Next 80B's figures).
+    fn gated_delta(arch: &str, blocks: u32) -> Writer {
+        Writer::new()
+            .str("general.architecture", arch)
+            .u32(&format!("{arch}.block_count"), blocks)
+            .u32(&format!("{arch}.embedding_length"), 4096)
+            .u32(&format!("{arch}.attention.head_count"), 16)
+            .u32(&format!("{arch}.attention.head_count_kv"), 4)
+            .u32(&format!("{arch}.attention.key_length"), 256)
+            .u32(&format!("{arch}.attention.value_length"), 256)
+            .u32(&format!("{arch}.ssm.conv_kernel"), 4)
+            .u32(&format!("{arch}.ssm.inner_size"), 4096)
+            .u32(&format!("{arch}.ssm.state_size"), 128)
+            .u32(&format!("{arch}.ssm.time_step_rank"), 32)
+            .u32(&format!("{arch}.ssm.group_count"), 16)
+    }
+
+    /// The recurrent state of hybrid models (review m1): allocated whatever the context on
+    /// each recurrent layer, and all of it in every saved copy. The reviewer measured one
+    /// copy at 50.25 MiB for Qwen 3.5 9B, 75.4 MiB for Qwen3-Next and 55.4 MiB for Granite
+    /// 4.0-H tiny: `(n_embd_r + n_embd_s) × 4` bytes a recurrent layer.
+    #[test]
+    fn recurrent_state_is_counted() {
+        // Qwen 3.5 9B: 24 of 32 layers are linear attention. A layer: n_embd_r = 3 × (4,096
+        // + 2 × 16 × 128) = 24,576 and n_embd_s = 128 × 4,096 = 524,288 values, 2,195,456
+        // bytes; 24 layers 52,690,944 (50.25 MiB).
+        let s = summary(gated_delta("qwen35", 32));
+        assert_eq!(
+            s.recurrent_layers,
+            (0..32).map(|il| il % 4 != 3).collect::<Vec<_>>()
+        );
+        assert_eq!(s.recurrent_state_bytes, 2_195_456);
+        let size = s.kv_size(F16);
+        assert_eq!(size.copy_fixed, 52_690_944);
+        assert_eq!(size.copy_fixed * 4, 201 * MIB);
+        assert_eq!(size.fixed, 52_690_944);
+        // The attention cache as before, the state besides at every context.
+        assert_eq!(s.kv_bytes(4096, F16), 128 * MIB + 52_690_944);
+        assert_eq!(size.copy_bytes(4096), 52_690_944);
+        assert_eq!(size.copy_bytes(262_144), 52_690_944);
+        // Layer by layer: the state goes with its layer.
+        let per = s.kv_shape().per_layer(4096, F16);
+        assert_eq!(per[0], 2_195_456);
+        assert_eq!(per[3], 4096 * 4 * 512 * 2);
+        // q8_0 changes the attention cache only: the state stays f32.
+        assert_eq!(s.kv_size(Q8).copy_fixed, 52_690_944);
+        // Qwen3-Next 80B: 36 of 48 layers, 79,036,416 bytes (75.375 MiB).
+        let next = summary(gated_delta("qwen3next", 48));
+        assert_eq!(next.kv_size(F16).copy_fixed, 79_036_416);
+        // Granite 4.0-H tiny: 36 Mamba-2 layers (no KV heads) of 40, `inner_size` 3,072,
+        // `state_size` 128, one group: (3 × 3,328 + 128 × 3,072) × 4 = 1,612,800 bytes a
+        // layer, 58,060,800 (55.37 MiB).
+        let heads: Vec<u32> = (0..40).map(|il| u32::from(il % 10 == 5) * 4).collect();
+        let granite = summary(
+            Writer::new()
+                .str("general.architecture", "granitehybrid")
+                .u32("granitehybrid.block_count", 40)
+                .u32("granitehybrid.embedding_length", 1536)
+                .u32("granitehybrid.attention.head_count", 12)
+                .u32_array("granitehybrid.attention.head_count_kv", &heads)
+                .u32("granitehybrid.ssm.conv_kernel", 4)
+                .u32("granitehybrid.ssm.inner_size", 3072)
+                .u32("granitehybrid.ssm.state_size", 128)
+                .u32("granitehybrid.ssm.time_step_rank", 48)
+                .u32("granitehybrid.ssm.group_count", 1),
+        );
+        assert_eq!(granite.recurrent_layers.iter().filter(|&&r| r).count(), 36);
+        assert_eq!(granite.recurrent_state_bytes, 1_612_800);
+        assert_eq!(granite.kv_size(F16).copy_fixed, 58_060_800);
+        // Extra prediction layers keep no state.
+        let mtp = summary(gated_delta("qwen35", 33).u32("qwen35.nextn_predict_layers", 1));
+        assert!(!mtp.recurrent_layers[32]);
+        assert_eq!(mtp.kv_size(F16).copy_fixed, 52_690_944);
+    }
+
+    /// The other recurrent kinds `n_embd_r` / `n_embd_s` know (`src/llama-hparams.cpp`).
+    #[test]
+    fn recurrent_state_of_each_kind() {
+        let state = |w: Writer| summary(w).recurrent_state_bytes;
+        // Mamba (one group): r = 3 × 5,120, s = 16 × 5,120; every layer, no cache.
+        let mamba = summary(
+            Writer::new()
+                .str("general.architecture", "mamba")
+                .u32("mamba.block_count", 64)
+                .u32("mamba.embedding_length", 2560)
+                .u32("mamba.ssm.conv_kernel", 4)
+                .u32("mamba.ssm.inner_size", 5120)
+                .u32("mamba.ssm.state_size", 16)
+                .u32("mamba.ssm.time_step_rank", 160),
+        );
+        assert_eq!(mamba.recurrent_state_bytes, (15_360 + 81_920) * 4);
+        assert_eq!(mamba.kv_bytes(4096, F16), 64 * 389_120);
+        assert_eq!(mamba.kv_size(F16).copy_bytes(4096), 64 * 389_120);
+        // RWKV 6: token shift 2 (the default) × 2,048 and 2,048 × a head of 64.
+        assert_eq!(
+            state(
+                Writer::new()
+                    .str("general.architecture", "rwkv6")
+                    .u32("rwkv6.block_count", 24)
+                    .u32("rwkv6.embedding_length", 2048)
+                    .u32("rwkv6.wkv.head_size", 64)
+            ),
+            (2 * 2048 + 2048 * 64) * 4
+        );
+        // LFM2: its convolution layers (no KV heads) keep 2,048 × (3 − 1) values.
+        let heads: Vec<u32> = (0..16).map(|il| u32::from(il % 4 == 2) * 8).collect();
+        let lfm2 = summary(
+            Writer::new()
+                .str("general.architecture", "lfm2")
+                .u32("lfm2.block_count", 16)
+                .u32("lfm2.embedding_length", 2048)
+                .u32("lfm2.attention.head_count", 32)
+                .u32_array("lfm2.attention.head_count_kv", &heads)
+                .u32("lfm2.shortconv.l_cache", 3),
+        );
+        assert_eq!(lfm2.recurrent_state_bytes, 2048 * 2 * 4);
+        assert_eq!(lfm2.recurrent_layers.iter().filter(|&&r| r).count(), 12);
+        // Kimi Linear's KDA layers: 3 × 3 × 32 heads × 128 and 128² × 32.
+        let heads: Vec<u32> = (0..8).map(|il| u32::from(il % 4 == 3) * 32).collect();
+        assert_eq!(
+            state(
+                Writer::new()
+                    .str("general.architecture", "kimi-linear")
+                    .u32("kimi-linear.block_count", 8)
+                    .u32("kimi-linear.embedding_length", 2304)
+                    .u32("kimi-linear.attention.head_count", 32)
+                    .u32_array("kimi-linear.attention.head_count_kv", &heads)
+                    .u32("kimi-linear.ssm.conv_kernel", 4)
+                    .u32("kimi-linear.kda.head_dim", 128)
+            ),
+            (3 * 3 * 32 * 128 + 128 * 128 * 32) * 4
+        );
+        // MiniMax-01: its key head size squared × 64 heads, every layer but each eighth.
+        let minimax = summary(
+            Writer::new()
+                .str("general.architecture", "minimax-01")
+                .u32("minimax-01.block_count", 16)
+                .u32("minimax-01.embedding_length", 6144)
+                .u32("minimax-01.attention.head_count", 64)
+                .u32("minimax-01.attention.head_count_kv", 8)
+                .u32("minimax-01.attention.key_length", 128)
+                .u32("minimax-01.attention.value_length", 128),
+        );
+        assert_eq!(minimax.recurrent_state_bytes, 128 * 128 * 64 * 4);
+        assert_eq!(minimax.recurrent_layers.iter().filter(|&&r| r).count(), 14);
+        // Nemotron-H: only the layers with neither KV heads nor a feed-forward part.
+        let heads: Vec<u32> = vec![0, 0, 8, 0];
+        let ff: Vec<u32> = vec![0, 21_504, 0, 0];
+        let nemotron = summary(
+            Writer::new()
+                .str("general.architecture", "nemotron_h")
+                .u32("nemotron_h.block_count", 4)
+                .u32("nemotron_h.embedding_length", 4096)
+                .u32("nemotron_h.attention.head_count", 32)
+                .u32_array("nemotron_h.attention.head_count_kv", &heads)
+                .u32_array("nemotron_h.feed_forward_length", &ff)
+                .u32("nemotron_h.ssm.conv_kernel", 4)
+                .u32("nemotron_h.ssm.inner_size", 8192)
+                .u32("nemotron_h.ssm.state_size", 128)
+                .u32("nemotron_h.ssm.group_count", 8),
+        );
+        assert_eq!(nemotron.recurrent_layers, vec![true, false, false, true]);
+        assert_eq!(nemotron.kv_layers, vec![false, false, true, false]);
+        // Falcon-H1: every layer has both attention and a state.
+        let falcon = summary(
+            Writer::new()
+                .str("general.architecture", "falcon-h1")
+                .u32("falcon-h1.block_count", 4)
+                .u32("falcon-h1.embedding_length", 1024)
+                .u32("falcon-h1.attention.head_count", 8)
+                .u32("falcon-h1.attention.head_count_kv", 2)
+                .u32("falcon-h1.ssm.conv_kernel", 4)
+                .u32("falcon-h1.ssm.inner_size", 1536)
+                .u32("falcon-h1.ssm.state_size", 64)
+                .u32("falcon-h1.ssm.group_count", 1),
+        );
+        assert_eq!(falcon.recurrent_layers, vec![true; 4]);
+        assert_eq!(falcon.kv_layers, vec![true; 4]);
+        let per = falcon.kv_shape().per_layer(4096, F16);
+        let state = (3 * (1536 + 128) + 64 * 1536) * 4;
+        assert_eq!(per[0], 2 * 128 * 2 * 2 * 4096 + state);
+        // Models with neither keep no copies, and the plain transformers no state.
+        assert!(summary(gemma4_12b()).recurrent_layers.is_empty());
+        assert_eq!(summary(gemma4_12b()).kv_size(F16).copy_fixed, 0);
+    }
+
+    /// The models whose saved copies are largest (review M2), one copy each by their
+    /// headers' rules: OLMo 3 7B (24 short-memory layers of 32 heads of 128 values, a
+    /// window of 4,096) 1.5 GiB; Llama 4 Scout (36 chunked layers of 8 heads, 8,192 tokens)
+    /// 1.125 GiB; Gemma 3 27B (52 short-memory layers of 16 heads, 1,024 tokens) 416 MiB.
+    #[test]
+    fn the_largest_copies() {
+        let olmo3 = summary(
+            Writer::new()
+                .str("general.architecture", "olmo2")
+                .u32("olmo2.block_count", 32)
+                .u32("olmo2.embedding_length", 4096)
+                .u32("olmo2.attention.head_count", 32)
+                .u32("olmo2.attention.head_count_kv", 32)
+                .u32("olmo2.attention.sliding_window", 4096),
+        );
+        assert_eq!(olmo3.kv_size(F16).copy_bytes(32_768), 1536 * MIB);
+        assert_eq!(olmo3.kv_size(F16).checkpoints_at(32_768, 8), 12 * 1024 * MIB);
+        let scout = summary(
+            Writer::new()
+                .str("general.architecture", "llama4")
+                .u32("llama4.block_count", 48)
+                .u32("llama4.embedding_length", 5120)
+                .u32("llama4.attention.head_count", 40)
+                .u32("llama4.attention.head_count_kv", 8)
+                .u32("llama4.attention.key_length", 128)
+                .u32("llama4.attention.value_length", 128),
+        );
+        assert_eq!(scout.kv_size(F16).copy_bytes(32_768), 1152 * MIB);
+        let gemma3 = summary(
+            Writer::new()
+                .str("general.architecture", "gemma3")
+                .u32("gemma3.block_count", 62)
+                .u32("gemma3.embedding_length", 5376)
+                .u32("gemma3.attention.head_count", 32)
+                .u32("gemma3.attention.head_count_kv", 16)
+                .u32("gemma3.attention.key_length", 128)
+                .u32("gemma3.attention.value_length", 128)
+                .u32("gemma3.attention.sliding_window", 1024),
+        );
+        assert_eq!(gemma3.kv_size(F16).copy_bytes(32_768), 416 * MIB);
+    }
+
     /// A model without short-memory layers keeps the 0.0.6 figures (Qwen3 0.6B: 28 layers
     /// of 8 KV heads of 128, 114,688 bytes a token; 469,762,048 bytes at 4,096 tokens, as
     /// llama-server reported for the test model).
