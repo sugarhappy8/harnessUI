@@ -1779,5 +1779,37 @@ mod tests {
                 .u64("gemma3.attention.value_length", 1 << 62),
         );
         assert_eq!(huge_heads.kv_bytes(4096, Q8), u64::MAX);
+        // Absurd recurrent sizes saturate, a convolution of 0 takes nothing, and a
+        // shortconv cache of 0 is Mamba's rule again.
+        let state = |key: &str, value: u64| {
+            summary(gated_delta("qwen35", 32).u64(&format!("qwen35.{key}"), value))
+        };
+        for key in ["ssm.inner_size", "ssm.state_size", "ssm.group_count"] {
+            let s = state(key, u64::MAX);
+            assert_eq!(s.recurrent_state_bytes, u64::MAX, "{key}");
+            assert_eq!(s.kv_size(F16).copy_bytes(4096), u64::MAX, "{key}");
+        }
+        assert_eq!(
+            state("ssm.conv_kernel", 0).recurrent_state_bytes,
+            128 * 4096 * 4
+        );
+        let heads = "attention.head_count";
+        let kda = summary(
+            Writer::new()
+                .str("general.architecture", "kimi-linear")
+                .u32("kimi-linear.block_count", 2)
+                .u64(&format!("kimi-linear.{heads}"), u64::MAX)
+                .u32("kimi-linear.kda.head_dim", u32::MAX),
+        );
+        assert_eq!(kda.recurrent_state_bytes, u64::MAX);
+        let rwkv = summary(
+            Writer::new()
+                .str("general.architecture", "rwkv7")
+                .u32("rwkv7.block_count", 2)
+                .u64("rwkv7.embedding_length", u64::MAX)
+                .u64("rwkv7.wkv.head_size", u64::MAX)
+                .u64("rwkv7.token_shift_count", u64::MAX),
+        );
+        assert_eq!(rwkv.recurrent_state_bytes, u64::MAX);
     }
 }
