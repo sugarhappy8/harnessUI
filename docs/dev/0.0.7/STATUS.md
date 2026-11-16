@@ -367,3 +367,13 @@ and `README.md`.
   README lines, checklist "start here"; local fmt, workspace clippy, docs, spawn, lint,
   typecheck and vitest (850) pass. Pushed d0aea01 without [skip ci]: CI run 43872030368.
   P7's round-1 verification still running.
+- P7 round-1 verification (~45 hostile captures through the real tool): no script ran in
+  any copy or saved SVG; every WebSocket variant blocked or stopped; new-tool carry right;
+  fidelity kept. Three majors remain, so the release waits for them: CSS `var()` inside
+  `image-set()` slipped past the CSS cleaner (the opened copy fetched `file://host/share`
+  pictures — an SMB request on Windows); a saved style sheet starting with
+  `@charset "ISO-2022-JP"` was read differently by the cleaner and the browser (a hidden
+  `@import` from a share); shared-worker and service-worker requests weren't checked
+  during a capture (a LAN device's answer reached the copy, the report and the model).
+  Minor: unrecognised pictures saved as `.img`; a service worker held 15 s; 3xx pages
+  without Location. P7 round 2 running; CI run 43872030368 continues for everything else.
