@@ -44,6 +44,11 @@ pub struct ModelSummary {
     pub kv_layers: Vec<bool>,
     /// Value rows are stored (false for a model that keeps keys only, MLA).
     pub kv_values: bool,
+    /// Which layers keep a recurrent state, one entry per block (empty when none does:
+    /// not a recurrent or hybrid model).
+    pub recurrent_layers: Vec<bool>,
+    /// Bytes of each of those layers' recurrent state (`crate::kv`, f32).
+    pub recurrent_state_bytes: u64,
     pub expert_count: Option<u64>,
     pub expert_used_count: Option<u64>,
     pub vocab_size: Option<u64>,
@@ -139,6 +144,8 @@ impl ModelSummary {
                 .unwrap_or(value_length),
             kv_layers: memory.kv_layers,
             kv_values: memory.values,
+            recurrent_layers: memory.recurrent_layers,
+            recurrent_state_bytes: memory.state_bytes,
             expert_count: h.arch_u64("expert_count").filter(|&n| n > 0),
             expert_used_count: h.arch_u64("expert_used_count").filter(|&n| n > 0),
             vocab_size,
@@ -174,6 +181,11 @@ impl ModelSummary {
                     },
                     window,
                     own: self.kv_layers.get(il).copied().unwrap_or(true),
+                    recurrent: if self.recurrent_layers.get(il).copied().unwrap_or(false) {
+                        self.recurrent_state_bytes
+                    } else {
+                        0
+                    },
                 }
             })
             .collect();

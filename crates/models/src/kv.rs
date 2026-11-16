@@ -42,21 +42,30 @@
 //!   for the BERT family, embedding and diffusion models; `llm_arch_is_recurrent`).
 //! - A quantized (q8_0) cache also gets small rotation matrices for each layer, in the
 //!   same buffer as its memory (`llama_kv_cache::init_rotation`).
+//! - A recurrent or hybrid model also keeps a recurrent state for each of its recurrent
+//!   layers, whatever the context: an f32 row of `n_embd_r()` and one of `n_embd_s()` values
+//!   for the one sequence (`src/llama-memory-recurrent.cpp`, the
+//!   `llama_memory_recurrent` constructor; `src/llama-hparams.cpp`, `n_embd_r`,
+//!   `n_embd_s`), on the layer's device like its other memory. See [`state_bytes`].
 //!
-//! llama-server also keeps saved copies ("context checkpoints") of the short-memory layers
-//! in computer memory while a chat goes on, so it can go back to an earlier point of the
-//! conversation (`tools/server/server-context.cpp`, `create_checkpoint`): at most
-//! `--ctx-checkpoints`, 8 with the app's launch (llama.cpp's default is 32,
-//! `common/common.h`: `n_ctx_checkpoints`). Each holds the cells of the last `n_swa`
-//! positions (`llama_kv_cache::state_write` skips cells the window masks), so they are
-//! counted as [`KvSize::checkpoints_at`].
+//! llama-server also keeps saved copies ("context checkpoints") of what it cannot roll
+//! back, in computer memory while a chat goes on, so it can go back to an earlier point of
+//! the conversation without reading it all again (`tools/server/server-context.cpp`,
+//! `create_checkpoint`; made when the model has short-memory layers or a recurrent state):
+//! at most `--ctx-checkpoints` of them, a number from 1 to [`MAX_CTX_CHECKPOINTS`] the app
+//! chooses for each load (`crate::fit::copies`; llama.cpp's default is 32,
+//! `common/common.h`: `n_ctx_checkpoints`). A copy is a partial state
+//! (`LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY`): the cells of the last `n_swa` positions of the
+//! short-memory layers (`llama_kv_cache::state_write` skips cells the window masks and the
+//! caches without a window) and the whole recurrent state, so one copy takes
+//! [`KvSize::copy_bytes`].
 //!
 //! Not ported (the estimate stays the plain sum over layers, as in 0.0.6): the
 //! architectures with an extra indexer or compressed cache (DeepSeek V3.2 and V4,
-//! GLM-DSA and GLM-5 Next, Mistral Large 4, MiniMax M3, HY-V4, dots3note, the speculative
-//! drafts DFlash and Gemma 4 assistant), Kimi K3 and Kimi Linear's own head sizes,
-//! Nanbeige's looped layers, the recurrent state of hybrid models (tens of megabytes,
-//! whatever the context) and its checkpoints.
+//! GLM-DSA and GLM-5 Next, Mistral Large 4, MiniMax M3, HY-V4, dots3note, Qwen4-Exp's
+//! indexer cache, the speculative drafts DFlash and Gemma 4 assistant), Kimi K3 and Kimi
+//! Linear's own head sizes, Nanbeige's looped layers, and the extra history row some
+//! hyper-connection models keep beside their recurrent state (`ple_conv_state`).
 //!
 //! Every number from the header is untrusted: products and sums saturate, a window is cut
 //! to llama.cpp's 32 bits, at most [`MAX_BLOCKS`] layers are built and nothing is
@@ -74,15 +83,22 @@ pub const CELL_PAD: u64 = 256;
 /// llama-server's batch sizes when no `-b` / `-ub` is given (`common/common.h`).
 pub const BATCH: u64 = 2048;
 pub const UBATCH: u64 = 512;
-/// Saved copies of the short-memory layers llama-server keeps at most per chat: the app
-/// launches it with `--ctx-checkpoints 8` (`runtime::llama::launch::CTX_CHECKPOINTS`; the
-/// app checks the two are equal), where llama.cpp's own default is 32
-/// (`common/common.h`: `n_ctx_checkpoints`).
-pub const CTX_CHECKPOINTS: u64 = 8;
+/// The most saved copies of the conversation llama-server keeps for a chat
+/// (`--ctx-checkpoints`): each load passes a number from 1 to this, chosen from the
+/// computer's free memory (`crate::fit::copies`). `runtime::llama::launch` has the same
+/// number as `MAX_CTX_CHECKPOINTS` (the two crates do not depend on each other; the app
+/// checks they are equal). llama.cpp's own default is 32 (`common/common.h`:
+/// `n_ctx_checkpoints`).
+pub const MAX_CTX_CHECKPOINTS: u32 = 8;
 /// llama.cpp keeps the window in 32 bits (`uint32_t n_swa`).
 const MAX_WINDOW: u64 = u32::MAX as u64;
 /// Bytes of one entry of a rotation matrix (f32).
 const ROTATION_ENTRY_BYTES: u64 = 4;
+/// Bytes of one value of a recurrent state (f32: `GGML_TYPE_F32` for both of its rows in
+/// `create_memory`).
+const STATE_VALUE_BYTES: u64 = 4;
+/// `token_shift_count` when the file does not say (`src/llama-hparams.h`).
+const TOKEN_SHIFT_DEFAULT: u64 = 2;
 
 /// The launch words that change the size of the conversation memory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -134,6 +150,9 @@ pub struct LayerKv {
     /// The layer keeps memory of its own (not a linear-attention layer, not one that reads
     /// an earlier layer's, not an extra prediction layer).
     pub own: bool,
+    /// Bytes of the layer's recurrent state ([`state_bytes`]): a recurrent layer of a
+    /// recurrent or hybrid model; 0 for every other layer.
+    pub recurrent: u64,
 }
 
 impl LayerKv {
@@ -175,7 +194,7 @@ pub fn window_cells(window: u64, ctx: u64) -> u64 {
 
 /// The conversation memory as a function of the context: layers that keep the whole
 /// conversation grow with it, short-memory layers stop at their window, and a quantized
-/// cache adds rotation matrices of a fixed size.
+/// cache's rotation matrices and a recurrent state have a fixed size.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KvSize {
@@ -185,10 +204,12 @@ pub struct KvSize {
     pub window_per_cell: u64,
     /// Their window, llama.cpp's `n_swa`.
     pub window: u64,
-    /// Bytes that do not depend on the context.
+    /// Bytes that do not depend on the context: rotation matrices and the recurrent state.
     pub fixed: u64,
-    /// Bytes per cell of one saved copy of the short-memory layers (a context checkpoint).
+    /// Bytes per cell of the short-memory layers in one saved copy (a context checkpoint).
     pub checkpoint_per_cell: u64,
+    /// Bytes of the recurrent state in one saved copy (all of it).
+    pub copy_fixed: u64,
 }
 
 impl KvSize {
@@ -212,13 +233,20 @@ impl KvSize {
             .saturating_add(self.fixed)
     }
 
-    /// What the saved copies of the short-memory layers take in computer memory at most,
-    /// at a context of `ctx` tokens: [`CTX_CHECKPOINTS`] copies of the last `n_swa` cells
-    /// (fewer when the context is shorter). 0 without a window.
-    pub fn checkpoints_at(&self, ctx: u64) -> u64 {
-        CTX_CHECKPOINTS
-            .saturating_mul(self.window.min(cells(ctx)))
+    /// What one saved copy takes in computer memory at most, at a context of `ctx` tokens:
+    /// the last `n_swa` cells of the short-memory layers (fewer when the context is
+    /// shorter) and the whole recurrent state. 0 for a model without either, for which
+    /// llama-server keeps no copies.
+    pub fn copy_bytes(&self, ctx: u64) -> u64 {
+        self.window
+            .min(cells(ctx))
             .saturating_mul(self.checkpoint_per_cell)
+            .saturating_add(self.copy_fixed)
+    }
+
+    /// What `copies` saved copies take in computer memory at most at `ctx` tokens.
+    pub fn checkpoints_at(&self, ctx: u64, copies: u32) -> u64 {
+        u64::from(copies).saturating_mul(self.copy_bytes(ctx))
     }
 }
 
@@ -234,6 +262,7 @@ impl KvShape {
                     value_length: head,
                     window: false,
                     own: true,
+                    recurrent: 0,
                 };
                 layers
             ],
@@ -308,7 +337,8 @@ impl KvShape {
     }
 
     /// The conversation memory of each block at a context of `ctx` tokens, as llama.cpp
-    /// allocates it (one entry per block; 0 for a block without memory of its own).
+    /// allocates it (one entry per block: its cache rows and its recurrent state; 0 for a
+    /// block with neither).
     pub fn per_layer(&self, ctx: u64, layout: impl Into<KvLayout>) -> Vec<u64> {
         let layout = layout.into();
         let widest = self.widest_value();
@@ -319,7 +349,7 @@ impl KvShape {
             .iter()
             .map(|layer| {
                 if !layer.own {
-                    return 0;
+                    return layer.recurrent;
                 }
                 let (key, value) = self.rows(layer, layout, widest);
                 let cells = if layer.window {
@@ -332,6 +362,8 @@ impl KvShape {
                     .saturating_mul(cells)
                     .saturating_add(rot_key)
                     .saturating_add(rot_value)
+                    // Falcon-H1's layers have both.
+                    .saturating_add(layer.recurrent)
             })
             .collect()
     }
@@ -353,6 +385,11 @@ impl KvShape {
             window: self.window,
             ..KvSize::default()
         };
+        // The recurrent state: allocated whatever the context, and all of it in each copy.
+        for layer in &self.layers {
+            size.fixed = size.fixed.saturating_add(layer.recurrent);
+            size.copy_fixed = size.copy_fixed.saturating_add(layer.recurrent);
+        }
         for layer in self.layers.iter().filter(|l| l.own) {
             let (key, value) = self.rows(layer, layout, widest);
             let row = key.saturating_add(value);
@@ -391,7 +428,15 @@ pub(crate) struct ArchKv {
     pub kv_layers: Vec<bool>,
     /// Value rows are stored (false for MLA).
     pub values: bool,
+    /// Which layers keep a recurrent state (empty when none does).
+    pub recurrent_layers: Vec<bool>,
+    /// Bytes of each of those layers' state ([`state_bytes`]).
+    pub state_bytes: u64,
 }
+
+/// Recurrent architectures (`llm_arch_is_recurrent`): every layer keeps a recurrent state
+/// and none a cache of this kind.
+const RECURRENT: &[&str] = &["mamba", "mamba2", "rwkv6", "rwkv6qwen2", "rwkv7", "arwkv7"];
 
 /// Architectures whose llama.cpp context has no memory of this kind (`create_memory`:
 /// `res = nullptr`; `llm_arch_is_recurrent`: a recurrent state instead).
@@ -517,6 +562,21 @@ impl Reader<'_> {
 
     fn number(&self, suffix: &str) -> Option<u64> {
         self.get(suffix).and_then(Value::as_u64)
+    }
+
+    /// A number per block (`get_key_or_arr`): an array's entries (one that is not a number
+    /// reads as 0), or one number for every block; empty without the key or for an array
+    /// too long to have been read.
+    fn per_block(&self, suffix: &str) -> Vec<u64> {
+        match self.get(suffix) {
+            Some(Value::Array(items)) => items
+                .iter()
+                .take(self.blocks)
+                .map(|v| v.as_u64().unwrap_or(0))
+                .collect(),
+            Some(v) => v.as_u64().map_or_else(Vec::new, |n| vec![n; self.blocks]),
+            None => Vec::new(),
+        }
     }
 
     /// `attention.sliding_window`, when the file has it.
@@ -685,6 +745,7 @@ pub(crate) fn read_arch(
         none_from(&mut kv_layers, r.main_layers);
     }
     // Linear-attention layers of the Qwen3-Next / Qwen 3.5 kind.
+    let mut linear = Vec::new();
     if let Some(default) = interval_default(arch) {
         let recurrent: Option<Vec<bool>> = match r.get("attention.recurrent_layers") {
             Some(Value::Array(items)) => Some(flags(items, blocks)),
@@ -705,23 +766,121 @@ pub(crate) fn read_arch(
                         .collect()
                 }),
         };
-        for (own, recurrent) in kv_layers.iter_mut().zip(recurrent.unwrap_or_default()) {
-            if recurrent {
+        linear = recurrent.unwrap_or_default();
+        for (own, recurrent) in kv_layers.iter_mut().zip(&linear) {
+            if *recurrent {
                 *own = false;
             }
         }
     }
-    // MLA keeps keys only (`has_v = !is_mla`): both MLA head sizes in the file.
-    let mla = matches!(arch, "deepseek2" | "bailingmoe3")
+    // MLA keeps keys only (`has_v = !is_mla`): both MLA head sizes in the file. Mistral 4
+    // reads DeepSeek 2's settings (`llama_model_mistral4` reuses its `load_arch_hparams`).
+    let mla = matches!(arch, "deepseek2" | "mistral4" | "bailingmoe3")
         && r.number("attention.key_length_mla").is_some_and(|n| n > 0)
         && r.number("attention.value_length_mla")
             .is_some_and(|n| n > 0);
+    let recurrent_layers = recurrent_layers(&r, head_count_kv, &linear);
+    let state_bytes = if recurrent_layers.contains(&true) {
+        state_bytes(&r)
+    } else {
+        0
+    };
     ArchKv {
         window,
         swa_layers,
         kv_layers,
         values: !mla,
+        recurrent_layers,
+        state_bytes,
     }
+}
+
+/// The layers that keep a recurrent state (`llama_memory_recurrent`'s layer filter over
+/// `n_layer()`, so never an extra prediction layer): every layer of a recurrent
+/// architecture and of Falcon-H1; the linear-attention layers `linear` of the Qwen3-Next
+/// kind; Nemotron-H's layers without key/value heads and without a feed-forward part;
+/// every other hybrid's layers without key/value heads (`is_recr`). Empty for any other
+/// architecture, and for the hybrids whose memory is not ported (DeepSeek V4).
+fn recurrent_layers(r: &Reader, head_count_kv: &[u64], linear: &[bool]) -> Vec<bool> {
+    let arch = r.arch;
+    let main = |il: usize| u64::try_from(il).is_ok_and(|i| i < r.main_layers);
+    let no_heads = |il: usize| head_count_kv.get(il).is_none_or(|&n| n == 0);
+    let layers = |rule: &dyn Fn(usize) -> bool| -> Vec<bool> {
+        (0..r.blocks).map(|il| main(il) && rule(il)).collect()
+    };
+    if RECURRENT.contains(&arch) || arch == "falcon-h1" {
+        return layers(&|_| true);
+    }
+    if !HYBRID.contains(&arch) || matches!(arch, "deepseek4" | "deepseek41") {
+        return Vec::new();
+    }
+    if interval_default(arch).is_some() {
+        return layers(&|il| linear.get(il).copied().unwrap_or(false));
+    }
+    if matches!(arch, "nemotron_h" | "nemotron_h_moe") {
+        let feed_forward = r.per_block("feed_forward_length");
+        return layers(&|il| no_heads(il) && feed_forward.get(il).is_none_or(|&n| n == 0));
+    }
+    layers(&no_heads)
+}
+
+/// Bytes of one recurrent layer's state: `n_embd_r()` + `n_embd_s()` f32 values
+/// (`src/llama-hparams.cpp`), with the header's numbers as each architecture reads them
+/// (`ssm.*`, `wkv.head_size`, `token_shift_count`, `shortconv.l_cache`, `kda.head_dim`;
+/// MiniMax-01's linear-attention head size is its key head size):
+///
+/// - `n_embd_r`: RWKV `token_shift_count × n_embd`; LFM2 `n_embd × (l_cache − 1)`; Kimi's
+///   KDA `3 × (d_conv − 1, or 3 without it) × n_head × head_dim`; else Mamba's
+///   `(d_conv − 1) × (d_inner + 2 × n_group × d_state)` (0 without a convolution).
+/// - `n_embd_s`: RWKV `n_embd × head_size`; KDA `head_dim² × n_head`; MiniMax-01
+///   `head_dim² × n_head`; else Mamba's `d_state × d_inner`.
+///
+/// `n_head` is the first layer's head count (`n_head()`). Every product saturates.
+fn state_bytes(r: &Reader) -> u64 {
+    let n = |suffix: &str| r.number(suffix).unwrap_or(0);
+    let n_embd = n("embedding_length");
+    let n_head = r.per_block("attention.head_count").first().copied().unwrap_or(0);
+    let d_conv = n("ssm.conv_kernel");
+    let d_inner = n("ssm.inner_size");
+    let d_state = n("ssm.state_size");
+    let n_group = n("ssm.group_count");
+    let wkv = n("wkv.head_size");
+    let shortconv = n("shortconv.l_cache");
+    let kda = n("kda.head_dim");
+    let linear_head = if r.arch == "minimax-01" {
+        r.number("attention.key_length")
+            .unwrap_or_else(|| n_embd.checked_div(n_head).unwrap_or(0))
+    } else {
+        0
+    };
+    let mamba_r = d_conv.saturating_sub(1).saturating_mul(
+        d_inner.saturating_add(2u64.saturating_mul(n_group).saturating_mul(d_state)),
+    );
+    let (r_values, s_values) = if wkv != 0 {
+        let shift = r.number("token_shift_count").unwrap_or(TOKEN_SHIFT_DEFAULT);
+        (shift.saturating_mul(n_embd), n_embd.saturating_mul(wkv))
+    } else {
+        let r_values = if shortconv != 0 {
+            n_embd.saturating_mul(shortconv - 1)
+        } else if kda != 0 {
+            let conv = if d_conv > 0 { d_conv - 1 } else { 3 };
+            3u64.saturating_mul(conv)
+                .saturating_mul(n_head.saturating_mul(kda))
+        } else {
+            mamba_r
+        };
+        let s_values = if kda != 0 {
+            kda.saturating_mul(kda).saturating_mul(n_head)
+        } else if linear_head != 0 {
+            linear_head.saturating_mul(linear_head).saturating_mul(n_head)
+        } else {
+            d_state.saturating_mul(d_inner)
+        };
+        (r_values, s_values)
+    };
+    r_values
+        .saturating_add(s_values)
+        .saturating_mul(STATE_VALUE_BYTES)
 }
 
 #[cfg(test)]

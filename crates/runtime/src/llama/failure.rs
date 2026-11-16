@@ -404,26 +404,49 @@ mod tests {
         }
     }
 
+    /// The image files of the captured logs (`tests/fixtures/stderr_image_file_*.txt`), as
+    /// the server named them in its last line.
+    const BROKEN: &str = "/home/u/models/someone/Sample-GGUF/Sample.mmproj-f16.gguf";
+    const GARBAGE: &str = "/home/u/models/someone/Sample-GGUF/mmproj-Sample-F16.gguf";
+    const OWNERS: &str = r"C:\Users\me\harnessUI\models\mradermacher\Ministral-3-14B-Reasoning-2512-Uncensored-GGUF\Ministral-3-14B-Reasoning-2512-Uncensored.mmproj-f16.gguf";
+
+    fn with_image(tail: &[String], image: &str) -> LoadFailure {
+        classify_load(tail, Some(1), Some(image))
+    }
+
     /// 0.0.7: the image file failed after the model loaded, captured from the pinned build
     /// with an image file that misses a tensor its kind needs (`v.token_embd.img_break`,
     /// as in the owner's report) and with one that is not a GGUF file at all. The second
     /// log also holds the GGUF reader's "invalid magic characters", which alone names a
     /// broken model file: here it is about the image file, and the model is not blamed.
+    /// Only a load given that image file can fail because of it: without one, or with
+    /// another, the same log is not the image file's failure.
     #[test]
     fn captured_broken_image_files_are_image_file_invalid() {
-        for tail in [
-            fixture(include_bytes!(
-                "../../tests/fixtures/stderr_image_file_broken.txt"
-            )),
-            fixture(include_bytes!(
-                "../../tests/fixtures/stderr_image_file_garbage.txt"
-            )),
+        for (tail, image) in [
+            (
+                fixture(include_bytes!(
+                    "../../tests/fixtures/stderr_image_file_broken.txt"
+                )),
+                BROKEN,
+            ),
+            (
+                fixture(include_bytes!(
+                    "../../tests/fixtures/stderr_image_file_garbage.txt"
+                )),
+                GARBAGE,
+            ),
         ] {
-            let failure = classify(&tail, Some(1));
+            let failure = with_image(&tail, image);
             assert_eq!(failure, LoadFailure::ImageFileInvalid, "{tail:?}");
             assert!(!failure.may_succeed_on_another_backend());
             assert!(!failure.save_memory_may_be_the_cause());
             assert!(!failure.is_out_of_memory());
+            assert_ne!(classify(&tail, Some(1)), LoadFailure::ImageFileInvalid);
+            assert_ne!(
+                with_image(&tail, "/home/u/models/other/mmproj-F16.gguf"),
+                LoadFailure::ImageFileInvalid
+            );
         }
     }
 
@@ -435,90 +458,252 @@ mod tests {
         let tail = fixture(include_bytes!(
             "../../tests/fixtures/stderr_image_file_owner_windows.txt"
         ));
-        assert_eq!(classify(&tail, Some(1)), LoadFailure::ImageFileInvalid);
+        assert_eq!(with_image(&tail, OWNERS), LoadFailure::ImageFileInvalid);
     }
 
-    /// The later attempt in the owner's report: `clip_init` names the missing tensor, then
-    /// `mtmd_init_from_file` says the file could not be loaded. Each line that ends a load
-    /// counts on its own.
+    /// The server's own last word decides, "failed to load multimodal model, '<file>'" for
+    /// exactly the image file it was given, at the start of a message (m3). The `clip_init`
+    /// and `mtmd_init_from_file` lines before it only say why.
     #[test]
-    fn the_clip_init_variant_is_image_file_invalid() {
+    fn only_the_servers_line_for_the_given_image_file_decides() {
         let path = r"C:\Users\me\harnessUI\models\x\M.mmproj-f16.gguf";
-        let both = lines(&format!(
-            "E clip_init: failed to load model '{path}': operator(): unable to find tensor v.token_embd.img_break\n\
-             E mtmd_init_from_file: error: Failed to load CLIP model from {path}\n\
-             E srv    load_model: failed to load multimodal model, '{path}'\n\
-             E srv  server_run_i: exiting due to model loading error"
+        let clip = format!(
+            "0.03.927.960 E clip_init: failed to load model '{path}': operator(): unable to find tensor v.token_embd.img_break"
+        );
+        let mtmd = format!(
+            "0.03.927.961 E mtmd_init_from_file: error: Failed to load CLIP model from {path}"
+        );
+        let server =
+            format!("0.03.927.966 E srv    load_model: failed to load multimodal model, '{path}'");
+        let all = lines(&format!(
+            "{clip}\n{mtmd}\n{server}\n0.03.929.912 E srv  server_run_i: exiting due to model loading error"
         ));
-        assert_eq!(classify(&both, Some(1)), LoadFailure::ImageFileInvalid);
-        for line in [
-            format!(
-                "E clip_init: failed to load model '{path}': operator(): unable to find tensor v.token_embd.img_break"
-            ),
-            format!("E mtmd_init_from_file: error: Failed to load CLIP model from {path}"),
-            format!("E srv    load_model: failed to load multimodal model, '{path}'"),
-        ] {
-            assert_eq!(
-                classify(&lines(&line), Some(1)),
-                LoadFailure::ImageFileInvalid,
-                "{line}"
-            );
+        assert_eq!(with_image(&all, path), LoadFailure::ImageFileInvalid);
+        assert_eq!(with_image(&lines(&server), path), LoadFailure::ImageFileInvalid);
+        for alone in [&clip, &mtmd] {
+            assert_eq!(with_image(&lines(alone), path), LoadFailure::Unknown, "{alone}");
         }
+        // Another image file, none given, or the words somewhere else in a line.
+        assert_eq!(
+            with_image(&all, r"C:\Users\me\harnessUI\models\x\other.gguf"),
+            LoadFailure::Unknown
+        );
+        assert_eq!(classify(&all, Some(1)), LoadFailure::Unknown);
+        let echoed = lines(&format!(
+            "E srv  log_server_r: request: error: failed to load multimodal model, '{path}'"
+        ));
+        assert_eq!(with_image(&echoed, path), LoadFailure::Unknown);
+    }
+
+    /// M1: a graphics card's own error while the image file loads (clip_init prints every
+    /// exception it catches) is not the file's fault: it is not an image file failure, so
+    /// it is not remembered, and another backend may load the model with it. Running out of
+    /// the card's memory there is running out of memory.
+    #[test]
+    fn a_device_error_while_the_image_file_loads_is_not_the_files_fault() {
+        let path = "/m/mmproj-F16.gguf";
+        let tail = |what: &str| {
+            lines(&format!(
+                "0.03.927.960 E clip_init: failed to load model '{path}': {what}\n\
+                 0.03.927.961 E mtmd_init_from_file: error: Failed to load CLIP model from {path}\n\
+                 0.03.927.966 E srv    load_model: failed to load multimodal model, '{path}'\n\
+                 0.03.929.912 E srv  server_run_i: exiting due to model loading error"
+            ))
+        };
+        for what in [
+            "vk::Queue::submit: ErrorDeviceLost",
+            "vk::Device::createComputePipeline: ErrorUnknown",
+            "clip_ctx: failed to initialize \"Vulkan0\" backend",
+            "clip_ctx: failed to initialize CPU backend",
+        ] {
+            let failure = with_image(&tail(what), path);
+            assert_eq!(failure, LoadFailure::Unknown, "{what}");
+            assert!(failure.may_succeed_on_another_backend());
+        }
+        assert_eq!(
+            with_image(&tail("vk::Device::allocateMemory: ErrorOutOfDeviceMemory"), path),
+            LoadFailure::OutOfMemory
+        );
+        // The file's own faults stay its own.
+        for what in [
+            "operator(): unable to find tensor v.token_embd.img_break",
+            "load_hparams: unknown projector type: newkind",
+            "Key not found: clip.vision.image_size",
+            "clip_model_loader: failed to load CLIP model from /m/mmproj-F16.gguf. Does this file exist?",
+        ] {
+            assert_eq!(with_image(&tail(what), path), LoadFailure::ImageFileInvalid, "{what}");
+        }
+        // The mismatch llama.cpp checks after clip_init, on the mtmd line.
+        let mismatch = lines(&format!(
+            "E mtmd_init_from_file: error: mismatch between text model (n_embd = 5120) and mmproj (n_embd = 4096)\n\
+             E srv    load_model: failed to load multimodal model, '{path}'"
+        ));
+        assert_eq!(with_image(&mismatch, path), LoadFailure::ImageFileInvalid);
     }
 
     /// Running out of memory while the image file loads is still running out of memory:
-    /// less of the model on the graphics card, or another backend, may make room for it.
+    /// less of the model on the graphics card, or another backend, may make room for it. At
+    /// the pinned build a failed allocation of its weights is reported by ggml's buffer
+    /// allocator and then stops the server at an assertion, before any line about the image
+    /// file (m8: the lines this build prints).
     #[test]
     fn running_out_of_memory_while_the_image_file_loads_is_out_of_memory() {
-        let path = "/m/mmproj-F16.gguf";
         let tail = |alloc: &str| {
             lines(&format!(
-                "I srv    load_model: loading model '/m/model.gguf'\n\
+                "0.00.033.358 I srv    load_model: loading model '/m/model.gguf'\n\
+                 0.03.741.858 I cmn          init: llama threadpool init, n_threads = 12\n\
                  {alloc}\n\
-                 E clip_init: failed to load model '{path}': load_tensors: failed to allocate the weights\n\
-                 E mtmd_init_from_file: error: Failed to load CLIP model from {path}\n\
-                 E srv    load_model: failed to load multimodal model, '{path}'\n\
-                 E srv  server_run_i: exiting due to model loading error"
+                 /src/llama.cpp/ggml/src/ggml-backend.cpp:328: GGML_ASSERT(buffer) failed"
             ))
         };
         for alloc in [
-            "E alloc_tensor_range: failed to allocate Vulkan0 buffer of size 851443712",
-            "E ggml_vulkan: Device memory allocation of size 851443712 failed.\nE vk::Device::allocateMemory: ErrorOutOfDeviceMemory",
-            "E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 812.00 MiB on device 0: cudaMalloc failed: out of memory",
-            "E ggml_metal_buffer_init: error: failed to allocate buffer, size = 812.00 MiB",
+            "0.03.900.000 E ggml_backend_buft_alloc_buffer_n_default: failed to allocate Vulkan0 buffer of size 851443712",
+            "0.03.900.000 E ggml_vulkan: Device memory allocation of size 851443712 failed.\n0.03.900.001 E ggml_backend_buft_alloc_buffer_n_default: failed to allocate Vulkan0 buffer of size 851443712",
+            "0.03.900.000 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 812.00 MiB on device 0: cudaMalloc failed: out of memory",
+            "0.03.900.000 E ggml_metal_buffer_init: error: failed to allocate buffer, size = 812.00 MiB",
         ] {
-            let failure = classify(&tail(alloc), Some(1));
-            assert_eq!(failure, LoadFailure::OutOfMemory, "{alloc}");
-            assert!(failure.may_succeed_on_another_backend());
+            for image in [None, Some("/m/mmproj-F16.gguf")] {
+                let failure = classify_load(&tail(alloc), Some(134), image);
+                assert_eq!(failure, LoadFailure::OutOfMemory, "{alloc}");
+                assert!(failure.may_succeed_on_another_backend());
+            }
         }
     }
 
     /// The server measures the image file before the model loads and goes on when that
-    /// fails: such a line alone never makes the failure the image file's. What failed after
+    /// fails: such a line alone never makes the failure the image file's, and what the GGUF
+    /// reader says about the image file then is not about the model (m1). What failed after
     /// it decides.
     #[test]
     fn measuring_the_image_file_is_not_a_failure_of_it() {
         let measured = "E mtmd_get_memory_usage: error: Failed to load CLIP model from /m/mmproj.gguf\n\
                         E mtmd_get_cap_from_file: failed to get capabilities from file '/m/mmproj.gguf': clip_model_loader: failed to load CLIP model from /m/mmproj.gguf. Does this file exist?\n\
                         E srv    load_model: [mtmd] failed to get memory usage of mmproj";
-        assert_eq!(classify(&lines(measured), Some(1)), LoadFailure::Unknown);
-        let weights = lines(&format!(
-            "{measured}\nE alloc_tensor_range: failed to allocate CUDA0 buffer of size 9437184000\n\
-             E llama_model_load_from_file_impl: failed to load model"
+        for image in [None, Some("/m/mmproj.gguf")] {
+            let load = |tail: &[String]| classify_load(tail, Some(1), image);
+            assert_eq!(load(&lines(measured)), LoadFailure::Unknown);
+            let weights = lines(&format!(
+                "{measured}\nE alloc_tensor_range: failed to allocate CUDA0 buffer of size 9437184000\n\
+                 E llama_model_load_from_file_impl: failed to load model"
+            ));
+            assert_eq!(load(&weights), LoadFailure::OutOfMemory);
+            let model = lines(&format!(
+                "{measured}\nE gguf_init_from_file_impl: failed to read header\n\
+                 E llama_model_load_from_file_impl: failed to load model"
+            ));
+            assert_eq!(load(&model), LoadFailure::ModelFileInvalid);
+            let context = lines(&format!(
+                "{measured}\nE common_init_result: failed to create context with model 'm.gguf'"
+            ));
+            assert_eq!(load(&context), LoadFailure::ContextTooLarge);
+        }
+
+        // The real capture of a file that is not GGUF, up to where the model loads: the GGUF
+        // reader's complaints are about the image file. Then the graphics card fails while
+        // the model loads: that is the card's failure, and the next backend may load it.
+        let garbage = fixture(include_bytes!(
+            "../../tests/fixtures/stderr_image_file_garbage.txt"
         ));
-        assert_eq!(classify(&weights, Some(1)), LoadFailure::OutOfMemory);
-        let model = lines(&format!(
-            "{measured}\nE gguf_init_from_file_impl: failed to read header\n\
-             E llama_model_load_from_file_impl: failed to load model"
-        ));
-        assert_eq!(classify(&model, Some(1)), LoadFailure::ModelFileInvalid);
-        let context = lines(&format!(
-            "{measured}\nE common_init_result: failed to create context with model 'm.gguf'"
-        ));
-        assert_eq!(classify(&context, Some(1)), LoadFailure::ContextTooLarge);
+        let before_model: Vec<String> = garbage
+            .iter()
+            .take_while(|l| !l.contains("control-looking token"))
+            .cloned()
+            .collect();
+        assert!(before_model.iter().any(|l| l.contains("invalid magic characters")));
+        let device_lost = lines(
+            "0.00.900.000 E llama_model_load: error loading model: vk::Queue::submit: ErrorDeviceLost\n\
+             0.00.900.001 E llama_model_load_from_file_impl: failed to load model\n\
+             0.00.900.002 E srv    load_model: failed to load model, '/home/u/models/Qwen3-0.6B-Q8_0.gguf'\n\
+             0.00.900.003 E srv  server_run_i: exiting due to model loading error",
+        );
+        let tail = [before_model.clone(), device_lost.clone()].concat();
+        for image in [None, Some(GARBAGE)] {
+            let failure = classify_load(&tail, Some(1), image);
+            assert_eq!(failure, LoadFailure::Unknown, "{image:?}");
+            assert!(failure.may_succeed_on_another_backend());
+        }
+        // A cut-short image file: the reader's complaint, measured, then the card fails.
+        let truncated = lines(
+            "0.00.014.268 I srv    load_model: loading model '/m/model.gguf'\n\
+             0.00.015.000 E gguf_init_from_file_impl: failed to read tensor data\n\
+             0.00.015.100 E mtmd_get_memory_usage: error: Failed to load CLIP model from /m/mmproj-F16.gguf\n\
+             0.00.900.000 E llama_model_load: error loading model: vk::Device::createComputePipeline: ErrorUnknown\n\
+             0.00.900.001 E llama_model_load_from_file_impl: failed to load model",
+        );
+        assert_eq!(
+            classify_load(&truncated, Some(1), Some("/m/mmproj-F16.gguf")),
+            LoadFailure::Unknown
+        );
+        // The model's own file broken after the image file was measured is still the model's.
+        let broken_model = [
+            before_model,
+            lines("0.00.020.000 E gguf_init_from_file_impl: failed to read header"),
+        ]
+        .concat();
+        assert_eq!(
+            classify_load(&broken_model, Some(1), Some(GARBAGE)),
+            LoadFailure::ModelFileInvalid
+        );
     }
 
-    /// Logs that say nothing about an image file stay as they were.
+    /// m3: names and paths llama.cpp quotes from files (an architecture, a key, a tensor, a
+    /// folder) never pass for one of its own messages.
+    #[test]
+    fn text_from_files_does_not_change_the_classification() {
+        for image in [None, Some("/m/mmproj-F16.gguf")] {
+            let load = |text: &str| classify_load(&lines(text), Some(1), image);
+            assert_eq!(
+                load(
+                    "0.00.020.000 E llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'failed to load multimodal model'\n\
+                     0.00.020.001 E llama_model_load_from_file_impl: failed to load model"
+                ),
+                LoadFailure::ModelFileInvalid
+            );
+            assert_eq!(
+                load(
+                    "0.00.020.000 E gguf_init_from_reader: duplicate key 'clip_init: failed to load model' for KV pair 3\n\
+                     0.00.020.001 E llama_model_load_from_file_impl: failed to load model"
+                ),
+                LoadFailure::ModelFileInvalid
+            );
+            // Folders named like an error, with the card failing for its own reason.
+            for folder in [
+                "Out of memory tests",
+                "couldn't bind HTTP server socket",
+                "invalid device: Vulkan9",
+                "failed to create context",
+                "gguf_init_from here",
+            ] {
+                let text = format!(
+                    "0.00.013.567 I srv    load_model: loading model '/home/u/{folder}/model.gguf'\n\
+                     0.00.900.000 E llama_model_load: error loading model: vk::Queue::submit: ErrorDeviceLost\n\
+                     0.00.900.002 E srv    load_model: failed to load model, '/home/u/{folder}/model.gguf'"
+                );
+                assert_eq!(load(&text), LoadFailure::Unknown, "{folder}");
+            }
+        }
+        // A broken image file in such a folder is still the image file's.
+        let image = "/home/u/Out of memory tests/mmproj-F16.gguf";
+        let tail = lines(&format!(
+            "0.03.927.960 E clip_init: failed to load model '{image}': operator(): unable to find tensor v.token_embd.img_break\n\
+             0.03.927.966 E srv    load_model: failed to load multimodal model, '{image}'"
+        ));
+        assert_eq!(with_image(&tail, image), LoadFailure::ImageFileInvalid);
+        // A crafted kind of image file names what a card says when it runs out of memory:
+        // the image file's own line is about the image file, never a memory failure.
+        let crafted = lines(
+            "0.03.927.960 E clip_init: failed to load model '/m/mmproj.gguf': load_hparams: unknown projector type: out of memory\n\
+             0.03.927.966 E srv    load_model: failed to load multimodal model, '/m/mmproj.gguf'",
+        );
+        assert_eq!(with_image(&crafted, "/m/mmproj.gguf"), LoadFailure::ImageFileInvalid);
+        // An apostrophe in a word is not a quote ("couldn't").
+        assert_eq!(
+            classify(&lines("0.00.011.000 E srv  init_listene: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080"), Some(1)),
+            LoadFailure::PortInUse
+        );
+    }
+
+    /// Logs that say nothing about an image file stay as they were, with or without one.
     #[test]
     fn logs_without_an_image_file_are_unchanged() {
         for (name, bytes, want) in [
@@ -542,8 +727,18 @@ mod tests {
                 &include_bytes!("../../tests/fixtures/stderr_port_in_use.txt")[..],
                 LoadFailure::PortInUse,
             ),
+            (
+                "invalid device",
+                &include_bytes!("../../tests/fixtures/stderr_invalid_device.txt")[..],
+                LoadFailure::InvalidDevice("Vulkan0".into()),
+            ),
         ] {
             assert_eq!(classify(&fixture(bytes), Some(1)), want, "{name}");
+            assert_eq!(
+                classify_load(&fixture(bytes), Some(1), Some("/m/mmproj.gguf")),
+                want,
+                "{name}"
+            );
         }
         let unrelated = lines(
             "I srv    load_model: loading model '/m/model.gguf'\n\
@@ -551,6 +746,7 @@ mod tests {
              E llama_model_load: error loading model: vk::Queue::submit: ErrorDeviceLost",
         );
         assert_eq!(classify(&unrelated, Some(1)), LoadFailure::Unknown);
+        assert_eq!(with_image(&unrelated, "/m/mmproj.gguf"), LoadFailure::Unknown);
     }
 
     /// An unknown failure is shown after the supervisor tried every backend it could, down

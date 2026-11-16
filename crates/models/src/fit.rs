@@ -1,12 +1,14 @@
 //! The first-tier fit check (ARCHITECTURE.md 11): will this model fit before it is
 //! downloaded? Weights + KV cache + projector + a stated compute allowance, compared
 //! with the memory the selected backend can use. The KV cache is a function of the
-//! context ([`KvSize`]): short-memory layers stop growing at their window, and their saved
-//! copies (context checkpoints) are counted in the computer's memory.
+//! context ([`KvSize`]): short-memory layers stop growing at their window. The saved
+//! copies llama-server keeps in the computer's memory during a long chat (context
+//! checkpoints) are sized for each load from what the computer has left ([`copies`]) and
+//! never decide the context or turn a verdict red.
 
 use serde::Serialize;
 
-use crate::kv::KvSize;
+use crate::kv::{KvSize, MAX_CTX_CHECKPOINTS};
 
 /// Headroom that a green verdict must leave free.
 pub const SPARE_BYTES: u64 = 1_000_000_000;
@@ -23,11 +25,12 @@ pub const RAM_RESERVE_BYTES: u64 = 2_000_000_000;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Target {
-    /// A discrete or integrated GPU with its own free memory figure.
+    /// A discrete or integrated GPU with its own free memory figure, and the computer's
+    /// (`None` when the system does not say).
     Gpu {
         name: String,
         free_bytes: u64,
-        ram_free_bytes: u64,
+        ram_free_bytes: Option<u64>,
     },
     /// Apple silicon: the Metal working-set limit applies.
     AppleUnified { working_set_bytes: u64 },
@@ -76,7 +79,7 @@ impl Target {
                 free_bytes,
                 ram_free_bytes,
                 ..
-            } => Room::graphics_card(free_bytes, ram_free_bytes),
+            } => Room::graphics_card(free_bytes, ram_free_bytes.unwrap_or(0)),
             Target::AppleUnified { working_set_bytes } => Room {
                 whole: working_set_bytes,
                 partial: working_set_bytes,
@@ -84,6 +87,17 @@ impl Target {
             },
             Target::Cpu { ram_free_bytes } => Room::processor(ram_free_bytes),
         }
+    }
+    /// The computer's free memory is known (always but on a graphics card whose computer
+    /// did not say).
+    fn computer_known(&self) -> bool {
+        !matches!(
+            self,
+            Target::Gpu {
+                ram_free_bytes: None,
+                ..
+            }
+        )
     }
 }
 
@@ -131,16 +145,63 @@ impl FitInput {
             .saturating_add(self.kv.at(ctx))
             .saturating_add(self.compute_bytes())
     }
-    /// What llama-server keeps besides in the computer's memory at `ctx` tokens, at most:
-    /// the saved copies of the short-memory layers ([`KvSize::checkpoints_at`]); 0 for a
-    /// model without them.
-    pub fn computer_at(&self, ctx: u64) -> u64 {
-        self.kv.checkpoints_at(ctx)
+    /// The saved copies llama-server may keep at `ctx` tokens with `spare` bytes of the
+    /// computer's memory left for them ([`copies`]; `None` when the computer's memory could
+    /// not be read).
+    pub fn copies_at(&self, ctx: u64, spare: Option<u64>) -> Copies {
+        copies(self.kv.copy_bytes(ctx), spare)
     }
     /// Whether `ctx` tokens fit `room` leaving `spare` free: (green, at all), as
-    /// [`Room::verdict_with`] counts it.
+    /// [`Room::verdict`] counts it.
     fn fits(&self, ctx: u64, room: Room, spare: u64) -> (bool, bool) {
-        room.fits(self.needed_at(ctx), self.computer_at(ctx), spare)
+        room.fits(self.needed_at(ctx), spare)
+    }
+}
+
+/// The share of the computer's spare memory the saved copies may take: they get half of
+/// what is left after the reserve and the model's own part there, so a long chat leaves as
+/// much again for other programs.
+pub const COPIES_SHARE_DIVISOR: u64 = 2;
+
+/// The saved copies of the conversation a load lets llama-server keep (0.0.7: context
+/// checkpoints, `--ctx-checkpoints`). They build up during a long chat, in the computer's
+/// memory wherever the model runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Copies {
+    /// How many (`--ctx-checkpoints`): 1 to [`MAX_CTX_CHECKPOINTS`].
+    pub count: u32,
+    /// What that many take at most.
+    pub bytes: u64,
+    /// Not even one copy fits the computer's memory that is left after the reserve and the
+    /// model's own part there: long chats may run short of memory. Never when that memory
+    /// is unknown.
+    pub short: bool,
+}
+
+/// How many saved copies of `copy_bytes` each ([`KvSize::copy_bytes`]) a load keeps when
+/// `spare` bytes of the computer's memory are left after the reserve and the model's own
+/// part there: as many as fit [`COPIES_SHARE_DIVISOR`]'s share of it, at least 1 and at most
+/// [`MAX_CTX_CHECKPOINTS`]. Never 0: without a copy llama-server reads the whole
+/// conversation again whenever the next message does not continue exactly where the last
+/// reply ended (a thinking model's reply is shortened in the history), and with one it
+/// still goes back to the end of the last message. With `spare` unknown the app cannot
+/// size them and passes the most, a quarter of what llama.cpp keeps by itself. A model
+/// without copies (`copy_bytes` 0) also gets the most, which costs nothing.
+pub fn copies(copy_bytes: u64, spare: Option<u64>) -> Copies {
+    let count = match spare {
+        Some(spare) if copy_bytes > 0 => {
+            let fit = spare / COPIES_SHARE_DIVISOR / copy_bytes;
+            u32::try_from(fit)
+                .unwrap_or(u32::MAX)
+                .clamp(1, MAX_CTX_CHECKPOINTS)
+        }
+        _ => MAX_CTX_CHECKPOINTS,
+    };
+    Copies {
+        count,
+        bytes: u64::from(count).saturating_mul(copy_bytes),
+        short: spare.is_some_and(|spare| copy_bytes > spare),
     }
 }
 
@@ -170,9 +231,8 @@ pub struct FitResult {
     /// Where the model would run.
     pub device: FitDevice,
     /// On a graphics card, what the model needs besides in the computer's memory when its
-    /// placement is known (an installed file), and in any case the saved copies of its
-    /// short-memory layers ([`FitInput::computer_at`], 0.0.7); 0 otherwise: on Apple
-    /// graphics and the processor [`Self::needed_bytes`] counts all of it.
+    /// placement is known (an installed file); 0 otherwise: on Apple graphics and the
+    /// processor [`Self::needed_bytes`] counts all of it.
     pub computer_bytes: u64,
     /// With [`Self::computer_bytes`] known, the computer's free memory as the system reports
     /// it (the settings panel's second bar); 0 otherwise.
@@ -181,6 +241,16 @@ pub struct FitResult {
     /// free memory less [`RAM_RESERVE_BYTES`] (`placement::judge_in`), not only because the
     /// whole does not fit: the screen then names the computer's memory as what is short.
     pub computer_short: bool,
+    /// What the saved copies of a long chat take at most in the computer's memory, with
+    /// as many as this computer gives the model ([`Copies`]); 0 for a model without them.
+    /// Not in [`Self::needed_bytes`]: they build up during a chat.
+    pub copies_bytes: u64,
+    /// Not even one saved copy fits what the computer has left ([`Copies::short`]): the
+    /// verdict is then yellow at most for that, never red.
+    pub copies_short: bool,
+    /// The computer's free memory could not be read (a graphics card's computer): the
+    /// copies and any part on the processor are not checked against it.
+    pub computer_unknown: bool,
     /// The 0.0.4 sentence (logs and scripts). The 0.0.6 screens word the figures instead
     /// (`fitLine` in src/lib/words.ts); empty when the placement judge made the result.
     pub sentence: String,
@@ -288,9 +358,9 @@ pub struct Room {
     /// after a graphics-card memory failure also reaches): `whole` plus system memory less
     /// the reserve. The same as `whole` when the model runs on the processor.
     pub partial: u64,
-    /// The main device has memory of its own (a graphics card), so what always stays in
-    /// the computer's memory must fit `partial − whole` on its own (0.0.7). False on the
-    /// processor and on Apple silicon, where it is all one memory.
+    /// The main device has memory of its own (a graphics card), so the computer's memory
+    /// is `partial − whole` (0.0.7, [`Self::computer`]). False on the processor and on
+    /// Apple silicon, where it is all one memory.
     pub separate: bool,
 }
 
@@ -330,41 +400,36 @@ impl Room {
     /// device with [`SPARE_BYTES`] to spare, yellow when it fits only with part of it on
     /// the processor, red otherwise.
     pub fn verdict(&self, needed: u64) -> Verdict {
-        self.verdict_with(needed, 0)
-    }
-
-    /// [`Self::verdict`] for something that also keeps `computer` bytes in the computer's
-    /// memory wherever it runs (the saved copies of short-memory layers). On a graphics card
-    /// (`separate`) they must fit the computer's memory on its own (`partial − whole`), for
-    /// green as for yellow, as the placement's verdict (`placement::judge_in`) checks the
-    /// computer's part; on the processor and Apple silicon they count with the rest in the
-    /// same memory. With `computer` 0 it is [`Self::verdict`] as before.
-    pub fn verdict_with(&self, needed: u64, computer: u64) -> Verdict {
-        match self.fits(needed, computer, SPARE_BYTES) {
+        match self.fits(needed, SPARE_BYTES) {
             (true, _) => Verdict::Green,
             (false, true) => Verdict::Yellow,
             (false, false) => Verdict::Red,
         }
     }
 
-    /// (green, at all) for `needed` bytes where the model runs and `computer` more in the
-    /// computer's memory, leaving `spare` free.
-    fn fits(&self, needed: u64, computer: u64, spare: u64) -> (bool, bool) {
+    /// (green, at all) for `needed` bytes leaving `spare` free.
+    fn fits(&self, needed: u64, spare: u64) -> (bool, bool) {
         let device = needed.saturating_add(spare);
-        let all = device.saturating_add(computer);
+        let green = device <= self.whole;
+        (green, green || device <= self.partial)
+    }
+
+    /// The computer's memory less the reserve, which the model's own part there and the
+    /// saved copies of a long chat share: on a graphics card what there is besides the card
+    /// (`partial − whole`); on the processor and on Apple silicon all of it (`partial`).
+    pub fn computer(&self) -> u64 {
         if self.separate {
-            let held = computer <= self.partial.saturating_sub(self.whole);
-            (held && device <= self.whole, held && all <= self.partial)
+            self.partial.saturating_sub(self.whole)
         } else {
-            let green = device <= self.whole && (computer == 0 || all <= self.partial);
-            (green, green || all <= self.partial)
+            self.partial
         }
     }
 }
 
-/// The fit mark of `input` at a context of `ctx` tokens.
+/// The fit mark of `input` at a context of `ctx` tokens (the saved copies left out: they
+/// never decide it, [`check`]).
 pub fn verdict_at(input: &FitInput, ctx: u64, room: Room) -> Verdict {
-    room.verdict_with(input.needed_at(ctx), input.computer_at(ctx))
+    room.verdict(input.needed_at(ctx))
 }
 
 /// What Automatic picked.
@@ -394,8 +459,8 @@ pub fn auto_ctx(input: &FitInput, room: Room) -> Option<AutoCtx> {
 /// The memory is not a straight line in the context (0.0.7 P1): short-memory layers stop
 /// growing at their window and llama.cpp counts cells in steps of 256, so the largest
 /// size is searched for exactly among the sizes Automatic chooses from ([`largest_size`]),
-/// each checked with [`FitInput::needed_at`] and [`FitInput::computer_at`], which only grow
-/// with the context.
+/// each checked with [`FitInput::needed_at`], which only grows with the context. The saved
+/// copies of a long chat are not counted: they are sized to what is left ([`copies`]).
 pub fn auto_ctx_with_margin(input: &FitInput, room: Room, spare_bytes: u64) -> Option<AutoCtx> {
     let floor = input
         .max_ctx
@@ -413,34 +478,43 @@ pub fn auto_ctx_with_margin(input: &FitInput, room: Room, spare_bytes: u64) -> O
     })
 }
 
+/// Will `input` fit `target`? The verdict counts what a load takes ([`FitInput::needed_at`]);
+/// the saved copies of a long chat are sized from what the computer has left after the
+/// model's own part there ([`copies`]: on a graphics card nothing when the whole model fits
+/// on it, else what does not; elsewhere all of it) and, when not even one fits, make a
+/// green verdict yellow, never red (0.0.7).
 pub fn check(input: &FitInput, target: &Target) -> FitResult {
     let needed = input.needed_at(input.ctx);
-    let computer = input.computer_at(input.ctx);
     let available = target.primary_bytes();
     let room = target.room();
     let place = target.place();
     let graphics = matches!(target, Target::Gpu { .. });
-    // The saved copies of short-memory layers stay in the computer's memory: on a graphics
-    // card they are its part besides the card's share (shown as the computer's part);
-    // elsewhere they are in the memory that holds the model.
-    let (needed_bytes, computer_bytes, computer_free_bytes) = match *target {
-        Target::Gpu { ram_free_bytes, .. } if computer > 0 => (needed, computer, ram_free_bytes),
-        Target::Gpu { .. } => (needed, 0, 0),
-        _ => (needed.saturating_add(computer), 0, 0),
+    let (green, at_all) = room.fits(needed, SPARE_BYTES);
+    let computer_part = match (graphics, green) {
+        (true, true) => 0,
+        (true, false) => needed.saturating_add(SPARE_BYTES).saturating_sub(room.whole),
+        (false, _) => needed,
     };
-    let base = |verdict, suggested_ctx, partial_offload, computer_short, sentence| FitResult {
+    let known = target.computer_known();
+    let copies = input.copies_at(
+        input.ctx,
+        known.then(|| room.computer().saturating_sub(computer_part)),
+    );
+    let base = |verdict, suggested_ctx, partial_offload, sentence| FitResult {
         verdict,
-        needed_bytes,
+        needed_bytes: needed,
         available_bytes: target.free_bytes(),
         suggested_ctx,
         partial_offload,
         device: target.device(),
-        computer_bytes,
-        computer_free_bytes,
-        computer_short,
+        computer_bytes: 0,
+        computer_free_bytes: 0,
+        computer_short: false,
+        copies_bytes: copies.bytes,
+        copies_short: copies.short,
+        computer_unknown: !known,
         sentence,
     };
-    let (green, at_all) = room.fits(needed, computer, SPARE_BYTES);
 
     if green {
         let free_word = if matches!(target, Target::AppleUnified { .. }) {
@@ -448,14 +522,18 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
         } else {
             " free"
         };
+        let verdict = if copies.short {
+            Verdict::Yellow
+        } else {
+            Verdict::Green
+        };
         return base(
-            Verdict::Green,
+            verdict,
             None,
-            false,
             false,
             format!(
                 "Needs about {}; {place} {}{free_word}. Fits.",
-                gb(needed_bytes),
+                gb(needed),
                 gb(available)
             ),
         );
@@ -466,10 +544,9 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
             Verdict::Yellow,
             Some(ctx),
             false,
-            false,
             format!(
                 "Needs about {} at this context; {place} {}. Fits with a context of {} tokens.",
-                gb(needed_bytes),
+                gb(needed),
                 gb(available),
                 ctx
             ),
@@ -481,25 +558,21 @@ pub fn check(input: &FitInput, target: &Target) -> FitResult {
             Verdict::Yellow,
             None,
             true,
-            false,
             format!(
                 "Needs about {}; {place} {} free, so some layers will run on the CPU and replies will be slower.",
-                gb(needed_bytes),
+                gb(needed),
                 gb(available)
             ),
         );
     }
 
-    // On a graphics card the computer's part on its own may be what does not fit.
-    let computer_short = graphics && computer > room.partial.saturating_sub(room.whole);
     base(
         Verdict::Red,
         None,
         false,
-        computer_short,
         format!(
             "Needs about {}; {place} only {}. Too large for this computer.",
-            gb(needed_bytes),
+            gb(needed),
             gb(available)
         ),
     )

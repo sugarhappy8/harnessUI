@@ -145,3 +145,9 @@ and `README.md`.
   users who changed their tool choices.
 - Disk: pruned 1,693 old test-build copies under target/debug/build (older than 2 h, newest
   kept per crate): 3.9 GB → 14 GB free.
+- P3 verification: all nine round-1 findings fixed, no safety rule weakened. Seven residual
+  problems found (the Allow all / Full access confirms not re-armed when the window comes
+  back; a window event while still minimised counted as "brought back"; the card re-arm
+  reacting a little after the window shows; Stop racing turn end could restore without the
+  keyboard; the ±100 ms own-input window; docs; Windows quiet restores could still activate
+  the window). All being fixed by P3 (round 2), plus nine owner-checklist items.
