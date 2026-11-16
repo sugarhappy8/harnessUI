@@ -1263,4 +1263,113 @@ mod tests {
             serde_json::json!({"type": "fileAnalysisSession"})
         );
     }
+
+    /// Website capture (0.0.7, P7: `browser_capture_site`) is a write into an approved
+    /// folder after opening a site: in Ask first a card that offers "Allow for this chat",
+    /// whose grant covers that site into that folder only; a grant for the site or for writes
+    /// in the folder does not cover it, and it covers neither. Outbound, so it asks after
+    /// untrusted content; in Allow all it asks then only when it opens another site
+    /// (`network`); in Full access it runs. Hard limits hold in every mode.
+    #[test]
+    fn site_capture_has_its_own_grant_and_follows_the_modes() {
+        let scope = |origin: &str, folder: &str| Scope::SiteCapture {
+            origin: origin.into(),
+            folder: folder.into(),
+        };
+        let capture = Action {
+            server: "browser".into(),
+            tool: "browser_capture_site".into(),
+            network: true,
+            ..action(scope("https://a.example", "/p"), Risk::Normal, false, true)
+        };
+        let none: BTreeSet<Scope> = BTreeSet::new();
+        let granted: BTreeSet<Scope> = [scope("https://a.example", "/p")].into();
+        let others: BTreeSet<Scope> = [
+            Scope::Site {
+                origin: "https://a.example".into(),
+            },
+            Scope::FileWrite {
+                folder: "/p".into(),
+            },
+        ]
+        .into();
+        let card = Decision::Ask {
+            card: CardKind::Grantable,
+            reason: AskReason::Normal,
+        };
+        assert_eq!(evaluate(&capture, &ready(), &none), card);
+        assert_eq!(evaluate(&capture, &ready(), &others), card);
+        assert_eq!(evaluate(&capture, &ready(), &granted), Decision::AllowedByGrant);
+        assert!(!granted.covers(&scope("https://b.example", "/p")));
+        assert!(!granted.covers(&scope("https://a.example", "/q")));
+        assert!(!granted.covers(&Scope::Site {
+            origin: "https://a.example".into()
+        }));
+        assert!(!granted.covers(&Scope::FileWrite {
+            folder: "/p".into()
+        }));
+        let untrusted = TurnContext {
+            untrusted_in_turn: true,
+            ..ready()
+        };
+        assert_eq!(
+            evaluate(&capture, &untrusted, &granted),
+            Decision::Ask {
+                card: CardKind::Grantable,
+                reason: AskReason::UntrustedContentThenOutbound
+            }
+        );
+        let allow_all = TurnContext {
+            allow_all: true,
+            ..ready()
+        };
+        assert_eq!(evaluate(&capture, &allow_all, &none), Decision::AllowedByMode);
+        assert_eq!(
+            evaluate(
+                &capture,
+                &TurnContext {
+                    untrusted_in_turn: true,
+                    ..allow_all
+                },
+                &none
+            ),
+            Decision::Ask {
+                card: CardKind::Grantable,
+                reason: AskReason::UntrustedContentThenOutbound
+            }
+        );
+        let same_site = Action {
+            network: false,
+            ..capture.clone()
+        };
+        assert_eq!(
+            evaluate(
+                &same_site,
+                &TurnContext {
+                    untrusted_in_turn: true,
+                    ..allow_all
+                },
+                &none
+            ),
+            Decision::AllowedByMode
+        );
+        let full = TurnContext {
+            full_access: true,
+            untrusted_in_turn: true,
+            ..ready()
+        };
+        assert_eq!(evaluate(&capture, &full, &none), Decision::AllowedByFullAccess);
+        let mut limited = capture.clone();
+        limited.hard_limit = Some("outside the approved folders".into());
+        for t in [ready(), allow_all, full] {
+            assert!(matches!(
+                evaluate(&limited, &t, &granted),
+                Decision::Denied { .. }
+            ));
+        }
+        assert_eq!(
+            serde_json::to_value(scope("https://a.example", "/p")).unwrap(),
+            serde_json::json!({"type": "siteCapture", "origin": "https://a.example", "folder": "/p"})
+        );
+    }
 }

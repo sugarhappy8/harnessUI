@@ -25,7 +25,16 @@ vi.mock("../lib/ipc", () => ipcMock);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./ModelPicker", () => ({ ModelPicker: () => null }));
 vi.mock("./RuntimeIndicator", () => ({ RuntimeIndicator: () => null }));
-vi.mock("./ToolsPanel", () => ({ ToolsPanel: () => null }));
+// The Tools panel says which chat it was made for (its state starts there) and which it shows.
+vi.mock("./ToolsPanel", async () => {
+  const { useState } = await import("react");
+  return {
+    ToolsPanel: (p: { chatId: number }) => {
+      const [madeFor] = useState(p.chatId);
+      return <div data-tools-panel={`${madeFor} ${p.chatId}`} />;
+    },
+  };
+});
 vi.mock("./AllowAllButton", () => ({ ApprovalModeMenu: () => null }));
 vi.mock("./SystemPromptDialog", () => ({ SystemPromptDialog: () => null }));
 vi.mock("./UsageLine", () => ({ UsageLine: () => null }));
@@ -297,6 +306,40 @@ describe("a reply running in another chat", () => {
   it("names a chat it cannot find in the list as another chat", () => {
     start(OTHER, { generation: generation(9) });
     expect(document.querySelector("[data-turn-elsewhere]")?.textContent).toBe("A reply is running in another chat. Open it");
+  });
+
+  // [0.0.7 P6a review] The sidebar's list holds only the chats a search finds; the running
+  // chat's name was taken from it, so during a search the line said "another chat".
+  it("is named while a search leaves its chat out of the chat list", async () => {
+    ipcMock.listChats.mockImplementation(async (query?: string | null) =>
+      query ? [summary(2, OTHER.chat.title)] : [summary(1, INSTALL.chat.title), summary(2, OTHER.chat.title)],
+    );
+    try {
+      start(OTHER, { generation: generation(1), search: "holiday", chats: [summary(2, OTHER.chat.title)] });
+      await act(async () => {
+        for (let i = 0; i < 5; i++) await Promise.resolve();
+      });
+      expect(document.querySelector("[data-turn-elsewhere]")?.textContent).toBe(
+        "A reply is running in “Install the toolchain”. Open it",
+      );
+    } finally {
+      ipcMock.listChats.mockImplementation(async () => []);
+    }
+  });
+});
+
+// [0.0.7 P6a review] Each chat gets a Tools panel of its own: nothing the panel held for the
+// previous chat (its tools, its folders, a lookup still on its way) is there to be saved to
+// the chat on screen.
+describe("the Tools panel", () => {
+  it("starts afresh for each chat", async () => {
+    start(INSTALL);
+    const panel = () => document.querySelector("[data-tools-panel]")?.getAttribute("data-tools-panel");
+    expect(panel()).toBe("1 1");
+    await act(async () => {
+      await useApp.getState().openChat(2);
+    });
+    expect(panel()).toBe("2 2");
   });
 });
 

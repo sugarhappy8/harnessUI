@@ -11,7 +11,7 @@ const ipcMock = vi.hoisted(() => ({
   modelBusy: vi.fn<() => Promise<ModelBusy>>(async () => ({ chatTurns: 0, modelChecks: 0, otherApps: 0 })),
   loadLocalModel: vi.fn<(path: string, s?: unknown, w?: boolean) => Promise<boolean>>(async () => true),
   unloadModel: vi.fn<(w?: boolean) => Promise<boolean>>(async () => true),
-  deleteModel: vi.fn<(id: number, files: boolean) => Promise<void>>(async () => undefined),
+  deleteModel: vi.fn<(id: number, files: boolean) => Promise<string | null | void>>(async () => undefined),
   getLocalModelSettings: vi.fn(async () => {
     throw new Error("Use must not pass the defaults for all models");
   }),
@@ -272,6 +272,25 @@ describe("Models → Installed", () => {
     ipcMock.deleteModel.mockClear();
     await click(screen.getByRole("button", { name: "Delete big.gguf" }));
     expect(ipcMock.deleteModel).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("[0.0.7 P6] says when Delete left a model's files in place, and the model leaves the list", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await show();
+    const note = "Removed from the list. Its file is outside the models folder, so it was left where it is.";
+    ipcMock.deleteModel.mockResolvedValueOnce(note);
+    ipcMock.listInstalledModels.mockResolvedValue([BIG]);
+    await click(screen.getByRole("button", { name: "Delete small.gguf" }));
+    expect(ipcMock.deleteModel).toHaveBeenCalledWith(1, true);
+    expect(screen.getByText(note)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete small.gguf" })).toBeNull();
+    // The next Delete says nothing more.
+    ipcMock.deleteModel.mockResolvedValueOnce(null);
+    ipcMock.listInstalledModels.mockResolvedValue([]);
+    await click(screen.getByRole("button", { name: "Delete big.gguf" }));
+    expect(screen.queryByText(note)).toBeNull();
     confirm.mockRestore();
   });
 

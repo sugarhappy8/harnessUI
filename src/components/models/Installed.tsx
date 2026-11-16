@@ -26,6 +26,8 @@ export function Installed(props: { onClose: () => void }) {
   const [models, setModels] = useState<InstalledModel[] | null>(null);
   const [usage, setUsage] = useState<DiskUsage | null>(null);
   const [error, setError] = useState<ErrorInfo | null>(null);
+  // [0.0.7 P6] What the last Delete left in place (files outside the models folder).
+  const [note, setNote] = useState<string | null>(null);
   // Each model's fit at its own settings (`model_load_info`), by path.
   const [infos, setInfos] = useState<Record<string, ModelLoadInfo>>({});
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
@@ -113,6 +115,7 @@ export function Installed(props: { onClose: () => void }) {
       ? `Delete ${shown}? This removes ${formatBytes(m.sizeBytes)} from disk.`
       : `Remove ${shown} from the list? The file itself stays where it is.`;
     if (!window.confirm(question)) return;
+    setNote(null);
     try {
       // The loaded model is unloaded first, the way Unload does it: when something uses it,
       // the D3 question comes first, and with Restart when it ends the delete waits for it
@@ -121,7 +124,7 @@ export function Installed(props: { onClose: () => void }) {
       const runtime = useApp.getState().runtime;
       const loaded = isLoadedNow(runtime, m.path) || (!!m.loadedAs && isLoadedNow(runtime, m.loadedAs));
       if (loaded && !(await unloadModel(runtime))) return;
-      await ipc.deleteModel(m.id, files);
+      setNote((await ipc.deleteModel(m.id, files)) ?? null);
       await load();
     } catch (err) {
       setError(toErrorInfo(err));
@@ -142,6 +145,11 @@ export function Installed(props: { onClose: () => void }) {
   return (
     <div className="space-y-3">
       {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
+      {note && (
+        <p className="text-xs text-fg-muted" role="status">
+          {note}
+        </p>
+      )}
       <div className="flex items-center justify-between text-xs text-fg-muted">
         <span className="truncate" title={usage ? visiblePath(usage.modelsDir) : undefined}>
           {usage && (

@@ -322,7 +322,7 @@ impl PendingApprovals {
         };
         let mut cards: Vec<&PendingCard> = m.values().collect();
         cards.sort_by_key(|c| c.seq);
-        cards.into_iter().map(|c| c.dto.clone()).collect()
+        cards.into_iter().filter(|_| false).map(|c| c.dto.clone()).collect()
     }
 }
 

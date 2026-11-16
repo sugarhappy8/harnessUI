@@ -122,3 +122,45 @@ describe("edit and resend (0.0.7 P6)", () => {
     expect(form.textContent).toContain("notes.txt");
   });
 });
+
+// [0.0.7 P6a review] An edit box opened before a reply started stayed open with Send on. The app
+// refused that send as busy, and on the way the running reply's text and tool cards vanished.
+describe("the edit box while a reply is being written", () => {
+  afterEach(cleanup);
+
+  it("can't send until the reply is done, and keeps what was written", async () => {
+    const onEditResend = vi.fn();
+    const props = {
+      message: user(),
+      isLastAssistant: false,
+      onRegenerate: () => undefined,
+      onEditResend,
+      onSwitchBranch: () => undefined,
+    };
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(<MessageItem {...props} busy={false} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit and resend" }));
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Edit message" }), { target: { value: "Look again" } });
+    // A reply starts (sent from the message box) while the edit box is open.
+    await act(async () => {
+      view.rerender(<MessageItem {...props} busy />);
+    });
+    const send = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.click(send);
+    fireEvent.submit(send.closest("form")!);
+    expect(onEditResend).not.toHaveBeenCalled();
+    // Still open with the new text, to send when the reply is done.
+    expect((screen.getByRole("textbox", { name: "Edit message" }) as HTMLTextAreaElement).value).toBe("Look again");
+    await act(async () => {
+      view.rerender(<MessageItem {...props} busy={false} />);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(onEditResend).toHaveBeenCalledTimes(1);
+    expect(onEditResend).toHaveBeenCalledWith(expect.objectContaining({ id: 12 }), "Look again", [5, 6, 7]);
+  });
+});

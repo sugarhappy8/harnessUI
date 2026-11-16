@@ -27,6 +27,7 @@ async function (opts) {
   const pre = 'hcap-' + NONCE + '-';
   const out = {
     url: String(location.href),
+    base: String(document.baseURI || location.href),
     title: String(document.title || ''),
     lang: String(document.documentElement.getAttribute('lang') || ''),
     quirks: document.compatMode === 'BackCompat',

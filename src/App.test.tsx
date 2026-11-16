@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { StrictMode } from "react";
+import type { ApprovalRequest } from "./lib/types";
 
 type Started = { unlisten: ReturnType<typeof vi.fn>; ready: () => void; handler: (payload: unknown) => void };
 
@@ -29,6 +30,7 @@ const ipcMock = vi.hoisted(() => {
     onRuntimeStatus: delayed("runtime-status"),
     onTurnRunning: delayed("turn-running"),
     runningTurn: vi.fn(async () => null as number | null),
+    pendingApprovals: vi.fn(async (): Promise<ApprovalRequest[]> => []),
     runtimeStatus: vi.fn(async () => null),
     listChats: vi.fn(async () => []),
     listModelOptions: vi.fn(async () => []),
@@ -126,6 +128,57 @@ describe("the chat whose reply runs", () => {
       await flush();
     });
     expect(useApp.getState().runningTurn).toBeNull();
+  });
+});
+
+describe("approval cards waiting when the window loads (0.0.7 P6)", () => {
+  const card = (id: string, chatId = 2): ApprovalRequest => ({
+    id,
+    chatId,
+    callId: `call-${id}`,
+    server: "builtin",
+    tool: "run_command",
+    summary: "Run a command",
+    preview: "ls",
+    card: "onceOnly",
+    reason: "normal",
+    keepAsking: null,
+  });
+
+  it("are read once both listeners started, so a reply that waits for one can go on", async () => {
+    ipcMock.pendingApprovals.mockResolvedValueOnce([card("a"), card("b", 3)]);
+    render(<App />);
+    await act(async () => {
+      started("approval-request")[0]!.ready();
+      await flush();
+    });
+    expect(ipcMock.pendingApprovals).not.toHaveBeenCalled();
+    await act(async () => {
+      started("approval-closed")[0]!.ready();
+      await flush();
+      await flush();
+    });
+    expect(ipcMock.pendingApprovals).toHaveBeenCalledTimes(1);
+    expect(useApp.getState().approvals.map((a) => a.id)).toEqual(["a", "b"]);
+  });
+
+  it("keeps a card closed while the answer was on its way, and adds none twice", async () => {
+    let answer: (cards: ApprovalRequest[]) => void = () => undefined;
+    ipcMock.pendingApprovals.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    listeners.delayed = false;
+    await act(async () => {
+      render(<App />);
+      await flush();
+    });
+    expect(ipcMock.pendingApprovals).toHaveBeenCalledTimes(1);
+    // While the answer is on its way, card b arrives by its event and card a is answered.
+    await act(async () => started("approval-request")[0]!.handler(card("b", 3)));
+    await act(async () => started("approval-closed")[0]!.handler("a"));
+    await act(async () => {
+      answer([card("a"), card("b", 3), card("c")]);
+      await flush();
+    });
+    expect(useApp.getState().approvals.map((a) => a.id)).toEqual(["b", "c"]);
   });
 });
 

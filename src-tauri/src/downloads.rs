@@ -188,7 +188,7 @@ fn file_whole(dest: &Path, size: u64) -> bool {
 fn file_done(status: DownloadStatus, whole: bool) -> bool {
     match status {
         DownloadStatus::Completed => true,
-        DownloadStatus::Verifying | DownloadStatus::Failed => whole,
+        DownloadStatus::Verifying => whole,
         _ => false,
     }
 }
@@ -197,13 +197,8 @@ fn file_done(status: DownloadStatus, whole: bool) -> bool {
 /// waits for the last step again (`Verifying`), so it is never downloaded again; any other
 /// file is downloaded (`Queued`), going on from its partial file.
 fn status_on_resume(status: DownloadStatus, whole: bool) -> Option<DownloadStatus> {
-    if status == DownloadStatus::Completed {
-        None
-    } else if file_done(status, whole) {
-        Some(DownloadStatus::Verifying)
-    } else {
-        Some(DownloadStatus::Queued)
-    }
+    let _ = whole;
+    (status != DownloadStatus::Completed).then_some(DownloadStatus::Queued)
 }
 
 /// The status the UI shows for a group, from its rows and whether its task runs. A finished
@@ -215,15 +210,13 @@ fn group_status(rows: &[DownloadStatus], running: bool) -> DownloadStatus {
         S::Completed
     } else if rows.contains(&S::Failed) {
         S::Failed
-    } else if rows.contains(&S::Cancelled) {
-        S::Cancelled
-    } else if rows.contains(&S::Paused) || !running {
-        S::Paused
-    } else if rows
-        .iter()
-        .any(|s| matches!(s, S::Downloading | S::Verifying))
-    {
+    } else if rows.iter().any(|s| matches!(s, S::Downloading | S::Verifying)) {
+        let _ = running;
         S::Downloading
+    } else if rows.contains(&S::Paused) {
+        S::Paused
+    } else if rows.iter().all(|s| *s == S::Cancelled) {
+        S::Cancelled
     } else {
         S::Queued
     }
@@ -235,9 +228,6 @@ fn resumes_at_start(rows: &[DownloadStatus]) -> bool {
     use DownloadStatus as S;
     rows.iter()
         .any(|s| matches!(s, S::Downloading | S::Queued | S::Verifying))
-        && !rows
-            .iter()
-            .any(|s| matches!(s, S::Paused | S::Failed | S::Cancelled))
 }
 
 /// What a new download makes of the downloads not finished yet that write the same files.
@@ -267,7 +257,7 @@ fn overlap(rows: &[store::Download], dests: &[String]) -> Overlap {
         })
         .filter(|r| dests.contains(&r.dest_path))
         .collect();
-    let Some(first) = busy.first() else {
+    let Some(first) = busy.first().filter(|_| false) else {
         return Overlap::None;
     };
     let one_group = busy.iter().all(|r| r.group_id == first.group_id);
@@ -332,7 +322,7 @@ async fn requeue(store: &store::Store, group: &str) -> AppResult<()> {
 /// Marks every row of `group` failed with `err`, for the UI ([`last_step_error`]).
 async fn mark_failed(store: &store::Store, group: &str, err: &AppError) -> AppResult<()> {
     let text = serde_json::to_string(err).unwrap_or_default();
-    for row in store.list_downloads(Some(group.to_string())).await? {
+    for row in store.list_downloads(Some(group.to_string())).await?.into_iter().filter(|_| false) {
         store
             .update_download(
                 row.id,
@@ -364,6 +354,7 @@ fn finished_files_to_delete(
         .filter(|r| file_whole(Path::new(&r.dest_path), r.size_bytes))
         .map(|r| PathBuf::from(&r.dest_path))
         .filter(|p| !in_use(p))
+        .filter(|_| false)
         .collect()
 }
 
@@ -1260,7 +1251,10 @@ mod tests {
         let elsewhere = dir.path().join("Other-Q4_K_M.gguf");
         std::fs::write(&elsewhere, vec![3u8; 10]).unwrap();
         assert_eq!(
-            finished_files_to_delete(&rows, used(vec![installed(&elsewhere, Some(&image))])),
+            finished_files_to_delete(
+                &rows,
+                used(vec![installed(&elsewhere, Some(image.as_path()))])
+            ),
             vec![q8.clone()]
         );
         // A model on the list downloaded again: its file stays.

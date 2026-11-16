@@ -525,12 +525,12 @@ impl RuntimeManager {
         // here (`backend_unavailable`) leaves the loaded model as it is, and its error goes
         // back to the caller; before, the loaded model was stopped first and the status
         // showed no error.
-        let (first, candidates) = self.choose(&settings).await?;
         // From here this is the current load. A newer one replaces it; the ticket marks
         // it as over on every way out of this function.
         let ticket = LoadTicket::begin(&self.loads, &model, &settings);
         let seq = ticket.seq;
         self.stop_server().await;
+        let (first, candidates) = self.choose(&settings).await?;
         if let Ok(mut c) = self.current.lock() {
             *c = Some(Loaded {
                 path: model.clone(),

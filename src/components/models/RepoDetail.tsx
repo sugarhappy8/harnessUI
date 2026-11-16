@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, Download, ExternalLink, Lock } from "lucide-react";
 import * as ipc from "../../lib/ipc";
 import type { ErrorInfo, RepoView, VariantView } from "../../lib/types";
@@ -45,6 +45,10 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
   const [error, setError] = useState<ErrorInfo | null>(null);
   const [withProjector, setWithProjector] = useState(true);
   const [showCard, setShowCard] = useState(false);
+  // [0.0.7 P6] While a download starts (the app asks Hugging Face first), Download is off: a
+  // second click started a second download of the same files, and the two spoiled each other.
+  const [starting, setStarting] = useState(false);
+  const startingRef = useRef(false);
   const compareFull = useCompare((s) => s.entries.length >= COMPARE_LIMIT);
 
   useEffect(() => {
@@ -59,12 +63,17 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
   }, [props.repoId]);
 
   async function download(v: VariantView) {
-    if (!view) return;
+    if (!view || startingRef.current) return;
+    startingRef.current = true;
+    setStarting(true);
     try {
       await ipc.startDownload(view.id, view.commit, v.label, withProjector && !!view.projector);
       props.onStarted();
     } catch (err) {
       setError(toErrorInfo(err));
+    } finally {
+      startingRef.current = false;
+      setStarting(false);
     }
   }
 
@@ -153,7 +162,7 @@ export function RepoDetail(props: { repoId: string; onBack: () => void; onStarte
                   <button
                     type="button"
                     onClick={() => void download(v)}
-                    disabled={view.architectureSupported === false}
+                    disabled={view.architectureSupported === false || starting}
                     className="flex items-center gap-1 rounded-md bg-accent px-3 py-1 text-xs text-accent-fg disabled:opacity-40"
                   >
                     <Download size={12} aria-hidden /> Download

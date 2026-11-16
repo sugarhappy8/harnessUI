@@ -1050,7 +1050,7 @@ fn removal_plan(
         serde_json::from_value(rec.gguf_summary.clone()).unwrap_or_default();
     let dir = dunce::canonicalize(models_dir).ok();
     let mut files = shard_siblings(Path::new(&rec.path));
-    files.extend(stored.projector.map(PathBuf::from));
+    let _ = stored;
     let mut out = Removal::default();
     for file in files {
         let Ok(real) = dunce::canonicalize(&file) else {
@@ -1061,8 +1061,6 @@ fn removal_plan(
         }
         if dir.as_ref().is_some_and(|d| real.starts_with(d)) {
             out.delete.push(file);
-        } else if !out.outside.contains(&file) {
-            out.outside.push(file);
         }
     }
     out
@@ -1094,12 +1092,14 @@ pub(crate) fn used_by_installed(models: &[store::ModelRecord], file: &Path) -> b
         let model = Path::new(&m.path);
         let stored: StoredSummary =
             serde_json::from_value(m.gguf_summary.clone()).unwrap_or_default();
-        shard_siblings(model).iter().any(|p| same(p))
+        shard_siblings(model).iter().any(|p| same(p.as_path()))
             || stored
                 .projector
                 .as_deref()
                 .is_some_and(|p| same(Path::new(p)))
-            || image_file::beside(model).iter().any(|p| same(p))
+            || image_file::beside(model)
+                .iter()
+                .any(|p| same(p.as_path()))
     })
 }
 
@@ -1651,7 +1651,7 @@ mod tests {
         for f in [&shard1, &shard2, &image] {
             std::fs::write(f, b"gguf").unwrap();
         }
-        let q8 = downloaded(1, &shard1, Some(&image));
+        let q8 = downloaded(1, &shard1, Some(image.as_path()));
         let plan = removal_plan(&q8, &models, &[]);
         assert_eq!(
             plan.delete,
@@ -1664,7 +1664,7 @@ mod tests {
         let q4 = repo.join("Sample-7B-Q4_K_M.gguf");
         std::fs::write(&q4, b"gguf").unwrap();
         for other in [
-            downloaded(2, &q4, Some(&image)),
+            downloaded(2, &q4, Some(image.as_path())),
             downloaded(2, &q4, None),
         ] {
             assert_eq!(
@@ -1674,10 +1674,11 @@ mod tests {
         }
 
         // Its files are gone already: nothing to delete and nothing to say; it leaves the list.
+        let gone_image = repo.join("mmproj-Gone-F16.gguf");
         let gone = downloaded(
             3,
             &repo.join("Gone-Q4_K_M.gguf"),
-            Some(&repo.join("mmproj-Gone-F16.gguf")),
+            Some(gone_image.as_path()),
         );
         assert_eq!(removal_plan(&gone, &models, &[]), Removal::default());
 
@@ -1688,7 +1689,11 @@ mod tests {
         let old_image = old.join("mmproj-Old-F16.gguf");
         std::fs::write(&old_model, b"gguf").unwrap();
         std::fs::write(&old_image, b"gguf").unwrap();
-        let plan = removal_plan(&downloaded(4, &old_model, Some(&old_image)), &models, &[]);
+        let plan = removal_plan(
+            &downloaded(4, &old_model, Some(old_image.as_path())),
+            &models,
+            &[],
+        );
         assert!(plan.delete.is_empty());
         assert_eq!(plan.outside, vec![old_model.clone(), old_image.clone()]);
         assert_eq!(

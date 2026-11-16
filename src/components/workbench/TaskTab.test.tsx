@@ -64,11 +64,11 @@ describe("TaskTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetTasks();
-    useApp.setState({ activeChatId: 7, generation: null, stop, send });
+    useApp.setState({ activeChatId: 7, generation: null, runningTurn: null, stop, send });
   });
   afterEach(() => {
     cleanup();
-    useApp.setState({ activeChatId: null, generation: null });
+    useApp.setState({ activeChatId: null, generation: null, runningTurn: null });
   });
 
   it("says what will appear when the chat has no task, and lets the user write a goal", async () => {
@@ -156,6 +156,40 @@ describe("TaskTab", () => {
     useApp.setState({ generation: { chatId: 99 } as never });
     await show(task({ status: "paused" }));
     expect((screen.getByRole("button", { name: "Resume" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // [0.0.7 P6a review] After the window reloads while a reply runs, the window knows that reply
+  // only as the chat the app says it is writing (`runningTurn`). Pause marked the task paused
+  // but never stopped the model, and Resume stayed on: the task was set active, then the
+  // message was refused as busy.
+  it("pauses and stops this chat's reply also when this window did not start it", async () => {
+    useApp.setState({ generation: null, runningTurn: 7 });
+    await show(task());
+    // It runs here, so there is nothing to resume.
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+    apiMock.setTaskStatus.mockResolvedValue(task({ status: "paused" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    });
+    expect(apiMock.setTaskStatus).toHaveBeenCalledWith(7, "paused");
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(stop).toHaveBeenCalledWith(7);
+  });
+
+  it("does not resume, or stop anything, while a reply this window did not start runs in another chat", async () => {
+    useApp.setState({ generation: null, runningTurn: 99 });
+    await show(task({ status: "paused" }));
+    const resume = screen.getByRole("button", { name: "Resume" }) as HTMLButtonElement;
+    expect(resume.disabled).toBe(true);
+    expect(resume.title).toBe("Wait until the current reply ends.");
+    cleanup();
+    resetTasks();
+    await show(task());
+    apiMock.setTaskStatus.mockResolvedValue(task({ status: "paused" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    });
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it("marks the task done, and offers to reopen a done task", async () => {
