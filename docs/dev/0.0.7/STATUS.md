@@ -389,3 +389,14 @@ and `README.md`.
   still requiring a bindable port); the Intel Mac smoke test failed only because no disk
   image was built. Linux: everything passed (lint, clippy, all workspace tests with the
   real llama-server, cargo-deny).
+- P7 round 2 done (0a85cd3): CSS image functions keep only literal addresses (an allow-list;
+  `var()`, `env()`, `attr()` and unknown functions blank the value) in the page, saved
+  sheets and SVGs; saved sheets and index.html start with a UTF-8 BOM and lose any
+  `@charset` and control characters; shared workers' requests checked (Fetch on their own
+  session before they run); service workers held for the whole capture and closed after it,
+  running shared/service workers closed first (decided: hold rather than stop the capture —
+  a held worker runs no script, and stopping would make every site with one uncapturable);
+  pictures kept only when their bytes are a picture format; 3xx bodiless only with
+  Location; the last-choice lock. browser lib 167, browser_e2e 30, capture_e2e 7 (with the
+  verifier's hostile pages), app mcp_cmd/toolset 43. The verifier is re-checking with its
+  harness. Disk: 4.4 GB free → pruned idle build output → 11 GB.
